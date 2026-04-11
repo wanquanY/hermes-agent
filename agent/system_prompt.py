@@ -46,6 +46,7 @@ from agent.prompt_builder import (
     build_environment_hints as _build_environment_hints,
     build_nous_subscription_prompt as _build_nous_subscription_prompt,
     build_skills_system_prompt as _build_skills_system_prompt,
+    drain_truncation_warnings,
     load_soul_md as _load_soul_md,
 )
 
@@ -224,25 +225,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             )
             if toolset
         }
-<<<<<<< HEAD
         skills_prompt = build_skills_system_prompt(
-=======
-        # Coding posture prunes non-coding skill categories from the index
-        # (discovery-only — skills_list/skill_view still reach everything).
-        _hidden_cats = frozenset()
-        try:
-            from agent.coding_context import coding_hidden_skill_categories
-
-            _hidden_cats = coding_hidden_skill_categories(
-                platform=agent.platform, cwd=resolve_context_cwd()
-            )
-        except Exception:
-            _hidden_cats = frozenset()
-        skills_prompt = _r.build_skills_system_prompt(
->>>>>>> 3e74f75e4 (feat(agent): coding-context posture across CLI/TUI/desktop/ACP (#43316))
             available_tools=agent.valid_tool_names,
             available_toolsets=avail_toolsets,
-            hidden_categories=_hidden_cats or None,
         )
         _log_dovie_system_prompt_stage(
             agent,
@@ -489,6 +474,12 @@ def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str
     parts = build_system_prompt_parts(agent, system_message=system_message)
     prompt = "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
     _log_dovie_system_prompt_stage(agent, "build-end", prompt_chars=len(prompt))
+
+    # Surface context-file truncation warnings through the normal agent status
+    # channel so gateway/CLI users see them in chat instead of only in logs.
+    for warning in drain_truncation_warnings():
+        agent._emit_status(warning)
+
     return prompt
 
 
