@@ -144,24 +144,15 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path:
     return p.resolve()
 
 
-def _is_blocked_device(filepath: str) -> bool:
-    """Return True if the path would hang the process (infinite output or blocking input).
-
-    Uses the *literal* path — no symlink resolution — because the model
-    specifies paths directly and realpath follows symlinks all the way
-    through (e.g. /dev/stdin → /proc/self/fd/0 → /dev/pts/0), defeating
-    the check.
-    """
-    normalized = os.path.expanduser(filepath)
+def _is_blocked_device_path(path: str) -> bool:
+    """Return True for concrete device/fd paths that can hang reads."""
+    normalized = os.path.normpath(os.path.expanduser(path))
     if normalized in _BLOCKED_DEVICE_PATHS:
         return True
-    # /proc/self/fd/0-2 and /proc/<pid>/fd/0-2 are Linux aliases for stdio
     if normalized.startswith("/proc/") and normalized.endswith(
         ("/fd/0", "/fd/1", "/fd/2")
     ):
         return True
-    # /proc/*/environ, /proc/*/cmdline, /proc/*/maps can leak secrets,
-    # command-line args, and memory layout from the host process (issue #4427)
     if normalized.startswith("/proc/") and normalized.endswith(
         ("/environ", "/cmdline", "/maps")
     ):
@@ -390,6 +381,49 @@ def _is_internal_file_status_text(content: str) -> bool:
             len(stripped) <= 2 * len(_READ_DEDUP_STATUS_MESSAGE):
         return True
     return False
+
+
+def _looks_like_read_file_line_numbered_content(content: str) -> bool:
+    """Return True for content dominated by read_file's ``LINE_NUM|CONTENT`` display.
+
+    ``read_file`` intentionally returns line-numbered text to the model. If
+    that display format is echoed into ``write_file``, config/source files are
+    silently corrupted with prefixes like `` 1|``.  We reject writes where the
+    non-empty lines are mostly consecutive read_file-style numbered lines, while
+    allowing sparse literal pipe content such as a single ``1|value`` line.
+    """
+    if not isinstance(content, str):
+        return False
+
+    lines = [line for line in content.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+
+    numbered: list[int] = []
+    for line in lines:
+        stripped = line.lstrip()
+        prefix, sep, _rest = stripped.partition("|")
+        if sep and prefix.isdigit():
+            numbered.append(int(prefix))
+
+    if len(numbered) < 2:
+        return False
+    if len(numbered) / len(lines) < 0.6:
+        return False
+
+    consecutive_pairs = sum(
+        1 for prev, current in zip(numbered, numbered[1:])
+        if current == prev + 1
+    )
+    return consecutive_pairs >= len(numbered) - 1
+
+
+def _is_internal_file_tool_content(content: str) -> bool:
+    """Return True when content is file-tool display text, not intended file bytes."""
+    return (
+        _is_internal_file_status_text(content)
+        or _looks_like_read_file_line_numbered_content(content)
+    )
 
 
 def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
@@ -885,10 +919,11 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
     sensitive_err = _check_sensitive_path(path, task_id)
     if sensitive_err:
         return tool_error(sensitive_err)
-    if _is_internal_file_status_text(content):
+    if _is_internal_file_tool_content(content):
         return tool_error(
-            "Refusing to write internal read_file status text as file content. "
-            "Re-read the file or reconstruct the intended file contents before writing."
+            "Refusing to write internal read_file display text as file content. "
+            "Strip read_file line-number prefixes or reconstruct the intended "
+            "file contents before writing."
         )
     try:
         # Resolve once for the registry lock + stale check.  Failures here
