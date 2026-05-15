@@ -4,6 +4,7 @@ import os
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -891,6 +892,72 @@ class TestWebServerEndpoints:
         data = resp.json()
         # Should contain known env var names
         assert any(k.endswith("_API_KEY") or k.endswith("_TOKEN") for k in data.keys())
+
+    def test_get_env_vars_marks_channel_managed_keys(self):
+        from hermes_cli.web_server import _channel_managed_env_keys
+
+        data = self.client.get("/api/env").json()
+        # Every entry carries the classification the Keys page relies on.
+        assert all("channel_managed" in info for info in data.values())
+
+        channel_keys = _channel_managed_env_keys()
+        # Messaging-platform credentials owned by the Channels page are flagged;
+        # everything else stays visible on the Keys page.
+        for key, info in data.items():
+            assert info["channel_managed"] is (key in channel_keys)
+
+    def test_platform_scoped_messaging_env_vars_are_channel_managed(self):
+        from hermes_cli.web_server import (
+            _MESSAGING_KEYS_PAGE_KEYS,
+            _build_catalog_entry,
+            _channel_managed_env_keys,
+        )
+
+        discord = _build_catalog_entry("discord")
+        assert "DISCORD_HOME_CHANNEL" in discord["env_vars"]
+        assert "DISCORD_ALLOW_ALL_USERS" in discord["env_vars"]
+
+        managed = _channel_managed_env_keys()
+        assert "DISCORD_HOME_CHANNEL" in managed
+        assert "BLUEBUBBLES_ALLOW_ALL_USERS" in managed
+        assert "MATTERMOST_ALLOW_ALL_USERS" in managed
+        assert "GATEWAY_PROXY_URL" not in managed
+        assert "GATEWAY_PROXY_URL" in _MESSAGING_KEYS_PAGE_KEYS
+
+    def test_model_set_requires_confirmation_for_expensive_model(self, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_cli.model_cost_guard.expensive_model_warning",
+            lambda *_args, **_kwargs: SimpleNamespace(message="EXPENSIVE MODEL WARNING"),
+        )
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "nous",
+                "model": "openai/gpt-5.5-pro",
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["confirm_required"] is True
+        assert data["confirm_message"] == "EXPENSIVE MODEL WARNING"
+
+        confirmed = self.client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "nous",
+                "model": "openai/gpt-5.5-pro",
+                "confirm_expensive_model": True,
+            },
+        )
+
+        assert confirmed.status_code == 200
+        assert confirmed.json()["ok"] is True
+
 
     def test_reveal_env_var(self, tmp_path):
         """POST /api/env/reveal should return the real unredacted value."""

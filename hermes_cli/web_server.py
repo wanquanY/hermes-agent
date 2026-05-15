@@ -483,6 +483,48 @@ class EnvVarReveal(BaseModel):
     key: str
 
 
+class MessagingPlatformUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    env: Dict[str, str] = {}
+    clear_env: List[str] = []
+
+
+class TelegramOnboardingStart(BaseModel):
+    bot_name: Optional[str] = None
+
+
+class TelegramOnboardingApply(BaseModel):
+    allowed_user_ids: List[str]
+
+
+class AudioTranscriptionRequest(BaseModel):
+    data_url: str
+    mime_type: Optional[str] = None
+
+
+_AUDIO_MIME_EXTENSIONS: Dict[str, str] = {
+    "audio/aac": ".aac",
+    "audio/flac": ".flac",
+    "audio/m4a": ".m4a",
+    "audio/mp3": ".mp3",
+    "audio/mp4": ".mp4",
+    "audio/mpeg": ".mp3",
+    "audio/ogg": ".ogg",
+    "audio/wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/webm": ".webm",
+    "audio/x-m4a": ".m4a",
+    "audio/x-wav": ".wav",
+    "video/webm": ".webm",
+}
+_MAX_TRANSCRIPTION_UPLOAD_BYTES = 25 * 1024 * 1024
+
+
+def _audio_extension_for_mime(mime_type: str) -> str:
+    normalized = (mime_type or "").split(";", 1)[0].strip().lower()
+    return _AUDIO_MIME_EXTENSIONS.get(normalized, ".webm")
+
+
 class ModelAssignment(BaseModel):
     """Payload for POST /api/model/set — assign a provider/model to a slot.
 
@@ -495,6 +537,58 @@ class ModelAssignment(BaseModel):
     provider: str
     model: str
     task: str = ""
+    # Optional OpenAI-compatible endpoint URL. Only honored for custom/local
+    # providers on the main slot — lets the GUI configure a self-hosted endpoint
+    # (vLLM, llama.cpp, Ollama, …) that needs no API key. The runtime resolver
+    # reads model.base_url from config (it ignores OPENAI_BASE_URL), so this is
+    # the path that actually wires a local endpoint into resolution.
+    base_url: str = ""
+    confirm_expensive_model: bool = False
+
+
+def _apply_main_model_assignment(
+    model_cfg: "Any", provider: str, model: str, base_url: str = ""
+) -> dict:
+    """Apply a main-slot model assignment to a ``model`` config dict in place.
+
+    Sets ``provider``/``default``, then reconciles ``base_url``:
+
+    - An explicitly supplied ``base_url`` is always persisted (covers
+      ``custom``/local endpoints and any provider whose key is bound to a
+      non-default host).
+    - Otherwise, a stale ``base_url`` is cleared ONLY when switching to a
+      *different* provider — that URL belonged to the old provider. When the
+      provider is unchanged and no new URL is supplied, the existing
+      ``base_url`` is preserved. This keeps a user's custom endpoint (e.g. a
+      Xiaomi MiMo Token Plan host, ``https://token-plan-*.xiaomimimo.com/v1``)
+      alive when they merely re-pick a model under the same provider — picking
+      a model previously wiped it, forcing the registry default and breaking
+      Token Plan keys.
+
+    The runtime resolver reads ``model.base_url`` from config (it ignores
+    ``OPENAI_BASE_URL``) and only honors it when the configured provider matches
+    and the pool entry is on the registry default, so preserving it here is what
+    lets the override actually route. The hardcoded ``context_length`` override
+    is always dropped since the new model may have a different context window.
+
+    Returns the same dict (coerced to a fresh dict if the input wasn't one) so
+    callers can assign it straight back onto the model config.
+    """
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    prev_provider = str(model_cfg.get("provider") or "").strip().lower()
+    new_provider = provider.strip().lower()
+    model_cfg["provider"] = provider
+    model_cfg["default"] = model
+    if base_url.strip():
+        model_cfg["base_url"] = base_url.strip()
+    elif model_cfg.get("base_url") and new_provider != prev_provider:
+        # Switching providers: the old URL belonged to the old provider, drop
+        # it so the new provider's default endpoint is used. Same-provider
+        # re-assignment keeps the user's configured base_url intact.
+        model_cfg["base_url"] = ""
+    model_cfg.pop("context_length", None)
+    return model_cfg
 
 
 _GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")

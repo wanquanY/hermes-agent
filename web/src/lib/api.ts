@@ -652,14 +652,19 @@ export interface AuxiliaryModelsResponse {
 }
 
 export interface ModelAssignmentRequest {
+  confirm_expensive_model?: boolean;
   scope: "main" | "auxiliary";
   provider: string;
   model: string;
+  /** Optional OpenAI-compatible endpoint URL for custom/local main providers. */
+  base_url?: string;
   /** For auxiliary: task slot name, "" for all, "__reset__" to reset all. */
   task?: string;
 }
 
 export interface ModelAssignmentResponse {
+  confirm_message?: string;
+  confirm_required?: boolean;
   ok: boolean;
   scope?: string;
   provider?: string;

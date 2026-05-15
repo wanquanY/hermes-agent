@@ -5318,6 +5318,7 @@ def _define_discord_view_classes() -> None:
             self.allowed_role_ids = allowed_role_ids or set()
             self.resolved = False
             self._selected_provider: str = ""
+            self._pending_expensive_model: str = ""
 
             self._build_provider_select()
 
@@ -5464,7 +5465,11 @@ def _define_discord_view_classes() -> None:
                 view=self,
             )
 
-        async def _on_model_selected(self, interaction: discord.Interaction):
+        async def _switch_selected_model(
+            self,
+            interaction: discord.Interaction,
+            model_id: str,
+        ):
             if self.resolved:
                 await interaction.response.send_message(
                     "Already resolved~", ephemeral=True
@@ -5477,7 +5482,6 @@ def _define_discord_view_classes() -> None:
                 return
 
             self.resolved = True
-            model_id = interaction.data["values"][0]
             self.clear_items()
             await interaction.response.edit_message(
                 embed=discord.Embed(
