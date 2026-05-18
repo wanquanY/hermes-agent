@@ -1070,6 +1070,20 @@ class TestDeleteAndExport:
         assert db.get_session("s1") is None
         assert db.message_count(session_id="s1") == 0
 
+    def test_delete_session_removes_prefixed_gateway_transcripts(self, db, tmp_path):
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        db.create_session(session_id="s1", source="tui")
+        legacy_transcript = sessions_dir / "s1.json"
+        gateway_transcript = sessions_dir / "session_s1.json"
+        legacy_transcript.write_text("{}", encoding="utf-8")
+        gateway_transcript.write_text("{}", encoding="utf-8")
+
+        assert db.delete_session("s1", sessions_dir=sessions_dir) is True
+
+        assert not legacy_transcript.exists()
+        assert not gateway_transcript.exists()
+
     def test_delete_nonexistent(self, db):
         assert db.delete_session("nope") is False
 
@@ -2942,4 +2956,3 @@ class TestFTS5ToolCallMigration:
             assert version == 11
         finally:
             session_db.close()
-

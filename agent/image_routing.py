@@ -100,6 +100,8 @@ def decide_image_input_mode(
     provider: str,
     model: str,
     cfg: Optional[Dict[str, Any]],
+    *,
+    supports_vision_override: Optional[bool] = None,
 ) -> str:
     """Return ``"native"`` or ``"text"`` for the given turn.
 
@@ -107,6 +109,10 @@ def decide_image_input_mode(
       provider: active inference provider ID (e.g. ``"anthropic"``, ``"openrouter"``).
       model:    active model slug as it would be sent to the provider.
       cfg:      loaded config.yaml dict, or None. When None, behaves as auto.
+      supports_vision_override: Optional session-scoped capability from a
+        platform model catalog. When present, it is used ahead of the static
+        Hermes model registry while still respecting explicit image routing
+        config and auxiliary vision overrides.
     """
     mode_cfg = "auto"
     if isinstance(cfg, dict):
@@ -122,6 +128,9 @@ def decide_image_input_mode(
     # auto
     if _explicit_aux_vision_override(cfg):
         return "text"
+
+    if supports_vision_override is not None:
+        return "native" if bool(supports_vision_override) else "text"
 
     supports = _lookup_supports_vision(provider, model)
     if supports is True:

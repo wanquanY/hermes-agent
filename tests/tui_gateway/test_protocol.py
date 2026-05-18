@@ -284,6 +284,23 @@ def test_sess_found(server):
     assert err is None
 
 
+def test_sess_resolves_stored_session_id_to_running_runtime(server):
+    idle = {"agent": MagicMock(), "session_key": "stored-1", "running": False}
+    running = {
+        "agent": MagicMock(),
+        "session_key": "stored-1",
+        "running": True,
+        "run_updated_at": 20,
+    }
+    server._sessions["idle-runtime"] = idle
+    server._sessions["running-runtime"] = running
+
+    s, err = server._sess({"session_id": "stored-1"}, "r1")
+
+    assert err is None
+    assert s is running
+
+
 # ── session.resume payload ────────────────────────────────────────────
 
 
@@ -328,6 +345,83 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
         {"role": "assistant", "text": "yo"},
         {"role": "tool", "name": "tool", "context": ""},
     ]
+
+
+def test_session_resume_reuses_live_running_runtime(server, monkeypatch):
+    class _DB:
+        def get_session(self, _sid):
+            return {"id": "stored-live"}
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def reopen_session(self, _sid):
+            return None
+
+        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+            return [{"role": "user", "content": "still running"}]
+
+    live_agent = MagicMock()
+    server._sessions["runtime-live"] = {
+        "agent": live_agent,
+        "session_key": "stored-live",
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": True,
+        "active_run_id": "run-live",
+        "run_started_at": 10,
+        "run_updated_at": 20,
+    }
+    make_agent = MagicMock()
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_make_agent", make_agent)
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {"model": "test/model"})
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "session.resume",
+            "params": {"session_id": "stored-live"},
+        }
+    )
+
+    assert "error" not in resp
+    assert resp["result"]["session_id"] == "runtime-live"
+    assert resp["result"]["resumed"] == "stored-live"
+    assert resp["result"]["running"] is True
+    assert resp["result"]["active_run_id"] == "run-live"
+    make_agent.assert_not_called()
+
+
+def test_session_status_returns_machine_readable_run_state(server):
+    agent = MagicMock(model="gpt-test", provider="test-provider")
+    agent.context_compressor = None
+    server._sessions["runtime-status"] = {
+        "agent": agent,
+        "session_key": "stored-status",
+        "running": True,
+        "active_run_id": "run-status",
+        "run_started_at": 11,
+        "run_updated_at": 22,
+        "history": [],
+        "history_lock": threading.Lock(),
+    }
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "session.status",
+            "params": {"session_id": "stored-status"},
+        }
+    )
+
+    assert "error" not in resp
+    assert resp["result"]["session_id"] == "runtime-status"
+    assert resp["result"]["stored_session_id"] == "stored-status"
+    assert resp["result"]["running"] is True
+    assert resp["result"]["active_run_id"] == "run-status"
+    assert resp["result"]["run_started_at"] == 11
+    assert resp["result"]["run_updated_at"] == 22
 
 
 # ── Config I/O ───────────────────────────────────────────────────────
@@ -536,7 +630,11 @@ def test_command_dispatch_queue_requires_arg(server):
 def test_skills_manage_search_uses_tools_hub_sources(server):
     result = type("Result", (), {
         "description": "Build better terminal demos",
+        "identifier": "openai/skills/showroom",
         "name": "showroom",
+        "source": "official",
+        "tags": ["demo"],
+        "trust_level": "trusted",
     })()
     auth = MagicMock(return_value="auth")
     router = MagicMock(return_value=["source"])
@@ -556,11 +654,451 @@ def test_skills_manage_search_uses_tools_hub_sources(server):
 
     assert "error" not in resp
     assert resp["result"] == {
-        "results": [{"description": "Build better terminal demos", "name": "showroom"}]
+        "results": [{
+            "description": "Build better terminal demos",
+            "identifier": "openai/skills/showroom",
+            "name": "showroom",
+            "source": "official",
+            "tags": ["demo"],
+            "trust": "trusted",
+        }]
     }
     auth.assert_called_once_with()
     router.assert_called_once_with("auth")
     search.assert_called_once_with("showroom", ["source"], source_filter="all", limit=20)
+
+
+def test_skills_manage_list_returns_structured_items(server):
+    fake_hub = types.SimpleNamespace(
+        ensure_hub_dirs=MagicMock(),
+        HubLockFile=MagicMock(return_value=types.SimpleNamespace(
+            list_installed=MagicMock(return_value=[{
+                "name": "showroom",
+                "source": "official",
+                "trust_level": "trusted",
+                "identifier": "openai/skills/showroom",
+                "install_path": "productivity/showroom",
+            }])
+        )),
+    )
+    fake_sync = types.SimpleNamespace(_read_manifest=MagicMock(return_value={"builtin-skill"}))
+    fake_tools = types.SimpleNamespace(_find_all_skills=MagicMock(return_value=[
+        {"name": "builtin-skill", "description": "Bundled", "category": "core"},
+        {"name": "showroom", "description": "Demos", "category": "productivity"},
+        {"name": "local-skill", "description": "Local", "category": ""},
+    ]))
+    fake_utils = types.SimpleNamespace(
+        get_disabled_skill_names=MagicMock(return_value={"local-skill"})
+    )
+
+    with patch.dict(sys.modules, {
+        "tools.skills_hub": fake_hub,
+        "tools.skills_sync": fake_sync,
+        "tools.skills_tool": fake_tools,
+        "agent.skill_utils": fake_utils,
+    }):
+        resp = server.handle_request({
+            "id": "skills-list",
+            "method": "skills.manage",
+            "params": {"action": "list"},
+        })
+
+    assert "error" not in resp
+    result = resp["result"]
+    assert result["skills"] == {
+        "core": ["builtin-skill"],
+        "productivity": ["showroom"],
+        "uncategorized": ["local-skill"],
+    }
+    assert result["stats"]["total_skills"] == 3
+    assert result["stats"]["enabled_skills"] == 2
+    assert result["stats"]["disabled_skills"] == 1
+    showroom = next(item for item in result["items"] if item["name"] == "showroom")
+    assert showroom["source_type"] == "hub"
+    assert showroom["can_uninstall"] is True
+    assert showroom["enabled"] is True
+
+
+def test_skills_manage_uninstall_uses_hub_lifecycle(server):
+    uninstall = MagicMock(return_value=(True, "Uninstalled 'showroom'"))
+    fake_hub = types.SimpleNamespace(uninstall_skill=uninstall)
+    fake_prompt_builder = types.SimpleNamespace(
+        clear_skills_system_prompt_cache=MagicMock()
+    )
+
+    with patch.dict(sys.modules, {
+        "tools.skills_hub": fake_hub,
+        "agent.prompt_builder": fake_prompt_builder,
+    }):
+        resp = server.handle_request({
+            "id": "skills-uninstall",
+            "method": "skills.manage",
+            "params": {"action": "uninstall", "query": "showroom"},
+        })
+
+    assert "error" not in resp
+    assert resp["result"] == {
+        "uninstalled": True,
+        "name": "showroom",
+        "message": "Uninstalled 'showroom'",
+    }
+    uninstall.assert_called_once_with("showroom")
+    fake_prompt_builder.clear_skills_system_prompt_cache.assert_called_once_with(
+        clear_snapshot=True
+    )
+
+
+def test_skills_manage_set_enabled_updates_config(server):
+    saved = []
+    fake_config = types.SimpleNamespace(
+        load_config=MagicMock(return_value={"skills": {"disabled": ["showroom"]}}),
+        save_config=MagicMock(side_effect=lambda cfg: saved.append(cfg)),
+    )
+    fake_prompt_builder = types.SimpleNamespace(
+        clear_skills_system_prompt_cache=MagicMock()
+    )
+
+    with patch.dict(sys.modules, {
+        "hermes_cli.config": fake_config,
+        "agent.prompt_builder": fake_prompt_builder,
+    }):
+        resp = server.handle_request({
+            "id": "skills-enable",
+            "method": "skills.manage",
+            "params": {"action": "enable", "query": "showroom"},
+        })
+
+    assert "error" not in resp
+    assert resp["result"] == {"name": "showroom", "enabled": True, "platform": None}
+    assert saved == [{"skills": {"disabled": []}}]
+
+
+def test_platforms_manage_catalog_returns_structured_platforms(server):
+    fake_gateway = types.SimpleNamespace(
+        _all_platforms=MagicMock(return_value=[
+            {
+                "key": "feishu",
+                "label": "Feishu / Lark",
+                "token_var": "FEISHU_APP_ID",
+                "setup_instructions": ["1. Create a Feishu app"],
+                "vars": [
+                    {"name": "FEISHU_APP_ID", "prompt": "App ID", "password": False},
+                ],
+            }
+        ]),
+        _platform_status=MagicMock(return_value="configured"),
+    )
+    fake_status = types.SimpleNamespace(
+        read_runtime_status=MagicMock(return_value={
+            "gateway_state": "running",
+            "active_agents": 1,
+            "platforms": {"feishu": {"state": "connected"}},
+            "updated_at": "now",
+        })
+    )
+
+    with patch.dict(sys.modules, {
+        "hermes_cli.gateway": fake_gateway,
+        "gateway.status": fake_status,
+    }):
+        resp = server.handle_request({
+            "id": "platforms-catalog",
+            "method": "platforms.manage",
+            "params": {"action": "catalog"},
+        })
+
+    assert "error" not in resp
+    result = resp["result"]
+    assert result["gateway"]["state"] == "running"
+    assert result["platforms"][0]["id"] == "feishu"
+    assert result["platforms"][0]["status"] == "connected"
+    assert result["platforms"][0]["capabilities"]["pairing"] is True
+
+
+def test_platforms_manage_schema_maps_setup_vars(server):
+    fake_gateway = types.SimpleNamespace(
+        _all_platforms=MagicMock(return_value=[
+            {
+                "key": "feishu",
+                "label": "Feishu / Lark",
+                "token_var": "FEISHU_APP_ID",
+                "vars": [
+                    {
+                        "name": "FEISHU_APP_ID",
+                        "prompt": "App ID",
+                        "password": False,
+                        "help": "App ID help",
+                    },
+                    {
+                        "name": "FEISHU_APP_SECRET",
+                        "prompt": "App Secret",
+                        "password": True,
+                    },
+                ],
+            }
+        ]),
+    )
+    fake_config = types.SimpleNamespace(
+        get_env_value=MagicMock(side_effect=lambda name: {
+            "FEISHU_APP_ID": "cli_a",
+            "FEISHU_APP_SECRET": "secret",
+        }.get(name, "")),
+    )
+
+    with patch.dict(sys.modules, {
+        "hermes_cli.gateway": fake_gateway,
+        "hermes_cli.config": fake_config,
+    }):
+        resp = server.handle_request({
+            "id": "platforms-schema",
+            "method": "platforms.manage",
+            "params": {"action": "schema", "platform": "feishu"},
+        })
+
+    assert "error" not in resp
+    result = resp["result"]
+    assert result["platform"] == "feishu"
+    field_keys = [field["key"] for field in result["fields"]]
+    assert field_keys[:3] == ["enabled", "FEISHU_APP_ID", "FEISHU_APP_SECRET"]
+    assert result["value"]["FEISHU_APP_ID"] == "cli_a"
+    assert result["value"]["FEISHU_APP_SECRET"] == "********"
+
+
+def test_platforms_manage_patch_config_saves_env_and_config(server, monkeypatch):
+    fake_gateway = types.SimpleNamespace(
+        _all_platforms=MagicMock(return_value=[{"key": "feishu", "label": "Feishu"}]),
+    )
+    saved_env = []
+    fake_config = types.SimpleNamespace(
+        save_env_value=MagicMock(side_effect=lambda key, value: saved_env.append((key, value))),
+    )
+    import tui_gateway.methods.integrations as integrations
+
+    saved_cfg = []
+    monkeypatch.setattr(integrations, "_load_cfg", lambda: {})
+    monkeypatch.setattr(integrations, "_save_cfg", lambda cfg: saved_cfg.append(cfg))
+
+    with patch.dict(sys.modules, {
+        "hermes_cli.gateway": fake_gateway,
+        "hermes_cli.config": fake_config,
+    }):
+        resp = server.handle_request({
+            "id": "platforms-patch",
+            "method": "platforms.manage",
+            "params": {
+                "action": "patch_config",
+                "platform": "feishu",
+                "config": {
+                    "enabled": True,
+                    "FEISHU_APP_ID": "cli_a",
+                    "FEISHU_APP_SECRET": "********",
+                },
+            },
+        })
+
+    assert "error" not in resp
+    assert resp["result"]["configUpdated"] is True
+    assert saved_cfg == [{"platforms": {"feishu": {"enabled": True}}}]
+    assert saved_env == [("FEISHU_APP_ID", "cli_a")]
+
+
+def test_platforms_manage_dingtalk_qr_flow_saves_credentials(server, monkeypatch):
+    fake_gateway = types.SimpleNamespace(
+        _all_platforms=MagicMock(return_value=[{"key": "dingtalk", "label": "DingTalk"}]),
+    )
+    saved_env = []
+    fake_config = types.SimpleNamespace(
+        save_env_value=MagicMock(side_effect=lambda key, value: saved_env.append((key, value))),
+    )
+    fake_dingtalk_auth = types.SimpleNamespace(
+        begin_registration=MagicMock(return_value={
+            "device_code": "device-1",
+            "verification_uri_complete": "https://dingtalk.example/qr",
+            "expires_in": 60,
+            "interval": 2,
+        }),
+        poll_registration=MagicMock(return_value={
+            "status": "SUCCESS",
+            "client_id": "ding-id",
+            "client_secret": "ding-secret",
+        }),
+    )
+    import tui_gateway.methods.integrations as integrations
+
+    saved_cfg = []
+    monkeypatch.setattr(integrations, "_load_cfg", lambda: {})
+    monkeypatch.setattr(integrations, "_save_cfg", lambda cfg: saved_cfg.append(cfg))
+
+    with patch.dict(sys.modules, {
+        "hermes_cli.gateway": fake_gateway,
+        "hermes_cli.config": fake_config,
+        "hermes_cli.dingtalk_auth": fake_dingtalk_auth,
+    }):
+        start = server.handle_request({
+            "id": "platforms-qr-start",
+            "method": "platforms.manage",
+            "params": {"action": "qr.start", "platform": "dingtalk"},
+        })
+        assert "error" not in start
+
+        status = server.handle_request({
+            "id": "platforms-qr-status",
+            "method": "platforms.manage",
+            "params": {
+                "action": "qr.status",
+                "platform": "dingtalk",
+                "flowId": start["result"]["flowId"],
+            },
+        })
+
+    assert "error" not in status
+    assert status["result"]["status"] == "confirmed"
+    assert status["result"]["account"]["accountId"] == "ding-id"
+    assert ("DINGTALK_CLIENT_ID", "ding-id") in saved_env
+    assert ("DINGTALK_CLIENT_SECRET", "ding-secret") in saved_env
+    assert saved_cfg == [{"platforms": {"dingtalk": {"enabled": True}}}]
+
+
+def test_platforms_manage_feishu_qr_flow_does_not_persist_bot_display_name(server, monkeypatch):
+    fake_gateway = types.SimpleNamespace(
+        _all_platforms=MagicMock(return_value=[{"key": "feishu", "label": "Feishu"}]),
+    )
+    saved_env = []
+    fake_config = types.SimpleNamespace(
+        save_env_value=MagicMock(side_effect=lambda key, value: saved_env.append((key, value))),
+    )
+    fake_feishu = types.SimpleNamespace(
+        _init_registration=MagicMock(),
+        _begin_registration=MagicMock(return_value={
+            "device_code": "device-1",
+            "qr_url": "https://feishu.example/qr",
+            "expire_in": 60,
+            "interval": 2,
+        }),
+        _accounts_base_url=MagicMock(return_value="https://accounts.example"),
+        _post_registration=MagicMock(return_value={
+            "client_id": "cli-feishu",
+            "client_secret": "secret-feishu",
+            "user_info": {"tenant_brand": "feishu", "open_id": "ou_owner"},
+        }),
+        probe_bot=MagicMock(return_value={"bot_name": "赛克思 汪汪"}),
+    )
+    import tui_gateway.methods.integrations as integrations
+
+    saved_cfg = []
+    monkeypatch.setattr(integrations, "_load_cfg", lambda: {})
+    monkeypatch.setattr(integrations, "_save_cfg", lambda cfg: saved_cfg.append(cfg))
+
+    with patch.dict(sys.modules, {
+        "hermes_cli.gateway": fake_gateway,
+        "hermes_cli.config": fake_config,
+        "gateway.platforms.feishu": fake_feishu,
+    }):
+        start = server.handle_request({
+            "id": "platforms-feishu-qr-start",
+            "method": "platforms.manage",
+            "params": {"action": "qr.start", "platform": "feishu"},
+        })
+        assert "error" not in start
+
+        status = server.handle_request({
+            "id": "platforms-feishu-qr-status",
+            "method": "platforms.manage",
+            "params": {
+                "action": "qr.status",
+                "platform": "feishu",
+                "flowId": start["result"]["flowId"],
+            },
+        })
+
+    assert "error" not in status
+    assert status["result"]["status"] == "confirmed"
+    assert status["result"]["account"]["label"] == "赛克思 汪汪"
+    assert ("FEISHU_BOT_NAME", "赛克思 汪汪") not in saved_env
+    assert ("FEISHU_APP_ID", "cli-feishu") in saved_env
+    assert ("FEISHU_ALLOWED_USERS", "ou_owner") in saved_env
+
+
+def test_platforms_manage_weixin_qr_flow_allows_scan_owner(server, monkeypatch):
+    fake_gateway = types.SimpleNamespace(
+        _all_platforms=MagicMock(return_value=[{"key": "weixin", "label": "Weixin"}]),
+    )
+    saved_env = []
+    fake_config = types.SimpleNamespace(
+        save_env_value=MagicMock(side_effect=lambda key, value: saved_env.append((key, value))),
+    )
+
+    class _FakeClientSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def _fake_api_get(_session, *, endpoint, **_kwargs):
+        if "get_bot_qr" in endpoint:
+            return {
+                "qrcode": "qr-1",
+                "qrcode_img_content": "https://weixin.example/qr.png",
+            }
+        if "get_qr_status" in endpoint:
+            return {
+                "status": "confirmed",
+                "ilink_bot_id": "bot-1",
+                "bot_token": "token-1",
+                "baseurl": "https://weixin.example",
+                "ilink_user_id": "owner@im.wechat",
+            }
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    fake_weixin = types.SimpleNamespace(
+        AIOHTTP_AVAILABLE=True,
+        aiohttp=types.SimpleNamespace(ClientSession=_FakeClientSession),
+        _make_ssl_connector=MagicMock(return_value=None),
+        _api_get=_fake_api_get,
+        ILINK_BASE_URL="https://weixin.example",
+        EP_GET_BOT_QR="get_bot_qr",
+        EP_GET_QR_STATUS="get_qr_status",
+        QR_TIMEOUT_MS=1000,
+        WEIXIN_CDN_BASE_URL="https://cdn.weixin.example",
+        save_weixin_account=MagicMock(),
+    )
+    import tui_gateway.methods.integrations as integrations
+
+    saved_cfg = []
+    monkeypatch.setattr(integrations, "_load_cfg", lambda: {})
+    monkeypatch.setattr(integrations, "_save_cfg", lambda cfg: saved_cfg.append(cfg))
+
+    with patch.dict(sys.modules, {
+        "hermes_cli.gateway": fake_gateway,
+        "hermes_cli.config": fake_config,
+        "gateway.platforms.weixin": fake_weixin,
+    }):
+        start = server.handle_request({
+            "id": "platforms-weixin-qr-start",
+            "method": "platforms.manage",
+            "params": {"action": "qr.start", "platform": "weixin"},
+        })
+        assert "error" not in start
+
+        status = server.handle_request({
+            "id": "platforms-weixin-qr-status",
+            "method": "platforms.manage",
+            "params": {
+                "action": "qr.status",
+                "platform": "weixin",
+                "flowId": start["result"]["flowId"],
+            },
+        })
+
+    assert "error" not in status
+    assert status["result"]["status"] == "confirmed"
+    assert ("WEIXIN_ALLOWED_USERS", "owner@im.wechat") in saved_env
+    assert ("WEIXIN_HOME_CHANNEL", "owner@im.wechat") in saved_env
+    assert saved_cfg == [{"platforms": {"weixin": {"enabled": True}}}]
 
 
 def test_command_dispatch_steer_fallback_sends_message(server):

@@ -71,6 +71,15 @@ from pathlib import Path
 from hermes_constants import get_hermes_home
 
 
+def _session_env(name: str, default: str = "") -> str:
+    try:
+        from gateway.session_context import get_session_env
+
+        return get_session_env(name, default)
+    except Exception:
+        return os.getenv(name, default)
+
+
 _OPENAI_CLS_CACHE: Optional[type] = None
 
 
@@ -1184,6 +1193,7 @@ class AIAgent:
         checkpoint_max_total_size_mb: int = 500,
         checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False,
+        model_descriptor: Dict[str, Any] = None,
     ):
         """
         Initialize the AI Agent.
@@ -1236,6 +1246,7 @@ class AIAgent:
         _install_safe_stdio()
 
         self.model = model
+        self.model_descriptor = dict(model_descriptor or {}) if isinstance(model_descriptor, dict) else {}
         self.max_iterations = max_iterations
         # Shared iteration budget — parent creates, children inherit.
         # Consumed by every LLM turn across parent + all subagents.
@@ -2394,7 +2405,7 @@ class AIAgent:
                 logger.debug("Context engine on_session_start: %s", _ce_err)
 
         self._subdirectory_hints = SubdirectoryHintTracker(
-            working_dir=os.getenv("TERMINAL_CWD") or None,
+            working_dir=_session_env("TERMINAL_CWD", "") or None,
         )
         self._user_turn_count = 0
 
@@ -4472,7 +4483,10 @@ class AIAgent:
             metadata["task_id"] = task_id
         if tool_call_id:
             metadata["tool_call_id"] = tool_call_id
-        return {k: v for k, v in metadata.items() if v not in {None, ""}}
+        return {
+            k: v for k, v in metadata.items()
+            if v is not None and not (isinstance(v, str) and v == "")
+        }
 
     def _apply_persist_user_message_override(self, messages: List[Dict]) -> None:
         """Rewrite the current-turn user message before persistence/return.
@@ -4491,6 +4505,42 @@ class AIAgent:
             msg = messages[idx]
             if isinstance(msg, dict) and msg.get("role") == "user":
                 msg["content"] = override
+
+    def _apply_turn_metadata(
+        self,
+        messages: List[Dict],
+        *,
+        start_idx: Optional[int],
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        """Attach turn ownership metadata to the current persisted turn."""
+        if not metadata or start_idx is None:
+            return
+        if start_idx < 0 or start_idx >= len(messages):
+            return
+        turn_id = metadata.get("turn_id")
+        if not turn_id:
+            return
+        base = {
+            k: v for k, v in metadata.items()
+            if v is not None and not (isinstance(v, str) and v == "")
+        }
+        for msg in messages[start_idx:]:
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            if role not in {"user", "assistant", "tool", "system"}:
+                continue
+            existing = msg.get("metadata")
+            merged = dict(existing) if isinstance(existing, dict) else {}
+            merged.setdefault("turn_id", turn_id)
+            if role == "user":
+                for key in ("client_message_id", "attachments", "draft_text", "model"):
+                    if key in base:
+                        merged.setdefault(key, base[key])
+            elif "run_id" in base:
+                merged.setdefault("run_id", base["run_id"])
+            msg["metadata"] = merged
 
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
@@ -4710,6 +4760,7 @@ class AIAgent:
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    metadata=msg.get("metadata") if isinstance(msg.get("metadata"), dict) else None,
                 )
             self._last_flushed_db_idx = len(messages)
         except Exception as e:
@@ -6060,7 +6111,7 @@ class AIAgent:
             # mode).  The gateway process runs from the hermes-agent install
             # dir, so os.getcwd() would pick up the repo's AGENTS.md and
             # other dev files — inflating token usage by ~10k for no benefit.
-            _context_cwd = os.getenv("TERMINAL_CWD") or None
+            _context_cwd = _session_env("TERMINAL_CWD", "") or None
             context_files_prompt = build_context_files_prompt(
                 cwd=_context_cwd, skip_soul=_soul_loaded)
             if context_files_prompt:
@@ -9192,6 +9243,10 @@ class AIAgent:
         them natively (for vision-capable models).
         """
         try:
+            descriptor = getattr(self, "model_descriptor", None)
+            if isinstance(descriptor, dict) and "vision_enabled" in descriptor:
+                return bool(descriptor.get("vision_enabled"))
+
             from agent.models_dev import get_model_capabilities
             provider = (getattr(self, "provider", "") or "").strip()
             model = (getattr(self, "model", "") or "").strip()
@@ -10814,7 +10869,7 @@ class AIAgent:
                 try:
                     cmd = function_args.get("command", "")
                     if _is_destructive_command(cmd):
-                        cwd = function_args.get("workdir") or os.getenv("TERMINAL_CWD", os.getcwd())
+                        cwd = function_args.get("workdir") or _session_env("TERMINAL_CWD", os.getcwd())
                         self._checkpoint_mgr.ensure_checkpoint(
                             cwd, f"before terminal: {cmd[:60]}"
                         )
@@ -11280,7 +11335,7 @@ class AIAgent:
                 try:
                     cmd = function_args.get("command", "")
                     if _is_destructive_command(cmd):
-                        cwd = function_args.get("workdir") or os.getenv("TERMINAL_CWD", os.getcwd())
+                        cwd = function_args.get("workdir") or _session_env("TERMINAL_CWD", os.getcwd())
                         self._checkpoint_mgr.ensure_checkpoint(
                             cwd, f"before terminal: {cmd[:60]}"
                         )
@@ -11628,7 +11683,7 @@ class AIAgent:
             for msg in messages:
                 api_msg = msg.copy()
                 self._copy_reasoning_content_for_api(msg, api_msg)
-                for internal_field in ("reasoning", "finish_reason", "_thinking_prefill"):
+                for internal_field in ("reasoning", "finish_reason", "_thinking_prefill", "metadata"):
                     api_msg.pop(internal_field, None)
                 if _needs_sanitize:
                     self._sanitize_tool_calls_for_strict_api(api_msg)
@@ -11833,6 +11888,7 @@ class AIAgent:
         task_id: str = None,
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
+        turn_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Run a complete conversation with tool calling until completion.
@@ -12036,6 +12092,11 @@ class AIAgent:
 
         # Add user message
         user_msg = {"role": "user", "content": user_message}
+        if turn_metadata:
+            user_msg["metadata"] = {
+                k: v for k, v in turn_metadata.items()
+                if v is not None and not (isinstance(v, str) and v == "")
+            }
         messages.append(user_msg)
         current_turn_user_idx = len(messages) - 1
         self._persist_user_message_idx = current_turn_user_idx
@@ -12449,6 +12510,7 @@ class AIAgent:
                 # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
                 if "finish_reason" in api_msg:
                     api_msg.pop("finish_reason")
+                api_msg.pop("metadata", None)
                 # Strip internal thinking-prefill marker
                 api_msg.pop("_thinking_prefill", None)
                 # Strip Codex Responses API fields (call_id, response_item_id) for
@@ -14605,16 +14667,13 @@ class AIAgent:
                         r'</?(?:REASONING_SCRATCHPAD|think|reasoning)>', '', _think_text
                     ).strip()
                     # For subagents: relay first line to parent display (existing behaviour).
-                    # For all agents with a structured callback: emit reasoning.available event.
+                    # Main-agent provider reasoning is delivered through reasoning_callback.
+                    # Emitting assistant content as reasoning.available here creates fake
+                    # reasoning panes for non-thinking models.
                     first_line = _think_text.split('\n')[0][:80] if _think_text else ""
                     if first_line and getattr(self, '_delegate_depth', 0) > 0:
                         try:
                             self.tool_progress_callback("_thinking", first_line)
-                        except Exception:
-                            pass
-                    elif _think_text:
-                        try:
-                            self.tool_progress_callback("reasoning.available", "_thinking", _think_text[:500], None)
                         except Exception:
                             pass
                 
@@ -15475,6 +15534,11 @@ class AIAgent:
         # can replay assistant("(empty)") / recovery nudges and fall into the
         # same empty-response loop again.
         self._drop_trailing_empty_response_scaffolding(messages)
+        self._apply_turn_metadata(
+            messages,
+            start_idx=current_turn_user_idx,
+            metadata=turn_metadata,
+        )
         self._persist_session(messages, conversation_history)
 
         # ── Turn-exit diagnostic log ─────────────────────────────────────

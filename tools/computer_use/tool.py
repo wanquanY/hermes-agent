@@ -69,7 +69,7 @@ def set_approval_callback(cb) -> None:
 
 
 # Actions that read, not mutate. Always allowed.
-_SAFE_ACTIONS = frozenset({"capture", "wait", "list_apps"})
+_SAFE_ACTIONS = frozenset({"capture", "wait", "list_apps", "list_targets"})
 
 # Actions that mutate user-visible state. Go through approval.
 _DESTRUCTIVE_ACTIONS = frozenset({
@@ -129,8 +129,19 @@ _always_allow: set = set()  # action names the user unlocked for the session
 def _get_backend() -> ComputerUseBackend:
     global _backend
     with _backend_lock:
+        backend_name = os.environ.get("HERMES_COMPUTER_USE_BACKEND", "cua").lower()
+        current_name = type(_backend).__name__.lower() if _backend is not None else ""
+        current_matches = (
+            (backend_name in {"cua", "cua-driver", ""} and "cuadriver" in current_name)
+            or (backend_name == "noop" and "noop" in current_name)
+        )
+        if _backend is not None and not current_matches:
+            try:
+                _backend.stop()
+            except Exception:
+                pass
+            _backend = None
         if _backend is None:
-            backend_name = os.environ.get("HERMES_COMPUTER_USE_BACKEND", "cua").lower()
             if backend_name in {"cua", "cua-driver", ""}:
                 from tools.computer_use.cua_backend import CuaDriverBackend
                 _backend = CuaDriverBackend()
@@ -167,10 +178,16 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
     def stop(self) -> None: self._started = False
     def is_available(self) -> bool: return True
 
-    def capture(self, mode: str = "som", app: Optional[str] = None) -> CaptureResult:
-        self.calls.append(("capture", {"mode": mode, "app": app}))
+    def capture(
+        self,
+        mode: str = "som",
+        app: Optional[str] = None,
+        target_id: Optional[str] = None,
+    ) -> CaptureResult:
+        self.calls.append(("capture", {"mode": mode, "app": app, "target_id": target_id}))
         return CaptureResult(mode=mode, width=1024, height=768, png_b64=None,
-                             elements=[], app=app or "", window_title="")
+                             elements=[], app=app or "", window_title="",
+                             target_id=target_id or "")
 
     def click(self, **kw) -> ActionResult:
         self.calls.append(("click", kw))
@@ -195,6 +212,10 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
     def list_apps(self) -> List[Dict[str, Any]]:
         self.calls.append(("list_apps", {}))
         return []
+
+    def list_targets(self) -> Dict[str, Any]:
+        self.calls.append(("list_targets", {}))
+        return {"displays": [], "windows": [], "active_target_id": None}
 
     def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
         self.calls.append(("focus_app", {"app": app, "raise": raise_window}))
@@ -316,7 +337,7 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
         mode = str(args.get("mode", "som"))
         if mode not in {"som", "vision", "ax"}:
             return json.dumps({"error": f"bad mode {mode!r}; use som|vision|ax"})
-        cap = backend.capture(mode=mode, app=args.get("app"))
+        cap = backend.capture(mode=mode, app=args.get("app"), target_id=args.get("target_id"))
         return _capture_response(cap)
 
     if action == "wait":
@@ -327,6 +348,10 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
     if action == "list_apps":
         apps = backend.list_apps()
         return json.dumps({"apps": apps, "count": len(apps)})
+
+    if action == "list_targets":
+        targets = backend.list_targets()
+        return json.dumps(targets)
 
     if action == "focus_app":
         app = args.get("app")
@@ -415,9 +440,14 @@ def _capture_response(cap: CaptureResult) -> Any:
     summary_lines = [
         f"capture mode={cap.mode} {cap.width}x{cap.height}"
         + (f" app={cap.app}" if cap.app else "")
-        + (f" window={cap.window_title!r}" if cap.window_title else ""),
+        + (f" window={cap.window_title!r}" if cap.window_title else "")
+        + (f" target={cap.target_id}" if cap.target_id else "")
+        + (f" display={cap.display_id}" if cap.display_id else ""),
         f"{len(cap.elements)} interactable element(s):",
     ]
+    if cap.warnings:
+        summary_lines.append("warnings:")
+        summary_lines.extend(f"  - {warning}" for warning in cap.warnings)
     if element_index:
         summary_lines.extend(element_index)
     summary = "\n".join(summary_lines)
@@ -436,8 +466,7 @@ def _capture_response(cap: CaptureResult) -> Any:
                  "image_url": {"url": f"data:{_mime};base64,{cap.png_b64}"}},
             ],
             "text_summary": summary,
-            "meta": {"mode": cap.mode, "width": cap.width, "height": cap.height,
-                     "elements": len(cap.elements), "png_bytes": cap.png_bytes_len},
+            "meta": _capture_meta(cap),
         }
     # AX-only (or image missing): text path.
     return json.dumps({
@@ -447,8 +476,29 @@ def _capture_response(cap: CaptureResult) -> Any:
         "app": cap.app,
         "window_title": cap.window_title,
         "elements": [_element_to_dict(e) for e in cap.elements],
+        "meta": _capture_meta(cap),
+        "warnings": cap.warnings,
         "summary": summary,
     })
+
+
+def _capture_meta(cap: CaptureResult) -> Dict[str, Any]:
+    return {
+        "mode": cap.mode,
+        "width": cap.width,
+        "height": cap.height,
+        "elements": len(cap.elements),
+        "png_bytes": cap.png_bytes_len,
+        "target_id": cap.target_id,
+        "pid": cap.pid,
+        "window_id": cap.window_id,
+        "display_id": cap.display_id,
+        "window_bounds": list(cap.window_bounds) if cap.window_bounds else None,
+        "capture_bounds": list(cap.capture_bounds) if cap.capture_bounds else None,
+        "coordinate_space": cap.coordinate_space,
+        "scale_factor": cap.scale_factor,
+        "warnings": cap.warnings,
+    }
 
 
 def _maybe_follow_capture(
@@ -457,7 +507,10 @@ def _maybe_follow_capture(
     if not do_capture:
         return _text_response(res)
     try:
-        cap = backend.capture(mode="som")
+        target_id = None
+        if res.meta:
+            target_id = res.meta.get("target_id")
+        cap = backend.capture(mode="som", target_id=target_id)
     except Exception as e:
         logger.warning("follow-up capture failed: %s", e)
         return _text_response(res)
@@ -508,7 +561,7 @@ def _element_to_dict(e: UIElement) -> Dict[str, Any]:
 def check_computer_use_requirements() -> bool:
     """Return True iff computer_use can run on this host.
 
-    Conditions: macOS + cua-driver binary installed (or override via env).
+    Conditions: macOS + cua-driver binary installed.
     """
     if sys.platform != "darwin":
         return False

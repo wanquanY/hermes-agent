@@ -21,6 +21,7 @@ from acp.schema import (
 TOOL_KIND_MAP: Dict[str, ToolKind] = {
     # File operations
     "read_file": "read",
+    "parse_document": "read",
     "write_file": "edit",
     "patch": "edit",
     "search_files": "search",
@@ -60,7 +61,7 @@ _POLISHED_TOOLS = {
     # Core operator loop
     "todo", "memory", "session_search", "delegate_task",
     # Files / execution
-    "read_file", "write_file", "patch", "search_files", "terminal", "process", "execute_code",
+    "read_file", "parse_document", "write_file", "patch", "search_files", "terminal", "process", "execute_code",
     # Skills / web / browser / media
     "skill_view", "skills_list", "skill_manage", "web_search", "web_extract",
     "browser_navigate", "browser_click", "browser_type", "browser_press", "browser_scroll",
@@ -97,6 +98,8 @@ def build_tool_title(tool_name: str, args: Dict[str, Any]) -> str:
         return f"terminal: {cmd}"
     if tool_name == "read_file":
         return f"read: {args.get('path', '?')}"
+    if tool_name == "parse_document":
+        return f"parse document: {args.get('path', args.get('file_url', '?'))}"
     if tool_name == "write_file":
         return f"write: {args.get('path', '?')}"
     if tool_name == "patch":

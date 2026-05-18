@@ -885,11 +885,19 @@ def switch_model(
                 requested=current_provider,
                 target_model=new_model,
             )
-            # If resolution fell through to "custom" (e.g. named custom provider like
-            # "ollama-launch" that resolve_runtime_provider doesn't know), keep existing
-            # credentials. Otherwise use the resolved values (picks up credential rotation,
-            # base_url adjustments for OpenCode, etc.).
-            api_key = runtime.get("api_key", "")
+            # Same-provider switches must never downgrade an already-live
+            # credential to the local-server placeholder. This matters for
+            # named custom providers: runtime resolution intentionally exposes
+            # them to the Agent as provider="custom", but a later /model
+            # switch re-resolves bare "custom" and may only see model.base_url,
+            # not the original providers.<name>.key_env. In that case the
+            # resolver returns "no-key-required"; keep the current API key so
+            # the running Agent continues to use the authenticated endpoint.
+            resolved_api_key = runtime.get("api_key", "")
+            if resolved_api_key and resolved_api_key != "no-key-required":
+                api_key = resolved_api_key
+            elif not current_api_key:
+                api_key = resolved_api_key
             base_url = runtime.get("base_url", "")
             api_mode = runtime.get("api_mode", "")
         except Exception:

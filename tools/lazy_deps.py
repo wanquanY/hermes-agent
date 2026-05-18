@@ -136,6 +136,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     ),
     "platform.feishu": (
         "lark-oapi==1.5.3",
+        "python-socks==2.8.1",
         "qrcode==7.4.2",
     ),
 

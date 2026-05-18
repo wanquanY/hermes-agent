@@ -832,6 +832,44 @@ def test_named_custom_provider_uses_key_env_from_providers_dict(monkeypatch):
     assert resolved["model"] == "acme-large"
 
 
+def test_bare_custom_reuses_configured_named_provider_key_env(monkeypatch):
+    """Live agents expose named custom providers as bare custom.
+
+    Rebinding that runtime must still use config.model.provider as the
+    credential authority; otherwise key_env credentials are replaced by
+    no-key-required.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("DOXIE_LLM_RUNTIME_TOKEN", "runtime-secret")
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "model": {
+                "default": "gpt-5.5",
+                "provider": "doxie-cloud",
+                "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+            },
+            "providers": {
+                "doxie-cloud": {
+                    "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+                    "default_model": "gpt-5.5",
+                    "key_env": "DOXIE_LLM_RUNTIME_TOKEN",
+                    "name": "Doxie Cloud",
+                }
+            },
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="custom", target_model="gpt-5.5")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["base_url"] == "http://127.0.0.1:8011/api/v1/llm-proxy/v1"
+    assert resolved["api_key"] == "runtime-secret"
+    assert resolved["source"] == "custom_provider:Doxie Cloud"
+
+
 def test_named_custom_provider_falls_back_to_openai_api_key(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

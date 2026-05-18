@@ -236,7 +236,8 @@ CREATE TABLE IF NOT EXISTS messages (
     reasoning_content TEXT,
     reasoning_details TEXT,
     codex_reasoning_items TEXT,
-    codex_message_items TEXT
+    codex_message_items TEXT,
+    metadata_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS state_meta (
@@ -1445,6 +1446,7 @@ class SessionDB:
         reasoning_details: Any = None,
         codex_reasoning_items: Any = None,
         codex_message_items: Any = None,
+        metadata: Any = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -1465,6 +1467,7 @@ class SessionDB:
             json.dumps(codex_message_items)
             if codex_message_items else None
         )
+        metadata_json = json.dumps(metadata) if metadata else None
         tool_calls_json = json.dumps(tool_calls) if tool_calls else None
         # Multimodal content (list of parts) must be JSON-encoded: sqlite3
         # cannot bind list/dict parameters directly.
@@ -1480,8 +1483,8 @@ class SessionDB:
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                   codex_message_items)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   codex_message_items, metadata_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -1497,6 +1500,7 @@ class SessionDB:
                     reasoning_details_json,
                     codex_items_json,
                     codex_message_items_json,
+                    metadata_json,
                 ),
             )
             msg_id = cursor.lastrowid
@@ -1547,6 +1551,7 @@ class SessionDB:
                 codex_message_items = (
                     msg.get("codex_message_items") if role == "assistant" else None
                 )
+                metadata = msg.get("metadata")
 
                 reasoning_details_json = (
                     json.dumps(reasoning_details) if reasoning_details else None
@@ -1557,14 +1562,15 @@ class SessionDB:
                 codex_message_items_json = (
                     json.dumps(codex_message_items) if codex_message_items else None
                 )
+                metadata_json = json.dumps(metadata) if metadata else None
                 tool_calls_json = json.dumps(tool_calls) if tool_calls else None
 
                 conn.execute(
                     """INSERT INTO messages (session_id, role, content, tool_call_id,
                        tool_calls, tool_name, timestamp, token_count, finish_reason,
                        reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                       codex_message_items)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       codex_message_items, metadata_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         role,
@@ -1580,6 +1586,7 @@ class SessionDB:
                         reasoning_details_json,
                         codex_items_json,
                         codex_message_items_json,
+                        metadata_json,
                     ),
                 )
                 total_messages += 1
@@ -1615,6 +1622,12 @@ class SessionDB:
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in get_messages, falling back to []")
                     msg["tool_calls"] = []
+            if msg.get("metadata_json"):
+                try:
+                    msg["metadata"] = json.loads(msg["metadata_json"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize metadata_json in get_messages")
+                    msg["metadata"] = None
             result.append(msg)
         return result
 
@@ -1699,7 +1712,7 @@ class SessionDB:
             rows = self._conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, "
                 "finish_reason, reasoning, reasoning_content, reasoning_details, "
-                "codex_reasoning_items, codex_message_items "
+                "codex_reasoning_items, codex_message_items, metadata_json "
                 f"FROM messages WHERE session_id IN ({placeholders}) ORDER BY id",
                 tuple(session_ids),
             ).fetchall()
@@ -1720,6 +1733,13 @@ class SessionDB:
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in conversation replay, falling back to []")
                     msg["tool_calls"] = []
+            if row["metadata_json"]:
+                try:
+                    metadata = json.loads(row["metadata_json"])
+                    if isinstance(metadata, dict):
+                        msg["metadata"] = metadata
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize metadata_json in conversation replay")
             # Restore reasoning fields on assistant messages so providers
             # that replay reasoning (OpenRouter, OpenAI, Nous) receive
             # coherent multi-turn reasoning context.
@@ -2250,15 +2270,21 @@ class SessionDB:
     def _remove_session_files(sessions_dir: Optional[Path], session_id: str) -> None:
         """Remove on-disk transcript files for a session.
 
-        Cleans up ``{session_id}.json``, ``{session_id}.jsonl``, and any
+        Cleans up ``{session_id}.json``, ``{session_id}.jsonl``,
+        Doxie/TUI ``session_{session_id}.json`` transcript files, and any
         ``request_dump_{session_id}_*.json`` files left by the gateway.
         Silently skips files that don't exist and swallows OSError so a
         filesystem hiccup never blocks a DB operation.
         """
         if sessions_dir is None:
             return
-        for suffix in (".json", ".jsonl"):
-            p = sessions_dir / f"{session_id}{suffix}"
+        for name in (
+            f"{session_id}.json",
+            f"{session_id}.jsonl",
+            f"session_{session_id}.json",
+            f"session_{session_id}.jsonl",
+        ):
+            p = sessions_dir / name
             try:
                 p.unlink(missing_ok=True)
             except OSError:
@@ -2963,4 +2989,3 @@ class SessionDB:
                 (error[:500], session_id),
             )
         self._execute_write(_do)
-

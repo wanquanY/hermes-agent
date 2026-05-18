@@ -60,6 +60,106 @@ def test_make_agent_passes_resolved_provider():
         assert call_kwargs.kwargs["api_mode"] == "anthropic_messages"
 
 
+def test_make_agent_remembers_requested_runtime_provider():
+    fake_runtime = {
+        "provider": "custom",
+        "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+        "api_key": "token-a",
+        "api_mode": "chat_completions",
+        "requested_provider": "doxie-cloud",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+    }
+    fake_cfg = {
+        "model": {"default": "gpt-5.5", "provider": "doxie-cloud"},
+        "agent": {"system_prompt": ""},
+    }
+    fake_agent = MagicMock()
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime),
+        patch("run_agent.AIAgent", return_value=fake_agent),
+    ):
+        from tui_gateway.server import _make_agent
+
+        agent = _make_agent("sid-doxie", "key-doxie")
+
+    assert agent._gateway_runtime_requested_provider == "doxie-cloud"
+
+
+def test_ensure_agent_runtime_current_rebinds_stale_session_credentials():
+    from tui_gateway.server import _ensure_agent_runtime_current
+
+    agent = MagicMock()
+    agent.model = "gpt-5.5"
+    agent.provider = "custom"
+    agent.base_url = "http://127.0.0.1:8011/api/v1/llm-proxy/v1"
+    agent.api_key = "token-a"
+    agent.api_mode = "chat_completions"
+    agent._gateway_runtime_requested_provider = "doxie-cloud"
+    session = {"agent": agent}
+    fake_runtime = {
+        "provider": "custom",
+        "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+        "api_key": "token-b",
+        "api_mode": "chat_completions",
+        "requested_provider": "doxie-cloud",
+    }
+
+    with (
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime) as mock_resolve,
+        patch("tui_gateway.server._emit"),
+        patch("tui_gateway.server._session_info", return_value={}),
+    ):
+        changed = _ensure_agent_runtime_current("sid-doxie", session)
+
+    assert changed is True
+    mock_resolve.assert_called_once_with(
+        requested="doxie-cloud",
+        target_model="gpt-5.5",
+    )
+    agent.switch_model.assert_called_once_with(
+        new_model="gpt-5.5",
+        new_provider="custom",
+        api_key="token-b",
+        base_url="http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+        api_mode="chat_completions",
+    )
+
+
+def test_ensure_agent_runtime_current_keeps_current_session_credentials():
+    from tui_gateway.server import _ensure_agent_runtime_current
+
+    agent = MagicMock()
+    agent.model = "gpt-5.5"
+    agent.provider = "custom"
+    agent.base_url = "http://127.0.0.1:8011/api/v1/llm-proxy/v1"
+    agent.api_key = "token-a"
+    agent.api_mode = "chat_completions"
+    agent._gateway_runtime_requested_provider = "doxie-cloud"
+    session = {"agent": agent}
+    fake_runtime = {
+        "provider": "custom",
+        "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+        "api_key": "token-a",
+        "api_mode": "chat_completions",
+        "requested_provider": "doxie-cloud",
+    }
+
+    with patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime):
+        changed = _ensure_agent_runtime_current("sid-doxie", session)
+
+    assert changed is False
+    agent.switch_model.assert_not_called()
+
+
 def test_make_agent_ignores_display_personality_without_system_prompt():
     """The TUI matches the classic CLI: personality only becomes active once
     it has been saved to agent.system_prompt."""

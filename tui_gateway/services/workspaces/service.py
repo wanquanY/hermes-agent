@@ -1,0 +1,105 @@
+"""Workspace normalization, validation, and persistence."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+from typing import Any
+
+from tui_gateway.services.persistence.gateway_store import get_gateway_state_store
+from tui_gateway.services.workspaces.domain import Workspace
+
+
+def normalize_session_cwd(value: Any = None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        raw = os.getenv("TERMINAL_CWD", "") or os.getcwd()
+    cwd = os.path.abspath(os.path.expanduser(raw))
+    if not os.path.isdir(cwd):
+        raise ValueError(f"cwd does not exist or is not a directory: {cwd}")
+    return cwd
+
+
+def is_path_inside(child_path: str, parent_path: str) -> bool:
+    try:
+        child = os.path.abspath(child_path)
+        parent = os.path.abspath(parent_path)
+        return os.path.commonpath([child, parent]) == parent
+    except Exception:
+        return False
+
+
+def _workspace_id_for_path(path: str) -> str:
+    digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:20]
+    return f"local:{digest}"
+
+
+def _workspace_name_for_path(path: str) -> str:
+    return os.path.basename(os.path.normpath(path)) or "workspace"
+
+
+def workspace_from_params(params: dict, cwd: str) -> dict:
+    raw = params.get("workspace")
+    workspace = raw if isinstance(raw, dict) else {}
+    workspace_path = normalize_session_cwd(workspace.get("path") or cwd)
+    if not is_path_inside(cwd, workspace_path):
+        raise ValueError(
+            f"cwd must be inside workspace path: cwd={cwd} workspace={workspace_path}"
+        )
+
+    explicit_id = workspace.get("id") or workspace.get("workspace_id")
+    model = Workspace(
+        id=str(explicit_id or _workspace_id_for_path(workspace_path)),
+        name=str(workspace.get("name") or _workspace_name_for_path(workspace_path)),
+        path=workspace_path,
+        kind=str(workspace.get("kind") or "local"),
+    )
+    return model.to_payload()
+
+
+def bind_session_workspace(
+    *,
+    session_id: str,
+    cwd: str,
+    workspace: dict[str, Any],
+) -> dict[str, Any]:
+    store = get_gateway_state_store()
+    persisted = store.upsert_workspace(workspace)
+    store.bind_session_workspace(
+        session_id=session_id,
+        workspace_id=persisted["id"],
+        cwd=cwd,
+    )
+    return persisted
+
+
+def workspace_for_session(session_id: str) -> dict[str, Any] | None:
+    row = get_gateway_state_store().get_session_workspace(session_id)
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "path": row["path"],
+        "kind": row.get("kind") or "",
+        "cwd": row.get("cwd") or row["path"],
+        "session_id": row["session_id"],
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def list_workspaces(limit: int = 200) -> list[dict[str, Any]]:
+    return get_gateway_state_store().list_workspaces(limit=limit)
+
+
+def session_cwd(session: dict | None = None) -> str:
+    if session and session.get("cwd"):
+        return str(session["cwd"])
+    try:
+        from gateway.session_context import get_session_env
+
+        return normalize_session_cwd(get_session_env("TERMINAL_CWD", ""))
+    except Exception:
+        return normalize_session_cwd()
+

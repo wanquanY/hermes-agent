@@ -53,6 +53,15 @@ from typing import Any, Dict, List, Optional
 # available on every platform Hermes itself runs on.
 logger = logging.getLogger(__name__)
 
+
+def _session_env(name: str, default: str = "") -> str:
+    try:
+        from gateway.session_context import get_session_env
+
+        return get_session_env(name, default)
+    except Exception:
+        return os.getenv(name, default)
+
 SANDBOX_AVAILABLE = True
 
 # The 7 tools allowed inside the sandbox. The intersection of this list
@@ -1628,7 +1637,7 @@ def _resolve_child_cwd(mode: str, staging_dir: str) -> str:
     """
     if mode != "project":
         return staging_dir
-    raw = os.environ.get("TERMINAL_CWD", "").strip()
+    raw = _session_env("TERMINAL_CWD", "").strip()
     if raw:
         expanded = os.path.expanduser(raw)
         if os.path.isdir(expanded):

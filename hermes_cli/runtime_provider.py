@@ -537,10 +537,36 @@ def _resolve_named_custom_runtime(
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
+    requested_norm = (requested_provider or "").strip().lower()
+
+    # Named custom providers are exposed to the live Agent as provider="custom"
+    # because the OpenAI-compatible transport is generic.  Later session
+    # rebinds can therefore come back as bare "custom" even though the
+    # persisted config still points at providers.<name>.  In that case keep the
+    # configured named provider as the credential authority so key_env (for
+    # example DOXIE_LLM_RUNTIME_TOKEN) is not lost and replaced with
+    # "no-key-required".
+    if requested_norm == "custom":
+        model_cfg = _get_model_config()
+        cfg_provider = str(model_cfg.get("provider") or "").strip()
+        cfg_provider_norm = cfg_provider.lower()
+        if cfg_provider and cfg_provider_norm not in {"custom", "auto"}:
+            configured_provider = _get_named_custom_provider(cfg_provider)
+            if configured_provider:
+                configured_base_url = str(configured_provider.get("base_url") or "").strip().rstrip("/")
+                explicit_base = (explicit_base_url or "").strip().rstrip("/")
+                cfg_base = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+                if (
+                    not explicit_base
+                    or explicit_base == configured_base_url
+                    or (cfg_base and explicit_base == cfg_base)
+                ):
+                    requested_provider = cfg_provider
+                    requested_norm = _normalize_custom_provider_name(cfg_provider)
+
     # Bare `provider="custom"` with an explicit base_url (e.g. propagated
     # from a `model_aliases:` direct-alias resolution) — build a runtime
     # directly so the alias's base_url actually takes effect.
-    requested_norm = (requested_provider or "").strip().lower()
     if requested_norm == "custom" and explicit_base_url:
         base_url = explicit_base_url.strip().rstrip("/")
         # Check credential pool first — mirrors the named-custom-provider path

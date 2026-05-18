@@ -4744,11 +4744,13 @@ def get_env_value(key: str) -> Optional[str]:
     """Get a value from ~/.hermes/.env or environment."""
     # Check environment first
     if key in os.environ:
-        return os.environ[key]
+        value = os.environ[key]
+        return None if value.strip() in {"<secure-store>", "<已隐藏>"} else value
     
     # Then check .env file
     env_vars = load_env()
-    return env_vars.get(key)
+    value = env_vars.get(key)
+    return None if value and value.strip() in {"<secure-store>", "<已隐藏>"} else value
 
 
 # =============================================================================

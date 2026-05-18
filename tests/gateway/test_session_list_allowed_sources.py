@@ -77,6 +77,47 @@ def test_session_list_default_limit_is_200(monkeypatch):
     _call()  # no explicit limit
     # fetch_limit = max(limit * 2, 200); limit defaults to 200, so 400.
     assert db.calls[0].get("limit") == 400, db.calls[0]
+    assert db.calls[0].get("order_by_last_active") is True, db.calls[0]
+
+
+def test_session_list_returns_last_message_activity_as_updated_at(monkeypatch):
+    db = _StubDB([
+        {
+            "id": "active-by-message",
+            "source": "tui",
+            "started_at": 1,
+            "last_active": 10,
+        }
+    ])
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    resp = _call(limit=10)
+    [session] = resp["result"]["sessions"]
+
+    assert session["updated_at"] == 10
+
+
+def test_session_list_overlays_live_running_state(monkeypatch):
+    db = _StubDB([{"id": "stored-live", "source": "tui", "started_at": 1}])
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    server._sessions["runtime-live"] = {
+        "session_key": "stored-live",
+        "running": True,
+        "active_run_id": "run-live",
+        "run_started_at": 10,
+        "run_updated_at": 20,
+    }
+
+    resp = _call(limit=10)
+    [session] = resp["result"]["sessions"]
+
+    assert session["id"] == "stored-live"
+    assert session["running"] is True
+    assert session["active_runtime_session_id"] == "runtime-live"
+    assert session["active_run_id"] == "run-live"
+    assert session["run_started_at"] == 10
+    assert session["run_updated_at"] == 20
+    server._sessions.clear()
 
 
 def test_session_list_respects_explicit_limit(monkeypatch):
@@ -86,6 +127,7 @@ def test_session_list_respects_explicit_limit(monkeypatch):
     _call(limit=10)
     # fetch_limit = max(limit * 2, 200) = 200 when limit is small.
     assert db.calls[0].get("limit") == 200, db.calls[0]
+    assert db.calls[0].get("order_by_last_active") is True, db.calls[0]
 
 
 def test_session_list_preserves_ordering_after_filter(monkeypatch):

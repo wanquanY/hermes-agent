@@ -387,6 +387,90 @@ def _stop_cdp_supervisor(task_id: str) -> None:
         logger.debug("CDP supervisor stop for task=%s failed (non-fatal): %s", task_id, exc)
 
 
+def _cdp_browser_call(
+    method: str,
+    params: Optional[Dict[str, Any]] = None,
+    *,
+    target_id: Optional[str] = None,
+    timeout: float = 10.0,
+) -> Dict[str, Any]:
+    """Run a CDP command against the configured native browser endpoint."""
+    from tools.browser_cdp_tool import (  # type: ignore[import-not-found]
+        _WS_AVAILABLE,
+        _cdp_call,
+        _resolve_cdp_endpoint,
+        _run_async,
+    )
+
+    if not _WS_AVAILABLE:
+        raise RuntimeError("The 'websockets' Python package is required for CDP tab operations")
+
+    endpoint = _resolve_cdp_endpoint()
+    if not endpoint:
+        raise RuntimeError("No CDP endpoint is available for native browser tab operations")
+    if not endpoint.startswith(("ws://", "wss://")):
+        raise RuntimeError(f"CDP endpoint is not a WebSocket URL: {endpoint!r}")
+
+    return _run_async(_cdp_call(endpoint, method, params or {}, target_id, timeout))
+
+
+def _cdp_page_targets() -> List[Dict[str, Any]]:
+    result = _cdp_browser_call("Target.getTargets")
+    targets = result.get("targetInfos", [])
+    if not isinstance(targets, list):
+        return []
+    pages: List[Dict[str, Any]] = []
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        target_type = str(target.get("type") or "")
+        if target_type not in {"page", "webview"}:
+            continue
+        url = str(target.get("url") or "")
+        if url.startswith("devtools://"):
+            continue
+        pages.append(target)
+    return pages
+
+
+def _default_cdp_task_id(task_id: Optional[str] = None) -> str:
+    return task_id or "default"
+
+
+def _active_cdp_target_for_task(task_id: Optional[str] = None) -> Optional[str]:
+    base_task_id = _default_cdp_task_id(task_id)
+    return _active_cdp_targets.get(base_task_id) or _active_cdp_targets.get(_last_session_key(base_task_id))
+
+
+def _set_active_cdp_target(task_id: Optional[str], target_id: str) -> None:
+    normalized = str(target_id or "").strip()
+    if not normalized:
+        return
+    base_task_id = _default_cdp_task_id(task_id)
+    _active_cdp_targets[base_task_id] = normalized
+    _active_cdp_targets[_last_session_key(base_task_id)] = normalized
+
+
+def _activate_cdp_target(task_id: Optional[str], target_id: str) -> None:
+    normalized = str(target_id or "").strip()
+    if not normalized:
+        raise ValueError("tab_id is required")
+    _cdp_browser_call("Target.activateTarget", {"targetId": normalized})
+    _set_active_cdp_target(task_id, normalized)
+
+
+def _activate_current_cdp_target(task_id: str) -> None:
+    if not _get_cdp_override():
+        return
+    target_id = _active_cdp_target_for_task(task_id)
+    if not target_id:
+        return
+    try:
+        _cdp_browser_call("Target.activateTarget", {"targetId": target_id}, timeout=3.0)
+    except Exception as exc:
+        logger.debug("Failed to activate CDP target %s before browser command: %s", target_id, exc)
+
+
 # ============================================================================
 # Cloud Provider Registry
 # ============================================================================
@@ -1052,6 +1136,11 @@ _recording_sessions: set = set()  # session_keys with active recordings
 # navigation.  Without this, a task that navigated to localhost on the local
 # sidecar would fall back to the cloud session on its next snapshot call.
 _last_active_session_key: Dict[str, str] = {}  # task_id -> session_key
+
+# Tracks the active CDP page target for each task/session key when Hermes is
+# connected to a native browser through BROWSER_CDP_URL.  This is the canonical
+# tab-selection state for the native CDP provider.
+_active_cdp_targets: Dict[str, str] = {}
 _LOCAL_SUFFIX = "::local"
 
 # Flag to track if cleanup has been done
@@ -1378,6 +1467,57 @@ BROWSER_TOOL_SCHEMAS = [
                 }
             },
             "required": []
+        }
+    },
+    {
+        "name": "browser_tabs",
+        "description": "List browser tabs when the active native Hermes browser provider supports explicit tab enumeration. The default local CDP provider may return unsupported.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "browser_new_tab",
+        "description": "Open a new browser tab when the active native Hermes browser provider supports explicit tab creation. The default local CDP provider may return unsupported.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Optional URL for the new tab. Defaults to about:blank."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "browser_select_tab",
+        "description": "Switch the active browser tab by tab_id from browser_tabs. Returns a compact snapshot of the selected tab.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tab_id": {
+                    "type": "string",
+                    "description": "The tab_id from browser_tabs."
+                }
+            },
+            "required": ["tab_id"]
+        }
+    },
+    {
+        "name": "browser_close_tab",
+        "description": "Close a browser tab by tab_id from browser_tabs. If the active tab is closed, another tab becomes active or a blank tab is created.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tab_id": {
+                    "type": "string",
+                    "description": "The tab_id from browser_tabs."
+                }
+            },
+            "required": ["tab_id"]
         }
     },
     {
@@ -1801,6 +1941,9 @@ def _run_browser_command(
     except Exception as e:
         logger.warning("Failed to create browser session for task=%s: %s", task_id, e)
         return {"success": False, "error": f"Failed to create browser session: {str(e)}"}
+
+    if session_info.get("cdp_url"):
+        _activate_current_cdp_target(task_id)
 
     # Build the command with the appropriate backend flag.
     # Cloud mode: --cdp <websocket_url> connects to Browserbase.
@@ -2414,6 +2557,207 @@ def browser_snapshot(
             "error": result.get("error", "Failed to get snapshot")
         }
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+
+
+def browser_tabs(task_id: Optional[str] = None) -> str:
+    """List tabs in the current browser session."""
+    if _is_camofox_mode():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations are not supported by the Camofox browser provider.",
+        }, ensure_ascii=False)
+    if not _get_cdp_override():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
+        }, ensure_ascii=False)
+    try:
+        targets = _cdp_page_targets()
+        active_target = _active_cdp_target_for_task(task_id)
+        if active_target and not any(str(t.get("targetId") or "") == active_target for t in targets):
+            _active_cdp_targets.pop(_default_cdp_task_id(task_id), None)
+            _active_cdp_targets.pop(_last_session_key(_default_cdp_task_id(task_id)), None)
+            active_target = None
+        if not active_target and targets:
+            active_target = str(targets[0].get("targetId") or "")
+            _set_active_cdp_target(task_id, active_target)
+        tabs = []
+        for target in targets:
+            target_id = str(target.get("targetId") or "")
+            tabs.append({
+                "tab_id": target_id,
+                "target_id": target_id,
+                "title": str(target.get("title") or ""),
+                "url": str(target.get("url") or "about:blank"),
+                "active": bool(target_id and target_id == active_target),
+                "attached": bool(target.get("attached")),
+                "type": str(target.get("type") or "page"),
+            })
+        return json.dumps({
+            "success": True,
+            "tabs": tabs,
+            "active_tab_id": active_target,
+            "provider": "native_cdp",
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({
+            "success": False,
+            "error": f"Failed to list native CDP browser tabs: {exc}",
+        }, ensure_ascii=False)
+
+
+def browser_new_tab(url: Optional[str] = None, task_id: Optional[str] = None) -> str:
+    """Open a new tab and make it active."""
+    if _is_camofox_mode():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations are not supported by the Camofox browser provider.",
+        }, ensure_ascii=False)
+    if not _get_cdp_override():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
+        }, ensure_ascii=False)
+    requested_url = str(url or "").strip()
+    try:
+        created = _cdp_browser_call("Target.createTarget", {"url": "about:blank"})
+        target_id = str(created.get("targetId") or "")
+        if not target_id:
+            raise RuntimeError("Target.createTarget did not return targetId")
+        _activate_cdp_target(task_id, target_id)
+        response: Dict[str, Any] = {
+            "success": True,
+            "tab_id": target_id,
+            "target_id": target_id,
+            "active_tab_id": target_id,
+            "url": "about:blank",
+            "provider": "native_cdp",
+        }
+        if requested_url and requested_url != "about:blank":
+            nav_payload = json.loads(browser_navigate(requested_url, task_id=task_id))
+            response["navigation"] = nav_payload
+            if isinstance(nav_payload, dict):
+                response["url"] = nav_payload.get("url", requested_url)
+                response["title"] = nav_payload.get("title", "")
+                if not nav_payload.get("success"):
+                    response["success"] = False
+                    response["error"] = nav_payload.get("error", "Navigation in new tab failed")
+        return json.dumps(response, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({
+            "success": False,
+            "error": f"Failed to create native CDP browser tab: {exc}",
+        }, ensure_ascii=False)
+
+
+def browser_select_tab(tab_id: str, task_id: Optional[str] = None) -> str:
+    """Switch to a tab by tab_id."""
+    if _is_camofox_mode():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations are not supported by the Camofox browser provider.",
+        }, ensure_ascii=False)
+    if not _get_cdp_override():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
+        }, ensure_ascii=False)
+    normalized = str(tab_id or "").strip()
+    if not normalized:
+        return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
+    try:
+        targets = _cdp_page_targets()
+        target = next((t for t in targets if str(t.get("targetId") or "") == normalized), None)
+        if target is None:
+            return json.dumps({
+                "success": False,
+                "error": f"Native CDP browser tab not found: {normalized}",
+            }, ensure_ascii=False)
+        _activate_cdp_target(task_id, normalized)
+        response: Dict[str, Any] = {
+            "success": True,
+            "tab_id": normalized,
+            "target_id": normalized,
+            "active_tab_id": normalized,
+            "title": str(target.get("title") or ""),
+            "url": str(target.get("url") or "about:blank"),
+            "provider": "native_cdp",
+        }
+        try:
+            snap_payload = json.loads(browser_snapshot(full=False, task_id=task_id))
+            response["snapshot"] = snap_payload.get("snapshot", "")
+            response["element_count"] = snap_payload.get("element_count", 0)
+        except Exception as exc:
+            logger.debug("Snapshot after native CDP tab select failed: %s", exc)
+        return json.dumps(response, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({
+            "success": False,
+            "error": f"Failed to select native CDP browser tab: {exc}",
+        }, ensure_ascii=False)
+
+
+def browser_close_tab(tab_id: str, task_id: Optional[str] = None) -> str:
+    """Close a tab by tab_id."""
+    if _is_camofox_mode():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations are not supported by the Camofox browser provider.",
+        }, ensure_ascii=False)
+    if not _get_cdp_override():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
+        }, ensure_ascii=False)
+    normalized = str(tab_id or "").strip()
+    if not normalized:
+        return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
+    try:
+        targets = _cdp_page_targets()
+        if not any(str(t.get("targetId") or "") == normalized for t in targets):
+            return json.dumps({
+                "success": False,
+                "error": f"Native CDP browser tab not found: {normalized}",
+            }, ensure_ascii=False)
+        closed = _cdp_browser_call("Target.closeTarget", {"targetId": normalized})
+        base_task_id = _default_cdp_task_id(task_id)
+        if _active_cdp_targets.get(base_task_id) == normalized:
+            _active_cdp_targets.pop(base_task_id, None)
+        last_key = _last_session_key(base_task_id)
+        if _active_cdp_targets.get(last_key) == normalized:
+            _active_cdp_targets.pop(last_key, None)
+        remaining = [t for t in _cdp_page_targets() if str(t.get("targetId") or "") != normalized]
+        next_active = str(remaining[0].get("targetId") or "") if remaining else ""
+        if next_active:
+            _activate_cdp_target(task_id, next_active)
+        elif not remaining:
+            created = _cdp_browser_call("Target.createTarget", {"url": "about:blank"})
+            next_active = str(created.get("targetId") or "")
+            if next_active:
+                _activate_cdp_target(task_id, next_active)
+        return json.dumps({
+            "success": True,
+            "closed_tab_id": normalized,
+            "closed": bool(closed.get("success", True)),
+            "active_tab_id": next_active or None,
+            "tabs": [
+                {
+                    "tab_id": str(target.get("targetId") or ""),
+                    "target_id": str(target.get("targetId") or ""),
+                    "title": str(target.get("title") or ""),
+                    "url": str(target.get("url") or "about:blank"),
+                    "active": bool(next_active and str(target.get("targetId") or "") == next_active),
+                    "type": str(target.get("type") or "page"),
+                }
+                for target in remaining
+            ],
+            "provider": "native_cdp",
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({
+            "success": False,
+            "error": f"Failed to close native CDP browser tab: {exc}",
+        }, ensure_ascii=False)
 
 
 def browser_click(ref: str, task_id: Optional[str] = None) -> str:
@@ -3590,6 +3934,38 @@ registry.register(
         full=args.get("full", False), task_id=kw.get("task_id"), user_task=kw.get("user_task")),
     check_fn=check_browser_requirements,
     emoji="📸",
+)
+registry.register(
+    name="browser_tabs",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_tabs"],
+    handler=lambda args, **kw: browser_tabs(task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🗂️",
+)
+registry.register(
+    name="browser_new_tab",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_new_tab"],
+    handler=lambda args, **kw: browser_new_tab(url=args.get("url"), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="➕",
+)
+registry.register(
+    name="browser_select_tab",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_select_tab"],
+    handler=lambda args, **kw: browser_select_tab(tab_id=args.get("tab_id", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🔀",
+)
+registry.register(
+    name="browser_close_tab",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_close_tab"],
+    handler=lambda args, **kw: browser_close_tab(tab_id=args.get("tab_id", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🗙",
 )
 registry.register(
     name="browser_click",

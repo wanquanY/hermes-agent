@@ -31,6 +31,10 @@ _approval_session_key: contextvars.ContextVar[str] = contextvars.ContextVar(
     "approval_session_key",
     default="",
 )
+_cron_approval_mode_override: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "cron_approval_mode_override",
+    default="",
+)
 
 
 def _fire_approval_hook(hook_name: str, **kwargs) -> None:
@@ -67,6 +71,23 @@ def set_current_session_key(session_key: str) -> contextvars.Token[str]:
 def reset_current_session_key(token: contextvars.Token[str]) -> None:
     """Restore the prior approval session key context."""
     _approval_session_key.reset(token)
+
+
+def set_cron_approval_mode_override(mode: str) -> contextvars.Token[str]:
+    """Bind a per-cron-job approval mode override to the current context."""
+    normalized = str(mode or "").strip().lower()
+    if normalized in {"approve", "allow", "allow_all", "full_access", "off"}:
+        normalized = "approve"
+    elif normalized in {"deny", "block", "manual"}:
+        normalized = "deny"
+    else:
+        normalized = ""
+    return _cron_approval_mode_override.set(normalized)
+
+
+def reset_cron_approval_mode_override(token: contextvars.Token[str]) -> None:
+    """Restore the previous cron approval mode override."""
+    _cron_approval_mode_override.reset(token)
 
 
 def get_current_session_key(default: str = "default") -> str:
@@ -551,6 +572,18 @@ def has_blocking_approval(session_key: str) -> bool:
         return bool(_gateway_queues.get(session_key))
 
 
+def list_gateway_approvals(session_key: str) -> list[dict]:
+    """Return pending gateway approval payloads for a session.
+
+    The returned dictionaries are shallow copies so callers cannot mutate the
+    live queue entries. This is used by clients after reconnect/resume to
+    recover approval UI that may have been emitted while the WebSocket was not
+    attached.
+    """
+    with _lock:
+        return [dict(entry.data) for entry in _gateway_queues.get(session_key, [])]
+
+
 def submit_pending(session_key: str, approval: dict):
     """Store a pending approval request for a session."""
     with _lock:
@@ -829,6 +862,9 @@ def _get_approval_timeout() -> int:
 
 def _get_cron_approval_mode() -> str:
     """Read the cron approval mode from config. Returns 'deny' or 'approve'."""
+    override = _cron_approval_mode_override.get()
+    if override:
+        return override
     try:
         from hermes_cli.config import load_config
         config = load_config()

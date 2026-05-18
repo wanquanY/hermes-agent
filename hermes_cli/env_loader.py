@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from utils import atomic_replace
 
 
@@ -20,6 +20,11 @@ _CREDENTIAL_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_KEY")
 # load_hermes_dotenv() calls (user env + project env, gateway hot-reload,
 # tests) don't spam the same warning multiple times.
 _WARNED_KEYS: set[str] = set()
+_SECURE_PLACEHOLDERS = frozenset({"<secure-store>", "<已隐藏>"})
+
+
+def _is_secure_placeholder(value: str | None) -> bool:
+    return str(value or "").strip() in _SECURE_PLACEHOLDERS
 
 
 def _format_offending_chars(value: str, limit: int = 3) -> str:
@@ -83,9 +88,21 @@ def _sanitize_loaded_credentials() -> None:
 
 def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
     try:
-        load_dotenv(dotenv_path=path, override=override, encoding="utf-8")
+        values = dotenv_values(dotenv_path=path, encoding="utf-8")
     except UnicodeDecodeError:
-        load_dotenv(dotenv_path=path, override=override, encoding="latin-1")
+        values = dotenv_values(dotenv_path=path, encoding="latin-1")
+
+    for key, value in values.items():
+        if not key or value is None:
+            continue
+        if _is_secure_placeholder(value):
+            existing = os.environ.get(key)
+            if _is_secure_placeholder(existing):
+                os.environ.pop(key, None)
+            continue
+        if override or key not in os.environ:
+            os.environ[key] = str(value)
+
     # Strip non-ASCII characters from credential env vars that were just
     # loaded.  API keys must be pure ASCII since they're sent as HTTP
     # header values (httpx encodes headers as ASCII).  Non-ASCII chars

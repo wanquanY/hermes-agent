@@ -86,6 +86,30 @@ class TestDecideImageInputMode:
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
             assert decide_image_input_mode("anthropic", "claude-sonnet-4", {}) == "native"
 
+    def test_auto_uses_platform_vision_override_before_static_registry(self):
+        with patch("agent.image_routing._lookup_supports_vision", return_value=None):
+            assert (
+                decide_image_input_mode(
+                    "custom",
+                    "gpt-5.5",
+                    {},
+                    supports_vision_override=True,
+                )
+                == "native"
+            )
+
+    def test_auto_uses_platform_non_vision_override_before_static_registry(self):
+        with patch("agent.image_routing._lookup_supports_vision", return_value=True):
+            assert (
+                decide_image_input_mode(
+                    "openai",
+                    "gpt-5.5",
+                    {},
+                    supports_vision_override=False,
+                )
+                == "text"
+            )
+
     def test_auto_with_non_vision_model(self):
         with patch("agent.image_routing._lookup_supports_vision", return_value=False):
             assert decide_image_input_mode("openrouter", "qwen/qwen3-235b", {}) == "text"
@@ -98,7 +122,15 @@ class TestDecideImageInputMode:
         """If the user configured a dedicated vision backend, don't bypass it."""
         cfg = {"auxiliary": {"vision": {"provider": "openrouter", "model": "google/gemini-2.5-flash"}}}
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
-            assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "text"
+            assert (
+                decide_image_input_mode(
+                    "anthropic",
+                    "claude-sonnet-4",
+                    cfg,
+                    supports_vision_override=True,
+                )
+                == "text"
+            )
 
     def test_none_config_is_auto(self):
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):

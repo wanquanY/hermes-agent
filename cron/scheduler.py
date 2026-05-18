@@ -1202,6 +1202,13 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     # This env var is process-wide and persists for the lifetime of the
     # scheduler process — every job this process runs is a cron job.
     os.environ["HERMES_CRON_SESSION"] = "1"
+    _cron_approval_token = None
+    try:
+        from tools.approval import set_cron_approval_mode_override
+        doxie_meta = job.get("doxie") if isinstance(job.get("doxie"), dict) else {}
+        _cron_approval_token = set_cron_approval_mode_override(doxie_meta.get("approval_policy") or "")
+    except Exception as exc:
+        logger.debug("Job '%s': failed to bind cron approval override: %s", job_id, exc)
 
     # Use ContextVars for per-job session/delivery state so parallel jobs
     # don't clobber each other's targets (os.environ is process-global).
@@ -1623,6 +1630,12 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             else:
                 os.environ["TERMINAL_CWD"] = _prior_terminal_cwd
         # Clean up ContextVar session/delivery state for this job.
+        if _cron_approval_token is not None:
+            try:
+                from tools.approval import reset_cron_approval_mode_override
+                reset_cron_approval_mode_override(_cron_approval_token)
+            except Exception as e:
+                logger.debug("Job '%s': failed to reset cron approval override: %s", job_id, e)
         clear_session_vars(_ctx_tokens)
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")

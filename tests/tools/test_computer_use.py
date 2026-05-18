@@ -68,7 +68,8 @@ class TestSchema:
         actions = set(COMPUTER_USE_SCHEMA["parameters"]["properties"]["action"]["enum"])
         assert actions >= {
             "capture", "click", "double_click", "right_click", "middle_click",
-            "drag", "scroll", "type", "key", "wait", "list_apps", "focus_app",
+            "drag", "scroll", "type", "key", "wait", "list_apps", "list_targets",
+            "focus_app",
         }
 
     def test_capture_mode_enum_has_som_vision_ax(self):
@@ -119,6 +120,13 @@ class TestDispatch:
         assert "apps" in parsed
         assert parsed["count"] == 0
 
+    def test_list_targets_returns_json(self, noop_backend):
+        from tools.computer_use.tool import handle_computer_use
+        out = handle_computer_use({"action": "list_targets"})
+        parsed = json.loads(out)
+        assert parsed["windows"] == []
+        assert parsed["displays"] == []
+
     def test_wait_clamps_long_waits(self, noop_backend):
         from tools.computer_use.tool import handle_computer_use
         # The backend's default wait() uses time.sleep with clamping.
@@ -154,6 +162,40 @@ class TestDispatch:
         handle_computer_use({"action": "right_click", "element": 3})
         click_kw = next(c[1] for c in noop_backend.calls if c[0] == "click")
         assert click_kw["button"] == "right"
+
+    def test_capture_after_preserves_action_target(self):
+        from tools.computer_use.backend import ActionResult, CaptureResult
+        from tools.computer_use import tool as cu_tool
+
+        class FakeBackend:
+            def __init__(self):
+                self.capture_calls = []
+            def start(self): pass
+            def stop(self): pass
+            def is_available(self): return True
+            def capture(self, mode="som", app=None, target_id=None):
+                self.capture_calls.append({"mode": mode, "app": app, "target_id": target_id})
+                return CaptureResult(mode=mode, width=0, height=0, target_id=target_id or "")
+            def click(self, **kw):
+                return ActionResult(
+                    ok=True,
+                    action="click",
+                    meta={"target_id": "window:99"},
+                )
+            def drag(self, **kw): ...
+            def scroll(self, **kw): ...
+            def type_text(self, text): ...
+            def key(self, keys): ...
+            def list_apps(self): return []
+            def list_targets(self): return {"displays": [], "windows": []}
+            def focus_app(self, app, raise_window=False): ...
+
+        fake = FakeBackend()
+        cu_tool.reset_backend_for_tests()
+        with patch.object(cu_tool, "_get_backend", return_value=fake):
+            cu_tool.handle_computer_use({"action": "click", "element": 1, "capture_after": True})
+
+        assert fake.capture_calls[-1]["target_id"] == "window:99"
 
 
 # ---------------------------------------------------------------------------
@@ -224,12 +266,13 @@ class TestCaptureResponse:
             def start(self): pass
             def stop(self): pass
             def is_available(self): return True
-            def capture(self, mode="som", app=None):
+            def capture(self, mode="som", app=None, target_id=None):
                 return CaptureResult(
                     mode=mode, width=1024, height=768,
                     png_b64=fake_png, elements=[],
                     app="Safari", window_title="example.com",
                     png_bytes_len=100,
+                    target_id=target_id or "window:1",
                 )
             # unused
             def click(self, **kw): ...
@@ -260,7 +303,7 @@ class TestCaptureResponse:
             def start(self): pass
             def stop(self): pass
             def is_available(self): return True
-            def capture(self, mode="som", app=None):
+            def capture(self, mode="som", app=None, target_id=None):
                 return CaptureResult(
                     mode=mode, width=800, height=600,
                     png_b64=fake_png,
@@ -269,6 +312,7 @@ class TestCaptureResponse:
                         UIElement(index=2, role="AXTextField", label="Search", bounds=(50, 20, 200, 30)),
                     ],
                     app="Safari",
+                    target_id=target_id or "window:1",
                 )
             def click(self, **kw): ...
             def drag(self, **kw): ...
@@ -286,6 +330,67 @@ class TestCaptureResponse:
         assert "#1" in text_part["text"]
         assert "AXButton" in text_part["text"]
         assert "AXTextField" in text_part["text"]
+
+
+class TestCuaDriverSessionLifecycle:
+    def test_call_tool_starts_lazy_session_when_cached_session_is_stopped(self):
+        from tools.computer_use.cua_backend import _CuaDriverSession
+
+        class FakeBridge:
+            def __init__(self):
+                self.started = False
+                self.calls = 0
+            def start(self): self.started = True
+            def run(self, coro, timeout=30.0):
+                self.calls += 1
+                if hasattr(coro, "close"):
+                    coro.close()
+                return {"data": "ok", "images": [], "structuredContent": None, "isError": False}
+
+        bridge = FakeBridge()
+        session = _CuaDriverSession(bridge)
+        session._aenter = lambda: object()
+        session._call_tool_async = lambda name, args: object()
+
+        out = session.call_tool("list_apps", {})
+
+        assert out["data"] == "ok"
+        assert session._started is True
+        assert bridge.started is True
+        assert bridge.calls == 2  # one for start/_aenter, one for tool call
+
+    def test_call_tool_restarts_once_when_existing_session_is_unhealthy(self):
+        from tools.computer_use.cua_backend import _CuaDriverSession
+
+        class FakeBridge:
+            def __init__(self):
+                self.calls = 0
+                self.starts = 0
+                self.stops = 0
+            def start(self): self.starts += 1
+            def stop(self): self.stops += 1
+            def run(self, coro, timeout=30.0):
+                self.calls += 1
+                if hasattr(coro, "close"):
+                    coro.close()
+                if self.calls == 1:
+                    raise RuntimeError("cua-driver session not started")
+                return {"data": "ok", "images": [], "structuredContent": None, "isError": False}
+
+        bridge = FakeBridge()
+        session = _CuaDriverSession(bridge)
+        session._started = True
+        session._session = object()
+        session._aenter = lambda: object()
+        session._aexit = lambda: object()
+        session._call_tool_async = lambda name, args: object()
+
+        out = session.call_tool("capture", {})
+
+        assert out["data"] == "ok"
+        assert session._started is True
+        assert bridge.starts == 1
+        assert bridge.calls == 4  # failed call, stop/_aexit, start/_aenter, retry
 
 
 # ---------------------------------------------------------------------------

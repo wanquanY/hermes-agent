@@ -104,6 +104,42 @@ def test_switch_model_accepts_explicit_named_custom_provider(monkeypatch):
     assert result.api_key == "no-key-required"
 
 
+def test_same_custom_provider_switch_preserves_current_api_key(monkeypatch):
+    """Same-provider custom switches must not replace live credentials with a placeholder."""
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **kwargs: {
+            "api_key": "no-key-required",
+            "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+            "api_mode": "chat_completions",
+        },
+    )
+    monkeypatch.setattr("hermes_cli.models.validate_requested_model", lambda *a, **k: _MOCK_VALIDATION)
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_info", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_capabilities", lambda *a, **k: None)
+
+    result = switch_model(
+        raw_input="gpt-5.5",
+        current_provider="custom",
+        current_model="gpt-5.5",
+        current_base_url="http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+        current_api_key="doxie-access-token",
+        user_providers={
+            "doxie-cloud": {
+                "name": "Doxie Cloud",
+                "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+                "key_env": "DOXIE_CLOUD_ACCESS_TOKEN",
+                "default_model": "gpt-5.5",
+            }
+        },
+    )
+
+    assert result.success is True
+    assert result.target_provider == "custom"
+    assert result.new_model == "gpt-5.5"
+    assert result.api_key == "doxie-access-token"
+
+
 def test_list_groups_same_name_custom_providers_into_one_row(monkeypatch):
     """Multiple custom_providers entries sharing a name should produce one row
     with all models collected, not N duplicate rows."""

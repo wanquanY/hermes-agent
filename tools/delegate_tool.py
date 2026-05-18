@@ -1128,6 +1128,9 @@ def _build_child_agent(
         provider_sort=child_provider_sort,
         openrouter_min_coding_score=child_openrouter_min_coding_score,
         tool_progress_callback=child_progress_cb,
+        stream_delta_callback=getattr(
+            parent_agent, "_delegate_child_stream_delta_callback", None
+        ),
         iteration_budget=None,  # fresh budget per subagent
     )
     child._print_fn = getattr(parent_agent, "_print_fn", None)

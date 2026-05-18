@@ -4,11 +4,32 @@ Import-safe module with no dependencies — can be imported from anywhere
 without risk of circular imports.
 """
 
+import contextvars
 import os
 from pathlib import Path
 
 
 _profile_fallback_warned: bool = False
+_hermes_home_override: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "hermes_home_override",
+    default=None,
+)
+
+
+def set_hermes_home_override(value: str | os.PathLike[str] | None):
+    """Bind HERMES_HOME to the current execution context.
+
+    Long-lived gateway processes can host multiple isolated Hermes profiles.
+    Environment variables are process-global and therefore unsafe for concurrent
+    sessions, so gateway code uses this context-local override while preserving
+    the historical HERMES_HOME fallback for CLI and subprocess entrypoints.
+    """
+    normalized = str(value or "").strip() or None
+    return _hermes_home_override.set(normalized)
+
+
+def reset_hermes_home_override(token) -> None:
+    _hermes_home_override.reset(token)
 
 
 def get_hermes_home() -> Path:
@@ -27,6 +48,10 @@ def get_hermes_home() -> Path:
     template in ``hermes_cli/gateway.py`` and the kanban dispatcher in
     ``hermes_cli/kanban_db.py``).  See https://github.com/NousResearch/hermes-agent/issues/18594.
     """
+    override = _hermes_home_override.get()
+    if override:
+        return Path(override)
+
     val = os.environ.get("HERMES_HOME", "").strip()
     if val:
         return Path(val)
