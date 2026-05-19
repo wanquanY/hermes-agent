@@ -139,6 +139,19 @@ DESIGN_AGENT_PROFILE_SCHEMA = {
                 "enum": ["inspect_context", "create", "update", "upsert"],
                 "description": "Use inspect_context first to retrieve real design catalog data. Use create/update/upsert for draft changes.",
             },
+            "catalog_kind": {
+                "type": "string",
+                "enum": ["overview", "toolsets", "skills", "templates", "avatars"],
+                "description": "When operation=inspect_context, choose which catalog slice to inspect. Default overview returns only compact hints.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional case-insensitive search text for inspect_context catalog slices.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Optional maximum number of catalog entries to return for inspect_context. Defaults to a compact page.",
+            },
             "draft_id": {
                 "type": "string",
                 "description": "Existing Doxie draft id to update. Leave empty only when creating a brand-new agent profile draft.",
@@ -311,20 +324,35 @@ def _architecture_templates() -> list[dict]:
 
 
 def _list_system_toolsets() -> list[dict]:
-    from toolsets import get_all_toolsets
+    from toolsets import get_internal_toolsets, get_toolset_info
+
+    internal_toolsets = get_internal_toolsets()
+    try:
+        from hermes_cli.tools_config import _get_effective_configurable_toolsets
+
+        candidates = [
+            (name, description)
+            for name, _label, description in _get_effective_configurable_toolsets()
+        ]
+    except Exception:
+        from toolsets import get_all_toolsets
+
+        candidates = [
+            (name, str(definition.get("description") or ""))
+            for name, definition in sorted(get_all_toolsets().items())
+        ]
 
     items: list[dict] = []
-    for name, definition in sorted(get_all_toolsets().items()):
-        if name == "doxie":
+    for name, fallback_description in candidates:
+        if name in internal_toolsets:
             continue
-        tools = definition.get("tools") or []
-        includes = definition.get("includes") or []
+        info = get_toolset_info(name) or {}
         items.append(
             {
                 "name": name,
-                "description": definition.get("description") or "",
-                "toolCount": len(tools),
-                "includes": includes,
+                "description": info.get("description") or fallback_description or "",
+                "toolCount": int(info.get("tool_count") or 0),
+                "includes": info.get("includes") or [],
             }
         )
     return items
@@ -354,13 +382,57 @@ def _list_installed_skills() -> list[dict]:
     return [item for item in result if item["name"]]
 
 
-def _profile_design_context_event() -> dict:
-    return {
+def _catalog_limit(value: Any, default: int = 12, maximum: int = 50) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    return max(1, min(maximum, parsed))
+
+
+def _catalog_matches(item: dict, query: str) -> bool:
+    if not query:
+        return True
+    haystack = " ".join(str(value or "") for value in item.values()).lower()
+    return query.lower() in haystack
+
+
+def _filter_catalog(items: list[dict], query: str = "", limit: Any = None, default_limit: int = 12) -> tuple[list[dict], dict]:
+    matched = [item for item in items if _catalog_matches(item, query)]
+    page_limit = _catalog_limit(limit, default=default_limit)
+    return matched[:page_limit], {
+        "query": query,
+        "limit": page_limit,
+        "returned": min(len(matched), page_limit),
+        "totalMatched": len(matched),
+        "totalAvailable": len(items),
+        "truncated": len(matched) > page_limit,
+    }
+
+
+def _profile_design_context_event(
+    catalog_kind: str = "overview",
+    query: str = "",
+    limit: Any = None,
+) -> dict:
+    kind = str(catalog_kind or "overview").strip() or "overview"
+    if kind not in {"overview", "toolsets", "skills", "templates", "avatars"}:
+        kind = "overview"
+
+    toolsets = _list_system_toolsets()
+    skills = _list_installed_skills()
+    templates = _architecture_templates()
+    avatars = _avatar_assets()
+
+    result = {
         "doxie_event": "agent_profile_design_context",
-        "systemToolsets": _list_system_toolsets(),
-        "installedSkillsSummary": _list_installed_skills()[:20],
-        "architectureTemplates": _architecture_templates(),
-        "avatarAssets": _avatar_assets(),
+        "catalogKind": kind,
+        "catalogQueries": {
+            "toolsets": "Call design_agent_profile(operation='inspect_context', catalog_kind='toolsets', query='...', limit=...) for detailed toolset choices.",
+            "skills": "Use skills_list/skill_view as the authoritative skill catalog; call catalog_kind='skills' only for a compact installed-skill hint page.",
+            "templates": "Call catalog_kind='templates' for architecture templates.",
+            "avatars": "Call catalog_kind='avatars' for avatar candidates.",
+        },
         "rules": {
             "skillCatalogSource": "hermes.skills",
             "useSkillsListForInstalledSkills": True,
@@ -375,6 +447,36 @@ def _profile_design_context_event() -> dict:
             ],
         },
     }
+
+    if kind == "overview":
+        result.update(
+            {
+                "summary": {
+                    "toolsetCount": len(toolsets),
+                    "installedSkillHintCount": len(skills),
+                    "architectureTemplateCount": len(templates),
+                    "avatarAssetCount": len(avatars),
+                },
+                "systemToolsets": [item["name"] for item in toolsets[:12]],
+                "installedSkillsSummary": skills[:8],
+                "architectureTemplates": templates[:3],
+                "avatarAssets": avatars[:6],
+            }
+        )
+        return result
+
+    catalog_map = {
+        "toolsets": toolsets,
+        "skills": skills,
+        "templates": templates,
+        "avatars": avatars,
+    }
+    page, page_info = _filter_catalog(catalog_map[kind], str(query or "").strip(), limit)
+    result["catalog"] = page
+    result["page"] = page_info
+    if kind == "skills":
+        result["note"] = "This is only a compact installed-skill hint. Verify recommendedSkills with skills_list or skill_view before creating a draft."
+    return result
 
 
 def _profile_design_event(**kwargs) -> dict:
@@ -489,7 +591,13 @@ def design_agent_profile(**kwargs) -> str:
     """Inspect 分身设计 context or return a structured draft request."""
     operation = str(kwargs.get("operation") or "").strip()
     if operation == "inspect_context":
-        return tool_result(_profile_design_context_event())
+        return tool_result(
+            _profile_design_context_event(
+                catalog_kind=str(kwargs.get("catalog_kind") or kwargs.get("catalogKind") or "overview"),
+                query=str(kwargs.get("query") or ""),
+                limit=kwargs.get("limit"),
+            )
+        )
     if _backend_bridge_available():
         try:
             return tool_result(_profile_design_backend_event(**kwargs))

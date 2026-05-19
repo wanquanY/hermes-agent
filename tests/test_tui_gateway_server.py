@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tui_gateway import server
+from tui_gateway.methods import session as session_methods
 from tui_gateway.services.persistence import gateway_store
 
 
@@ -262,6 +263,44 @@ def test_session_create_accepts_tool_progress_mode_override(monkeypatch, tmp_pat
     result = resp["result"]
     assert server._sessions[result["session_id"]]["tool_progress_mode"] == "all"
     server._sessions.pop(result["session_id"], None)
+
+
+def test_session_create_control_plane_only_does_not_build_agent(monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    build_calls = []
+    monkeypatch.setattr(
+        server,
+        "_start_agent_build",
+        lambda sid, _session: build_calls.append(sid),
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+
+    try:
+        resp = server.dispatch(
+            {
+                "id": "create-control-plane-only",
+                "method": "session.create",
+                "params": {
+                    "cwd": str(workspace),
+                    "control_plane_only": True,
+                },
+            }
+        )
+
+        assert "error" not in resp
+        result = resp["result"]
+        assert result["session_id"] == result["stored_session_id"]
+        assert result["info"]["control_plane_only"] is True
+        assert result["session_id"] not in server._sessions
+        assert db.get_session(result["stored_session_id"])["id"] == result["stored_session_id"]
+        time.sleep(0.1)
+        assert build_calls == []
+    finally:
+        db.close()
 
 
 def test_session_create_rejects_missing_workspace_cwd(tmp_path):
@@ -940,7 +979,7 @@ def test_prompt_submit_uses_shared_voice_tts_runtime_state(monkeypatch):
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
     monkeypatch.setattr(server, "_get_db", lambda: None)
 
-    server._sessions["sid"] = _session(agent=_Agent())
+    server._sessions["sid"] = _session(agent=_Agent(), session_key=f"voice-tts-{time.time_ns()}")
     try:
         tts_resp = server.dispatch(
             {"id": "voice-tts", "method": "voice.toggle", "params": {"action": "tts"}}
@@ -961,10 +1000,298 @@ def test_prompt_submit_uses_shared_voice_tts_runtime_state(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_prompt_submit_rejects_persisted_active_run(monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.upsert_run(
+        run_id="run-active",
+        session_id="session-key",
+        runtime_scope_key="profile:test",
+        turn_id="turn-active",
+        status="running",
+    )
+
+    server._sessions["sid"] = _session(runtime_scope_key="profile:test")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "hello",
+                    "runtime_scope_key": "profile:test",
+                    "client_run_id": "run-new",
+                },
+            }
+        )
+
+        assert resp["error"]["code"] == 4009
+        assert resp["error"]["data"]["active_run_id"] == "run-active"
+        assert server._sessions["sid"]["running"] is False
+    finally:
+        server._sessions.pop("sid", None)
+        db.close()
+
+
+def test_prompt_submit_runtime_rebind_uses_session_profile_context(monkeypatch, tmp_path):
+    class _ImmediateThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            self._target(*self._args, **self._kwargs)
+
+    ready = threading.Event()
+    ready.set()
+    observed = {}
+    profile_home = tmp_path / "profile-home"
+
+    session = _session(
+        agent=types.SimpleNamespace(switch_model=lambda **_kwargs: None),
+        agent_ready=ready,
+        profile_context={
+            "hermes_home": str(profile_home),
+            "env": {"DOXIE_TEST_PROFILE_ENV": "profile-value"},
+        },
+    )
+    server._sessions["sid"] = session
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+
+    def fake_rebind(_sid, _session):
+        observed["env"] = os.environ.get("DOXIE_TEST_PROFILE_ENV")
+        observed["home"] = str(server._active_hermes_home())
+        return False
+
+    monkeypatch.setattr(server, "_ensure_agent_runtime_current", fake_rebind)
+    monkeypatch.setattr(server, "_run_prompt_submit", lambda *args, **kwargs: observed.setdefault("submitted", True))
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "stored_session_id": "session-key",
+                    "text": "hello",
+                    "run_id": "run-profile",
+                    "_run_registry_reserved": True,
+                },
+            }
+        )
+
+        assert resp["result"]["status"] == "streaming"
+        assert observed["env"] == "profile-value"
+        assert observed["home"] == str(profile_home)
+        assert observed["submitted"] is True
+        assert os.environ.get("DOXIE_TEST_PROFILE_ENV") is None
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_doxie_profile_runtime_scope_key_is_authoritative(tmp_path):
+    from tui_gateway.methods import run as run_methods
+
+    profile_home = tmp_path / "profile-home"
+    params = {
+        "doxie_profile": {
+            "id": "draft:draft-1",
+            "name": "Draft",
+            "hermesHomePath": str(profile_home),
+            "runtimeScopeKey": "draft:draft-1",
+        }
+    }
+
+    context = server._profile_context_for_params(params)
+
+    assert context["runtime_scope_key"] == "draft:draft-1"
+    assert run_methods._runtime_scope_key_from_params(params) == "draft:draft-1"
+
+
+def test_run_cancel_marks_persisted_run_cancelled_without_live_runtime(monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.upsert_run(
+        run_id="run-cancel",
+        session_id="stored-cancel",
+        runtime_scope_key="profile:test",
+        turn_id="turn-cancel",
+        status="running",
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "cancel",
+                "method": "run.cancel",
+                "params": {
+                    "stored_session_id": "stored-cancel",
+                    "run_id": "run-cancel",
+                },
+            }
+        )
+
+        assert resp["result"]["status"] == "cancelled"
+        assert db.get_run("run-cancel")["status"] == "cancelled"
+        events = db.list_run_events("stored-cancel")
+        assert len(events) == 1
+        assert events[0]["type"] == "message.complete"
+        assert events[0]["runtime_scope_key"] == "profile:test"
+        assert events[0]["payload"]["status"] == "cancelled"
+        assert resp["result"]["seq"] == events[0]["seq"]
+    finally:
+        db.close()
+
+
+def test_run_reserve_creates_control_plane_owned_run_and_rejects_busy_session(monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    try:
+        reserved = server.handle_request(
+            {
+                "id": "reserve",
+                "method": "run.reserve",
+                "params": {
+                    "stored_session_id": "stored-reserve",
+                    "run_id": "run-reserve",
+                    "turn_id": "turn-reserve",
+                    "runtime_scope_key": "profile:test",
+                },
+            }
+        )
+        conflict = server.handle_request(
+            {
+                "id": "reserve-2",
+                "method": "run.reserve",
+                "params": {
+                    "stored_session_id": "stored-reserve",
+                    "run_id": "run-other",
+                    "turn_id": "turn-other",
+                    "runtime_scope_key": "profile:test",
+                },
+            }
+        )
+
+        assert reserved["result"]["status"] == "queued"
+        assert reserved["result"]["created"] is True
+        run = db.get_run("run-reserve")
+        assert run["status"] == "queued"
+        assert run["metadata"]["reserved_by"] == "control_plane"
+        assert conflict["error"]["code"] == 4009
+        assert conflict["error"]["data"]["active_run_id"] == "run-reserve"
+        assert conflict["error"]["data"]["active_turn_id"] == "turn-reserve"
+    finally:
+        db.close()
+
+
+def test_run_fail_marks_reserved_run_failed_with_terminal_event(monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.upsert_run(
+        run_id="run-fail",
+        session_id="stored-fail",
+        runtime_scope_key="profile:test",
+        turn_id="turn-fail",
+        status="queued",
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "fail",
+                "method": "run.fail",
+                "params": {
+                    "stored_session_id": "stored-fail",
+                    "run_id": "run-fail",
+                    "message": "worker dispatch failed",
+                },
+            }
+        )
+
+        assert resp["result"]["status"] == "failed"
+        assert db.get_run("run-fail")["status"] == "failed"
+        events = db.list_run_events("stored-fail")
+        assert len(events) == 1
+        assert events[0]["type"] == "message.complete"
+        assert events[0]["payload"]["status"] == "error"
+        assert events[0]["payload"]["message"] == "worker dispatch failed"
+        assert resp["result"]["seq"] == events[0]["seq"]
+    finally:
+        db.close()
+
+
 def test_load_enabled_toolsets_prefers_tui_env(monkeypatch):
     monkeypatch.setenv("HERMES_TUI_TOOLSETS", "web, terminal, ,memory")
 
     assert server._load_enabled_toolsets() == ["web", "terminal", "memory"]
+
+
+def test_load_enabled_toolsets_strips_internal_toolsets(monkeypatch):
+    monkeypatch.setenv("HERMES_TUI_TOOLSETS", "web,doxie,skills")
+
+    assert server._load_enabled_toolsets() == ["web", "skills"]
+
+
+def test_session_turn_toolsets_override_default_and_can_enable_internal(monkeypatch):
+    monkeypatch.setattr(server, "_load_enabled_toolsets", lambda: ["web", "file", "browser"])
+
+    assert server._session_enabled_toolsets({"turn_enabled_toolsets": ["doxie", "skills"]}) == ["doxie", "skills"]
+    assert server._session_enabled_toolsets({"turn_enabled_toolsets": []}) == ["web", "file", "browser"]
+
+
+def test_resumed_session_turn_toolset_switch_can_rebuild_agent(monkeypatch):
+    class _Agent:
+        def __init__(self, label):
+            self.label = label
+            self.model = "test-model"
+
+    rebuilt = []
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_make_agent", lambda sid, key, cwd=None: rebuilt.append((sid, key, cwd)) or _Agent("rebuilt"))
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_probe_credentials", lambda _agent: "")
+    monkeypatch.setattr(server, "_probe_config_health", lambda _cfg: "")
+    monkeypatch.setattr(server, "_SlashWorker", lambda *_args, **_kwargs: types.SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(server, "_restart_slash_worker", lambda _session: None)
+
+    try:
+        server._init_session(
+            "sid-resumed",
+            "stored-session",
+            _Agent("initial"),
+            [],
+            cwd="/tmp",
+            workspace={"id": "workspace-test", "path": "/tmp"},
+        )
+        session = server._sessions["sid-resumed"]
+
+        server._ensure_session_turn_toolsets("sid-resumed", session, ["doxie", "skills"])
+
+        assert session["agent"].label == "rebuilt"
+        assert session["agent_ready"].is_set()
+        assert session["agent_error"] is None
+        assert session["turn_enabled_toolsets"] == ["doxie", "skills"]
+        assert rebuilt == [("sid-resumed", "stored-session", "/tmp")]
+    finally:
+        server._sessions.pop("sid-resumed", None)
 
 
 def test_load_enabled_toolsets_filters_invalid_tui_env(monkeypatch, capsys):
@@ -1169,6 +1496,57 @@ def test_history_to_messages_renders_multimodal_content():
     ]
 
 
+def test_session_resume_runtime_attach_rebuilds_scope_mismatch(monkeypatch, tmp_path):
+    class _DB:
+        def get_session(self, session_id):
+            return {"id": session_id, "title": "Stored"}
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def reopen_session(self, _session_id):
+            return None
+
+        def get_messages_as_conversation(self, _session_id, **_kwargs):
+            return []
+
+        def get_messages_page_as_conversation(self, *_args, **_kwargs):
+            return {"messages": [], "pageInfo": {"totalCount": 0}}
+
+    old_session = _session(runtime_scope_key="profile:old")
+    server._sessions["runtime-old"] = old_session
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_make_agent", lambda *args, **kwargs: types.SimpleNamespace())
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "_SlashWorker", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "_wire_callbacks", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "_normalize_session_cwd", lambda value=None: str(tmp_path))
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "resume",
+                "method": "session.resume",
+                "params": {
+                    "session_id": "session-key",
+                    "hydrate": "none",
+                    "_runtime_attach": True,
+                    "runtime_scope_key": "profile:new",
+                },
+            }
+        )
+
+        assert "error" not in resp
+        assert resp["result"]["session_id"] != "runtime-old"
+        new_session = server._sessions[resp["result"]["session_id"]]
+        assert new_session["runtime_scope_key"] == "profile:new"
+    finally:
+        server._sessions.pop("runtime-old", None)
+        if "resp" in locals() and "result" in resp:
+            server._sessions.pop(resp["result"]["session_id"], None)
+
+
 def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
     captured = {}
 
@@ -1244,6 +1622,27 @@ def test_status_callback_accepts_single_message_argument():
         "status.update",
         "sid",
         {"kind": "status", "text": "thinking..."},
+    )
+
+
+def test_status_callback_classifies_api_retry_for_ui():
+    with patch("tui_gateway.server._emit") as emit:
+        cb = server._agent_cbs("sid")["status_callback"]
+        cb("lifecycle", "⏳ Retrying in 2.8s (attempt 1/3)...")
+
+    emit.assert_called_once_with(
+        "status.update",
+        "sid",
+        {
+            "kind": "lifecycle",
+            "text": "⏳ Retrying in 2.8s (attempt 1/3)...",
+            "category": "connection",
+            "state": "retrying",
+            "delay_s": 2.8,
+            "attempt": 1,
+            "max_attempts": 3,
+            "display_text": "连接暂时中断，正在重连（第 1/3 次，约 2.8 秒后）",
+        },
     )
 
 
@@ -2423,6 +2822,77 @@ def test_config_set_model_pending_before_agent_ready(monkeypatch):
         assert calls["new_model"] == "deepseek-v4-pro"
         assert calls["new_provider"] == "custom"
         assert calls["api_key"] == "doxie-token"
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_fails_cleanly_when_runtime_has_no_agent(monkeypatch):
+    class _ImmediateThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            self._target(*self._args, **self._kwargs)
+
+    ready = threading.Event()
+    ready.set()
+    emitted = []
+    session = {
+        "agent": None,
+        "agent_error": None,
+        "agent_ready": ready,
+        "session_key": "session-key",
+        "history": [],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "running": False,
+        "active_run_id": None,
+        "active_turn_id": None,
+        "pending_turn": None,
+        "attached_images": [],
+        "image_counter": 0,
+        "cols": 80,
+        "slash_worker": None,
+        "show_reasoning": False,
+        "tool_progress_mode": "all",
+    }
+    server._sessions["sid"] = session
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append((args, kwargs)))
+    monkeypatch.setattr(
+        server,
+        "_run_prompt_submit",
+        lambda *args, **kwargs: pytest.fail("_run_prompt_submit should not run without an agent"),
+    )
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "stored_session_id": "session-key",
+                    "text": "hello",
+                    "run_id": "run-no-agent",
+                    "_run_registry_reserved": True,
+                },
+            }
+        )
+
+        assert resp["result"]["status"] == "streaming"
+        assert session["running"] is False
+        assert session["active_run_id"] is None
+        assert any(
+            args[0] == "error"
+            and args[1] == "sid"
+            and args[2]["message"] == "runtime agent unavailable"
+            for args, _kwargs in emitted
+        )
     finally:
         server._sessions.pop("sid", None)
 
@@ -3745,6 +4215,8 @@ def test_session_interrupt_response_does_not_wait_for_agent_interrupt(monkeypatc
     """The RPC must acknowledge immediately even if agent interrupt fan-out blocks."""
     called = threading.Event()
     release = threading.Event()
+    emitted_event = threading.Event()
+    emit_release = threading.Event()
     emitted: list[tuple[str, str, dict | None]] = []
 
     class BlockingAgent:
@@ -3759,7 +4231,13 @@ def test_session_interrupt_response_does_not_wait_for_agent_interrupt(monkeypatc
         active_turn_id="turn-1",
     )
     server._sessions["sid"] = session
-    monkeypatch.setattr(server, "_emit", lambda event, sid, payload=None: emitted.append((event, sid, payload)))
+
+    def capture_emit(event, sid, payload=None):
+        emitted.append((event, sid, payload))
+        emitted_event.set()
+        emit_release.wait(timeout=5)
+
+    monkeypatch.setattr(server, "_emit", capture_emit)
 
     try:
         started = time.monotonic()
@@ -3780,6 +4258,7 @@ def test_session_interrupt_response_does_not_wait_for_agent_interrupt(monkeypatc
         assert session["active_turn_id"] is None
         assert session["interrupted_run_id"] == "run-1"
         assert session["interrupted_turn_id"] == "turn-1"
+        assert emitted_event.wait(timeout=0.5), "interrupt completion should still be emitted asynchronously"
         assert emitted == [
             (
                 "message.complete",
@@ -3794,7 +4273,131 @@ def test_session_interrupt_response_does_not_wait_for_agent_interrupt(monkeypatc
         ]
     finally:
         release.set()
+        emit_release.set()
         server._sessions.pop("sid", None)
+
+
+def test_session_interrupt_response_does_not_wait_for_side_effect_execution(monkeypatch):
+    scheduled = []
+    session = _session(
+        agent=types.SimpleNamespace(interrupt=lambda: None),
+        running=True,
+        active_run_id="run-1",
+        active_turn_id="turn-1",
+    )
+    server._sessions["sid"] = session
+
+    monkeypatch.setattr(session_methods, "_schedule_interrupt_work", scheduled.append)
+
+    try:
+        started = time.monotonic()
+        resp = server.handle_request(
+            {"id": "1", "method": "session.interrupt", "params": {"session_id": "sid"}}
+        )
+        elapsed = time.monotonic() - started
+
+        assert resp["result"]["status"] == "interrupted"
+        assert elapsed < 0.25, f"session.interrupt blocked on side effect scheduling for {elapsed:.2f}s"
+        assert len(scheduled) == 1
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_session_interrupt_bypasses_profile_env_lock(monkeypatch):
+    session = _session(
+        agent=types.SimpleNamespace(interrupt=lambda: None),
+        running=True,
+        active_run_id="run-1",
+        active_turn_id="turn-1",
+        profile_context={
+            "hermes_home": "/tmp/hermes-profile",
+            "env": {"DOXIE_TEST_PROFILE_ENV": "1"},
+        },
+    )
+    server._sessions["sid"] = session
+    monkeypatch.setattr(session_methods, "_schedule_interrupt_work", lambda _fn: None)
+    server._profile_env_lock.acquire()
+
+    try:
+        started = time.monotonic()
+        resp = server.handle_request(
+            {"id": "1", "method": "session.interrupt", "params": {"session_id": "sid"}}
+        )
+        elapsed = time.monotonic() - started
+
+        assert resp["result"]["status"] == "interrupted"
+        assert elapsed < 0.25, f"session.interrupt waited for profile env lock for {elapsed:.2f}s"
+    finally:
+        server._profile_env_lock.release()
+        server._sessions.pop("sid", None)
+
+
+def test_control_plane_responses_bypass_profile_env_lock(monkeypatch):
+    """User responses must be able to unblock a run that is holding profile env."""
+
+    import tools.approval as approval_module
+
+    session = _session(
+        profile_context={
+            "hermes_home": "/tmp/hermes-profile",
+            "env": {"DOXIE_TEST_PROFILE_ENV": "1"},
+        },
+    )
+    server._sessions["sid"] = session
+    clarify_event = threading.Event()
+    server._pending["clarify-1"] = ("sid", clarify_event)
+    approval_entry = approval_module._ApprovalEntry({"command": "rm -rf /tmp/x"})
+    approval_module._gateway_queues[session["session_key"]] = [approval_entry]
+    server._profile_env_lock.acquire()
+
+    try:
+        started = time.monotonic()
+        clarify_resp = server.handle_request(
+            {
+                "id": "clarify",
+                "method": "clarify.respond",
+                "params": {
+                    "session_id": "sid",
+                    "request_id": "clarify-1",
+                    "answer": "continue",
+                },
+            }
+        )
+        approval_resp = server.handle_request(
+            {
+                "id": "approval",
+                "method": "approval.respond",
+                "params": {
+                    "session_id": "sid",
+                    "choice": "once",
+                },
+            }
+        )
+        pending_resp = server.handle_request(
+            {
+                "id": "pending",
+                "method": "approval.pending.list",
+                "params": {"session_id": "sid"},
+            }
+        )
+        elapsed = time.monotonic() - started
+
+        assert clarify_resp["result"]["status"] == "ok"
+        assert clarify_event.is_set()
+        assert approval_resp["result"]["resolved"] == 1
+        assert pending_resp["result"]["approvals"] == []
+        assert approval_entry.result == "once"
+        assert approval_entry.event.is_set()
+        assert elapsed < 0.25, (
+            "control-plane response waited for profile env lock "
+            f"for {elapsed:.2f}s"
+        )
+    finally:
+        server._profile_env_lock.release()
+        server._sessions.pop("sid", None)
+        server._pending.pop("clarify-1", None)
+        server._answers.pop("clarify-1", None)
+        approval_module._gateway_queues.pop(session["session_key"], None)
 
 
 def test_session_interrupt_preserves_requested_target_when_session_state_is_idle(monkeypatch):
@@ -3806,8 +4409,6 @@ def test_session_interrupt_preserves_requested_target_when_session_state_is_idle
         active_turn_id=None,
     )
     server._sessions["sid"] = session
-    pending_event = threading.Event()
-    server._pending["pending-current"] = ("sid", pending_event)
     monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
 
     try:
@@ -3872,6 +4473,38 @@ def test_session_interrupt_target_does_not_clear_or_interrupt_unrelated_active_r
         server._sessions.pop("sid", None)
         server._pending.pop("pending-current", None)
         server._answers.pop("pending-current", None)
+
+
+def test_stale_interrupt_side_effects_do_not_touch_new_active_run(monkeypatch):
+    interrupted = threading.Event()
+    emitted = threading.Event()
+    pending_event = threading.Event()
+    session = _session(
+        agent=types.SimpleNamespace(interrupt=interrupted.set),
+        running=True,
+        active_run_id="run-new",
+        active_turn_id="turn-new",
+    )
+    server._sessions["sid"] = session
+    server._pending["pending-new"] = ("sid", pending_event)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: emitted.set())
+
+    try:
+        session_methods._request_session_interrupt_side_effects_async(
+            sid="sid",
+            session=session,
+            should_interrupt_agent=True,
+            interrupted_run_id="run-old",
+            interrupted_turn_id="turn-old",
+        )
+
+        assert not interrupted.wait(timeout=0.1)
+        assert not emitted.wait(timeout=0.1)
+        assert not pending_event.is_set()
+    finally:
+        server._sessions.pop("sid", None)
+        server._pending.pop("pending-new", None)
+        server._answers.pop("pending-new", None)
 
 
 def test_tool_events_are_not_emitted_after_session_interrupt(monkeypatch):

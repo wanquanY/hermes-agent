@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from tui_gateway.methods._shared import bind_server_globals
+from tui_gateway.services import run_control
 from tui_gateway.services.voice import voice_tts_enabled
 
 _server = bind_server_globals(globals())
@@ -12,14 +13,91 @@ _server = bind_server_globals(globals())
 # ── Methods: prompt ──────────────────────────────────────────────────
 
 
+def _mark_prompt_run_failed(
+    *,
+    run_id: str,
+    stored_session_id: str,
+    runtime_scope_key: str,
+    turn_id: str = "",
+    message: str = "",
+) -> None:
+    db = _get_db()
+    if db is None or not run_id or not stored_session_id:
+        return
+    run_control.publish_run_terminal_event(
+        stored_session_id=stored_session_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        runtime_scope_key=runtime_scope_key or stored_session_id,
+        status="failed",
+        message=message,
+        db=db,
+        owner_transport=current_transport(),
+    )
+
+
+def _fail_unavailable_runtime_agent(
+    *,
+    sid: str,
+    session: dict,
+    run_id: str,
+    turn_id: str,
+    message: str = "runtime agent unavailable",
+) -> None:
+    _emit("error", sid, {"message": message})
+    with session["history_lock"]:
+        session["running"] = False
+        session["active_run_id"] = None
+        session["active_turn_id"] = None
+        session["pending_turn"] = None
+    _mark_prompt_run_failed(
+        run_id=run_id,
+        stored_session_id=str(session.get("session_key") or sid),
+        runtime_scope_key=str(
+            session.get("runtime_scope_key")
+            or session.get("active_runtime_scope_key")
+            or session.get("session_key")
+            or sid
+        ),
+        turn_id=turn_id,
+        message=message,
+    )
+
+
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
+    if not params.get("_run_registry_reserved"):
+        target = str(
+            params.get("stored_session_id")
+            or params.get("storedSessionId")
+            or params.get("session_id")
+            or ""
+        ).strip()
+        sid, session = _resolve_runtime_session(target)
+        stable_session_id = str((session or {}).get("session_key") or target).strip()
+        if not stable_session_id:
+            return _err(rid, 4006, "stored_session_id or session_id required")
+        return _methods["run.submit"](
+            rid,
+            {
+                **params,
+                "stored_session_id": stable_session_id,
+                "session_id": stable_session_id,
+                "_legacy_prompt_adapter": True,
+                **({"runtime_session_id": sid} if sid else {}),
+            },
+        )
+    return _execute_prompt_submit(rid, params)
+
+
+def _execute_prompt_submit(rid, params: dict) -> dict:
     sid, text = params.get("session_id", ""), params.get("text", "")
     requested_model = str(params.get("model") or "").strip()
     model_descriptor = _normalize_model_descriptor(params.get("model_descriptor") or params.get("modelDescriptor"))
     has_model_descriptor = bool(params.get("model_descriptor") or params.get("modelDescriptor"))
     run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
     turn_id = str(params.get("turn_id") or uuid.uuid4().hex).strip()
+    runtime_scope_key = str(params.get("runtime_scope_key") or params.get("runtimeScopeKey") or "").strip()
     client_message_id = str(params.get("client_message_id") or "").strip()
     raw_doxie_context = params.get("doxie_product_context") or params.get("doxieProductContext") or ""
     doxie_product_context = (
@@ -32,12 +110,28 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    stable_session_id = str(
+        params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or session.get("session_key")
+        or sid
+    ).strip()
+    effective_runtime_scope_key = runtime_scope_key or stable_session_id
     with session["history_lock"]:
         if session.get("running"):
+            _mark_prompt_run_failed(
+                run_id=run_id,
+                stored_session_id=stable_session_id,
+                runtime_scope_key=effective_runtime_scope_key,
+                turn_id=turn_id,
+                message="session busy",
+            )
             return _err(rid, 4009, "session busy")
         session["running"] = True
         session["active_run_id"] = run_id
         session["active_turn_id"] = turn_id
+        session["active_runtime_scope_key"] = effective_runtime_scope_key
+        session["runtime_scope_key"] = effective_runtime_scope_key
         session["pending_turn"] = {
             "turn_id": turn_id,
             "run_id": run_id,
@@ -53,6 +147,25 @@ def _(rid, params: dict) -> dict:
         session["run_updated_at"] = session["run_started_at"]
         session["interrupted_run_id"] = ""
         session["interrupted_turn_id"] = ""
+        if is_truthy_value(os.environ.get("HERMES_INTERRUPT_TRACE")):
+            print(
+                "[hermes] [tui_gateway] [interrupt-trace] prompt.submit.run_state "
+                f"sid={sid} run_id={run_id or '-'} turn_id={turn_id or '-'} cleared_interrupt=1",
+                file=sys.stderr,
+                flush=True,
+            )
+        run_control.mark_run_started(
+            stored_session_id=stable_session_id,
+            runtime_session_id=sid,
+            run_id=run_id,
+            turn_id=turn_id,
+            runtime_scope_key=effective_runtime_scope_key,
+            metadata={
+                "gateway_pid": os.getpid(),
+                "gateway_instance_id": _GATEWAY_INSTANCE_ID,
+            },
+            db=_get_db(),
+        )
 
     if requested_model:
         try:
@@ -68,6 +181,13 @@ def _(rid, params: dict) -> dict:
                 session["active_run_id"] = None
                 session["active_turn_id"] = None
                 session["pending_turn"] = None
+            _mark_prompt_run_failed(
+                run_id=run_id,
+                stored_session_id=stable_session_id,
+                runtime_scope_key=effective_runtime_scope_key,
+                turn_id=turn_id,
+                message=f"model switch failed: {e}",
+            )
             return _err(rid, 5001, f"model switch failed: {e}")
     elif has_model_descriptor:
         _set_session_model_descriptor(session, model_descriptor, clear_if_empty=True)
@@ -80,51 +200,77 @@ def _(rid, params: dict) -> dict:
     _start_agent_build(sid, session)
 
     def run_after_agent_ready() -> None:
-        err = _wait_agent(session, rid)
-        if err:
-            _emit(
-                "error",
-                sid,
-                {
-                    "message": err.get("error", {}).get(
-                        "message", "agent initialization failed"
-                    )
-                },
-            )
-            with session["history_lock"]:
-                session["running"] = False
-                session["active_run_id"] = None
-                session["active_turn_id"] = None
-                session["pending_turn"] = None
-            return
+        profile_tokens = _enter_profile_context(session.get("profile_context"))
         try:
-            _ensure_agent_runtime_current(sid, session)
-        except Exception as e:
-            _emit("error", sid, {"message": f"runtime auth rebind failed: {e}"})
-            with session["history_lock"]:
-                session["running"] = False
-                session["active_run_id"] = None
-                session["active_turn_id"] = None
-                session["pending_turn"] = None
-            return
-        with session["history_lock"]:
-            if (
-                str(session.get("interrupted_run_id") or "") == run_id
-                or str(session.get("interrupted_turn_id") or "") == turn_id
-                or str(session.get("active_run_id") or "") != run_id
-                or turn_id in set(session.get("recalled_turn_ids") or set())
-            ):
+            err = _wait_agent(session, rid)
+            if err:
+                _emit(
+                    "error",
+                    sid,
+                    {
+                        "message": err.get("error", {}).get(
+                            "message", "agent initialization failed"
+                        )
+                    },
+                )
+                with session["history_lock"]:
+                    session["running"] = False
+                    session["active_run_id"] = None
+                    session["active_turn_id"] = None
+                    session["pending_turn"] = None
+                _mark_prompt_run_failed(
+                    run_id=run_id,
+                    stored_session_id=stable_session_id,
+                    runtime_scope_key=effective_runtime_scope_key,
+                    turn_id=turn_id,
+                    message=err.get("error", {}).get("message", "agent initialization failed"),
+                )
                 return
-        turn_metadata = {
-            "turn_id": turn_id,
-            "run_id": run_id,
-            "client_message_id": client_message_id,
-            "attachments": submitted_attachments,
-            "draft_text": str(params.get("draft_text") or text or ""),
-            "model": requested_model,
-            "model_descriptor": model_descriptor,
-            "doxie_product_context": doxie_product_context,
-        }
+            if session.get("agent") is None:
+                _fail_unavailable_runtime_agent(
+                    sid=sid,
+                    session=session,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                )
+                return
+            try:
+                _ensure_agent_runtime_current(sid, session)
+            except Exception as e:
+                _emit("error", sid, {"message": f"runtime auth rebind failed: {e}"})
+                with session["history_lock"]:
+                    session["running"] = False
+                    session["active_run_id"] = None
+                    session["active_turn_id"] = None
+                    session["pending_turn"] = None
+                _mark_prompt_run_failed(
+                    run_id=run_id,
+                    stored_session_id=stable_session_id,
+                    runtime_scope_key=effective_runtime_scope_key,
+                    turn_id=turn_id,
+                    message=f"runtime auth rebind failed: {e}",
+                )
+                return
+            with session["history_lock"]:
+                if (
+                    str(session.get("interrupted_run_id") or "") == run_id
+                    or str(session.get("interrupted_turn_id") or "") == turn_id
+                    or str(session.get("active_run_id") or "") != run_id
+                    or turn_id in set(session.get("recalled_turn_ids") or set())
+                ):
+                    return
+            turn_metadata = {
+                "turn_id": turn_id,
+                "run_id": run_id,
+                "client_message_id": client_message_id,
+                "attachments": submitted_attachments,
+                "draft_text": str(params.get("draft_text") or text or ""),
+                "model": requested_model,
+                "model_descriptor": model_descriptor,
+                "doxie_product_context": doxie_product_context,
+            }
+        finally:
+            _leave_profile_context(profile_tokens)
         _server._run_prompt_submit(rid, sid, session, text, submitted_images, turn_metadata)
 
     threading.Thread(target=run_after_agent_ready, daemon=True).start()
@@ -136,7 +282,8 @@ def _(rid, params: dict) -> dict:
             "turn_id": turn_id,
             "client_message_id": client_message_id,
             "session_id": sid,
-            "stored_session_id": str(session.get("session_key") or ""),
+            "stored_session_id": stable_session_id,
+            "runtime_scope_key": effective_runtime_scope_key,
         },
     )
 
@@ -227,7 +374,15 @@ def _run_prompt_submit(
         turn_run_id = str(session.get("active_run_id") or "")
         turn_id = str((turn_metadata or {}).get("turn_id") or session.get("active_turn_id") or "")
         session["attached_images"] = []
-    agent = session["agent"]
+    agent = session.get("agent")
+    if agent is None:
+        _fail_unavailable_runtime_agent(
+            sid=sid,
+            session=session,
+            run_id=turn_run_id,
+            turn_id=turn_id,
+        )
+        return
     _emit("message.start", sid)
 
     def is_turn_interrupted() -> bool:
@@ -236,12 +391,35 @@ def _run_prompt_submit(
             interrupted_turn_id = str(session.get("interrupted_turn_id") or "")
             active_run_id = str(session.get("active_run_id") or "")
             if turn_run_id and interrupted_run_id == turn_run_id:
+                if is_truthy_value(os.environ.get("HERMES_INTERRUPT_TRACE")):
+                    print(
+                        "[hermes] [tui_gateway] [interrupt-trace] prompt.stream.skip_interrupted_run "
+                        f"sid={sid} run_id={turn_run_id or '-'} turn_id={turn_id or '-'}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 return True
             if turn_id and interrupted_turn_id == turn_id:
+                if is_truthy_value(os.environ.get("HERMES_INTERRUPT_TRACE")):
+                    print(
+                        "[hermes] [tui_gateway] [interrupt-trace] prompt.stream.skip_interrupted_turn "
+                        f"sid={sid} run_id={turn_run_id or '-'} turn_id={turn_id or '-'}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 return True
             if turn_id and turn_id in set(session.get("recalled_turn_ids") or set()):
                 return True
-            return bool(turn_run_id and active_run_id and active_run_id != turn_run_id)
+            stale = bool(turn_run_id and active_run_id and active_run_id != turn_run_id)
+            if stale:
+                if is_truthy_value(os.environ.get("HERMES_INTERRUPT_TRACE")):
+                    print(
+                        "[hermes] [tui_gateway] [interrupt-trace] prompt.stream.skip_stale_active_run "
+                        f"sid={sid} run_id={turn_run_id or '-'} active_run_id={active_run_id or '-'} turn_id={turn_id or '-'}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            return stale
 
     delivered_parts: list[str] = []
 
@@ -284,7 +462,10 @@ def _run_prompt_submit(
         profile_tokens = []
         goal_followup = None  # set by the post-turn goal hook below
         try:
-            profile_tokens = _enter_profile_context(session.get("profile_context"))
+            profile_tokens = _enter_profile_context(
+                session.get("profile_context"),
+                apply_env=False,
+            )
             from tools.approval import (
                 reset_current_session_key,
                 set_current_session_key,
@@ -403,12 +584,21 @@ def _run_prompt_submit(
                 delivered_parts.append(str(delta))
                 _emit("message.delta", sid, payload)
 
-            result = agent.run_conversation(
-                run_message,
-                conversation_history=list(history),
-                stream_callback=_stream,
-                turn_metadata=turn_metadata,
-            )
+            try:
+                result = agent.run_conversation(
+                    run_message,
+                    conversation_history=list(history),
+                    stream_callback=_stream,
+                    turn_metadata=turn_metadata,
+                )
+            except TypeError as exc:
+                if "turn_metadata" not in str(exc):
+                    raise
+                result = agent.run_conversation(
+                    run_message,
+                    conversation_history=list(history),
+                    stream_callback=_stream,
+                )
 
             if is_turn_interrupted():
                 persist_interrupted_partial()
@@ -641,21 +831,63 @@ def _run_prompt_submit(
         # prompt.submit sets running=True under the history_lock and
         # we check that guard before re-firing.
         if goal_followup:
+            followup_run_id = uuid.uuid4().hex
+            followup_turn_id = uuid.uuid4().hex
+            stable_session_id = str(session.get("session_key") or sid)
+            followup_scope_key = str(session.get("runtime_scope_key") or stable_session_id)
             with session["history_lock"]:
                 if session.get("running"):
                     # User already sent something — their turn wins,
                     # the judge will re-run on the next turn anyway.
                     return
                 session["running"] = True
-                session["active_run_id"] = uuid.uuid4().hex
-                session["active_turn_id"] = uuid.uuid4().hex
+                session["active_run_id"] = followup_run_id
+                session["active_turn_id"] = followup_turn_id
+                session["active_runtime_scope_key"] = followup_scope_key
+                session["runtime_scope_key"] = followup_scope_key
                 session["run_started_at"] = time.time()
                 session["run_updated_at"] = session["run_started_at"]
                 session["interrupted_run_id"] = ""
                 session["interrupted_turn_id"] = ""
+            reservation = run_control.create_run_if_session_idle(
+                stored_session_id=stable_session_id,
+                runtime_session_id=sid,
+                run_id=followup_run_id,
+                turn_id=followup_turn_id,
+                runtime_scope_key=followup_scope_key,
+                db=_get_db(),
+            )
+            if isinstance(reservation, dict) and reservation.get("conflict"):
+                with session["history_lock"]:
+                    if str(session.get("active_run_id") or "") == followup_run_id:
+                        session["running"] = False
+                        session["active_run_id"] = None
+                        session["active_turn_id"] = None
+                return
+            run_control.mark_run_started(
+                stored_session_id=stable_session_id,
+                runtime_session_id=sid,
+                run_id=followup_run_id,
+                turn_id=followup_turn_id,
+                runtime_scope_key=followup_scope_key,
+                metadata={
+                    "gateway_pid": os.getpid(),
+                    "gateway_instance_id": _GATEWAY_INSTANCE_ID,
+                },
+                db=_get_db(),
+            )
             try:
-                _emit("message.start", sid)
-                _run_prompt_submit(rid, sid, session, goal_followup)
+                _run_prompt_submit(
+                    rid,
+                    sid,
+                    session,
+                    goal_followup,
+                    turn_metadata={
+                        "turn_id": followup_turn_id,
+                        "run_id": followup_run_id,
+                        "draft_text": str(goal_followup or ""),
+                    },
+                )
             except Exception as _cont_exc:
                 print(
                     f"[tui_gateway] goal continuation dispatch failed: "

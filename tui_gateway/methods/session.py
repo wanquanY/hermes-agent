@@ -1,9 +1,66 @@
 # ruff: noqa: F401,F403,F405,F821,ARG001
 from __future__ import annotations
 
+import base64
+import json
+import queue
+
 from tui_gateway.methods._shared import bind_server_globals
+from tui_gateway.services import run_control
 
 _server = bind_server_globals(globals())
+_interrupt_work_queue: queue.SimpleQueue = queue.SimpleQueue()
+_agent_interrupt_work_queue: queue.SimpleQueue = queue.SimpleQueue()
+
+
+def _interrupt_trace(message: str) -> None:
+    if not is_truthy_value(os.environ.get("HERMES_INTERRUPT_TRACE")):
+        return
+    print(message, file=sys.stderr, flush=True)
+
+
+def _interrupt_work_loop() -> None:
+    while True:
+        fn = _interrupt_work_queue.get()
+        try:
+            fn()
+        except Exception as exc:
+            _interrupt_trace(
+                f"[hermes] [tui_gateway] [interrupt-trace] interrupt.work.failed error={type(exc).__name__}: {exc}",
+            )
+
+
+threading.Thread(
+    target=_interrupt_work_loop,
+    name="tui-session-interrupt-worker",
+    daemon=True,
+).start()
+
+
+def _agent_interrupt_work_loop() -> None:
+    while True:
+        fn = _agent_interrupt_work_queue.get()
+        try:
+            fn()
+        except Exception as exc:
+            _interrupt_trace(
+                f"[hermes] [tui_gateway] [interrupt-trace] agent.interrupt.work.failed error={type(exc).__name__}: {exc}",
+            )
+
+
+threading.Thread(
+    target=_agent_interrupt_work_loop,
+    name="tui-agent-interrupt-worker",
+    daemon=True,
+).start()
+
+
+def _schedule_interrupt_work(fn) -> None:
+    _interrupt_work_queue.put(fn)
+
+
+def _schedule_agent_interrupt_work(fn) -> None:
+    _agent_interrupt_work_queue.put(fn)
 
 
 # ── Methods: session ─────────────────────────────────────────────────
@@ -16,16 +73,28 @@ def _stored_workspace(session_id: str) -> dict | None:
         return None
 
 
-def _session_run_snapshot(runtime_sid: str, session: dict | None) -> dict:
+def _requested_runtime_scope_key(params: dict | None = None) -> str:
+    return str(
+        (params or {}).get("runtime_scope_key")
+        or (params or {}).get("runtimeScopeKey")
+        or ""
+    ).strip()
+
+
+def _session_run_snapshot(runtime_sid: str, session: dict | None, db=None) -> dict:
     session = session or {}
-    running = bool(session.get("running"))
+    stable_session_id = str(session.get("session_key") or runtime_sid or "")
+    control_state = run_control.session_status(stable_session_id, db=db)
+    running = bool(session.get("running") or control_state.get("running"))
     return {
         "running": running,
+        "runtime_scope_key": str(control_state.get("runtime_scope_key") or session.get("active_runtime_scope_key") or stable_session_id),
         "active_runtime_session_id": runtime_sid or "",
-        "active_run_id": str(session.get("active_run_id") or "") if running else "",
-        "active_turn_id": str(session.get("active_turn_id") or "") if running else "",
-        "run_started_at": (session.get("run_started_at") or 0) if running else 0,
-        "run_updated_at": (session.get("run_updated_at") or 0) if running else 0,
+        "active_run_id": str(session.get("active_run_id") or control_state.get("active_run_id") or "") if running else "",
+        "active_turn_id": str(session.get("active_turn_id") or control_state.get("active_turn_id") or "") if running else "",
+        "run_started_at": (session.get("run_started_at") or control_state.get("run_started_at") or 0) if running else 0,
+        "run_updated_at": (session.get("run_updated_at") or control_state.get("run_updated_at") or 0) if running else 0,
+        "last_event_seq": int(control_state.get("last_event_seq") or 0),
     }
 
 
@@ -61,23 +130,165 @@ def _live_sessions_by_stored_key() -> dict[str, tuple[str, dict]]:
 
 def _request_agent_interrupt_async(sid: str, agent) -> None:
     if agent is None or not hasattr(agent, "interrupt"):
+        _interrupt_trace(
+            f"[hermes] [tui_gateway] [interrupt-trace] agent.interrupt.skip sid={sid} has_agent={agent is not None}",
+        )
         return
 
     def run_interrupt() -> None:
+        started_at = time.time()
+        _interrupt_trace(
+            f"[hermes] [tui_gateway] [interrupt-trace] agent.interrupt.begin sid={sid}",
+        )
         try:
             agent.interrupt()
+            _interrupt_trace(
+                f"[hermes] [tui_gateway] [interrupt-trace] agent.interrupt.done sid={sid} elapsed_ms={int((time.time() - started_at) * 1000)}",
+            )
         except Exception as exc:
-            print(
-                f"[tui_gateway] session.interrupt agent interrupt failed sid={sid}: {exc}",
-                file=sys.stderr,
-                flush=True,
+            _interrupt_trace(
+                f"[hermes] [tui_gateway] [interrupt-trace] agent.interrupt.failed sid={sid} error={type(exc).__name__}: {exc}",
             )
 
-    threading.Thread(
-        target=run_interrupt,
-        name=f"tui-session-interrupt-{sid}",
-        daemon=True,
-    ).start()
+    _schedule_agent_interrupt_work(run_interrupt)
+
+
+def _request_session_interrupt_side_effects_async(
+    *,
+    sid: str,
+    session: dict,
+    should_interrupt_agent: bool,
+    interrupted_run_id: str,
+    interrupted_turn_id: str,
+    completion_status: str = "interrupted",
+) -> None:
+    def run_side_effects() -> None:
+        if should_interrupt_agent:
+            with session["history_lock"]:
+                active_run_id = str(session.get("active_run_id") or "")
+                active_turn_id = str(session.get("active_turn_id") or "")
+                if (
+                    (active_run_id and active_run_id != interrupted_run_id)
+                    or (active_turn_id and active_turn_id != interrupted_turn_id)
+                ):
+                    _interrupt_trace(
+                        "[hermes] [tui_gateway] [interrupt-trace] session.interrupt.side_effects.skip_stale "
+                        f"sid={sid} interrupted_run_id={interrupted_run_id or '-'} "
+                        f"interrupted_turn_id={interrupted_turn_id or '-'} active_run_id={active_run_id or '-'} "
+                        f"active_turn_id={active_turn_id or '-'}",
+                    )
+                    return
+            _interrupt_trace(
+                "[hermes] [tui_gateway] [interrupt-trace] session.interrupt.side_effects.begin "
+                f"sid={sid} run_id={interrupted_run_id or '-'} turn_id={interrupted_turn_id or '-'}",
+            )
+            _request_agent_interrupt_async(sid, session.get("agent"))
+            # Scope pending prompt release to THIS session. A global
+            # _clear_pending() would collaterally cancel clarify/sudo/secret
+            # prompts on unrelated sessions sharing the same gateway process.
+            _clear_pending(sid)
+            try:
+                from tools.approval import resolve_gateway_approval
+
+                resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
+            except Exception:
+                pass
+            _emit(
+                "message.complete",
+                sid,
+                {
+                    "text": "",
+                    "status": completion_status,
+                    "run_id": interrupted_run_id,
+                    "turn_id": interrupted_turn_id,
+                },
+            )
+            _interrupt_trace(
+                "[hermes] [tui_gateway] [interrupt-trace] session.interrupt.side_effects.done "
+                f"sid={sid} run_id={interrupted_run_id or '-'} turn_id={interrupted_turn_id or '-'}",
+            )
+
+    _schedule_interrupt_work(run_side_effects)
+
+
+def _bounded_page_limit(value, *, default: int = 50, maximum: int = 200) -> int:
+    try:
+        parsed = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(parsed, maximum))
+
+
+def _encode_page_cursor(payload: dict | None) -> str:
+    if not payload:
+        return ""
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_page_cursor(value) -> dict:
+    token = str(value or "").strip()
+    if not token:
+        return {}
+    try:
+        padded = token + ("=" * (-len(token) % 4))
+        decoded = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        return decoded if isinstance(decoded, dict) else {}
+    except Exception:
+        return {}
+
+
+def _message_page_info(raw: dict | None) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    prev_id = raw.get("prev_cursor_id")
+    next_id = raw.get("next_cursor_id")
+    return {
+        "prevCursor": _encode_page_cursor({"id": prev_id}) if prev_id is not None else "",
+        "nextCursor": _encode_page_cursor({"id": next_id}) if next_id is not None else "",
+        "hasMoreBefore": bool(raw.get("hasMoreBefore")),
+        "hasMoreAfter": bool(raw.get("hasMoreAfter")),
+        "totalCount": int(raw.get("totalCount") or 0),
+    }
+
+
+def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tuple[list[dict], dict]:
+    mode = hydrate if hydrate in {"full", "tail", "none"} else "full"
+    if mode == "none":
+        return [], {
+            "prevCursor": "",
+            "nextCursor": "",
+            "hasMoreBefore": False,
+            "hasMoreAfter": False,
+            "totalCount": 0,
+        }
+    if mode == "tail":
+        page = db.get_messages_page_as_conversation(
+            session_id,
+            direction="tail",
+            limit=limit,
+            include_ancestors=True,
+        )
+        return _history_to_messages(page.get("messages") or []), _message_page_info(page.get("pageInfo"))
+    try:
+        display_history = db.get_messages_as_conversation(
+            session_id,
+            include_ancestors=True,
+            include_storage_metadata=True,
+        )
+    except TypeError:
+        display_history = db.get_messages_as_conversation(
+            session_id,
+            include_ancestors=True,
+        )
+    messages = _history_to_messages(display_history)
+    page_info = {
+        "prevCursor": "",
+        "nextCursor": "",
+        "hasMoreBefore": False,
+        "hasMoreAfter": False,
+        "totalCount": len(messages),
+    }
+    return messages, page_info
 
 
 @method("session.create")
@@ -86,7 +297,14 @@ def _(rid, params: dict) -> dict:
     key = _new_session_key()
     cols = int(params.get("cols", 80))
     transient = bool(params.get("transient") or params.get("temporary") or params.get("ephemeral"))
+    control_plane_only = bool(
+        params.get("control_plane_only")
+        or params.get("controlPlaneOnly")
+        or params.get("defer_agent_build")
+        or params.get("deferAgentBuild")
+    )
     tool_progress_mode = _requested_tool_progress_mode(params)
+    runtime_scope_key = _requested_runtime_scope_key(params)
     try:
         cwd = _normalize_session_cwd(params.get("cwd"))
         workspace = _workspace_from_params(params, cwd)
@@ -100,8 +318,36 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as exc:
         return _err(rid, 5012, f"workspace bind failed: {exc}")
-    _enable_gateway_prompts()
+    db = _get_db()
+    if db is None and control_plane_only:
+        return _db_unavailable_error(rid, code=5000)
+    model = _resolve_model()
+    if db is not None:
+        try:
+            db.create_session(key, source="tui", model=model)
+        except Exception as exc:
+            return _err(rid, 5000, f"session create failed: {exc}")
 
+    if control_plane_only:
+        return _ok(
+            rid,
+            {
+                "session_id": key,
+                "stored_session_id": key,
+                "info": {
+                    "model": model,
+                    "tools": {},
+                    "skills": {},
+                    "cwd": cwd,
+                    "workspace": workspace,
+                    "lazy": True,
+                    "transient": transient,
+                    "control_plane_only": True,
+                },
+            },
+        )
+
+    _enable_gateway_prompts()
     ready = threading.Event()
 
     _sessions[sid] = {
@@ -118,6 +364,7 @@ def _(rid, params: dict) -> dict:
         "image_counter": 0,
         "pending_title": None,
         "profile_context": _profile_context_for_params(params),
+        "runtime_scope_key": runtime_scope_key,
         "running": False,
         "active_run_id": None,
         "active_turn_id": None,
@@ -139,18 +386,19 @@ def _(rid, params: dict) -> dict:
         "workspace": workspace,
     }
 
-    # Return the lightweight session immediately so Ink can paint the composer
-    # + skeleton panel, then build the real AIAgent just after this response is
-    # flushed.  This keeps startup responsive while still hydrating tools/skills
-    # without requiring the user to submit a first prompt.
-    def _deferred_build() -> None:
-        session = _sessions.get(sid)
-        if session is not None:
-            _start_agent_build(sid, session)
+    if not control_plane_only:
+        # Legacy TUI compatibility: return the lightweight session first, then
+        # build the AIAgent shortly after response flush. Doxie/new run.*
+        # callers should pass control_plane_only/defer_agent_build and let
+        # run.submit lazily attach the runtime.
+        def _deferred_build() -> None:
+            session = _sessions.get(sid)
+            if session is not None:
+                _start_agent_build(sid, session)
 
-    build_timer = threading.Timer(0.05, _deferred_build)
-    build_timer.daemon = True
-    build_timer.start()
+        build_timer = threading.Timer(0.05, _deferred_build)
+        build_timer.daemon = True
+        build_timer.start()
 
     return _ok(
         rid,
@@ -165,6 +413,7 @@ def _(rid, params: dict) -> dict:
                 "workspace": workspace,
                 "lazy": True,
                 "transient": transient,
+                "control_plane_only": control_plane_only,
             },
         },
     )
@@ -186,25 +435,26 @@ def _(rid, params: dict) -> dict:
         # platform is added or a user names their own source.
         deny = frozenset({"tool"})
 
-        limit = int(params.get("limit", 200) or 200)
-        # Over-fetch modestly so per-source filtering doesn't leave us
-        # short; the compression-tip projection in ``list_sessions_rich``
-        # can also merge rows.
-        fetch_limit = max(limit * 2, 200)
+        limit = _bounded_page_limit(params.get("limit"), default=200, maximum=200)
+        cursor = _decode_page_cursor(params.get("cursor"))
         rows = [
             s
             for s in db.list_sessions_rich(
                 source=None,
-                limit=fetch_limit,
+                exclude_sources=list(deny),
+                limit=limit + 1,
+                page_cursor=cursor,
                 order_by_last_active=True,
             )
             if (s.get("source") or "").strip().lower() not in deny
-        ][:limit]
+        ]
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
         live_by_key = _live_sessions_by_stored_key()
         session_items = []
-        for s in rows:
+        for s in page_rows:
             live_sid, live_session = live_by_key.get(s["id"], ("", None))
-            live_state = _session_run_snapshot(live_sid, live_session)
+            live_state = _session_run_snapshot(live_sid, live_session, db=db)
             session_items.append(
                 {
                     "id": s["id"],
@@ -218,10 +468,22 @@ def _(rid, params: dict) -> dict:
                     **live_state,
                 }
             )
+        next_cursor = ""
+        if has_more and page_rows:
+            cursor_payload = page_rows[-1].get("_page_cursor") or {
+                "effective_last_active": page_rows[-1].get("last_active") or page_rows[-1].get("started_at") or 0,
+                "started_at": page_rows[-1].get("started_at") or 0,
+                "id": page_rows[-1].get("id") or "",
+            }
+            next_cursor = _encode_page_cursor(cursor_payload)
         return _ok(
             rid,
             {
-                "sessions": session_items
+                "sessions": session_items,
+                "pageInfo": {
+                    "nextCursor": next_cursor,
+                    "hasMore": has_more,
+                },
             },
         )
     except Exception as e:
@@ -307,34 +569,54 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5012, f"workspace bind failed: {exc}")
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
+    hydrate = str(params.get("hydrate") or "full").strip().lower()
+    runtime_scope_key = _requested_runtime_scope_key(params)
+    message_limit = _bounded_page_limit(
+        params.get("message_limit", params.get("messageLimit")),
+        default=50,
+        maximum=200,
+    )
     try:
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
-        display_history = db.get_messages_as_conversation(
-            target, include_ancestors=True
-        )
-        messages = _history_to_messages(display_history)
+        messages, message_page_info = _display_history_page(db, target, hydrate, message_limit)
         live_sid, live_session = _resolve_runtime_session(target)
         if live_session is not None:
-            live_session["transport"] = (
-                current_transport()
-                or live_session.get("transport")
-                or _stdio_transport
-            )
-            live_session["cwd"] = cwd
-            live_session["workspace"] = workspace
-            live_state = _session_run_snapshot(live_sid, live_session)
-            return _ok(
-                rid,
-                {
-                    "session_id": live_sid,
-                    "resumed": target,
-                    "message_count": len(messages),
-                    "messages": messages,
-                    "info": _session_info(live_session.get("agent"), live_session),
-                    **live_state,
-                },
-            )
+            live_runtime_scope_key = str(
+                live_session.get("runtime_scope_key")
+                or live_session.get("active_runtime_scope_key")
+                or ""
+            ).strip()
+            if (
+                params.get("_runtime_attach")
+                and runtime_scope_key
+                and live_runtime_scope_key
+                and live_runtime_scope_key != runtime_scope_key
+            ):
+                live_session = None
+            else:
+                live_session["transport"] = (
+                    current_transport()
+                    or live_session.get("transport")
+                    or _stdio_transport
+                )
+                live_session["cwd"] = cwd
+                live_session["workspace"] = workspace
+                if runtime_scope_key:
+                    live_session["runtime_scope_key"] = runtime_scope_key
+                live_state = _session_run_snapshot(live_sid, live_session, db=db)
+                return _ok(
+                    rid,
+                    {
+                        "session_id": live_sid,
+                        "resumed": target,
+                        "message_count": message_page_info.get("totalCount") or len(messages),
+                        "messages": messages,
+                        "messagePageInfo": message_page_info,
+                        "info": _session_info(live_session.get("agent"), live_session),
+                        **live_state,
+                    },
+                )
         profile_context = _profile_context_for_params(params)
         profile_tokens = _enter_profile_context(profile_context)
         tokens = _set_session_context(target, terminal_cwd=cwd)
@@ -363,6 +645,8 @@ def _(rid, params: dict) -> dict:
             if "unexpected keyword argument" not in str(exc):
                 raise
             _init_session(sid, target, agent, history, cols=int(params.get("cols", 80)))
+        if sid in _sessions:
+            _sessions[sid]["runtime_scope_key"] = runtime_scope_key
     except Exception as e:
         return _err(rid, 5000, f"resume failed: {e}")
     return _ok(
@@ -370,14 +654,15 @@ def _(rid, params: dict) -> dict:
         {
             "session_id": sid,
             "resumed": target,
-            "message_count": len(messages),
+            "message_count": message_page_info.get("totalCount") or len(messages),
             "messages": messages,
+            "messagePageInfo": message_page_info,
             "info": (
                 _session_info(agent, _sessions.get(sid))
                 if _sessions.get(sid) is not None
                 else _session_info(agent)
             ),
-            **_session_run_snapshot(sid, _sessions.get(sid)),
+            **_session_run_snapshot(sid, _sessions.get(sid), db=db),
         },
     )
 
@@ -399,6 +684,9 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5036)
+    run_state = run_control.session_status(target, db=db)
+    if run_state.get("running"):
+        return _err(rid, 4023, "cannot delete a session with an active run")
     # Block deletion of any session currently bound to a live TUI session
     # in this process.  The picker hides the active session anyway, but a
     # racing caller could still target it.  Snapshot via ``list(...)``
@@ -539,21 +827,28 @@ def _(rid, params: dict) -> dict:
 
 @method("session.status")
 def _(rid, params: dict) -> dict:
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
-
     from hermes_constants import display_hermes_home
 
-    key = session.get("session_key") or params.get("session_id") or ""
-    agent = session.get("agent")
+    requested = str(params.get("session_id") or params.get("stored_session_id") or "").strip()
+    if not requested:
+        return _err(rid, 4006, "session_id required")
+    runtime_sid, session = _resolve_runtime_session(requested)
+    key = str((session or {}).get("session_key") or requested)
+    agent = (session or {}).get("agent")
     meta = {}
     db = _get_db()
     if db and key:
         try:
             meta = db.get_session(key) or {}
+            if not meta:
+                by_title = db.get_session_by_title(key)
+                if by_title:
+                    key = by_title["id"]
+                    meta = by_title
         except Exception:
             meta = {}
+    if db and not meta and session is None:
+        return _err(rid, 4007, "session not found")
 
     def _dt(value, fallback: datetime | None = None) -> datetime:
         if value:
@@ -588,20 +883,16 @@ def _(rid, params: dict) -> dict:
             f"Created: {created.strftime('%Y-%m-%d %H:%M')}",
             f"Last Activity: {updated.strftime('%Y-%m-%d %H:%M')}",
             f"Tokens: {int(usage.get('total') or 0):,}",
-            f"Agent Running: {'Yes' if session.get('running') else 'No'}",
+            f"Agent Running: {'Yes' if (session or {}).get('running') else 'No'}",
         ]
     )
-    runtime_sid, live_session = _resolve_runtime_session(key)
-    if live_session is None:
-        runtime_sid = str(params.get("session_id") or "")
-        live_session = session
     return _ok(
         rid,
         {
             "output": "\n".join(lines),
             "session_id": runtime_sid,
             "stored_session_id": key,
-            **_session_run_snapshot(runtime_sid, live_session),
+            **_session_run_snapshot(runtime_sid, session or {"session_key": key}, db=db),
         },
     )
 
@@ -625,6 +916,47 @@ def _(rid, params: dict) -> dict:
         {
             "count": len(history),
             "messages": _history_to_messages(history),
+        },
+    )
+
+
+@method("session.messages")
+def _(rid, params: dict) -> dict:
+    target = str(params.get("session_id") or "").strip()
+    if not target:
+        return _err(rid, 4006, "session_id required")
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5000)
+    found = db.get_session(target)
+    if not found:
+        found = db.get_session_by_title(target)
+        if found:
+            target = found["id"]
+        else:
+            return _err(rid, 4007, "session not found")
+    cursor = _decode_page_cursor(params.get("cursor"))
+    cursor_id = cursor.get("id")
+    try:
+        cursor_id = int(cursor_id) if cursor_id is not None else None
+    except (TypeError, ValueError):
+        cursor_id = None
+    try:
+        page = db.get_messages_page_as_conversation(
+            target,
+            direction=str(params.get("direction") or "tail"),
+            cursor_id=cursor_id,
+            limit=_bounded_page_limit(params.get("limit"), default=50, maximum=200),
+            include_ancestors=bool(params.get("include_ancestors", params.get("includeAncestors", True))),
+        )
+    except Exception as exc:
+        return _err(rid, 5000, f"messages page failed: {exc}")
+    return _ok(
+        rid,
+        {
+            "session_id": target,
+            "messages": _history_to_messages(page.get("messages") or []),
+            "pageInfo": _message_page_info(page.get("pageInfo")),
         },
     )
 
@@ -1068,6 +1400,9 @@ def _(rid, params: dict) -> dict:
     sid = params.get("session_id", "")
     requested_run_id = str(params.get("run_id") or params.get("runId") or "").strip()
     requested_turn_id = str(params.get("turn_id") or params.get("turnId") or "").strip()
+    completion_status = str(
+        params.get("completion_status") or params.get("completionStatus") or "interrupted"
+    ).strip() or "interrupted"
     session, err = _sess_nowait(params, rid)
     if err:
         return err
@@ -1095,41 +1430,33 @@ def _(rid, params: dict) -> dict:
         session["interrupted_turn_id"] = interrupted_turn_id
         session["interrupt_seq"] = int(session.get("interrupt_seq") or 0) + 1
         interrupt_seq = int(session.get("interrupt_seq") or 0)
-    print(
-        f"[tui_gateway] session.interrupt sid={sid} run_id={interrupted_run_id or '-'} turn_id={interrupted_turn_id or '-'} seq={interrupt_seq}",
-        file=sys.stderr,
-        flush=True,
-    )
-    if should_interrupt_agent:
-        _request_agent_interrupt_async(sid, session.get("agent"))
-    if should_interrupt_agent:
-        # Scope the pending-prompt release to THIS session.  A global
-        # _clear_pending() would collaterally cancel clarify/sudo/secret
-        # prompts on unrelated sessions sharing the same tui_gateway
-        # process, silently resolving them to empty strings.
-        _clear_pending(params.get("session_id", ""))
-        try:
-            from tools.approval import resolve_gateway_approval
-
-            resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
-        except Exception:
-            pass
-    _emit(
-        "message.complete",
-        sid,
-        {
-            "text": "",
-            "status": "interrupted",
-            "run_id": interrupted_run_id,
-            "turn_id": interrupted_turn_id,
-        },
-    )
-    with session["history_lock"]:
         if should_clear_current:
             session["running"] = False
             session["active_run_id"] = None
             session["active_turn_id"] = None
             session["run_updated_at"] = time.time()
+    _interrupt_trace(
+        "[hermes] [tui_gateway] [interrupt-trace] session.interrupt.state "
+        f"sid={sid} requested_run_id={requested_run_id or '-'} requested_turn_id={requested_turn_id or '-'} "
+        f"active_run_id={active_run_id or '-'} active_turn_id={active_turn_id or '-'} "
+        f"interrupted_run_id={interrupted_run_id or '-'} interrupted_turn_id={interrupted_turn_id or '-'} "
+        f"should_clear_current={should_clear_current} should_interrupt_agent={should_interrupt_agent} seq={interrupt_seq}",
+    )
+    _interrupt_trace(
+        f"[hermes] [tui_gateway] session.interrupt sid={sid} run_id={interrupted_run_id or '-'} turn_id={interrupted_turn_id or '-'} seq={interrupt_seq}",
+    )
+    _request_session_interrupt_side_effects_async(
+        sid=sid,
+        session=session,
+        should_interrupt_agent=should_interrupt_agent,
+        interrupted_run_id=interrupted_run_id,
+        interrupted_turn_id=interrupted_turn_id,
+        completion_status=completion_status,
+    )
+    _interrupt_trace(
+        "[hermes] [tui_gateway] [interrupt-trace] session.interrupt.return "
+        f"sid={sid} run_id={interrupted_run_id or '-'} turn_id={interrupted_turn_id or '-'}",
+    )
     return _ok(
         rid,
         {

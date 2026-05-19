@@ -77,6 +77,7 @@ git merge upstream/main
 - `tui_gateway/core/method_registration.py`
 - `tui_gateway/core/panic.py`
 - `tui_gateway/methods/*.py`
+- `tui_gateway/methods/run.py`
 - `tui_gateway/services/*.py`
 - `tests/test_tui_gateway_server.py`
 - `tests/tui_gateway/test_protocol.py`
@@ -84,15 +85,77 @@ git merge upstream/main
 必须确认：
 
 - `tui_gateway/server.py` 仍然是轻量协调层，RPC 处理逻辑仍然分拆在 `tui_gateway/methods/` 和 `tui_gateway/services/`
-- `@method(...)` 注册机制仍然会加载并暴露 `prompt.submit`、`session.*`、`config.*`、`model.*`、`voice.*`、`platforms.manage`、`workspace.current`、`artifacts.list` 等本地方法
+- `@method(...)` 注册机制仍然会加载并暴露 `run.*`、`events.*`、`prompt.submit`、`session.*`、`config.*`、`model.*`、`voice.*`、`platforms.manage`、`workspace.current`、`artifacts.list` 等本地方法
 - `_LONG_HANDLERS` 仍然包含会阻塞 dispatcher 的重操作，尤其是 `platforms.manage`、session resume / branch / compress、CLI 执行等
 - panic hook 仍然写入 `$HERMES_HOME/logs/tui_gateway_crash.log`，并把一行摘要发到 stderr，避免 TUI gateway 崩溃时没有诊断信息
 - 兼容性 patch point 仍然保留，例如 `_SlashWorker = SlashWorker`
+- `session.messages` 这类只读 profile data 方法不能获取 profile env lock，避免历史读取阻塞正在运行的 profile runtime
 
 推荐验证：
 
 ```sh
-scripts/run_tests.sh tests/test_tui_gateway_server.py tests/tui_gateway/test_protocol.py -q
+scripts/run_tests.sh tests/test_tui_gateway_server.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py -q
+```
+
+### 0.1 Run control、runtime lease 与事件订阅协议
+
+涉及文件：
+
+- `tui_gateway/methods/run.py`
+- `tui_gateway/services/run_control.py`
+- `tui_gateway/services/runtime_pool.py`
+- `tui_gateway/services/status_events.py`
+- `tui_gateway/services/session_info.py`
+- `tui_gateway/services/transcript_messages.py`
+- `hermes_state_runs.py`
+- `tui_gateway/methods/prompt.py`
+- `tui_gateway/methods/session.py`
+- `tests/test_tui_gateway_server.py`
+- `tests/tui_gateway/test_protocol.py`
+- `tests/tui_gateway/test_runtime_pool.py`
+- `tests/test_hermes_state_runs.py`
+
+必须确认：
+
+- `prompt.submit` 仍然是兼容入口；没有 `_run_registry_reserved` 时必须转发到 `run.submit`，由 run registry 统一做 busy gate 和状态持久化
+- `run.submit`、`run.reserve`、`run.fail`、`run.status`、`run.list`、`run.cancel` 仍然完整注册并可通过 stored session id 调用
+- `runtime_scope_key` 仍然是 Doxie profile / draft runtime 的隔离键；同一个 stored session 在不同 profile scope 下不能错误复用旧 runtime
+- `acquire_runtime_lease()` 仍然只复用可执行 runtime；scope 不匹配时必须通过 `session.resume(... hydrate=none, _runtime_attach=True)` 重建轻量 runtime
+- `run_events` 仍然是 append-only、单调 `seq`，`events.subscribe` 必须支持 `after_seq` replay 和 `active_only`
+- `events.unsubscribe` 必须清理 transport subscription；WebSocket / stdio 断开后不能继续向死 transport 写事件
+- `run.cancel` 在没有 live runtime 但有持久 run state 时，仍然能发布 cancelled terminal event，而不是让 UI 永远显示 running
+- gateway 启动或恢复时，`fail_orphaned_active_runs` 仍然会把死进程 owner 的 active runs 标记为 failed，同时保留当前 pid 的 live runs
+
+推荐验证：
+
+```sh
+scripts/run_tests.sh tests/test_tui_gateway_server.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_runtime_pool.py tests/test_hermes_state_runs.py -q
+```
+
+### 0.2 WebSocket dispatch、控制面优先级与 interrupt 响应
+
+涉及文件：
+
+- `tui_gateway/ws.py`
+- `tui_gateway/server.py`
+- `tui_gateway/services/run_control.py`
+- `tests/test_tui_gateway_ws.py`
+- `tests/tui_gateway/test_ws_dispatch.py`
+- `tests/tui_gateway/test_protocol.py`
+
+必须确认：
+
+- WebSocket 仍然复用 `tui_gateway.server.dispatch`，不能引入第二套 RPC 行为
+- 控制面方法仍然走独立 executor，尤其是 `run.status`、`run.reserve`、`run.fail`、`events.subscribe/unsubscribe`、`session.interrupt`、`session.messages`、approval / clarify / sudo / secret respond
+- WS transport 写出仍然用优先级队列，JSON-RPC response 必须优先于高频 `message.delta` / tool progress event
+- 从 event loop 线程调用 `write()` 时不能死锁；从 worker 线程写 WS frame 必须有超时保护
+- `HERMES_INTERRUPT_TRACE` 诊断只在显式开启时输出，不能污染普通 stderr
+- WebSocket 断开时必须 detach run-control transport，避免订阅泄漏
+
+推荐验证：
+
+```sh
+scripts/run_tests.sh tests/test_tui_gateway_ws.py tests/tui_gateway/test_ws_dispatch.py tests/tui_gateway/test_protocol.py -q
 ```
 
 ### 1. Workspace / Artifact 持久化与 Doxie 成果视图协议
@@ -138,20 +201,25 @@ scripts/run_tests.sh tests/tui_gateway/test_artifacts.py tests/tui_gateway/test_
 - `tests/tui_gateway/test_protocol.py`
 - `tests/run_agent/test_model_descriptor_vision.py`
 - `tests/test_hermes_state.py`
+- `tests/test_hermes_state_messages.py`
+- `tests/tui_gateway/test_profile_data_context.py`
 
 必须确认：
 
 - `prompt.submit` 仍然接受并返回 `run_id`、`turn_id`、`client_message_id`，并把当前 turn 的 pending metadata 写入 session
+- `prompt.submit` 不能绕开 run registry；新客户端应使用 `run.submit`，老客户端的 `prompt.submit` 必须自动进入同一条 run-control 路径
 - user / assistant / tool 消息落库时仍然保留 `metadata_json`，conversation replay 时也能恢复 `metadata`
 - API 请求发给模型前仍然会剥离内部 `metadata` 字段，避免严格 provider 报错
 - `model_descriptor.vision_enabled` 仍然可以覆盖主模型视觉能力判断，用于 Doxie runtime 模型元数据
 - 附件仍然会被规范化为 `attachments` metadata；图片附件仍然按当前模型能力走 native image input 或 vision pre-analysis
 - 中断、recall turn、session busy、running runtime 复用等场景，不能把已经撤回或被打断的 turn 错误追加成完整历史
+- agent 初始化失败、runtime agent 缺失、runtime auth rebind 失败、model switch 失败、session busy 等错误路径，必须发布 failed terminal run event，不能留下挂起 run
+- goal follow-up 自触发回合也必须分配新的 run / turn id 和 runtime scope，不能复用上一轮 active run
 
 推荐验证：
 
 ```sh
-scripts/run_tests.sh tests/test_tui_gateway_server.py tests/tui_gateway/test_protocol.py tests/run_agent/test_model_descriptor_vision.py tests/test_hermes_state.py -q
+scripts/run_tests.sh tests/test_tui_gateway_server.py tests/tui_gateway/test_protocol.py tests/run_agent/test_model_descriptor_vision.py tests/test_hermes_state.py tests/test_hermes_state_messages.py -q
 ```
 
 ### 3. Session context、HERMES_HOME 上下文隔离与 cwd 语义
@@ -210,13 +278,19 @@ scripts/run_tests.sh tests/hermes_cli/test_runtime_provider_resolution.py tests/
 
 - `tools/doxie_agent_profile_tool.py`
 - `toolsets.py`
+- `hermes_cli/tools_config.py`
+- `model_tools.py`
 - `gateway/session_context.py`
 - `tests/tools/test_doxie_agent_profile_tool.py`
+- `tests/hermes_cli/test_tools_config.py`
+- `tests/test_model_tools.py`
 
 必须确认：
 
-- `doxie` toolset 仍然暴露 `design_agent_profile` 和 `test_agent_profile`
+- `doxie` toolset 仍然是 internal toolset：可供 Doxie runtime 定向开启，但不能出现在普通 tools picker、默认 toolset 扫描或平台配置保存结果里
 - `design_agent_profile operation=inspect_context` 仍然先返回真实 Doxie 模板、Hermes toolsets、avatar assets、workflow rules，模型不能凭空编造 tools / skills
+- `inspect_context` 默认只返回 compact overview；详细 catalog 必须通过 `catalog_kind=toolsets|skills|templates|avatars`、`query`、`limit` 分页获取，避免把完整 skill/tool catalog 一次性塞进上下文
+- system toolsets catalog 必须过滤 internal toolsets，并优先使用 `_get_effective_configurable_toolsets()` 作为可展示来源
 - 后端桥接环境 `DOXIE_BACKEND_BRIDGE_URL` / `DOXIE_BACKEND_BRIDGE_TOKEN` 可用时，draft create / update / revision / resolve / list / prepare runtime 仍然走 Doxie backend bridge
 - `HERMES_DOXIE_PRODUCT_CONTEXT` 仍然会注入 design mode、source session / turn / message、workspace、active draft、target profile 等上下文
 - `test_agent_profile` 在有 backend bridge 时可以省略 `draft_id`，由 Doxie 解析 active 或匹配 draft；无 bridge 时仍然要求本地 draft runtime 文件存在
@@ -225,7 +299,7 @@ scripts/run_tests.sh tests/hermes_cli/test_runtime_provider_resolution.py tests/
 推荐验证：
 
 ```sh
-scripts/run_tests.sh tests/tools/test_doxie_agent_profile_tool.py -q
+scripts/run_tests.sh tests/tools/test_doxie_agent_profile_tool.py tests/hermes_cli/test_tools_config.py tests/test_model_tools.py -q
 ```
 
 ### 6. 文档解析工具与附件读取能力
@@ -306,6 +380,8 @@ scripts/run_tests.sh tests/tools/test_computer_use.py -q
 - `tui_gateway/methods/integrations.py`
 - `tui_gateway/services/doxie_cron_jobs.py`
 - `tui_gateway/services/platform_connections.py`
+- `tui_gateway/services/tool_events.py`
+- `tui_gateway/services/status_events.py`
 - `cron/scheduler.py`
 - `tools/approval.py`
 - `tests/test_tui_gateway_server.py`
@@ -317,6 +393,9 @@ scripts/run_tests.sh tests/tools/test_computer_use.py -q
 - `approval.pending.list` 仍然能让客户端重连后恢复等待中的 approval UI
 - `platforms.manage` 仍然是长任务 handler，并能通过 service 层管理平台连接，不要把平台管理逻辑重新塞回 server 主文件
 - `plugins.list`、`tools.list/show/configure`、`toolsets.list`、`agents.list`、`skills.manage/reload` 等 integration RPC 仍然可用
+- tool progress event 仍然通过 `GatewayToolEventBridge` 输出，且 session 已 interrupt 时不能继续发 `tool.start` / `tool.complete`
+- Doxie structured tool result 仍然只对白名单工具透传结构化结果，例如 `design_agent_profile`、draft create/revision、`test_agent_profile`
+- retry / rate-limit / stream reconnect / fallback 等 provider status 文本仍然会被 `status_events.classify_status_update()` 归一化为客户端可稳定渲染的结构化状态
 
 ### 10. Feishu 依赖与 websocket 代理兼容
 
@@ -337,18 +416,39 @@ scripts/run_tests.sh tests/tools/test_computer_use.py -q
 涉及文件：
 
 - `hermes_state.py`
+- `hermes_state_messages.py`
+- `hermes_state_platform.py`
+- `hermes_state_runs.py`
+- `hermes_state_search.py`
 - `tui_gateway/methods/session.py`
+- `tui_gateway/services/session_info.py`
+- `tui_gateway/services/transcript_messages.py`
 - `tests/gateway/test_session_list_allowed_sources.py`
 - `tests/test_hermes_state.py`
+- `tests/test_hermes_state_schema.py`
+- `tests/test_hermes_state_messages.py`
+- `tests/test_hermes_state_runs.py`
+- `tests/test_hermes_state_search.py`
 - `tests/tui_gateway/test_protocol.py`
 
 必须确认：
 
+- `hermes_state.py` 仍然只是组合入口；message、platform、run、search 逻辑分别留在 mixin 模块中，避免重新膨胀成单文件巨物
 - session DB messages 表仍然包含 `metadata_json` 并能迁移旧库
+- `runs` / `run_events` 表和索引仍然存在，旧库缺少 `runtime_scope_key` 时必须能迁移并回填
+- structured / multimodal message content 仍然通过 sentinel JSON 编码落 SQLite，读取时恢复 list/dict，不能重新触发 sqlite bind list/dict 错误
+- FTS5 搜索、CJK LIKE fallback、session list allowed sources 仍然走拆分后的 search/platform mixin，不能在拆分后丢行为
 - 删除 session 时，除了 `{session_id}.json` / `{session_id}.jsonl`，也要清理 Doxie/TUI `session_{session_id}.json` / `session_{session_id}.jsonl`
 - `session.list` 仍然只返回允许来源的 sessions，不能把内部或不该展示的来源混进 Doxie UI
+- `session.messages` 仍然提供分页 transcript，支持 cursor / limit，并且只读 profile 数据时不进入 profile env lock
 - `session.history`、`session.recall_turn`、`session.undo` 等 Doxie 依赖的方法仍然按 turn metadata 和 stored session id 正确工作
 - 如果同一个 stored session id 同时有 idle runtime 和 running runtime，方法解析应优先使用 running runtime
+
+推荐验证：
+
+```sh
+scripts/run_tests.sh tests/test_hermes_state.py tests/test_hermes_state_schema.py tests/test_hermes_state_messages.py tests/test_hermes_state_runs.py tests/test_hermes_state_search.py tests/gateway/test_session_list_allowed_sources.py -q
+```
 
 ### 12. ACP / tool schema / terminal 小型但高风险修复
 
@@ -370,6 +470,20 @@ scripts/run_tests.sh tests/tools/test_computer_use.py -q
 - delegate tool 仍然与本地 toolset / session metadata 改动兼容
 - image routing 仍然能在模型描述符、provider 配置和附件类型之间做正确选择
 
+### 13. Skills Hub inspect 与 skill 文件预览
+
+涉及文件：
+
+- `hermes_cli/skills_hub.py`
+- `tests/test_tui_gateway_server.py`
+
+必须确认：
+
+- `inspect_skill()` 仍然返回 `skill_md_preview`，并额外包含 bundle `files` 列表
+- 文件 payload 必须包含 `path`、`content`、`truncated`、`is_binary`、`size`
+- 二进制文件不能按文本硬解；应返回二进制占位说明，并标记 `is_binary=True`
+- 单文件内容仍然有字符上限，默认 `max_chars=96000`，避免 inspect skill 一次性把大文件塞爆上下文
+
 ## 推荐总体验证
 
 同步完成后，至少跑下面这些测试。范围较大时可以分批执行。
@@ -377,12 +491,20 @@ scripts/run_tests.sh tests/tools/test_computer_use.py -q
 ```sh
 scripts/run_tests.sh \
   tests/test_tui_gateway_server.py \
+  tests/test_tui_gateway_ws.py \
   tests/tui_gateway/test_protocol.py \
+  tests/tui_gateway/test_ws_dispatch.py \
+  tests/tui_gateway/test_runtime_pool.py \
+  tests/tui_gateway/test_profile_data_context.py \
   tests/tui_gateway/test_make_agent_provider.py \
   tests/tui_gateway/test_artifacts.py \
   tests/tui_gateway/test_workspace_context.py \
   tests/run_agent/test_model_descriptor_vision.py \
   tests/test_hermes_state.py \
+  tests/test_hermes_state_schema.py \
+  tests/test_hermes_state_messages.py \
+  tests/test_hermes_state_runs.py \
+  tests/test_hermes_state_search.py \
   tests/tools/test_document_parse_tool.py \
   tests/tools/test_doxie_agent_profile_tool.py \
   tests/tools/test_browser_cdp_override.py \
@@ -390,17 +512,20 @@ scripts/run_tests.sh \
   tests/hermes_cli/test_runtime_provider_resolution.py \
   tests/hermes_cli/test_model_switch_custom_providers.py \
   tests/hermes_cli/test_env_loader.py \
+  tests/hermes_cli/test_tools_config.py \
+  tests/test_model_tools.py \
   tests/gateway/test_runtime_auth_response.py \
   tests/gateway/test_session_list_allowed_sources.py \
   -q
 ```
 
-如果同步触碰 TUI gateway、workspace/artifact、Doxie runtime provider 或 computer-use，不能只跑单测。还应手工验证：
+如果同步触碰 TUI gateway、run control、workspace/artifact、Doxie runtime provider 或 computer-use，不能只跑单测。还应手工验证：
 
 - Doxie 桌面端能创建 / resume session，且 `cwd` 和 workspace 显示正确
+- Doxie 桌面端能通过 `run.submit` 发起回合，通过 `events.subscribe(after_seq=...)` 重连 replay，并能 cancel running run
 - agent 写入文件后，成果视图能收到并恢复 artifact
 - 分身设计能 inspect context、保存 draft、测试 draft runtime
 - runtime token 失效后，客户端能看到登录过期提示，并在刷新后恢复
 - native CDP browser 多标签页操作不会串 tab
 - computer-use 在多窗口场景下能 list target、capture 指定窗口、按窗口坐标操作
-
+- WebSocket 客户端在高频 streaming 时仍能快速收到 `run.status`、`session.interrupt`、approval respond 等控制面响应

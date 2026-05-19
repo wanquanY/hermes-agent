@@ -27,7 +27,6 @@ from tui_gateway.transport import (
     current_transport,
     reset_transport,
 )
-from tui_gateway.services.artifacts import record_artifacts_from_tool_complete
 from tui_gateway.services.config_store import (
     load_cfg as _load_cfg_from_store,
     save_cfg as _save_cfg_to_store,
@@ -41,10 +40,17 @@ from tui_gateway.services.media import (
     estimate_image_tokens as _estimate_image_tokens,
     image_meta as _image_meta,
 )
+from tui_gateway.services import run_control as _run_control
 from tui_gateway.services.session_lifecycle import (
     finalize_session as _finalize_session_impl,
     notify_session_boundary as _notify_session_boundary_impl,
     shutdown_sessions as _shutdown_sessions_impl,
+)
+from tui_gateway.services.session_info import (
+    get_usage as _get_usage,
+    probe_config_health as _probe_config_health,
+    probe_credentials as _probe_credentials,
+    session_info as _session_info,
 )
 from tui_gateway.services.completions import (
     details_completions as _details_completions,
@@ -55,6 +61,17 @@ from tui_gateway.services.completions import (
     path_completion_items,
 )
 from tui_gateway.services.slash_worker_client import SlashWorker
+from tui_gateway.services.status_events import classify_status_update
+from tui_gateway.services.transcript_messages import (
+    history_to_messages as _history_to_messages,
+    serializable_tool_args as _tool_args_payload,
+    tool_context as _tool_ctx,
+)
+from tui_gateway.services.tool_events import (
+    GatewayToolEventBridge,
+    session_interrupted as _session_interrupted,
+    wire_secret_callbacks as _wire_secret_callbacks,
+)
 from tui_gateway.services.workspace import (
     bind_session_workspace as _bind_session_workspace,
     normalize_session_cwd as _normalize_session_cwd,
@@ -65,7 +82,7 @@ from tui_gateway.services.workspace import (
 
 logger = logging.getLogger(__name__)
 
-_hermes_home = get_hermes_home()
+_hermes_home = Path(get_hermes_home())
 load_hermes_dotenv(
     hermes_home=_hermes_home, project_env=Path(__file__).parent.parent / ".env"
 )
@@ -91,6 +108,7 @@ _pending: dict[str, tuple[str, threading.Event]] = {}
 _answers: dict[str, str] = {}
 _db_by_home: dict[str, Any] = {}
 _db_error: str | None = None
+_GATEWAY_INSTANCE_ID = f"{os.getpid()}:{uuid.uuid4().hex}"
 _profile_context: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "tui_gateway_profile_context",
     default=None,
@@ -100,6 +118,41 @@ _stdout_lock = threading.Lock()
 _DETAIL_SECTION_NAMES = ("thinking", "tools", "subagents", "activity")
 _DETAIL_MODES = frozenset({"hidden", "collapsed", "expanded"})
 _STATUSBAR_MODES = frozenset({"off", "top", "bottom"})
+_PROFILE_CONTEXT_BYPASS_METHODS = frozenset({
+    # Control-plane user responses must not wait for the long-running prompt
+    # thread to release the process-wide profile environment lock. These
+    # handlers only resolve session-local waiters; entering profile context
+    # here can deadlock while the prompt thread is waiting for the response.
+    "approval.pending.list",
+    "approval.policy.get",
+    "approval.policy.set",
+    "approval.respond",
+    "clarify.respond",
+    "secret.respond",
+    "session.interrupt",
+    "sudo.respond",
+})
+_PROFILE_DATA_CONTEXT_ONLY_METHODS = frozenset({
+    # These handlers only need the profile's Hermes home to read local state.
+    # They must stay responsive while a turn is running under the same profile
+    # and holding the process-wide environment lock.
+    "artifacts.list",
+    "session.create",
+    "session.delete",
+    "session.list",
+    "session.messages",
+    "session.most_recent",
+    "session.status",
+    "events.prune",
+    "events.subscribe",
+    "events.unsubscribe",
+    "run.list",
+    "run.reserve",
+    "run.fail",
+    "run.status",
+    "workspace.current",
+    "workspace.list",
+})
 
 # ── Async RPC dispatch (#12546) ──────────────────────────────────────
 # A handful of handlers block the dispatcher loop in entry.py for seconds
@@ -118,6 +171,7 @@ _LONG_HANDLERS = frozenset(
         "session.branch",
         "session.compress",
         "session.resume",
+        "run.submit",
         "shell.exec",
         "skills.manage",
         "slash.exec",
@@ -189,7 +243,7 @@ def _active_hermes_home() -> Path:
     raw = profile.get("hermes_home") if isinstance(profile, dict) else None
     if raw:
         return Path(str(raw)).expanduser().resolve()
-    return get_hermes_home()
+    return Path(_hermes_home or get_hermes_home()).expanduser().resolve()
 
 
 def _normalize_profile_context(params: dict | None = None) -> dict | None:
@@ -213,6 +267,16 @@ def _normalize_profile_context(params: dict | None = None) -> dict | None:
     return {
         "id": str(raw.get("id") or raw.get("agentProfileId") or "").strip(),
         "name": str(raw.get("name") or "").strip(),
+        "agent_profile_version_id": str(
+            raw.get("agentProfileVersionId")
+            or raw.get("agent_profile_version_id")
+            or ""
+        ).strip(),
+        "runtime_scope_key": str(
+            raw.get("runtimeScopeKey")
+            or raw.get("runtime_scope_key")
+            or ""
+        ).strip(),
         "hermes_home": str(Path(hermes_home).expanduser().resolve()),
         "env": safe_env,
     }
@@ -231,23 +295,28 @@ def _profile_context_for_params(params: dict | None = None) -> dict | None:
     return None
 
 
-def _enter_profile_context(profile: dict | None):
+def _enter_profile_context(profile: dict | None, *, apply_env: bool = True):
     if not isinstance(profile, dict) or not profile.get("hermes_home"):
         return []
     env = profile.get("env") if isinstance(profile.get("env"), dict) else {}
-    _profile_env_lock.acquire()
-    previous_env = {key: os.environ.get(key) for key in env}
-    for key, value in env.items():
-        os.environ[str(key)] = str(value)
+    lock_acquired = False
+    previous_env = {}
+    if apply_env:
+        _profile_env_lock.acquire()
+        lock_acquired = True
+        previous_env = {key: os.environ.get(key) for key in env}
+        for key, value in env.items():
+            os.environ[str(key)] = str(value)
     home_token = set_hermes_home_override(profile["hermes_home"])
     context_token = _profile_context.set(profile)
-    return [context_token, home_token, previous_env]
+    return [context_token, home_token, previous_env, lock_acquired]
 
 
 def _leave_profile_context(tokens: list) -> None:
     if not tokens:
         return
-    context_token, home_token, previous_env = tokens
+    context_token, home_token, previous_env, *rest = tokens
+    lock_acquired = bool(rest[0]) if rest else True
     try:
         _profile_context.reset(context_token)
         reset_hermes_home_override(home_token)
@@ -257,7 +326,17 @@ def _leave_profile_context(tokens: list) -> None:
             else:
                 os.environ[key] = previous
     finally:
-        _profile_env_lock.release()
+        if lock_acquired:
+            _profile_env_lock.release()
+
+
+def _enter_request_profile_context(method: str, params: dict | None):
+    if method in _PROFILE_CONTEXT_BYPASS_METHODS:
+        return []
+    return _enter_profile_context(
+        _profile_context_for_params(params),
+        apply_env=method not in _PROFILE_DATA_CONTEXT_ONLY_METHODS,
+    )
 
 
 def _get_db():
@@ -268,7 +347,16 @@ def _get_db():
         from hermes_state import SessionDB
 
         try:
-            _db_by_home[key] = SessionDB(hermes_home / "state.db")
+            db = SessionDB(hermes_home / "state.db")
+            stale_after = float(os.environ.get("HERMES_RUN_STALE_AFTER_SECONDS") or 300)
+            db.fail_orphaned_active_runs(
+                live_runtime_session_ids=set(_sessions.keys()),
+                current_pid=os.getpid(),
+                current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+                stale_after_seconds=stale_after,
+                reason="runtime owner is no longer available after gateway startup",
+            )
+            _db_by_home[key] = db
             _db_error = None
         except Exception as exc:
             _db_error = str(exc)
@@ -308,14 +396,21 @@ def write_json(obj: dict) -> bool:
 
 def _emit(event: str, sid: str, payload: dict | None = None):
     session = _sessions.get(sid) or {}
-    session["event_seq"] = int(session.get("event_seq") or 0) + 1
+    stored_session_id = str(session.get("session_key") or "")
+    db = _get_db()
+    session["event_seq"] = _run_control.next_event_seq(
+        stored_session_id or sid,
+        int(session.get("event_seq") or 0) + 1,
+        db=db,
+    )
     session["run_updated_at"] = time.time()
     params = {
         "type": event,
         "session_id": sid,
-        "stored_session_id": str(session.get("session_key") or ""),
+        "stored_session_id": stored_session_id,
         "run_id": str(session.get("active_run_id") or session.get("interrupted_run_id") or ""),
         "turn_id": str(session.get("active_turn_id") or session.get("interrupted_turn_id") or ""),
+        "runtime_scope_key": str(session.get("active_runtime_scope_key") or ""),
         "seq": int(session.get("event_seq") or 0),
     }
     if payload and payload.get("run_id"):
@@ -324,7 +419,15 @@ def _emit(event: str, sid: str, payload: dict | None = None):
         params["turn_id"] = str(payload.get("turn_id") or "")
     if payload is not None:
         params["payload"] = payload
-    write_json({"jsonrpc": "2.0", "method": "event", "params": params})
+    owner_transport = session.get("transport")
+    subscribers = _run_control.record_event(params, owner_transport=owner_transport, db=db)
+    frame = {"jsonrpc": "2.0", "method": "event", "params": params}
+    write_json(frame)
+    for transport in subscribers:
+        try:
+            transport.write(frame)
+        except Exception:
+            _run_control.detach_transport(transport)
 
 
 def _status_update(sid: str, kind: str, text: str | None = None):
@@ -334,7 +437,7 @@ def _status_update(sid: str, kind: str, text: str | None = None):
     _emit(
         "status.update",
         sid,
-        {"kind": kind if text is not None else "status", "text": body},
+        classify_status_update(kind if text is not None else "status", body),
     )
 
 
@@ -382,9 +485,29 @@ def handle_request(req: dict) -> dict | None:
     fn = _methods.get(method)
     if not fn:
         return _err(rid, -32601, f"unknown method: {method}")
-    tokens = _enter_profile_context(_profile_context_for_params(params))
+    trace_interrupt = method == "session.interrupt" and is_truthy_value(os.environ.get("HERMES_INTERRUPT_TRACE"))
+    trace_started_at = time.time()
+    if trace_interrupt:
+        print(
+            "[hermes] [tui_gateway] [interrupt-trace] server.handle.enter "
+            f"id={rid} sid={params.get('session_id') or '-'} "
+            f"run_id={params.get('run_id') or params.get('runId') or '-'} "
+            f"turn_id={params.get('turn_id') or params.get('turnId') or '-'}",
+            file=sys.stderr,
+            flush=True,
+        )
+    tokens = _enter_request_profile_context(method, params)
     try:
-        return fn(rid, params)
+        resp = fn(rid, params)
+        if trace_interrupt:
+            print(
+                "[hermes] [tui_gateway] [interrupt-trace] server.handle.return "
+                f"id={rid} elapsed_ms={int((time.time() - trace_started_at) * 1000)} "
+                f"has_resp={resp is not None}",
+                file=sys.stderr,
+                flush=True,
+            )
+        return resp
     finally:
         _leave_profile_context(tokens)
 
@@ -815,6 +938,17 @@ def _requested_tool_progress_mode(params: dict | None = None) -> str:
 
 
 def _load_enabled_toolsets() -> list[str] | None:
+    try:
+        from toolsets import get_internal_toolsets
+        internal_toolsets = get_internal_toolsets()
+    except Exception:
+        internal_toolsets = set()
+
+    def strip_internal(values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        return [name for name in values if name not in internal_toolsets]
+
     explicit = [
         item.strip()
         for item in os.environ.get("HERMES_TUI_TOOLSETS", "").split(",")
@@ -857,7 +991,7 @@ def _load_enabled_toolsets() -> list[str] | None:
             return None
 
         if not unresolved:
-            return built_in
+            return strip_internal(built_in)
 
         mcp_names: set[str] = set()
         mcp_disabled: set[str] = set()
@@ -907,7 +1041,7 @@ def _load_enabled_toolsets() -> list[str] | None:
             )
 
         if valid:
-            return valid
+            return strip_internal(valid)
 
         fallback_notice = (
             "[tui] no valid HERMES_TUI_TOOLSETS entries; using configured CLI toolsets"
@@ -930,7 +1064,7 @@ def _load_enabled_toolsets() -> list[str] | None:
         )
         if fallback_notice is not None:
             print(fallback_notice, file=sys.stderr, flush=True)
-        return enabled or None
+        return strip_internal(enabled) or None
     except Exception:
         if fallback_notice is not None:
             print(
@@ -941,7 +1075,7 @@ def _load_enabled_toolsets() -> list[str] | None:
         return None
 
 
-def _normalize_turn_toolsets(value) -> list[str]:
+def _normalize_turn_toolsets(value, *, allow_internal: bool = False) -> list[str]:
     if isinstance(value, str):
         raw_items = value.replace("\n", ",").split(",")
     elif isinstance(value, (list, tuple, set)):
@@ -951,45 +1085,37 @@ def _normalize_turn_toolsets(value) -> list[str]:
     seen: set[str] = set()
     normalized: list[str] = []
     try:
-        from toolsets import validate_toolset
+        from toolsets import get_internal_toolsets, validate_toolset
+        internal_toolsets = get_internal_toolsets()
     except Exception:
         validate_toolset = None
+        internal_toolsets = set()
     for raw in raw_items:
         name = str(raw or "").strip()
         if not name or name in seen:
             continue
         if validate_toolset is not None and not validate_toolset(name):
             continue
+        if not allow_internal and name in internal_toolsets:
+            continue
         seen.add(name)
         normalized.append(name)
     return normalized
 
 
-def _merge_enabled_toolsets(base: list[str] | None, extra: list[str] | None) -> list[str] | None:
-    extra = list(extra or [])
-    if not extra:
-        return base
-    if base is None:
-        return None
-    merged = list(base)
-    seen = set(merged)
-    for name in extra:
-        if name not in seen:
-            seen.add(name)
-            merged.append(name)
-    return merged
-
-
 def _session_enabled_toolsets(session: dict | None) -> list[str] | None:
-    return _merge_enabled_toolsets(
-        _load_enabled_toolsets(),
-        _normalize_turn_toolsets((session or {}).get("turn_enabled_toolsets")),
+    turn_toolsets = _normalize_turn_toolsets(
+        (session or {}).get("turn_enabled_toolsets"),
+        allow_internal=True,
     )
+    if turn_toolsets:
+        return turn_toolsets
+    return _load_enabled_toolsets()
 
 
 def _ensure_session_turn_toolsets(sid: str, session: dict, enabled_toolsets) -> None:
-    requested = _normalize_turn_toolsets(enabled_toolsets)
-    current = _normalize_turn_toolsets(session.get("turn_enabled_toolsets"))
+    requested = _normalize_turn_toolsets(enabled_toolsets, allow_internal=True)
+    current = _normalize_turn_toolsets(session.get("turn_enabled_toolsets"), allow_internal=True)
     if requested == current:
         return
     session["turn_enabled_toolsets"] = requested
@@ -1072,6 +1198,8 @@ def _ensure_agent_runtime_current(sid: str, session: dict) -> bool:
     with lock:
         agent = session.get("agent")
         if not agent:
+            return False
+        if not hasattr(agent, "switch_model"):
             return False
 
         current_model = getattr(agent, "model", "") or _resolve_model()
@@ -1412,557 +1540,38 @@ def _sync_session_key_after_compress(
             pass
 
 
-def _get_usage(agent) -> dict:
-    g = lambda k, fb=None: getattr(agent, k, 0) or (getattr(agent, fb, 0) if fb else 0)
-    usage = {
-        "model": getattr(agent, "model", "") or "",
-        "input": g("session_input_tokens", "session_prompt_tokens"),
-        "output": g("session_output_tokens", "session_completion_tokens"),
-        "cache_read": g("session_cache_read_tokens"),
-        "cache_write": g("session_cache_write_tokens"),
-        "reasoning": g("session_reasoning_tokens"),
-        "prompt": g("session_prompt_tokens"),
-        "completion": g("session_completion_tokens"),
-        "total": g("session_total_tokens"),
-        "calls": g("session_api_calls"),
-    }
-    comp = getattr(agent, "context_compressor", None)
-    if comp:
-        ctx_used = getattr(comp, "last_prompt_tokens", 0) or usage["total"] or 0
-        ctx_max = getattr(comp, "context_length", 0) or 0
-        if ctx_max:
-            usage["context_used"] = ctx_used
-            usage["context_max"] = ctx_max
-            usage["context_percent"] = max(0, min(100, round(ctx_used / ctx_max * 100)))
-        usage["compressions"] = getattr(comp, "compression_count", 0) or 0
-    try:
-        from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
 
-        cost = estimate_usage_cost(
-            usage["model"],
-            CanonicalUsage(
-                input_tokens=usage["input"],
-                output_tokens=usage["output"],
-                cache_read_tokens=usage["cache_read"],
-                cache_write_tokens=usage["cache_write"],
-            ),
-            provider=getattr(agent, "provider", None),
-            base_url=getattr(agent, "base_url", None),
-        )
-        usage["cost_status"] = cost.status
-        if cost.amount_usd is not None:
-            usage["cost_usd"] = float(cost.amount_usd)
-    except Exception:
-        pass
-    return usage
-
-
-def _probe_credentials(agent) -> str:
-    """Light credential check at session creation — returns warning or ''."""
-    try:
-        key = getattr(agent, "api_key", "") or ""
-        provider = getattr(agent, "provider", "") or ""
-        if not key or key == "no-key-required":
-            return f"No API key configured for provider '{provider}'. First message will fail."
-    except Exception:
-        pass
-    return ""
-
-
-def _probe_config_health(cfg: dict) -> str:
-    """Flag bare YAML keys (`agent:` with no value → None) that silently
-    drop nested settings. Returns warning or ''."""
-    if not isinstance(cfg, dict):
-        return ""
-    warnings: list[str] = []
-    null_keys = sorted(k for k, v in cfg.items() if v is None)
-    if not null_keys:
-        pass
-    else:
-        keys = ", ".join(f"`{k}`" for k in null_keys)
-        warnings.append(
-            f"config.yaml has empty section(s): {keys}. "
-            f"Remove the line(s) or set them to `{{}}` — "
-            f"empty sections silently drop nested settings."
-        )
-    display_cfg = cfg.get("display")
-    agent_cfg = cfg.get("agent")
-    if isinstance(display_cfg, dict):
-        personality = str(display_cfg.get("personality", "") or "").strip().lower()
-        if (
-            personality
-            and personality not in {"default", "none", "neutral"}
-            and isinstance(agent_cfg, dict)
-            and agent_cfg.get("personalities") is None
-        ):
-            warnings.append(
-                "`display.personality` is set but `agent.personalities` is empty/null; "
-                "personality overlay will be skipped."
-            )
-    return " ".join(warnings).strip()
-
-
-def _session_info(agent, session: dict | None = None) -> dict:
-    reasoning_config = getattr(agent, "reasoning_config", None)
-    reasoning_effort = ""
-    if (
-        isinstance(reasoning_config, dict)
-        and reasoning_config.get("enabled") is not False
-    ):
-        reasoning_effort = str(reasoning_config.get("effort", "") or "")
-    service_tier = getattr(agent, "service_tier", None) or ""
-    info: dict = {
-        "model": getattr(agent, "model", ""),
-        "reasoning_effort": reasoning_effort,
-        "service_tier": service_tier,
-        "fast": service_tier == "priority",
-        "tools": {},
-        "skills": {},
-        "cwd": _session_cwd(session),
-        "workspace": dict(session.get("workspace") or {}) if session else {},
-        "model_descriptor": dict(session.get("model_descriptor") or {}) if session else {},
-        "version": "",
-        "release_date": "",
-        "update_behind": None,
-        "update_command": "",
-        "usage": _get_usage(agent),
-    }
-    try:
-        from hermes_cli import __version__, __release_date__
-
-        info["version"] = __version__
-        info["release_date"] = __release_date__
-    except Exception:
-        pass
-    try:
-        from model_tools import get_toolset_for_tool
-
-        for t in getattr(agent, "tools", []) or []:
-            name = t["function"]["name"]
-            info["tools"].setdefault(get_toolset_for_tool(name) or "other", []).append(
-                name
-            )
-    except Exception:
-        pass
-    try:
-        from hermes_cli.banner import get_available_skills
-
-        info["skills"] = get_available_skills()
-    except Exception:
-        pass
-    try:
-        from tools.mcp_tool import get_mcp_status
-
-        info["mcp_servers"] = get_mcp_status()
-    except Exception:
-        info["mcp_servers"] = []
-    try:
-        info["system_prompt"] = getattr(agent, "_cached_system_prompt", "") or ""
-    except Exception:
-        pass
-    try:
-        from hermes_cli.banner import get_update_result
-        from hermes_cli.config import recommended_update_command
-
-        info["update_behind"] = get_update_result(timeout=0.5)
-        info["update_command"] = recommended_update_command()
-    except Exception:
-        pass
-    return info
-
-
-def _tool_ctx(name: str, args: dict) -> str:
-    try:
-        from agent.display import build_tool_preview
-
-        return build_tool_preview(name, args, max_len=80) or ""
-    except Exception:
-        return ""
-
-
-def _tool_args_payload(args: dict | None) -> dict:
-    if not isinstance(args, dict):
-        return {}
-    try:
-        json.dumps(args)
-        return args
-    except Exception:
-        return {
-            str(key): str(value)
-            for key, value in args.items()
-            if isinstance(key, (str, int, float, bool))
-        }
-
-
-def _fmt_tool_duration(seconds: float | None) -> str:
-    if seconds is None:
-        return ""
-    if seconds < 10:
-        return f"{seconds:.1f}s"
-    if seconds < 60:
-        return f"{round(seconds)}s"
-    mins, secs = divmod(int(round(seconds)), 60)
-    return f"{mins}m {secs}s" if secs else f"{mins}m"
-
-
-def _count_list(obj: object, *path: str) -> int | None:
-    cur = obj
-    for key in path:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(key)
-    return len(cur) if isinstance(cur, list) else None
-
-
-def _tool_summary(name: str, result: str, duration_s: float | None) -> str | None:
-    try:
-        data = json.loads(result)
-    except Exception:
-        data = None
-
-    dur = _fmt_tool_duration(duration_s)
-    suffix = f" in {dur}" if dur else ""
-    text = None
-
-    if name == "web_search" and isinstance(data, dict):
-        n = _count_list(data, "data", "web")
-        if n is not None:
-            text = f"Did {n} {'search' if n == 1 else 'searches'}"
-
-    elif name == "web_extract" and isinstance(data, dict):
-        n = _count_list(data, "results") or _count_list(data, "data", "results")
-        if n is not None:
-            text = f"Extracted {n} {'page' if n == 1 else 'pages'}"
-
-    if isinstance(data, dict) and data.get("fallback_warning"):
-        warning = str(data.get("fallback_warning") or "").strip()
-        if warning:
-            return f"{warning}{suffix}"
-
-    return f"{text}{suffix}" if text else None
-
-
-_DOXIE_STRUCTURED_RESULT_TOOLS = {
-    "design_agent_profile",
-    "create_agent_profile_draft",
-    "create_agent_profile_revision_draft",
-    "doxie_agent_profile_create_draft",
-    "test_agent_profile",
-}
-
-
-def _doxie_structured_tool_result(name: str, result: str) -> dict | None:
-    if name not in _DOXIE_STRUCTURED_RESULT_TOOLS:
-        return None
-    try:
-        data = json.loads(result)
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    event_name = data.get("doxie_event")
-    if name == "test_agent_profile":
-        if event_name != "agent_profile_test_completed":
-            return None
-        return data
-    if event_name not in {
-        "agent_profile_draft_requested",
-        "agent_profile_design_draft_requested",
-        "agent_profile_design_draft_saved",
-        "agent_profile_draft_saved",
-    }:
-        return None
-    draft = data.get("draft")
-    if not isinstance(draft, dict):
-        return None
-    event = {
-        "doxie_event": event_name,
-        "draft": draft,
-    }
-    operation = data.get("operation")
-    if operation in {"create", "update", "upsert", "revision"}:
-        event["operation"] = operation
-    return event
-
-
-def _session_interrupted(session: dict | None) -> bool:
-    if not session:
-        return False
-    interrupted_run_id = str(session.get("interrupted_run_id") or "")
-    interrupted_turn_id = str(session.get("interrupted_turn_id") or "")
-    active_run_id = str(session.get("active_run_id") or "")
-    active_turn_id = str(session.get("active_turn_id") or "")
-    return bool(
-        (interrupted_run_id and (not active_run_id or interrupted_run_id == active_run_id))
-        or (interrupted_turn_id and (not active_turn_id or interrupted_turn_id == active_turn_id))
+def _tool_event_bridge() -> GatewayToolEventBridge:
+    return GatewayToolEventBridge(
+        sessions=_sessions,
+        emit=_emit,
+        tool_progress_enabled=_tool_progress_enabled,
+        session_cwd=_session_cwd,
+        tool_context=_tool_ctx,
+        tool_args_payload=_tool_args_payload,
     )
 
-
 def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
-    session = _sessions.get(sid)
-    if _session_interrupted(session):
-        return
-    enabled = _tool_progress_enabled(sid)
-    if session is not None:
-        try:
-            from agent.display import capture_local_edit_snapshot
-
-            snapshot = capture_local_edit_snapshot(name, args)
-            if snapshot is not None:
-                session.setdefault("edit_snapshots", {})[tool_call_id] = snapshot
-        except Exception:
-            pass
-        session.setdefault("tool_started_at", {})[tool_call_id] = time.time()
-    if enabled:
-        # tool.complete is the source of truth for todos (full list from the
-        # tool result). args.todos here may be a partial merge update.
-        _emit(
-            "tool.start",
-            sid,
-            {
-                "tool_id": tool_call_id,
-                "name": name,
-                "context": _tool_ctx(name, args),
-                "arguments": _tool_args_payload(args),
-            },
-        )
-
+    _tool_event_bridge().on_tool_start(sid, tool_call_id, name, args)
 
 def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result: str):
-    session = _sessions.get(sid)
-    if _session_interrupted(session):
-        return
-    payload = {
-        "tool_id": tool_call_id,
-        "name": name,
-        "context": _tool_ctx(name, args),
-        "arguments": _tool_args_payload(args),
-    }
-    snapshot = None
-    started_at = None
-    if session is not None:
-        snapshot = session.setdefault("edit_snapshots", {}).pop(tool_call_id, None)
-        started_at = session.setdefault("tool_started_at", {}).pop(tool_call_id, None)
-    duration_s = time.time() - started_at if started_at else None
-    if duration_s is not None:
-        payload["duration_s"] = duration_s
-    summary = _tool_summary(name, result, duration_s)
-    if summary:
-        payload["summary"] = summary
-    doxie_result = _doxie_structured_tool_result(name, result)
-    if doxie_result:
-        payload["result"] = doxie_result
-    if name == "todo":
-        try:
-            data = json.loads(result)
-            if isinstance(data, dict) and isinstance(data.get("todos"), list):
-                payload["todos"] = data.get("todos")
-        except Exception:
-            pass
-    try:
-        from agent.display import render_edit_diff_with_delta
-
-        rendered: list[str] = []
-        if render_edit_diff_with_delta(
-            name,
-            result,
-            function_args=args,
-            snapshot=snapshot,
-            print_fn=rendered.append,
-        ):
-            payload["inline_diff"] = "\n".join(rendered)
-    except Exception:
-        pass
-    enabled = _tool_progress_enabled(sid)
-    if enabled or payload.get("inline_diff") or doxie_result:
-        _emit("tool.complete", sid, payload)
-    _emit_artifacts_from_tool_complete(sid, tool_call_id, name, args, result)
-
-
-def _emit_artifacts_from_tool_complete(
-    sid: str,
-    tool_call_id: str,
-    name: str,
-    args: dict,
-    result: str,
-) -> None:
-    session = _sessions.get(sid)
-    if not session:
-        return
-    if _session_interrupted(session):
-        return
-    if session.get("transient"):
-        return
-    cwd = _session_cwd(session)
-    workspace = dict(session.get("workspace") or {})
-    session_key = session.get("session_key") or sid
-    origin = {
-        key: value
-        for key, value in {
-            "run_id": str(session.get("active_run_id") or ""),
-            "turn_id": str(session.get("active_turn_id") or ""),
-            "client_message_id": str((session.get("pending_turn") or {}).get("client_message_id") or ""),
-        }.items()
-        if value
-    }
-    for payload in record_artifacts_from_tool_complete(
-        session_id=session_key,
-        tool_call_id=tool_call_id,
-        name=name,
-        args=args,
-        result=result,
-        cwd=cwd,
-        workspace=workspace,
-        origin=origin,
-    ):
-        _emit(
-            "artifact.created",
-            sid,
-            payload,
-        )
-
+    _tool_event_bridge().on_tool_complete(sid, tool_call_id, name, args, result)
 
 def _on_tool_progress(
     sid: str,
     event_type: str,
     name: str | None = None,
     preview: str | None = None,
-    _args: dict | None = None,
-    **_kwargs,
+    args: dict | None = None,
+    **kwargs,
 ):
-    if _session_interrupted(_sessions.get(sid)):
-        return
-    enabled = _tool_progress_enabled(sid)
-    if not enabled:
-        return
-    if event_type == "tool.started" and name:
-        # The Doxie desktop gateway also receives the structured
-        # tool_start_callback for the same tool call, including the stable
-        # provider tool id. Emitting this legacy progress-only event would
-        # create a duplicate row that can never be reconciled with
-        # tool.complete because it has no tool id.
-        return
-    if event_type == "reasoning.available" and preview:
-        _emit("reasoning.available", sid, {"text": str(preview)})
-        return
-    if event_type.startswith("subagent."):
-        payload = {
-            "goal": str(_kwargs.get("goal") or ""),
-            "task_count": int(_kwargs.get("task_count") or 1),
-            "task_index": int(_kwargs.get("task_index") or 0),
-        }
-        # Identity fields for the TUI spawn tree.  All optional — older
-        # emitters that omit them fall back to flat rendering client-side.
-        if _kwargs.get("subagent_id"):
-            payload["subagent_id"] = str(_kwargs["subagent_id"])
-        if _kwargs.get("parent_id"):
-            payload["parent_id"] = str(_kwargs["parent_id"])
-        if _kwargs.get("depth") is not None:
-            payload["depth"] = int(_kwargs["depth"])
-        if _kwargs.get("model"):
-            payload["model"] = str(_kwargs["model"])
-        if _kwargs.get("tool_count") is not None:
-            payload["tool_count"] = int(_kwargs["tool_count"])
-        if _kwargs.get("toolsets"):
-            payload["toolsets"] = [str(t) for t in _kwargs["toolsets"]]
-        # Per-branch rollups emitted on subagent.complete (features 1+2+4).
-        for int_key in (
-            "input_tokens",
-            "output_tokens",
-            "reasoning_tokens",
-            "api_calls",
-        ):
-            val = _kwargs.get(int_key)
-            if val is not None:
-                try:
-                    payload[int_key] = int(val)
-                except (TypeError, ValueError):
-                    pass
-        if _kwargs.get("cost_usd") is not None:
-            try:
-                payload["cost_usd"] = float(_kwargs["cost_usd"])
-            except (TypeError, ValueError):
-                pass
-        if _kwargs.get("files_read"):
-            payload["files_read"] = [str(p) for p in _kwargs["files_read"]]
-        if _kwargs.get("files_written"):
-            payload["files_written"] = [str(p) for p in _kwargs["files_written"]]
-        if _kwargs.get("output_tail"):
-            payload["output_tail"] = list(_kwargs["output_tail"])  # list of dicts
-        if name:
-            payload["tool_name"] = str(name)
-        if preview:
-            payload["text"] = str(preview)
-        if _kwargs.get("status"):
-            payload["status"] = str(_kwargs["status"])
-        if _kwargs.get("summary"):
-            payload["summary"] = str(_kwargs["summary"])
-        if _kwargs.get("duration_seconds") is not None:
-            payload["duration_seconds"] = float(_kwargs["duration_seconds"])
-        if preview and event_type == "subagent.tool":
-            payload["tool_preview"] = str(preview)
-            payload["text"] = str(preview)
-        _emit(event_type, sid, payload)
-
+    _tool_event_bridge().on_tool_progress(sid, event_type, name, preview, args, **kwargs)
 
 def _agent_cbs(sid: str) -> dict:
-    return {
-        "tool_start_callback": lambda tc_id, name, args: _on_tool_start(
-            sid, tc_id, name, args
-        ),
-        "tool_complete_callback": lambda tc_id, name, args, result: _on_tool_complete(
-            sid, tc_id, name, args, result
-        ),
-        "tool_progress_callback": lambda event_type, name=None, preview=None, args=None, **kwargs: _on_tool_progress(
-            sid, event_type, name, preview, args, **kwargs
-        ),
-        "tool_gen_callback": lambda name: _tool_progress_enabled(sid)
-        and _emit("tool.generating", sid, {"name": name}),
-        # AIAgent thinking_callback is Hermes' local waiting/musing status,
-        # not provider/model reasoning. Keep it separate so clients do not
-        # create fake reasoning panes for models that emitted no reasoning.
-        "thinking_callback": lambda text: _emit("agent.musing", sid, {"text": text}),
-        "reasoning_callback": lambda text: _emit(
-            "reasoning.delta", sid, {"text": text, "source": "provider_reasoning"}
-        ),
-        "status_callback": lambda kind, text=None: _status_update(
-            sid, str(kind), None if text is None else str(text)
-        ),
-        "clarify_callback": lambda q, c: _block(
-            "clarify.request", sid, {"question": q, "choices": c}
-        ),
-    }
-
+    return _tool_event_bridge().agent_callbacks(sid, block=_block, status_update=_status_update)
 
 def _wire_callbacks(sid: str):
-    from tools.terminal_tool import set_sudo_password_callback
-    from tools.skills_tool import set_secret_capture_callback
-
-    set_sudo_password_callback(lambda: _block("sudo.request", sid, {}, timeout=120))
-
-    def secret_cb(env_var, prompt, metadata=None):
-        pl = {"prompt": prompt, "env_var": env_var}
-        if metadata:
-            pl["metadata"] = metadata
-        val = _block("secret.request", sid, pl)
-        if not val:
-            return {
-                "success": True,
-                "stored_as": env_var,
-                "validated": False,
-                "skipped": True,
-                "message": "skipped",
-            }
-        from hermes_cli.config import save_env_value_secure
-
-        return {
-            **save_env_value_secure(env_var, val),
-            "skipped": False,
-            "message": "ok",
-        }
-
-    set_secret_capture_callback(secret_cb)
-
+    _wire_secret_callbacks(sid, block=_block)
 
 def _render_personality_prompt(value) -> str:
     if isinstance(value, dict):
@@ -2221,8 +1830,13 @@ def _init_session(
     workspace: dict | None = None,
     profile_context: dict | None = None,
 ):
+    ready = threading.Event()
+    ready.set()
     _sessions[sid] = {
         "agent": agent,
+        "agent_error": None,
+        "agent_ready": ready,
+        "agent_build_started": True,
         "session_key": key,
         "cwd": _normalize_session_cwd(cwd),
         "profile_context": profile_context,
@@ -2341,91 +1955,6 @@ def _enrich_with_attached_images(user_text: str, image_paths: list[str]) -> str:
         return f"{prefix}\n\n{text}" if text else prefix
     return text or "What do you see in this image?"
 
-
-def _content_display_text(content: Any) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, (int, float)):
-        return str(content)
-    if isinstance(content, list):
-        parts = []
-        for part in content:
-            text = _content_display_text(part).strip()
-            if text:
-                parts.append(text)
-        return "\n".join(parts)
-    if isinstance(content, dict):
-        kind = content.get("type")
-        if kind in {"text", "input_text", "output_text"}:
-            return str(content.get("text") or content.get("content") or "")
-        if kind in {"image_url", "input_image", "image"}:
-            return "[image]"
-        if kind in {"input_audio", "audio"}:
-            return "[audio]"
-        if kind:
-            return f"[{kind}]"
-        if "text" in content:
-            return str(content.get("text") or "")
-        return "[structured content]"
-    return str(content)
-
-
-def _history_to_messages(history: list[dict]) -> list[dict]:
-    messages = []
-    tool_call_args = {}
-
-    for m in history:
-        if not isinstance(m, dict):
-            continue
-        role = m.get("role")
-        if role not in {"user", "assistant", "tool", "system"}:
-            continue
-        content_text = _content_display_text(m.get("content"))
-        reasoning_text = ""
-        if role == "assistant":
-            reasoning_text = _content_display_text(
-                m.get("reasoning") or m.get("reasoning_content")
-            )
-        if role == "assistant" and m.get("tool_calls"):
-            for tc in m["tool_calls"]:
-                fn = tc.get("function", {})
-                tc_id = tc.get("id", "")
-                if tc_id and fn.get("name"):
-                    try:
-                        args = json.loads(fn.get("arguments", "{}"))
-                    except (json.JSONDecodeError, TypeError):
-                        args = {}
-                    tool_call_args[tc_id] = (fn["name"], args)
-            if not content_text.strip() and not reasoning_text.strip():
-                continue
-        if role == "tool":
-            tc_id = m.get("tool_call_id", "")
-            tc_info = tool_call_args.get(tc_id) if tc_id else None
-            name = (tc_info[0] if tc_info else None) or m.get("tool_name") or "tool"
-            args = (tc_info[1] if tc_info else None) or {}
-            item = {
-                "role": "tool",
-                "name": name,
-                "context": _tool_ctx(name, args),
-            }
-            if args:
-                item["arguments"] = _tool_args_payload(args)
-            messages.append(
-                item
-            )
-            continue
-        if not content_text.strip() and not reasoning_text.strip():
-            continue
-        message = {"role": role, "text": content_text}
-        if isinstance(m.get("metadata"), dict):
-            message["metadata"] = dict(m["metadata"])
-        if reasoning_text.strip():
-            message["reasoning"] = reasoning_text
-        messages.append(message)
-
-    return messages
 
 # ── Method registration ───────────────────────────────────────────────
 

@@ -8,6 +8,7 @@ import pytest
 from model_tools import (
     handle_function_call,
     get_all_tool_names,
+    get_tool_definitions,
     get_toolset_for_tool,
     _AGENT_LOOP_TOOLS,
     _LEGACY_TOOLSET_MAP,
@@ -116,6 +117,21 @@ class TestHandleFunctionCall:
 # =========================================================================
 # Agent loop tools
 # =========================================================================
+
+def test_default_tool_definitions_exclude_internal_doxie_tools():
+    names = {tool["function"]["name"] for tool in get_tool_definitions(quiet_mode=True)}
+
+    assert "design_agent_profile" not in names
+    assert "test_agent_profile" not in names
+
+
+def test_explicit_doxie_toolset_exposes_design_tools():
+    names = {
+        tool["function"]["name"]
+        for tool in get_tool_definitions(enabled_toolsets=["doxie"], quiet_mode=True)
+    }
+
+    assert {"design_agent_profile", "test_agent_profile"} <= names
 
 class TestAgentLoopTools:
     def test_expected_tools_in_set(self):

@@ -9,6 +9,7 @@ from typing import Any
 METHOD_MODULES = (
     "session",
     "prompt",
+    "run",
     "config",
     "system",
     "paste",

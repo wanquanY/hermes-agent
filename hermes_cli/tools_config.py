@@ -1019,7 +1019,7 @@ def _get_platform_tools(
     include_default_mcp_servers: bool = True,
 ) -> Set[str]:
     """Resolve which individual toolset names are enabled for a platform."""
-    from toolsets import resolve_toolset, TOOLSETS
+    from toolsets import get_internal_toolsets, resolve_toolset, TOOLSETS
 
     platform_toolsets = config.get("platform_toolsets") or {}
     toolset_names = platform_toolsets.get(platform)
@@ -1040,12 +1040,15 @@ def _get_platform_tools(
     configurable_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
     plugin_ts_keys = _get_plugin_toolset_keys()
     platform_default_keys = {p["default_toolset"] for p in PLATFORMS.values()}
+    internal_toolsets = get_internal_toolsets()
 
     # If the saved list contains any configurable keys directly, the user
     # has explicitly configured this platform — use direct membership.
     # This avoids the subset-inference bug where composite toolsets like
     # "hermes-cli" (which include all _HERMES_CORE_TOOLS) cause disabled
     # toolsets to re-appear as enabled.
+    toolset_names = [ts for ts in toolset_names if ts not in internal_toolsets]
+
     has_explicit_config = any(ts in configurable_keys for ts in toolset_names)
 
     if has_explicit_config:
@@ -1135,6 +1138,7 @@ def _get_platform_tools(
     for ts_key in enabled_toolsets:
         claimed.update(resolve_toolset(ts_key))
     skip = configurable_keys | plugin_ts_keys | platform_default_keys
+    skip |= internal_toolsets
     skip |= {k for k in TOOLSETS if k.startswith("hermes-")}
     skip |= set(_DEFAULT_OFF_TOOLSETS) - {platform}
     for ts_key, ts_def in TOOLSETS.items():
@@ -1181,6 +1185,7 @@ def _get_platform_tools(
         if ts not in configurable_keys
         and ts not in plugin_ts_keys
         and ts not in platform_default_keys
+        and ts not in internal_toolsets
     }
 
     # MCP servers are expected to be available on all platforms by default.
@@ -1233,9 +1238,13 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
     # Drop platform-scoped toolsets that don't apply here.  Prevents the
     # "Configure all platforms" checklist (or a hand-edited config.yaml)
     # from turning on, say, the `discord` toolset for Telegram.
+    from toolsets import get_internal_toolsets
+    internal_toolsets = get_internal_toolsets()
+
     enabled_toolset_keys = {
         ts for ts in enabled_toolset_keys
         if _toolset_allowed_for_platform(ts, platform)
+        and ts not in internal_toolsets
     }
 
     # Get the set of all configurable toolset keys (built-in + plugin)
@@ -1258,7 +1267,7 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
     # defaults (i.e. only MCP server names should be preserved)
     preserved_entries = {
         entry for entry in existing_toolsets
-        if entry not in configurable_keys and entry not in platform_default_keys
+        if entry not in configurable_keys and entry not in platform_default_keys and entry not in internal_toolsets
     }
     # Opening `hermes tools` is the user's opt-in to reconfigure tools, so treat
     # saving from the picker as consent to clear the "no_mcp" sentinel. The

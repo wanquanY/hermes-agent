@@ -424,6 +424,154 @@ def test_session_status_returns_machine_readable_run_state(server):
     assert resp["result"]["run_updated_at"] == 22
 
 
+def test_run_control_replays_events_and_tracks_status(capture):
+    server, _buf = capture
+    server._sessions["runtime-events"] = {
+        "agent": MagicMock(model="gpt-test", provider="test-provider"),
+        "session_key": "stored-events",
+        "running": True,
+        "active_run_id": "run-events",
+        "active_turn_id": "turn-events",
+        "run_started_at": 11,
+        "run_updated_at": 22,
+        "history": [],
+        "history_lock": threading.Lock(),
+    }
+
+    server._emit("message.start", "runtime-events", {"run_id": "run-events", "turn_id": "turn-events"})
+
+    replay = server.handle_request(
+        {
+            "id": "r1",
+            "method": "events.subscribe",
+            "params": {"stored_session_id": "stored-events"},
+        }
+    )
+    status = server.handle_request(
+        {
+            "id": "r2",
+            "method": "run.status",
+            "params": {"run_id": "run-events"},
+        }
+    )
+
+    assert "error" not in replay
+    assert replay["result"]["events"][0]["type"] == "message.start"
+    assert replay["result"]["events"][0]["stored_session_id"] == "stored-events"
+    assert "error" not in status
+    assert status["result"]["run"]["status"] == "running"
+
+    server._emit("message.complete", "runtime-events", {"run_id": "run-events", "status": "complete"})
+    done = server.handle_request(
+        {
+            "id": "r3",
+            "method": "run.status",
+            "params": {"run_id": "run-events"},
+        }
+    )
+
+    assert done["result"]["run"]["status"] == "completed"
+
+
+def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
+    class _RunDB:
+        def get_session_run_status(self, _session_id):
+            return {
+                "running": True,
+                "active_run_id": "run-active",
+                "active_turn_id": "turn-active",
+                "last_event_seq": 3,
+            }
+
+        def list_runs(self, _session_id):
+            return [
+                {
+                    "run_id": "run-active",
+                    "turn_id": "turn-active",
+                    "session_id": "stored-active",
+                    "status": "running",
+                    "started_at": 1,
+                    "updated_at": 2,
+                    "last_seq": 3,
+                }
+            ]
+
+    monkeypatch.setattr(server, "_get_db", lambda: _RunDB())
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "run.submit",
+            "params": {"stored_session_id": "stored-active", "text": "hello"},
+        }
+    )
+
+    assert resp["error"]["code"] == 4009
+    assert resp["error"]["data"]["active_run_id"] == "run-active"
+
+
+def test_events_subscribe_returns_subscription_id_and_unsubscribes(capture):
+    server, _buf = capture
+    token = server.bind_transport(server._stdio_transport)
+
+    try:
+        subscribed = server.handle_request(
+            {
+                "id": "r1",
+                "method": "events.subscribe",
+                "params": {"stored_session_id": "stored-sub"},
+            }
+        )
+        subscription_id = subscribed["result"]["subscription_id"]
+        unsubscribed = server.handle_request(
+            {
+                "id": "r2",
+                "method": "events.unsubscribe",
+                "params": {"subscription_id": subscription_id},
+            }
+        )
+    finally:
+        server.reset_transport(token)
+
+    assert subscription_id
+    assert unsubscribed["result"]["removed"] == 1
+
+
+def test_run_list_accepts_runtime_scope_and_status_filters(server, monkeypatch):
+    captured = {}
+
+    class _RunDB:
+        def list_runs(self, session_id="", *, runtime_scope_key="", statuses=None, limit=200):
+            captured.update(
+                {
+                    "session_id": session_id,
+                    "runtime_scope_key": runtime_scope_key,
+                    "statuses": statuses,
+                    "limit": limit,
+                }
+            )
+            return [{"run_id": "run-filtered", "status": "running", "runtime_scope_key": runtime_scope_key}]
+
+    monkeypatch.setattr(server, "_get_db", lambda: _RunDB())
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "run.list",
+            "params": {"runtime_scope_key": "profile:alpha", "status": "running", "limit": 10},
+        }
+    )
+
+    assert "error" not in resp
+    assert resp["result"]["runs"][0]["run_id"] == "run-filtered"
+    assert captured == {
+        "session_id": "",
+        "runtime_scope_key": "profile:alpha",
+        "statuses": ["running"],
+        "limit": 10,
+    }
+
+
 # ── Config I/O ───────────────────────────────────────────────────────
 
 

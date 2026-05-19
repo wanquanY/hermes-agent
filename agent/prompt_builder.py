@@ -776,7 +776,14 @@ def build_environment_hints() -> str:
 
         host_lines.append(f"User home directory: {os.path.expanduser('~')}")
         try:
-            host_lines.append(f"Current working directory: {os.getcwd()}")
+            from gateway.session_context import get_session_env
+
+            session_cwd = get_session_env("TERMINAL_CWD", "").strip()
+        except Exception:
+            session_cwd = ""
+        try:
+            cwd = session_cwd or os.getcwd()
+            host_lines.append(f"Current working directory: {cwd}")
         except OSError:
             pass
 

@@ -319,7 +319,7 @@ _DEFAULT_STORE_LOCK = threading.Lock()
 
 
 def get_gateway_state_store() -> GatewayStateStore:
-    home = get_hermes_home()
+    home = Path(get_hermes_home()).expanduser()
     key = str(home.resolve())
     with _DEFAULT_STORE_LOCK:
         store = _DEFAULT_STORES.get(key)

@@ -720,6 +720,29 @@ def browse_skills(page: int = 1, page_size: int = 20, source: str = "all") -> di
     }
 
 
+def _skill_inspect_file_payload(path: str, content, *, max_chars: int = 96_000) -> dict:
+    if isinstance(content, bytes):
+        try:
+            text = content.decode("utf-8")
+            is_binary = False
+        except UnicodeDecodeError:
+            text = f"[Binary file: {path}, size: {len(content)} bytes]"
+            is_binary = True
+    else:
+        text = str(content)
+        is_binary = False
+    truncated = len(text) > max_chars
+    if truncated:
+        text = text[:max_chars]
+    return {
+        "path": path,
+        "content": text,
+        "truncated": truncated,
+        "is_binary": is_binary,
+        "size": len(content) if isinstance(content, bytes) else len(str(content).encode("utf-8")),
+    }
+
+
 def inspect_skill(identifier: str) -> Optional[dict]:
     """Skill metadata (+ SKILL.md preview) for programmatic callers."""
     from tools.skills_hub import GitHubAuth, create_source_router
@@ -755,6 +778,11 @@ def inspect_skill(identifier: str) -> Optional[dict]:
         if len(lines) > 50:
             preview += f"\n\n... ({len(lines) - 50} more lines)"
         out["skill_md_preview"] = preview
+    if bundle and bundle.files:
+        out["files"] = [
+            _skill_inspect_file_payload(path, content)
+            for path, content in sorted(bundle.files.items())
+        ]
     return out
 
 

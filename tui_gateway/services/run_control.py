@@ -1,0 +1,785 @@
+"""Control-plane run registry and event log for the TUI gateway.
+
+The gateway process may host many live runtime containers, but durable UI
+state is keyed by the stored conversation session and run id.  This module
+keeps that control-plane state out of ``server.py`` so route switching, replay,
+and live event delivery do not depend on whichever runtime object happens to
+own a session at the moment.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+import uuid
+from collections import defaultdict, deque
+import logging
+from typing import Any
+
+from tui_gateway.transport import Transport
+
+try:
+    from hermes_state_runs import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES
+except Exception:  # pragma: no cover - keeps gateway importable in mocked tests.
+    ACTIVE_RUN_STATUSES = {
+        "queued",
+        "starting",
+        "running",
+        "waiting_approval",
+        "cancelling",
+        "finalizing",
+    }
+    TERMINAL_RUN_STATUSES = {"completed", "failed", "interrupted", "cancelled"}
+
+_MAX_EVENTS_PER_SESSION = 2000
+_POLL_INTERVAL_SECONDS = 0.25
+
+logger = logging.getLogger(__name__)
+
+_lock = threading.RLock()
+_events_by_session: dict[str, deque[dict[str, Any]]] = defaultdict(
+    lambda: deque(maxlen=_MAX_EVENTS_PER_SESSION)
+)
+_subscribers_by_session: dict[str, set[Transport]] = defaultdict(set)
+_subscriptions_by_id: dict[str, dict[str, Any]] = {}
+_subscription_ids_by_session: dict[str, set[str]] = defaultdict(set)
+_subscription_ids_by_transport: dict[Transport, set[str]] = defaultdict(set)
+_run_state_by_id: dict[str, dict[str, Any]] = {}
+_run_ids_by_session: dict[str, list[str]] = defaultdict(list)
+_last_seq_by_session: dict[str, int] = defaultdict(int)
+_subscription_poller_thread: threading.Thread | None = None
+
+
+def _db_method(db: Any, name: str):
+    if db is None or db.__class__.__module__.startswith("unittest.mock"):
+        return None
+    method = getattr(db, name, None)
+    return method if callable(method) else None
+
+
+def _stable_session_id(params: dict[str, Any]) -> str:
+    return str(
+        params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or params.get("session_id")
+        or params.get("sessionId")
+        or ""
+    ).strip()
+
+
+def _event_run_id(params: dict[str, Any]) -> str:
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    return str(params.get("run_id") or payload.get("run_id") or "").strip()
+
+
+def _event_turn_id(params: dict[str, Any]) -> str:
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    return str(params.get("turn_id") or payload.get("turn_id") or "").strip()
+
+
+def _terminal_status(event_type: str, payload: dict[str, Any]) -> str | None:
+    if event_type == "error":
+        return "failed"
+    if event_type != "message.complete":
+        return None
+    status = str(payload.get("status") or "").strip().lower()
+    if status == "interrupted":
+        return "interrupted"
+    if status in {"cancelled", "canceled"}:
+        return "cancelled"
+    if status in {"error", "failed"}:
+        return "failed"
+    return "completed"
+
+
+def _payload_status(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized in {"failed", "error"}:
+        return "error"
+    if normalized in {"cancelled", "canceled"}:
+        return "cancelled"
+    if normalized == "interrupted":
+        return "interrupted"
+    return "complete"
+
+
+def _active_run_ids_for_session(stable: str, db: Any = None) -> set[str]:
+    active_ids: set[str] = set()
+    if method := _db_method(db, "list_runs"):
+        try:
+            for run in method(
+                stable,
+                statuses=sorted(ACTIVE_RUN_STATUSES),
+                limit=100,
+            ):
+                run_id = str((run or {}).get("run_id") or "").strip()
+                if run_id:
+                    active_ids.add(run_id)
+        except Exception:
+            logger.debug("failed to load active run ids from db", exc_info=True)
+    with _lock:
+        for run_id in _run_ids_by_session.get(stable, ()):
+            state = _run_state_by_id.get(run_id) or {}
+            if str(state.get("status") or "") in ACTIVE_RUN_STATUSES:
+                active_ids.add(run_id)
+    return active_ids
+
+
+def _event_frame(event: dict[str, Any]) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "method": "event", "params": event}
+
+
+def _write_event(transport: Transport, event: dict[str, Any]) -> bool:
+    try:
+        transport.write(_event_frame(event))
+        return True
+    except Exception:
+        detach_transport(transport)
+        return False
+
+
+def _max_event_seq(events: list[dict[str, Any]], fallback: int = 0) -> int:
+    last = int(fallback or 0)
+    for event in events:
+        try:
+            last = max(last, int((event or {}).get("seq") or 0))
+        except (TypeError, ValueError):
+            continue
+    return last
+
+
+def _filter_events_for_subscription(
+    events: list[dict[str, Any]],
+    *,
+    active_only: bool,
+    active_run_ids: set[str],
+) -> list[dict[str, Any]]:
+    if not active_only:
+        return events
+    return [
+        event
+        for event in events
+        if _event_run_id(event) in active_run_ids
+    ]
+
+
+def _start_subscription_poller_locked() -> None:
+    global _subscription_poller_thread
+    if _subscription_poller_thread and _subscription_poller_thread.is_alive():
+        return
+    _subscription_poller_thread = threading.Thread(
+        target=_poll_subscription_events,
+        name="hermes-run-event-log-poller",
+        daemon=True,
+    )
+    _subscription_poller_thread.start()
+
+
+def _poll_subscription_events() -> None:
+    while True:
+        time.sleep(_POLL_INTERVAL_SECONDS)
+        with _lock:
+            subscriptions = [
+                dict(subscription)
+                for subscription in _subscriptions_by_id.values()
+                if subscription.get("transport") is not None
+            ]
+        if not subscriptions:
+            continue
+        for subscription in subscriptions:
+            db = subscription.get("db")
+            method = _db_method(db, "list_run_events")
+            if method is None:
+                continue
+            stable = str(subscription.get("stored_session_id") or "").strip()
+            transport = subscription.get("transport")
+            if not stable or transport is None:
+                continue
+            last_seq = int(subscription.get("last_seq") or 0)
+            active_only = bool(subscription.get("active_only"))
+            active_run_ids = set(subscription.get("active_run_ids") or set())
+            try:
+                events = method(
+                    stable,
+                    after_seq=last_seq,
+                    active_only=False,
+                    limit=_MAX_EVENTS_PER_SESSION,
+                )
+            except Exception:
+                logger.debug("failed to poll run event log", exc_info=True)
+                continue
+            events = _filter_events_for_subscription(
+                [event for event in events if isinstance(event, dict)],
+                active_only=active_only,
+                active_run_ids=active_run_ids,
+            )
+            if not events:
+                continue
+            delivered_seq = last_seq
+            for event in events:
+                seq = int(event.get("seq") or 0)
+                if seq <= delivered_seq:
+                    continue
+                if not _write_event(transport, event):
+                    break
+                delivered_seq = seq
+            with _lock:
+                current = _subscriptions_by_id.get(str(subscription.get("id") or ""))
+                if current is not None:
+                    current["last_seq"] = max(int(current.get("last_seq") or 0), delivered_seq)
+
+
+def _ensure_run(
+    *,
+    stable_session_id: str,
+    run_id: str,
+    runtime_scope_key: str = "",
+    turn_id: str = "",
+    runtime_session_id: str = "",
+) -> dict[str, Any]:
+    now = time.time()
+    state = _run_state_by_id.get(run_id)
+    if state is None:
+        state = {
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "session_id": runtime_session_id,
+            "stored_session_id": stable_session_id,
+            "runtime_scope_key": runtime_scope_key or stable_session_id,
+            "status": "running",
+            "started_at": now,
+            "updated_at": now,
+            "last_seq": 0,
+            "error": "",
+        }
+        _run_state_by_id[run_id] = state
+        if run_id not in _run_ids_by_session[stable_session_id]:
+            _run_ids_by_session[stable_session_id].append(run_id)
+    else:
+        state["updated_at"] = now
+        if turn_id:
+            state["turn_id"] = turn_id
+        if runtime_session_id:
+            state["session_id"] = runtime_session_id
+        if runtime_scope_key:
+            state["runtime_scope_key"] = runtime_scope_key
+        if stable_session_id:
+            state["stored_session_id"] = stable_session_id
+    return state
+
+
+def mark_run_started(
+    *,
+    stored_session_id: str,
+    runtime_session_id: str,
+    run_id: str,
+    turn_id: str = "",
+    runtime_scope_key: str = "",
+    metadata: dict[str, Any] | None = None,
+    db: Any = None,
+) -> dict[str, Any]:
+    stable = str(stored_session_id or runtime_session_id or "").strip()
+    normalized_run_id = str(run_id or "").strip()
+    if not stable or not normalized_run_id:
+        return {}
+    with _lock:
+        state = _ensure_run(
+            stable_session_id=stable,
+            run_id=normalized_run_id,
+            runtime_scope_key=runtime_scope_key or stable,
+            turn_id=turn_id,
+            runtime_session_id=str(runtime_session_id or "").strip(),
+        )
+        state["status"] = "running"
+        state["error"] = ""
+        snapshot = dict(state)
+    if method := _db_method(db, "upsert_run"):
+        try:
+            persisted = method(
+                run_id=normalized_run_id,
+                session_id=stable,
+                runtime_scope_key=runtime_scope_key or stable,
+                turn_id=turn_id,
+                runtime_session_id=str(runtime_session_id or "").strip(),
+                status="running",
+                started_at=float(snapshot.get("started_at") or time.time()),
+                updated_at=float(snapshot.get("updated_at") or time.time()),
+                last_seq=int(snapshot.get("last_seq") or 0),
+                error="",
+                metadata=metadata,
+            )
+            if isinstance(persisted, dict) and persisted:
+                return persisted
+        except Exception:
+            pass
+    return snapshot
+
+
+def create_run_if_session_idle(
+    *,
+    stored_session_id: str,
+    run_id: str,
+    turn_id: str = "",
+    runtime_scope_key: str = "",
+    runtime_session_id: str = "",
+    metadata: dict[str, Any] | None = None,
+    db: Any = None,
+) -> dict[str, Any]:
+    stable = str(stored_session_id or runtime_session_id or "").strip()
+    normalized_run_id = str(run_id or "").strip()
+    if not stable or not normalized_run_id:
+        return {"run": None, "conflict": None}
+
+    if method := _db_method(db, "create_run_if_session_idle"):
+        try:
+            result = method(
+                run_id=normalized_run_id,
+                session_id=stable,
+                runtime_scope_key=runtime_scope_key or stable,
+                turn_id=turn_id,
+                runtime_session_id=runtime_session_id,
+                status="queued",
+                metadata=metadata,
+            )
+            run = result.get("run") if isinstance(result, dict) else None
+            conflict = result.get("conflict") if isinstance(result, dict) else None
+            created = bool(result.get("created")) if isinstance(result, dict) else False
+            if isinstance(run, dict) and run:
+                with _lock:
+                    state = _ensure_run(
+                        stable_session_id=stable,
+                        run_id=normalized_run_id,
+                        runtime_scope_key=runtime_scope_key or stable,
+                        turn_id=turn_id,
+                        runtime_session_id=runtime_session_id,
+                    )
+                    state.update(run)
+                return {"run": run, "conflict": None, "created": created}
+            if isinstance(conflict, dict) and conflict:
+                return {"run": None, "conflict": conflict, "created": False}
+        except Exception:
+            pass
+
+    persisted_status = session_status(stable, db=db)
+    if persisted_status.get("running"):
+        active_run_id = str(persisted_status.get("active_run_id") or "").strip()
+        if active_run_id and active_run_id != normalized_run_id:
+            return {
+                "run": None,
+                "conflict": {
+                    "run_id": active_run_id,
+                    "turn_id": str(persisted_status.get("active_turn_id") or ""),
+                    "session_id": stable,
+                    "stored_session_id": stable,
+                    "runtime_scope_key": str(persisted_status.get("runtime_scope_key") or ""),
+                    "status": "running",
+                    "started_at": float(persisted_status.get("run_started_at") or 0),
+                    "updated_at": float(persisted_status.get("run_updated_at") or 0),
+                    "last_seq": int(persisted_status.get("last_event_seq") or 0),
+                },
+                "created": False,
+            }
+
+    with _lock:
+        for active_run_id in _run_ids_by_session.get(stable, ()):
+            active = _run_state_by_id.get(active_run_id) or {}
+            if (
+                active_run_id != normalized_run_id
+                and str(active.get("status") or "") in ACTIVE_RUN_STATUSES
+            ):
+                return {"run": None, "conflict": dict(active), "created": False}
+        state = _ensure_run(
+            stable_session_id=stable,
+            run_id=normalized_run_id,
+            runtime_scope_key=runtime_scope_key or stable,
+            turn_id=turn_id,
+            runtime_session_id=runtime_session_id,
+        )
+        state["status"] = "queued"
+        if isinstance(metadata, dict) and metadata:
+            current_metadata = state.get("metadata")
+            if not isinstance(current_metadata, dict):
+                current_metadata = {}
+            current_metadata.update(metadata)
+            state["metadata"] = current_metadata
+        return {"run": dict(state), "conflict": None, "created": True}
+
+
+def next_event_seq(stored_session_id: str, fallback_seq: int = 0, db: Any = None) -> int:
+    stable = str(stored_session_id or "").strip()
+    if not stable:
+        return int(fallback_seq or 0)
+    persisted_next = 0
+    if method := _db_method(db, "next_run_event_seq"):
+        try:
+            persisted_next = int(method(stable, fallback_seq=fallback_seq) or 0)
+        except Exception:
+            persisted_next = 0
+    with _lock:
+        next_seq = max(
+            int(_last_seq_by_session.get(stable) or 0) + 1,
+            int(fallback_seq or 0),
+            persisted_next,
+        )
+        _last_seq_by_session[stable] = next_seq
+        return next_seq
+
+
+def record_event(
+    params: dict[str, Any],
+    owner_transport: Transport | None = None,
+    db: Any = None,
+) -> list[Transport]:
+    """Persist an event frame and return live subscriber transports to notify."""
+    frame = dict(params)
+    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    stable = _stable_session_id(frame)
+    run_id = _event_run_id(frame)
+    turn_id = _event_turn_id(frame)
+    event_type = str(frame.get("type") or "").strip()
+    runtime_session_id = str(frame.get("session_id") or "").strip()
+    now = time.time()
+    frame["timestamp"] = now
+
+    with _lock:
+        if stable:
+            _events_by_session[stable].append(frame)
+            _last_seq_by_session[stable] = max(
+                int(_last_seq_by_session.get(stable) or 0),
+                int(frame.get("seq") or 0),
+            )
+        if stable and run_id:
+            state = _ensure_run(
+                stable_session_id=stable,
+                run_id=run_id,
+                runtime_scope_key=str((payload or {}).get("runtime_scope_key") or frame.get("runtime_scope_key") or ""),
+                turn_id=turn_id,
+                runtime_session_id=runtime_session_id,
+            )
+            state["last_seq"] = int(frame.get("seq") or state.get("last_seq") or 0)
+            terminal = _terminal_status(event_type, payload)
+            if terminal:
+                state["status"] = terminal
+                if terminal == "failed":
+                    state["error"] = str(payload.get("message") or "")
+            elif event_type in {"message.start", "tool.start", "tool.generating"}:
+                state["status"] = "running"
+            state["updated_at"] = now
+
+        subscribers = set()
+        if stable:
+            for subscription_id in list(_subscription_ids_by_session.get(stable, set())):
+                subscription = _subscriptions_by_id.get(subscription_id)
+                transport = subscription.get("transport") if isinstance(subscription, dict) else None
+                if transport is not None:
+                    subscribers.add(transport)
+            subscribers.update(_subscribers_by_session.get(stable, set()))
+        if owner_transport is not None:
+            subscribers.discard(owner_transport)
+        result = list(subscribers)
+    if stable and (method := _db_method(db, "append_run_event")):
+        try:
+            method(stable, frame)
+        except Exception:
+            logger.warning("failed to persist run event", exc_info=True)
+    return result
+
+
+def publish_run_terminal_event(
+    *,
+    stored_session_id: str,
+    run_id: str,
+    turn_id: str = "",
+    runtime_scope_key: str = "",
+    runtime_session_id: str = "",
+    status: str = "failed",
+    message: str = "",
+    db: Any = None,
+    owner_transport: Transport | None = None,
+) -> dict[str, Any]:
+    stable = str(stored_session_id or runtime_session_id or "").strip()
+    normalized_run_id = str(run_id or "").strip()
+    if not stable or not normalized_run_id:
+        return {}
+    terminal_status = str(status or "failed").strip().lower() or "failed"
+    payload_status = _payload_status(terminal_status)
+    payload: dict[str, Any] = {
+        "run_id": normalized_run_id,
+        "turn_id": str(turn_id or "").strip(),
+        "status": payload_status,
+    }
+    if message:
+        payload["message"] = str(message)
+        payload["text"] = str(message) if payload_status == "error" else ""
+    else:
+        payload["text"] = ""
+    frame = {
+        "type": "message.complete",
+        "session_id": str(runtime_session_id or stable).strip(),
+        "stored_session_id": stable,
+        "run_id": normalized_run_id,
+        "turn_id": str(turn_id or "").strip(),
+        "runtime_scope_key": str(runtime_scope_key or stable).strip(),
+        "seq": next_event_seq(stable, db=db),
+        "payload": payload,
+    }
+    subscribers = record_event(frame, owner_transport=owner_transport, db=db)
+    for transport in subscribers:
+        _write_event(transport, frame)
+    return frame
+
+
+def subscribe_session(
+    *,
+    stored_session_id: str,
+    transport: Transport | None,
+    after_seq: int = 0,
+    active_only: bool = False,
+    db: Any = None,
+) -> list[dict[str, Any]]:
+    _subscription_id, events = subscribe_session_with_id(
+        stored_session_id=stored_session_id,
+        transport=transport,
+        after_seq=after_seq,
+        active_only=active_only,
+        db=db,
+    )
+    return events
+
+
+def subscribe_session_with_id(
+    *,
+    stored_session_id: str,
+    transport: Transport | None,
+    after_seq: int = 0,
+    active_only: bool = False,
+    db: Any = None,
+    subscription_id: str = "",
+) -> tuple[str, list[dict[str, Any]]]:
+    stable = str(stored_session_id or "").strip()
+    if not stable:
+        return "", []
+    with _lock:
+        normalized_subscription_id = str(subscription_id or uuid.uuid4().hex).strip()
+        active_run_ids = _active_run_ids_for_session(stable, db=db) if active_only else set()
+        if transport is not None:
+            _subscriptions_by_id[normalized_subscription_id] = {
+                "id": normalized_subscription_id,
+                "stored_session_id": stable,
+                "transport": transport,
+                "active_only": bool(active_only),
+                "active_run_ids": set(active_run_ids),
+                "last_seq": max(0, int(after_seq or 0)),
+                "db": db,
+                "created_at": time.time(),
+            }
+            _subscription_ids_by_session[stable].add(normalized_subscription_id)
+            _subscription_ids_by_transport[transport].add(normalized_subscription_id)
+            if _db_method(db, "list_run_events") is not None:
+                _start_subscription_poller_locked()
+        memory_events = list(_events_by_session.get(stable, ()))
+    events: list[dict[str, Any]] = []
+    if method := _db_method(db, "list_run_events"):
+        try:
+            events = method(
+                stable,
+                after_seq=after_seq,
+                active_only=False,
+                limit=_MAX_EVENTS_PER_SESSION,
+            )
+        except Exception:
+            events = []
+    events = _filter_events_for_subscription(
+        [event for event in events if isinstance(event, dict)],
+        active_only=active_only,
+        active_run_ids=active_run_ids,
+    )
+    memory_events = _filter_events_for_subscription(
+        memory_events,
+        active_only=active_only,
+        active_run_ids=active_run_ids,
+    )
+    if after_seq > 0:
+        memory_events = [event for event in memory_events if int(event.get("seq") or 0) > after_seq]
+    by_seq = {
+        int(event.get("seq") or 0): event
+        for event in events
+        if isinstance(event, dict) and int(event.get("seq") or 0) > 0
+    }
+    for event in memory_events:
+        seq = int(event.get("seq") or 0)
+        if seq > 0:
+            by_seq.setdefault(seq, event)
+    events = [by_seq[seq] for seq in sorted(by_seq)]
+    with _lock:
+        subscription = _subscriptions_by_id.get(normalized_subscription_id)
+        if subscription is not None:
+            subscription["last_seq"] = _max_event_seq(events, after_seq)
+    if after_seq <= 0:
+        return normalized_subscription_id, events
+    return normalized_subscription_id, [event for event in events if int(event.get("seq") or 0) > after_seq]
+
+
+def unsubscribe_session(
+    *,
+    subscription_id: str = "",
+    stored_session_id: str = "",
+    transport: Transport | None = None,
+) -> int:
+    removed = 0
+    normalized_subscription_id = str(subscription_id or "").strip()
+    stable = str(stored_session_id or "").strip()
+    with _lock:
+        if normalized_subscription_id:
+            ids = {normalized_subscription_id}
+        elif transport is not None and stable:
+            ids = {
+                sub_id
+                for sub_id in _subscription_ids_by_transport.get(transport, set())
+                if (_subscriptions_by_id.get(sub_id) or {}).get("stored_session_id") == stable
+            }
+        elif transport is not None:
+            ids = set(_subscription_ids_by_transport.get(transport, set()))
+        else:
+            ids = set()
+        for sub_id in ids:
+            subscription = _subscriptions_by_id.pop(sub_id, None)
+            if not subscription:
+                continue
+            removed += 1
+            sid = str(subscription.get("stored_session_id") or "")
+            sub_transport = subscription.get("transport")
+            if sid:
+                _subscription_ids_by_session.get(sid, set()).discard(sub_id)
+            if sub_transport is not None:
+                _subscription_ids_by_transport.get(sub_transport, set()).discard(sub_id)
+        if transport is not None and stable:
+            _subscribers_by_session.get(stable, set()).discard(transport)
+    return removed
+
+
+def detach_transport(transport: Transport | None) -> None:
+    if transport is None:
+        return
+    with _lock:
+        unsubscribe_session(transport=transport)
+        for subscribers in _subscribers_by_session.values():
+            subscribers.discard(transport)
+
+
+def get_run(run_id: str, db: Any = None) -> dict[str, Any] | None:
+    normalized = str(run_id or "").strip()
+    if not normalized:
+        return None
+    persisted = None
+    if method := _db_method(db, "get_run"):
+        try:
+            persisted = method(normalized)
+        except Exception:
+            persisted = None
+    with _lock:
+        state = _run_state_by_id.get(normalized)
+        memory = dict(state) if state else None
+    if not memory:
+        return persisted if isinstance(persisted, dict) else None
+    if not isinstance(persisted, dict):
+        return memory
+    if float(memory.get("updated_at") or 0) >= float(persisted.get("updated_at") or 0):
+        return memory
+    return persisted
+
+
+def list_runs(
+    stored_session_id: str = "",
+    db: Any = None,
+    runtime_scope_key: str = "",
+    statuses: list[str] | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    stable = str(stored_session_id or "").strip()
+    scope = str(runtime_scope_key or "").strip()
+    normalized_statuses = [
+        str(status or "").strip()
+        for status in (statuses or [])
+        if str(status or "").strip()
+    ]
+    if not stable and not scope and not normalized_statuses:
+        return []
+    persisted: list[dict[str, Any]] = []
+    if method := _db_method(db, "list_runs"):
+        try:
+            persisted = method(
+                stable,
+                runtime_scope_key=scope,
+                statuses=normalized_statuses,
+                limit=limit,
+            )
+        except Exception:
+            persisted = []
+    with _lock:
+        if stable:
+            ids = list(_run_ids_by_session.get(stable, ()))
+            memory = [dict(_run_state_by_id[run_id]) for run_id in ids if run_id in _run_state_by_id]
+        else:
+            memory = [dict(run) for run in _run_state_by_id.values()]
+    if scope:
+        memory = [run for run in memory if str(run.get("runtime_scope_key") or "") == scope]
+    if normalized_statuses:
+        allowed = set(normalized_statuses)
+        memory = [run for run in memory if str(run.get("status") or "") in allowed]
+    by_id = {
+        str(run.get("run_id") or ""): run
+        for run in persisted
+        if isinstance(run, dict) and run.get("run_id")
+    }
+    for run in memory:
+        run_id = str(run.get("run_id") or "")
+        existing = by_id.get(run_id)
+        if not existing or float(run.get("updated_at") or 0) >= float(existing.get("updated_at") or 0):
+            by_id[run_id] = run
+    return sorted(
+        by_id.values(),
+        key=lambda run: (float(run.get("updated_at") or 0), float(run.get("started_at") or 0)),
+        reverse=True,
+    )[:max(1, min(int(limit or 200), 1000))]
+
+
+def session_status(stored_session_id: str, db: Any = None) -> dict[str, Any]:
+    persisted_status = None
+    if method := _db_method(db, "get_session_run_status"):
+        try:
+            persisted_status = method(stored_session_id)
+        except Exception:
+            persisted_status = None
+    runs = list_runs(stored_session_id, db=db)
+    active = [
+        run for run in runs
+        if str(run.get("status") or "") in ACTIVE_RUN_STATUSES
+    ]
+    last_seq = 0
+    with _lock:
+        events = _events_by_session.get(str(stored_session_id or "").strip(), ())
+        for event in events:
+            last_seq = max(last_seq, int(event.get("seq") or 0))
+    if isinstance(persisted_status, dict):
+        last_seq = max(last_seq, int(persisted_status.get("last_event_seq") or 0))
+    active_run = max(active, key=lambda run: float(run.get("updated_at") or 0), default=None)
+    if active_run is None and isinstance(persisted_status, dict) and persisted_status.get("running"):
+        return {
+            "running": True,
+            "active_run_id": str(persisted_status.get("active_run_id") or ""),
+            "active_turn_id": str(persisted_status.get("active_turn_id") or ""),
+            "runtime_scope_key": str(persisted_status.get("runtime_scope_key") or ""),
+            "run_started_at": float(persisted_status.get("run_started_at") or 0),
+            "run_updated_at": float(persisted_status.get("run_updated_at") or 0),
+            "last_event_seq": last_seq,
+        }
+    return {
+        "running": bool(active_run),
+        "active_run_id": str((active_run or {}).get("run_id") or ""),
+        "active_turn_id": str((active_run or {}).get("turn_id") or ""),
+        "runtime_scope_key": str((active_run or {}).get("runtime_scope_key") or ""),
+        "run_started_at": float((active_run or {}).get("started_at") or 0),
+        "run_updated_at": float((active_run or {}).get("updated_at") or 0),
+        "last_event_seq": last_seq,
+    }

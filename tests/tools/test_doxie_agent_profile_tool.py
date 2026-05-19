@@ -10,13 +10,32 @@ def test_design_agent_profile_inspects_real_design_context():
     result = json.loads(design_agent_profile(operation="inspect_context"))
 
     assert result["doxie_event"] == "agent_profile_design_context"
-    assert any(item["name"] == "web" for item in result["systemToolsets"])
+    assert result["catalogKind"] == "overview"
+    assert "web" in result["systemToolsets"]
+    assert "doxie" not in result["systemToolsets"]
     assert result["architectureTemplates"]
     assert result["avatarAssets"]
     assert result["installedSkillsSummary"] is not None
+    assert result["summary"]["toolsetCount"] >= len(result["systemToolsets"])
     assert result["rules"]["skillCatalogSource"] == "hermes.skills"
     assert result["rules"]["useSkillManageForCreation"] is True
     assert "installedSkills" not in result
+
+
+def test_design_agent_profile_inspects_catalog_slice_on_demand():
+    result = json.loads(
+        design_agent_profile(
+            operation="inspect_context",
+            catalog_kind="toolsets",
+            query="web",
+            limit=5,
+        )
+    )
+
+    assert result["catalogKind"] == "toolsets"
+    assert result["page"]["limit"] == 5
+    assert any(item["name"] == "web" for item in result["catalog"])
+    assert all(item["name"] != "doxie" for item in result["catalog"])
 
 
 def test_design_agent_profile_emits_composite_design_event():

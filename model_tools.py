@@ -28,7 +28,7 @@ import time
 from typing import Dict, Any, List, Optional, Tuple
 
 from tools.registry import discover_builtin_tools, registry
-from toolsets import resolve_toolset, validate_toolset
+from toolsets import get_internal_toolsets, resolve_toolset, validate_toolset
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +341,8 @@ def _compute_tool_definitions(
     # Determine which tool names the caller wants
     tools_to_include: set = set()
 
+    internal_toolsets = get_internal_toolsets()
+
     if enabled_toolsets is not None:
         for toolset_name in enabled_toolsets:
             if validate_toolset(toolset_name):
@@ -359,6 +361,8 @@ def _compute_tool_definitions(
         # Default: start with everything
         from toolsets import get_all_toolsets
         for ts_name in get_all_toolsets():
+            if ts_name in internal_toolsets:
+                continue
             tools_to_include.update(resolve_toolset(ts_name))
 
     # Always apply disabled toolsets as a subtraction step at the end.

@@ -9,8 +9,8 @@ History:
   but exist in .hermes/sessions."
 - The handler now deny-lists only the internal/noisy source ``tool``
   (sub-agent runs) and surfaces every other source to the picker.
-- The default ``limit`` raised from 20 to 200 so longer-running users
-  can scroll through their history without hitting an artificial cap.
+- The handler now exposes backend pagination metadata so clients can keep
+  loading older sessions without a fixed fetch cap.
 """
 
 from __future__ import annotations
@@ -69,15 +69,15 @@ def test_session_list_surfaces_all_user_facing_sources(monkeypatch):
     assert "tool-1" not in ids
 
 
-def test_session_list_default_limit_is_200(monkeypatch):
-    """Default limit should be wide enough for long-running users."""
+def test_session_list_default_limit_stays_legacy_compatible(monkeypatch):
+    """Clients that omit limit still get the historical broad first page."""
     db = _StubDB([{"id": "x", "source": "cli", "started_at": 1}])
     monkeypatch.setattr(server, "_get_db", lambda: db)
 
     _call()  # no explicit limit
-    # fetch_limit = max(limit * 2, 200); limit defaults to 200, so 400.
-    assert db.calls[0].get("limit") == 400, db.calls[0]
+    assert db.calls[0].get("limit") == 201, db.calls[0]
     assert db.calls[0].get("order_by_last_active") is True, db.calls[0]
+    assert db.calls[0].get("exclude_sources") == ["tool"], db.calls[0]
 
 
 def test_session_list_returns_last_message_activity_as_updated_at(monkeypatch):
@@ -125,9 +125,24 @@ def test_session_list_respects_explicit_limit(monkeypatch):
     monkeypatch.setattr(server, "_get_db", lambda: db)
 
     _call(limit=10)
-    # fetch_limit = max(limit * 2, 200) = 200 when limit is small.
-    assert db.calls[0].get("limit") == 200, db.calls[0]
+    assert db.calls[0].get("limit") == 11, db.calls[0]
     assert db.calls[0].get("order_by_last_active") is True, db.calls[0]
+
+
+def test_session_list_returns_page_info(monkeypatch):
+    rows = [
+        {"id": "s1", "source": "cli", "started_at": 3, "_page_cursor": {"effective_last_active": 3, "started_at": 3, "id": "s1"}},
+        {"id": "s2", "source": "cli", "started_at": 2, "_page_cursor": {"effective_last_active": 2, "started_at": 2, "id": "s2"}},
+        {"id": "s3", "source": "cli", "started_at": 1, "_page_cursor": {"effective_last_active": 1, "started_at": 1, "id": "s3"}},
+    ]
+    db = _StubDB(rows)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    resp = _call(limit=2)
+
+    assert [s["id"] for s in resp["result"]["sessions"]] == ["s1", "s2"]
+    assert resp["result"]["pageInfo"]["hasMore"] is True
+    assert resp["result"]["pageInfo"]["nextCursor"]
 
 
 def test_session_list_preserves_ordering_after_filter(monkeypatch):
@@ -144,3 +159,47 @@ def test_session_list_preserves_ordering_after_filter(monkeypatch):
     ids = [s["id"] for s in resp["result"]["sessions"]]
 
     assert ids == ["newest", "middle", "also-visible", "oldest"]
+
+
+def test_session_messages_returns_paged_transcript(monkeypatch):
+    class _MessagesDB:
+        def get_session(self, session_id):
+            return {"id": session_id} if session_id == "s1" else None
+
+        def get_messages_page_as_conversation(self, *args, **kwargs):
+            assert args[0] == "s1"
+            assert kwargs["direction"] == "before"
+            assert kwargs["cursor_id"] == 20
+            return {
+                "messages": [
+                    {"id": 10, "role": "user", "content": "older", "timestamp": 10.0},
+                ],
+                "pageInfo": {
+                    "prev_cursor_id": 10,
+                    "next_cursor_id": 10,
+                    "hasMoreBefore": False,
+                    "hasMoreAfter": True,
+                    "totalCount": 3,
+                },
+            }
+
+    cursor = server._methods["session.messages"].__globals__["_encode_page_cursor"]({"id": 20})
+    monkeypatch.setattr(server, "_get_db", lambda: _MessagesDB())
+
+    resp = server.handle_request({
+        "id": "1",
+        "method": "session.messages",
+        "params": {
+            "session_id": "s1",
+            "direction": "before",
+            "cursor": cursor,
+            "limit": 1,
+        },
+    })
+
+    assert resp["result"]["messages"] == [
+        {"role": "user", "text": "older", "message_id": "10", "timestamp": 10.0},
+    ]
+    assert resp["result"]["pageInfo"]["hasMoreBefore"] is False
+    assert resp["result"]["pageInfo"]["hasMoreAfter"] is True
+    assert resp["result"]["pageInfo"]["totalCount"] == 3

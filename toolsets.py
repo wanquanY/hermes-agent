@@ -542,6 +542,16 @@ TOOLSETS = {
     }
 }
 
+INTERNAL_TOOLSETS = {"doxie"}
+
+
+def is_internal_toolset(name: str) -> bool:
+    return str(name or "").strip() in INTERNAL_TOOLSETS
+
+
+def get_internal_toolsets() -> Set[str]:
+    return set(INTERNAL_TOOLSETS)
+
 
 
 def get_toolset(name: str) -> Optional[Dict[str, Any]]:
