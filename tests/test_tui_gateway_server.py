@@ -441,6 +441,65 @@ def test_tools_prepare_configure_saves_env_and_marks_ready(monkeypatch, tmp_path
     assert os.environ["OPENROUTER_API_KEY"] == "sk-test"
 
 
+def test_tools_prepare_browser_uses_packaged_local_runtime(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("BROWSERBASE_API_KEY", raising=False)
+    monkeypatch.delenv("BROWSERBASE_PROJECT_ID", raising=False)
+    monkeypatch.delenv("BROWSER_USE_API_KEY", raising=False)
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    monkeypatch.delenv("CAMOFOX_URL", raising=False)
+    monkeypatch.setattr(
+        "tools.browser_tool._find_agent_browser",
+        lambda: str(tmp_path / "tool-runtime" / "bin" / "agent-browser"),
+    )
+    monkeypatch.setattr("tools.browser_tool._requires_real_termux_browser_install", lambda _cmd: False)
+    monkeypatch.setattr("tools.browser_tool._chromium_installed", lambda: True)
+    monkeypatch.setattr("tools.browser_tool._using_lightpanda_engine", lambda: False)
+
+    resp = server.dispatch(
+        {
+            "id": "prepare-browser",
+            "method": "tools.prepare",
+            "params": {"action": "status", "names": ["browser"]},
+        }
+    )
+
+    assert "error" not in resp
+    status = resp["result"]["toolsets"][0]
+    assert status["name"] == "browser"
+    assert status["ready"] is True
+    assert status["requires_prepare"] is False
+    assert status["requires_configuration"] is False
+    local = next(provider for provider in status["providers"] if provider["name"] == "Local Browser")
+    assert local["ready"] is True
+
+
+def test_tools_prepare_browser_prefers_installable_local_runtime_over_cloud_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("BROWSERBASE_API_KEY", raising=False)
+    monkeypatch.delenv("BROWSERBASE_PROJECT_ID", raising=False)
+    monkeypatch.delenv("BROWSER_USE_API_KEY", raising=False)
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    monkeypatch.delenv("CAMOFOX_URL", raising=False)
+    monkeypatch.setattr("tools.browser_tool._find_agent_browser", lambda: (_ for _ in ()).throw(FileNotFoundError()))
+    monkeypatch.setattr("tools.browser_tool._chromium_installed", lambda: False)
+    monkeypatch.setattr("tools.browser_tool._using_lightpanda_engine", lambda: False)
+
+    resp = server.dispatch(
+        {
+            "id": "prepare-browser-installable",
+            "method": "tools.prepare",
+            "params": {"action": "status", "names": ["browser"]},
+        }
+    )
+
+    assert "error" not in resp
+    status = resp["result"]["toolsets"][0]
+    assert status["ready"] is False
+    assert status["installable"] is True
+    assert status["requires_configuration"] is False
+
+
 def test_tool_events_include_stable_preview_arguments(monkeypatch):
     events = []
     monkeypatch.setattr(server, "_tool_progress_enabled", lambda _sid: True)
@@ -6310,6 +6369,7 @@ def test_tools_list_only_returns_configurable_toolsets(monkeypatch):
     names = {item["name"] for item in resp["result"]["toolsets"]}
 
     assert "browser" in names
+    assert "doxie_web" in names
     assert "browser-cdp" not in names
     assert all(item["configurable"] is True for item in resp["result"]["toolsets"])
 

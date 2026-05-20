@@ -1192,6 +1192,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         return True, "", SILENT_MARKER, None
     origin = _resolve_origin(job)
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
+    job["_runtime_session_id"] = _cron_session_id
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
     logger.info("Prompt: %s", prompt[:100])
@@ -1775,12 +1776,18 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     success = False
                     error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
-                mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+                mark_job_run(
+                    job["id"],
+                    success,
+                    error,
+                    delivery_error=delivery_error,
+                    session_id=job.get("_runtime_session_id"),
+                )
                 return True
 
             except Exception as e:
                 logger.error("Error processing job %s: %s", job['id'], e)
-                mark_job_run(job["id"], False, str(e))
+                mark_job_run(job["id"], False, str(e), session_id=job.get("_runtime_session_id"))
                 return False
 
         # Partition due jobs: those with a per-job workdir mutate

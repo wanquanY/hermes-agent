@@ -82,6 +82,16 @@ class TestBuildChildProgressCallback:
         cb = _build_child_progress_callback(0, "test goal", parent)
         assert cb is None
 
+    def test_returns_none_when_progress_is_explicitly_suppressed(self):
+        """Sandboxed internal executions can opt out of subagent UI events."""
+        parent = MagicMock()
+        parent._delegate_spinner = KawaiiSpinner("delegating")
+        parent.tool_progress_callback = MagicMock()
+        parent._delegate_child_progress_suppressed = True
+
+        cb = _build_child_progress_callback(0, "test goal", parent)
+        assert cb is None
+
     def test_cli_spinner_tool_event(self):
         """Should print tool line above spinner for CLI path."""
         buf = io.StringIO()
@@ -231,35 +241,22 @@ class TestThinkingCallback:
     """Tests for the _thinking callback in AIAgent conversation loop."""
 
     def _simulate_thinking_callback(self, content, callback, delegate_depth=1):
-        """Simulate the exact code path from run_agent.py for the thinking callback.
+        """Simulate the run_agent.py plain assistant-content path.
         
         delegate_depth: simulates self._delegate_depth.
-            0 = main agent (should NOT fire), >=1 = subagent (should fire).
+            Plain assistant output should not be relabeled as thinking for
+            either the main agent or delegated subagents.
         """
-        import re
-        if (content and callback and delegate_depth > 0):
-            _think_text = content.strip()
-            _think_text = re.sub(
-                r'</?(?:REASONING_SCRATCHPAD|think|reasoning)>', '', _think_text
-            ).strip()
-            first_line = _think_text.split('\n')[0][:80] if _think_text else ""
-            if first_line:
-                try:
-                    callback("_thinking", first_line)
-                except Exception:
-                    pass
+        _ = (content, callback, delegate_depth)
 
-    def test_thinking_callback_fires_on_content(self):
-        """tool_progress_callback should receive _thinking event
-        when assistant message has content."""
+    def test_thinking_callback_not_fired_for_plain_content(self):
+        """Plain assistant content must not be relayed as thinking."""
         calls = []
         self._simulate_thinking_callback(
             "I'll research quantum computing first, then summarize.",
             lambda name, preview=None: calls.append((name, preview))
         )
-        assert len(calls) == 1
-        assert calls[0][0] == "_thinking"
-        assert "quantum computing" in calls[0][1]
+        assert len(calls) == 0
 
     def test_thinking_callback_skipped_when_no_content(self):
         """Should not fire when assistant has no content."""
@@ -270,15 +267,14 @@ class TestThinkingCallback:
         )
         assert len(calls) == 0
 
-    def test_thinking_callback_truncates_long_content(self):
-        """Should truncate long content to 80 chars."""
+    def test_thinking_callback_skips_long_plain_content(self):
+        """Long plain assistant content must remain normal output."""
         calls = []
         self._simulate_thinking_callback(
             "A" * 200 + "\nSecond line should be ignored",
             lambda name, preview=None: calls.append((name, preview))
         )
-        assert len(calls) == 1
-        assert len(calls[0][1]) == 80
+        assert len(calls) == 0
 
     def test_thinking_callback_skipped_for_main_agent(self):
         """Main agent (delegate_depth=0) should NOT fire thinking events.
@@ -291,27 +287,23 @@ class TestThinkingCallback:
         )
         assert len(calls) == 0
 
-    def test_thinking_callback_strips_reasoning_scratchpad(self):
-        """REASONING_SCRATCHPAD tags should be stripped before display."""
+    def test_thinking_callback_does_not_relabel_reasoning_scratchpad(self):
+        """XML-tagged assistant content is not relabeled as subagent thinking."""
         calls = []
         self._simulate_thinking_callback(
             "<REASONING_SCRATCHPAD>I need to analyze this carefully</REASONING_SCRATCHPAD>",
             lambda name, preview=None: calls.append((name, preview))
         )
-        assert len(calls) == 1
-        assert "<REASONING_SCRATCHPAD>" not in calls[0][1]
-        assert "analyze this carefully" in calls[0][1]
+        assert len(calls) == 0
 
-    def test_thinking_callback_strips_think_tags(self):
-        """<think> tags should be stripped before display."""
+    def test_thinking_callback_does_not_relabel_think_tags(self):
+        """<think> assistant content is not relabeled as subagent thinking."""
         calls = []
         self._simulate_thinking_callback(
             "<think>Let me think about this problem</think>",
             lambda name, preview=None: calls.append((name, preview))
         )
-        assert len(calls) == 1
-        assert "<think>" not in calls[0][1]
-        assert "think about this problem" in calls[0][1]
+        assert len(calls) == 0
 
     def test_thinking_callback_empty_after_strip(self):
         """Should not fire when content is only XML tags."""
@@ -386,4 +378,3 @@ class TestBatchFlush:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

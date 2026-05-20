@@ -877,29 +877,14 @@ def test_agent_profile(
     started = time.monotonic()
     from tools.delegate_tool import delegate_task
 
-    previous_stream_delta_callback = getattr(
-        parent_agent, "_delegate_child_stream_delta_callback", None
+    previous_child_transient_session = getattr(
+        parent_agent, "_delegate_child_transient_session", None
     )
-
-    def _relay_test_delta(delta: str | None) -> None:
-        if not delta:
-            return
-        progress_cb = getattr(parent_agent, "tool_progress_callback", None)
-        if not progress_cb:
-            return
-        try:
-            progress_cb(
-                "subagent.output_delta",
-                "test_agent_profile",
-                str(delta),
-                None,
-                goal=test_message,
-                status="running",
-            )
-        except Exception:
-            pass
-
-    setattr(parent_agent, "_delegate_child_stream_delta_callback", _relay_test_delta)
+    previous_child_progress_suppressed = getattr(
+        parent_agent, "_delegate_child_progress_suppressed", None
+    )
+    setattr(parent_agent, "_delegate_child_transient_session", True)
+    setattr(parent_agent, "_delegate_child_progress_suppressed", True)
     try:
         raw = delegate_task(
             goal=test_message,
@@ -910,16 +895,27 @@ def test_agent_profile(
             parent_agent=parent_agent,
         )
     finally:
-        if previous_stream_delta_callback is None:
+        if previous_child_transient_session is None:
             try:
-                delattr(parent_agent, "_delegate_child_stream_delta_callback")
+                delattr(parent_agent, "_delegate_child_transient_session")
             except AttributeError:
                 pass
         else:
             setattr(
                 parent_agent,
-                "_delegate_child_stream_delta_callback",
-                previous_stream_delta_callback,
+                "_delegate_child_transient_session",
+                previous_child_transient_session,
+            )
+        if previous_child_progress_suppressed is None:
+            try:
+                delattr(parent_agent, "_delegate_child_progress_suppressed")
+            except AttributeError:
+                pass
+        else:
+            setattr(
+                parent_agent,
+                "_delegate_child_progress_suppressed",
+                previous_child_progress_suppressed,
             )
     duration = round(time.monotonic() - started, 2)
     try:

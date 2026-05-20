@@ -1261,6 +1261,59 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         )
 
 
+def get_environment(config: Dict[str, Any], task_id: str = "default"):
+    """Create an execution environment from a terminal config dictionary."""
+    env_type = str(config.get("env_type") or "local")
+    image = (
+        config.get("docker_image")
+        or config.get("singularity_image")
+        or config.get("modal_image")
+        or config.get("daytona_image")
+        or ""
+    )
+    ssh_config = None
+    if env_type == "ssh":
+        ssh_config = {
+            "host": config.get("ssh_host", ""),
+            "user": config.get("ssh_user", ""),
+            "port": config.get("ssh_port", 22),
+            "key": config.get("ssh_key", ""),
+            "persistent": config.get("ssh_persistent", False),
+        }
+    container_config = None
+    if env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}:
+        container_config = {
+            "container_cpu": config.get("container_cpu", 1),
+            "container_memory": config.get("container_memory", 5120),
+            "container_disk": config.get("container_disk", 51200),
+            "container_persistent": config.get("container_persistent", True),
+            "modal_mode": config.get("modal_mode", "auto"),
+            "vercel_runtime": config.get("vercel_runtime", ""),
+            "docker_volumes": config.get("docker_volumes", []),
+            "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
+            "docker_forward_env": config.get("docker_forward_env", []),
+            "docker_env": config.get("docker_env", {}),
+            "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
+            "docker_extra_args": config.get("docker_extra_args", []),
+        }
+    local_config = None
+    if env_type == "local":
+        local_config = {
+            "persistent": config.get("local_persistent", False),
+        }
+    return _create_environment(
+        env_type=env_type,
+        image=image,
+        cwd=str(config.get("cwd") or os.getcwd()),
+        timeout=int(config.get("timeout") or 180),
+        ssh_config=ssh_config,
+        container_config=container_config,
+        local_config=local_config,
+        task_id=task_id,
+        host_cwd=config.get("host_cwd"),
+    )
+
+
 def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     """Clean up environments that have been inactive for longer than lifetime_seconds."""
     current_time = time.time()

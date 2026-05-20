@@ -69,6 +69,7 @@ _CONTROL_PLANE_METHODS = frozenset(
         "events.subscribe",
         "events.unsubscribe",
         "run.list",
+        "run.cancel",
         "run.reserve",
         "run.fail",
         "run.status",

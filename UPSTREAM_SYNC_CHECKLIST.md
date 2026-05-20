@@ -140,6 +140,7 @@ scripts/run_tests.sh tests/test_tui_gateway_server.py tests/tui_gateway/test_pro
 
 - `tui_gateway/ws.py`
 - `tui_gateway/server.py`
+- `tui_gateway/doxie_sidecar.py`
 - `tui_gateway/services/run_control.py`
 - `tests/test_tui_gateway_ws.py`
 - `tests/tui_gateway/test_ws_dispatch.py`
@@ -153,6 +154,8 @@ scripts/run_tests.sh tests/test_tui_gateway_server.py tests/tui_gateway/test_pro
 - 从 event loop 线程调用 `write()` 时不能死锁；从 worker 线程写 WS frame 必须有超时保护
 - `HERMES_INTERRUPT_TRACE` 诊断只在显式开启时输出，不能污染普通 stderr
 - WebSocket 断开时必须 detach run-control transport，避免订阅泄漏
+- `run.cancel` 必须属于 profile-context bypass 和 WS control-plane 方法，取消运行不能被目标 profile env lock 或后台队列阻塞
+- `tui_gateway/doxie_sidecar.py` 仍然只暴露 `/api/ws`，必须用 query `token` 做 constant-time 校验；启动时要注册 gateway methods 并启动 Doxie cron ticker，退出时停止 ticker
 
 推荐验证：
 
@@ -300,7 +303,7 @@ scripts/run_tests.sh tests/hermes_cli/test_runtime_provider_resolution.py tests/
 - `test_agent_profile` 在有 backend bridge 时可以省略 `draft_id`，由 Doxie 解析 active 或匹配 draft；无 bridge 时仍然要求本地 draft runtime 文件存在
 - `operation=install_skill` 和 `install_skill_to_agent_profile_draft` 仍然只安装已经存在于当前 Hermes 的真实 skill；必须先让 Doxie backend `prepare_runtime` 返回目标 draft home，再把完整 skill package 复制进 draft profile 的 Hermes home
 - 安装 skill 到 draft 后，draft `recommendedSkills` 必须加入该 skill，`missingCapabilities` 中对应“技能未安装 / skill missing”条目必须被清掉
-- 分身测试仍然用 parent agent 创建隔离 runtime，不应污染当前主 session 的配置和历史
+- 分身测试仍然用 parent agent 创建隔离 runtime，不应污染当前主 session 的配置和历史；测试子代理必须设置 transient session 并 suppress child progress，不能把草稿测试的 subagent delta / fake thinking 暴露到主会话 UI
 - `model_tools.handle_function_call(... parent_agent=...)` 和 `run_agent.py` 的调用链必须继续把当前 agent 传给 registry tool，否则 `test_agent_profile` 等需要 parent context 的工具会退化失败
 
 推荐验证：
@@ -386,23 +389,39 @@ scripts/run_tests.sh tests/tools/test_computer_use.py -q
 
 - `tui_gateway/methods/integrations.py`
 - `tui_gateway/services/doxie_cron_jobs.py`
+- `tui_gateway/services/doxie_cron_runtime.py`
 - `tui_gateway/services/platform_connections.py`
 - `tui_gateway/services/tool_events.py`
 - `tui_gateway/services/status_events.py`
+- `tui_gateway/doxie_sidecar.py`
+- `cron/jobs.py`
 - `cron/scheduler.py`
 - `tools/approval.py`
 - `tests/test_tui_gateway_server.py`
+- `tests/tui_gateway/test_doxie_cron_jobs.py`
+- `tests/cron/test_jobs.py`
 
 必须确认：
 
 - `cron.manage` 仍然支持 status/list/add/update/remove/run/runs/pause/resume，并能把 Doxie metadata 写入 cron job
+- Doxie sidecar runtime 必须启动 `doxie_cron_runtime` ticker；`cron.status.scheduler` 应反映真实 ticker 状态，而不是硬编码 healthy
+- `cron.manage add` 带 `wakeMode=now` 和 `cron.manage run` 必须调用 `trigger_job()` 并 `request_cron_tick()`，让任务立即执行而不是等下一个固定 tick
+- cron scheduler 每次运行必须把真实 `_runtime_session_id` 写入 job，`mark_job_run(... session_id=...)` 持久化为 `last_session_id`
+- `cron.manage runs` 返回的 run entry 必须优先用 `last_session_id` 作为 `sessionId/sessionKey`，同时保留 Doxie 目标会话为 `targetSessionId`
 - cron job 的 `doxie.approval_policy` 仍然能通过 ContextVar 覆盖该 job 的 approval mode，job 结束后必须 reset
 - `approval.pending.list` 仍然能让客户端重连后恢复等待中的 approval UI
 - `platforms.manage` 仍然是长任务 handler，并能通过 service 层管理平台连接，不要把平台管理逻辑重新塞回 server 主文件
 - `plugins.list`、`tools.list/show/configure`、`toolsets.list`、`agents.list`、`skills.manage/reload` 等 integration RPC 仍然可用
+- `tools.prepare` 对 `agent_browser/browserbase` 的 ready/installable/config-required 判断必须区分 local browser provider 与 Browserbase，并且 `requires_configuration` 不能压过可安装状态
 - tool progress event 仍然通过 `GatewayToolEventBridge` 输出，且 session 已 interrupt 时不能继续发 `tool.start` / `tool.complete`
 - Doxie structured tool result 仍然只对白名单工具透传结构化结果，例如 `design_agent_profile`、draft create/revision、`test_agent_profile`
 - retry / rate-limit / stream reconnect / fallback 等 provider status 文本仍然会被 `status_events.classify_status_update()` 归一化为客户端可稳定渲染的结构化状态
+
+推荐验证：
+
+```sh
+scripts/run_tests.sh tests/tui_gateway/test_doxie_cron_jobs.py tests/cron/test_jobs.py tests/test_tui_gateway_server.py -q
+```
 
 ### 10. Feishu 依赖与 websocket 代理兼容
 
@@ -471,14 +490,24 @@ scripts/run_tests.sh tests/test_hermes_state.py tests/test_hermes_state_schema.p
 - `agent/prompt_builder.py`
 - `agent/image_routing.py`
 - `tests/agent/test_image_routing.py`
+- `tests/agent/test_subagent_progress.py`
+- `tests/tools/test_delegate.py`
 - `tests/tools/test_document_parse_tool.py`
 
 必须确认：
 
 - ACP 工具定义、Hermes tool schemas 和 core toolset 对新增工具保持一致
 - terminal / code execution / file tools 仍然尊重 session cwd 和 workspace 语义
-- delegate tool 仍然与本地 toolset / session metadata 改动兼容
+- `tools.terminal_tool.get_environment(config, task_id=...)` 仍然是 prompt builder remote backend probe 的入口；不要退回到从 `tools.environments` 直接 import，避免导入路径不一致
+- delegate tool 仍然与本地 toolset / session metadata 改动兼容；子代理普通 assistant 内容和 quiet spinner 不能被重新标记成 `_thinking`
+- `delegate_task` 必须支持 parent opt-out 标志 `_delegate_child_progress_suppressed` 和 `_delegate_child_transient_session`，草稿测试等内部执行不能落主 session DB，也不能流式输出到主 UI
 - image routing 仍然能在模型描述符、provider 配置和附件类型之间做正确选择
+
+推荐验证：
+
+```sh
+scripts/run_tests.sh tests/agent/test_subagent_progress.py tests/tools/test_delegate.py tests/tools/test_doxie_agent_profile_tool.py -q
+```
 
 ### 13. Skills Hub inspect 与 skill 文件预览
 
@@ -530,6 +559,30 @@ scripts/run_tests.sh tests/tools/test_skill_package_lifecycle.py tests/tools/tes
 - workspace payload 仍然标记 `authority: "doxie"`（显式 workspace id）或 `authority: "hermes_runtime_cache"`（无显式 id fallback），并始终带 `runtime_cache: true`
 - Hermes gateway 只缓存 runtime/session artifact 所需 workspace 信息；Doxie 仍然是产品级 workspace 名称、默认 profile、last-used profile 等元数据权威
 
+### 15. Doxie-managed web search / page parse tools
+
+涉及文件：
+
+- `tools/doxie_web_tools.py`
+- `toolsets.py`
+- `hermes_cli/tools_config.py`
+- `tests/tools/test_doxie_web_tools.py`
+
+必须确认：
+
+- `doxie_web` toolset 仍然是可配置 toolset，包含且只包含 `jina_web_parser_tool` 和 `serper_search_tool`
+- `serper_search_tool` 必须通过 `DOXIE_SERPER_PROXY_URL` 调用 Doxie llm-proxy，使用 `DOXIE_LLM_RUNTIME_TOKEN` bearer auth；不能把 SERPER key 放进 Hermes runtime
+- `jina_web_parser_tool` 必须通过 `DOXIE_WEB_PARSE_PROXY_URL` 调用 Doxie-managed web reader，使用相同 runtime token
+- web proxy timeout 必须有边界：默认 45 秒，最小 5 秒，最大 60 秒，并允许 `DOXIE_WEB_PROXY_TIMEOUT` 作为默认覆盖
+- 代理返回非 2xx、非 JSON、超时或 URL error 时，工具仍然返回 Hermes tool error JSON，而不是抛出未捕获异常
+- `serper_search_tool` 应继续透传 query、location、gl、hl、page、num、time_range；`jina_web_parser_tool` 应继续透传 url、output_format、include_links、include_images、timeout
+
+推荐验证：
+
+```sh
+scripts/run_tests.sh tests/tools/test_doxie_web_tools.py -q
+```
+
 ## 推荐总体验证
 
 同步完成后，至少跑下面这些测试。范围较大时可以分批执行。
@@ -542,10 +595,12 @@ scripts/run_tests.sh \
   tests/tui_gateway/test_ws_dispatch.py \
   tests/tui_gateway/test_runtime_pool.py \
   tests/tui_gateway/test_profile_data_context.py \
+  tests/tui_gateway/test_doxie_cron_jobs.py \
   tests/tui_gateway/test_make_agent_provider.py \
   tests/tui_gateway/test_artifacts.py \
   tests/tui_gateway/test_workspace_context.py \
   tests/run_agent/test_model_descriptor_vision.py \
+  tests/agent/test_subagent_progress.py \
   tests/test_hermes_state.py \
   tests/test_hermes_state_schema.py \
   tests/test_hermes_state_messages.py \
@@ -553,8 +608,10 @@ scripts/run_tests.sh \
   tests/test_hermes_state_search.py \
   tests/tools/test_document_parse_tool.py \
   tests/tools/test_doxie_agent_profile_tool.py \
+  tests/tools/test_doxie_web_tools.py \
   tests/tools/test_browser_cdp_override.py \
   tests/tools/test_computer_use.py \
+  tests/tools/test_delegate.py \
   tests/hermes_cli/test_runtime_provider_resolution.py \
   tests/hermes_cli/test_model_switch_custom_providers.py \
   tests/hermes_cli/test_env_loader.py \
@@ -563,6 +620,7 @@ scripts/run_tests.sh \
   tests/gateway/test_runtime_auth_response.py \
   tests/gateway/test_feishu.py \
   tests/gateway/test_session_list_allowed_sources.py \
+  tests/cron/test_jobs.py \
   tests/tools/test_skill_package_lifecycle.py \
   tests/tools/test_skills_hub.py \
   -q
@@ -576,6 +634,8 @@ scripts/run_tests.sh \
 - 分身设计能 inspect context、保存 draft、测试 draft runtime
 - 已创建或已安装的 Hermes skill 能被安装进 Doxie draft profile，draft runtime home 下能看到完整 skill package，draft recommendedSkills 同步更新
 - Doxie profile / draft scope 下的技能列表、删除、导入 zip、复制到 target home 都作用在目标 Hermes home，而不是主进程默认 home
+- Doxie-managed SERPER 搜索和网页解析工具通过后端 proxy 正常工作，Hermes 侧不持有第三方搜索/解析密钥
+- Doxie sidecar 启动后 cron ticker 正常运行，`wakeMode=now` 和手动 run 能立即唤醒执行，运行记录能打开真实 cron runtime session
 - runtime token 失效后，客户端能看到登录过期提示，并在刷新后恢复
 - native CDP browser 多标签页操作不会串 tab
 - computer-use 在多窗口场景下能 list target、capture 指定窗口、按窗口坐标操作

@@ -61,7 +61,31 @@ def _tool_prepare_import_available(module_name: str) -> bool:
         return False
 
 
-def _tool_prepare_post_setup_installed(post_setup_key: str) -> bool:
+def _tool_prepare_agent_browser_cli_available() -> bool:
+    try:
+        from tools.browser_tool import (
+            _find_agent_browser,
+            _requires_real_termux_browser_install,
+        )
+
+        browser_cmd = _find_agent_browser()
+        return not _requires_real_termux_browser_install(browser_cmd)
+    except Exception:
+        return False
+
+
+def _tool_prepare_local_browser_available() -> bool:
+    try:
+        from tools.browser_tool import _chromium_installed, _using_lightpanda_engine
+
+        return _tool_prepare_agent_browser_cli_available() and (
+            bool(_chromium_installed()) or bool(_using_lightpanda_engine())
+        )
+    except Exception:
+        return False
+
+
+def _tool_prepare_post_setup_installed(post_setup_key: str, provider: dict | None = None) -> bool:
     import shutil
 
     try:
@@ -82,17 +106,10 @@ def _tool_prepare_post_setup_installed(post_setup_key: str) -> bool:
 
             return (PROJECT_ROOT / "node_modules" / "@askjo" / "camofox-browser").exists()
         if post_setup_key in {"agent_browser", "browserbase"}:
-            from hermes_cli.tools_config import PROJECT_ROOT
-
-            node_modules = PROJECT_ROOT / "node_modules" / "agent-browser"
-            if not node_modules.exists():
-                return False
-            try:
-                from tools.browser_tool import _chromium_installed
-
-                return bool(_chromium_installed())
-            except Exception:
-                return True
+            browser_provider = str((provider or {}).get("browser_provider") or "").strip()
+            if browser_provider == "local":
+                return _tool_prepare_local_browser_available()
+            return _tool_prepare_agent_browser_cli_available()
         if post_setup_key == "spotify":
             # Spotify setup is OAuth, not a package install. Treat it as an
             # interactive configuration flow unless Hermes exposes a browser
@@ -293,7 +310,7 @@ def _tool_prepare_status(name: str, config: dict | None = None) -> dict:
     for provider in _visible_providers(cat, cfg):
         post_setup = str(provider.get("post_setup") or "").strip()
         missing_env = _tool_prepare_missing_env(provider)
-        installed = _tool_prepare_post_setup_installed(post_setup) if post_setup else True
+        installed = _tool_prepare_post_setup_installed(post_setup, provider) if post_setup else True
         requires_configuration = bool(missing_env) or post_setup == "spotify"
         installable = bool(post_setup) and not installed and not missing_env and _tool_prepare_post_setup_installable(post_setup)
         ready = installed and not requires_configuration
@@ -325,7 +342,11 @@ def _tool_prepare_status(name: str, config: dict | None = None) -> dict:
 
     ready = any(row["ready"] for row in actionable)
     installable = any(row["installable"] for row in actionable)
-    requires_configuration = not ready and any(row["requires_configuration"] for row in actionable)
+    requires_configuration = (
+        not ready
+        and not installable
+        and any(row["requires_configuration"] for row in actionable)
+    )
     if ready:
         label = "已准备就绪"
     elif installable:

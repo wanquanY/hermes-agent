@@ -391,7 +391,7 @@ class TestDelegateTask(unittest.TestCase):
 
         self.assertIs(mock_child._print_fn, sink)
 
-    def test_child_uses_thinking_callback_when_progress_callback_available(self):
+    def test_child_does_not_relay_spinner_as_thinking(self):
         parent = _make_mock_parent(depth=0)
         parent.tool_progress_callback = MagicMock()
 
@@ -401,7 +401,7 @@ class TestDelegateTask(unittest.TestCase):
 
             _build_child_agent(
                 task_index=0,
-                goal="Avoid raw child spinners",
+                goal="Avoid fake child thinking",
                 context=None,
                 toolsets=None,
                 model=None,
@@ -410,8 +410,7 @@ class TestDelegateTask(unittest.TestCase):
                 task_count=1,
             )
 
-        self.assertTrue(callable(mock_child.thinking_callback))
-        mock_child.thinking_callback("deliberating...")
+        self.assertIsNone(MockAgent.call_args.kwargs.get("thinking_callback"))
         parent.tool_progress_callback.assert_not_called()
 
 

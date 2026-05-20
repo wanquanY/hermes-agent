@@ -4753,6 +4753,16 @@ def get_env_value(key: str) -> Optional[str]:
     return None if value and value.strip() in {"<secure-store>", "<已隐藏>"} else value
 
 
+def get_env_var(key: str) -> Optional[str]:
+    """Backward-compatible alias for platform setup helpers."""
+    return get_env_value(key)
+
+
+def set_env_var(key: str, value: str) -> None:
+    """Backward-compatible alias for platform setup helpers."""
+    save_env_value(key, value)
+
+
 # =============================================================================
 # Config display
 # =============================================================================

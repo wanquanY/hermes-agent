@@ -360,6 +360,12 @@ class TestMarkJobRun:
         assert updated["last_status"] == "error"
         assert updated["last_error"] == "timeout"
 
+    def test_records_last_runtime_session_id(self, tmp_cron_dir):
+        job = create_job(prompt="Report", schedule="every 1h")
+        mark_job_run(job["id"], success=True, session_id="cron_job_20260521_090000")
+        updated = get_job(job["id"])
+        assert updated["last_session_id"] == "cron_job_20260521_090000"
+
     def test_delivery_error_tracked_separately(self, tmp_cron_dir):
         """Agent succeeds but delivery fails — both tracked independently."""
         job = create_job(prompt="Report", schedule="every 1h")

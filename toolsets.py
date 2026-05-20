@@ -83,6 +83,12 @@ TOOLSETS = {
         "tools": ["web_search", "web_extract"],
         "includes": []  # No other toolsets included
     },
+
+    "doxie_web": {
+        "description": "Doxie-managed SERPER search and webpage parsing tools",
+        "tools": ["serper_search_tool", "jina_web_parser_tool"],
+        "includes": []
+    },
     
     "search": {
         "description": "Web search only (no content extraction/scraping)",

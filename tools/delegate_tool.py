@@ -702,6 +702,9 @@ def _build_child_progress_callback(
     Returns None if no display mechanism is available, in which case the
     child agent runs with no progress callback (identical to current behavior).
     """
+    if getattr(parent_agent, "_delegate_child_progress_suppressed", False) is True:
+        return None
+
     spinner = getattr(parent_agent, "_delegate_spinner", None)
     parent_cb = getattr(parent_agent, "tool_progress_callback", None)
 
@@ -999,18 +1002,10 @@ def _build_child_agent(
     # total iterations across parent + subagents can exceed the parent's
     # max_iterations.  The user controls the per-subagent cap in config.yaml.
 
+    # Quiet-mode thinking_callback is a local activity spinner, not provider
+    # reasoning. Routing it through child_progress_cb makes Doxie render
+    # ordinary subagent runtime status as a model "thinking" block.
     child_thinking_cb = None
-    if child_progress_cb:
-
-        def _child_thinking(text: str) -> None:
-            if not text:
-                return
-            try:
-                child_progress_cb("_thinking", text)
-            except Exception as e:
-                logger.debug("Child thinking callback relay failed: %s", e)
-
-        child_thinking_cb = _child_thinking
 
     # Resolve effective credentials: config override > parent inherit
     effective_model = model or parent_agent.model
@@ -1098,6 +1093,13 @@ def _build_child_agent(
         # openrouter/pareto-code), so we keep it inherited even when the
         # provider is overridden — it's a no-op on any other model.
 
+    child_session_db = (
+        None
+        if getattr(parent_agent, "_delegate_child_transient_session", False) is True
+        else getattr(parent_agent, "_session_db", None)
+    )
+    child_parent_session_id = None if child_session_db is None else getattr(parent_agent, "session_id", None)
+
     child = AIAgent(
         base_url=effective_base_url,
         api_key=effective_api_key,
@@ -1120,17 +1122,15 @@ def _build_child_agent(
         skip_memory=True,
         clarify_callback=None,
         thinking_callback=child_thinking_cb,
-        session_db=getattr(parent_agent, "_session_db", None),
-        parent_session_id=getattr(parent_agent, "session_id", None),
+        session_db=child_session_db,
+        parent_session_id=child_parent_session_id,
         providers_allowed=child_providers_allowed,
         providers_ignored=child_providers_ignored,
         providers_order=child_providers_order,
         provider_sort=child_provider_sort,
         openrouter_min_coding_score=child_openrouter_min_coding_score,
         tool_progress_callback=child_progress_cb,
-        stream_delta_callback=getattr(
-            parent_agent, "_delegate_child_stream_delta_callback", None
-        ),
+        stream_delta_callback=None,
         iteration_budget=None,  # fresh budget per subagent
     )
     child._print_fn = getattr(parent_agent, "_print_fn", None)

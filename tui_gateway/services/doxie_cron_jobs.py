@@ -28,6 +28,7 @@ def manage_cron(params: dict[str, Any]) -> dict[str, Any]:
 
 def cron_status() -> dict[str, Any]:
     from cron.jobs import JOBS_FILE, list_jobs
+    from tui_gateway.services.doxie_cron_runtime import cron_ticker_status
 
     jobs = list_jobs(include_disabled=True)
     return {
@@ -35,7 +36,7 @@ def cron_status() -> dict[str, Any]:
         "storePath": str(JOBS_FILE),
         "jobs": len(jobs),
         "nextWakeAtMs": _next_wake_at_ms(jobs),
-        "scheduler": {"source": "gateway-ticker", "healthy": True},
+        "scheduler": cron_ticker_status(),
     }
 
 
@@ -61,7 +62,8 @@ def list_cron_jobs(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def add_cron_job(params: dict[str, Any]) -> dict[str, Any]:
-    from cron.jobs import create_job, pause_job, update_job
+    from cron.jobs import create_job, pause_job, trigger_job, update_job
+    from tui_gateway.services.doxie_cron_runtime import request_cron_tick
 
     payload = _payload_from_params(params)
     job = create_job(
@@ -86,6 +88,9 @@ def add_cron_job(params: dict[str, Any]) -> dict[str, Any]:
     }) or job
     if not _bool(params.get("enabled"), default=True):
         updated = pause_job(job["id"], reason="disabled from Doxie") or updated
+    elif _optional_text(params.get("wakeMode") or params.get("wake_mode")) == "now":
+        updated = trigger_job(job["id"]) or updated
+        request_cron_tick()
     return _normalize_job(updated)
 
 
@@ -155,10 +160,12 @@ def remove_cron_job(params: dict[str, Any]) -> dict[str, Any]:
 
 def run_cron_job(params: dict[str, Any]) -> dict[str, Any]:
     from cron.jobs import trigger_job
+    from tui_gateway.services.doxie_cron_runtime import request_cron_tick
 
     job = trigger_job(_job_id(params))
     if not job:
         return {"ok": False, "ran": False}
+    request_cron_tick()
     return {"ok": True, "ran": True, "job": _normalize_job(job)}
 
 
@@ -218,6 +225,8 @@ def _normalize_job(job: dict[str, Any]) -> dict[str, Any]:
     doxie = job.get("doxie") if isinstance(job.get("doxie"), dict) else {}
     job_id = _text(job.get("id") or job.get("job_id"))
     last_status = _optional_text(job.get("last_status"))
+    last_session_id = _optional_text(job.get("last_session_id"))
+    target_session_id = _optional_text(doxie.get("session_id"))
     payload_kind = "sessionMessage" if doxie.get("session_target") == "main" else "agentTask"
     return {
         "id": job_id,
@@ -233,8 +242,9 @@ def _normalize_job(job: dict[str, Any]) -> dict[str, Any]:
         "updatedAtMs": _iso_to_ms(job.get("updated_at") or job.get("created_at")) or 0,
         "workspaceId": _optional_text(doxie.get("workspace_id")),
         "workdir": _optional_text(job.get("workdir")),
-        "sessionId": _optional_text(doxie.get("session_id")),
-        "sessionKey": _optional_text(doxie.get("session_id")),
+        "sessionId": target_session_id,
+        "sessionKey": target_session_id,
+        "lastRunSessionId": last_session_id,
         "sessionTarget": _optional_text(doxie.get("session_target")) or "isolated",
         "wakeMode": _optional_text(doxie.get("wake_mode")) or "next-heartbeat",
         "schedule": _normalize_schedule(job.get("schedule"), job.get("schedule_display")),
@@ -255,6 +265,7 @@ def _normalize_job(job: dict[str, Any]) -> dict[str, Any]:
             "lastRunStatus": last_status,
             "lastStatus": last_status,
             "lastError": _optional_text(job.get("last_error")),
+            "lastRunSessionId": last_session_id,
         },
         "raw": job,
     }
@@ -299,6 +310,7 @@ def _run_entries_for_job(job: dict[str, Any]) -> list[dict[str, Any]]:
     from cron.jobs import OUTPUT_DIR
 
     job_id = _text(job.get("id") or job.get("job_id"))
+    run_session_id = _cron_run_session_id(job)
     entries: list[dict[str, Any]] = []
     output_dir = Path(OUTPUT_DIR) / job_id
     if output_dir.exists():
@@ -313,8 +325,9 @@ def _run_entries_for_job(job: dict[str, Any]) -> list[dict[str, Any]]:
                 "summary": preview,
                 "outputPath": str(file_path),
                 "outputPreview": preview,
-                "sessionId": _doxie_session_id(job),
-                "sessionKey": _doxie_session_id(job),
+                "sessionId": run_session_id,
+                "sessionKey": run_session_id,
+                "targetSessionId": _doxie_session_id(job),
                 "runAtMs": ts_ms,
                 "nextRunAtMs": _iso_to_ms(job.get("next_run_at")),
                 "model": _optional_text(job.get("model")),
@@ -330,8 +343,9 @@ def _run_entries_for_job(job: dict[str, Any]) -> list[dict[str, Any]]:
             "status": _optional_text(job.get("last_status")) or "unknown",
             "error": _optional_text(job.get("last_error")),
             "summary": _optional_text(job.get("last_error")) or "",
-            "sessionId": _doxie_session_id(job),
-            "sessionKey": _doxie_session_id(job),
+            "sessionId": run_session_id,
+            "sessionKey": run_session_id,
+            "targetSessionId": _doxie_session_id(job),
             "runAtMs": last_run_ms,
             "nextRunAtMs": _iso_to_ms(job.get("next_run_at")),
             "model": _optional_text(job.get("model")),
@@ -430,6 +444,10 @@ def _payload_text(job: dict[str, Any]) -> str:
 def _doxie_session_id(job: dict[str, Any]) -> str | None:
     doxie = job.get("doxie") if isinstance(job.get("doxie"), dict) else {}
     return _optional_text(doxie.get("session_id"))
+
+
+def _cron_run_session_id(job: dict[str, Any]) -> str | None:
+    return _optional_text(job.get("last_session_id")) or _doxie_session_id(job)
 
 
 def _job_id(params: dict[str, Any]) -> str:

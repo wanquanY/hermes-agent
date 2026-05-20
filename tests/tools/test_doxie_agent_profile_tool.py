@@ -203,7 +203,8 @@ def test_test_agent_profile_runs_draft_through_delegation(monkeypatch, tmp_path)
 
     def fake_delegate_task(**kwargs):
         calls.update(kwargs)
-        kwargs["parent_agent"]._delegate_child_stream_delta_callback("实时")
+        assert kwargs["parent_agent"]._delegate_child_transient_session is True
+        assert kwargs["parent_agent"]._delegate_child_progress_suppressed is True
         return json.dumps({"results": [{"status": "success", "summary": "这是 PRD 草稿。", "api_calls": 1}]})
 
     monkeypatch.setattr("tools.delegate_tool.delegate_task", fake_delegate_task)
@@ -225,5 +226,38 @@ def test_test_agent_profile_runs_draft_through_delegation(monkeypatch, tmp_path)
     assert result["draftId"] == "draft-1"
     assert result["status"] == "completed"
     assert result["response"] == "这是 PRD 草稿。"
-    assert progress_events[0][0][:3] == ("subagent.output_delta", "test_agent_profile", "实时")
-    assert not hasattr(parent_agent, "_delegate_child_stream_delta_callback")
+    assert progress_events == []
+    assert not hasattr(parent_agent, "_delegate_child_transient_session")
+    assert not hasattr(parent_agent, "_delegate_child_progress_suppressed")
+
+
+def test_test_agent_profile_does_not_expose_subagent_progress(monkeypatch, tmp_path):
+    draft_home = tmp_path / "drafts" / "draft-1"
+    draft_home.mkdir(parents=True)
+    (draft_home / "SOUL.md").write_text("# 市场分身\n你负责输出推广方案。", encoding="utf-8")
+    (draft_home / "config.yaml").write_text("platform_toolsets:\n  cli: []\n", encoding="utf-8")
+    monkeypatch.setattr("tools.doxie_agent_profile_tool._draft_home", lambda _draft_id: draft_home)
+
+    progress_events = []
+
+    class ParentAgent:
+        def tool_progress_callback(self, *args, **kwargs):
+            progress_events.append((args, kwargs))
+
+    def fake_delegate_task(**kwargs):
+        assert kwargs["parent_agent"]._delegate_child_transient_session is True
+        assert kwargs["parent_agent"]._delegate_child_progress_suppressed is True
+        return json.dumps({"results": [{"status": "success", "summary": "完成。"}]})
+
+    monkeypatch.setattr("tools.delegate_tool.delegate_task", fake_delegate_task)
+
+    result = json.loads(
+        run_agent_profile_test(
+            draft_id="draft-1",
+            message="给我推广方案",
+            parent_agent=ParentAgent(),
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert progress_events == []

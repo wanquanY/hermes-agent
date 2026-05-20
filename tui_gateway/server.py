@@ -128,6 +128,7 @@ _PROFILE_CONTEXT_BYPASS_METHODS = frozenset({
     "approval.policy.set",
     "approval.respond",
     "clarify.respond",
+    "run.cancel",
     "secret.respond",
     "session.interrupt",
     "sudo.respond",

@@ -766,7 +766,8 @@ def remove_job(job_id: str) -> bool:
 
 
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
-                 delivery_error: Optional[str] = None):
+                 delivery_error: Optional[str] = None,
+                 session_id: Optional[str] = None):
     """
     Mark a job as having been run.
     
@@ -784,6 +785,8 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 job["last_run_at"] = now
                 job["last_status"] = "ok" if success else "error"
                 job["last_error"] = error if not success else None
+                if session_id:
+                    job["last_session_id"] = session_id
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error
                 
