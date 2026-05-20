@@ -222,6 +222,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     handoff_state TEXT,
     handoff_platform TEXT,
     handoff_error TEXT,
+    transient INTEGER DEFAULT 0,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -270,6 +271,7 @@ CREATE TABLE IF NOT EXISTS run_events (
     run_id TEXT,
     turn_id TEXT,
     runtime_session_id TEXT,
+    runtime_scope_key TEXT,
     event_type TEXT NOT NULL,
     seq INTEGER NOT NULL,
     timestamp REAL NOT NULL,
@@ -303,6 +305,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestam
 CREATE INDEX IF NOT EXISTS idx_runs_session_status ON runs(session_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_scope_status ON runs(runtime_scope_key, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_run_events_session_seq ON run_events(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_events_scope_seq ON run_events(runtime_scope_key, session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_run_event_archives_session ON run_event_archives(session_id, archived_at DESC);
 """
@@ -604,6 +607,42 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
                             "reconcile %s.%s: %s", table_name, col_name, exc,
                         )
 
+    def _backfill_run_event_scope_keys(self, cursor: sqlite3.Cursor) -> None:
+        """Populate runtime_scope_key for event rows created before the column existed."""
+        try:
+            rows = cursor.execute(
+                """
+                SELECT id, session_id, payload_json, event_json
+                FROM run_events
+                WHERE runtime_scope_key IS NULL OR runtime_scope_key = ''
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+        for row in rows:
+            event = {}
+            payload = {}
+            try:
+                event = json.loads(row["event_json"] or "{}")
+            except Exception:
+                event = {}
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except Exception:
+                payload = {}
+            scope = str(
+                (event if isinstance(event, dict) else {}).get("runtime_scope_key")
+                or (payload if isinstance(payload, dict) else {}).get("runtime_scope_key")
+                or row["session_id"]
+                or ""
+            ).strip()
+            if not scope:
+                continue
+            cursor.execute(
+                "UPDATE run_events SET runtime_scope_key = ? WHERE id = ?",
+                (scope, row["id"]),
+            )
+
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -631,6 +670,7 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
         # Index DDL must run after column reconciliation. Existing tables
         # created by older Hermes versions may be missing newly declared
         # columns even when CREATE TABLE IF NOT EXISTS succeeds.
+        self._backfill_run_event_scope_keys(cursor)
         cursor.executescript(SCHEMA_INDEX_SQL)
         self._ensure_active_run_unique_index(cursor)
 
@@ -808,13 +848,14 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
         system_prompt: str = None,
         user_id: str = None,
         parent_session_id: str = None,
+        transient: bool = False,
     ) -> None:
         """Shared INSERT OR IGNORE for session rows."""
         def _do(conn):
             conn.execute(
                 """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
-                   system_prompt, parent_session_id, started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   system_prompt, parent_session_id, started_at, transient)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     source,
@@ -824,6 +865,7 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
                     system_prompt,
                     parent_session_id,
                     time.time(),
+                    1 if transient else 0,
                 ),
             )
         self._execute_write(_do)
@@ -1339,6 +1381,7 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
                 "            AND p.end_reason = 'branched'"
                 "            AND s.started_at >= p.ended_at))"
             )
+        where_clauses.append("COALESCE(s.transient, 0) = 0")
 
         if source:
             where_clauses.append("s.source = ?")

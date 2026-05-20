@@ -2829,6 +2829,68 @@ def uninstall_skill(skill_name: str) -> Tuple[bool, str]:
     return True, f"Uninstalled '{skill_name}' from {entry['install_path']}"
 
 
+def delete_skill_package(skill_name: str) -> Tuple[bool, str]:
+    """Delete a local or hub-installed skill package from the local skills dir."""
+    ensure_hub_dirs()
+    safe_name = _validate_skill_name(skill_name)
+    lock = HubLockFile()
+    entry = lock.get_installed(safe_name)
+    source = "local"
+    trust_level = "local"
+
+    if entry:
+        install_path = str(entry.get("install_path") or "").strip()
+        source = str(entry.get("source") or "hub")
+        trust_level = str(entry.get("trust_level") or "community")
+        package_dir = SKILLS_DIR / install_path
+    else:
+        from agent.skill_utils import iter_skill_index_files
+        from tools.skills_sync import _read_manifest
+        from tools.skills_tool import _parse_frontmatter
+
+        if safe_name in set(_read_manifest()):
+            return False, f"'{safe_name}' is a builtin skill and cannot be deleted"
+
+        matches: List[Path] = []
+        if SKILLS_DIR.exists():
+            for skill_md in iter_skill_index_files(SKILLS_DIR, "SKILL.md"):
+                skill_dir = skill_md.parent
+                try:
+                    content = skill_md.read_text(encoding="utf-8")[:4000]
+                    frontmatter, _body = _parse_frontmatter(content)
+                    name = str(frontmatter.get("name") or skill_dir.name).strip()
+                except Exception:
+                    name = skill_dir.name
+                if name == safe_name:
+                    matches.append(skill_dir)
+
+        if not matches:
+            return False, f"'{safe_name}' is not a local skill package"
+        if len(matches) > 1:
+            return False, f"ambiguous local skill package '{safe_name}'"
+        package_dir = matches[0]
+
+    try:
+        package_resolved = package_dir.resolve()
+        skills_resolved = SKILLS_DIR.resolve()
+    except OSError as exc:
+        return False, f"failed to resolve skill package path: {exc}"
+
+    if package_resolved == skills_resolved or not package_resolved.is_relative_to(skills_resolved):
+        return False, f"refusing to delete skill package outside local skills dir: {package_dir}"
+    if package_resolved == HUB_DIR.resolve() or HUB_DIR.resolve() in package_resolved.parents:
+        return False, "refusing to delete Skills Hub internal data"
+    if not package_resolved.exists():
+        lock.record_uninstall(safe_name)
+        return True, f"Deleted missing skill package record '{safe_name}'"
+
+    shutil.rmtree(package_resolved)
+    if entry:
+        lock.record_uninstall(safe_name)
+    append_audit_log("DELETE", safe_name, source, trust_level, "n/a", "user_request")
+    return True, f"Deleted local skill package '{safe_name}'"
+
+
 def bundle_content_hash(bundle: SkillBundle) -> str:
     """Compute a deterministic hash for an in-memory skill bundle."""
     h = hashlib.sha256()
@@ -2912,6 +2974,7 @@ def check_for_skill_updates(
 HERMES_INDEX_URL = "https://hermes-agent.nousresearch.com/docs/api/skills-index.json"
 HERMES_INDEX_CACHE_FILE = INDEX_CACHE_DIR / "hermes-index.json"
 HERMES_INDEX_TTL = 6 * 3600  # 6 hours
+HERMES_INDEX_FETCH_TIMEOUT = 2
 
 
 def _load_hermes_index() -> Optional[dict]:
@@ -2932,7 +2995,7 @@ def _load_hermes_index() -> Optional[dict]:
 
     # Fetch from docs site
     try:
-        resp = httpx.get(HERMES_INDEX_URL, timeout=15, follow_redirects=True)
+        resp = httpx.get(HERMES_INDEX_URL, timeout=HERMES_INDEX_FETCH_TIMEOUT, follow_redirects=True)
         if resp.status_code != 200:
             logger.debug("Hermes index fetch returned %d", resp.status_code)
             return _load_stale_index_cache()

@@ -22,6 +22,7 @@ from tools.skills_hub import (
     bundle_content_hash,
     check_for_skill_updates,
     create_source_router,
+    delete_skill_package,
     unified_search,
     append_audit_log,
     _skill_meta_to_dict,
@@ -1471,6 +1472,52 @@ class TestQuarantineBundleBinaryAssets:
 
         assert (q_path / "SKILL.md").read_text(encoding="utf-8").startswith("---")
         assert (q_path / "assets" / "neutts-cli" / "samples" / "jo.wav").read_bytes() == b"RIFF\x00\x01fakewav"
+
+
+class TestDeleteSkillPackage:
+    def test_deletes_local_skill_package(self, tmp_path):
+        import tools.skills_hub as hub
+
+        skills_dir = tmp_path / "skills"
+        hub_dir = skills_dir / ".hub"
+        skill_dir = skills_dir / "creative" / "local-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: local-skill\ndescription: Local\n---\n\nBody\n",
+            encoding="utf-8",
+        )
+
+        with patch.object(hub, "SKILLS_DIR", skills_dir), \
+             patch.object(hub, "HUB_DIR", hub_dir), \
+             patch.object(hub, "LOCK_FILE", hub_dir / "lock.json"), \
+             patch.object(hub, "QUARANTINE_DIR", hub_dir / "quarantine"), \
+             patch.object(hub, "AUDIT_LOG", hub_dir / "audit.log"), \
+             patch.object(hub, "TAPS_FILE", hub_dir / "taps.json"), \
+             patch.object(hub, "INDEX_CACHE_DIR", hub_dir / "index-cache"), \
+             patch("tools.skills_sync._read_manifest", return_value=set()):
+            ok, message = delete_skill_package("local-skill")
+
+        assert ok is True
+        assert "Deleted local skill package" in message
+        assert not skill_dir.exists()
+
+    def test_refuses_builtin_skill_package(self, tmp_path):
+        import tools.skills_hub as hub
+
+        skills_dir = tmp_path / "skills"
+        hub_dir = skills_dir / ".hub"
+        with patch.object(hub, "SKILLS_DIR", skills_dir), \
+             patch.object(hub, "HUB_DIR", hub_dir), \
+             patch.object(hub, "LOCK_FILE", hub_dir / "lock.json"), \
+             patch.object(hub, "QUARANTINE_DIR", hub_dir / "quarantine"), \
+             patch.object(hub, "AUDIT_LOG", hub_dir / "audit.log"), \
+             patch.object(hub, "TAPS_FILE", hub_dir / "taps.json"), \
+             patch.object(hub, "INDEX_CACHE_DIR", hub_dir / "index-cache"), \
+             patch("tools.skills_sync._read_manifest", return_value={"builtin-skill"}):
+            ok, message = delete_skill_package("builtin-skill")
+
+        assert ok is False
+        assert "builtin skill" in message
 
     def test_quarantine_bundle_rejects_traversal_file_paths(self, tmp_path):
         import tools.skills_hub as hub

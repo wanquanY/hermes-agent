@@ -679,7 +679,7 @@ def browse_skills(page: int = 1, page_size: int = 20, source: str = "all") -> di
 
     Returns ``{"items": [...], "page": int, "total_pages": int, "total": int}``.
     """
-    from tools.skills_hub import GitHubAuth, create_source_router
+    from tools.skills_hub import GitHubAuth, create_source_router, parallel_search_sources
 
     page_size = max(1, min(page_size, 100))
     _TRUST_RANK = {"builtin": 3, "trusted": 2, "community": 1}
@@ -687,16 +687,13 @@ def browse_skills(page: int = 1, page_size: int = 20, source: str = "all") -> di
                          "claude-marketplace": 50, "lobehub": 50}
     auth = GitHubAuth()
     sources = create_source_router(auth)
-    all_results: list = []
-    for src in sources:
-        sid = src.source_id()
-        if source != "all" and sid != source and sid != "official":
-            continue
-        try:
-            limit = _PER_SOURCE_LIMIT.get(sid, 50)
-            all_results.extend(src.search("", limit=limit))
-        except Exception:
-            continue
+    all_results, _source_counts, _timed_out_ids = parallel_search_sources(
+        sources,
+        query="",
+        per_source_limits=_PER_SOURCE_LIMIT,
+        source_filter=source,
+        overall_timeout=6,
+    )
     if not all_results:
         return {"items": [], "page": 1, "total_pages": 1, "total": 0}
     seen: dict = {}

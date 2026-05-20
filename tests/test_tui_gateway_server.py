@@ -303,6 +303,40 @@ def test_session_create_control_plane_only_does_not_build_agent(monkeypatch, tmp
         db.close()
 
 
+def test_transient_control_plane_session_is_not_listed(monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+
+    try:
+        create_resp = server.dispatch(
+            {
+                "id": "create-transient-control-plane",
+                "method": "session.create",
+                "params": {
+                    "cwd": str(workspace),
+                    "control_plane_only": True,
+                    "transient": True,
+                },
+            }
+        )
+        assert "error" not in create_resp
+        stored_session_id = create_resp["result"]["stored_session_id"]
+        assert db.get_session(stored_session_id)["transient"] == 1
+
+        list_resp = server.dispatch(
+            {"id": "list-sessions", "method": "session.list", "params": {}}
+        )
+
+        assert "error" not in list_resp
+        assert list_resp["result"]["sessions"] == []
+    finally:
+        db.close()
+
+
 def test_session_create_rejects_missing_workspace_cwd(tmp_path):
     missing = tmp_path / "missing"
 
@@ -1194,6 +1228,35 @@ def test_run_reserve_creates_control_plane_owned_run_and_rejects_busy_session(mo
         assert conflict["error"]["code"] == 4009
         assert conflict["error"]["data"]["active_run_id"] == "run-reserve"
         assert conflict["error"]["data"]["active_turn_id"] == "turn-reserve"
+    finally:
+        db.close()
+
+
+def test_run_reserve_transient_does_not_persist_active_run(monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    db.create_session("transient-stored", source="tui", transient=True)
+
+    try:
+        resp = server.dispatch(
+            {
+                "id": "reserve-transient",
+                "method": "run.reserve",
+                "params": {
+                    "stored_session_id": "transient-stored",
+                    "client_run_id": "run-transient",
+                    "turn_id": "turn-transient",
+                    "runtime_scope_key": "draft:draft-1",
+                    "transient": True,
+                },
+            }
+        )
+
+        assert "error" not in resp
+        assert resp["result"]["transient"] is True
+        assert db.get_session_run_status("transient-stored")["running"] is False
     finally:
         db.close()
 

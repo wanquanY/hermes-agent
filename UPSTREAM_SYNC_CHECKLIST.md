@@ -122,8 +122,10 @@ scripts/run_tests.sh tests/test_tui_gateway_server.py tests/tui_gateway/test_pro
 - `runtime_scope_key` 仍然是 Doxie profile / draft runtime 的隔离键；同一个 stored session 在不同 profile scope 下不能错误复用旧 runtime
 - `acquire_runtime_lease()` 仍然只复用可执行 runtime；scope 不匹配时必须通过 `session.resume(... hydrate=none, _runtime_attach=True)` 重建轻量 runtime
 - `run_events` 仍然是 append-only、单调 `seq`，`events.subscribe` 必须支持 `after_seq` replay 和 `active_only`
+- `runtime_scope_key` 必须同时落在 `runs` 和 `run_events` 上；`events.subscribe(runtime_scope_key=...)`、`session.messages(include_run_events=true, runtime_scope_key=...)` 和 `SessionDB.list_run_events(..., runtime_scope_key=...)` 都必须按 scope 过滤 replay
 - `events.unsubscribe` 必须清理 transport subscription；WebSocket / stdio 断开后不能继续向死 transport 写事件
 - `run.cancel` 在没有 live runtime 但有持久 run state 时，仍然能发布 cancelled terminal event，而不是让 UI 永远显示 running
+- `transient` / `temporary` / `ephemeral` run 和 control-plane-only session 不能持久化 active run，也不能出现在普通 `session.list` 里
 - gateway 启动或恢复时，`fail_orphaned_active_runs` 仍然会把死进程 owner 的 active runs 标记为 failed，同时保留当前 pid 的 live runs
 
 推荐验证：
@@ -214,6 +216,8 @@ scripts/run_tests.sh tests/tui_gateway/test_artifacts.py tests/tui_gateway/test_
 - 附件仍然会被规范化为 `attachments` metadata；图片附件仍然按当前模型能力走 native image input 或 vision pre-analysis
 - 中断、recall turn、session busy、running runtime 复用等场景，不能把已经撤回或被打断的 turn 错误追加成完整历史
 - agent 初始化失败、runtime agent 缺失、runtime auth rebind 失败、model switch 失败、session busy 等错误路径，必须发布 failed terminal run event，不能留下挂起 run
+- transient session / run 的失败路径不能写入持久 run event，避免临时 control-plane runtime 污染用户历史
+- `approval_policy` / `permission_mode` 仍然只接受 `default` 和 `full_access`；`full_access` 必须通过 `tools.approval.enable_session_yolo(stored_session_id)` 对当前 session 生效，`default` 必须关闭该 override
 - goal follow-up 自触发回合也必须分配新的 run / turn id 和 runtime scope，不能复用上一轮 active run
 
 推荐验证：
@@ -294,7 +298,10 @@ scripts/run_tests.sh tests/hermes_cli/test_runtime_provider_resolution.py tests/
 - 后端桥接环境 `DOXIE_BACKEND_BRIDGE_URL` / `DOXIE_BACKEND_BRIDGE_TOKEN` 可用时，draft create / update / revision / resolve / list / prepare runtime 仍然走 Doxie backend bridge
 - `HERMES_DOXIE_PRODUCT_CONTEXT` 仍然会注入 design mode、source session / turn / message、workspace、active draft、target profile 等上下文
 - `test_agent_profile` 在有 backend bridge 时可以省略 `draft_id`，由 Doxie 解析 active 或匹配 draft；无 bridge 时仍然要求本地 draft runtime 文件存在
+- `operation=install_skill` 和 `install_skill_to_agent_profile_draft` 仍然只安装已经存在于当前 Hermes 的真实 skill；必须先让 Doxie backend `prepare_runtime` 返回目标 draft home，再把完整 skill package 复制进 draft profile 的 Hermes home
+- 安装 skill 到 draft 后，draft `recommendedSkills` 必须加入该 skill，`missingCapabilities` 中对应“技能未安装 / skill missing”条目必须被清掉
 - 分身测试仍然用 parent agent 创建隔离 runtime，不应污染当前主 session 的配置和历史
+- `model_tools.handle_function_call(... parent_agent=...)` 和 `run_agent.py` 的调用链必须继续把当前 agent 传给 registry tool，否则 `test_agent_profile` 等需要 parent context 的工具会退化失败
 
 推荐验证：
 
@@ -436,11 +443,14 @@ scripts/run_tests.sh tests/tools/test_computer_use.py -q
 - `hermes_state.py` 仍然只是组合入口；message、platform、run、search 逻辑分别留在 mixin 模块中，避免重新膨胀成单文件巨物
 - session DB messages 表仍然包含 `metadata_json` 并能迁移旧库
 - `runs` / `run_events` 表和索引仍然存在，旧库缺少 `runtime_scope_key` 时必须能迁移并回填
+- 旧 `run_events` 表迁移时必须从 `event_json.runtime_scope_key`、`payload_json.runtime_scope_key` 或 session id 回填 `runtime_scope_key`，并创建 `idx_run_events_scope_seq`
 - structured / multimodal message content 仍然通过 sentinel JSON 编码落 SQLite，读取时恢复 list/dict，不能重新触发 sqlite bind list/dict 错误
 - FTS5 搜索、CJK LIKE fallback、session list allowed sources 仍然走拆分后的 search/platform mixin，不能在拆分后丢行为
 - 删除 session 时，除了 `{session_id}.json` / `{session_id}.jsonl`，也要清理 Doxie/TUI `session_{session_id}.json` / `session_{session_id}.jsonl`
 - `session.list` 仍然只返回允许来源的 sessions，不能把内部或不该展示的来源混进 Doxie UI
+- `session.list` 必须排除 `sessions.transient=1` 和无内容占位行，但不能因为测试 stub 或旧 DB 缺少 `message_count/title/preview` 字段就误删真实历史
 - `session.messages` 仍然提供分页 transcript，支持 cursor / limit，并且只读 profile 数据时不进入 profile env lock
+- `session.messages(include_run_events=true)` 必须返回 `runEvents`，并支持按 `runtime_scope_key` 过滤，方便客户端一次恢复 transcript 和同 scope run 事件
 - `session.history`、`session.recall_turn`、`session.undo` 等 Doxie 依赖的方法仍然按 turn metadata 和 stored session id 正确工作
 - 如果同一个 stored session id 同时有 idle runtime 和 running runtime，方法解析应优先使用 running runtime
 
@@ -475,6 +485,13 @@ scripts/run_tests.sh tests/test_hermes_state.py tests/test_hermes_state_schema.p
 涉及文件：
 
 - `hermes_cli/skills_hub.py`
+- `tools/skill_package_lifecycle.py`
+- `tools/skills_hub.py`
+- `tools/skills_tool.py`
+- `tui_gateway/methods/integrations.py`
+- `tests/tools/test_skill_package_lifecycle.py`
+- `tests/tools/test_skills_hub.py`
+- `tests/tui_gateway/test_protocol.py`
 - `tests/test_tui_gateway_server.py`
 
 必须确认：
@@ -483,6 +500,35 @@ scripts/run_tests.sh tests/test_hermes_state.py tests/test_hermes_state_schema.p
 - 文件 payload 必须包含 `path`、`content`、`truncated`、`is_binary`、`size`
 - 二进制文件不能按文本硬解；应返回二进制占位说明，并标记 `is_binary=True`
 - 单文件内容仍然有字符上限，默认 `max_chars=96000`，避免 inspect skill 一次性把大文件塞爆上下文
+- `browse_skills()` 和 `skills.manage action=search` 仍然使用 `parallel_search_sources(... overall_timeout=6)`，不能退回串行或无限等待 marketplace
+- `skills.list` 必须只列本地已安装技能，不依赖 marketplace router；返回项需包含 `install_path`、`modified_at`、`managed`、`can_delete`、`can_update`、`can_toggle`
+- gateway 在 Doxie profile context 下执行 `skills.list/manage/reload` 前，必须把已 import 的 `tools.skills_tool`、`tools.skill_manager_tool`、`tools.skills_sync`、`tools.skills_hub` 模块级 `HERMES_HOME/SKILLS_DIR/.hub` 路径同步到当前 profile home
+- `skills.manage action=copy_installed|copy_local` 必须通过 `copy_installed_skill_to_home()` 把完整 skill package 复制到目标 Hermes home，并保留 scripts/templates/assets 等辅助文件
+- `skills.manage action=import_archive` 必须只接受单 skill `.zip` 包；拒绝多 `SKILL.md`、路径穿越和 symlink；安装前仍然运行本地 skill security scan
+- `skills.manage action=delete` / `delete_skill_package()` 只能删除本地 skills root 下的 local 或 hub skill；必须拒绝 builtin skill、`.hub` 内部目录和 skills root 之外路径
+- `copy_installed_skill_to_home()` / `import_skill_archive_to_home()` 完成后必须清理 skill prompt cache 并 reload skills
+
+推荐验证：
+
+```sh
+scripts/run_tests.sh tests/tools/test_skill_package_lifecycle.py tests/tools/test_skills_hub.py tests/tui_gateway/test_protocol.py -q
+```
+
+### 14. Feishu 身份映射与 workspace authority 元数据
+
+涉及文件：
+
+- `gateway/platforms/feishu.py`
+- `tests/gateway/test_feishu.py`
+- `tui_gateway/services/workspaces/service.py`
+- `tests/tui_gateway/test_workspace_context.py`
+
+必须确认：
+
+- Feishu `SessionSource.user_id` 仍然优先使用 `open_id`，因为 QR onboarding allowlist 存的是 open_id；`user_id_alt` 才携带 `union_id` 或 tenant `user_id`
+- bot name lookup 仍然使用 `open_id`，不能切到 union_id / tenant user_id 导致官方接口查名失败
+- workspace payload 仍然标记 `authority: "doxie"`（显式 workspace id）或 `authority: "hermes_runtime_cache"`（无显式 id fallback），并始终带 `runtime_cache: true`
+- Hermes gateway 只缓存 runtime/session artifact 所需 workspace 信息；Doxie 仍然是产品级 workspace 名称、默认 profile、last-used profile 等元数据权威
 
 ## 推荐总体验证
 
@@ -515,7 +561,10 @@ scripts/run_tests.sh \
   tests/hermes_cli/test_tools_config.py \
   tests/test_model_tools.py \
   tests/gateway/test_runtime_auth_response.py \
+  tests/gateway/test_feishu.py \
   tests/gateway/test_session_list_allowed_sources.py \
+  tests/tools/test_skill_package_lifecycle.py \
+  tests/tools/test_skills_hub.py \
   -q
 ```
 
@@ -525,6 +574,8 @@ scripts/run_tests.sh \
 - Doxie 桌面端能通过 `run.submit` 发起回合，通过 `events.subscribe(after_seq=...)` 重连 replay，并能 cancel running run
 - agent 写入文件后，成果视图能收到并恢复 artifact
 - 分身设计能 inspect context、保存 draft、测试 draft runtime
+- 已创建或已安装的 Hermes skill 能被安装进 Doxie draft profile，draft runtime home 下能看到完整 skill package，draft recommendedSkills 同步更新
+- Doxie profile / draft scope 下的技能列表、删除、导入 zip、复制到 target home 都作用在目标 Hermes home，而不是主进程默认 home
 - runtime token 失效后，客户端能看到登录过期提示，并在刷新后恢复
 - native CDP browser 多标签页操作不会串 tab
 - computer-use 在多窗口场景下能 list target、capture 指定窗口、按窗口坐标操作

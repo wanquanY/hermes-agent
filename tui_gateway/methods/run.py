@@ -126,7 +126,8 @@ def _(rid, params: dict) -> dict:
         or params.get("control_plane_reserved")
         or params.get("controlPlaneReserved")
     )
-    if target and requested_run_id and not control_plane_reserved:
+    transient = bool(params.get("transient") or params.get("temporary") or params.get("ephemeral"))
+    if target and requested_run_id and not control_plane_reserved and not transient:
         reservation = run_control.create_run_if_session_idle(
             stored_session_id=target,
             run_id=requested_run_id,
@@ -161,7 +162,7 @@ def _(rid, params: dict) -> dict:
             )
     sid, session, err = _runtime_for_run_target(rid, params)
     if err:
-        if target and requested_run_id:
+        if target and requested_run_id and not transient:
             _mark_registered_run_failed(
                 run_id=requested_run_id,
                 stored_session_id=target,
@@ -183,7 +184,7 @@ def _(rid, params: dict) -> dict:
         "_run_registry_reserved": True,
     }
     response = _methods["prompt.submit"](rid, submit_params)
-    if isinstance(response, dict) and response.get("error") and requested_run_id:
+    if isinstance(response, dict) and response.get("error") and requested_run_id and not transient:
         _mark_registered_run_failed(
             run_id=requested_run_id,
             stored_session_id=stable_session_id,
@@ -196,7 +197,7 @@ def _(rid, params: dict) -> dict:
     if isinstance(result, dict):
         run_id = str(result.get("run_id") or params.get("client_run_id") or params.get("run_id") or "").strip()
         turn_id = str(result.get("turn_id") or params.get("turn_id") or "").strip()
-        if run_id:
+        if run_id and not bool((session or {}).get("transient") or transient):
             run_control.mark_run_started(
                 stored_session_id=stable_session_id,
                 runtime_session_id=sid,
@@ -223,6 +224,19 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4006, "stored_session_id required")
     if not requested_run_id:
         return _err(rid, 4006, "run_id required")
+    if params.get("transient") or params.get("temporary") or params.get("ephemeral"):
+        return _ok(
+            rid,
+            {
+                "status": "queued",
+                "run_id": requested_run_id,
+                "turn_id": requested_turn_id,
+                "stored_session_id": target,
+                "runtime_scope_key": requested_scope_key,
+                "created": False,
+                "transient": True,
+            },
+        )
     reservation = run_control.create_run_if_session_idle(
         stored_session_id=target,
         run_id=requested_run_id,
@@ -396,11 +410,15 @@ def _(rid, params: dict) -> dict:
         after_seq = int(params.get("after_seq") or params.get("afterSeq") or 0)
     except (TypeError, ValueError):
         after_seq = 0
+    runtime_scope_key = str(
+        params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
+    ).strip()
     subscription_id, replay = run_control.subscribe_session_with_id(
         stored_session_id=stable_session_id,
         transport=current_transport(),
         after_seq=after_seq,
         active_only=bool(params.get("active_only") or params.get("activeOnly")),
+        runtime_scope_key=runtime_scope_key,
         db=_get_db(),
     )
     return _ok(

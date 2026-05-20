@@ -50,6 +50,16 @@ def _event_turn_id(event: Dict[str, Any]) -> str:
     return str(event.get("turn_id") or payload.get("turn_id") or "").strip()
 
 
+def _event_runtime_scope_key(event: Dict[str, Any], fallback: str = "") -> str:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    return str(
+        event.get("runtime_scope_key")
+        or payload.get("runtime_scope_key")
+        or fallback
+        or ""
+    ).strip()
+
+
 def _event_status(event_type: str, payload: Dict[str, Any]) -> str | None:
     if event_type == "error":
         return "failed"
@@ -327,6 +337,8 @@ class SessionDBRunMixin:
         run_id = _event_run_id(frame)
         turn_id = _event_turn_id(frame)
         runtime_session_id = str(frame.get("session_id") or "").strip()
+        runtime_scope_key = _event_runtime_scope_key(frame, stable)
+        frame["runtime_scope_key"] = runtime_scope_key
         timestamp = float(frame.get("timestamp") or time.time())
         seq = int(frame.get("seq") or 0)
         if seq <= 0:
@@ -340,16 +352,17 @@ class SessionDBRunMixin:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO run_events (
-                    session_id, run_id, turn_id, runtime_session_id, event_type,
+                    session_id, run_id, turn_id, runtime_session_id, runtime_scope_key, event_type,
                     seq, timestamp, payload_json, event_json, status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stable,
                     run_id,
                     turn_id,
                     runtime_session_id,
+                    runtime_scope_key,
                     event_type,
                     seq,
                     timestamp,
@@ -408,7 +421,7 @@ class SessionDBRunMixin:
                         (
                             run_id,
                             stable,
-                            str(frame.get("runtime_scope_key") or payload.get("runtime_scope_key") or stable),
+                            runtime_scope_key,
                             turn_id,
                             runtime_session_id,
                             next_status,
@@ -428,6 +441,7 @@ class SessionDBRunMixin:
                         """
                         UPDATE runs
                         SET session_id = ?,
+                            runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
                             turn_id = COALESCE(NULLIF(?, ''), turn_id),
                             runtime_session_id = COALESCE(NULLIF(?, ''), runtime_session_id),
                             status = ?,
@@ -439,6 +453,7 @@ class SessionDBRunMixin:
                         """,
                         (
                             stable,
+                            runtime_scope_key,
                             turn_id,
                             runtime_session_id,
                             next_status,
@@ -465,6 +480,7 @@ class SessionDBRunMixin:
         *,
         after_seq: int = 0,
         active_only: bool = False,
+        runtime_scope_key: str = "",
         limit: int = 2000,
     ) -> List[Dict[str, Any]]:
         stable = str(session_id or "").strip()
@@ -472,6 +488,11 @@ class SessionDBRunMixin:
             return []
         bounded_limit = max(1, min(int(limit or 2000), 5000))
         params: list[Any] = [stable, int(after_seq or 0)]
+        scope = str(runtime_scope_key or "").strip()
+        scope_clause = ""
+        if scope:
+            scope_clause = "AND COALESCE(runtime_scope_key, session_id) = ?"
+            params.append(scope)
         active_clause = ""
         if active_only:
             active_statuses = _sql_status_literals(ACTIVE_RUN_STATUSES)
@@ -490,6 +511,7 @@ class SessionDBRunMixin:
                 FROM run_events
                 WHERE session_id = ?
                   AND seq > ?
+                  {scope_clause}
                   {active_clause}
                 ORDER BY seq ASC
                 LIMIT ?
@@ -649,16 +671,17 @@ class SessionDBRunMixin:
                 conn.execute(
                     """
                     INSERT INTO run_events (
-                        session_id, run_id, turn_id, runtime_session_id, event_type,
+                        session_id, run_id, turn_id, runtime_session_id, runtime_scope_key, event_type,
                         seq, timestamp, payload_json, event_json, status
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["session_id"],
                         row["run_id"],
                         row["turn_id"],
                         row["runtime_session_id"],
+                        row["runtime_scope_key"] or row["session_id"],
                         "message.complete",
                         terminal_seq,
                         now,

@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import types
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -786,11 +787,11 @@ def test_skills_manage_search_uses_tools_hub_sources(server):
     })()
     auth = MagicMock(return_value="auth")
     router = MagicMock(return_value=["source"])
-    search = MagicMock(return_value=[result])
+    search = MagicMock(return_value=([result], {"official": 1}, []))
     fake_hub = types.SimpleNamespace(
         GitHubAuth=auth,
         create_source_router=router,
-        unified_search=search,
+        parallel_search_sources=search,
     )
 
     with patch.dict(sys.modules, {"tools.skills_hub": fake_hub}):
@@ -813,7 +814,7 @@ def test_skills_manage_search_uses_tools_hub_sources(server):
     }
     auth.assert_called_once_with()
     router.assert_called_once_with("auth")
-    search.assert_called_once_with("showroom", ["source"], source_filter="all", limit=20)
+    search.assert_called_once_with(["source"], query="showroom", source_filter="all", overall_timeout=6)
 
 
 def test_skills_manage_list_returns_structured_items(server):
@@ -828,6 +829,7 @@ def test_skills_manage_list_returns_structured_items(server):
                 "install_path": "productivity/showroom",
             }])
         )),
+        SKILLS_DIR=Path("/tmp/hermes_test/skills"),
     )
     fake_sync = types.SimpleNamespace(_read_manifest=MagicMock(return_value={"builtin-skill"}))
     fake_tools = types.SimpleNamespace(_find_all_skills=MagicMock(return_value=[
@@ -867,6 +869,107 @@ def test_skills_manage_list_returns_structured_items(server):
     assert showroom["enabled"] is True
 
 
+def test_skills_list_returns_structured_items_without_market_router(server):
+    fake_hub = types.SimpleNamespace(
+        ensure_hub_dirs=MagicMock(),
+        HubLockFile=MagicMock(return_value=types.SimpleNamespace(
+            list_installed=MagicMock(return_value=[])
+        )),
+        SKILLS_DIR=Path("/tmp/hermes_test/skills"),
+    )
+    fake_sync = types.SimpleNamespace(_read_manifest=MagicMock(return_value={"builtin-skill"}))
+    fake_tools = types.SimpleNamespace(_find_all_skills=MagicMock(return_value=[
+        {"name": "builtin-skill", "description": "Bundled", "category": "core"},
+    ]))
+    fake_utils = types.SimpleNamespace(get_disabled_skill_names=MagicMock(return_value=set()))
+
+    with patch.dict(sys.modules, {
+        "tools.skills_hub": fake_hub,
+        "tools.skills_sync": fake_sync,
+        "tools.skills_tool": fake_tools,
+        "agent.skill_utils": fake_utils,
+    }):
+        resp = server.handle_request({
+            "id": "skills-list-local",
+            "method": "skills.list",
+            "params": {},
+        })
+
+    assert "error" not in resp
+    assert resp["result"]["skills"] == {"core": ["builtin-skill"]}
+    assert resp["result"]["items"][0]["source_type"] == "builtin"
+
+
+def test_skills_list_realigns_cached_skill_modules_to_doxie_profile_home(server, tmp_path):
+    profile_home = tmp_path / "draft-home"
+    stale_home = tmp_path / "stale-home"
+    skill_dir = profile_home / "skills" / "productivity" / "draft-skill"
+    skill_dir.mkdir(parents=True)
+
+    fake_hub = types.SimpleNamespace(
+        HERMES_HOME=stale_home,
+        SKILLS_DIR=stale_home / "skills",
+        HUB_DIR=stale_home / "skills" / ".hub",
+        LOCK_FILE=stale_home / "skills" / ".hub" / "lock.json",
+        QUARANTINE_DIR=stale_home / "skills" / ".hub" / "quarantine",
+        AUDIT_LOG=stale_home / "skills" / ".hub" / "audit.log",
+        TAPS_FILE=stale_home / "skills" / ".hub" / "taps.json",
+        INDEX_CACHE_DIR=stale_home / "skills" / ".hub" / "index-cache",
+        ensure_hub_dirs=MagicMock(),
+        HubLockFile=MagicMock(return_value=types.SimpleNamespace(
+            list_installed=MagicMock(return_value=[])
+        )),
+    )
+    fake_sync = types.SimpleNamespace(
+        HERMES_HOME=stale_home,
+        SKILLS_DIR=stale_home / "skills",
+        MANIFEST_FILE=stale_home / "skills" / ".bundled_manifest",
+        _read_manifest=MagicMock(return_value={}),
+    )
+    fake_tools = types.SimpleNamespace(
+        HERMES_HOME=stale_home,
+        SKILLS_DIR=stale_home / "skills",
+        _find_all_skills=MagicMock(return_value=[
+            {
+                "name": "draft-skill",
+                "description": "Draft scoped skill",
+                "category": "productivity",
+                "skill_dir": str(skill_dir),
+            },
+        ]),
+    )
+    fake_utils = types.SimpleNamespace(get_disabled_skill_names=MagicMock(return_value=set()))
+    fake_constants = sys.modules["hermes_constants"]
+    fake_constants.get_hermes_home.return_value = profile_home
+
+    with patch.dict(sys.modules, {
+        "tools.skills_hub": fake_hub,
+        "tools.skills_sync": fake_sync,
+        "tools.skills_tool": fake_tools,
+        "agent.skill_utils": fake_utils,
+    }):
+        resp = server.handle_request({
+            "id": "skills-list-scoped",
+            "method": "skills.list",
+            "params": {
+                "doxie_profile": {
+                    "id": "draft:one",
+                    "runtimeScopeKey": "draft:one",
+                    "hermesHomePath": str(profile_home),
+                },
+            },
+        })
+
+    scoped_skills_dir = profile_home.resolve() / "skills"
+    scoped_hub_dir = scoped_skills_dir / ".hub"
+    assert "error" not in resp
+    assert fake_hub.SKILLS_DIR == scoped_skills_dir
+    assert fake_hub.LOCK_FILE == scoped_hub_dir / "lock.json"
+    assert fake_sync.MANIFEST_FILE == scoped_skills_dir / ".bundled_manifest"
+    assert fake_tools.SKILLS_DIR == scoped_skills_dir
+    assert resp["result"]["items"][0]["install_path"] == "productivity/draft-skill"
+
+
 def test_skills_manage_uninstall_uses_hub_lifecycle(server):
     uninstall = MagicMock(return_value=(True, "Uninstalled 'showroom'"))
     fake_hub = types.SimpleNamespace(uninstall_skill=uninstall)
@@ -891,6 +994,120 @@ def test_skills_manage_uninstall_uses_hub_lifecycle(server):
         "message": "Uninstalled 'showroom'",
     }
     uninstall.assert_called_once_with("showroom")
+    fake_prompt_builder.clear_skills_system_prompt_cache.assert_called_once_with(
+        clear_snapshot=True
+    )
+
+
+def test_skills_manage_delete_uses_local_package_lifecycle(server):
+    delete_skill_package = MagicMock(return_value=(True, "Deleted local skill package 'showroom'"))
+    fake_hub = types.SimpleNamespace(delete_skill_package=delete_skill_package)
+    fake_prompt_builder = types.SimpleNamespace(
+        clear_skills_system_prompt_cache=MagicMock()
+    )
+
+    with patch.dict(sys.modules, {
+        "tools.skills_hub": fake_hub,
+        "agent.prompt_builder": fake_prompt_builder,
+    }):
+        resp = server.handle_request({
+            "id": "skills-delete",
+            "method": "skills.manage",
+            "params": {"action": "delete", "query": "showroom"},
+        })
+
+    assert "error" not in resp
+    assert resp["result"] == {
+        "deleted": True,
+        "name": "showroom",
+        "message": "Deleted local skill package 'showroom'",
+    }
+    delete_skill_package.assert_called_once_with("showroom")
+    fake_prompt_builder.clear_skills_system_prompt_cache.assert_called_once_with(
+        clear_snapshot=True
+    )
+
+
+def test_skills_manage_copy_installed_uses_package_lifecycle(server, tmp_path):
+    target_home = tmp_path / "draft-home"
+    copy_installed_skill_to_home = MagicMock(return_value={
+        "name": "showroom",
+        "sourceSkillDir": "/source/showroom",
+        "targetSkillDir": str(target_home / "skills" / "showroom"),
+        "targetHermesHome": str(target_home),
+    })
+    fake_lifecycle = types.SimpleNamespace(
+        copy_installed_skill_to_home=copy_installed_skill_to_home
+    )
+
+    with patch.dict(sys.modules, {"tools.skill_package_lifecycle": fake_lifecycle}):
+        resp = server.handle_request({
+            "id": "skills-copy-installed",
+            "method": "skills.manage",
+            "params": {
+                "action": "copy_installed",
+                "query": "showroom",
+                "target_hermes_home": str(target_home),
+            },
+        })
+
+    assert "error" not in resp
+    assert resp["result"] == {
+        "copied": True,
+        "name": "showroom",
+        "sourceSkillDir": "/source/showroom",
+        "targetSkillDir": str(target_home / "skills" / "showroom"),
+        "targetHermesHome": str(target_home),
+    }
+    copy_installed_skill_to_home.assert_called_once_with("showroom", str(target_home))
+
+
+def test_skills_manage_import_archive_uses_package_lifecycle(server, tmp_path):
+    archive = tmp_path / "showroom.zip"
+    archive.write_bytes(b"zip")
+    import_skill_archive_to_home = MagicMock(return_value={
+        "name": "showroom",
+        "sourceArchive": str(archive),
+        "targetSkillDir": str(tmp_path / "skills" / "showroom"),
+        "targetHermesHome": str(tmp_path),
+        "installPath": "showroom",
+    })
+    fake_lifecycle = types.SimpleNamespace(
+        import_skill_archive_to_home=import_skill_archive_to_home
+    )
+    fake_prompt_builder = types.SimpleNamespace(
+        clear_skills_system_prompt_cache=MagicMock()
+    )
+
+    with patch.dict(sys.modules, {
+        "tools.skill_package_lifecycle": fake_lifecycle,
+        "agent.prompt_builder": fake_prompt_builder,
+    }):
+        resp = server.handle_request({
+            "id": "skills-import-archive",
+            "method": "skills.manage",
+            "params": {
+                "action": "import_archive",
+                "archive_path": str(archive),
+                "category": "productivity",
+                "name": "showroom",
+            },
+        })
+
+    assert "error" not in resp
+    assert resp["result"] == {
+        "imported": True,
+        "name": "showroom",
+        "sourceArchive": str(archive),
+        "targetSkillDir": str(tmp_path / "skills" / "showroom"),
+        "targetHermesHome": str(tmp_path),
+        "installPath": "showroom",
+    }
+    import_skill_archive_to_home.assert_called_once_with(
+        str(archive),
+        category="productivity",
+        name="showroom",
+    )
     fake_prompt_builder.clear_skills_system_prompt_cache.assert_called_once_with(
         clear_snapshot=True
     )

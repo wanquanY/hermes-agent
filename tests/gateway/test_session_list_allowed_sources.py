@@ -120,6 +120,41 @@ def test_session_list_overlays_live_running_state(monkeypatch):
     server._sessions.clear()
 
 
+def test_session_list_hides_only_explicit_empty_stored_placeholders(monkeypatch):
+    rows = [
+        {
+            "id": "empty-placeholder",
+            "source": "tui",
+            "started_at": 3,
+            "title": "",
+            "preview": "",
+            "message_count": 0,
+        },
+        {
+            "id": "visible-title",
+            "source": "tui",
+            "started_at": 2,
+            "title": "Draft conversation",
+            "preview": "",
+            "message_count": 0,
+        },
+        {
+            "id": "visible-message",
+            "source": "tui",
+            "started_at": 1,
+            "title": "",
+            "preview": "hello",
+            "message_count": 1,
+        },
+    ]
+    monkeypatch.setattr(server, "_get_db", lambda: _StubDB(rows))
+
+    resp = _call(limit=10)
+    ids = [s["id"] for s in resp["result"]["sessions"]]
+
+    assert ids == ["visible-title", "visible-message"]
+
+
 def test_session_list_respects_explicit_limit(monkeypatch):
     db = _StubDB([{"id": "x", "source": "cli", "started_at": 1}])
     monkeypatch.setattr(server, "_get_db", lambda: db)
@@ -183,6 +218,23 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
                 },
             }
 
+        def list_run_events(self, *args, **kwargs):
+            assert args[0] == "s1"
+            assert kwargs["runtime_scope_key"] == "profile:agent-default:version:v1"
+            return [
+                {
+                    "type": "tool.complete",
+                    "stored_session_id": "s1",
+                    "run_id": "run-1",
+                    "turn_id": "turn-1",
+                    "seq": 4,
+                    "payload": {
+                        "name": "create_agent_profile_draft",
+                        "result": {"doxie_event": "agent_profile_draft_saved", "draft": {"id": "draft-1"}},
+                    },
+                },
+            ]
+
     cursor = server._methods["session.messages"].__globals__["_encode_page_cursor"]({"id": 20})
     monkeypatch.setattr(server, "_get_db", lambda: _MessagesDB())
 
@@ -194,12 +246,16 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
             "direction": "before",
             "cursor": cursor,
             "limit": 1,
+            "includeRunEvents": True,
+            "runtimeScopeKey": "profile:agent-default:version:v1",
         },
     })
 
     assert resp["result"]["messages"] == [
         {"role": "user", "text": "older", "message_id": "10", "timestamp": 10.0},
     ]
+    assert resp["result"]["runEvents"][0]["type"] == "tool.complete"
+    assert resp["result"]["runEvents"][0]["payload"]["result"]["draft"]["id"] == "draft-1"
     assert resp["result"]["pageInfo"]["hasMoreBefore"] is False
     assert resp["result"]["pageInfo"]["hasMoreAfter"] is True
     assert resp["result"]["pageInfo"]["totalCount"] == 3

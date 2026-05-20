@@ -50,18 +50,19 @@ def _fail_unavailable_runtime_agent(
         session["active_run_id"] = None
         session["active_turn_id"] = None
         session["pending_turn"] = None
-    _mark_prompt_run_failed(
-        run_id=run_id,
-        stored_session_id=str(session.get("session_key") or sid),
-        runtime_scope_key=str(
-            session.get("runtime_scope_key")
-            or session.get("active_runtime_scope_key")
-            or session.get("session_key")
-            or sid
-        ),
-        turn_id=turn_id,
-        message=message,
-    )
+    if not session.get("transient"):
+        _mark_prompt_run_failed(
+            run_id=run_id,
+            stored_session_id=str(session.get("session_key") or sid),
+            runtime_scope_key=str(
+                session.get("runtime_scope_key")
+                or session.get("active_runtime_scope_key")
+                or session.get("session_key")
+                or sid
+            ),
+            turn_id=turn_id,
+            message=message,
+        )
 
 
 @method("prompt.submit")
@@ -117,15 +118,35 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
         or sid
     ).strip()
     effective_runtime_scope_key = runtime_scope_key or stable_session_id
+    approval_policy = str(
+        params.get("approval_policy")
+        or params.get("approvalPolicy")
+        or params.get("permission_mode")
+        or params.get("permissionMode")
+        or ""
+    ).strip().lower()
+    if approval_policy:
+        if approval_policy not in {"default", "full_access"}:
+            return _err(rid, 4002, f"unknown approval policy mode: {approval_policy}")
+        try:
+            from tools.approval import disable_session_yolo, enable_session_yolo
+
+            if approval_policy == "full_access":
+                enable_session_yolo(stable_session_id)
+            else:
+                disable_session_yolo(stable_session_id)
+        except Exception as e:
+            return _err(rid, 5004, str(e))
     with session["history_lock"]:
         if session.get("running"):
-            _mark_prompt_run_failed(
-                run_id=run_id,
-                stored_session_id=stable_session_id,
-                runtime_scope_key=effective_runtime_scope_key,
-                turn_id=turn_id,
-                message="session busy",
-            )
+            if not session.get("transient"):
+                _mark_prompt_run_failed(
+                    run_id=run_id,
+                    stored_session_id=stable_session_id,
+                    runtime_scope_key=effective_runtime_scope_key,
+                    turn_id=turn_id,
+                    message="session busy",
+                )
             return _err(rid, 4009, "session busy")
         session["running"] = True
         session["active_run_id"] = run_id
@@ -154,18 +175,19 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 file=sys.stderr,
                 flush=True,
             )
-        run_control.mark_run_started(
-            stored_session_id=stable_session_id,
-            runtime_session_id=sid,
-            run_id=run_id,
-            turn_id=turn_id,
-            runtime_scope_key=effective_runtime_scope_key,
-            metadata={
-                "gateway_pid": os.getpid(),
-                "gateway_instance_id": _GATEWAY_INSTANCE_ID,
-            },
-            db=_get_db(),
-        )
+        if not session.get("transient"):
+            run_control.mark_run_started(
+                stored_session_id=stable_session_id,
+                runtime_session_id=sid,
+                run_id=run_id,
+                turn_id=turn_id,
+                runtime_scope_key=effective_runtime_scope_key,
+                metadata={
+                    "gateway_pid": os.getpid(),
+                    "gateway_instance_id": _GATEWAY_INSTANCE_ID,
+                },
+                db=_get_db(),
+            )
 
     if requested_model:
         try:
@@ -181,13 +203,14 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 session["active_run_id"] = None
                 session["active_turn_id"] = None
                 session["pending_turn"] = None
-            _mark_prompt_run_failed(
-                run_id=run_id,
-                stored_session_id=stable_session_id,
-                runtime_scope_key=effective_runtime_scope_key,
-                turn_id=turn_id,
-                message=f"model switch failed: {e}",
-            )
+            if not session.get("transient"):
+                _mark_prompt_run_failed(
+                    run_id=run_id,
+                    stored_session_id=stable_session_id,
+                    runtime_scope_key=effective_runtime_scope_key,
+                    turn_id=turn_id,
+                    message=f"model switch failed: {e}",
+                )
             return _err(rid, 5001, f"model switch failed: {e}")
     elif has_model_descriptor:
         _set_session_model_descriptor(session, model_descriptor, clear_if_empty=True)

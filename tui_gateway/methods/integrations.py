@@ -1049,14 +1049,61 @@ def _clear_skill_prompt_cache() -> None:
         pass
 
 
+def _sync_skill_module_paths_to_active_home() -> None:
+    """Keep legacy skill modules aligned with the active Doxie profile home.
+
+    The gateway can serve many Doxie profile/draft scopes in one process. Some
+    older skill modules cache paths such as SKILLS_DIR at import time, so an
+    already-imported module must be realigned after server.py enters the
+    request profile context.
+    """
+    import sys
+    from pathlib import Path
+
+    home = Path(_active_hermes_home()).expanduser().resolve()
+    skills_dir = home / "skills"
+
+    module = sys.modules.get("tools.skills_tool")
+    if module is not None:
+        module.HERMES_HOME = home
+        module.SKILLS_DIR = skills_dir
+
+    module = sys.modules.get("tools.skill_manager_tool")
+    if module is not None:
+        module.HERMES_HOME = home
+        module.SKILLS_DIR = skills_dir
+
+    module = sys.modules.get("tools.skills_sync")
+    if module is not None:
+        module.HERMES_HOME = home
+        module.SKILLS_DIR = skills_dir
+        module.MANIFEST_FILE = skills_dir / ".bundled_manifest"
+
+    module = sys.modules.get("tools.skills_hub")
+    if module is not None:
+        hub_dir = skills_dir / ".hub"
+        module.HERMES_HOME = home
+        module.SKILLS_DIR = skills_dir
+        module.HUB_DIR = hub_dir
+        module.LOCK_FILE = hub_dir / "lock.json"
+        module.QUARANTINE_DIR = hub_dir / "quarantine"
+        module.AUDIT_LOG = hub_dir / "audit.log"
+        module.TAPS_FILE = hub_dir / "taps.json"
+        module.INDEX_CACHE_DIR = hub_dir / "index-cache"
+
+
 def _list_installed_skill_records(
     *,
     source_filter: str = "all",
     enabled_only: bool = False,
     platform: str | None = None,
 ) -> dict:
+    from pathlib import Path
+
+    _sync_skill_module_paths_to_active_home()
+
     from agent.skill_utils import get_disabled_skill_names
-    from tools.skills_hub import HubLockFile, ensure_hub_dirs
+    from tools.skills_hub import HubLockFile, SKILLS_DIR, ensure_hub_dirs
     from tools.skills_sync import _read_manifest
     from tools.skills_tool import _find_all_skills
 
@@ -1111,6 +1158,8 @@ def _list_installed_skill_records(
             continue
 
         grouped.setdefault(category, []).append(name)
+        skill_dir = Path(str(skill.get("skill_dir"))).resolve() if skill.get("skill_dir") else None
+        modified_at = skill_dir.stat().st_mtime if skill_dir and skill_dir.exists() else 0.0
         stats["total_skills"] += 1
         stats["enabled_skills" if enabled else "disabled_skills"] += 1
         stats["skills_by_source"][source_type] = (
@@ -1129,13 +1178,19 @@ def _list_installed_skill_records(
                 "source_type": source_type,
                 "trust": trust,
                 "identifier": identifier,
-                "install_path": install_path,
+                "install_path": install_path or (
+                    str(skill_dir.relative_to(Path(SKILLS_DIR).resolve()))
+                    if skill_dir and skill_dir.is_relative_to(Path(SKILLS_DIR).resolve())
+                    else ""
+                ),
+                "modified_at": modified_at,
                 "installed": True,
                 "enabled": enabled,
                 "status": "enabled" if enabled else "disabled",
                 "install_status": "installed",
                 "managed": bool(hub_entry),
                 "can_uninstall": bool(hub_entry),
+                "can_delete": source_type in {"hub", "local"},
                 "can_update": bool(hub_entry),
                 "can_toggle": True,
             }
@@ -1179,6 +1234,8 @@ def _check_skill_requirements(name: str, session_id: str = "") -> dict:
     if not name:
         raise ValueError("skill name required")
 
+    _sync_skill_module_paths_to_active_home()
+
     from tools.skills_tool import skill_view
 
     raw = skill_view(name, task_id=session_id or None, preprocess=False)
@@ -1206,11 +1263,28 @@ def _check_skill_requirements(name: str, session_id: str = "") -> dict:
     }
 
 
+@method("skills.list")
+def _(rid, params: dict) -> dict:
+    try:
+        return _ok(
+            rid,
+            _list_installed_skill_records(
+                source_filter=str(params.get("source") or "all"),
+                enabled_only=bool(params.get("enabled_only")),
+                platform=params.get("platform") or None,
+            ),
+        )
+    except Exception as exc:
+        return _err(rid, 4020, f"skills.list failed: {exc}")
+
+
 @method("skills.manage")
 def _(rid, params: dict) -> dict:
     action = params.get("action", "list")
     query = _skill_query(params)
     try:
+        _sync_skill_module_paths_to_active_home()
+
         if action == "list":
             return _ok(
                 rid,
@@ -1224,18 +1298,16 @@ def _(rid, params: dict) -> dict:
             from tools.skills_hub import (
                 GitHubAuth,
                 create_source_router,
-                unified_search,
+                parallel_search_sources,
             )
 
-            raw = (
-                unified_search(
-                    query,
-                    create_source_router(GitHubAuth()),
-                    source_filter="all",
-                    limit=20,
-                )
-                or []
+            raw, _source_counts, _timed_out_ids = parallel_search_sources(
+                create_source_router(GitHubAuth()),
+                query=query,
+                source_filter="all",
+                overall_timeout=6,
             )
+            raw = raw[:20]
             return _ok(
                 rid,
                 {
@@ -1265,6 +1337,40 @@ def _(rid, params: dict) -> dict:
             )
             _clear_skill_prompt_cache()
             return _ok(rid, {"installed": True, "name": query})
+        if action in {"copy_local", "copy_installed"}:
+            target_home = str(
+                params.get("target_hermes_home")
+                or params.get("targetHermesHome")
+                or params.get("hermes_home")
+                or params.get("hermesHome")
+                or ""
+            ).strip()
+            if not target_home:
+                return _err(rid, 4006, "target_hermes_home required")
+
+            from tools.skill_package_lifecycle import copy_installed_skill_to_home
+
+            copied = copy_installed_skill_to_home(query, target_home)
+            return _ok(rid, {"copied": True, **copied})
+        if action in {"import_archive", "import_local_archive"}:
+            archive_path = str(
+                params.get("archive_path")
+                or params.get("archivePath")
+                or params.get("path")
+                or ""
+            ).strip()
+            if not archive_path:
+                return _err(rid, 4006, "archive_path required")
+
+            from tools.skill_package_lifecycle import import_skill_archive_to_home
+
+            imported = import_skill_archive_to_home(
+                archive_path,
+                category=str(params.get("category") or ""),
+                name=str(params.get("name") or params.get("name_override") or ""),
+            )
+            _clear_skill_prompt_cache()
+            return _ok(rid, {"imported": True, **imported})
         if action == "uninstall":
             from tools.skills_hub import uninstall_skill
 
@@ -1273,6 +1379,14 @@ def _(rid, params: dict) -> dict:
                 return _err(rid, 4021, message)
             _clear_skill_prompt_cache()
             return _ok(rid, {"uninstalled": True, "name": query, "message": message})
+        if action == "delete":
+            from tools.skills_hub import delete_skill_package
+
+            success, message = delete_skill_package(query)
+            if not success:
+                return _err(rid, 4025, message)
+            _clear_skill_prompt_cache()
+            return _ok(rid, {"deleted": True, "name": query, "message": message})
         if action == "update":
             from hermes_cli.skills_hub import _derive_category_from_install_path, do_install
             from tools.skills_hub import HubLockFile, check_for_skill_updates
@@ -1362,6 +1476,8 @@ def _(rid, params: dict) -> dict:
 @method("skills.reload")
 def _(rid, params: dict) -> dict:
     try:
+        _sync_skill_module_paths_to_active_home()
+
         from agent.skill_commands import reload_skills
 
         result = reload_skills()

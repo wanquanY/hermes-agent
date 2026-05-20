@@ -77,6 +77,15 @@ def _event_turn_id(params: dict[str, Any]) -> str:
     return str(params.get("turn_id") or payload.get("turn_id") or "").strip()
 
 
+def _event_runtime_scope_key(params: dict[str, Any]) -> str:
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    return str(
+        params.get("runtime_scope_key")
+        or payload.get("runtime_scope_key")
+        or ""
+    ).strip()
+
+
 def _terminal_status(event_type: str, payload: dict[str, Any]) -> str | None:
     if event_type == "error":
         return "failed"
@@ -153,7 +162,19 @@ def _filter_events_for_subscription(
     *,
     active_only: bool,
     active_run_ids: set[str],
+    runtime_scope_key: str = "",
 ) -> list[dict[str, Any]]:
+    scope = str(runtime_scope_key or "").strip()
+    if scope:
+        events = [
+            event
+            for event in events
+            if (
+                _event_runtime_scope_key(event)
+                or str(event.get("stored_session_id") or "")
+            ).strip()
+            == scope
+        ]
     if not active_only:
         return events
     return [
@@ -197,12 +218,18 @@ def _poll_subscription_events() -> None:
                 continue
             last_seq = int(subscription.get("last_seq") or 0)
             active_only = bool(subscription.get("active_only"))
-            active_run_ids = set(subscription.get("active_run_ids") or set())
+            runtime_scope_key = str(subscription.get("runtime_scope_key") or "").strip()
+            active_run_ids = (
+                _active_run_ids_for_session(stable, db=db)
+                if active_only
+                else set()
+            )
             try:
                 events = method(
                     stable,
                     after_seq=last_seq,
                     active_only=False,
+                    runtime_scope_key=runtime_scope_key,
                     limit=_MAX_EVENTS_PER_SESSION,
                 )
             except Exception:
@@ -212,6 +239,7 @@ def _poll_subscription_events() -> None:
                 [event for event in events if isinstance(event, dict)],
                 active_only=active_only,
                 active_run_ids=active_run_ids,
+                runtime_scope_key=runtime_scope_key,
             )
             if not events:
                 continue
@@ -227,6 +255,8 @@ def _poll_subscription_events() -> None:
                 current = _subscriptions_by_id.get(str(subscription.get("id") or ""))
                 if current is not None:
                     current["last_seq"] = max(int(current.get("last_seq") or 0), delivered_seq)
+                    if active_only:
+                        current["active_run_ids"] = set(active_run_ids)
 
 
 def _ensure_run(
@@ -535,6 +565,7 @@ def subscribe_session(
     transport: Transport | None,
     after_seq: int = 0,
     active_only: bool = False,
+    runtime_scope_key: str = "",
     db: Any = None,
 ) -> list[dict[str, Any]]:
     _subscription_id, events = subscribe_session_with_id(
@@ -542,6 +573,7 @@ def subscribe_session(
         transport=transport,
         after_seq=after_seq,
         active_only=active_only,
+        runtime_scope_key=runtime_scope_key,
         db=db,
     )
     return events
@@ -553,12 +585,14 @@ def subscribe_session_with_id(
     transport: Transport | None,
     after_seq: int = 0,
     active_only: bool = False,
+    runtime_scope_key: str = "",
     db: Any = None,
     subscription_id: str = "",
 ) -> tuple[str, list[dict[str, Any]]]:
     stable = str(stored_session_id or "").strip()
     if not stable:
         return "", []
+    scope = str(runtime_scope_key or "").strip()
     with _lock:
         normalized_subscription_id = str(subscription_id or uuid.uuid4().hex).strip()
         active_run_ids = _active_run_ids_for_session(stable, db=db) if active_only else set()
@@ -568,6 +602,7 @@ def subscribe_session_with_id(
                 "stored_session_id": stable,
                 "transport": transport,
                 "active_only": bool(active_only),
+                "runtime_scope_key": scope,
                 "active_run_ids": set(active_run_ids),
                 "last_seq": max(0, int(after_seq or 0)),
                 "db": db,
@@ -585,6 +620,7 @@ def subscribe_session_with_id(
                 stable,
                 after_seq=after_seq,
                 active_only=False,
+                runtime_scope_key=scope,
                 limit=_MAX_EVENTS_PER_SESSION,
             )
         except Exception:
@@ -593,11 +629,13 @@ def subscribe_session_with_id(
         [event for event in events if isinstance(event, dict)],
         active_only=active_only,
         active_run_ids=active_run_ids,
+        runtime_scope_key=scope,
     )
     memory_events = _filter_events_for_subscription(
         memory_events,
         active_only=active_only,
         active_run_ids=active_run_ids,
+        runtime_scope_key=scope,
     )
     if after_seq > 0:
         memory_events = [event for event in memory_events if int(event.get("seq") or 0) > after_seq]

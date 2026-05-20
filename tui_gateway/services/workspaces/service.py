@@ -54,7 +54,13 @@ def workspace_from_params(params: dict, cwd: str) -> dict:
         path=workspace_path,
         kind=str(workspace.get("kind") or "local"),
     )
-    return model.to_payload()
+    payload = model.to_payload()
+    # Hermes stores this only as a runtime/session cache for artifact lookup and
+    # session restoration. Doxie remains the authority for product workspace
+    # metadata such as default profile, last-used profile, and user-facing names.
+    payload["authority"] = "doxie" if explicit_id else "hermes_runtime_cache"
+    payload["runtime_cache"] = True
+    return payload
 
 
 def bind_session_workspace(
@@ -84,13 +90,22 @@ def workspace_for_session(session_id: str) -> dict[str, Any] | None:
         "kind": row.get("kind") or "",
         "cwd": row.get("cwd") or row["path"],
         "session_id": row["session_id"],
+        "authority": "doxie",
+        "runtime_cache": True,
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
 
 
 def list_workspaces(limit: int = 200) -> list[dict[str, Any]]:
-    return get_gateway_state_store().list_workspaces(limit=limit)
+    return [
+        {
+            **workspace,
+            "authority": "doxie",
+            "runtime_cache": True,
+        }
+        for workspace in get_gateway_state_store().list_workspaces(limit=limit)
+    ]
 
 
 def session_cwd(session: dict | None = None) -> str:
@@ -102,4 +117,3 @@ def session_cwd(session: dict | None = None) -> str:
         return normalize_session_cwd(get_session_env("TERMINAL_CWD", ""))
     except Exception:
         return normalize_session_cwd()
-

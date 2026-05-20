@@ -81,6 +81,64 @@ class TestSchemaInit:
         assert [run["run_id"] for run in db.list_runs(runtime_scope_key="stored-old")] == ["run-old"]
         db.close()
 
+    def test_existing_run_events_table_backfills_runtime_scope_key(self, tmp_path):
+        """Old event logs get a first-class scope column before scoped replay."""
+        import sqlite3
+
+        old_db = tmp_path / "old-run-events.db"
+        conn = sqlite3.connect(old_db)
+        conn.executescript(
+            """
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version VALUES (11);
+            CREATE TABLE run_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                run_id TEXT,
+                turn_id TEXT,
+                runtime_session_id TEXT,
+                event_type TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                payload_json TEXT,
+                event_json TEXT NOT NULL,
+                status TEXT,
+                UNIQUE(session_id, seq)
+            );
+            INSERT INTO run_events (
+                session_id, run_id, turn_id, runtime_session_id, event_type,
+                seq, timestamp, payload_json, event_json, status
+            ) VALUES (
+                'stored-old', 'run-old', 'turn-old', 'runtime-old', 'message.start',
+                1, 1000.0,
+                '{"run_id":"run-old","turn_id":"turn-old"}',
+                '{"type":"message.start","stored_session_id":"stored-old","run_id":"run-old","runtime_scope_key":"profile:alpha"}',
+                ''
+            );
+            """
+        )
+        conn.close()
+
+        db = SessionDB(db_path=old_db)
+        columns = {
+            row[1]
+            for row in db._conn.execute("PRAGMA table_info(run_events)").fetchall()
+        }
+        row = db._conn.execute(
+            "SELECT runtime_scope_key FROM run_events WHERE run_id = 'run-old'"
+        ).fetchone()
+
+        assert "runtime_scope_key" in columns
+        assert row[0] == "profile:alpha"
+        events = db.list_run_events(
+            "stored-old",
+            runtime_scope_key="profile:alpha",
+        )
+        assert [event["run_id"] for event in events] == [
+            "run-old"
+        ]
+        db.close()
+
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
         cursor = db._conn.execute("PRAGMA table_info(sessions)")

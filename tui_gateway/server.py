@@ -150,6 +150,7 @@ _PROFILE_DATA_CONTEXT_ONLY_METHODS = frozenset({
     "run.reserve",
     "run.fail",
     "run.status",
+    "skills.list",
     "workspace.current",
     "workspace.list",
 })
@@ -302,6 +303,11 @@ def _enter_profile_context(profile: dict | None, *, apply_env: bool = True):
     lock_acquired = False
     previous_env = {}
     if apply_env:
+        # Legacy executor/tools still read process-global os.environ. Only
+        # execution/mutation paths may enter this lock; read-only control-plane
+        # methods must use contextvars/HERMES_HOME override without env mutation
+        # so session status, run status, event replay, and workspace reads stay
+        # responsive while a turn is running.
         _profile_env_lock.acquire()
         lock_acquired = True
         previous_env = {key: os.environ.get(key) for key in env}
@@ -410,7 +416,11 @@ def _emit(event: str, sid: str, payload: dict | None = None):
         "stored_session_id": stored_session_id,
         "run_id": str(session.get("active_run_id") or session.get("interrupted_run_id") or ""),
         "turn_id": str(session.get("active_turn_id") or session.get("interrupted_turn_id") or ""),
-        "runtime_scope_key": str(session.get("active_runtime_scope_key") or ""),
+        "runtime_scope_key": str(
+            session.get("active_runtime_scope_key")
+            or session.get("runtime_scope_key")
+            or ""
+        ),
         "seq": int(session.get("event_seq") or 0),
     }
     if payload and payload.get("run_id"):

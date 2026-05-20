@@ -40,9 +40,10 @@ For bots specifically:
 In single-bot mode (what Hermes currently supports), open_id works as a
 de-facto unique user identifier since there is only one app context.
 
-Session-key participant isolation prefers ``union_id`` (via user_id_alt)
-over ``open_id`` (via user_id) so that sessions stay stable if the same
-user is seen through different apps in the future.
+SessionSource.user_id uses ``open_id`` first because QR onboarding stores the
+owner allowlist as an open_id.  ``user_id_alt`` carries ``union_id`` when
+available, then tenant ``user_id`` as a secondary stable identity for session
+partitioning and diagnostics.
 """
 
 from __future__ import annotations
@@ -3761,28 +3762,29 @@ class FeishuAdapter(BasePlatformAdapter):
         """Map Feishu's three-tier user IDs onto Hermes' SessionSource fields.
 
         Preference order for the primary ``user_id`` field:
-          1. user_id  (tenant-scoped, most stable — requires permission scope)
-          2. open_id  (app-scoped, always available — different per bot app)
+          1. open_id  (app-scoped, always available and what QR onboarding saves)
+          2. user_id  (tenant-scoped fallback when open_id is unavailable)
 
         ``user_id_alt`` carries the union_id (developer-scoped, stable across
-        all apps by the same developer).  Session-key generation prefers
-        user_id_alt when present, so participant isolation stays stable even
-        if the primary ID is the app-scoped open_id.
+        all apps by the same developer) when present, otherwise the tenant
+        user_id.  Session-key generation prefers user_id_alt when present, so
+        participant isolation can still use a stable non-app-scoped ID without
+        breaking open_id-based allowlists.
         """
         open_id = getattr(sender_id, "open_id", None) or None
         user_id = getattr(sender_id, "user_id", None) or None
         union_id = getattr(sender_id, "union_id", None) or None
-        # Prefer tenant-scoped user_id; fall back to app-scoped open_id.
-        primary_id = user_id or open_id
+        primary_id = open_id or user_id
+        alternate_id = union_id or (user_id if user_id != primary_id else None)
         # bot/v3/bots/basic_batch only accepts open_id.
-        name_lookup_id = open_id if is_bot else (primary_id or union_id)
+        name_lookup_id = open_id if is_bot else (primary_id or alternate_id)
         display_name = await self._resolve_sender_name_from_api(
             name_lookup_id, is_bot=is_bot,
         )
         return {
             "user_id": primary_id,
             "user_name": display_name,
-            "user_id_alt": union_id,
+            "user_id_alt": alternate_id,
         }
 
     def _get_cached_sender_name(self, sender_id: Optional[str]) -> Optional[str]:

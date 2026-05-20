@@ -151,7 +151,45 @@ def test_event_created_run_preserves_runtime_scope_key(db):
 
     run = db.get_run("run-scope")
     assert run["runtime_scope_key"] == "profile:alpha:version:v1"
-    assert [item["run_id"] for item in db.list_runs(runtime_scope_key="profile:alpha:version:v1")] == ["run-scope"]
+    assert [item["run_id"] for item in db.list_runs(runtime_scope_key="profile:alpha:version:v1")] == [
+        "run-scope"
+    ]
+
+
+def test_run_event_replay_filters_by_runtime_scope_key(db):
+    db.append_run_event(
+        "stored-scope",
+        {
+            "type": "message.start",
+            "session_id": "runtime-alpha",
+            "stored_session_id": "stored-scope",
+            "run_id": "run-alpha",
+            "turn_id": "turn-alpha",
+            "runtime_scope_key": "profile:alpha:version:v1",
+            "seq": 1,
+            "payload": {"run_id": "run-alpha", "turn_id": "turn-alpha"},
+        },
+    )
+    db.append_run_event(
+        "stored-scope",
+        {
+            "type": "message.start",
+            "session_id": "runtime-beta",
+            "stored_session_id": "stored-scope",
+            "run_id": "run-beta",
+            "turn_id": "turn-beta",
+            "runtime_scope_key": "profile:beta:version:v1",
+            "seq": 2,
+            "payload": {"run_id": "run-beta", "turn_id": "turn-beta"},
+        },
+    )
+
+    alpha_events = db.list_run_events(
+        "stored-scope",
+        runtime_scope_key="profile:alpha:version:v1",
+    )
+
+    assert [event["run_id"] for event in alpha_events] == ["run-alpha"]
 
 
 def test_create_run_if_session_idle_rejects_second_active_run(db):

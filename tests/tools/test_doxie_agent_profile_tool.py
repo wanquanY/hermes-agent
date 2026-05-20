@@ -2,6 +2,7 @@ import json
 
 from tools.doxie_agent_profile_tool import (
     design_agent_profile,
+    install_skill_to_agent_profile_draft,
     test_agent_profile as run_agent_profile_test,
 )
 
@@ -123,6 +124,62 @@ def test_design_agent_profile_creates_revision_from_selected_target(monkeypatch)
     assert calls[0][1]["designMode"] == "revision"
     assert result["operation"] == "revision"
     assert result["draftId"] == "draft-revision-1"
+
+
+def test_install_skill_to_agent_profile_draft_copies_skill_and_updates_draft(monkeypatch, tmp_path):
+    monkeypatch.setenv("DOXIE_BACKEND_BRIDGE_URL", "http://127.0.0.1:1/api/doxie/invoke")
+    monkeypatch.setenv("DOXIE_BACKEND_BRIDGE_TOKEN", "token")
+    source_home = tmp_path / "source"
+    source_skill = source_home / "skills" / "product" / "meeting-prd"
+    source_skill.mkdir(parents=True)
+    (source_skill / "SKILL.md").write_text(
+        "---\nname: meeting-prd\ndescription: Meeting to PRD\n---\n\n# Meeting PRD\n",
+        encoding="utf-8",
+    )
+    (source_skill / "templates").mkdir()
+    (source_skill / "templates" / "prd.md").write_text("template\n", encoding="utf-8")
+    target_home = tmp_path / "draft-home"
+    calls = []
+
+    def fake_backend_call(command, payload):
+        calls.append((command, payload))
+        if command == "doxie_agent_profile_draft_prepare_runtime":
+            return {
+                "prepared": True,
+                "draft": {
+                    "id": "draft-1",
+                    "recommendedSkills": [],
+                    "missingCapabilities": ["技能未安装：meeting-prd", "其他缺失"],
+                },
+                "runtimeProfileId": "draft:draft-1",
+                "hermesHomePath": str(target_home),
+            }
+        if command == "doxie_agent_profile_draft_update":
+            return {
+                "id": payload["draftId"],
+                "recommendedSkills": payload["recommendedSkills"],
+                "missingCapabilities": payload["missingCapabilities"],
+            }
+        raise AssertionError(command)
+
+    monkeypatch.setattr("tools.doxie_agent_profile_tool._backend_call", fake_backend_call)
+    monkeypatch.setattr("tools.skills_tool.SKILLS_DIR", source_home / "skills")
+
+    result = json.loads(
+        install_skill_to_agent_profile_draft(
+            draft_id="draft-1",
+            skill_name="meeting-prd",
+        )
+    )
+
+    assert result["doxie_event"] == "agent_profile_draft_skill_installed"
+    assert result["draftId"] == "draft-1"
+    assert result["skillName"] == "meeting-prd"
+    assert (target_home / "skills" / "product" / "meeting-prd" / "SKILL.md").read_text(encoding="utf-8").startswith("---")
+    assert (target_home / "skills" / "product" / "meeting-prd" / "templates" / "prd.md").read_text(encoding="utf-8") == "template\n"
+    assert calls[-1][0] == "doxie_agent_profile_draft_update"
+    assert calls[-1][1]["recommendedSkills"] == ["meeting-prd"]
+    assert calls[-1][1]["missingCapabilities"] == ["其他缺失"]
 
 
 def test_test_agent_profile_runs_draft_through_delegation(monkeypatch, tmp_path):

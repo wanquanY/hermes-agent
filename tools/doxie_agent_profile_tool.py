@@ -129,15 +129,17 @@ DESIGN_AGENT_PROFILE_SCHEMA = {
         "only real toolsets and verified skills. Put unavailable capabilities into "
         "missing_capabilities or skill_creation_plans instead of inventing enabled "
         "tools or skills. Doxie will open the right-side creation workspace for "
-        "preview, test chat, editing, validation, testing, and publishing."
+        "preview, test chat, editing, validation, testing, and publishing. "
+        "Use operation=install_skill only after a skill is really created or "
+        "installed in Hermes and the user wants it added to a draft profile."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "operation": {
                 "type": "string",
-                "enum": ["inspect_context", "create", "update", "upsert"],
-                "description": "Use inspect_context first to retrieve real design catalog data. Use create/update/upsert for draft changes.",
+                "enum": ["inspect_context", "create", "update", "upsert", "install_skill"],
+                "description": "Use inspect_context first to retrieve real design catalog data. Use create/update/upsert for draft changes. Use install_skill to install an existing Hermes skill into a target draft profile.",
             },
             "catalog_kind": {
                 "type": "string",
@@ -155,6 +157,14 @@ DESIGN_AGENT_PROFILE_SCHEMA = {
             "draft_id": {
                 "type": "string",
                 "description": "Existing Doxie draft id to update. Leave empty only when creating a brand-new agent profile draft.",
+            },
+            "draft_reference": {
+                "type": "string",
+                "description": "Optional human-readable draft reference when installing a skill or testing and draft_id is unknown.",
+            },
+            "skill_name": {
+                "type": "string",
+                "description": "Existing Hermes skill name to install into the target draft when operation=install_skill.",
             },
             "name": {
                 "type": "string",
@@ -587,6 +597,83 @@ def _profile_design_backend_event(**kwargs) -> dict:
     }
 
 
+def _install_skill_into_draft_home(skill_name: str, target_home: Path) -> dict:
+    from tools.skill_package_lifecycle import copy_installed_skill_to_home
+
+    return copy_installed_skill_to_home(skill_name, target_home)
+
+
+def _without_skill_missing_capability(items: Any, skill_name: str) -> list[str]:
+    normalized = str(skill_name or "").strip()
+    result = []
+    for item in items if isinstance(items, list) else []:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if normalized and normalized in text and ("技能未安装" in text or "skill" in text.lower()):
+            continue
+        result.append(text)
+    return result
+
+
+def _install_skill_to_draft_event(**kwargs) -> dict:
+    skill_name = _first_non_empty(
+        kwargs.get("skill_name"),
+        kwargs.get("skillName"),
+        kwargs.get("source_skill_name"),
+        kwargs.get("sourceSkillName"),
+        kwargs.get("name"),
+    )
+    if not skill_name:
+        raise RuntimeError("skill_name is required")
+    if not _backend_bridge_available():
+        raise RuntimeError("Doxie backend bridge is required to install a skill into a draft profile.")
+
+    prepared = _backend_call(
+        "doxie_agent_profile_draft_prepare_runtime",
+        _contextual_payload(
+            {
+                "draftId": _first_non_empty(kwargs.get("draft_id"), kwargs.get("draftId")),
+                "reference": _first_non_empty(kwargs.get("draft_reference"), kwargs.get("draftReference"), kwargs.get("reference")),
+            }
+        ),
+    )
+    if not isinstance(prepared, dict) or not prepared.get("prepared"):
+        return {
+            "doxie_event": "agent_profile_draft_skill_install_resolution_required",
+            **(prepared if isinstance(prepared, dict) else {"status": "error"}),
+            "skillName": skill_name,
+        }
+
+    draft = prepared.get("draft") if isinstance(prepared.get("draft"), dict) else {}
+    draft_id = str(draft.get("id") or "").strip()
+    target_home = Path(str(prepared.get("hermesHomePath") or "")).expanduser()
+    if not draft_id or not target_home:
+        raise RuntimeError("prepared draft runtime did not return draft id or hermesHomePath")
+
+    installed = _install_skill_into_draft_home(skill_name, target_home)
+    current_skills = [str(item).strip() for item in (draft.get("recommendedSkills") or []) if str(item).strip()]
+    if installed["name"] not in current_skills:
+        current_skills.append(installed["name"])
+    update_payload = _contextual_payload(
+        {
+            "draftId": draft_id,
+            "recommendedSkills": current_skills,
+            "missingCapabilities": _without_skill_missing_capability(draft.get("missingCapabilities"), installed["name"]),
+        }
+    )
+    updated_draft = _backend_call("doxie_agent_profile_draft_update", update_payload)
+    return {
+        "doxie_event": "agent_profile_draft_skill_installed",
+        "draftId": draft_id,
+        "skillName": installed["name"],
+        "runtimeProfileId": prepared.get("runtimeProfileId") or f"draft:{draft_id}",
+        "targetHermesHome": installed["targetHermesHome"],
+        "targetSkillDir": installed["targetSkillDir"],
+        "draft": updated_draft,
+    }
+
+
 def design_agent_profile(**kwargs) -> str:
     """Inspect 分身设计 context or return a structured draft request."""
     operation = str(kwargs.get("operation") or "").strip()
@@ -598,6 +685,11 @@ def design_agent_profile(**kwargs) -> str:
                 limit=kwargs.get("limit"),
             )
         )
+    if operation == "install_skill":
+        try:
+            return tool_result(_install_skill_to_draft_event(**kwargs))
+        except Exception as exc:
+            return tool_error(f"failed to install skill into Doxie draft profile: {exc}")
     if _backend_bridge_available():
         try:
             return tool_result(_profile_design_backend_event(**kwargs))
@@ -658,6 +750,13 @@ def create_agent_profile_revision_draft(**kwargs) -> str:
 
 def prepare_agent_profile_draft_runtime(**kwargs) -> str:
     return _backend_tool_result("doxie_agent_profile_draft_prepare_runtime", kwargs)
+
+
+def install_skill_to_agent_profile_draft(**kwargs) -> str:
+    try:
+        return tool_result(_install_skill_to_draft_event(**kwargs))
+    except Exception as exc:
+        return tool_error(str(exc))
 
 
 def _slug(value: str, fallback: str = "draft") -> str:
@@ -956,6 +1055,19 @@ for _name, _description, _handler, _properties in [
         "Prepare the transient Hermes runtime files for a Doxie draft profile.",
         prepare_agent_profile_draft_runtime,
         {"draftId": {"type": "string"}, "reference": {"type": "string"}},
+    ),
+    (
+        "install_skill_to_agent_profile_draft",
+        "Install an existing Hermes skill into a Doxie draft profile runtime scope, then add it to the draft recommendedSkills. Use after creating a reusable skill with skill_manage and confirming it should belong to the draft.",
+        install_skill_to_agent_profile_draft,
+        {
+            "draftId": {"type": "string"},
+            "draft_id": {"type": "string"},
+            "reference": {"type": "string"},
+            "draft_reference": {"type": "string"},
+            "skill_name": {"type": "string"},
+            "skillName": {"type": "string"},
+        },
     ),
 ]:
     registry.register(

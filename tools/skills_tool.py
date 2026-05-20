@@ -609,6 +609,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                     "name": name,
                     "description": description,
                     "category": category,
+                    "skill_dir": str(skill_dir),
                 })
 
             except (UnicodeDecodeError, PermissionError) as e:
@@ -1564,4 +1565,3 @@ registry.register(
     check_fn=check_skills_requirements,
     emoji="📚",
 )
-

@@ -10787,6 +10787,7 @@ class AIAgent:
                 tool_call_id=tool_call_id,
                 session_id=self.session_id or "",
                 enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
+                parent_agent=self,
                 skip_pre_tool_call_hook=True,
             )
 
@@ -11504,6 +11505,7 @@ class AIAgent:
                         tool_call_id=tool_call.id,
                         session_id=self.session_id or "",
                         enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
+                        parent_agent=self,
                         skip_pre_tool_call_hook=True,
                     )
                     _spinner_result = function_result
@@ -11524,6 +11526,7 @@ class AIAgent:
                         tool_call_id=tool_call.id,
                         session_id=self.session_id or "",
                         enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
+                        parent_agent=self,
                         skip_pre_tool_call_hook=True,
                     )
                 except Exception as tool_error:

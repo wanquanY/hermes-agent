@@ -128,6 +128,24 @@ def _live_sessions_by_stored_key() -> dict[str, tuple[str, dict]]:
     return live
 
 
+def _is_empty_stored_conversation(row: dict) -> bool:
+    """Return true only when a rich session row is explicitly content-empty.
+
+    ``session.list`` can be backed by older tests or alternate DB shims that
+    expose a minimal session row. Treating missing ``message_count`` /
+    ``title`` / ``preview`` fields as empty makes the gateway silently hide
+    real history rows. Only the canonical rich-row shape can prove that a
+    stored row is an empty placeholder.
+    """
+    if not all(key in row for key in ("message_count", "title", "preview")):
+        return False
+    return (
+        int(row.get("message_count") or 0) <= 0
+        and not (row.get("title") or "").strip()
+        and not (row.get("preview") or "").strip()
+    )
+
+
 def _request_agent_interrupt_async(sid: str, agent) -> None:
     if agent is None or not hasattr(agent, "interrupt"):
         _interrupt_trace(
@@ -324,7 +342,7 @@ def _(rid, params: dict) -> dict:
     model = _resolve_model()
     if db is not None:
         try:
-            db.create_session(key, source="tui", model=model)
+            db.create_session(key, source="tui", model=model, transient=transient)
         except Exception as exc:
             return _err(rid, 5000, f"session create failed: {exc}")
 
@@ -455,6 +473,8 @@ def _(rid, params: dict) -> dict:
         for s in page_rows:
             live_sid, live_session = live_by_key.get(s["id"], ("", None))
             live_state = _session_run_snapshot(live_sid, live_session, db=db)
+            if not live_sid and _is_empty_stored_conversation(s):
+                continue
             session_items.append(
                 {
                     "id": s["id"],
@@ -951,11 +971,25 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as exc:
         return _err(rid, 5000, f"messages page failed: {exc}")
+    include_run_events = bool(params.get("include_run_events", params.get("includeRunEvents", False)))
+    run_events = []
+    if include_run_events:
+        try:
+            list_run_events = getattr(db, "list_run_events", None)
+            if callable(list_run_events):
+                run_events = list_run_events(
+                    target,
+                    runtime_scope_key=_requested_runtime_scope_key(params),
+                    limit=_bounded_page_limit(params.get("run_events_limit", params.get("runEventsLimit")), default=2000, maximum=5000),
+                )
+        except Exception as exc:
+            return _err(rid, 5000, f"run event page failed: {exc}")
     return _ok(
         rid,
         {
             "session_id": target,
             "messages": _history_to_messages(page.get("messages") or []),
+            "runEvents": run_events,
             "pageInfo": _message_page_info(page.get("pageInfo")),
         },
     )

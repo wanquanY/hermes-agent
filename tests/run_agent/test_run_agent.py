@@ -2089,9 +2089,22 @@ class TestConcurrentToolExecution:
                 tool_call_id=None,
                 session_id=agent.session_id,
                 enabled_tools=list(agent.valid_tool_names),
+                parent_agent=agent,
                 skip_pre_tool_call_hook=True,
             )
             assert result == "result"
+
+    def test_invoke_tool_passes_parent_agent_to_registry_tools(self, agent):
+        """Registry tools can depend on the active agent context."""
+        with patch("run_agent.handle_function_call", return_value="result") as mock_hfc:
+            result = agent._invoke_tool(
+                "test_agent_profile",
+                {"draft_id": "draft-1", "messages": ["hello"]},
+                "task-1",
+            )
+
+        assert result == "result"
+        assert mock_hfc.call_args.kwargs["parent_agent"] is agent
 
     def test_sequential_tool_callbacks_fire_in_order(self, agent):
         tool_call = _mock_tool_call(name="web_search", arguments='{"query":"hello"}', call_id="c1")

@@ -706,6 +706,7 @@ def handle_function_call(
     session_id: Optional[str] = None,
     user_task: Optional[str] = None,
     enabled_tools: Optional[List[str]] = None,
+    parent_agent: Optional[Any] = None,
     skip_pre_tool_call_hook: bool = False,
 ) -> str:
     """
@@ -720,6 +721,8 @@ def handle_function_call(
                        execute_code uses this list to determine which sandbox
                        tools to generate.  Falls back to the process-global
                        ``_last_resolved_tool_names`` for backward compat.
+        parent_agent: The active AIAgent for registry tools that need the
+                      current run context, such as profile testing tools.
 
     Returns:
         Function result as a JSON string.
@@ -775,19 +778,22 @@ def handle_function_call(
         # to wrap every tool manually.  We use monotonic() so the value is
         # unaffected by wall-clock adjustments during the call.
         _dispatch_start = time.monotonic()
+        dispatch_kwargs = {"task_id": task_id}
+        if parent_agent is not None:
+            dispatch_kwargs["parent_agent"] = parent_agent
         if function_name == "execute_code":
             # Prefer the caller-provided list so subagents can't overwrite
             # the parent's tool set via the process-global.
             sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
             result = registry.dispatch(
                 function_name, function_args,
-                task_id=task_id,
+                **dispatch_kwargs,
                 enabled_tools=sandbox_enabled,
             )
         else:
             result = registry.dispatch(
                 function_name, function_args,
-                task_id=task_id,
+                **dispatch_kwargs,
                 user_task=user_task,
             )
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
