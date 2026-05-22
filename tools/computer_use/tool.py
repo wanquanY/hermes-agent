@@ -69,7 +69,7 @@ def set_approval_callback(cb) -> None:
 
 
 # Actions that read, not mutate. Always allowed.
-_SAFE_ACTIONS = frozenset({"capture", "wait", "list_apps", "list_targets"})
+_SAFE_ACTIONS = frozenset({"capture", "wait", "list_apps"})
 
 # Actions that mutate user-visible state. Go through approval.
 _DESTRUCTIVE_ACTIONS = frozenset({
@@ -129,19 +129,8 @@ _always_allow: set = set()  # action names the user unlocked for the session
 def _get_backend() -> ComputerUseBackend:
     global _backend
     with _backend_lock:
-        backend_name = os.environ.get("HERMES_COMPUTER_USE_BACKEND", "cua").lower()
-        current_name = type(_backend).__name__.lower() if _backend is not None else ""
-        current_matches = (
-            (backend_name in {"cua", "cua-driver", ""} and "cuadriver" in current_name)
-            or (backend_name == "noop" and "noop" in current_name)
-        )
-        if _backend is not None and not current_matches:
-            try:
-                _backend.stop()
-            except Exception:
-                pass
-            _backend = None
         if _backend is None:
+            backend_name = os.environ.get("HERMES_COMPUTER_USE_BACKEND", "cua").lower()
             if backend_name in {"cua", "cua-driver", ""}:
                 from tools.computer_use.cua_backend import CuaDriverBackend
                 _backend = CuaDriverBackend()
@@ -178,16 +167,10 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
     def stop(self) -> None: self._started = False
     def is_available(self) -> bool: return True
 
-    def capture(
-        self,
-        mode: str = "som",
-        app: Optional[str] = None,
-        target_id: Optional[str] = None,
-    ) -> CaptureResult:
-        self.calls.append(("capture", {"mode": mode, "app": app, "target_id": target_id}))
+    def capture(self, mode: str = "som", app: Optional[str] = None) -> CaptureResult:
+        self.calls.append(("capture", {"mode": mode, "app": app}))
         return CaptureResult(mode=mode, width=1024, height=768, png_b64=None,
-                             elements=[], app=app or "", window_title="",
-                             target_id=target_id or "")
+                             elements=[], app=app or "", window_title="")
 
     def click(self, **kw) -> ActionResult:
         self.calls.append(("click", kw))
@@ -212,10 +195,6 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
     def list_apps(self) -> List[Dict[str, Any]]:
         self.calls.append(("list_apps", {}))
         return []
-
-    def list_targets(self) -> Dict[str, Any]:
-        self.calls.append(("list_targets", {}))
-        return {"displays": [], "windows": [], "active_target_id": None}
 
     def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
         self.calls.append(("focus_app", {"app": app, "raise": raise_window}))
@@ -337,8 +316,8 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
         mode = str(args.get("mode", "som"))
         if mode not in {"som", "vision", "ax"}:
             return json.dumps({"error": f"bad mode {mode!r}; use som|vision|ax"})
-        cap = backend.capture(mode=mode, app=args.get("app"), target_id=args.get("target_id"))
-        return _capture_response(cap)
+        cap = backend.capture(mode=mode, app=args.get("app"))
+        return _capture_response(cap, max_elements=_coerce_max_elements(args.get("max_elements")))
 
     if action == "wait":
         seconds = float(args.get("seconds", 1.0))
@@ -348,10 +327,6 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
     if action == "list_apps":
         apps = backend.list_apps()
         return json.dumps({"apps": apps, "count": len(apps)})
-
-    if action == "list_targets":
-        targets = backend.list_targets()
-        return json.dumps(targets)
 
     if action == "focus_app":
         app = args.get("app")
@@ -382,6 +357,12 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
         return _maybe_follow_capture(backend, res, capture_after)
 
     if action == "drag":
+        has_elements = args.get("from_element") is not None and args.get("to_element") is not None
+        has_coords = args.get("from_coordinate") and args.get("to_coordinate")
+        if not has_elements and not has_coords:
+            return json.dumps({
+                "error": "drag requires from_coordinate/to_coordinate or from_element/to_element",
+            })
         res = backend.drag(
             from_element=args.get("from_element"),
             to_element=args.get("to_element"),
@@ -435,29 +416,88 @@ def _text_response(res: ActionResult) -> str:
     return json.dumps(payload)
 
 
-def _capture_response(cap: CaptureResult) -> Any:
-    element_index = _format_elements(cap.elements)
+# Default cap for the AX `elements` array returned by capture. Dense UIs
+# (Electron apps, Obsidian, JetBrains IDEs) can publish 500+ AX nodes, which
+# can exhaust session context after a single capture. The model-facing
+# `max_elements` argument lets callers raise this when they need the full tree.
+_DEFAULT_MAX_ELEMENTS = 100
+# Hard upper bound on caller-supplied `max_elements`. Without this, a tool
+# call passing a very large integer would silently disable the safeguard and
+# reintroduce the original unbounded behavior.
+_MAX_ALLOWED_MAX_ELEMENTS = 1000
+
+
+def _coerce_max_elements(value: Any) -> int:
+    """Validate the caller-supplied ``max_elements``.
+
+    Falls back to :data:`_DEFAULT_MAX_ELEMENTS` for missing / non-integer /
+    sub-1 inputs so the cap can never be silently disabled by a malformed
+    tool-call argument. Clamps oversized values to
+    :data:`_MAX_ALLOWED_MAX_ELEMENTS` so a caller cannot bypass the
+    safeguard by passing a very large integer.
+    """
+    if value is None:
+        return _DEFAULT_MAX_ELEMENTS
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_ELEMENTS
+    if n < 1:
+        return _DEFAULT_MAX_ELEMENTS
+    if n > _MAX_ALLOWED_MAX_ELEMENTS:
+        return _MAX_ALLOWED_MAX_ELEMENTS
+    return n
+
+
+def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEMENTS) -> Any:
+    total_elements = len(cap.elements)
+    visible_elements = cap.elements[:max_elements]
+    truncated_elements = max(0, total_elements - len(visible_elements))
+
+    # Index only what's actually surfaced in the response — otherwise the
+    # human-readable summary references element indices the model cannot
+    # find in the JSON `elements` array (e.g. max_elements=10 vs the default
+    # 40-line index window).
+    element_index = _format_elements(visible_elements)
     summary_lines = [
         f"capture mode={cap.mode} {cap.width}x{cap.height}"
         + (f" app={cap.app}" if cap.app else "")
-        + (f" window={cap.window_title!r}" if cap.window_title else "")
-        + (f" target={cap.target_id}" if cap.target_id else "")
-        + (f" display={cap.display_id}" if cap.display_id else ""),
-        f"{len(cap.elements)} interactable element(s):",
+        + (f" window={cap.window_title!r}" if cap.window_title else ""),
+        f"{total_elements} interactable element(s):",
     ]
-    if cap.warnings:
-        summary_lines.append("warnings:")
-        summary_lines.extend(f"  - {warning}" for warning in cap.warnings)
     if element_index:
         summary_lines.extend(element_index)
+    # Multimodal and AX paths both reference `summary`; build it once up-front
+    # so the aux-vision routing branch (which fires before either path is
+    # selected) has a valid value to hand to _route_capture_through_aux_vision.
+    # The AX path appends the "truncated to N of M" note to summary_lines
+    # below and rebuilds; the multimodal path keeps this version untouched.
     summary = "\n".join(summary_lines)
 
     if cap.png_b64 and cap.mode != "ax":
+        # Decide whether to hand the screenshot to the auxiliary.vision
+        # pipeline (text-only result) or keep the multimodal envelope (main
+        # model handles vision natively). Issue #24015: previously the
+        # multimodal envelope was returned unconditionally, so non-vision
+        # main models tripped HTTP 404 / 400 at the provider boundary even
+        # when auxiliary.vision was explicitly configured to handle this.
+        if _should_route_through_aux_vision():
+            routed = _route_capture_through_aux_vision(cap, summary)
+            if routed is not None:
+                return routed
+            # Aux routing was requested but failed (no vision client, aux
+            # call raised, etc.). Fall through to the multimodal envelope —
+            # better to surface a tool-result error from the main model
+            # than to silently drop the screenshot entirely.
+
         # Detect actual image format from base64 magic bytes so the MIME type
         # matches what the data contains (cua-driver may return JPEG or PNG).
         # JPEG: base64 starts with /9j/   PNG: starts with iVBOR
         _b64_prefix = cap.png_b64[:8]
         _mime = "image/jpeg" if _b64_prefix.startswith("/9j/") else "image/png"
+        # The multimodal response carries the screenshot, not the AX
+        # elements array, so a "response truncated to N of M elements"
+        # note would be inaccurate — skip it on this branch.
         return {
             "_multimodal": True,
             "content": [
@@ -466,9 +506,153 @@ def _capture_response(cap: CaptureResult) -> Any:
                  "image_url": {"url": f"data:{_mime};base64,{cap.png_b64}"}},
             ],
             "text_summary": summary,
-            "meta": _capture_meta(cap),
+            "meta": {"mode": cap.mode, "width": cap.width, "height": cap.height,
+                     "elements": total_elements, "png_bytes": cap.png_bytes_len},
         }
-    # AX-only (or image missing): text path.
+    # AX-only (or image-missing fallback): text path actually carries the
+    # `elements` array, so the truncation note applies here.
+    if truncated_elements:
+        summary_lines.append(
+            f"  (response truncated to {len(visible_elements)} of {total_elements} elements; "
+            f"raise max_elements or pass app= to narrow)"
+        )
+    summary = "\n".join(summary_lines)
+    payload: Dict[str, Any] = {
+        "mode": cap.mode,
+        "width": cap.width,
+        "height": cap.height,
+        "app": cap.app,
+        "window_title": cap.window_title,
+        "elements": [_element_to_dict(e) for e in visible_elements],
+        "total_elements": total_elements,
+        "summary": summary,
+    }
+    if truncated_elements:
+        payload["truncated_elements"] = truncated_elements
+    return json.dumps(payload)
+
+
+# ---------------------------------------------------------------------------
+# auxiliary.vision routing for captured screenshots (#24015)
+# ---------------------------------------------------------------------------
+
+def _should_route_through_aux_vision() -> bool:
+    """Return True when ``_capture_response`` should hand the PNG to aux vision.
+
+    Reads the active main provider/model and the loaded config and asks the
+    routing helper. Any failure (config import, runtime override missing,
+    etc.) returns False so the existing multimodal envelope continues to be
+    returned — fail open on the routing decision so a broken config can
+    never silently drop the screenshot for vision-capable main models.
+    """
+    try:
+        from agent.auxiliary_client import _read_main_model, _read_main_provider
+        from hermes_cli.config import load_config
+        from tools.computer_use.vision_routing import (
+            should_route_capture_to_aux_vision,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("computer_use: aux-vision routing import failed: %s", exc)
+        return False
+    try:
+        provider = _read_main_provider()
+        model = _read_main_model()
+        cfg = load_config()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("computer_use: aux-vision routing config read failed: %s", exc)
+        return False
+    try:
+        return bool(should_route_capture_to_aux_vision(provider, model, cfg))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("computer_use: aux-vision routing decision failed: %s", exc)
+        return False
+
+
+def _route_capture_through_aux_vision(
+    cap: CaptureResult,
+    summary: str,
+) -> Optional[str]:
+    """Pre-analyse the captured PNG via ``vision_analyze`` and return a text result.
+
+    The captured base64 PNG is materialised to ``$HERMES_HOME/cache/vision/``
+    and handed to ``vision_analyze_tool`` with a generic describe prompt.
+    The resulting text description is merged into the existing AX/SOM
+    summary so the main model receives a single text payload that mentions
+    every interactable element AND a description of what the screenshot
+    looked like.
+
+    Returns:
+      A JSON-encoded text response on success.
+      ``None`` on failure (caller falls back to the multimodal envelope).
+    """
+    if not cap.png_b64:
+        return None
+    try:
+        import base64 as _base64
+        import os as _os
+        import uuid as _uuid
+
+        from hermes_constants import get_hermes_dir
+        from model_tools import _run_async
+        from tools.vision_tools import vision_analyze_tool
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("computer_use: aux-vision import failed: %s", exc)
+        return None
+
+    temp_image_path = None
+    try:
+        try:
+            raw = _base64.b64decode(cap.png_b64, validate=False)
+        except Exception as exc:
+            logger.debug("computer_use: failed to decode capture base64: %s", exc)
+            return None
+
+        # Pick an extension that matches the on-disk bytes so vision_analyze's
+        # MIME sniffing returns the right content-type.
+        ext = ".jpg" if cap.png_b64[:8].startswith("/9j/") else ".png"
+        cache_dir = get_hermes_dir("cache/vision", "temp_vision_images")
+        temp_image_path = cache_dir / f"computer_use_{_uuid.uuid4().hex}{ext}"
+        temp_image_path.write_bytes(raw)
+
+        prompt = (
+            "Describe what is visible in this macOS application screenshot in "
+            "concise but specific terms. Mention the app name and window "
+            "title if visible, the overall layout, any labelled buttons, "
+            "menus or text fields, and any prominent text content the user "
+            "would need to know about. Do not invent details that are not "
+            "actually visible.\n\n"
+            f"AX/SOM index for cross-reference:\n{summary}"
+        )
+
+        result_json = _run_async(
+            vision_analyze_tool(str(temp_image_path), prompt)
+        )
+    except Exception as exc:
+        logger.warning(
+            "computer_use: auxiliary.vision pre-analysis failed (%s); "
+            "falling back to native multimodal envelope",
+            exc,
+        )
+        return None
+    finally:
+        if temp_image_path is not None:
+            try:
+                _os.unlink(str(temp_image_path))
+            except Exception:
+                pass
+
+    analysis_text = ""
+    if isinstance(result_json, str):
+        try:
+            parsed = json.loads(result_json)
+            if isinstance(parsed, dict):
+                analysis_text = str(parsed.get("analysis") or "").strip()
+        except (TypeError, json.JSONDecodeError):
+            analysis_text = result_json.strip()
+
+    if not analysis_text:
+        return None
+
     return json.dumps({
         "mode": cap.mode,
         "width": cap.width,
@@ -476,29 +660,10 @@ def _capture_response(cap: CaptureResult) -> Any:
         "app": cap.app,
         "window_title": cap.window_title,
         "elements": [_element_to_dict(e) for e in cap.elements],
-        "meta": _capture_meta(cap),
-        "warnings": cap.warnings,
         "summary": summary,
+        "vision_analysis": analysis_text,
+        "vision_analysis_routed_via": "auxiliary.vision",
     })
-
-
-def _capture_meta(cap: CaptureResult) -> Dict[str, Any]:
-    return {
-        "mode": cap.mode,
-        "width": cap.width,
-        "height": cap.height,
-        "elements": len(cap.elements),
-        "png_bytes": cap.png_bytes_len,
-        "target_id": cap.target_id,
-        "pid": cap.pid,
-        "window_id": cap.window_id,
-        "display_id": cap.display_id,
-        "window_bounds": list(cap.window_bounds) if cap.window_bounds else None,
-        "capture_bounds": list(cap.capture_bounds) if cap.capture_bounds else None,
-        "coordinate_space": cap.coordinate_space,
-        "scale_factor": cap.scale_factor,
-        "warnings": cap.warnings,
-    }
 
 
 def _maybe_follow_capture(
@@ -507,10 +672,11 @@ def _maybe_follow_capture(
     if not do_capture:
         return _text_response(res)
     try:
-        target_id = None
-        if res.meta:
-            target_id = res.meta.get("target_id")
-        cap = backend.capture(mode="som", target_id=target_id)
+        # Preserve the app context established by the preceding capture/focus_app so
+        # that capture_after=True re-captures the same app rather than the frontmost
+        # window (which may have changed if the action caused a focus shift).
+        last_app = getattr(backend, "_last_app", None)
+        cap = backend.capture(mode="som", app=last_app)
     except Exception as e:
         logger.warning("follow-up capture failed: %s", e)
         return _text_response(res)
@@ -561,7 +727,7 @@ def _element_to_dict(e: UIElement) -> Dict[str, Any]:
 def check_computer_use_requirements() -> bool:
     """Return True iff computer_use can run on this host.
 
-    Conditions: macOS + cua-driver binary installed.
+    Conditions: macOS + cua-driver binary installed (or override via env).
     """
     if sys.platform != "darwin":
         return False

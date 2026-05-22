@@ -20,10 +20,7 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
         "keyboard, scroll, drag — without stealing the user's cursor, "
         "keyboard focus, or Space. Preferred workflow: call with "
         "action='capture' (mode='som' gives numbered element overlays), "
-        "then click by `element` index for reliability. Use "
-        "action='list_targets' when multiple displays or multiple windows "
-        "may be involved, then pass `target_id` to bind subsequent captures. "
-        "Pixel coordinates "
+        "then click by `element` index for reliability. Pixel coordinates "
         "are supported for models trained on them. Works on any window — "
         "hidden, minimized, on another Space, or behind another app. "
         "macOS only; requires cua-driver to be installed."
@@ -46,7 +43,6 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
                     "set_value",
                     "wait",
                     "list_apps",
-                    "list_targets",
                     "focus_app",
                 ],
                 "description": (
@@ -79,13 +75,27 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
                     "frontmost app's window or the whole screen."
                 ),
             },
-            "target_id": {
-                "type": "string",
+            "max_elements": {
+                "type": "integer",
                 "description": (
-                    "Stable target returned by action='list_targets' or in a "
-                    "capture response, e.g. 'window:12345'. Use this instead "
-                    "of app name when multiple windows or displays exist."
+                    "Optional cap on the AX `elements` array returned by "
+                    "`action='capture'`. Default 100, hard maximum 1000. "
+                    "Dense UIs (Electron apps such as Obsidian or VS Code, "
+                    "JetBrains IDEs) can publish 500+ AX nodes — capping "
+                    "prevents a single capture from blowing session "
+                    "context. When the cap trims the response, "
+                    "`total_elements` and `truncated_elements` are "
+                    "surfaced in the result so you can re-call with "
+                    "`app=` to narrow scope or raise `max_elements` when "
+                    "the full tree is required. Has no effect on "
+                    "`mode='som'` / `mode='vision'` when a screenshot is "
+                    "included in the response; only the rare image-"
+                    "missing fallback returns an `elements` array and is "
+                    "subject to the cap."
                 ),
+                "default": 100,
+                "minimum": 1,
+                "maximum": 1000,
             },
             # ── click / drag / scroll targeting ────────────────────
             "element": {
@@ -102,9 +112,9 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
                 "minItems": 2,
                 "maxItems": 2,
                 "description": (
-                    "Pixel coordinates [x, y] in the capture response's "
-                    "`coordinate_space` (normally window-local logical "
-                    "pixels). Only use this if no element index is available."
+                    "Pixel coordinates [x, y] in logical screen space (as "
+                    "returned by capture width/height). Only use this if "
+                    "no element index is available."
                 ),
             },
             "button": {
@@ -177,10 +187,10 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
             "raise_window": {
                 "type": "boolean",
                 "description": (
-                    "Only for action='focus_app'. Current cua-driver backend "
-                    "uses focus_app as a background target selector. It does "
-                    "not bring the window to front; returned metadata says "
-                    "whether foreground raise is supported."
+                    "Only for action='focus_app'. If true, brings the "
+                    "window to front (DISRUPTS the user). Default false "
+                    "— input is routed to the app without raising, "
+                    "matching the background co-work model."
                 ),
             },
             # ── return shape ───────────────────────────────────────
