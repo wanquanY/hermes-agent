@@ -18,6 +18,10 @@ DOXIE_STRUCTURED_RESULT_TOOLS = {
     "create_agent_profile_revision_draft",
     "doxie_agent_profile_create_draft",
     "test_agent_profile",
+    "doxie_automation_task_create",
+    "doxie_automation_task_list",
+    "doxie_automation_task_update",
+    "doxie_automation_task_remove",
 }
 
 
@@ -82,6 +86,23 @@ def _doxie_structured_tool_result(name: str, result: str) -> dict | None:
         if event_name != "agent_profile_test_completed":
             return None
         return data
+    if name == "doxie_automation_task_create":
+        if event_name != "automation_job_created":
+            return None
+        job = data.get("job")
+        return data if isinstance(job, dict) else None
+    if name == "doxie_automation_task_list":
+        if event_name != "automation_job_listed":
+            return None
+        return data if isinstance(data.get("jobs"), list) else None
+    if name == "doxie_automation_task_update":
+        if event_name != "automation_job_updated":
+            return None
+        return data if isinstance(data.get("job"), dict) else None
+    if name == "doxie_automation_task_remove":
+        if event_name != "automation_job_removed":
+            return None
+        return data if isinstance(data.get("job"), dict) else None
     if event_name not in {
         "agent_profile_draft_requested",
         "agent_profile_design_draft_requested",
@@ -123,15 +144,23 @@ class GatewayToolEventBridge:
         emit: Callable[[str, str, dict | None], Any],
         tool_progress_enabled: Callable[[str], bool],
         session_cwd: Callable[[dict], str],
+        session_verbose: Callable[[str], bool] | None = None,
         tool_context: Callable[[str, dict], str] = default_tool_context,
         tool_args_payload: Callable[[dict | None], dict] = default_tool_args_payload,
+        tool_args_text: Callable[[dict], str] | None = None,
+        tool_result_text: Callable[[object], str] | None = None,
+        thinking_event: str = "agent.musing",
     ) -> None:
         self._sessions = sessions
         self._emit = emit
         self._tool_progress_enabled = tool_progress_enabled
         self._session_cwd = session_cwd
+        self._session_verbose = session_verbose or (lambda _sid: False)
         self._tool_context = tool_context
         self._tool_args_payload = tool_args_payload
+        self._tool_args_text = tool_args_text
+        self._tool_result_text = tool_result_text
+        self._thinking_event = thinking_event
 
     def on_tool_start(self, sid: str, tool_call_id: str, name: str, args: dict) -> None:
         session = self._sessions.get(sid)
@@ -149,16 +178,27 @@ class GatewayToolEventBridge:
                 pass
             session.setdefault("tool_started_at", {})[tool_call_id] = time.time()
         if enabled:
-            self._emit(
-                "tool.start",
-                sid,
-                {
-                    "tool_id": tool_call_id,
-                    "name": name,
-                    "context": self._tool_context(name, args),
-                    "arguments": self._tool_args_payload(args),
-                },
-            )
+            payload = {
+                "tool_id": tool_call_id,
+                "name": name,
+                "context": self._tool_context(name, args),
+                "arguments": self._tool_args_payload(args),
+            }
+            if self._session_verbose(sid) and self._tool_args_text:
+                args_text = self._tool_args_text(args)
+                if args_text:
+                    payload["args_text"] = args_text
+            self._emit("tool.start", sid, payload)
+            if name == "test_agent_profile":
+                self._emit(
+                    "agent_profile_test.start",
+                    sid,
+                    {
+                        "tool_id": tool_call_id,
+                        "name": name,
+                        "arguments": self._tool_args_payload(args),
+                    },
+                )
 
     def on_tool_complete(self, sid: str, tool_call_id: str, name: str, args: dict, result: str) -> None:
         session = self._sessions.get(sid)
@@ -181,6 +221,10 @@ class GatewayToolEventBridge:
         summary = _tool_summary(name, result, duration_s)
         if summary:
             payload["summary"] = summary
+        if self._session_verbose(sid) and self._tool_result_text:
+            result_text = self._tool_result_text(result)
+            if result_text:
+                payload["result_text"] = result_text
         doxie_result = _doxie_structured_tool_result(name, result)
         if doxie_result:
             payload["result"] = doxie_result
@@ -208,6 +252,8 @@ class GatewayToolEventBridge:
         enabled = self._tool_progress_enabled(sid)
         if enabled or payload.get("inline_diff") or doxie_result:
             self._emit("tool.complete", sid, payload)
+            if name == "test_agent_profile":
+                self._emit("agent_profile_test.complete", sid, payload)
         self.emit_artifacts_from_tool_complete(sid, tool_call_id, name, args, result)
 
     def emit_artifacts_from_tool_complete(
@@ -256,9 +302,13 @@ class GatewayToolEventBridge:
         if session_interrupted(self._sessions.get(sid)) or not self._tool_progress_enabled(sid):
             return
         if event_type == "tool.started" and name:
+            self._emit("tool.progress", sid, {"name": name, "preview": preview or ""})
             return
         if event_type == "reasoning.available" and preview:
-            self._emit("reasoning.available", sid, {"text": str(preview)})
+            payload: dict[str, object] = {"text": str(preview)}
+            if self._session_verbose(sid):
+                payload["verbose"] = True
+            self._emit("reasoning.available", sid, payload)
             return
         if not event_type.startswith("subagent."):
             return
@@ -302,6 +352,17 @@ class GatewayToolEventBridge:
         if preview and event_type == "subagent.tool":
             payload["tool_preview"] = str(preview)
             payload["text"] = str(preview)
+        if name == "test_agent_profile":
+            mapped_type = {
+                "subagent.output_delta": "agent_profile_test.output_delta",
+                "subagent.thinking": "agent_profile_test.thinking",
+                "subagent.tool": "agent_profile_test.tool",
+                "subagent.progress": "agent_profile_test.progress",
+                "subagent.complete": "agent_profile_test.complete",
+            }.get(event_type)
+            if mapped_type:
+                self._emit(mapped_type, sid, payload)
+                return
         self._emit(event_type, sid, payload)
 
     def agent_callbacks(
@@ -321,9 +382,15 @@ class GatewayToolEventBridge:
             ),
             "tool_gen_callback": lambda name: self._tool_progress_enabled(sid)
             and self._emit("tool.generating", sid, {"name": name}),
-            "thinking_callback": lambda text: self._emit("agent.musing", sid, {"text": text}),
+            "thinking_callback": lambda text: self._emit(self._thinking_event, sid, {"text": text}),
             "reasoning_callback": lambda text: self._emit(
-                "reasoning.delta", sid, {"text": text, "source": "provider_reasoning"}
+                "reasoning.delta",
+                sid,
+                {
+                    "text": text,
+                    "source": "provider_reasoning",
+                    **({"verbose": True} if self._session_verbose(sid) else {}),
+                },
             ),
             "status_callback": lambda kind, text=None: status_update(
                 sid, str(kind), None if text is None else str(text)

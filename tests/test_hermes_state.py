@@ -153,6 +153,35 @@ class TestMessageStorage:
         assert messages[0]["content"] == "Hello"
         assert messages[1]["role"] == "assistant"
 
+    def test_message_metadata_round_trips(self, db):
+        db.create_session(session_id="s1", source="cli")
+        metadata = {
+            "turn_id": "turn-1",
+            "run_id": "run-1",
+            "client_message_id": "msg-1",
+        }
+
+        db.append_message("s1", role="user", content="Hello", metadata=metadata)
+
+        messages = db.get_messages("s1")
+        assert messages[0]["metadata"] == metadata
+
+        conversation = db.get_messages_as_conversation("s1", include_storage_metadata=True)
+        assert conversation[0]["metadata"] == metadata
+
+    def test_replace_messages_preserves_metadata(self, db):
+        db.create_session(session_id="s1", source="cli")
+        metadata = {
+            "turn_id": "turn-1",
+            "run_id": "run-1",
+            "client_message_id": "msg-1",
+        }
+
+        db.replace_messages("s1", [{"role": "user", "content": "Hello", "metadata": metadata}])
+
+        conversation = db.get_messages_as_conversation("s1", include_storage_metadata=True)
+        assert conversation[0]["metadata"] == metadata
+
     def test_message_increments_session_count(self, db):
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="Hello")
@@ -243,6 +272,62 @@ class TestMessageStorage:
         conv = db.get_messages_as_conversation("s1")
         assert len(conv) == 1
         assert conv[0] == {"role": "user", "content": content}
+
+    def test_get_messages_page_tail_returns_storage_cursors(self, db):
+        db.create_session(session_id="s1", source="cli")
+        ids = [
+            db.append_message("s1", role="user", content=f"msg {idx}")
+            for idx in range(5)
+        ]
+
+        page = db.get_messages_page_as_conversation("s1", direction="tail", limit=2)
+
+        assert [m["content"] for m in page["messages"]] == ["msg 3", "msg 4"]
+        assert [m["message_id"] for m in page["messages"]] == [str(ids[3]), str(ids[4])]
+        assert page["messages"][0]["timestamp"]
+        assert page["pageInfo"] == {
+            "prev_cursor_id": ids[3],
+            "next_cursor_id": None,
+            "hasMoreBefore": True,
+            "hasMoreAfter": False,
+            "totalCount": 5,
+        }
+
+    def test_get_messages_page_before_cursor_returns_older_page(self, db):
+        db.create_session(session_id="s1", source="cli")
+        ids = [
+            db.append_message("s1", role="user", content=f"msg {idx}")
+            for idx in range(5)
+        ]
+
+        page = db.get_messages_page_as_conversation(
+            "s1",
+            direction="before",
+            cursor_id=ids[3],
+            limit=2,
+        )
+
+        assert [m["content"] for m in page["messages"]] == ["msg 1", "msg 2"]
+        assert page["pageInfo"]["prev_cursor_id"] == ids[1]
+        assert page["pageInfo"]["next_cursor_id"] == ids[2]
+        assert page["pageInfo"]["hasMoreBefore"] is True
+        assert page["pageInfo"]["hasMoreAfter"] is True
+
+    def test_get_messages_page_includes_ancestor_messages(self, db):
+        db.create_session(session_id="root", source="cli")
+        db.append_message("root", role="user", content="root question")
+        db.create_session(session_id="child", source="cli", parent_session_id="root")
+        db.append_message("child", role="assistant", content="child answer")
+
+        page = db.get_messages_page_as_conversation(
+            "child",
+            direction="tail",
+            limit=10,
+            include_ancestors=True,
+        )
+
+        assert [m["content"] for m in page["messages"]] == ["root question", "child answer"]
+        assert page["pageInfo"]["totalCount"] == 2
 
     def test_dict_content_round_trip(self, db):
         """Dict-shaped content (e.g. provider wrappers) also round-trips."""
@@ -2174,6 +2259,63 @@ class TestListSessionsRich:
             s["id"] for s in db.list_sessions_rich(limit=5, order_by_last_active=True)
         ] == ["old", "new"]
 
+    def test_page_cursor_paginates_order_by_last_active(self, db):
+        t0 = 1709500000.0
+        rows = [
+            ("old-active", t0, t0 + 30),
+            ("mid-active", t0 + 10, t0 + 20),
+            ("new-start", t0 + 20, t0 + 10),
+        ]
+        for session_id, started_at, message_ts in rows:
+            db.create_session(session_id, "cli")
+            with db._lock:
+                db._conn.execute(
+                    "UPDATE sessions SET started_at=? WHERE id=?",
+                    (started_at, session_id),
+                )
+            db.append_message(session_id, "user", session_id)
+            with db._lock:
+                db._conn.execute(
+                    "UPDATE messages SET timestamp=? WHERE session_id=? AND content=?",
+                    (message_ts, session_id, session_id),
+                )
+                db._conn.commit()
+
+        first_page = db.list_sessions_rich(limit=2, order_by_last_active=True)
+        assert [s["id"] for s in first_page] == ["old-active", "mid-active"]
+        assert first_page[-1]["_page_cursor"] == {
+            "effective_last_active": t0 + 20,
+            "started_at": t0 + 10,
+            "id": "mid-active",
+        }
+
+        second_page = db.list_sessions_rich(
+            limit=2,
+            order_by_last_active=True,
+            page_cursor=first_page[-1]["_page_cursor"],
+        )
+        assert [s["id"] for s in second_page] == ["new-start"]
+
+    def test_page_cursor_paginates_started_at_order(self, db):
+        t0 = 1709500000.0
+        for index, session_id in enumerate(("s1", "s2", "s3")):
+            db.create_session(session_id, "cli")
+            with db._lock:
+                db._conn.execute(
+                    "UPDATE sessions SET started_at=? WHERE id=?",
+                    (t0 + index, session_id),
+                )
+                db._conn.commit()
+
+        first_page = db.list_sessions_rich(limit=2)
+        assert [s["id"] for s in first_page] == ["s3", "s2"]
+
+        second_page = db.list_sessions_rich(
+            limit=2,
+            page_cursor=first_page[-1]["_page_cursor"],
+        )
+        assert [s["id"] for s in second_page] == ["s1"]
+
     def test_order_by_last_active_uses_compression_tip_activity(self, db):
         """A compression root whose tip was touched recently must rank above
         a newer uncompressed session, even when that tip activity lives in a
@@ -2998,4 +3140,3 @@ class TestFTS5ToolCallMigration:
             assert version == SCHEMA_VERSION
         finally:
             session_db.close()
-

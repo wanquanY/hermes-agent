@@ -573,7 +573,12 @@ def test_history_to_messages_preserves_tool_calls_for_resume_display():
 
     assert server._history_to_messages(history) == [
         {"role": "user", "text": "first prompt"},
-        {"context": "resume", "name": "search_files", "role": "tool"},
+        {
+            "arguments": {"pattern": "resume"},
+            "context": "resume",
+            "name": "search_files",
+            "role": "tool",
+        },
         {"role": "assistant", "text": "first answer"},
         {"role": "user", "text": "second prompt"},
     ]
@@ -3378,6 +3383,52 @@ def test_session_create_continues_when_state_db_is_unavailable(monkeypatch):
     server._sessions.pop(sid, None)
 
 
+def test_session_turn_toolsets_are_added_to_prewarmed_agent(monkeypatch):
+    from tui_gateway.services.toolset_scope import ensure_session_turn_toolsets
+
+    class _FakeAgent:
+        quiet_mode = True
+        disabled_toolsets = None
+
+        def __init__(self):
+            self.enabled_toolsets = ["memory"]
+            self.tools = []
+            self.valid_tool_names = set()
+
+    emits = []
+    agent = _FakeAgent()
+    session = {"agent": agent, "enabled_toolsets_override": ["memory"]}
+
+    ensure_session_turn_toolsets(
+        sid="sid-design",
+        session=session,
+        requested_toolsets=["doxie", "skills"],
+        load_enabled_toolsets=lambda: ["memory"],
+        emit_session_info=lambda sid, agent: emits.append((sid, sorted(agent.valid_tool_names))),
+    )
+
+    assert "doxie" in agent.enabled_toolsets
+    assert "skills" in agent.enabled_toolsets
+    assert {"design_agent_profile", "test_agent_profile", "skills_list"} <= agent.valid_tool_names
+    assert emits[-1][0] == "sid-design"
+
+
+def test_session_turn_toolsets_are_used_when_agent_builds_after_submit(monkeypatch):
+    from tui_gateway.services.toolset_scope import ensure_session_turn_toolsets
+
+    session = {}
+
+    ensure_session_turn_toolsets(
+        sid="sid-design",
+        session=session,
+        requested_toolsets=["doxie"],
+        load_enabled_toolsets=lambda: ["memory"],
+        emit_session_info=lambda *_args: None,
+    )
+
+    assert session["enabled_toolsets_override"] == ["memory", "doxie"]
+
+
 def test_session_list_returns_clean_error_when_state_db_is_unavailable(monkeypatch):
     monkeypatch.setattr(server, "_get_db", lambda: None)
     monkeypatch.setattr(server, "_db_error", "locking protocol")
@@ -3628,6 +3679,55 @@ class _ImmediateThread:
         self._target()
 
 
+def test_prompt_submit_emits_explicit_append_and_snapshot_message_delta(monkeypatch):
+    """Gateway text events expose deterministic reducer semantics to clients."""
+
+    class _Agent:
+        session_id = "session-key"
+
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None, **_kwargs):
+            stream_callback("你好，我是小多～很高兴见到。")
+            stream_callback("你好，我是小多～很高兴见到你。\n\n如果你愿意，我们可以先对齐一下合作方式。")
+            stream_callback(" 继续说。")
+            return {
+                "final_response": "你好，我是小多～很高兴见到你。\n\n如果你愿意，我们可以先对齐一下合作方式。 继续说。",
+                "messages": [
+                    {"role": "user", "content": "你好"},
+                    {
+                        "role": "assistant",
+                        "content": "你好，我是小多～很高兴见到你。\n\n如果你愿意，我们可以先对齐一下合作方式。 继续说。",
+                    },
+                ],
+            }
+
+    emitted = []
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    try:
+        server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid", "text": "你好"},
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    deltas = [args[2] for args in emitted if args[0] == "message.delta"]
+    assert [payload["mode"] for payload in deltas] == ["append", "snapshot", "append"]
+    assert deltas[0]["delta"] == "你好，我是小多～很高兴见到。"
+    assert deltas[0]["offset"] == 0
+    assert deltas[1]["snapshot"].startswith("你好，我是小多～很高兴见到你。")
+    assert deltas[1]["text"] == deltas[1]["snapshot"]
+    assert deltas[2]["delta"] == " 继续说。"
+
+
 def test_prompt_submit_auto_titles_session_on_complete(monkeypatch):
     """maybe_auto_title is called after a successful (complete) prompt."""
 
@@ -3696,6 +3796,170 @@ def test_prompt_submit_skips_auto_title_when_interrupted(monkeypatch):
         )
 
     mock_title.assert_not_called()
+
+
+def test_prompt_submit_does_not_surface_interrupt_diagnostic_as_text(monkeypatch):
+    """Interrupted turns are terminal state, not assistant content."""
+
+    class _Agent:
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            return {
+                "final_response": "Operation interrupted: waiting for model response (7.9s elapsed).",
+                "interrupted": True,
+                "messages": [],
+            }
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    server.handle_request(
+        {
+            "id": "1",
+            "method": "prompt.submit",
+            "params": {"session_id": "sid", "text": "Tell me about Rome"},
+        }
+    )
+
+    complete_events = [e for e in emitted if e[0] == "message.complete"]
+    assert complete_events, "expected message.complete to be emitted"
+    payload = complete_events[-1][2]
+    assert payload.get("status") == "interrupted"
+    assert payload.get("text") == ""
+    assert payload.get("interrupt_detail", "").startswith("Operation interrupted:")
+
+
+def test_prompt_submit_persists_interrupted_partial_after_tool_flush(monkeypatch):
+    """Interrupted post-tool text must append after already-flushed tool messages."""
+
+    class _Agent:
+        session_id = "session-key"
+
+        def __init__(self):
+            self.persisted_messages = None
+            self.persisted_history = None
+
+        def run_conversation(
+            self,
+            prompt,
+            conversation_history=None,
+            stream_callback=None,
+            turn_metadata=None,
+            **_kwargs,
+        ):
+            if stream_callback:
+                stream_callback("partial after tool")
+            session = server._sessions["sid"]
+            with session["history_lock"]:
+                session["interrupted_run_id"] = str(turn_metadata.get("run_id"))
+                session["interrupted_turn_id"] = str(turn_metadata.get("turn_id"))
+            return {
+                "final_response": "Operation interrupted: waiting for model response (1.0s elapsed).",
+                "interrupted": True,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "use a tool first",
+                        "metadata": dict(turn_metadata),
+                    },
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call-1",
+                        "tool_name": "lookup",
+                        "content": "tool result",
+                    },
+                ],
+            }
+
+        def _persist_session(self, messages, conversation_history=None):
+            self.persisted_messages = list(messages)
+            self.persisted_history = list(conversation_history or [])
+
+    agent = _Agent()
+    server._sessions["sid"] = _session(agent=agent)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    server.handle_request(
+        {
+            "id": "1",
+            "method": "prompt.submit",
+            "params": {
+                "_run_registry_reserved": True,
+                "session_id": "sid",
+                "text": "use a tool first",
+                "client_run_id": "run-tool",
+                "turn_id": "turn-tool",
+            },
+        }
+    )
+
+    assert agent.persisted_messages == [
+        {
+            "role": "user",
+            "content": "use a tool first",
+            "metadata": {
+                "turn_id": "turn-tool",
+                "run_id": "run-tool",
+                "client_message_id": "",
+                "attachments": [],
+                "draft_text": "use a tool first",
+                "model": "",
+                "model_descriptor": {},
+                "doxie_product_context": "",
+            },
+        },
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "tool_name": "lookup",
+            "content": "tool result",
+        },
+        {
+            "role": "assistant",
+            "content": "partial after tool",
+            "metadata": {
+                "turn_id": "turn-tool",
+                "run_id": "run-tool",
+            },
+        },
+    ]
+    assert server._sessions["sid"]["history"] == agent.persisted_messages
 
 
 def test_prompt_submit_skips_auto_title_when_response_empty(monkeypatch):

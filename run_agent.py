@@ -412,6 +412,7 @@ class AIAgent:
         checkpoint_max_total_size_mb: int = 500,
         checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False,
+        cwd: str = None,
     ):
         """Forwarder — see ``agent.agent_init.init_agent``."""
         from agent.agent_init import init_agent
@@ -481,6 +482,7 @@ class AIAgent:
             checkpoint_max_total_size_mb=checkpoint_max_total_size_mb,
             checkpoint_max_file_size_mb=checkpoint_max_file_size_mb,
             pass_session_id=pass_session_id,
+            cwd=cwd,
         )
 
     def _get_session_db_for_recall(self):
@@ -1291,6 +1293,7 @@ class AIAgent:
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    metadata=msg.get("metadata"),
                 )
             self._last_flushed_db_idx = len(messages)
         except Exception as e:
@@ -3201,13 +3204,18 @@ class AIAgent:
         messages (for non-vision models) or let the provider adapter handle
         them natively (for vision-capable models).
 
-        Resolution order (see ``agent.image_routing._supports_vision_override``):
-          1. ``model.supports_vision`` (top-level, single-model shortcut)
-          2. ``providers.<provider>.models.<model>.supports_vision``
-          3. models.dev capability lookup
+        Resolution order:
+          1. Runtime ``model_descriptor.vision_enabled`` supplied by gateway
+             clients such as Doxie.
+          2. ``model.supports_vision`` (top-level, single-model shortcut)
+          3. ``providers.<provider>.models.<model>.supports_vision``
+          4. models.dev capability lookup
         Custom/local models absent from models.dev would otherwise be
         misclassified as non-vision and have their images stripped.
         """
+        descriptor = getattr(self, "model_descriptor", None)
+        if isinstance(descriptor, dict) and isinstance(descriptor.get("vision_enabled"), bool):
+            return bool(descriptor.get("vision_enabled"))
         try:
             from hermes_cli.config import load_config
             from agent.image_routing import _lookup_supports_vision
@@ -3902,10 +3910,20 @@ class AIAgent:
         task_id: str = None,
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
+        turn_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         from agent.conversation_loop import run_conversation
-        return run_conversation(self, user_message, system_message, conversation_history, task_id, stream_callback, persist_user_message)
+        return run_conversation(
+            self,
+            user_message,
+            system_message,
+            conversation_history,
+            task_id,
+            stream_callback,
+            persist_user_message,
+            turn_metadata,
+        )
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """

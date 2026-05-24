@@ -1026,8 +1026,9 @@ def _get_env_config() -> Dict[str, Any]:
     # Default cwd: local uses the host's current directory, ssh uses the
     # remote home, Vercel uses its documented workspace root, and everything
     # else starts in the backend's default root-like cwd.
+    doxie_workspace_root = os.getenv("DOXIE_WORKSPACE_ROOT", "").strip()
     if env_type == "local":
-        default_cwd = os.getcwd()
+        default_cwd = doxie_workspace_root or os.getcwd()
     elif env_type == "ssh":
         default_cwd = "~"
     elif env_type == "vercel_sandbox":
@@ -1039,7 +1040,7 @@ def _get_env_config() -> Dict[str, Any]:
     # If Docker cwd passthrough is explicitly enabled, remap the host path to
     # /workspace and track the original host path separately. Otherwise keep the
     # normal sandbox behavior and discard host paths.
-    cwd = _session_env("TERMINAL_CWD", default_cwd)
+    cwd = _session_env("TERMINAL_CWD", default_cwd) or default_cwd
     if cwd:
         cwd = os.path.expanduser(cwd)
     host_cwd = None

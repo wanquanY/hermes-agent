@@ -95,7 +95,7 @@ def test_make_agent_remembers_requested_runtime_provider():
 
 
 def test_ensure_agent_runtime_current_rebinds_stale_session_credentials():
-    from tui_gateway.server import _ensure_agent_runtime_current
+    from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
 
     agent = MagicMock()
     agent.model = "gpt-5.5"
@@ -115,10 +115,13 @@ def test_ensure_agent_runtime_current_rebinds_stale_session_credentials():
 
     with (
         patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime) as mock_resolve,
-        patch("tui_gateway.server._emit"),
-        patch("tui_gateway.server._session_info", return_value={}),
     ):
-        changed = _ensure_agent_runtime_current("sid-doxie", session)
+        changed = ensure_agent_runtime_current(
+            sid="sid-doxie",
+            session=session,
+            resolve_model=lambda: "gpt-5.5",
+            emit_session_info=lambda *_args: None,
+        )
 
     assert changed is True
     mock_resolve.assert_called_once_with(
@@ -135,7 +138,7 @@ def test_ensure_agent_runtime_current_rebinds_stale_session_credentials():
 
 
 def test_ensure_agent_runtime_current_keeps_current_session_credentials():
-    from tui_gateway.server import _ensure_agent_runtime_current
+    from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
 
     agent = MagicMock()
     agent.model = "gpt-5.5"
@@ -154,7 +157,12 @@ def test_ensure_agent_runtime_current_keeps_current_session_credentials():
     }
 
     with patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime):
-        changed = _ensure_agent_runtime_current("sid-doxie", session)
+        changed = ensure_agent_runtime_current(
+            sid="sid-doxie",
+            session=session,
+            resolve_model=lambda: "gpt-5.5",
+            emit_session_info=lambda *_args: None,
+        )
 
     assert changed is False
     agent.switch_model.assert_not_called()

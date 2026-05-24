@@ -25,6 +25,7 @@ from pathlib import Path
 
 from agent.memory_manager import sanitize_context
 from hermes_constants import get_hermes_home
+from hermes_state_runs import SessionDBRunMixin
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -218,6 +219,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     handoff_state TEXT,
     handoff_platform TEXT,
     handoff_error TEXT,
+    transient INTEGER DEFAULT 0,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -237,7 +239,8 @@ CREATE TABLE IF NOT EXISTS messages (
     reasoning_details TEXT,
     codex_reasoning_items TEXT,
     codex_message_items TEXT,
-    platform_message_id TEXT
+    platform_message_id TEXT,
+    metadata_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS state_meta (
@@ -245,10 +248,61 @@ CREATE TABLE IF NOT EXISTS state_meta (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS runs (
+    run_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    runtime_scope_key TEXT,
+    turn_id TEXT,
+    runtime_session_id TEXT,
+    status TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    completed_at REAL,
+    last_seq INTEGER DEFAULT 0,
+    error TEXT,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS run_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    run_id TEXT,
+    turn_id TEXT,
+    runtime_session_id TEXT,
+    runtime_scope_key TEXT,
+    event_type TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    timestamp REAL NOT NULL,
+    payload_json TEXT,
+    event_json TEXT NOT NULL,
+    status TEXT,
+    UNIQUE(session_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS run_event_archives (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    run_id TEXT,
+    archived_at REAL NOT NULL,
+    first_seq INTEGER NOT NULL,
+    last_seq INTEGER NOT NULL,
+    first_timestamp REAL NOT NULL,
+    last_timestamp REAL NOT NULL,
+    event_count INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    metadata_json TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_runs_session_status ON runs(session_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_scope_status ON runs(runtime_scope_key, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_events_session_seq ON run_events(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_events_scope_seq ON run_events(runtime_scope_key, session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_run_event_archives_session ON run_event_archives(session_id, archived_at DESC);
 """
 
 FTS_SQL = """
@@ -307,7 +361,7 @@ END;
 """
 
 
-class SessionDB:
+class SessionDB(SessionDBRunMixin):
     """
     SQLite-backed session storage with FTS5 search.
 
@@ -704,13 +758,14 @@ class SessionDB:
         system_prompt: str = None,
         user_id: str = None,
         parent_session_id: str = None,
+        transient: bool = False,
     ) -> None:
         """Shared INSERT OR IGNORE for session rows."""
         def _do(conn):
             conn.execute(
                 """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
-                   system_prompt, parent_session_id, started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   system_prompt, parent_session_id, started_at, transient)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     source,
@@ -720,6 +775,7 @@ class SessionDB:
                     system_prompt,
                     parent_session_id,
                     time.time(),
+                    1 if transient else 0,
                 ),
             )
         self._execute_write(_do)
@@ -1182,6 +1238,7 @@ class SessionDB:
         include_children: bool = False,
         project_compression_tips: bool = True,
         order_by_last_active: bool = False,
+        page_cursor: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview (first user message) and last active timestamp.
 
@@ -1209,6 +1266,10 @@ class SessionDB:
         surfaces in the correct slot. Ordering is computed at SQL level via
         a recursive CTE that walks compression-continuation edges, so LIMIT
         and OFFSET still apply efficiently.
+
+        ``page_cursor`` is a keyset cursor emitted on each returned row as
+        ``_page_cursor``. It keeps pagination stable while conversations are
+        sorted by ``effective_last_active DESC, started_at DESC, id DESC``.
         """
         where_clauses = []
         params = []
@@ -1235,8 +1296,51 @@ class SessionDB:
             where_clauses.append(f"s.source NOT IN ({placeholders})")
             params.extend(exclude_sources)
 
+        def _cursor_number(key: str) -> float:
+            if not page_cursor:
+                return 0.0
+            try:
+                return float(page_cursor.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _cursor_id() -> str:
+            if not page_cursor:
+                return ""
+            value = page_cursor.get("id")
+            return str(value) if value is not None else ""
+
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         if order_by_last_active:
+            outer_where_clauses = list(where_clauses)
+            outer_params = list(params)
+            cursor_id = _cursor_id()
+            if cursor_id:
+                effective_last_active_expr = "COALESCE(cm.effective_last_active, s.started_at)"
+                cursor_effective_last_active = _cursor_number("effective_last_active")
+                cursor_started_at = _cursor_number("started_at")
+                outer_where_clauses.append(
+                    f"""(
+                        {effective_last_active_expr} < ?
+                        OR ({effective_last_active_expr} = ? AND s.started_at < ?)
+                        OR ({effective_last_active_expr} = ? AND s.started_at = ? AND s.id < ?)
+                    )"""
+                )
+                outer_params.extend(
+                    [
+                        cursor_effective_last_active,
+                        cursor_effective_last_active,
+                        cursor_started_at,
+                        cursor_effective_last_active,
+                        cursor_started_at,
+                        cursor_id,
+                    ]
+                )
+            outer_where_sql = (
+                f"WHERE {' AND '.join(outer_where_clauses)}"
+                if outer_where_clauses
+                else ""
+            )
             # Compute effective_last_active by walking each surfaced session's
             # compression-continuation chain forward in SQL and taking the MAX
             # timestamp across the chain. This lets us ORDER BY + LIMIT at SQL
@@ -1284,13 +1388,27 @@ class SessionDB:
                     COALESCE(cm.effective_last_active, s.started_at) AS _effective_last_active
                 FROM sessions s
                 LEFT JOIN chain_max cm ON cm.root_id = s.id
-                {where_sql}
+                {outer_where_sql}
                 ORDER BY _effective_last_active DESC, s.started_at DESC, s.id DESC
                 LIMIT ? OFFSET ?
             """
             # WHERE params apply twice (CTE seed + outer select).
-            params = params + params + [limit, offset]
+            params = params + outer_params + [limit, offset]
         else:
+            outer_where_clauses = list(where_clauses)
+            outer_params = list(params)
+            cursor_id = _cursor_id()
+            if cursor_id:
+                cursor_started_at = _cursor_number("started_at")
+                outer_where_clauses.append(
+                    "(s.started_at < ? OR (s.started_at = ? AND s.id < ?))"
+                )
+                outer_params.extend([cursor_started_at, cursor_started_at, cursor_id])
+            outer_where_sql = (
+                f"WHERE {' AND '.join(outer_where_clauses)}"
+                if outer_where_clauses
+                else ""
+            )
             query = f"""
                 SELECT s.*,
                     COALESCE(
@@ -1305,11 +1423,11 @@ class SessionDB:
                         s.started_at
                     ) AS last_active
                 FROM sessions s
-                {where_sql}
-                ORDER BY s.started_at DESC
+                {outer_where_sql}
+                ORDER BY s.started_at DESC, s.id DESC
                 LIMIT ? OFFSET ?
             """
-            params.extend([limit, offset])
+            params = outer_params + [limit, offset]
         with self._lock:
             cursor = self._conn.execute(query, params)
             rows = cursor.fetchall()
@@ -1323,8 +1441,14 @@ class SessionDB:
                 s["preview"] = text + ("..." if len(raw) > 60 else "")
             else:
                 s["preview"] = ""
-            # Drop the internal ordering column so callers see a clean dict.
-            s.pop("_effective_last_active", None)
+            effective_last_active = s.pop("_effective_last_active", None)
+            if effective_last_active is None:
+                effective_last_active = s.get("last_active") or s.get("started_at") or 0
+            s["_page_cursor"] = {
+                "effective_last_active": effective_last_active,
+                "started_at": s.get("started_at") or 0,
+                "id": s.get("id") or "",
+            }
             sessions.append(s)
 
         # Project compression roots forward to their tips. Each row whose
@@ -1460,6 +1584,7 @@ class SessionDB:
         codex_reasoning_items: Any = None,
         codex_message_items: Any = None,
         platform_message_id: str = None,
+        metadata: Any = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -1487,6 +1612,7 @@ class SessionDB:
             if codex_message_items else None
         )
         tool_calls_json = json.dumps(tool_calls) if tool_calls else None
+        metadata_json = json.dumps(metadata) if metadata else None
         # Multimodal content (list of parts) must be JSON-encoded: sqlite3
         # cannot bind list/dict parameters directly.
         stored_content = self._encode_content(content)
@@ -1501,8 +1627,8 @@ class SessionDB:
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                   codex_message_items, platform_message_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   codex_message_items, platform_message_id, metadata_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -1519,6 +1645,7 @@ class SessionDB:
                     codex_items_json,
                     codex_message_items_json,
                     platform_message_id,
+                    metadata_json,
                 ),
             )
             msg_id = cursor.lastrowid
@@ -1580,6 +1707,7 @@ class SessionDB:
                     json.dumps(codex_message_items) if codex_message_items else None
                 )
                 tool_calls_json = json.dumps(tool_calls) if tool_calls else None
+                metadata_json = json.dumps(msg.get("metadata")) if msg.get("metadata") else None
                 # Accept either `platform_message_id` (new explicit name) or
                 # `message_id` (yuanbao's existing convention on message dicts).
                 platform_msg_id = (
@@ -1590,8 +1718,8 @@ class SessionDB:
                     """INSERT INTO messages (session_id, role, content, tool_call_id,
                        tool_calls, tool_name, timestamp, token_count, finish_reason,
                        reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                       codex_message_items, platform_message_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       codex_message_items, platform_message_id, metadata_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         role,
@@ -1608,6 +1736,7 @@ class SessionDB:
                         codex_items_json,
                         codex_message_items_json,
                         platform_msg_id,
+                        metadata_json,
                     ),
                 )
                 total_messages += 1
@@ -1643,6 +1772,12 @@ class SessionDB:
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in get_messages, falling back to []")
                     msg["tool_calls"] = []
+            if msg.get("metadata_json"):
+                try:
+                    msg["metadata"] = json.loads(msg["metadata_json"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize metadata_json in get_messages, falling back to None")
+                    msg["metadata"] = None
             result.append(msg)
         return result
 
@@ -1909,8 +2044,81 @@ class SessionDB:
                 current = child_id
         return session_id
 
+    def _message_row_as_conversation(
+        self,
+        row,
+        *,
+        include_storage_metadata: bool = False,
+    ) -> Dict[str, Any]:
+        content = self._decode_content(row["content"])
+        if row["role"] in {"user", "assistant"} and isinstance(content, str):
+            content = sanitize_context(content).strip()
+        msg = {"role": row["role"], "content": content}
+        if include_storage_metadata:
+            msg["message_id"] = str(row["id"])
+            msg["timestamp"] = row["timestamp"]
+        elif row["platform_message_id"]:
+            # Surface the platform-side message id (e.g. yuanbao msg_id,
+            # telegram update_id) so platform-specific flows like recall
+            # can match by external identifier instead of having to fall
+            # back to content-match heuristics.  Exposed as ``message_id``
+            # for backward compatibility with the JSONL transcript shape.
+            msg["message_id"] = row["platform_message_id"]
+        if row["tool_call_id"]:
+            msg["tool_call_id"] = row["tool_call_id"]
+        if row["tool_name"]:
+            msg["tool_name"] = row["tool_name"]
+        if row["tool_calls"]:
+            try:
+                msg["tool_calls"] = json.loads(row["tool_calls"])
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Failed to deserialize tool_calls in conversation replay, falling back to []")
+                msg["tool_calls"] = []
+        if row["role"] == "assistant":
+            if row["finish_reason"]:
+                msg["finish_reason"] = row["finish_reason"]
+            if row["reasoning"]:
+                msg["reasoning"] = row["reasoning"]
+            if row["reasoning_content"] is not None:
+                msg["reasoning_content"] = row["reasoning_content"]
+            if row["reasoning_details"]:
+                try:
+                    msg["reasoning_details"] = json.loads(row["reasoning_details"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize reasoning_details, falling back to None")
+                    msg["reasoning_details"] = None
+            if row["codex_reasoning_items"]:
+                try:
+                    msg["codex_reasoning_items"] = json.loads(row["codex_reasoning_items"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize codex_reasoning_items, falling back to None")
+                    msg["codex_reasoning_items"] = None
+            if row["codex_message_items"]:
+                try:
+                    msg["codex_message_items"] = json.loads(row["codex_message_items"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize codex_message_items, falling back to None")
+                    msg["codex_message_items"] = None
+        if row["metadata_json"]:
+            try:
+                msg["metadata"] = json.loads(row["metadata_json"])
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Failed to deserialize message metadata, falling back to None")
+                msg["metadata"] = None
+        return msg
+
+    def _conversation_message_columns(self) -> str:
+        return (
+            "id, role, content, tool_call_id, tool_calls, tool_name, timestamp, "
+            "finish_reason, reasoning, reasoning_content, reasoning_details, "
+            "codex_reasoning_items, codex_message_items, platform_message_id, metadata_json"
+        )
+
     def get_messages_as_conversation(
-        self, session_id: str, include_ancestors: bool = False
+        self,
+        session_id: str,
+        include_ancestors: bool = False,
+        include_storage_metadata: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Load messages in the OpenAI conversation format (role + content dicts).
@@ -1923,68 +2131,117 @@ class SessionDB:
         with self._lock:
             placeholders = ",".join("?" for _ in session_ids)
             rows = self._conn.execute(
-                "SELECT role, content, tool_call_id, tool_calls, tool_name, "
-                "finish_reason, reasoning, reasoning_content, reasoning_details, "
-                "codex_reasoning_items, codex_message_items, platform_message_id "
+                f"SELECT {self._conversation_message_columns()} "
                 f"FROM messages WHERE session_id IN ({placeholders}) ORDER BY id",
                 tuple(session_ids),
             ).fetchall()
 
         messages = []
         for row in rows:
-            content = self._decode_content(row["content"])
-            if row["role"] in {"user", "assistant"} and isinstance(content, str):
-                content = sanitize_context(content).strip()
-            msg = {"role": row["role"], "content": content}
-            if row["tool_call_id"]:
-                msg["tool_call_id"] = row["tool_call_id"]
-            if row["tool_name"]:
-                msg["tool_name"] = row["tool_name"]
-            if row["tool_calls"]:
-                try:
-                    msg["tool_calls"] = json.loads(row["tool_calls"])
-                except (json.JSONDecodeError, TypeError):
-                    logger.warning("Failed to deserialize tool_calls in conversation replay, falling back to []")
-                    msg["tool_calls"] = []
-            # Surface the platform-side message id (e.g. yuanbao msg_id,
-            # telegram update_id) so platform-specific flows like recall
-            # can match by external identifier instead of having to fall
-            # back to content-match heuristics.  Exposed as ``message_id``
-            # for backward compatibility with the JSONL transcript shape.
-            if row["platform_message_id"]:
-                msg["message_id"] = row["platform_message_id"]
-            # Restore reasoning fields on assistant messages so providers
-            # that replay reasoning (OpenRouter, OpenAI, Nous) receive
-            # coherent multi-turn reasoning context.
-            if row["role"] == "assistant":
-                if row["finish_reason"]:
-                    msg["finish_reason"] = row["finish_reason"]
-                if row["reasoning"]:
-                    msg["reasoning"] = row["reasoning"]
-                if row["reasoning_content"] is not None:
-                    msg["reasoning_content"] = row["reasoning_content"]
-                if row["reasoning_details"]:
-                    try:
-                        msg["reasoning_details"] = json.loads(row["reasoning_details"])
-                    except (json.JSONDecodeError, TypeError):
-                        logger.warning("Failed to deserialize reasoning_details, falling back to None")
-                        msg["reasoning_details"] = None
-                if row["codex_reasoning_items"]:
-                    try:
-                        msg["codex_reasoning_items"] = json.loads(row["codex_reasoning_items"])
-                    except (json.JSONDecodeError, TypeError):
-                        logger.warning("Failed to deserialize codex_reasoning_items, falling back to None")
-                        msg["codex_reasoning_items"] = None
-                if row["codex_message_items"]:
-                    try:
-                        msg["codex_message_items"] = json.loads(row["codex_message_items"])
-                    except (json.JSONDecodeError, TypeError):
-                        logger.warning("Failed to deserialize codex_message_items, falling back to None")
-                        msg["codex_message_items"] = None
+            msg = self._message_row_as_conversation(
+                row,
+                include_storage_metadata=include_storage_metadata,
+            )
             if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
                 continue
             messages.append(msg)
         return messages
+
+    def get_messages_page_as_conversation(
+        self,
+        session_id: str,
+        direction: str = "tail",
+        cursor_id: Optional[int] = None,
+        limit: int = 50,
+        include_ancestors: bool = False,
+    ) -> Dict[str, Any]:
+        """Load one stable page of conversation messages with storage cursors.
+
+        ``direction`` accepts:
+          - ``tail``: newest ``limit`` messages, returned oldest-to-newest.
+          - ``before``: ``limit`` messages older than ``cursor_id``.
+          - ``after``: ``limit`` messages newer than ``cursor_id``.
+
+        Cursors are SQLite message row ids.  The returned messages include a
+        string ``message_id`` based on that row id so clients can dedupe pages
+        without relying on mutable text content.
+        """
+        try:
+            page_limit = int(limit)
+        except (TypeError, ValueError):
+            page_limit = 50
+        page_limit = max(1, min(page_limit, 500))
+
+        session_ids = [session_id]
+        if include_ancestors:
+            session_ids = self._session_lineage_root_to_tip(session_id)
+
+        normalized_direction = str(direction or "tail").lower()
+        if normalized_direction not in {"tail", "before", "after"}:
+            normalized_direction = "tail"
+
+        with self._lock:
+            placeholders = ",".join("?" for _ in session_ids)
+            base_params: Tuple[Any, ...] = tuple(session_ids)
+            total_count = self._conn.execute(
+                f"SELECT COUNT(*) FROM messages WHERE session_id IN ({placeholders})",
+                base_params,
+            ).fetchone()[0]
+
+            columns = self._conversation_message_columns()
+            if normalized_direction == "before" and cursor_id is not None:
+                rows = self._conn.execute(
+                    f"SELECT {columns} FROM messages "
+                    f"WHERE session_id IN ({placeholders}) AND id < ? "
+                    "ORDER BY id DESC LIMIT ?",
+                    base_params + (cursor_id, page_limit + 1),
+                ).fetchall()
+                has_more_before = len(rows) > page_limit
+                selected_rows = list(reversed(rows[:page_limit]))
+                has_more_after = bool(selected_rows)
+            elif normalized_direction == "after" and cursor_id is not None:
+                rows = self._conn.execute(
+                    f"SELECT {columns} FROM messages "
+                    f"WHERE session_id IN ({placeholders}) AND id > ? "
+                    "ORDER BY id ASC LIMIT ?",
+                    base_params + (cursor_id, page_limit + 1),
+                ).fetchall()
+                has_more_after = len(rows) > page_limit
+                selected_rows = list(rows[:page_limit])
+                has_more_before = bool(selected_rows)
+            else:
+                rows = self._conn.execute(
+                    f"SELECT {columns} FROM messages "
+                    f"WHERE session_id IN ({placeholders}) "
+                    "ORDER BY id DESC LIMIT ?",
+                    base_params + (page_limit + 1,),
+                ).fetchall()
+                has_more_before = len(rows) > page_limit
+                selected_rows = list(reversed(rows[:page_limit]))
+                has_more_after = False
+
+        messages = []
+        for row in selected_rows:
+            msg = self._message_row_as_conversation(
+                row,
+                include_storage_metadata=True,
+            )
+            if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
+                continue
+            messages.append(msg)
+
+        first_id = int(selected_rows[0]["id"]) if selected_rows else None
+        last_id = int(selected_rows[-1]["id"]) if selected_rows else None
+        return {
+            "messages": messages,
+            "pageInfo": {
+                "prev_cursor_id": first_id if has_more_before else None,
+                "next_cursor_id": last_id if has_more_after else None,
+                "hasMoreBefore": has_more_before,
+                "hasMoreAfter": has_more_after,
+                "totalCount": int(total_count or 0),
+            },
+        }
 
     def _session_lineage_root_to_tip(self, session_id: str) -> List[str]:
         if not session_id:
@@ -3270,4 +3527,3 @@ class SessionDB:
                 (error[:500], session_id),
             )
         self._execute_write(_do)
-

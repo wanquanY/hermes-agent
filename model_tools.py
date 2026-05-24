@@ -199,6 +199,12 @@ try:
 except Exception as e:
     logger.debug("Plugin discovery failed: %s", e)
 
+try:
+    from doxie_extension import load_extension
+    load_extension().register_tools()
+except Exception as e:
+    logger.debug("Doxie extension tool registration failed: %s", e)
+
 
 # =============================================================================
 # Backward-compat constants  (built once after discovery)

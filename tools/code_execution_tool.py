@@ -1633,17 +1633,20 @@ def _resolve_child_cwd(mode: str, staging_dir: str) -> str:
 
     - ``strict``: the staging tmpdir (today's behavior).
     - ``project``: the session's TERMINAL_CWD (same as the terminal tool), or
-      ``os.getcwd()`` if TERMINAL_CWD is unset or doesn't point at a real dir.
-      Falls back to the staging tmpdir as a last resort so we never invoke
-      Popen with a nonexistent cwd.
+      Doxie's configured workspace root when running under the Doxie gateway.
+      Non-Doxie callers keep the legacy process-cwd fallback. Falls back to the
+      staging tmpdir as a last resort so we never invoke Popen with a nonexistent
+      cwd.
     """
     if mode != "project":
         return staging_dir
-    raw = _session_env("TERMINAL_CWD", "").strip()
+    raw = _session_env("TERMINAL_CWD", "").strip() or os.getenv("DOXIE_WORKSPACE_ROOT", "").strip()
     if raw:
         expanded = os.path.expanduser(raw)
         if os.path.isdir(expanded):
             return expanded
+    if os.getenv("DOXIE_PROCESS_ROLE") == "hermes-worker":
+        return staging_dir
     here = os.getcwd()
     if os.path.isdir(here):
         return here

@@ -43,7 +43,7 @@ _WINDOWS_LOCK_OFFSET = 1024 * 1024
 
 def _get_pid_path() -> Path:
     """Return the path to the gateway PID file, respecting HERMES_HOME."""
-    home = get_hermes_home()
+    home = Path(get_hermes_home())
     return home / "gateway.pid"
 
 
@@ -51,7 +51,7 @@ def _get_gateway_lock_path(pid_path: Optional[Path] = None) -> Path:
     """Return the path to the runtime gateway lock file."""
     if pid_path is not None:
         return pid_path.with_name(_GATEWAY_LOCK_FILENAME)
-    home = get_hermes_home()
+    home = Path(get_hermes_home())
     return home / _GATEWAY_LOCK_FILENAME
 
 

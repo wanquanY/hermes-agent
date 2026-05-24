@@ -14,9 +14,27 @@ silently if the surrounding ``computer_use`` plumbing is refactored.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+
+from tools.computer_use.backend import CaptureResult
+from tools.computer_use.tool import _capture_response
+
+
+def _doxie_managed_vision_config() -> dict:
+    return {
+        "auxiliary": {
+            "vision": {
+                "provider": "doxie-cloud",
+                "model": "gpt-5.5",
+                "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+                "key_env": "DOXIE_LLM_RUNTIME_TOKEN",
+                "api_mode": "chat_completions",
+            },
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +141,33 @@ class TestRouteDecision:
                 "anthropic", "claude-opus-4-5", cfg
             ) is True
 
+    def test_runtime_vision_descriptor_overrides_doxie_managed_auxiliary_config(self):
+        """Doxie-managed aux config is not a user preference for screenshots."""
+        from tools.computer_use import vision_routing
+
+        with patch.object(vision_routing,
+                          "_provider_accepts_multimodal_tool_result",
+                          return_value=True):
+            assert vision_routing.should_route_capture_to_aux_vision(
+                "doxie-cloud",
+                "gpt-5.5",
+                _doxie_managed_vision_config(),
+                supports_vision_override=True,
+            ) is False
+
+    def test_runtime_non_vision_descriptor_forces_auxiliary_route(self):
+        from tools.computer_use import vision_routing
+
+        with patch.object(vision_routing,
+                          "_provider_accepts_multimodal_tool_result",
+                          return_value=True):
+            assert vision_routing.should_route_capture_to_aux_vision(
+                "doxie-cloud",
+                "text-only",
+                {},
+                supports_vision_override=False,
+            ) is True
+
     def test_non_vision_main_model_routes_to_aux(self):
         """The reported #24015 scenario: tencent/hy3-preview has no vision."""
         from tools.computer_use import vision_routing
@@ -196,6 +241,35 @@ class TestRouteDecision:
             assert vision_routing.should_route_capture_to_aux_vision(
                 "openrouter", "tencent/hy3-preview", cfg
             ) is True
+
+
+def test_capture_response_uses_parent_agent_model_descriptor_for_native_screenshot():
+    parent_agent = SimpleNamespace(model_descriptor={"vision_enabled": True})
+    cap = CaptureResult(
+        mode="som",
+        width=100,
+        height=80,
+        png_b64="iVBORw0KGgo=",
+        elements=[],
+        app="WeChat",
+        window_title="chat",
+    )
+
+    with (
+        patch("agent.auxiliary_client._read_main_provider", return_value="doxie-cloud"),
+        patch("agent.auxiliary_client._read_main_model", return_value="gpt-5.5"),
+        patch("hermes_cli.config.load_config", return_value=_doxie_managed_vision_config()),
+        patch(
+            "tools.computer_use.vision_routing._provider_accepts_multimodal_tool_result",
+            return_value=True,
+        ),
+        patch("tools.computer_use.tool._route_capture_through_aux_vision") as route_aux,
+    ):
+        result = _capture_response(cap, parent_agent=parent_agent)
+
+    assert result["_multimodal"] is True
+    assert result["content"][1]["type"] == "image_url"
+    route_aux.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

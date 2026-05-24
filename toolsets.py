@@ -56,7 +56,8 @@ _HERMES_CORE_TOOLS = [
     # Code execution + delegation
     "execute_code", "delegate_task",
     # Cronjob management
-    "cronjob",
+    "cronjob", "doxie_automation_task_create", "doxie_automation_task_list",
+    "doxie_automation_task_update", "doxie_automation_task_remove",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)

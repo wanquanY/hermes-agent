@@ -13,7 +13,11 @@ from tui_gateway.services.workspaces.domain import Workspace
 def normalize_session_cwd(value: Any = None) -> str:
     raw = str(value or "").strip()
     if not raw:
-        raw = os.getenv("TERMINAL_CWD", "") or os.getcwd()
+        raw = os.getenv("DOXIE_WORKSPACE_ROOT", "") or os.getenv("TERMINAL_CWD", "")
+        if not raw:
+            if os.getenv("DOXIE_PROCESS_ROLE") == "hermes-worker":
+                raise ValueError("Doxie workspace root is not configured")
+            raw = os.getcwd()
     cwd = os.path.abspath(os.path.expanduser(raw))
     if not os.path.isdir(cwd):
         raise ValueError(f"cwd does not exist or is not a directory: {cwd}")
@@ -83,6 +87,7 @@ def workspace_for_session(session_id: str) -> dict[str, Any] | None:
     row = get_gateway_state_store().get_session_workspace(session_id)
     if not row:
         return None
+    authority = "hermes_runtime_cache" if str(row["id"]).startswith("local:") else "doxie"
     return {
         "id": row["id"],
         "name": row["name"],
@@ -90,7 +95,7 @@ def workspace_for_session(session_id: str) -> dict[str, Any] | None:
         "kind": row.get("kind") or "",
         "cwd": row.get("cwd") or row["path"],
         "session_id": row["session_id"],
-        "authority": "doxie",
+        "authority": authority,
         "runtime_cache": True,
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
@@ -101,7 +106,9 @@ def list_workspaces(limit: int = 200) -> list[dict[str, Any]]:
     return [
         {
             **workspace,
-            "authority": "doxie",
+            "authority": "hermes_runtime_cache"
+            if str(workspace.get("id") or "").startswith("local:")
+            else "doxie",
             "runtime_cache": True,
         }
         for workspace in get_gateway_state_store().list_workspaces(limit=limit)

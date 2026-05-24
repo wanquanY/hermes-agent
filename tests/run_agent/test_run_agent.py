@@ -2202,6 +2202,22 @@ class TestConcurrentToolExecution:
         assert result == "result"
         assert mock_hfc.call_args.kwargs["parent_agent"] is agent
 
+    def test_sequential_registry_tool_passes_parent_agent(self, agent):
+        """Single-tool execution must preserve the active agent context."""
+        tool_call = _mock_tool_call(
+            name="test_agent_profile",
+            arguments='{"draft_id":"draft-1","message":"hello"}',
+            call_id="c1",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tool_call])
+        messages = []
+
+        with patch("run_agent.handle_function_call", return_value='{"ok": true}') as mock_hfc:
+            agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
+
+        assert mock_hfc.call_args.kwargs["parent_agent"] is agent
+        assert len(messages) == 1
+
     def test_sequential_tool_callbacks_fire_in_order(self, agent):
         tool_call = _mock_tool_call(name="web_search", arguments='{"query":"hello"}', call_id="c1")
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tool_call])
@@ -2648,6 +2664,25 @@ class TestRunConversation:
             result = agent.run_conversation("hello")
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
+
+    def test_plain_assistant_content_is_not_emitted_as_reasoning_progress(self, agent):
+        self._setup_agent(agent)
+        progress_events = []
+        agent.tool_progress_callback = lambda *args, **kwargs: progress_events.append(
+            (args, kwargs)
+        )
+        resp = _mock_response(content="Final answer", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["final_response"] == "Final answer"
+        assert progress_events == []
 
     def test_tool_calls_then_stop(self, agent):
         self._setup_agent(agent)

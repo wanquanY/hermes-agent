@@ -3348,8 +3348,12 @@ def resolve_provider_client(
         if custom_entry is None:
             custom_entry = _get_named_custom_provider(provider)
         if custom_entry:
-            custom_base = custom_entry.get("base_url", "").strip()
-            custom_key = custom_entry.get("api_key", "").strip()
+            custom_base = (
+                explicit_base_url
+                or custom_entry.get("base_url", "")
+                or ""
+            ).strip()
+            custom_key = (explicit_api_key or custom_entry.get("api_key", "") or "").strip()
             custom_key_env = (custom_entry.get("key_env") or custom_entry.get("api_key_env") or "").strip()
             if not custom_key and custom_key_env:
                 custom_key = os.getenv(custom_key_env, "").strip()
@@ -3435,6 +3439,26 @@ def resolve_provider_client(
             return None, None
     except ImportError:
         pass
+
+    if explicit_base_url and explicit_api_key:
+        custom_base = _to_openai_base_url(explicit_base_url).strip()
+        if not custom_base:
+            logger.warning(
+                "resolve_provider_client: explicit endpoint requested for %r "
+                "but base_url is empty",
+                provider,
+            )
+            return None, None
+        final_model = _normalize_resolved_model(
+            model or (main_runtime.get("model") if main_runtime else None) or "gpt-4o-mini",
+            provider,
+        )
+        clean_base, default_query = _extract_url_query_params(custom_base)
+        extra = {"default_query": default_query} if default_query else {}
+        client = OpenAI(api_key=explicit_api_key.strip(), base_url=clean_base, **extra)
+        client = _wrap_if_needed(client, final_model, explicit_base_url, explicit_api_key)
+        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
+                else (client, final_model))
 
     # ── Azure Foundry (delegates to runtime resolver for auth_mode-aware routing) ─
     #
@@ -4311,7 +4335,7 @@ def _resolve_task_provider_model(
         cfg_provider = str(task_config.get("provider", "")).strip() or None
         cfg_model = str(task_config.get("model", "")).strip() or None
         cfg_base_url = str(task_config.get("base_url", "")).strip() or None
-        cfg_api_key = str(task_config.get("api_key", "")).strip() or None
+        cfg_api_key = _resolve_auxiliary_config_api_key(task_config) or None
         cfg_api_mode = str(task_config.get("api_mode", "")).strip() or None
 
     resolved_model = model or cfg_model
@@ -4355,6 +4379,23 @@ def _get_auxiliary_task_config(task: str) -> Dict[str, Any]:
     aux = config.get("auxiliary", {}) if isinstance(config, dict) else {}
     task_config = aux.get(task, {}) if isinstance(aux, dict) else {}
     return task_config if isinstance(task_config, dict) else {}
+
+
+def _resolve_auxiliary_config_api_key(config: Dict[str, Any]) -> str:
+    """Resolve inline or env-backed API credentials from an auxiliary config."""
+    if not isinstance(config, dict):
+        return ""
+    inline_key = str(config.get("api_key", "") or "").strip()
+    if inline_key:
+        return inline_key
+    key_env = str(
+        config.get("key_env", "")
+        or config.get("api_key_env", "")
+        or ""
+    ).strip()
+    if not key_env:
+        return ""
+    return os.getenv(key_env, "").strip()
 
 
 def _get_task_timeout(task: str, default: float = _DEFAULT_AUX_TIMEOUT) -> float:

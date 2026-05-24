@@ -15,6 +15,7 @@ History:
 
 from __future__ import annotations
 
+from hermes_state import SessionDB
 from tui_gateway import server
 
 
@@ -196,6 +197,41 @@ def test_session_list_preserves_ordering_after_filter(monkeypatch):
     assert ids == ["newest", "middle", "also-visible", "oldest"]
 
 
+def test_session_list_reads_requested_doxie_profile_home(tmp_path, monkeypatch):
+    """Control-plane session.list must read the requested profile/version DB."""
+    profile_home = tmp_path / "profile-home"
+    seed_db = SessionDB(profile_home / "state.db")
+    try:
+        seed_db.create_session("stored-1", "tui")
+        seed_db.append_message("stored-1", "user", "hello from profile db")
+    finally:
+        seed_db.close()
+
+    monkeypatch.setattr(server, "_db_by_home", {})
+    monkeypatch.setattr(server, "_db_error_by_home", {})
+    try:
+        resp = server.handle_request({
+            "id": "1",
+            "method": "session.list",
+            "params": {
+                "agentProfileId": "agent-a",
+                "agentProfileVersionId": "version-1",
+                "runtimeScopeKey": "profile:agent-a:version:version-1",
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "agentProfileVersionId": "version-1",
+                    "runtimeScopeKey": "profile:agent-a:version:version-1",
+                    "hermesHomePath": str(profile_home),
+                },
+            },
+        })
+        assert resp["result"]["sessions"][0]["id"] == "stored-1"
+        assert resp["result"]["sessions"][0]["preview"] == "hello from profile db"
+    finally:
+        for db in list(server._db_by_home.values()):
+            db.close()
+
+
 def test_session_messages_returns_paged_transcript(monkeypatch):
     class _MessagesDB:
         def get_session(self, session_id):
@@ -259,3 +295,31 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
     assert resp["result"]["pageInfo"]["hasMoreBefore"] is False
     assert resp["result"]["pageInfo"]["hasMoreAfter"] is True
     assert resp["result"]["pageInfo"]["totalCount"] == 3
+
+
+def test_session_status_reads_stored_profile_session_without_runtime(monkeypatch, tmp_path):
+    profile_home = tmp_path / "profile-home"
+    db = SessionDB(db_path=profile_home / "state.db")
+    try:
+        db.create_session("stored-1", source="tui")
+        monkeypatch.setattr(server, "_db_by_home", {})
+        monkeypatch.setattr(server, "_db_error_by_home", {})
+        resp = server.handle_request({
+            "id": "1",
+            "method": "session.status",
+            "params": {
+                "session_id": "stored-1",
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "agentProfileVersionId": "version-1",
+                    "runtimeScopeKey": "profile:agent-a:version:version-1",
+                    "hermesHomePath": str(profile_home),
+                },
+            },
+        })
+
+        assert "error" not in resp
+        assert resp["result"]["stored_session_id"] == "stored-1"
+        assert resp["result"]["running"] is False
+    finally:
+        db.close()

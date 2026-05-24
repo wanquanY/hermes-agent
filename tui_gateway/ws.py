@@ -24,6 +24,7 @@ Mounting
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 from collections import deque
@@ -37,6 +38,35 @@ _log = logging.getLogger(__name__)
 # to flush a WS frame before we mark the transport dead. Protects handler
 # threads from a wedged socket.
 _WS_WRITE_TIMEOUT_S = 10.0
+_WS_CONTROL_METHODS = frozenset(
+    {
+        "events.prune",
+        "events.subscribe",
+        "events.unsubscribe",
+        "run.cancel",
+        "run.events",
+        "run.fail",
+        "run.list",
+        "run.reserve",
+        "run.status",
+        "session.list",
+        "session.messages",
+        "session.status",
+        "workspace.current",
+        "workspace.list",
+    }
+)
+_ws_control_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="tui-ws-control",
+)
+
+
+def _executor_for_request(req: dict) -> concurrent.futures.Executor | None:
+    method = str((req or {}).get("method") or "")
+    if method in _WS_CONTROL_METHODS:
+        return _ws_control_executor
+    return None
 
 # Keep starlette optional at import time; handle_ws uses the real class when
 # it's available and falls back to a generic Exception sentinel otherwise.
@@ -198,7 +228,13 @@ async def handle_ws(ws: Any) -> None:
             # the transport we pass in (a separate thread, so transport.write
             # is the safe path there). For inline handlers it returns the
             # response dict, which we write here from the loop.
-            resp = await asyncio.to_thread(server.dispatch, req, transport)
+            loop = asyncio.get_running_loop()
+            resp = await loop.run_in_executor(
+                _executor_for_request(req),
+                server.dispatch,
+                req,
+                transport,
+            )
             if resp is not None and not await transport.write_async(resp):
                 break
     finally:

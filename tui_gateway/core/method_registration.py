@@ -6,6 +6,8 @@ import importlib
 import sys
 from typing import Any
 
+from doxie_extension import load_extension
+
 METHOD_MODULES = (
     "session",
     "prompt",
@@ -32,14 +34,15 @@ def register_method_modules(target: dict[str, Any]) -> None:
         else:
             importlib.import_module(name)
 
+    load_extension().register_gateway_methods(target)
+
     from tui_gateway.methods import prompt, slash, system
 
-    target.update(
-        {
-            "_PENDING_INPUT_COMMANDS": system._PENDING_INPUT_COMMANDS,
-            "_WORKER_BLOCKED_COMMANDS": system._WORKER_BLOCKED_COMMANDS,
-            "_cli_exec_blocked": system._cli_exec_blocked,
-            "_mirror_slash_side_effects": slash._mirror_slash_side_effects,
-            "_run_prompt_submit": prompt._run_prompt_submit,
-        }
-    )
+    for key, value in {
+        "_PENDING_INPUT_COMMANDS": system._PENDING_INPUT_COMMANDS,
+        "_WORKER_BLOCKED_COMMANDS": system._WORKER_BLOCKED_COMMANDS,
+        "_cli_exec_blocked": system._cli_exec_blocked,
+        "_mirror_slash_side_effects": slash._mirror_slash_side_effects,
+        "_run_prompt_submit": prompt._run_prompt_submit,
+    }.items():
+        target.setdefault(key, value)

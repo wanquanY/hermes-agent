@@ -790,7 +790,11 @@ def build_environment_hints() -> str:
         except Exception:
             session_cwd = ""
         try:
-            cwd = session_cwd or os.getcwd()
+            cwd = session_cwd or os.getenv("DOXIE_WORKSPACE_ROOT", "").strip()
+            if not cwd:
+                if os.getenv("DOXIE_PROCESS_ROLE") == "hermes-worker":
+                    raise RuntimeError("Doxie workspace root is not configured")
+                cwd = os.getcwd()
             host_lines.append(f"Current working directory: {cwd}")
         except OSError:
             pass

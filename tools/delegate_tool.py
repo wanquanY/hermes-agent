@@ -870,6 +870,68 @@ def _build_child_progress_callback(
     return _callback
 
 
+def _build_child_output_delta_callback(
+    task_index: int,
+    goal: str,
+    parent_agent,
+    task_count: int = 1,
+    *,
+    subagent_id: Optional[str] = None,
+    parent_id: Optional[str] = None,
+    depth: Optional[int] = None,
+    model: Optional[str] = None,
+    toolsets: Optional[List[str]] = None,
+) -> Optional[callable]:
+    """Build a callback that relays child assistant text deltas to the parent.
+
+    This is intentionally separate from ``_build_child_progress_callback``.
+    Doxie draft-profile tests need live answer streaming in the side panel,
+    while still suppressing ordinary subagent tool/progress noise from the
+    main conversation.
+    """
+    if getattr(parent_agent, "_delegate_child_output_delta_enabled", False) is not True:
+        return None
+
+    parent_cb = getattr(parent_agent, "tool_progress_callback", None)
+    if not parent_cb:
+        return None
+
+    goal_label = (goal or "").strip()
+    tool_name = str(getattr(parent_agent, "_delegate_child_output_tool_name", "") or "").strip()
+
+    def _identity_kwargs() -> Dict[str, Any]:
+        kw: Dict[str, Any] = {
+            "task_index": task_index,
+            "task_count": task_count,
+            "goal": goal_label,
+            "tool_count": 0,
+        }
+        if subagent_id is not None:
+            kw["subagent_id"] = subagent_id
+        if parent_id is not None:
+            kw["parent_id"] = parent_id
+        if depth is not None:
+            kw["depth"] = depth
+        if model is not None:
+            kw["model"] = model
+        if toolsets is not None:
+            kw["toolsets"] = list(toolsets)
+        return kw
+
+    def _callback(text: Optional[str]) -> None:
+        if text is None:
+            return
+        delta = str(text)
+        if not delta:
+            return
+        try:
+            parent_cb("subagent.output_delta", tool_name or None, delta, None, **_identity_kwargs())
+        except Exception as exc:
+            logger.debug("Parent output-delta callback failed: %s", exc)
+
+    return _callback
+
+
 def _build_child_agent(
     task_index: int,
     goal: str,
@@ -991,6 +1053,17 @@ def _build_child_agent(
     # Identity kwargs thread the subagent_id through every emitted event so the
     # TUI can reconstruct the spawn tree and route per-branch controls.
     child_progress_cb = _build_child_progress_callback(
+        task_index,
+        goal,
+        parent_agent,
+        task_count,
+        subagent_id=subagent_id,
+        parent_id=parent_subagent_id,
+        depth=tui_depth,
+        model=effective_model_for_cb,
+        toolsets=child_toolsets,
+    )
+    child_output_delta_cb = _build_child_output_delta_callback(
         task_index,
         goal,
         parent_agent,
@@ -1135,7 +1208,7 @@ def _build_child_agent(
         provider_sort=child_provider_sort,
         openrouter_min_coding_score=child_openrouter_min_coding_score,
         tool_progress_callback=child_progress_cb,
-        stream_delta_callback=None,
+        stream_delta_callback=child_output_delta_cb,
         iteration_budget=None,  # fresh budget per subagent
     )
     child._print_fn = getattr(parent_agent, "_print_fn", None)
@@ -1369,13 +1442,19 @@ def _run_single_child(
     _last_seen_tool = [None]  # type: list
     _stale_count = [0]
 
+    def _touch_parent_activity(desc: str) -> None:
+        if parent_agent is None:
+            return
+        touch = getattr(parent_agent, "_touch_activity", None)
+        if not touch:
+            return
+        try:
+            touch(desc)
+        except Exception:
+            pass
+
     def _heartbeat_loop():
         while not _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
-            if parent_agent is None:
-                continue
-            touch = getattr(parent_agent, "_touch_activity", None)
-            if not touch:
-                continue
             # Pull detail from the child's own activity tracker
             desc = f"delegate_task: subagent {task_index} working"
             try:
@@ -1433,12 +1512,10 @@ def _run_single_child(
                         )
             except Exception:
                 pass
-            try:
-                touch(desc)
-            except Exception:
-                pass
+            _touch_parent_activity(desc)
 
     _heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    _touch_parent_activity(f"delegate_task: subagent {task_index} started")
 
     # Register the live agent in the module-level registry so the TUI can
     # target it by subagent_id (kill, pause, status queries).  Unregistered

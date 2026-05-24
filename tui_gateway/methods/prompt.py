@@ -5,6 +5,8 @@ import json
 
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
+from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
+from tui_gateway.services.toolset_scope import ensure_session_turn_toolsets
 from tui_gateway.services.voice import voice_tts_enabled
 
 _server = bind_server_globals(globals())
@@ -36,6 +38,37 @@ def _mark_prompt_run_failed(
     )
 
 
+def _mark_prompt_run_cancelled(
+    *,
+    run_id: str,
+    stored_session_id: str,
+    runtime_scope_key: str,
+    turn_id: str = "",
+    message: str = "",
+) -> dict:
+    db = _get_db()
+    event = None
+    if db is not None and run_id and stored_session_id:
+        event = run_control.publish_run_terminal_event(
+            stored_session_id=stored_session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+            runtime_scope_key=runtime_scope_key or stored_session_id,
+            status="cancelled",
+            message=message or "cancelled before prompt start",
+            db=db,
+            owner_transport=current_transport(),
+        )
+    return {
+        "status": "cancelled",
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "stored_session_id": stored_session_id,
+        "runtime_scope_key": runtime_scope_key or stored_session_id,
+        "seq": int((event or {}).get("seq") or 0),
+    }
+
+
 def _fail_unavailable_runtime_agent(
     *,
     sid: str,
@@ -63,6 +96,101 @@ def _fail_unavailable_runtime_agent(
             turn_id=turn_id,
             message=message,
         )
+
+
+class _MessageDeltaNormalizer:
+    """Normalizes agent stream callbacks into explicit Gateway text events.
+
+    Most model adapters call stream callbacks with append-only token deltas, but
+    some paths can resend the current visible snapshot or a chunk overlapping
+    text already delivered.  The Gateway ABI should expose that distinction
+    explicitly so clients can run deterministic reducers instead of guessing
+    from message text.
+    """
+
+    _SNAPSHOT_COMMON_PREFIX_MIN = 8
+    _OVERLAP_MIN = 8
+
+    def __init__(self) -> None:
+        self.text = ""
+
+    @staticmethod
+    def _common_prefix_len(left: str, right: str) -> int:
+        limit = min(len(left), len(right))
+        index = 0
+        while index < limit and left[index] == right[index]:
+            index += 1
+        return index
+
+    @staticmethod
+    def _suffix_prefix_overlap(left: str, right: str) -> int:
+        limit = min(len(left), len(right))
+        for size in range(limit, 0, -1):
+            if left.endswith(right[:size]):
+                return size
+        return 0
+
+    def feed(self, value) -> dict | None:
+        incoming = str(value or "")
+        if not incoming:
+            return None
+        current = self.text
+        if not current:
+            self.text = incoming
+            return {
+                "mode": "append",
+                "text": incoming,
+                "delta": incoming,
+                "offset": 0,
+            }
+        if incoming == current or current.startswith(incoming):
+            return None
+        if incoming.startswith(current):
+            delta = incoming[len(current):]
+            offset = len(current)
+            self.text = incoming
+            return {
+                "mode": "append",
+                "text": delta,
+                "delta": delta,
+                "offset": offset,
+            }
+
+        common_prefix = self._common_prefix_len(current, incoming)
+        if (
+            common_prefix >= self._SNAPSHOT_COMMON_PREFIX_MIN
+            and len(incoming) >= common_prefix
+        ):
+            self.text = incoming
+            return {
+                "mode": "snapshot",
+                "text": incoming,
+                "snapshot": incoming,
+                "offset": 0,
+            }
+
+        overlap = self._suffix_prefix_overlap(current, incoming)
+        if overlap >= self._OVERLAP_MIN:
+            delta = incoming[overlap:]
+            if not delta:
+                return None
+            offset = len(current)
+            self.text = current + delta
+            return {
+                "mode": "append",
+                "text": delta,
+                "delta": delta,
+                "offset": offset,
+            }
+
+        offset = len(current)
+        self.text = current + incoming
+        return {
+            "mode": "append",
+            "text": incoming,
+            "delta": incoming,
+            "offset": offset,
+        }
 
 
 @method("prompt.submit")
@@ -137,6 +265,28 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 disable_session_yolo(stable_session_id)
         except Exception as e:
             return _err(rid, 5004, str(e))
+    with session["history_lock"]:
+        preinterrupted_run_id = str(session.get("interrupted_run_id") or "")
+        preinterrupted_turn_id = str(session.get("interrupted_turn_id") or "")
+        if (
+            (preinterrupted_run_id and preinterrupted_run_id == run_id)
+            or (preinterrupted_turn_id and preinterrupted_turn_id == turn_id)
+        ):
+            session["running"] = False
+            session["active_run_id"] = None
+            session["active_turn_id"] = None
+            session["pending_turn"] = None
+            session["run_updated_at"] = time.time()
+            return _ok(
+                rid,
+                _mark_prompt_run_cancelled(
+                    run_id=run_id,
+                    stored_session_id=stable_session_id,
+                    runtime_scope_key=effective_runtime_scope_key,
+                    turn_id=turn_id,
+                    message="cancelled before prompt start",
+                ),
+            )
     with session["history_lock"]:
         if session.get("running"):
             if not session.get("transient"):
@@ -215,10 +365,16 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
     elif has_model_descriptor:
         _set_session_model_descriptor(session, model_descriptor, clear_if_empty=True)
 
-    _server._ensure_session_turn_toolsets(
-        sid,
-        session,
-        params.get("enabled_toolsets") or params.get("enabledToolsets"),
+    ensure_session_turn_toolsets(
+        sid=sid,
+        session=session,
+        requested_toolsets=params.get("enabled_toolsets") or params.get("enabledToolsets"),
+        load_enabled_toolsets=_load_enabled_toolsets,
+        emit_session_info=lambda event_sid, agent: _emit(
+            "session.info",
+            event_sid,
+            _session_info(agent, _sessions.get(event_sid)),
+        ),
     )
     _start_agent_build(sid, session)
 
@@ -258,7 +414,16 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 )
                 return
             try:
-                _ensure_agent_runtime_current(sid, session)
+                ensure_agent_runtime_current(
+                    sid=sid,
+                    session=session,
+                    resolve_model=_resolve_model,
+                    emit_session_info=lambda event_sid, agent: _emit(
+                        "session.info",
+                        event_sid,
+                        _session_info(agent, _sessions.get(event_sid)),
+                    ),
+                )
             except Exception as e:
                 _emit("error", sid, {"message": f"runtime auth rebind failed: {e}"})
                 with session["history_lock"]:
@@ -294,7 +459,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             }
         finally:
             _leave_profile_context(profile_tokens)
-        _server._run_prompt_submit(rid, sid, session, text, submitted_images, turn_metadata)
+        _run_prompt_submit(rid, sid, session, text, submitted_images, turn_metadata)
 
     threading.Thread(target=run_after_agent_ready, daemon=True).start()
     return _ok(
@@ -444,10 +609,10 @@ def _run_prompt_submit(
                     )
             return stale
 
-    delivered_parts: list[str] = []
+    delta_normalizer = _MessageDeltaNormalizer()
 
-    def persist_interrupted_partial() -> None:
-        partial = "".join(delivered_parts).strip()
+    def persist_interrupted_partial(base_messages: list[dict] | None = None) -> None:
+        partial = delta_normalizer.text.strip()
         if not partial:
             return
         assistant_message = {"role": "assistant", "content": partial}
@@ -456,12 +621,43 @@ def _run_prompt_submit(
                 "turn_id": turn_metadata.get("turn_id"),
                 "run_id": turn_metadata.get("run_id"),
             }
-        next_history = list(history)
-        user_message = {"role": "user", "content": text}
-        if turn_metadata:
-            user_message["metadata"] = turn_metadata
-        next_history.append(user_message)
-        next_history.append(assistant_message)
+        next_history = [
+            dict(message)
+            for message in (base_messages or [])
+            if isinstance(message, dict)
+        ]
+        if not next_history:
+            next_history = list(history)
+        current_turn_id = str((turn_metadata or {}).get("turn_id") or "")
+        current_run_id = str((turn_metadata or {}).get("run_id") or "")
+
+        def is_current_user_message(message: dict) -> bool:
+            if message.get("role") != "user":
+                return False
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            if current_turn_id and str(metadata.get("turn_id") or "") == current_turn_id:
+                return True
+            if current_run_id and str(metadata.get("run_id") or "") == current_run_id:
+                return True
+            return message.get("content") == text
+
+        if not any(is_current_user_message(message) for message in next_history[len(history):]):
+            user_message = {"role": "user", "content": text}
+            if turn_metadata:
+                user_message["metadata"] = turn_metadata
+            next_history.append(user_message)
+
+        last_message = next_history[-1] if next_history else {}
+        if (
+            isinstance(last_message, dict)
+            and last_message.get("role") == "assistant"
+            and not last_message.get("tool_calls")
+            and str(last_message.get("content") or "").strip() == partial
+        ):
+            if assistant_message.get("metadata") and not isinstance(last_message.get("metadata"), dict):
+                last_message["metadata"] = assistant_message["metadata"]
+        else:
+            next_history.append(assistant_message)
         with session["history_lock"]:
             if int(session.get("history_version", 0)) != history_version:
                 return
@@ -504,6 +700,7 @@ def _run_prompt_submit(
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
             prompt = text
+            clean_prompt = prompt
 
             if isinstance(prompt, str) and "@" in prompt:
                 from agent.context_references import preprocess_context_references
@@ -535,6 +732,20 @@ def _run_prompt_submit(
                     )
                     return
                 prompt = ctx.message
+                clean_prompt = prompt
+
+            try:
+                from doxie_extension.prompt_attachments import enrich_prompt_with_document_attachments
+
+                prompt = enrich_prompt_with_document_attachments(
+                    prompt,
+                    (turn_metadata or {}).get("attachments"),
+                )
+            except Exception as exc:
+                print(
+                    f"[tui_gateway] document attachment prompt enrichment failed: {exc}",
+                    file=sys.stderr,
+                )
 
             # Decide image routing per-turn based on active provider/model.
             # "native" → pass pixels to the main model as OpenAI-style content
@@ -601,10 +812,11 @@ def _run_prompt_submit(
             def _stream(delta):
                 if is_turn_interrupted():
                     return
-                payload = {"text": delta}
+                payload = delta_normalizer.feed(delta)
+                if payload is None:
+                    return
                 if streamer and (r := streamer.feed(delta)) is not None:
                     payload["rendered"] = r
-                delivered_parts.append(str(delta))
                 _emit("message.delta", sid, payload)
 
             try:
@@ -612,10 +824,11 @@ def _run_prompt_submit(
                     run_message,
                     conversation_history=list(history),
                     stream_callback=_stream,
+                    persist_user_message=clean_prompt,
                     turn_metadata=turn_metadata,
                 )
             except TypeError as exc:
-                if "turn_metadata" not in str(exc):
+                if "turn_metadata" not in str(exc) and "persist_user_message" not in str(exc):
                     raise
                 result = agent.run_conversation(
                     run_message,
@@ -624,7 +837,12 @@ def _run_prompt_submit(
                 )
 
             if is_turn_interrupted():
-                persist_interrupted_partial()
+                result_messages = (
+                    result.get("messages")
+                    if isinstance(result, dict) and isinstance(result.get("messages"), list)
+                    else None
+                )
+                persist_interrupted_partial(result_messages)
                 return
 
             last_reasoning = None
@@ -691,7 +909,17 @@ def _run_prompt_submit(
                 raw = str(result)
                 status = "complete"
 
+            interrupt_detail = ""
+            if (
+                status == "interrupted"
+                and isinstance(raw, str)
+                and raw.strip().startswith("Operation interrupted:")
+            ):
+                interrupt_detail = raw.strip()
+                raw = ""
             payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+            if interrupt_detail:
+                payload["interrupt_detail"] = interrupt_detail
             if last_reasoning:
                 payload["reasoning"] = last_reasoning
             if status_note:
@@ -1114,6 +1342,39 @@ def _respond(rid, params, key):
     return _ok(rid, {"status": "ok"})
 
 
+def _approval_session_key(params: dict, rid):
+    requested = str(
+        params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or params.get("session_id")
+        or params.get("sessionId")
+        or ""
+    ).strip()
+    if not requested:
+        return "", _err(rid, 4006, "session_id or stored_session_id required")
+
+    session = _sessions.get(requested)
+    if session:
+        return str(session.get("session_key") or requested), None
+
+    for runtime_sid, live_session in list(_sessions.items()):
+        if str((live_session or {}).get("session_key") or "") == requested:
+            return str((live_session or {}).get("session_key") or runtime_sid), None
+
+    db = _get_db()
+    if db is not None:
+        try:
+            stored = db.get_session(requested)
+        except AttributeError:
+            stored = None
+        except Exception as exc:
+            return "", _err(rid, 5004, str(exc))
+        if stored:
+            return requested, None
+
+    return "", _err(rid, 4001, "session not found")
+
+
 @method("clarify.respond")
 def _(rid, params: dict) -> dict:
     return _respond(rid, params, "answer")
@@ -1131,7 +1392,7 @@ def _(rid, params: dict) -> dict:
 
 @method("approval.respond")
 def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
+    session_key, err = _approval_session_key(params, rid)
     if err:
         return err
     try:
@@ -1141,7 +1402,7 @@ def _(rid, params: dict) -> dict:
             rid,
             {
                 "resolved": resolve_gateway_approval(
-                    session["session_key"],
+                    session_key,
                     params.get("choice", "deny"),
                     resolve_all=params.get("all", False),
                 )
@@ -1153,13 +1414,13 @@ def _(rid, params: dict) -> dict:
 
 @method("approval.policy.get")
 def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
+    session_key, err = _approval_session_key(params, rid)
     if err:
         return err
     try:
         from tools.approval import is_session_yolo_enabled
 
-        yolo = is_session_yolo_enabled(session["session_key"])
+        yolo = is_session_yolo_enabled(session_key)
         return _ok(
             rid,
             {
@@ -1173,7 +1434,7 @@ def _(rid, params: dict) -> dict:
 
 @method("approval.policy.set")
 def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
+    session_key, err = _approval_session_key(params, rid)
     if err:
         return err
     mode = str(params.get("mode") or "default").strip().lower()
@@ -1183,10 +1444,10 @@ def _(rid, params: dict) -> dict:
         from tools.approval import disable_session_yolo, enable_session_yolo
 
         if mode == "full_access":
-            enable_session_yolo(session["session_key"])
+            enable_session_yolo(session_key)
             yolo = True
         else:
-            disable_session_yolo(session["session_key"])
+            disable_session_yolo(session_key)
             yolo = False
         return _ok(rid, {"mode": mode, "yolo": yolo})
     except Exception as e:
@@ -1195,7 +1456,7 @@ def _(rid, params: dict) -> dict:
 
 @method("approval.pending.list")
 def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
+    session_key, err = _approval_session_key(params, rid)
     if err:
         return err
     try:
@@ -1204,7 +1465,7 @@ def _(rid, params: dict) -> dict:
         return _ok(
             rid,
             {
-                "approvals": list_gateway_approvals(session["session_key"]),
+                "approvals": list_gateway_approvals(session_key),
             },
         )
     except Exception as e:

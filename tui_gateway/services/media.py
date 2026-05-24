@@ -22,3 +22,27 @@ def image_meta(path: Path) -> dict:
     except Exception:
         pass
     return meta
+
+
+def enrich_with_attached_images(user_text: str, image_paths: list[str]) -> str:
+    parts: list[str] = []
+    for raw in image_paths:
+        path = Path(raw)
+        try:
+            from tools.image_analysis import analyze_image_for_prompt
+
+            desc = analyze_image_for_prompt(str(path))
+            hint = f"Path: {path}"
+            parts.append(
+                f"[The user attached an image:\n{desc}]\n{hint}"
+                if desc
+                else f"[The user attached an image but analysis failed.]\n{hint}"
+            )
+        except Exception:
+            parts.append(f"[The user attached an image but analysis failed.]\nPath: {path}")
+
+    text = user_text or ""
+    prefix = "\n\n".join(parts)
+    if prefix:
+        return f"{prefix}\n\n{text}" if text else prefix
+    return text or "What do you see in this image?"

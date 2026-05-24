@@ -18,6 +18,126 @@ from typing import Any
 
 from tools.registry import registry, tool_error, tool_result
 
+AGENT_PROFILE_CATEGORIES = ["工作", "学习", "创作", "开发", "生活", "其他"]
+AGENT_PROFILE_CATEGORY_ALIASES = {
+    "work": "工作",
+    "office": "工作",
+    "productivity": "工作",
+    "business": "工作",
+    "product": "工作",
+    "pm": "工作",
+    "prd": "工作",
+    "operations": "工作",
+    "operation": "工作",
+    "marketing": "工作",
+    "market": "工作",
+    "sales": "工作",
+    "legal": "工作",
+    "finance": "工作",
+    "management": "工作",
+    "project": "工作",
+    "办公": "工作",
+    "产品": "工作",
+    "产品经理": "工作",
+    "运营": "工作",
+    "市场": "工作",
+    "销售": "工作",
+    "法务": "工作",
+    "财务": "工作",
+    "项目管理": "工作",
+    "study": "学习",
+    "learning": "学习",
+    "education": "学习",
+    "academic": "学习",
+    "research": "学习",
+    "reading": "学习",
+    "reader": "学习",
+    "book": "学习",
+    "course": "学习",
+    "paper": "学习",
+    "knowledge": "学习",
+    "教育": "学习",
+    "研究": "学习",
+    "阅读": "学习",
+    "读书": "学习",
+    "课程": "学习",
+    "论文": "学习",
+    "知识": "学习",
+    "creative": "创作",
+    "creation": "创作",
+    "writing": "创作",
+    "writer": "创作",
+    "copywriting": "创作",
+    "content": "创作",
+    "design": "创作",
+    "image": "创作",
+    "video": "创作",
+    "media": "创作",
+    "novel": "创作",
+    "写作": "创作",
+    "文案": "创作",
+    "内容": "创作",
+    "设计": "创作",
+    "图片": "创作",
+    "视频": "创作",
+    "小说": "创作",
+    "development": "开发",
+    "develop": "开发",
+    "dev": "开发",
+    "coding": "开发",
+    "coder": "开发",
+    "code": "开发",
+    "programming": "开发",
+    "engineering": "开发",
+    "software": "开发",
+    "devops": "开发",
+    "data": "开发",
+    "analysis": "开发",
+    "编程": "开发",
+    "代码": "开发",
+    "工程": "开发",
+    "软件": "开发",
+    "数据": "开发",
+    "数据分析": "开发",
+    "life": "生活",
+    "lifestyle": "生活",
+    "personal": "生活",
+    "health": "生活",
+    "travel": "生活",
+    "food": "生活",
+    "shopping": "生活",
+    "family": "生活",
+    "habit": "生活",
+    "emotion": "生活",
+    "emotions": "生活",
+    "relationship": "生活",
+    "个人": "生活",
+    "健康": "生活",
+    "旅行": "生活",
+    "饮食": "生活",
+    "购物": "生活",
+    "家庭": "生活",
+    "习惯": "生活",
+    "情感": "生活",
+    "other": "其他",
+    "custom": "其他",
+    "general": "其他",
+    "misc": "其他",
+    "uncategorized": "其他",
+    "自定义": "其他",
+    "通用": "其他",
+}
+
+
+def _normalize_agent_profile_category(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "其他"
+    if raw in AGENT_PROFILE_CATEGORIES:
+        return raw
+    key = re.sub(r"[\s_-]+", "", raw.lower())
+    return AGENT_PROFILE_CATEGORY_ALIASES.get(raw.lower()) or AGENT_PROFILE_CATEGORY_ALIASES.get(key) or AGENT_PROFILE_CATEGORY_ALIASES.get(raw) or "其他"
+
 
 def _backend_bridge_config() -> tuple[str, str]:
     return (
@@ -180,7 +300,8 @@ DESIGN_AGENT_PROFILE_SCHEMA = {
             },
             "category": {
                 "type": "string",
-                "description": "Profile category, such as coding, office, research, writing, or operations.",
+                "enum": AGENT_PROFILE_CATEGORIES,
+                "description": "分身固定分类。只能选择：工作、学习、创作、开发、生活、其他。",
             },
             "tags": {
                 "type": "array",
@@ -306,7 +427,7 @@ def _architecture_templates() -> list[dict]:
         {
             "id": "product-manager",
             "name": "产品经理分身",
-            "category": "product",
+            "category": "工作",
             "description": "面向 PRD、需求分析、用户研究、竞品分析、路线图和跨团队沟通。",
             "recommendedToolsets": ["web", "browser", "file", "memory"],
             "recommendedSkills": [],
@@ -315,7 +436,7 @@ def _architecture_templates() -> list[dict]:
         {
             "id": "coding-agent",
             "name": "编程助手分身",
-            "category": "development",
+            "category": "开发",
             "description": "面向代码阅读、实现、测试、调试、重构和工程方案设计。",
             "recommendedToolsets": ["terminal", "file", "code_execution", "web"],
             "recommendedSkills": [],
@@ -324,7 +445,7 @@ def _architecture_templates() -> list[dict]:
         {
             "id": "research-analyst",
             "name": "研究分析分身",
-            "category": "research",
+            "category": "学习",
             "description": "面向资料检索、信息抽取、报告生成和证据链整理。",
             "recommendedToolsets": ["web", "browser", "file", "memory"],
             "recommendedSkills": [],
@@ -444,12 +565,14 @@ def _profile_design_context_event(
             "avatars": "Call catalog_kind='avatars' for avatar candidates.",
         },
         "rules": {
+            "allowedCategories": AGENT_PROFILE_CATEGORIES,
             "skillCatalogSource": "hermes.skills",
             "useSkillsListForInstalledSkills": True,
             "useSkillManageForCreation": True,
             "instructions": [
                 "recommendedToolsets must be selected from systemToolsets.name.",
                 "recommendedSkills must be selected only after verifying with skills_list or skill_view.",
+                "category must be one of 工作, 学习, 创作, 开发, 生活, 其他; do not invent new categories.",
                 "installedSkillsSummary is a non-authoritative hint only.",
                 "If a requested capability is unavailable, put it into missingCapabilities or skillCreationPlans.",
                 "After inspecting context, call this same tool again with operation=create/update/upsert to request the draft.",
@@ -502,7 +625,7 @@ def _profile_design_event(**kwargs) -> dict:
             "name": kwargs.get("name", ""),
             "description": kwargs.get("description", ""),
             "avatar": kwargs.get("avatar", ""),
-            "category": kwargs.get("category", ""),
+            "category": _normalize_agent_profile_category(kwargs.get("category", "")),
             "tags": kwargs.get("tags") or [],
             "architectureTemplateId": kwargs.get("architecture_template_id", ""),
             "recommendedToolsets": kwargs.get("recommended_toolsets") or [],
@@ -555,6 +678,8 @@ def _draft_payload_from_kwargs(**kwargs) -> dict:
             files[target] = str(kwargs.get(source) or "")
     if files:
         payload["files"] = files
+    if "category" in payload:
+        payload["category"] = _normalize_agent_profile_category(payload.get("category"))
     return _contextual_payload(payload)
 
 
@@ -883,8 +1008,16 @@ def test_agent_profile(
     previous_child_progress_suppressed = getattr(
         parent_agent, "_delegate_child_progress_suppressed", None
     )
+    previous_child_output_delta_enabled = getattr(
+        parent_agent, "_delegate_child_output_delta_enabled", None
+    )
+    previous_child_output_tool_name = getattr(
+        parent_agent, "_delegate_child_output_tool_name", None
+    )
     setattr(parent_agent, "_delegate_child_transient_session", True)
     setattr(parent_agent, "_delegate_child_progress_suppressed", True)
+    setattr(parent_agent, "_delegate_child_output_delta_enabled", True)
+    setattr(parent_agent, "_delegate_child_output_tool_name", "test_agent_profile")
     try:
         raw = delegate_task(
             goal=test_message,
@@ -916,6 +1049,28 @@ def test_agent_profile(
                 parent_agent,
                 "_delegate_child_progress_suppressed",
                 previous_child_progress_suppressed,
+            )
+        if previous_child_output_delta_enabled is None:
+            try:
+                delattr(parent_agent, "_delegate_child_output_delta_enabled")
+            except AttributeError:
+                pass
+        else:
+            setattr(
+                parent_agent,
+                "_delegate_child_output_delta_enabled",
+                previous_child_output_delta_enabled,
+            )
+        if previous_child_output_tool_name is None:
+            try:
+                delattr(parent_agent, "_delegate_child_output_tool_name")
+            except AttributeError:
+                pass
+        else:
+            setattr(
+                parent_agent,
+                "_delegate_child_output_tool_name",
+                previous_child_output_tool_name,
             )
     duration = round(time.monotonic() - started, 2)
     try:

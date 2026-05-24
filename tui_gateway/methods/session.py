@@ -5,8 +5,18 @@ import base64
 import json
 import queue
 
+from doxie_extension.display_transcript import (
+    sanitize_session_list_item,
+    sanitize_transcript_messages,
+)
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
+from tui_gateway.services.workspace import (
+    bind_session_workspace as _bind_session_workspace,
+    normalize_session_cwd as _normalize_session_cwd,
+    workspace_for_session as _workspace_for_session,
+    workspace_from_params as _workspace_from_params,
+)
 
 _server = bind_server_globals(globals())
 _interrupt_work_queue: queue.SimpleQueue = queue.SimpleQueue()
@@ -79,6 +89,23 @@ def _requested_runtime_scope_key(params: dict | None = None) -> str:
         or (params or {}).get("runtimeScopeKey")
         or ""
     ).strip()
+
+
+def _requested_tool_progress_mode(params: dict | None = None) -> str:
+    raw = (
+        (params or {}).get("tool_progress_mode")
+        or (params or {}).get("toolProgressMode")
+        or (params or {}).get("tool_progress")
+        or (params or {}).get("toolProgress")
+    )
+    if raw is False:
+        return "off"
+    if raw is True:
+        return "all"
+    mode = str(raw or "").strip().lower()
+    if mode in {"off", "new", "all", "verbose"}:
+        return mode
+    return _load_tool_progress_mode()
 
 
 def _session_run_snapshot(runtime_sid: str, session: dict | None, db=None) -> dict:
@@ -286,7 +313,10 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
             limit=limit,
             include_ancestors=True,
         )
-        return _history_to_messages(page.get("messages") or []), _message_page_info(page.get("pageInfo"))
+        return (
+            sanitize_transcript_messages(_history_to_messages(page.get("messages") or [])),
+            _message_page_info(page.get("pageInfo")),
+        )
     try:
         display_history = db.get_messages_as_conversation(
             session_id,
@@ -298,7 +328,7 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
             session_id,
             include_ancestors=True,
         )
-    messages = _history_to_messages(display_history)
+    messages = sanitize_transcript_messages(_history_to_messages(display_history))
     page_info = {
         "prevCursor": "",
         "nextCursor": "",
@@ -476,7 +506,7 @@ def _(rid, params: dict) -> dict:
             if not live_sid and _is_empty_stored_conversation(s):
                 continue
             session_items.append(
-                {
+                sanitize_session_list_item({
                     "id": s["id"],
                     "title": s.get("title") or "",
                     "preview": s.get("preview") or "",
@@ -486,7 +516,7 @@ def _(rid, params: dict) -> dict:
                     "source": s.get("source") or "",
                     "workspace": _stored_workspace(s["id"]),
                     **live_state,
-                }
+                })
             )
         next_cursor = ""
         if has_more and page_rows:
@@ -935,7 +965,7 @@ def _(rid, params: dict) -> dict:
         rid,
         {
             "count": len(history),
-            "messages": _history_to_messages(history),
+            "messages": sanitize_transcript_messages(_history_to_messages(history)),
         },
     )
 
@@ -988,7 +1018,7 @@ def _(rid, params: dict) -> dict:
         rid,
         {
             "session_id": target,
-            "messages": _history_to_messages(page.get("messages") or []),
+            "messages": sanitize_transcript_messages(_history_to_messages(page.get("messages") or [])),
             "runEvents": run_events,
             "pageInfo": _message_page_info(page.get("pageInfo")),
         },
@@ -1073,15 +1103,98 @@ def _rewrite_live_and_persisted_history(session: dict, history: list[dict]) -> N
             pass
 
 
+def _recall_turn_from_history(history: list[dict], turn_id: str, pending_turn: dict | None = None) -> tuple[list[dict], dict, int] | None:
+    target_idx = None
+    for idx, message in enumerate(history):
+        if isinstance(message, dict) and _message_turn_id(message) == turn_id and message.get("role") == "user":
+            target_idx = idx
+            break
+    if target_idx is None:
+        return None
+
+    remove_end = len(history)
+    for idx in range(target_idx + 1, len(history)):
+        message = history[idx]
+        if isinstance(message, dict) and message.get("role") == "user":
+            remove_end = idx
+            break
+    target_message = history[target_idx]
+    draft = _draft_from_turn_message(target_message, pending_turn)
+    next_history = history[:target_idx] + history[remove_end:]
+    return next_history, draft, remove_end - target_idx
+
+
+def _load_stored_history_for_rewrite(db, session_key: str) -> list[dict]:
+    try:
+        return db.get_messages_as_conversation(
+            session_key,
+            include_ancestors=False,
+            include_storage_metadata=True,
+        )
+    except TypeError:
+        return db.get_messages_as_conversation(session_key, include_ancestors=False)
+
+
+def _recall_stored_turn(rid, sid: str, turn_id: str) -> dict | None:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5036)
+    session_key = sid
+    found = db.get_session(session_key)
+    if not found:
+        found = db.get_session_by_title(session_key)
+        if found:
+            session_key = found["id"]
+        else:
+            return None
+    try:
+        history = _load_stored_history_for_rewrite(db, session_key)
+        recalled = _recall_turn_from_history(list(history or []), turn_id)
+        if recalled is None:
+            return _err(rid, 4019, "turn not found or already recalled")
+        next_history, draft, removed = recalled
+        db.replace_messages(session_key, next_history)
+        messages = sanitize_transcript_messages(_history_to_messages(next_history))
+    except Exception as exc:
+        return _err(rid, 5036, f"recall failed: {exc}")
+
+    _emit("session.recalled", sid, {
+        "turn_id": turn_id,
+        "removed_messages": removed,
+        "draft": draft,
+        "messages": messages,
+    })
+    return _ok(rid, {
+        "status": "recalled",
+        "session_id": sid,
+        "stored_session_id": session_key,
+        "turn_id": turn_id,
+        "interrupted": False,
+        "removed_messages": removed,
+        "draft": draft,
+        "messages": messages,
+        "memory_retract": {
+            "status": "unsupported",
+            "warnings": ["Memory provider turn-level retraction is not implemented yet."],
+        },
+    })
+
+
 @method("session.recall_turn")
 def _(rid, params: dict) -> dict:
-    sid = params.get("session_id", "")
+    sid = str(params.get("session_id") or "").strip()
     turn_id = str(params.get("turn_id") or "").strip()
     if not turn_id:
         return _err(rid, 4006, "turn_id required")
+    runtime_sid, live_session = _resolve_runtime_session(sid)
+    if live_session is None:
+        stored_result = _recall_stored_turn(rid, sid, turn_id)
+        if stored_result is not None:
+            return stored_result
     session, err = _sess(params, rid)
     if err:
         return err
+    sid = str(params.get("session_id") or runtime_sid or sid)
 
     interrupted = False
     agent_to_interrupt = None
@@ -1106,12 +1219,8 @@ def _(rid, params: dict) -> dict:
     with session["history_lock"]:
         history = list(session.get("history") or [])
         pending_turn = session.get("pending_turn")
-        target_idx = None
-        for idx, message in enumerate(history):
-            if isinstance(message, dict) and _message_turn_id(message) == turn_id and message.get("role") == "user":
-                target_idx = idx
-                break
-        if target_idx is None:
+        recalled = _recall_turn_from_history(history, turn_id, pending_turn)
+        if recalled is None:
             if isinstance(pending_turn, dict) and str(pending_turn.get("turn_id") or "") == turn_id:
                 draft = _draft_from_turn_message(None, pending_turn)
                 session.setdefault("recalled_turn_ids", set()).add(turn_id)
@@ -1120,7 +1229,7 @@ def _(rid, params: dict) -> dict:
                 session["active_turn_id"] = None
                 session["pending_turn"] = None
                 session["run_updated_at"] = time.time()
-                messages = _history_to_messages(history)
+                messages = sanitize_transcript_messages(_history_to_messages(history))
                 _emit("session.recalled", sid, {
                     "turn_id": turn_id,
                     "removed_messages": 0,
@@ -1144,16 +1253,7 @@ def _(rid, params: dict) -> dict:
                 })
             return _err(rid, 4019, "turn not found or already recalled")
 
-        remove_end = len(history)
-        for idx in range(target_idx + 1, len(history)):
-            message = history[idx]
-            if isinstance(message, dict) and message.get("role") == "user":
-                remove_end = idx
-                break
-        target_message = history[target_idx]
-        draft = _draft_from_turn_message(target_message, pending_turn)
-        next_history = history[:target_idx] + history[remove_end:]
-        removed = remove_end - target_idx
+        next_history, draft, removed = recalled
         _rewrite_live_and_persisted_history(session, next_history)
         session.setdefault("recalled_turn_ids", set()).add(turn_id)
         if active_turn_id == turn_id or str(session.get("active_turn_id") or "") == turn_id:
@@ -1162,7 +1262,7 @@ def _(rid, params: dict) -> dict:
             session["active_turn_id"] = None
             session["pending_turn"] = None
             session["run_updated_at"] = time.time()
-        messages = _history_to_messages(next_history)
+        messages = sanitize_transcript_messages(_history_to_messages(next_history))
 
     _emit("session.recalled", sid, {
         "turn_id": turn_id,

@@ -143,7 +143,7 @@ def update_cron_job(params: dict[str, Any]) -> dict[str, Any]:
         updates["enabled_toolsets"] = _string_list(payload_patch.get("enabled_toolsets"))
 
     existing_doxie = current.get("doxie") if isinstance(current.get("doxie"), dict) else {}
-    doxie_patch = {k: v for k, v in _doxie_metadata_from_params(patch).items() if v is not None}
+    doxie_patch = {k: v for k, v in _doxie_metadata_from_params(patch, partial=True).items() if v is not None}
     updates["doxie"] = {**existing_doxie, **doxie_patch}
 
     updated = update_job(job_id, updates) if updates else current
@@ -226,8 +226,11 @@ def _normalize_job(job: dict[str, Any]) -> dict[str, Any]:
     job_id = _text(job.get("id") or job.get("job_id"))
     last_status = _optional_text(job.get("last_status"))
     last_session_id = _optional_text(job.get("last_session_id"))
-    target_session_id = _optional_text(doxie.get("session_id"))
-    payload_kind = "sessionMessage" if doxie.get("session_target") == "main" else "agentTask"
+    owner = _owner_from_doxie(job, doxie)
+    result_binding = _result_binding_from_doxie(job, doxie)
+    target_session_id = _result_binding_session_id(result_binding) or _optional_text(doxie.get("session_id"))
+    payload_kind = "sessionMessage" if result_binding.get("mode") == "current-session" else "agentTask"
+    session_target = "main" if result_binding.get("mode") == "current-session" else "isolated"
     return {
         "id": job_id,
         "jobId": job_id,
@@ -235,18 +238,21 @@ def _normalize_job(job: dict[str, Any]) -> dict[str, Any]:
         "description": _optional_text(job.get("description") or doxie.get("description")),
         "enabled": _bool(job.get("enabled"), default=True),
         "deleteAfterRun": _bool(doxie.get("delete_after_run"), default=False),
-        "agentProfileId": _optional_text(doxie.get("agent_profile_id")),
-        "agentProfileName": _optional_text(doxie.get("agent_profile_name")),
+        "agentProfileId": _optional_text(owner.get("agentProfileId")),
+        "agentProfileName": _optional_text(owner.get("agentProfileName")),
         "approvalPolicy": _normalize_approval_policy(doxie.get("approval_policy")),
         "createdAtMs": _iso_to_ms(job.get("created_at")) or 0,
         "updatedAtMs": _iso_to_ms(job.get("updated_at") or job.get("created_at")) or 0,
-        "workspaceId": _optional_text(doxie.get("workspace_id")),
-        "workdir": _optional_text(job.get("workdir")),
+        "workspaceId": _optional_text(owner.get("workspaceId")),
+        "workdir": _optional_text(owner.get("workdir") or job.get("workdir")),
         "sessionId": target_session_id,
         "sessionKey": target_session_id,
         "lastRunSessionId": last_session_id,
-        "sessionTarget": _optional_text(doxie.get("session_target")) or "isolated",
+        "sessionTarget": session_target,
         "wakeMode": _optional_text(doxie.get("wake_mode")) or "next-heartbeat",
+        "origin": _created_by_origin(doxie.get("created_by") or owner.get("createdBy")),
+        "owner": owner,
+        "resultBinding": result_binding,
         "schedule": _normalize_schedule(job.get("schedule"), job.get("schedule_display")),
         "scheduleDisplay": _optional_text(job.get("schedule_display")),
         "payload": {
@@ -366,23 +372,143 @@ def _payload_from_params(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _doxie_metadata_from_params(params: dict[str, Any]) -> dict[str, Any]:
+def _owner_from_params(params: dict[str, Any]) -> dict[str, Any]:
+    owner = params.get("owner") if isinstance(params.get("owner"), dict) else {}
+    agent_profile_id = _optional_text(owner.get("agentProfileId") or owner.get("agent_profile_id") or params.get("agentProfileId") or params.get("agent_profile_id") or params.get("targetAgentProfileId"))
+    agent_profile_name = _optional_text(owner.get("agentProfileName") or owner.get("agent_profile_name") or params.get("agentProfileName") or params.get("agent_profile_name") or params.get("targetAgentProfileName"))
+    workspace_id = _optional_text(owner.get("workspaceId") or owner.get("workspace_id") or params.get("workspaceId") or params.get("workspace_id"))
+    workdir = _optional_text(owner.get("workdir") or params.get("workdir"))
+    result = {
+        "agentProfileId": agent_profile_id,
+        "agentProfileName": agent_profile_name,
+        "agentProfileVersionId": _optional_text(owner.get("agentProfileVersionId") or owner.get("agent_profile_version_id") or params.get("agentProfileVersionId") or params.get("agent_profile_version_id")),
+        "runtimeScopeKey": _optional_text(owner.get("runtimeScopeKey") or owner.get("runtime_scope_key") or params.get("runtimeScopeKey") or params.get("runtime_scope_key")),
+        "workspaceId": workspace_id,
+        "workdir": workdir,
+        "sourceSessionId": _optional_text(owner.get("sourceSessionId") or owner.get("source_session_id") or params.get("sourceSessionId") or params.get("source_session_id")),
+        "sourceRunId": _optional_text(owner.get("sourceRunId") or owner.get("source_run_id") or params.get("sourceRunId") or params.get("source_run_id")),
+        "sourceTurnId": _optional_text(owner.get("sourceTurnId") or owner.get("source_turn_id") or params.get("sourceTurnId") or params.get("source_turn_id")),
+        "sourceClientMessageId": _optional_text(owner.get("sourceClientMessageId") or owner.get("source_client_message_id") or params.get("sourceClientMessageId") or params.get("source_client_message_id")),
+        "createdBy": _created_by_origin(owner.get("createdBy") or owner.get("created_by") or params.get("createdBy") or params.get("created_by")),
+    }
+    return {key: value for key, value in result.items() if value is not None}
+
+
+def _owner_from_doxie(job: dict[str, Any], doxie: dict[str, Any]) -> dict[str, Any]:
+    owner = doxie.get("owner") if isinstance(doxie.get("owner"), dict) else {}
+    merged = {
+        "agentProfileId": owner.get("agentProfileId") or owner.get("agent_profile_id") or doxie.get("agent_profile_id"),
+        "agentProfileName": owner.get("agentProfileName") or owner.get("agent_profile_name") or doxie.get("agent_profile_name"),
+        "agentProfileVersionId": owner.get("agentProfileVersionId") or owner.get("agent_profile_version_id"),
+        "runtimeScopeKey": owner.get("runtimeScopeKey") or owner.get("runtime_scope_key"),
+        "workspaceId": owner.get("workspaceId") or owner.get("workspace_id") or doxie.get("workspace_id"),
+        "workdir": owner.get("workdir") or doxie.get("workdir") or job.get("workdir"),
+        "sourceSessionId": owner.get("sourceSessionId") or owner.get("source_session_id"),
+        "sourceRunId": owner.get("sourceRunId") or owner.get("source_run_id"),
+        "sourceTurnId": owner.get("sourceTurnId") or owner.get("source_turn_id"),
+        "sourceClientMessageId": owner.get("sourceClientMessageId") or owner.get("source_client_message_id"),
+        "createdBy": _created_by_origin(owner.get("createdBy") or owner.get("created_by") or doxie.get("created_by")),
+    }
+    return {key: _optional_text(value) for key, value in merged.items() if _optional_text(value)}
+
+
+def _result_binding_from_params(params: dict[str, Any]) -> dict[str, Any]:
+    binding = params.get("resultBinding") if isinstance(params.get("resultBinding"), dict) else {}
+    if not binding:
+        binding = params.get("result_binding") if isinstance(params.get("result_binding"), dict) else {}
+    mode = _optional_text(binding.get("mode") or params.get("resultBindingMode") or params.get("result_binding_mode"))
+    session_id = _optional_text(binding.get("sessionId") or binding.get("session_id") or params.get("sessionId") or params.get("sessionKey") or params.get("session_id"))
+    if not mode:
+        session_target = _optional_text(params.get("sessionTarget") or params.get("session_target"))
+        mode = "current-session" if session_target == "main" and session_id else "new-session"
+    mode = mode if mode in {"current-session", "new-session", "run-log-only", "hermes-native"} else "new-session"
+    result: dict[str, Any] = {"mode": mode}
+    if mode == "current-session":
+        result["sessionId"] = session_id or ""
+    elif mode == "new-session":
+        title_template = _optional_text(binding.get("titleTemplate") or binding.get("title_template"))
+        if title_template:
+            result["titleTemplate"] = title_template
+    elif mode == "hermes-native":
+        deliver = _optional_text(binding.get("deliver") or params.get("deliver"))
+        if deliver:
+            result["deliver"] = deliver
+    return result
+
+
+def _result_binding_from_doxie(job: dict[str, Any], doxie: dict[str, Any]) -> dict[str, Any]:
+    binding = doxie.get("result_binding") if isinstance(doxie.get("result_binding"), dict) else {}
+    if not binding:
+        binding = doxie.get("resultBinding") if isinstance(doxie.get("resultBinding"), dict) else {}
+    if binding:
+        mode = _optional_text(binding.get("mode")) or "new-session"
+        result: dict[str, Any] = {"mode": mode}
+        if mode == "current-session":
+            result["sessionId"] = _optional_text(binding.get("sessionId") or binding.get("session_id")) or ""
+        elif mode == "new-session":
+            title_template = _optional_text(binding.get("titleTemplate") or binding.get("title_template"))
+            if title_template:
+                result["titleTemplate"] = title_template
+        elif mode == "hermes-native":
+            deliver = _optional_text(binding.get("deliver") or job.get("deliver"))
+            if deliver:
+                result["deliver"] = deliver
+        return result
+    if _optional_text(doxie.get("session_target")) == "main":
+        return {"mode": "current-session", "sessionId": _optional_text(doxie.get("session_id")) or ""}
+    if _optional_text(job.get("deliver")):
+        return {"mode": "hermes-native", "deliver": _optional_text(job.get("deliver"))}
+    return {"mode": "new-session"}
+
+
+def _result_binding_session_id(result_binding: dict[str, Any]) -> str | None:
+    if result_binding.get("mode") != "current-session":
+        return None
+    return _optional_text(result_binding.get("sessionId") or result_binding.get("session_id"))
+
+
+def _created_by_origin(value: Any) -> str:
+    text = _text(value).strip().lower()
+    if text in {"manual", "conversation", "hermes-native"}:
+        return text
+    if text == "doxie-desktop":
+        return "manual"
+    return "unknown"
+
+
+def _doxie_metadata_from_params(params: dict[str, Any], *, partial: bool = False) -> dict[str, Any]:
     delete_after_run = params.get("deleteAfterRun", params.get("delete_after_run"))
     approval_policy = None
     if "approvalPolicy" in params or "approval_policy" in params:
         approval_policy = _normalize_approval_policy(params.get("approvalPolicy") or params.get("approval_policy"))
-    return {
+    owner = _owner_from_params(params)
+    has_binding_patch = any(key in params for key in ("resultBinding", "result_binding", "resultBindingMode", "result_binding_mode", "sessionTarget", "session_target", "sessionId", "sessionKey", "session_id"))
+    result_binding = _result_binding_from_params(params) if (not partial or has_binding_patch) else {}
+    target_session_id = _result_binding_session_id(result_binding)
+    metadata = {
         "description": _optional_text(params.get("description")),
-        "agent_profile_id": _optional_text(params.get("agentProfileId") or params.get("agent_profile_id")),
-        "agent_profile_name": _optional_text(params.get("agentProfileName") or params.get("agent_profile_name")),
         "approval_policy": approval_policy,
-        "session_target": _optional_text(params.get("sessionTarget") or params.get("session_target")),
         "wake_mode": _optional_text(params.get("wakeMode") or params.get("wake_mode")),
         "delete_after_run": _bool(delete_after_run, default=False) if delete_after_run is not None else None,
-        "session_id": _optional_text(params.get("sessionId") or params.get("sessionKey") or params.get("session_id")),
-        "workspace_id": _optional_text(params.get("workspaceId") or params.get("workspace_id")),
-        "created_by": "doxie-desktop",
     }
+    if owner or not partial:
+        metadata.update({
+            "owner": owner,
+            "agent_profile_id": _optional_text(owner.get("agentProfileId")),
+            "agent_profile_name": _optional_text(owner.get("agentProfileName")),
+            "workspace_id": _optional_text(owner.get("workspaceId")),
+            "workdir": _optional_text(owner.get("workdir")),
+            "created_by": _created_by_origin(owner.get("createdBy")) if owner.get("createdBy") else "manual",
+        })
+    if result_binding or not partial:
+        metadata.update({
+            "result_binding": result_binding,
+            "session_target": "main" if result_binding.get("mode") == "current-session" else "isolated",
+            "session_id": target_session_id,
+        })
+    if not partial or any(value is not None for value in metadata.values()):
+        metadata["schema_version"] = 2
+    return metadata
 
 
 def _normalize_approval_policy(value: Any) -> str:
@@ -443,7 +569,7 @@ def _payload_text(job: dict[str, Any]) -> str:
 
 def _doxie_session_id(job: dict[str, Any]) -> str | None:
     doxie = job.get("doxie") if isinstance(job.get("doxie"), dict) else {}
-    return _optional_text(doxie.get("session_id"))
+    return _result_binding_session_id(_result_binding_from_doxie(job, doxie)) or _optional_text(doxie.get("session_id"))
 
 
 def _cron_run_session_id(job: dict[str, Any]) -> str | None:

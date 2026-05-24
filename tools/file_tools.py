@@ -30,6 +30,15 @@ def _session_env(name: str, default: str = "") -> str:
         return os.getenv(name, default)
 
 
+def _default_workspace_cwd() -> str:
+    cwd = os.getenv("DOXIE_WORKSPACE_ROOT", "").strip()
+    if cwd:
+        return cwd
+    if os.getenv("DOXIE_PROCESS_ROLE") == "hermes-worker":
+        raise RuntimeError("Doxie workspace root is not configured")
+    return os.getcwd()
+
+
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
 # ---------------------------------------------------------------------------
@@ -129,7 +138,8 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path:
     """Resolve *filepath* against the task's live terminal cwd when possible."""
     p = Path(filepath).expanduser()
     if not p.is_absolute():
-        base = _get_live_tracking_cwd(task_id) or _session_env("TERMINAL_CWD", os.getcwd())
+        default_cwd = _default_workspace_cwd()
+        base = _get_live_tracking_cwd(task_id) or _session_env("TERMINAL_CWD", default_cwd) or default_cwd
         p = Path(base) / p
     return p.resolve()
 

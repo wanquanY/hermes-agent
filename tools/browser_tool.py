@@ -2699,6 +2699,18 @@ def browser_snapshot(
 
 def browser_tabs(task_id: Optional[str] = None) -> str:
     """List tabs in the current browser session."""
+    try:
+        from doxie_extension import browser_bridge as _doxie_browser
+
+        if _doxie_browser.available():
+            session = _doxie_browser.session_from_value(
+                _doxie_browser.call("browser_use_list_sessions")
+            )
+            if session:
+                return json.dumps(_doxie_browser.tab_payload_from_session(session), ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("Doxie desktop browser tab list failed; falling back to native CDP: %s", exc)
+
     if _is_camofox_mode():
         return json.dumps({
             "success": False,
@@ -2746,6 +2758,38 @@ def browser_tabs(task_id: Optional[str] = None) -> str:
 
 def browser_new_tab(url: Optional[str] = None, task_id: Optional[str] = None) -> str:
     """Open a new tab and make it active."""
+    requested_url = str(url or "").strip()
+    try:
+        from doxie_extension import browser_bridge as _doxie_browser
+
+        if _doxie_browser.available():
+            session = _doxie_browser.session_from_value(
+                _doxie_browser.call(
+                    "browser_use_create_tab",
+                    {
+                        "request": {
+                            "browserSessionId": _doxie_browser.browser_session_id(),
+                            "url": requested_url or "about:blank",
+                        },
+                    },
+                )
+            )
+            payload = _doxie_browser.tab_payload_from_session(session)
+            active_tab_id = str(payload.get("active_tab_id") or "")
+            active_tab = next(
+                (tab for tab in payload.get("tabs", []) if isinstance(tab, dict) and tab.get("tab_id") == active_tab_id),
+                {},
+            )
+            return json.dumps({
+                **payload,
+                "tab_id": active_tab_id,
+                "target_id": active_tab_id,
+                "url": str(active_tab.get("url") or requested_url or "about:blank"),
+                "title": str(active_tab.get("title") or ""),
+            }, ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("Doxie desktop browser new tab failed; falling back to native CDP: %s", exc)
+
     if _is_camofox_mode():
         return json.dumps({
             "success": False,
@@ -2756,7 +2800,6 @@ def browser_new_tab(url: Optional[str] = None, task_id: Optional[str] = None) ->
             "success": False,
             "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
         }, ensure_ascii=False)
-    requested_url = str(url or "").strip()
     try:
         created = _cdp_browser_call("Target.createTarget", {"url": "about:blank"})
         target_id = str(created.get("targetId") or "")
@@ -2790,6 +2833,39 @@ def browser_new_tab(url: Optional[str] = None, task_id: Optional[str] = None) ->
 
 def browser_select_tab(tab_id: str, task_id: Optional[str] = None) -> str:
     """Switch to a tab by tab_id."""
+    normalized = str(tab_id or "").strip()
+    if not normalized:
+        return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
+    try:
+        from doxie_extension import browser_bridge as _doxie_browser
+
+        if _doxie_browser.available():
+            session = _doxie_browser.session_from_value(
+                _doxie_browser.call(
+                    "browser_use_activate_tab",
+                    {
+                        "request": {
+                            "browserSessionId": _doxie_browser.browser_session_id(),
+                            "tabId": normalized,
+                        },
+                    },
+                )
+            )
+            payload = _doxie_browser.tab_payload_from_session(session)
+            active_tab = next(
+                (tab for tab in payload.get("tabs", []) if isinstance(tab, dict) and tab.get("tab_id") == normalized),
+                {},
+            )
+            return json.dumps({
+                **payload,
+                "tab_id": normalized,
+                "target_id": normalized,
+                "url": str(active_tab.get("url") or "about:blank"),
+                "title": str(active_tab.get("title") or ""),
+            }, ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("Doxie desktop browser tab select failed; falling back to native CDP: %s", exc)
+
     if _is_camofox_mode():
         return json.dumps({
             "success": False,
@@ -2800,9 +2876,6 @@ def browser_select_tab(tab_id: str, task_id: Optional[str] = None) -> str:
             "success": False,
             "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
         }, ensure_ascii=False)
-    normalized = str(tab_id or "").strip()
-    if not normalized:
-        return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
     try:
         targets = _cdp_page_targets()
         target = next((t for t in targets if str(t.get("targetId") or "") == normalized), None)
@@ -2837,6 +2910,34 @@ def browser_select_tab(tab_id: str, task_id: Optional[str] = None) -> str:
 
 def browser_close_tab(tab_id: str, task_id: Optional[str] = None) -> str:
     """Close a tab by tab_id."""
+    normalized = str(tab_id or "").strip()
+    if not normalized:
+        return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
+    try:
+        from doxie_extension import browser_bridge as _doxie_browser
+
+        if _doxie_browser.available():
+            session = _doxie_browser.session_from_value(
+                _doxie_browser.call(
+                    "browser_use_close_tab",
+                    {
+                        "request": {
+                            "browserSessionId": _doxie_browser.browser_session_id(),
+                            "tabId": normalized,
+                            "fallbackUrl": "about:blank",
+                        },
+                    },
+                )
+            )
+            payload = _doxie_browser.tab_payload_from_session(session)
+            return json.dumps({
+                **payload,
+                "closed_tab_id": normalized,
+                "closed": True,
+            }, ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("Doxie desktop browser tab close failed; falling back to native CDP: %s", exc)
+
     if _is_camofox_mode():
         return json.dumps({
             "success": False,
@@ -2847,9 +2948,6 @@ def browser_close_tab(tab_id: str, task_id: Optional[str] = None) -> str:
             "success": False,
             "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
         }, ensure_ascii=False)
-    normalized = str(tab_id or "").strip()
-    if not normalized:
-        return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
     try:
         targets = _cdp_page_targets()
         if not any(str(t.get("targetId") or "") == normalized for t in targets):

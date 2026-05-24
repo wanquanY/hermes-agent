@@ -233,6 +233,30 @@ def test_emit_without_payload(capture):
     assert "payload" not in json.loads(buf.getvalue())["params"]
 
 
+def test_emit_realtime_frame_includes_stable_run_metadata(capture):
+    server, buf = capture
+    server._sessions["runtime-meta"] = {
+        "session_key": "stored-meta",
+        "active_run_id": "run-meta",
+        "active_turn_id": "turn-meta",
+        "active_runtime_scope_key": "scope-meta",
+        "transport": None,
+    }
+
+    server._emit("message.delta", "runtime-meta", {"text": "hi"})
+    params = json.loads(buf.getvalue())["params"]
+
+    assert params["session_id"] == "runtime-meta"
+    assert params["runtime_session_id"] == "runtime-meta"
+    assert params["stored_session_id"] == "stored-meta"
+    assert params["run_id"] == "run-meta"
+    assert params["turn_id"] == "turn-meta"
+    assert params["runtime_scope_key"] == "scope-meta"
+    assert isinstance(params["seq"], int)
+    assert params["seq"] > 0
+    assert params["payload"]["text"] == "hi"
+
+
 # ── Blocking prompt round-trip ───────────────────────────────────────
 
 
@@ -394,6 +418,83 @@ def test_session_resume_reuses_live_running_runtime(server, monkeypatch):
     make_agent.assert_not_called()
 
 
+def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server, monkeypatch):
+    class _DB:
+        def __init__(self):
+            self.replaced = None
+
+        def get_session(self, sid):
+            return {"id": sid} if sid == "stored-1" else None
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def get_messages_as_conversation(
+            self,
+            _sid,
+            include_ancestors=False,
+            include_storage_metadata=False,
+        ):
+            return [
+                {
+                    "role": "user",
+                    "content": "hidden attachment context",
+                    "metadata": {
+                        "turn_id": "turn-1",
+                        "draft_text": "请读这个文件",
+                        "attachments": [
+                            {
+                                "name": "spec.pdf",
+                                "path": "/tmp/spec.pdf",
+                                "mimeType": "application/pdf",
+                                "size": 123,
+                                "kind": "file",
+                            },
+                        ],
+                    },
+                },
+                {"role": "assistant", "content": "ok", "metadata": {"turn_id": "turn-1"}},
+                {
+                    "role": "user",
+                    "content": "next",
+                    "metadata": {"turn_id": "turn-2", "draft_text": "下一条"},
+                },
+            ]
+
+        def replace_messages(self, sid, messages):
+            self.replaced = (sid, messages)
+
+    db = _DB()
+    make_agent = MagicMock()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_make_agent", make_agent)
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "session.recall_turn",
+            "params": {"session_id": "stored-1", "turn_id": "turn-1"},
+        }
+    )
+
+    assert "error" not in resp
+    make_agent.assert_not_called()
+    assert db.replaced is not None
+    assert db.replaced[0] == "stored-1"
+    assert [message["metadata"]["turn_id"] for message in db.replaced[1]] == ["turn-2"]
+    assert resp["result"]["stored_session_id"] == "stored-1"
+    assert resp["result"]["removed_messages"] == 2
+    assert resp["result"]["draft"]["text"] == "请读这个文件"
+    assert resp["result"]["draft"]["attachments"][0]["name"] == "spec.pdf"
+    assert resp["result"]["messages"] == [
+        {
+            "role": "user",
+            "text": "next",
+            "metadata": {"turn_id": "turn-2", "draft_text": "下一条"},
+        },
+    ]
+
+
 def test_session_status_returns_machine_readable_run_state(server):
     agent = MagicMock(model="gpt-test", provider="test-provider")
     agent.context_compressor = None
@@ -423,6 +524,120 @@ def test_session_status_returns_machine_readable_run_state(server):
     assert resp["result"]["active_run_id"] == "run-status"
     assert resp["result"]["run_started_at"] == 11
     assert resp["result"]["run_updated_at"] == 22
+
+
+def test_session_create_control_plane_only_accepts_tool_progress_mode(server, monkeypatch):
+    import importlib
+
+    importlib.reload(importlib.import_module("tui_gateway.methods.session"))
+
+    class _DB:
+        def __init__(self):
+            self.created = []
+
+        def create_session(self, session_id, source, model, transient=False):
+            self.created.append(
+                {
+                    "session_id": session_id,
+                    "source": source,
+                    "model": model,
+                    "transient": transient,
+                }
+            )
+
+    db = _DB()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_resolve_model", lambda: "gpt-test")
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "session.create",
+            "params": {
+                "control_plane_only": True,
+                "toolProgressMode": "verbose",
+                "transient": True,
+            },
+        }
+    )
+
+    assert "error" not in resp
+    assert resp["result"]["session_id"] == resp["result"]["stored_session_id"]
+    assert resp["result"]["info"]["control_plane_only"] is True
+    assert resp["result"]["info"]["lazy"] is True
+    assert resp["result"]["info"]["transient"] is True
+    assert db.created == [
+        {
+            "session_id": resp["result"]["stored_session_id"],
+            "source": "tui",
+            "model": "gpt-test",
+            "transient": True,
+        }
+    ]
+
+
+def test_approval_control_plane_methods_accept_stored_session_id(server, monkeypatch):
+    import importlib
+
+    importlib.reload(importlib.import_module("tui_gateway.methods.prompt"))
+
+    class _DB:
+        def get_session(self, session_id):
+            return {"id": session_id} if session_id == "stored-approval" else None
+
+    yolo_sessions = set()
+    approval_mod = types.SimpleNamespace(
+        is_session_yolo_enabled=lambda session_id: session_id in yolo_sessions,
+        enable_session_yolo=lambda session_id: yolo_sessions.add(session_id),
+        disable_session_yolo=lambda session_id: yolo_sessions.discard(session_id),
+        list_gateway_approvals=lambda session_id: [{"session_id": session_id}],
+        resolve_gateway_approval=lambda session_id, choice, resolve_all=False: {
+            "session_id": session_id,
+            "choice": choice,
+            "all": resolve_all,
+        },
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setitem(sys.modules, "tools.approval", approval_mod)
+
+    pending = server.handle_request(
+        {
+            "id": "pending",
+            "method": "approval.pending.list",
+            "params": {"session_id": "stored-approval"},
+        }
+    )
+    before = server.handle_request(
+        {
+            "id": "before",
+            "method": "approval.policy.get",
+            "params": {"stored_session_id": "stored-approval"},
+        }
+    )
+    updated = server.handle_request(
+        {
+            "id": "set",
+            "method": "approval.policy.set",
+            "params": {"session_id": "stored-approval", "mode": "full_access"},
+        }
+    )
+    after = server.handle_request(
+        {
+            "id": "after",
+            "method": "approval.policy.get",
+            "params": {"session_id": "stored-approval"},
+        }
+    )
+
+    assert "error" not in pending
+    assert pending["result"]["approvals"] == [{"session_id": "stored-approval"}]
+    assert "error" not in before
+    assert before["result"] == {"mode": "default", "yolo": False}
+    assert "error" not in updated
+    assert updated["result"] == {"mode": "full_access", "yolo": True}
+    assert "error" not in after
+    assert after["result"] == {"mode": "full_access", "yolo": True}
 
 
 def test_run_control_replays_events_and_tracks_status(capture):
@@ -511,6 +726,65 @@ def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
     assert resp["error"]["data"]["active_run_id"] == "run-active"
 
 
+def test_run_submit_preserves_prestart_cancelled_run(server, monkeypatch):
+    session = {
+        "agent": MagicMock(model="gpt-test", provider="test-provider"),
+        "session_key": "stored-prestart-cancel",
+        "running": False,
+        "active_run_id": "",
+        "active_turn_id": "",
+        "history": [],
+        "history_lock": threading.Lock(),
+    }
+    server._sessions["runtime-prestart-cancel"] = session
+    monkeypatch.setattr(
+        server,
+        "_start_agent_build",
+        MagicMock(side_effect=AssertionError("pre-cancelled submit must not start agent")),
+    )
+    monkeypatch.setattr(
+        server,
+        "_run_prompt_submit",
+        MagicMock(side_effect=AssertionError("pre-cancelled submit must not run prompt")),
+    )
+
+    cancelled = server.handle_request(
+        {
+            "id": "cancel",
+            "method": "run.cancel",
+            "params": {
+                "stored_session_id": "stored-prestart-cancel",
+                "run_id": "run-prestart-cancel",
+                "turn_id": "turn-prestart-cancel",
+                "runtime_scope_key": "profile:agent-default",
+            },
+        }
+    )
+    submitted = server.handle_request(
+        {
+            "id": "submit",
+            "method": "run.submit",
+            "params": {
+                "stored_session_id": "stored-prestart-cancel",
+                "run_id": "run-prestart-cancel",
+                "turn_id": "turn-prestart-cancel",
+                "text": "hello",
+                "runtime_scope_key": "profile:agent-default",
+                "_control_plane_reserved": True,
+            },
+        }
+    )
+
+    assert "error" not in cancelled
+    assert "error" not in submitted
+    assert submitted["result"]["status"] == "cancelled"
+    assert submitted["result"]["run_id"] == "run-prestart-cancel"
+    assert session["running"] is False
+    assert session["active_run_id"] is None
+    assert server._start_agent_build.call_count == 0
+    assert server._run_prompt_submit.call_count == 0
+
+
 def test_events_subscribe_returns_subscription_id_and_unsubscribes(capture):
     server, _buf = capture
     token = server.bind_transport(server._stdio_transport)
@@ -536,6 +810,49 @@ def test_events_subscribe_returns_subscription_id_and_unsubscribes(capture):
 
     assert subscription_id
     assert unsubscribed["result"]["removed"] == 1
+
+
+def test_run_events_replays_without_creating_subscription(server, monkeypatch):
+    from tui_gateway.services import run_control
+
+    class _RunDB:
+        def list_run_events(self, session_id, *, after_seq=0, active_only=False, runtime_scope_key="", limit=2000):
+            assert session_id == "stored-run-events"
+            assert after_seq == 1
+            assert active_only is False
+            assert runtime_scope_key == "profile:agent-a"
+            assert limit == 321
+            return [
+                {
+                    "type": "message.delta",
+                    "stored_session_id": session_id,
+                    "run_id": "run-a",
+                    "runtime_scope_key": runtime_scope_key,
+                    "seq": 2,
+                    "payload": {"text": "hello"},
+                }
+            ]
+
+    monkeypatch.setattr(server, "_get_db", lambda: _RunDB())
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "run.events",
+            "params": {
+                "stored_session_id": "stored-run-events",
+                "after_seq": 1,
+                "runtime_scope_key": "profile:agent-a",
+                "limit": 321,
+            },
+        }
+    )
+
+    assert "error" not in resp
+    assert resp["result"]["stored_session_id"] == "stored-run-events"
+    assert resp["result"]["last_event_seq"] == 2
+    assert resp["result"]["events"][0]["run_id"] == "run-a"
+    assert run_control._subscriptions_by_id == {}
 
 
 def test_run_list_accepts_runtime_scope_and_status_filters(server, monkeypatch):

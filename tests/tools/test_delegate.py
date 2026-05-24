@@ -1528,6 +1528,43 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
             ["web", "browser"],
         )
 
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_build_child_agent_relay_output_delta_when_progress_suppressed(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.tool_progress_callback = MagicMock()
+        parent._delegate_child_progress_suppressed = True
+        parent._delegate_child_output_delta_enabled = True
+        parent._delegate_child_output_tool_name = "test_agent_profile"
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="test goal",
+                context=None,
+                toolsets=[],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        call_kwargs = MockAgent.call_args[1]
+        self.assertIsNone(call_kwargs["tool_progress_callback"])
+        output_delta_cb = call_kwargs["stream_delta_callback"]
+        self.assertIsNotNone(output_delta_cb)
+
+        output_delta_cb("hello")
+
+        args, kwargs = parent.tool_progress_callback.call_args
+        self.assertEqual(args[:4], ("subagent.output_delta", "test_agent_profile", "hello", None))
+        self.assertEqual(kwargs["goal"], "test goal")
+        self.assertEqual(kwargs["task_index"], 0)
+        self.assertEqual(kwargs["task_count"], 1)
+        self.assertEqual(kwargs["depth"], 0)
+
 
 class TestChildCredentialLeasing(unittest.TestCase):
     def test_run_single_child_acquires_and_releases_lease(self):

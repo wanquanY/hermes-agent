@@ -190,6 +190,8 @@ def decide_image_input_mode(
     provider: str,
     model: str,
     cfg: Optional[Dict[str, Any]],
+    *,
+    supports_vision_override: Optional[bool] = None,
 ) -> str:
     """Return ``"native"`` or ``"text"`` for the given turn.
 
@@ -197,6 +199,9 @@ def decide_image_input_mode(
       provider: active inference provider ID (e.g. ``"anthropic"``, ``"openrouter"``).
       model:    active model slug as it would be sent to the provider.
       cfg:      loaded config.yaml dict, or None. When None, behaves as auto.
+      supports_vision_override: optional per-turn capability from the runtime
+        model descriptor. Used by Doxie and other gateway clients when the
+        active model capability is known outside static models.dev metadata.
     """
     mode_cfg = "auto"
     if isinstance(cfg, dict):
@@ -211,6 +216,11 @@ def decide_image_input_mode(
 
     # auto
     if _explicit_aux_vision_override(cfg):
+        return "text"
+
+    if supports_vision_override is True:
+        return "native"
+    if supports_vision_override is False:
         return "text"
 
     supports = _lookup_supports_vision(provider, model, cfg)

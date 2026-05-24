@@ -197,7 +197,12 @@ def _(rid, params: dict) -> dict:
     if isinstance(result, dict):
         run_id = str(result.get("run_id") or params.get("client_run_id") or params.get("run_id") or "").strip()
         turn_id = str(result.get("turn_id") or params.get("turn_id") or "").strip()
-        if run_id and not bool((session or {}).get("transient") or transient):
+        status = str(result.get("status") or "").strip().lower()
+        if (
+            run_id
+            and status not in {"cancelled", "canceled", "failed", "interrupted", "completed", "complete"}
+            and not bool((session or {}).get("transient") or transient)
+        ):
             run_control.mark_run_started(
                 stored_session_id=stable_session_id,
                 runtime_session_id=sid,
@@ -356,9 +361,14 @@ def _(rid, params: dict) -> dict:
     stable_session_id = _stored_session_id_from_params(params)
     if not run_id and not stable_session_id:
         return _err(rid, 4006, "run_id or stored_session_id required")
+    runtime_session_id = str(params.get("runtime_session_id") or params.get("runtimeSessionId") or "").strip()
+    if not runtime_session_id and stable_session_id:
+        resolved_sid, _session = _resolve_runtime_session(stable_session_id)
+        runtime_session_id = resolved_sid or stable_session_id
     interrupt_params = {
         **params,
-        "session_id": stable_session_id or params.get("session_id") or "",
+        "session_id": runtime_session_id or stable_session_id or params.get("session_id") or "",
+        "stored_session_id": stable_session_id,
         "run_id": run_id,
         "completion_status": "cancelled",
     }
@@ -428,6 +438,42 @@ def _(rid, params: dict) -> dict:
             "subscription_id": subscription_id,
             "events": replay,
             "last_event_seq": max([int(event.get("seq") or 0) for event in replay], default=after_seq),
+        },
+    )
+
+
+@method("run.events")
+def _(rid, params: dict) -> dict:
+    stable_session_id = str(
+        params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or params.get("session_id")
+        or ""
+    ).strip()
+    if not stable_session_id:
+        return _err(rid, 4006, "stored_session_id required")
+    try:
+        after_seq = int(params.get("after_seq") or params.get("afterSeq") or 0)
+    except (TypeError, ValueError):
+        after_seq = 0
+    runtime_scope_key = str(
+        params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
+    ).strip()
+    _, events = run_control.subscribe_session_with_id(
+        stored_session_id=stable_session_id,
+        transport=None,
+        after_seq=after_seq,
+        active_only=bool(params.get("active_only") or params.get("activeOnly")),
+        runtime_scope_key=runtime_scope_key,
+        limit=_bounded_limit(params.get("limit"), default=2000, maximum=5000),
+        db=_get_db(),
+    )
+    return _ok(
+        rid,
+        {
+            "stored_session_id": stable_session_id,
+            "events": events,
+            "last_event_seq": max([int(event.get("seq") or 0) for event in events], default=after_seq),
         },
     )
 

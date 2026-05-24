@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 from tui_gateway.methods._shared import bind_server_globals
+from tui_gateway.services.completions import (
+    details_completions,
+    path_completion_items,
+)
 
 _server = bind_server_globals(globals())
 
@@ -73,7 +77,7 @@ def _(rid, params: dict) -> dict:
             ):
                 items.append(extra)
 
-        details_items = _details_completions(text)
+        details_items = details_completions(text)
         if details_items is not None:
             return _ok(
                 rid,

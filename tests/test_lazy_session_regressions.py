@@ -135,6 +135,7 @@ class TestSyncSessionKeyAfterAutoCompress:
         """Simulate: run_conversation() internally compresses and rotates
         agent.session_id. After it returns, session['session_key'] must match."""
         from tui_gateway import server
+        from tui_gateway.methods import prompt as prompt_methods
 
         class _CompressingAgent:
             """Agent that simulates compression-driven session_id rotation."""
@@ -168,6 +169,7 @@ class TestSyncSessionKeyAfterAutoCompress:
                 sess["session_key"] = new_id
 
         monkeypatch.setattr(server, "_sync_session_key_after_compress", _tracking_sync)
+        monkeypatch.setattr(prompt_methods, "_sync_session_key_after_compress", _tracking_sync)
         monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
         monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
         monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
@@ -181,6 +183,7 @@ class TestSyncSessionKeyAfterAutoCompress:
 
         server._sessions["test-sid"] = session
         monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(prompt_methods.threading, "Thread", _ImmediateThread)
 
         try:
             server.handle_request({

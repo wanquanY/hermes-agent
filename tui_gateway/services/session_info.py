@@ -101,6 +101,7 @@ def session_info(agent: Any, session: dict | None = None) -> dict:
     ):
         reasoning_effort = str(reasoning_config.get("effort", "") or "")
     service_tier = getattr(agent, "service_tier", None) or ""
+    cwd = session_cwd(session) if session else str(getattr(agent, "session_cwd", "") or "")
     info: dict = {
         "model": getattr(agent, "model", ""),
         "reasoning_effort": reasoning_effort,
@@ -108,7 +109,7 @@ def session_info(agent: Any, session: dict | None = None) -> dict:
         "fast": service_tier == "priority",
         "tools": {},
         "skills": {},
-        "cwd": session_cwd(session),
+        "cwd": cwd,
         "workspace": dict(session.get("workspace") or {}) if session else {},
         "model_descriptor": dict(session.get("model_descriptor") or {}) if session else {},
         "version": "",

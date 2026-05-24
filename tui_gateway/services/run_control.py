@@ -566,6 +566,7 @@ def subscribe_session(
     after_seq: int = 0,
     active_only: bool = False,
     runtime_scope_key: str = "",
+    limit: int = _MAX_EVENTS_PER_SESSION,
     db: Any = None,
 ) -> list[dict[str, Any]]:
     _subscription_id, events = subscribe_session_with_id(
@@ -574,6 +575,7 @@ def subscribe_session(
         after_seq=after_seq,
         active_only=active_only,
         runtime_scope_key=runtime_scope_key,
+        limit=limit,
         db=db,
     )
     return events
@@ -586,6 +588,7 @@ def subscribe_session_with_id(
     after_seq: int = 0,
     active_only: bool = False,
     runtime_scope_key: str = "",
+    limit: int = _MAX_EVENTS_PER_SESSION,
     db: Any = None,
     subscription_id: str = "",
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -621,7 +624,7 @@ def subscribe_session_with_id(
                 after_seq=after_seq,
                 active_only=False,
                 runtime_scope_key=scope,
-                limit=_MAX_EVENTS_PER_SESSION,
+                limit=limit,
             )
         except Exception:
             events = []

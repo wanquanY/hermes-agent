@@ -115,7 +115,14 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             try:
                 cmd = function_args.get("command", "")
                 if _is_destructive_command(cmd):
-                    cwd = function_args.get("workdir") or os.getenv("TERMINAL_CWD", os.getcwd())
+                    cwd = (
+                        function_args.get("workdir")
+                        or getattr(agent, "session_cwd", "")
+                        or os.getenv("DOXIE_WORKSPACE_ROOT", "")
+                        or os.getenv("TERMINAL_CWD", "")
+                    )
+                    if not cwd and os.getenv("DOXIE_PROCESS_ROLE") != "hermes-worker":
+                        cwd = os.getcwd()
                     agent._checkpoint_mgr.ensure_checkpoint(
                         cwd, f"before terminal: {cmd[:60]}"
                     )
@@ -577,7 +584,14 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             try:
                 cmd = function_args.get("command", "")
                 if _is_destructive_command(cmd):
-                    cwd = function_args.get("workdir") or os.getenv("TERMINAL_CWD", os.getcwd())
+                    cwd = (
+                        function_args.get("workdir")
+                        or getattr(agent, "session_cwd", "")
+                        or os.getenv("DOXIE_WORKSPACE_ROOT", "")
+                        or os.getenv("TERMINAL_CWD", "")
+                    )
+                    if not cwd and os.getenv("DOXIE_PROCESS_ROLE") != "hermes-worker":
+                        cwd = os.getcwd()
                     agent._checkpoint_mgr.ensure_checkpoint(
                         cwd, f"before terminal: {cmd[:60]}"
                     )
@@ -745,12 +759,13 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 spinner.start()
             _spinner_result = None
             try:
-                function_result = _ra().handle_function_call(
-                    function_name, function_args, effective_task_id,
-                    tool_call_id=tool_call.id,
-                    session_id=agent.session_id or "",
-                    enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
-                    skip_pre_tool_call_hook=True,
+                function_result = agent._invoke_tool(
+                    function_name,
+                    function_args,
+                    effective_task_id,
+                    tool_call.id,
+                    messages=messages,
+                    pre_tool_block_checked=True,
                 )
                 _spinner_result = function_result
             except Exception as tool_error:
@@ -765,12 +780,13 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     agent._vprint(f"  {cute_msg}")
         else:
             try:
-                function_result = _ra().handle_function_call(
-                    function_name, function_args, effective_task_id,
-                    tool_call_id=tool_call.id,
-                    session_id=agent.session_id or "",
-                    enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
-                    skip_pre_tool_call_hook=True,
+                function_result = agent._invoke_tool(
+                    function_name,
+                    function_args,
+                    effective_task_id,
+                    tool_call.id,
+                    messages=messages,
+                    pre_tool_block_checked=True,
                 )
             except Exception as tool_error:
                 function_result = f"Error executing tool '{function_name}': {tool_error}"

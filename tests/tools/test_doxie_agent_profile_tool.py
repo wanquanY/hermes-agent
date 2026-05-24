@@ -20,6 +20,7 @@ def test_design_agent_profile_inspects_real_design_context():
     assert result["summary"]["toolsetCount"] >= len(result["systemToolsets"])
     assert result["rules"]["skillCatalogSource"] == "hermes.skills"
     assert result["rules"]["useSkillManageForCreation"] is True
+    assert result["rules"]["allowedCategories"] == ["工作", "学习", "创作", "开发", "生活", "其他"]
     assert "installedSkills" not in result
 
 
@@ -44,6 +45,7 @@ def test_design_agent_profile_emits_composite_design_event():
         design_agent_profile(
             operation="create",
             name="产品经理分身",
+            category="product",
             recommended_toolsets=["web"],
             recommended_skills=["notion"],
             missing_capabilities=["技能未安装：bilibili-video"],
@@ -53,6 +55,7 @@ def test_design_agent_profile_emits_composite_design_event():
 
     assert result["doxie_event"] == "agent_profile_design_draft_requested"
     assert result["operation"] == "create"
+    assert result["draft"]["category"] == "工作"
     assert result["draft"]["recommendedToolsets"] == ["web"]
     assert result["draft"]["recommendedSkills"] == ["notion"]
     assert result["draft"]["missingCapabilities"] == ["技能未安装：bilibili-video"]
@@ -79,6 +82,7 @@ def test_design_agent_profile_saves_draft_through_backend_bridge(monkeypatch):
         design_agent_profile(
             operation="create",
             name="产品经理分身",
+            category="product",
             recommended_toolsets=["web"],
             soul_markdown="# 产品经理分身\n",
         )
@@ -86,6 +90,7 @@ def test_design_agent_profile_saves_draft_through_backend_bridge(monkeypatch):
 
     assert calls[0][0] == "doxie_agent_profile_draft_create"
     assert calls[0][1]["name"] == "产品经理分身"
+    assert calls[0][1]["category"] == "工作"
     assert result["doxie_event"] == "agent_profile_design_draft_saved"
     assert result["draftId"] == "draft-1"
 
@@ -205,6 +210,8 @@ def test_test_agent_profile_runs_draft_through_delegation(monkeypatch, tmp_path)
         calls.update(kwargs)
         assert kwargs["parent_agent"]._delegate_child_transient_session is True
         assert kwargs["parent_agent"]._delegate_child_progress_suppressed is True
+        assert kwargs["parent_agent"]._delegate_child_output_delta_enabled is True
+        assert kwargs["parent_agent"]._delegate_child_output_tool_name == "test_agent_profile"
         return json.dumps({"results": [{"status": "success", "summary": "这是 PRD 草稿。", "api_calls": 1}]})
 
     monkeypatch.setattr("tools.delegate_tool.delegate_task", fake_delegate_task)
@@ -229,6 +236,8 @@ def test_test_agent_profile_runs_draft_through_delegation(monkeypatch, tmp_path)
     assert progress_events == []
     assert not hasattr(parent_agent, "_delegate_child_transient_session")
     assert not hasattr(parent_agent, "_delegate_child_progress_suppressed")
+    assert not hasattr(parent_agent, "_delegate_child_output_delta_enabled")
+    assert not hasattr(parent_agent, "_delegate_child_output_tool_name")
 
 
 def test_test_agent_profile_does_not_expose_subagent_progress(monkeypatch, tmp_path):

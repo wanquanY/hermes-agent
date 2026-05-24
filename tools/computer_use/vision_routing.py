@@ -28,6 +28,9 @@ Behaviour (mirrors ``vision_analyze`` for consistency)
   ``provider``, ``model``, or ``base_url`` non-empty / not ``"auto"``),
   the screenshot is routed through the aux vision pipeline. Users who
   pay for a dedicated vision model usually want it used.
+* If the active runtime supplied an authoritative model descriptor
+  (``vision_enabled``), use that before static config heuristics. This is
+  how Doxie passes model catalog capabilities for managed proxy models.
 * Otherwise, if the active main model+provider can carry an image inside
   a tool-result message AND the model reports ``supports_vision=True``
   in models.dev metadata, return ``False`` (use the multimodal path).
@@ -119,6 +122,8 @@ def should_route_capture_to_aux_vision(
     provider: str,
     model: str,
     cfg: Optional[Dict[str, Any]],
+    *,
+    supports_vision_override: Optional[bool] = None,
 ) -> bool:
     """Return True iff the captured screenshot should be pre-analysed via aux vision.
 
@@ -127,6 +132,9 @@ def should_route_capture_to_aux_vision(
         ``"anthropic"``, ``"openai-codex"``). Lower-case canonical id.
       model:    active main model slug as it would be sent to the provider.
       cfg:      loaded ``config.yaml`` dict (or None).
+      supports_vision_override: per-turn capability from the runtime model
+        descriptor. When present, it is more authoritative than static
+        models.dev metadata and Doxie-managed auxiliary config.
 
     Returns:
       ``True`` when the caller should hand the screenshot to the aux vision
@@ -134,11 +142,20 @@ def should_route_capture_to_aux_vision(
       caller should keep the existing multimodal envelope (main model
       handles vision natively).
     """
-    if _explicit_aux_vision_override(cfg):
+    if supports_vision_override is True:
+        return False
+    if supports_vision_override is False:
         return True
+
+    explicit_aux = _explicit_aux_vision_override(cfg)
+    if not provider and not model and not explicit_aux:
+        return False
 
     accepts_tool_image = _provider_accepts_multimodal_tool_result(provider, model)
     if accepts_tool_image is None or accepts_tool_image is False:
+        return True
+
+    if explicit_aux:
         return True
 
     supports_vision = _lookup_supports_vision(provider, model)

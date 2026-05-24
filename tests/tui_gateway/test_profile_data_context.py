@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 
 from tui_gateway import server
 from tui_gateway.methods import session as session_methods
@@ -54,3 +55,43 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
     assert resp["result"]["messages"] == [{"role": "user", "text": "hello"}]
     assert seen["home"] == str(profile_home.resolve())
     assert os.environ.get("DOXIE_TEST_PROFILE_ENV") is None
+
+
+def test_profile_db_selection_uses_process_home_as_default(monkeypatch, tmp_path):
+    """A request-scoped profile home must not redefine the process default DB."""
+
+    process_home = tmp_path / "process-home"
+    profile_home = tmp_path / "profile-home"
+    seen: dict[str, str] = {}
+
+    def fake_get_session_db_for_home(**kwargs):
+        seen["active_home"] = str(kwargs["active_home"])
+        seen["default_home"] = str(kwargs["default_home"])
+        return SimpleNamespace(
+            db=object(),
+            default_db=kwargs["default_db"],
+            default_error=kwargs["default_error"],
+        )
+
+    monkeypatch.setattr(server, "_hermes_home", process_home)
+    monkeypatch.setattr(server, "_db", object())
+    monkeypatch.setattr(server, "_db_error", None)
+    monkeypatch.setattr(server, "_get_session_db_for_home", fake_get_session_db_for_home)
+
+    token = server._enter_profile_context(
+        server._profile_context_for_params({
+            "doxie_profile": {
+                "id": "agent-default",
+                "hermesHomePath": str(profile_home),
+            },
+        })
+    )
+    try:
+        server._get_db()
+    finally:
+        server._leave_profile_context(token)
+
+    assert seen == {
+        "active_home": str(profile_home.resolve()),
+        "default_home": str(process_home.resolve()),
+    }

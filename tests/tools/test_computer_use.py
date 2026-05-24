@@ -1209,6 +1209,52 @@ class TestCaptureAppFilterNoMatch:
         assert backend._active_pid == 200
         assert backend._active_window_id == 2
 
+    def test_app_filter_can_target_background_window_and_preserve_capture_metadata(self):
+        windows = [
+            {
+                "app_name": "微信",
+                "pid": 17899,
+                "window_id": 211621,
+                "is_on_screen": False,
+                "on_current_space": False,
+                "title": "聊天记录",
+                "z_index": 10,
+                "bounds": {"x": 852, "y": 1562, "width": 550, "height": 700},
+            },
+        ]
+        backend = _make_cua_backend_with_windows(windows)
+        backend._session.call_tool.side_effect = [
+            {"data": "", "images": [], "isError": False,
+             "structuredContent": {"windows": windows}},
+            {
+                "data": '✅ 微信 — 1 elements, turn 1 + screenshot\n- AXApplication "微信"\n',
+                "images": ["iVBORw0KGgo="],
+                "isError": False,
+                "structuredContent": {
+                    "name": "微信",
+                    "pid": 17899,
+                    "screenshot_width": 550,
+                    "screenshot_height": 700,
+                    "screenshot_scale_factor": 1,
+                    "tree_markdown": '- AXApplication "微信"\n',
+                },
+            },
+        ]
+
+        cap = backend.capture(mode="som", app="微信")
+
+        assert backend._session.call_tool.call_args_list[0].args == (
+            "list_windows",
+            {"on_screen_only": False},
+        )
+        assert cap.app == "微信"
+        assert cap.width == 550
+        assert cap.height == 700
+        assert cap.window_bounds == (852, 1562, 550, 700)
+        assert cap.capture_bounds == (0, 0, 550, 700)
+        assert cap.window_id == 211621
+        assert any("not reported on screen" in w for w in cap.warnings)
+
     def test_no_app_filter_still_picks_frontmost(self):
         """When no app= is given, capture continues to pick the frontmost
         window — the no-match early-return must not fire on the empty case."""
@@ -1266,3 +1312,22 @@ class TestFocusAppFilterNoMatch:
         assert res.ok is True
         assert backend._active_pid == 200
         assert backend._active_window_id == 2
+
+
+class TestCuaDriverListAppsParsing:
+    def test_list_apps_strips_bullet_prefix_from_text_output(self):
+        from tools.computer_use.cua_backend import CuaDriverBackend
+
+        backend = CuaDriverBackend()
+        backend._session = MagicMock()
+        backend._session.call_tool.return_value = {
+            "data": "- 微信 (pid 17899)\n- Safari (pid 42)",
+            "images": [],
+            "structuredContent": None,
+            "isError": False,
+        }
+
+        assert backend.list_apps() == [
+            {"name": "微信", "pid": 17899},
+            {"name": "Safari", "pid": 42},
+        ]

@@ -274,6 +274,72 @@ class TestVisionPathApiMode:
         assert kwargs.get("api_mode") == "chat_completions"
 
 
+class TestVisionTaskDoxieCloudAuth:
+    """Doxie-managed vision tasks must keep their runtime-token binding."""
+
+    def test_vision_task_base_url_uses_named_provider_key_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DOXIE_LLM_RUNTIME_TOKEN", "runtime-token")
+        _write_config(tmp_path, {
+            "providers": {
+                "doxie-cloud": {
+                    "name": "Doxie Cloud",
+                    "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+                    "key_env": "DOXIE_LLM_RUNTIME_TOKEN",
+                    "default_model": "gpt-5.5",
+                    "api_mode": "chat_completions",
+                },
+            },
+            "auxiliary": {
+                "vision": {
+                    "provider": "doxie-cloud",
+                    "model": "gpt-5.5",
+                    "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+                    "api_mode": "chat_completions",
+                },
+            },
+        })
+
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            from agent.auxiliary_client import resolve_vision_provider_client
+
+            provider, client, model = resolve_vision_provider_client()
+
+        assert provider == "doxie-cloud"
+        assert client is not None
+        assert model == "gpt-5.5"
+        _, kwargs = mock_openai.call_args
+        assert kwargs["api_key"] == "runtime-token"
+        assert str(kwargs["base_url"]) == "http://127.0.0.1:8011/api/v1/llm-proxy/v1"
+
+    def test_vision_task_key_env_survives_without_provider_entry(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DOXIE_LLM_RUNTIME_TOKEN", "runtime-token")
+        _write_config(tmp_path, {
+            "auxiliary": {
+                "vision": {
+                    "provider": "doxie-cloud",
+                    "model": "gpt-5.5",
+                    "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+                    "key_env": "DOXIE_LLM_RUNTIME_TOKEN",
+                    "api_mode": "chat_completions",
+                },
+            },
+        })
+
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            from agent.auxiliary_client import resolve_vision_provider_client
+
+            provider, client, model = resolve_vision_provider_client()
+
+        assert provider == "custom"
+        assert client is not None
+        assert model == "gpt-5.5"
+        _, kwargs = mock_openai.call_args
+        assert kwargs["api_key"] == "runtime-token"
+        assert str(kwargs["base_url"]) == "http://127.0.0.1:8011/api/v1/llm-proxy/v1"
+
+
 class TestProvidersDictApiModeAnthropicMessages:
     """Regression guard for #15033.
 

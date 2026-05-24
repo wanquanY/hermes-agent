@@ -456,8 +456,11 @@ def _supports_media_in_tool_results(provider: str, model: str) -> bool:
     if p in {"anthropic", "claude", "anthropic-direct"}:
         return True
 
-    # OpenAI Chat Completions and Responses
-    if p in {"openai", "openai-chat", "openai-codex", "azure-openai"}:
+    # OpenAI Chat Completions and Responses. Doxie Cloud exposes an
+    # OpenAI-compatible chat-completions proxy and carries image_url parts
+    # through tool-result content when the runtime model descriptor marks
+    # the selected model as vision-capable.
+    if p in {"openai", "openai-chat", "openai-codex", "azure-openai", "doxie-cloud"}:
         return True
 
     # Gemini — gate on model name; older Gemini variants did not support
@@ -1028,7 +1031,19 @@ def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
         _provider = _read_main_provider()
         _model = _read_main_model()
         _cfg = load_config()
-        _mode = decide_image_input_mode(_provider, _model, _cfg)
+        _descriptor = getattr(kw.get("parent_agent"), "model_descriptor", None)
+        _supports_vision = (
+            bool(_descriptor.get("vision_enabled"))
+            if isinstance(_descriptor, dict)
+            and isinstance(_descriptor.get("vision_enabled"), bool)
+            else None
+        )
+        _mode = decide_image_input_mode(
+            _provider,
+            _model,
+            _cfg,
+            supports_vision_override=_supports_vision,
+        )
         if _mode == "native" and _supports_media_in_tool_results(_provider, _model):
             logger.info(
                 "vision_analyze: native fast path (provider=%s, model=%s)",

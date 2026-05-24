@@ -9,6 +9,104 @@ _server = bind_server_globals(globals())
 # ── Methods: tools & system ──────────────────────────────────────────
 
 
+@method("gateway.capabilities")
+def _(rid, params: dict) -> dict:
+    from doxie_extension.manifest import gateway_capabilities
+
+    return _ok(rid, gateway_capabilities())
+
+
+def _profile_runtime_scope_from_params(params: dict) -> dict:
+    agent_profile_id = str(
+        params.get("agent_profile_id")
+        or params.get("agentProfileId")
+        or params.get("profile_id")
+        or params.get("profileId")
+        or ""
+    ).strip()
+    agent_profile_version_id = str(
+        params.get("agent_profile_version_id")
+        or params.get("agentProfileVersionId")
+        or params.get("version_id")
+        or params.get("versionId")
+        or ""
+    ).strip()
+    draft_id = str(
+        params.get("agent_profile_draft_id")
+        or params.get("agentProfileDraftId")
+        or params.get("draft_id")
+        or params.get("draftId")
+        or ""
+    ).strip()
+    explicit_scope = str(
+        params.get("runtime_scope_key")
+        or params.get("runtimeScopeKey")
+        or ""
+    ).strip()
+    if explicit_scope:
+        runtime_scope_key = explicit_scope
+    elif draft_id:
+        runtime_scope_key = f"draft:{draft_id}"
+    elif agent_profile_id and agent_profile_version_id:
+        runtime_scope_key = f"profile:{agent_profile_id}:version:{agent_profile_version_id}"
+    elif agent_profile_id:
+        runtime_scope_key = f"profile:{agent_profile_id}"
+    else:
+        runtime_scope_key = "profile:agent-default"
+    return {
+        "agent_profile_id": agent_profile_id,
+        "agent_profile_version_id": agent_profile_version_id,
+        "agent_profile_draft_id": draft_id,
+        "runtime_scope_key": runtime_scope_key,
+        "transient": bool(draft_id or str(runtime_scope_key).startswith("draft:")),
+    }
+
+
+@method("profile.prepare_runtime")
+def _(rid, params: dict) -> dict:
+    """Normalize the Doxie profile runtime scope before a worker is used.
+
+    Doxie owns profile metadata and filesystem preparation. Hermes owns the
+    stable Gateway ABI for profile-scoped runtime identity. This control-plane
+    method gives clients a side-effect-light contract check that does not build
+    an agent or touch model/tool state.
+    """
+    scope = _profile_runtime_scope_from_params(params or {})
+    return _ok(
+        rid,
+        {
+            "status": "prepared",
+            "prepared": True,
+            **scope,
+        },
+    )
+
+
+@method("runtime.status")
+def _(rid, params: dict) -> dict:
+    """Return lightweight gateway runtime diagnostics without building an agent."""
+    try:
+        from gateway.status import read_runtime_status
+
+        state = read_runtime_status()
+        if not isinstance(state, dict):
+            state = {}
+    except Exception as exc:
+        state = {}
+        error = str(exc)
+    else:
+        error = ""
+    return _ok(
+        rid,
+        {
+            "status": str(state.get("gateway_state") or state.get("status") or "unknown"),
+            "runtime": state,
+            "available": bool(state),
+            **({"error": error} if error else {}),
+        },
+    )
+
+
 @method("process.stop")
 def _(rid, params: dict) -> dict:
     try:
