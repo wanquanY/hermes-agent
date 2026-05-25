@@ -101,6 +101,32 @@ _cfg_mtime: float | None = None
 _cfg_path = None
 _DETAIL_SECTION_NAMES = ("thinking", "tools", "subagents", "activity")
 _DETAIL_MODES = frozenset({"hidden", "collapsed", "expanded"})
+_READ_ONLY_DB_METHODS = frozenset(
+    {
+        "artifacts.list",
+        "delegation.status",
+        "events.subscribe",
+        "insights.get",
+        "rollback.diff",
+        "rollback.list",
+        "run.events",
+        "run.list",
+        "run.status",
+        "session.history",
+        "session.list",
+        "session.messages",
+        "session.most_recent",
+        "session.status",
+        "session.usage",
+        "spawn_tree.list",
+        "workspace.current",
+        "workspace.list",
+    }
+)
+_current_method: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "tui_gateway_current_method",
+    default="",
+)
 # ── Async RPC dispatch (#12546) ──────────────────────────────────────
 # A handful of handlers block the dispatcher loop in entry.py for seconds
 # to minutes (slash.exec, cli.exec, shell.exec, session.resume,
@@ -228,6 +254,7 @@ def _get_db():
     global _db, _db_error
     active_home = _resolve_home_path(_active_hermes_home, fallback=_hermes_home)
     default_home = _resolve_home_path(_hermes_home, fallback=_hermes_home)
+    create_if_missing = _current_method.get("") not in _READ_ONLY_DB_METHODS
     result = _get_session_db_for_home(
         active_home=active_home,
         default_home=default_home,
@@ -236,6 +263,7 @@ def _get_db():
         db_by_home=_db_by_home,
         db_error_by_home=_db_error_by_home,
         logger=logger,
+        create_if_missing=create_if_missing,
     )
     _db = result.default_db
     _db_error = result.default_error
@@ -406,9 +434,11 @@ def handle_request(req: dict) -> dict | None:
     if not fn:
         return _err(rid, -32601, f"unknown method: {method}")
     profile_token = _enter_profile_context(_profile_context_for_params(params))
+    method_token = _current_method.set(method)
     try:
         return fn(rid, params)
     finally:
+        _current_method.reset(method_token)
         _leave_profile_context(profile_token)
 
 

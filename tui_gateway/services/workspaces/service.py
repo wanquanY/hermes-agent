@@ -84,7 +84,10 @@ def bind_session_workspace(
 
 
 def workspace_for_session(session_id: str) -> dict[str, Any] | None:
-    row = get_gateway_state_store().get_session_workspace(session_id)
+    store = get_gateway_state_store(create_if_missing=False)
+    if store is None:
+        return None
+    row = store.get_session_workspace(session_id)
     if not row:
         return None
     authority = "hermes_runtime_cache" if str(row["id"]).startswith("local:") else "doxie"
@@ -103,6 +106,9 @@ def workspace_for_session(session_id: str) -> dict[str, Any] | None:
 
 
 def list_workspaces(limit: int = 200) -> list[dict[str, Any]]:
+    store = get_gateway_state_store(create_if_missing=False)
+    if store is None:
+        return []
     return [
         {
             **workspace,
@@ -111,7 +117,7 @@ def list_workspaces(limit: int = 200) -> list[dict[str, Any]]:
             else "doxie",
             "runtime_cache": True,
         }
-        for workspace in get_gateway_state_store().list_workspaces(limit=limit)
+        for workspace in store.list_workspaces(limit=limit)
     ]
 
 

@@ -82,6 +82,27 @@ def _(rid, params: dict) -> dict:
     )
 
 
+@method("runtime.ensure")
+def _(rid, params: dict) -> dict:
+    """Ensure the scoped Doxie runtime worker is spawned and websocket-ready."""
+    scope = _profile_runtime_scope_from_params(params or {})
+    try:
+        from tui_gateway.services.runtime_proxy import ensure_runtime_ready_sync
+
+        worker = ensure_runtime_ready_sync(params or {})
+    except Exception as exc:
+        return _err(rid, 5020, f"runtime ensure failed: {exc}")
+    return _ok(
+        rid,
+        {
+            "status": "ready",
+            "ready": True,
+            **scope,
+            "worker": worker,
+        },
+    )
+
+
 @method("runtime.status")
 def _(rid, params: dict) -> dict:
     """Return lightweight gateway runtime diagnostics without building an agent."""
@@ -96,11 +117,18 @@ def _(rid, params: dict) -> dict:
         error = str(exc)
     else:
         error = ""
+    try:
+        from tui_gateway.services.runtime_proxy import runtime_proxy_pool
+
+        runtime_proxy = runtime_proxy_pool().snapshot()
+    except Exception as exc:
+        runtime_proxy = {"error": str(exc)}
     return _ok(
         rid,
         {
             "status": str(state.get("gateway_state") or state.get("status") or "unknown"),
             "runtime": state,
+            "runtime_proxy": runtime_proxy,
             "available": bool(state),
             **({"error": error} if error else {}),
         },

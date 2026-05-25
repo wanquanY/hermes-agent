@@ -40,6 +40,7 @@ DOXIE_GATEWAY_METHOD_OVERRIDES = frozenset(
         "run.reserve",
         "run.status",
         "run.submit",
+        "runtime.ensure",
         "runtime.status",
         "secret.respond",
         "session.create",

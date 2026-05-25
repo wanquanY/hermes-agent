@@ -64,19 +64,24 @@ CREATE INDEX IF NOT EXISTS idx_gateway_session_artifacts_session
 class GatewayStateStore:
     """Small gateway-owned store separate from Hermes transcript state."""
 
-    def __init__(self, db_path: Path | None = None):
+    def __init__(self, db_path: Path | None = None, *, create_if_missing: bool = True):
         self.db_path = db_path or get_hermes_home() / "tui-gateway" / "state.db"
         self._lock = threading.Lock()
-        self._init_schema()
+        self._create_if_missing = bool(create_if_missing)
+        if self._create_if_missing or self.db_path.exists():
+            self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
+        if not self._create_if_missing and not self.db_path.exists():
+            raise FileNotFoundError(str(self.db_path))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path), timeout=1.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.OperationalError:
-            conn.execute("PRAGMA journal_mode=DELETE")
+        if self._create_if_missing:
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                conn.execute("PRAGMA journal_mode=DELETE")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
@@ -315,15 +320,25 @@ class GatewayStateStore:
 
 
 _DEFAULT_STORES: dict[str, GatewayStateStore] = {}
+_READONLY_STORES: dict[str, GatewayStateStore] = {}
 _DEFAULT_STORE_LOCK = threading.Lock()
 
 
-def get_gateway_state_store() -> GatewayStateStore:
+def get_gateway_state_store(*, create_if_missing: bool = True) -> GatewayStateStore | None:
     home = Path(get_hermes_home()).expanduser()
     key = str(home.resolve())
     with _DEFAULT_STORE_LOCK:
-        store = _DEFAULT_STORES.get(key)
+        if create_if_missing:
+            store = _DEFAULT_STORES.get(key)
+            if store is None:
+                store = GatewayStateStore(home / "tui-gateway" / "state.db")
+                _DEFAULT_STORES[key] = store
+            return store
+        db_path = home / "tui-gateway" / "state.db"
+        if not db_path.exists():
+            return None
+        store = _READONLY_STORES.get(key)
         if store is None:
-            store = GatewayStateStore(home / "tui-gateway" / "state.db")
-            _DEFAULT_STORES[key] = store
+            store = GatewayStateStore(db_path, create_if_missing=False)
+            _READONLY_STORES[key] = store
         return store

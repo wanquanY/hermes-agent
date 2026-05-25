@@ -547,6 +547,58 @@ def _submitted_image_paths(params: dict) -> list[str]:
     return image_paths
 
 
+def _turn_identity(metadata: dict | None) -> dict:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return {
+        key: str(metadata.get(key) or "").strip()
+        for key in ("run_id", "turn_id", "client_message_id")
+        if str(metadata.get(key) or "").strip()
+    }
+
+
+def _turn_matches(candidate: dict, target: dict) -> bool:
+    if not candidate or not target:
+        return False
+    return any(
+        candidate.get(key) and target.get(key) and candidate.get(key) == target.get(key)
+        for key in ("run_id", "turn_id", "client_message_id")
+    )
+
+
+def _latest_assistant_message_id_for_turn(session_id: str, turn_metadata: dict | None) -> str:
+    target = _turn_identity(turn_metadata)
+    if not session_id or not target:
+        return ""
+    db = _get_db()
+    if db is None:
+        return ""
+    try:
+        messages = db.get_messages_as_conversation(
+            session_id,
+            include_ancestors=False,
+            include_storage_metadata=True,
+        )
+    except Exception:
+        return ""
+
+    active_turn: dict = {}
+    latest_message_id = ""
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        if role == "user":
+            active_turn = _turn_identity(metadata)
+            continue
+        if role != "assistant":
+            continue
+        message_turn = _turn_identity(metadata) or active_turn
+        if _turn_matches(message_turn, target):
+            latest_message_id = str(message.get("message_id") or "").strip()
+    return latest_message_id
+
+
 def _run_prompt_submit(
     rid,
     sid: str,
@@ -924,6 +976,12 @@ def _run_prompt_submit(
                 payload["reasoning"] = last_reasoning
             if status_note:
                 payload["warning"] = status_note
+            message_id = _latest_assistant_message_id_for_turn(
+                str(session.get("session_key") or sid),
+                turn_metadata,
+            )
+            if message_id:
+                payload["message_id"] = message_id
             rendered = render_message(raw, cols)
             if rendered:
                 payload["rendered"] = rendered

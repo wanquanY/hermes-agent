@@ -471,7 +471,16 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
-        return _db_unavailable_error(rid, code=5006)
+        return _ok(
+            rid,
+            {
+                "sessions": [],
+                "pageInfo": {
+                    "nextCursor": "",
+                    "hasMore": False,
+                },
+            },
+        )
     try:
         # Resume picker should surface human conversation sessions from every
         # user-facing surface — CLI, TUI, all gateway platforms (including new
@@ -591,7 +600,7 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4006, "session_id required")
     db = _get_db()
     if db is None:
-        return _db_unavailable_error(rid, code=5000)
+        return _err(rid, 4007, "session not found")
     found = db.get_session(target)
     if not found:
         found = db.get_session_by_title(target)

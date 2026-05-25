@@ -1255,8 +1255,39 @@ class AIAgent:
                 self._ensure_db_session()
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
+
+            def _turn_metadata(value):
+                if not isinstance(value, dict):
+                    return {}
+                result = {}
+                for key in ("turn_id", "run_id", "client_message_id"):
+                    text = str(value.get(key) or "").strip()
+                    if text:
+                        result[key] = text
+                return result
+
+            current_turn_metadata = {}
+            for prior in reversed(messages[:flush_from]):
+                if not isinstance(prior, dict):
+                    continue
+                if prior.get("role") == "user":
+                    current_turn_metadata = _turn_metadata(prior.get("metadata"))
+                    break
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
+                msg_metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+                if role == "user":
+                    current_turn_metadata = _turn_metadata(msg_metadata)
+                elif role in {"assistant", "tool"} and current_turn_metadata:
+                    merged_metadata = dict(msg_metadata)
+                    changed_metadata = False
+                    for key, value in current_turn_metadata.items():
+                        if not str(merged_metadata.get(key) or "").strip():
+                            merged_metadata[key] = value
+                            changed_metadata = True
+                    if changed_metadata:
+                        msg["metadata"] = merged_metadata
+                        msg_metadata = merged_metadata
                 content = msg.get("content")
                 # Persist multimodal tool results as their text summary only —
                 # base64 images would bloat the session DB and aren't useful
@@ -1293,7 +1324,7 @@ class AIAgent:
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
-                    metadata=msg.get("metadata"),
+                    metadata=msg_metadata,
                 )
             self._last_flushed_db_idx = len(messages)
         except Exception as e:

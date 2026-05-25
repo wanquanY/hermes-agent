@@ -23,6 +23,33 @@ _CRON_DELIVERY_GUIDANCE_RE = re.compile(
     re.IGNORECASE | re.DOTALL | re.VERBOSE,
 )
 
+_TURN_METADATA_KEYS = ("turn_id", "run_id", "client_message_id")
+
+
+def _turn_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        key: str(value.get(key) or "").strip()
+        for key in _TURN_METADATA_KEYS
+        if str(value.get(key) or "").strip()
+    }
+
+
+def _merge_turn_metadata(message: dict[str, Any], turn_metadata: dict[str, Any]) -> dict[str, Any]:
+    if not turn_metadata:
+        return message
+    existing = message.get("metadata")
+    metadata = dict(existing) if isinstance(existing, Mapping) else {}
+    changed = False
+    for key, value in turn_metadata.items():
+        if not str(metadata.get(key) or "").strip():
+            metadata[key] = value
+            changed = True
+    if changed:
+        message["metadata"] = metadata
+    return message
+
 
 def sanitize_display_text(value: Any) -> str:
     """Remove Hermes internal prompt guidance from user-visible text."""
@@ -56,9 +83,15 @@ def sanitize_transcript_message(message: Mapping[str, Any]) -> dict[str, Any] | 
 
 def sanitize_transcript_messages(messages: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     cleaned: list[dict[str, Any]] = []
+    current_turn_metadata: dict[str, Any] = {}
     for message in messages:
         item = sanitize_transcript_message(message)
         if item is not None:
+            role = str(item.get("role") or "")
+            if role == "user":
+                current_turn_metadata = _turn_metadata(item.get("metadata"))
+            elif role in {"assistant", "tool"}:
+                item = _merge_turn_metadata(item, current_turn_metadata)
             cleaned.append(item)
     return cleaned
 

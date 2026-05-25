@@ -31,6 +31,7 @@ def get_session_db_for_home(
     db_error_by_home: dict[str, str],
     logger: logging.Logger,
     session_db_factory: Callable[..., Any] | None = None,
+    create_if_missing: bool = True,
 ) -> SessionStoreResult:
     if session_db_factory is None:
         from hermes_state import SessionDB
@@ -40,6 +41,8 @@ def get_session_db_for_home(
     if active_home == default_home:
         if default_db is not None:
             return SessionStoreResult(default_db, default_db, default_error)
+        if not create_if_missing and not (default_home / "state.db").exists():
+            return SessionStoreResult(None, default_db, default_error)
         try:
             db = session_db_factory()
             return SessionStoreResult(db, db, None)
@@ -55,6 +58,8 @@ def get_session_db_for_home(
     db = db_by_home.get(home_key)
     if db is not None:
         return SessionStoreResult(db, default_db, default_error)
+    if not create_if_missing and not (active_home / "state.db").exists():
+        return SessionStoreResult(None, default_db, default_error)
 
     try:
         db = session_db_factory(db_path=active_home / "state.db")

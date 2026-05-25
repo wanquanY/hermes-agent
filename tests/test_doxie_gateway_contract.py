@@ -55,6 +55,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "model.options" in response["result"]["methods"]
     assert "toolsets.list" in response["result"]["methods"]
     assert "profile.prepare_runtime" in response["result"]["methods"]
+    assert "runtime.ensure" in response["result"]["methods"]
     assert "runtime.status" in response["result"]["methods"]
     assert "approval.respond" in response["result"]["methods"]
     assert "sudo.respond" in response["result"]["methods"]
@@ -70,6 +71,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "model.options" in server._methods
     assert "toolsets.list" in server._methods
     assert "profile.prepare_runtime" in server._methods
+    assert "runtime.ensure" in server._methods
     assert "runtime.status" in server._methods
     assert "approval.respond" in server._methods
     assert "sudo.respond" in server._methods
@@ -181,6 +183,43 @@ def test_profile_prepare_runtime_preserves_draft_scope():
     assert response["result"]["agent_profile_draft_id"] == "draft-1"
     assert response["result"]["runtime_scope_key"] == "draft:draft-1"
     assert response["result"]["transient"] is True
+
+
+def test_runtime_ensure_starts_scoped_runtime_worker(monkeypatch):
+    from tui_gateway import server
+    from tui_gateway.services import runtime_proxy
+
+    calls = []
+
+    def fake_ensure(params):
+        calls.append(params)
+        return {
+            "scopeKey": "profile:agent-a:version:version-1",
+            "running": True,
+            "healthy": True,
+            "pid": 1234,
+            "port": 5678,
+        }
+
+    monkeypatch.setattr(runtime_proxy, "ensure_runtime_ready_sync", fake_ensure)
+    response = server._methods["runtime.ensure"](
+        1,
+        {
+            "agentProfileId": "agent-a",
+            "agentProfileVersionId": "version-1",
+            "doxie_profile": {
+                "id": "agent-a",
+                "hermesHomePath": "/tmp/hermes-agent-a",
+                "runtimeScopeKey": "profile:agent-a:version:version-1",
+            },
+        },
+    )
+
+    assert response["result"]["ready"] is True
+    assert response["result"]["status"] == "ready"
+    assert response["result"]["runtime_scope_key"] == "profile:agent-a:version:version-1"
+    assert response["result"]["worker"]["running"] is True
+    assert calls[0]["doxie_profile"]["hermesHomePath"] == "/tmp/hermes-agent-a"
 
 
 def test_runtime_status_returns_lightweight_diagnostics(monkeypatch):

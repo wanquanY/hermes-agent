@@ -152,7 +152,10 @@ def list_artifacts(
     workspace_id: str | None = None,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
-    return get_gateway_state_store().list_artifacts(
+    store = get_gateway_state_store(create_if_missing=False)
+    if store is None:
+        return []
+    return store.list_artifacts(
         session_id=session_id,
         workspace_id=workspace_id,
         limit=limit,

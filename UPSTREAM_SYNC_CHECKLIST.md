@@ -14,6 +14,8 @@
 - prompt submit、interrupt、recall turn、partial assistant 持久化和 delta streaming 是一个整体；只修其中一段会制造重复消息、丢 metadata 或取消不落库。
 - tool 调用链现在依赖 `parent_agent`、session cwd、model descriptor、Doxie runtime credentials；上游同步后如果退回旧调用方式，会让 computer use、delegate、profile test、vision routing 出问题。
 - document parse、prompt attachments、display transcript sanitization、desktop browser bridge 已经属于 Doxie extension 边界；同步时要确认它们仍通过 extension 注册和使用。
+- profile-scoped runtime 现在可由 control plane 通过 `runtime.ensure` 启动 sidecar worker，并把 scoped 请求经 WebSocket bridge 代理到 worker；同步时要特别防止请求被错误留在 control plane 或桥接连接提前关闭。
+- 只读 Gateway 查询不应为了空 profile 创建 SQLite state；否则 Doxie UI 仅查看 session/workspace/artifact 时会制造空 DB 和假状态。
 
 ## 10 分钟快速分诊
 
@@ -29,8 +31,10 @@ git diff --cached --check
 快速判断：
 
 - 如果 `tui_gateway/server.py`、`tui_gateway/core/method_registration.py`、`tui_gateway/methods/*.py`、`tui_gateway/services/*.py` 有改动，优先检查 Gateway ABI 和 run control。
+- 如果 `tui_gateway/services/runtime_proxy.py`、`tui_gateway/ws.py`、`tui_gateway/methods/system.py` 有改动，优先检查 `runtime.ensure`、runtime proxy、WS bridge 生命周期和 control-plane 方法分流。
 - 如果 `run_agent.py`、`agent/conversation_loop.py`、`agent/tool_executor.py`、`model_tools.py` 有改动，优先检查 metadata、parent agent、tool invocation 和 extension tool registration。
 - 如果 `hermes_state.py`、`hermes_state_runs.py` 有改动，优先检查 run registry、run events、message metadata、transient session migration。
+- 如果 `tui_gateway/services/persistence/gateway_store.py`、`tui_gateway/services/session_store.py`、`tui_gateway/services/workspaces/service.py`、`tui_gateway/services/artifact_registry/service.py` 有改动，优先检查只读查询不会创建空 DB。
 - 如果 `tools/browser_tool.py`、`tools/computer_use/*`、`tools/delegate_tool.py`、`tools/vision_tools.py` 有改动，优先检查 Doxie desktop bridge、vision routing、child progress suppression。
 - 如果新增或移动 Doxie 文件，确认它们在 `doxie_extension` 或 Doxie service 边界内，不要把产品专属逻辑重新混进 Hermes upstream core。
 
@@ -49,17 +53,19 @@ git diff --cached --check
 - `model_tools.py` 中 extension tool registration。
 - `tui_gateway/core/method_registration.py` 中 extension gateway method registration。
 - `tui_gateway/server.py` 中 `_EXTRACTED_METHOD_OVERRIDES` 对 extracted method 的优先注册。
+- `runtime.ensure` 在 Doxie manifest、gateway method overrides 和 `tui_gateway.methods.system` 中同时存在。
 
 检查方式：
 
 ```sh
-rg "load_extension|gateway_method_overrides|register_tools|register_gateway_methods" doxie_extension model_tools.py tui_gateway
+rg "load_extension|gateway_method_overrides|register_tools|register_gateway_methods|runtime.ensure" doxie_extension model_tools.py tui_gateway
 ```
 
 常见坏症状：
 
 - `gateway.capabilities` 显示缺 Doxie required methods。
 - `parse_document` 不再可用。
+- `runtime.ensure` 不在 `gateway.capabilities` 中。
 - `prompt.submit`、`run.*`、`session.*` 回到 upstream 默认行为。
 - Doxie UI 调用某些 RPC 返回 method not found。
 
@@ -78,11 +84,12 @@ rg "load_extension|gateway_method_overrides|register_tools|register_gateway_meth
 - tool event bridge: `tui_gateway/services/tool_events.py`
 - turn toolset scope: `tui_gateway/services/toolset_scope.py`
 - notification poller: `tui_gateway/services/notification_poller.py`
+- runtime proxy: `tui_gateway/services/runtime_proxy.py`
 
 检查方式：
 
 ```sh
-rg "_get_db|_active_hermes_home|ensure_agent_runtime_current|ensure_session_turn_toolsets|GatewayToolEventBridge" tui_gateway
+rg "_get_db|_active_hermes_home|ensure_agent_runtime_current|ensure_session_turn_toolsets|GatewayToolEventBridge|runtime_proxy" tui_gateway
 ```
 
 常见坏症状：
@@ -91,6 +98,7 @@ rg "_get_db|_active_hermes_home|ensure_agent_runtime_current|ensure_session_turn
 - Doxie runtime token 更新后，旧 agent 继续用过期凭据。
 - tool events 不带 run / turn / runtime scope。
 - `session.info`、`runtime.status`、`model.set` 行为和 Doxie UI 不一致。
+- `runtime.status` 不包含 runtime proxy pool snapshot。
 
 ### 3. Run Control 是 UI 状态的事实来源
 
@@ -131,6 +139,8 @@ Gateway 发起的一轮对话至少要保留：
 - `attachments`
 - `runtime_scope_key`
 - clean prompt / persisted prompt 的区分
+- assistant / tool message 继承当前 user turn 的 `turn_id` / `run_id` / `client_message_id`
+- `message.complete` 返回可定位的 persisted assistant `message_id`
 
 重点路径：
 
@@ -142,7 +152,7 @@ Gateway 发起的一轮对话至少要保留：
 检查方式：
 
 ```sh
-rg "turn_metadata|persist_user_message|metadata_json|client_message_id|attachments" tui_gateway agent run_agent.py hermes_state.py
+rg "turn_metadata|persist_user_message|metadata_json|client_message_id|attachments|message_id" tui_gateway agent run_agent.py hermes_state.py doxie_extension
 ```
 
 常见坏症状：
@@ -152,6 +162,7 @@ rg "turn_metadata|persist_user_message|metadata_json|client_message_id|attachmen
 - recall turn 删除了错误范围。
 - provider 请求里混入内部 `metadata` 字段。
 - 附件存在但 agent 不知道该调用 `parse_document`。
+- assistant/tool 消息没有 turn metadata，导致客户端无法按 turn 更新、recall 或定位最终 assistant message。
 
 ### 5. Doxie 文档和 transcript 处理在 extension 层
 
@@ -296,16 +307,76 @@ rg "doxie_automation|approval_policy|cron.manage|trigger_job|request_cron_tick|l
 - cron job 的 full_access/default approval policy 不生效。
 - automation task tool 不在正确 toolset 中。
 
+### 11. Runtime Proxy / Scoped Worker 是 profile 执行边界
+
+Doxie profile-scoped 请求不能长期跑在 control plane 进程里。control plane 负责启动、探活、代理和回收 worker；真正的 scoped runtime 在 sidecar worker 中执行。
+
+重点保留：
+
+- `runtime.ensure` 控制面方法。
+- `doxie_extension` manifest 和 method overrides 中的 `runtime.ensure`。
+- `tui_gateway/services/runtime_proxy.py` 的 `RuntimeWorkerPool`、`RuntimeProxyBridge`、`should_proxy_to_runtime(...)`。
+- `tui_gateway/ws.py` 在普通 dispatch 前先调用 `proxy_to_runtime(...)`。
+- worker 启动环境中的 `HERMES_HOME`、`DOXIE_HERMES_RUNTIME_SCOPE_KEY`、`DOXIE_AGENT_PROFILE_ID`、`DOXIE_AGENT_PROFILE_VERSION_ID`。
+- WebSocket bridge 读取 worker 的 response/event 后原样写回客户端，并在客户端 WS 关闭时释放 bridge。
+- `bridge_count > 0` 时 idle reclaim 不能杀 worker；idle timeout 到期且无活动 bridge 时才回收。
+- control-plane 方法默认不代理，但 `cron.manage`、`run.cancel`、`session.create(control_plane_only)`、clarify/sudo/secret respond 等 scoped 控制动作要按规则处理。
+
+检查方式：
+
+```sh
+rg "runtime.ensure|RuntimeWorkerPool|RuntimeProxyBridge|should_proxy_to_runtime|proxy_to_runtime|DOXIE_HERMES_RUNTIME_SCOPE_KEY|bridge_count" tui_gateway doxie_extension tests
+```
+
+常见坏症状：
+
+- `prompt.submit` 带 `runtime_scope_key` 后仍在 control plane 执行。
+- `session.list` / `session.messages` 被错误代理到 worker。
+- worker emit 的 `message.delta` 到不了客户端。
+- 首个 response 后 bridge 被关闭，后续 stream event 丢失。
+- 用户关闭 WebSocket 后 worker bridge 计数不释放，idle worker 永远不回收。
+- worker 启动时没有 scoped `HERMES_HOME`，导致 profile 数据写到 control plane home。
+
+### 12. 只读 Gateway 查询不能创建空状态库
+
+Doxie UI 会频繁读取 session、workspace、artifact、run event 等状态。只读查询不应因为目标 profile 还没有 DB，就创建空 `state.db` 或 `tui-gateway/state.db`。
+
+重点保留：
+
+- `tui_gateway/server.py` 的 `_READ_ONLY_DB_METHODS` 和 `_current_method`。
+- `tui_gateway/services/session_store.py` 的 `create_if_missing=False`。
+- `tui_gateway/services/persistence/gateway_store.py` 的 read-only store path。
+- `workspace_for_session(...)`、`list_workspaces(...)`、`list_artifacts(...)` 在 store 不存在时返回空结果。
+- `session.list` 在 DB 不存在时返回空列表；`session.messages` 在 DB 不存在时返回 session not found。
+
+检查方式：
+
+```sh
+rg "create_if_missing|_READ_ONLY_DB_METHODS|_current_method|get_gateway_state_store" tui_gateway tests
+```
+
+常见坏症状：
+
+- 只是打开 profile 下拉或 workspace 视图，就在 profile home 下创建空 DB。
+- 空 DB 被当成真实历史，Doxie UI 出现无意义 session/workspace。
+- read-only 方法在缺 DB 时返回 500，而不是空结果或 not found。
+
 ## 症状到检查点
 
 | 症状 | 先查 |
 | --- | --- |
 | Doxie UI method not found | `doxie_extension/gateway_methods.py`、`tui_gateway/core/method_registration.py`、`gateway.capabilities` |
+| `runtime.ensure` 缺失或失败 | `doxie_extension/manifest.py`、`methods/system.py`、`services/runtime_proxy.py`、`tests/test_doxie_gateway_contract.py` |
+| scoped prompt 没有进 profile worker | `runtime_proxy.should_proxy_to_runtime`、`ws.proxy_to_runtime`、`DOXIE_HERMES_RUNTIME_SCOPE_KEY` |
+| worker stream 只收到首包 | `RuntimeProxyBridge._read_loop`、`WSTransport.runtime_bridge`、bridge close/release 逻辑 |
+| idle worker 不回收 | `RuntimeWorkerPool.reclaim_idle`、`bridge_count`、WS close cleanup |
 | UI 一直 running | `tui_gateway/methods/run.py`、`tui_gateway/methods/prompt.py`、`tui_gateway/services/run_control.py`、`hermes_state_runs.py` |
 | 重连后 tool progress 丢失 | `run.events`、`events.subscribe`、`append_run_event`、`runtime_scope_key` |
 | 不同 profile 历史串了 | `profile_context.py`、`session_store.py`、`_get_db()`、`get_hermes_home()` |
+| 只读查询创建空 DB | `_READ_ONLY_DB_METHODS`、`session_store.create_if_missing`、`gateway_store.create_if_missing` |
 | 文档附件没被解析 | `prompt_attachments.py`、`document_parse_tool.py`、`model_tools.py`、`toolsets.py` |
 | transcript 出现 cron 内部提示 | `display_transcript.py`、`session.messages`、`session.list` |
+| assistant 完成事件不能定位消息 | `_latest_assistant_message_id_for_turn`、`run_agent.py` metadata merge、`display_transcript.py` metadata merge |
 | browser 多 tab 在桌面端不可用 | `browser_bridge.py`、`tools/browser_tool.py` |
 | computer use 抓错窗口或坐标错 | `tools/computer_use/cua_backend.py`、`tools/computer_use/tool.py` |
 | 非 vision 模型收到图片 | `agent/image_routing.py`、`tools/computer_use/vision_routing.py`、`model_descriptor.py` |
@@ -326,6 +397,7 @@ scripts/run_tests.sh \
   tests/tui_gateway/test_protocol.py \
   tests/tui_gateway/test_profile_data_context.py \
   tests/tui_gateway/test_tool_events.py \
+  tests/tui_gateway/test_ws_dispatch.py \
   -q
 ```
 
@@ -382,6 +454,16 @@ scripts/run_tests.sh \
   -q
 ```
 
+### Runtime Proxy / WebSocket Bridge
+
+```sh
+scripts/run_tests.sh \
+  tests/test_doxie_gateway_contract.py \
+  tests/tui_gateway/test_ws_dispatch.py \
+  tests/tui_gateway/test_protocol.py \
+  -q
+```
+
 ## 同步后的人工检查
 
 自动测试通过后，再做这些人工检查：
@@ -391,8 +473,11 @@ scripts/run_tests.sh \
 3. 中断一轮正在运行的 prompt，确认 transcript 中有 partial assistant 或 cancelled terminal event，UI 不再 stuck running。
 4. 上传一个 PDF 或 Office 文档，确认 prompt 中出现 Doxie document attachment context，agent 会调用 `parse_document`。
 5. 切换 Doxie profile 或 draft runtime，确认 session list、history、run events 没有串到另一个 profile。
-6. 在桌面浏览器 bridge 可用时，跑 `browser_tabs` / `browser_new_tab` / `browser_select_tab`。
-7. 跑一次 `computer_use capture`，确认返回窗口元数据和 warnings 字段。
+6. 调用 `runtime.ensure`，确认返回 `ready=true`，`worker.running=true`，且 `runtime.status.runtime_proxy` 能看到 worker。
+7. 通过 WebSocket 提交带 `runtime_scope_key` 的 `prompt.submit`，确认 response 和后续 stream events 都从 worker bridge 回到客户端。
+8. 在只读 profile 上调用 `session.list`、`workspace.list`、`artifacts.list`，确认不会创建空 DB。
+9. 在桌面浏览器 bridge 可用时，跑 `browser_tabs` / `browser_new_tab` / `browser_select_tab`。
+10. 跑一次 `computer_use capture`，确认返回窗口元数据和 warnings 字段。
 
 ## 文档维护规则
 
@@ -430,3 +515,11 @@ scripts/run_tests.sh \
 - 修复涉及：`doxie_extension/`、`tui_gateway/server.py`、`tui_gateway/methods/`、`tui_gateway/services/`、`hermes_state.py`、`hermes_state_runs.py`、`agent/`、`run_agent.py`、`model_tools.py`、`tools/`。
 - 下次优先检查：extension hook、run control、profile-scoped DB、turn metadata、parent_agent 工具调用、Doxie document/browser/computer-use 边界。
 - 最小验证：先跑 Gateway ABI / Run Control 包，再根据 diff 跑 State、Prompt、Agent/Tools、Runtime Credentials、Cron 包。
+
+### 2026-05-26 同步记录
+
+- 暴露问题：新增 profile-scoped runtime worker proxy、`runtime.ensure`、WS bridge streaming、只读 DB 查询和 turn metadata/message id 补齐后，同步风险从单进程 Gateway 扩展到 control plane 与 worker 的请求分流。
+- 根因边界：Doxie profile runtime 必须由 control plane 管理 worker 生命周期，但 scoped 执行必须进入 worker；同时 Doxie UI 的只读恢复路径不能因为 profile 尚无状态库而创建假数据。
+- 修复涉及：`tui_gateway/services/runtime_proxy.py`、`tui_gateway/ws.py`、`tui_gateway/methods/system.py`、`tui_gateway/server.py`、`tui_gateway/services/session_store.py`、`tui_gateway/services/persistence/gateway_store.py`、`tui_gateway/services/workspaces/service.py`、`tui_gateway/services/artifact_registry/service.py`、`run_agent.py`、`doxie_extension/display_transcript.py`、`doxie_extension/manifest.py`、`doxie_extension/gateway_methods.py`。
+- 下次优先检查：`runtime.ensure` 是否仍在 gateway contract；`should_proxy_to_runtime` 是否正确区分 control-plane 和 scoped 方法；WS bridge 是否保持 streaming event 通道；只读 session/workspace/artifact 查询是否使用 `create_if_missing=False`；assistant/tool metadata 是否继承当前 turn identity。
+- 最小验证：优先跑 Runtime Proxy / WebSocket Bridge 包，再跑 Gateway ABI / Run Control、Prompt / Attachments / Doxie Extension、State / Session / Run Events 包。

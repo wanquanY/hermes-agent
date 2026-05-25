@@ -31,6 +31,11 @@ from collections import deque
 from typing import Any
 
 from tui_gateway import server
+from tui_gateway.services.runtime_proxy import (
+    RuntimeProxyBridge,
+    RuntimeWorker,
+    proxy_to_runtime,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -60,7 +65,6 @@ _ws_control_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="tui-ws-control",
 )
-
 
 def _executor_for_request(req: dict) -> concurrent.futures.Executor | None:
     method = str((req or {}).get("method") or "")
@@ -98,6 +102,7 @@ class WSTransport:
         self._closed = False
         self._send_queue: deque[tuple[bool, str, asyncio.Future | None]] = deque()
         self._send_worker: asyncio.Task | None = None
+        self._runtime_bridges: dict[str, RuntimeProxyBridge] = {}
 
     def write(self, obj: dict) -> bool:
         if self._closed:
@@ -180,6 +185,26 @@ class WSTransport:
     def close(self) -> None:
         self._closed = True
 
+    async def runtime_bridge(self, worker: RuntimeWorker) -> RuntimeProxyBridge:
+        scope_key = worker.scope_key
+        bridge = self._runtime_bridges.get(scope_key)
+        if bridge is None or bridge.closed:
+            from tui_gateway.services.runtime_proxy import runtime_proxy_pool
+
+            bridge = RuntimeProxyBridge(
+                worker=worker,
+                transport=self,
+                pool=runtime_proxy_pool(),
+            )
+            self._runtime_bridges[scope_key] = bridge
+        return bridge
+
+    async def aclose(self) -> None:
+        self.close()
+        bridges = list(self._runtime_bridges.values())
+        self._runtime_bridges.clear()
+        await asyncio.gather(*(bridge.close() for bridge in bridges), return_exceptions=True)
+
 
 async def handle_ws(ws: Any) -> None:
     """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``."""
@@ -223,6 +248,21 @@ async def handle_ws(ws: Any) -> None:
                     break
                 continue
 
+            try:
+                if await proxy_to_runtime(req, transport):
+                    continue
+            except Exception as exc:
+                ok = await transport.write_async(
+                    {
+                        "jsonrpc": "2.0",
+                        "error": {"code": 5020, "message": f"runtime proxy failed: {exc}"},
+                        "id": req.get("id"),
+                    }
+                )
+                if not ok:
+                    break
+                continue
+
             # dispatch() may schedule long handlers on the pool; it returns
             # None in that case and the worker writes the response itself via
             # the transport we pass in (a separate thread, so transport.write
@@ -238,7 +278,7 @@ async def handle_ws(ws: Any) -> None:
             if resp is not None and not await transport.write_async(resp):
                 break
     finally:
-        transport.close()
+        await transport.aclose()
 
         # Detach the transport from any sessions it owned so later emits
         # fall back to stdio instead of crashing into a closed socket.
