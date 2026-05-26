@@ -42,13 +42,12 @@ DOXIE_AUTOMATION_CREATE_SCHEMA = {
                 "result_binding": {
                     "type": "string",
                     "enum": ["current-session", "new-session", "run-log-only"],
-                    "description": "Where future run results should appear. Default is new-session.",
+                    "description": "Where future run results should appear. Default is current-session.",
                 },
                 "enabled": {"type": "boolean"},
                 "run_immediately": {"type": "boolean"},
                 "approval_policy": {"type": "string", "enum": ["default", "deny", "approve"]},
                 "model": {"type": "string"},
-                "enabled_toolsets": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["name", "prompt", "schedule"],
             "additionalProperties": False,
@@ -105,7 +104,6 @@ DOXIE_AUTOMATION_UPDATE_SCHEMA = {
                 "result_binding": {"type": "string", "enum": ["current-session", "new-session", "run-log-only"]},
                 "approval_policy": {"type": "string", "enum": ["default", "deny", "approve"]},
                 "model": {"type": "string"},
-                "enabled_toolsets": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["task_id"],
             "additionalProperties": False,
@@ -152,6 +150,13 @@ def _session_design_context() -> dict[str, Any]:
 
 def _has_doxie_product_context() -> bool:
     return bool(_session_design_context())
+
+
+def _doxie_automation_tool_available() -> bool:
+    # Tool schema resolution happens before per-turn Doxie product context is
+    # installed. Do not gate visibility on HERMES_DOXIE_PRODUCT_CONTEXT here;
+    # handlers validate the active conversation context at execution time.
+    return True
 
 
 def _text(value: Any) -> str:
@@ -291,7 +296,7 @@ def _resolve_visible_job(context: dict[str, Any], task_id: str, *, scope: str) -
 def _result_binding_payload(mode: str | None, context: dict[str, Any]) -> dict[str, Any] | None:
     if not mode:
         return None
-    normalized = mode if mode in {"current-session", "new-session", "run-log-only"} else "new-session"
+    normalized = mode if mode in {"current-session", "new-session", "run-log-only"} else "current-session"
     if normalized == "current-session":
         session_id = _current_session_id(context)
         if not session_id:
@@ -318,7 +323,8 @@ def _summarize_job(job: dict[str, Any]) -> dict[str, Any]:
         "lastRunStatus": state.get("lastRunStatus") or state.get("lastStatus"),
         "prompt": payload.get("prompt") or payload.get("text"),
         "model": payload.get("model"),
-        "enabledToolsets": payload.get("enabledToolsets"),
+        "capabilitySource": job.get("capabilitySource"),
+        "capabilityOverride": job.get("capabilityOverride"),
     }
 
 
@@ -328,19 +334,18 @@ def doxie_automation_task_create(
     prompt: str,
     schedule: Any,
     description: str = "",
-    result_binding: str = "new-session",
+    result_binding: str = "current-session",
     enabled: bool = True,
     run_immediately: bool = False,
     approval_policy: str = "default",
     model: str = "",
-    enabled_toolsets: list[str] | None = None,
 ) -> str:
     context = _session_design_context()
     owner = _owner_from_context(context)
     if not owner.get("agentProfileId"):
         return tool_error("Doxie automation tasks require an active Doxie agent profile context.")
 
-    binding_mode = result_binding if result_binding in {"current-session", "new-session", "run-log-only"} else "new-session"
+    binding_mode = result_binding if result_binding in {"current-session", "new-session", "run-log-only"} else "current-session"
     if binding_mode == "current-session":
         session_id = _optional_text(owner.get("sourceSessionId"))
         if not session_id:
@@ -365,7 +370,6 @@ def doxie_automation_task_create(
             "kind": "agentTask",
             "prompt": prompt,
             **({"model": model} if _optional_text(model) else {}),
-            **({"enabledToolsets": _string_list(enabled_toolsets)} if enabled_toolsets else {}),
         },
     })
     return tool_result({
@@ -403,7 +407,6 @@ def doxie_automation_task_update(
     result_binding: str | None = None,
     approval_policy: str | None = None,
     model: str | None = None,
-    enabled_toolsets: list[str] | None = None,
 ) -> str:
     context = _session_design_context()
     if not _current_agent_profile_id(context):
@@ -427,8 +430,6 @@ def doxie_automation_task_update(
         payload_patch["prompt"] = prompt
     if model is not None:
         patch["model"] = model
-    if enabled_toolsets is not None:
-        patch["enabledToolsets"] = _string_list(enabled_toolsets)
     if len(payload_patch) > 1:
         patch["payload"] = payload_patch
     try:
@@ -476,7 +477,7 @@ registry.register(
     toolset="cronjob",
     schema=DOXIE_AUTOMATION_CREATE_SCHEMA,
     handler=lambda args, **kw: doxie_automation_task_create(**args),
-    check_fn=_has_doxie_product_context,
+    check_fn=_doxie_automation_tool_available,
     emoji="clock",
     max_result_size_chars=32_000,
 )
@@ -486,7 +487,7 @@ registry.register(
     toolset="cronjob",
     schema=DOXIE_AUTOMATION_LIST_SCHEMA,
     handler=lambda args, **kw: doxie_automation_task_list(**args),
-    check_fn=_has_doxie_product_context,
+    check_fn=_doxie_automation_tool_available,
     emoji="clock",
     max_result_size_chars=32_000,
 )
@@ -496,7 +497,7 @@ registry.register(
     toolset="cronjob",
     schema=DOXIE_AUTOMATION_UPDATE_SCHEMA,
     handler=lambda args, **kw: doxie_automation_task_update(**args),
-    check_fn=_has_doxie_product_context,
+    check_fn=_doxie_automation_tool_available,
     emoji="clock",
     max_result_size_chars=32_000,
 )
@@ -506,7 +507,7 @@ registry.register(
     toolset="cronjob",
     schema=DOXIE_AUTOMATION_REMOVE_SCHEMA,
     handler=lambda args, **kw: doxie_automation_task_remove(**args),
-    check_fn=_has_doxie_product_context,
+    check_fn=_doxie_automation_tool_available,
     emoji="clock",
     max_result_size_chars=32_000,
 )

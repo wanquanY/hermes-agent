@@ -236,7 +236,12 @@ _LEGACY_TOOLSET_MAP = {
         "browser_press", "browser_get_images",
         "browser_vision", "browser_console"
     ],
-    "cronjob_tools": ["cronjob"],
+    "cronjob_tools": [
+        "doxie_automation_task_create",
+        "doxie_automation_task_list",
+        "doxie_automation_task_update",
+        "doxie_automation_task_remove",
+    ],
     "file_tools": ["read_file", "write_file", "patch", "search_files"],
     "tts_tools": ["text_to_speech"],
 }

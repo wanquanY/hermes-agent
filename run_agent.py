@@ -3034,11 +3034,18 @@ class AIAgent:
         # break before the first real text delta.  This prevents the original
         # problem (text concatenation across tool boundaries) without stacking
         # blank lines when multiple tool iterations run back-to-back.
-        if getattr(self, "_stream_needs_break", False) and text and text.strip():
+        if (
+            getattr(self, "_stream_needs_break", False)
+            and getattr(self, "_stream_inject_tool_breaks", True)
+            and text
+            and text.strip()
+        ):
             self._stream_needs_break = False
             text = "\n\n" + text
             prepended_break = True
         else:
+            if getattr(self, "_stream_needs_break", False) and text and text.strip():
+                self._stream_needs_break = False
             prepended_break = False
         if isinstance(text, str):
             # Suppress reasoning/thinking blocks via the stateful

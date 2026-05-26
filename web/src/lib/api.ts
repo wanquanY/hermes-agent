@@ -397,6 +397,8 @@ export interface SessionInfo {
   output_tokens: number;
   preview: string | null;
   parent_session_id?: string | null;
+  has_automation_tasks?: boolean;
+  automation_task_count?: number;
 }
 
 export interface SessionLatestDescendantResponse {

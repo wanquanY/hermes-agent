@@ -29,7 +29,7 @@ except ImportError:
     except ImportError:
         msvcrt = None
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 # Add parent directory to path for imports BEFORE repo-level imports.
 # Without this, standalone invocations (e.g. after `hermes update` reloads
@@ -77,6 +77,9 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
     per_job = job.get("enabled_toolsets")
     if per_job:
         return per_job
+    handled, tui_toolsets = _resolve_tui_toolsets_env()
+    if handled:
+        return tui_toolsets
     try:
         from hermes_cli.tools_config import _get_platform_tools  # lazy: avoid heavy import at cron module load
         return sorted(_get_platform_tools(cfg or {}, "cron"))
@@ -86,6 +89,76 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
             exc,
         )
         return None
+
+
+def _resolve_tui_toolsets_env() -> tuple[bool, list[str] | None]:
+    """Resolve Doxie/TUI runtime toolsets for cron jobs in a sidecar process.
+
+    Doxie profile runtimes launch the sidecar with HERMES_TUI_TOOLSETS, and
+    live chat agents use that surface. Scheduled jobs created from the same
+    conversation should inherit it unless the job pins enabled_toolsets.
+    """
+    raw = os.getenv("HERMES_TUI_TOOLSETS", "").strip()
+    if not raw:
+        return False, None
+    requested = [
+        part.strip()
+        for part in raw.replace("\n", ",").split(",")
+        if part.strip()
+    ]
+    if not requested:
+        return False, None
+    if any(name in {"all", "*"} for name in requested):
+        return True, None
+
+    try:
+        from toolsets import validate_toolset
+    except Exception as exc:
+        logger.warning("Cron TUI toolset resolution failed, falling back to cron config: %s", exc)
+        return False, None
+
+    valid = [name for name in requested if validate_toolset(name)]
+    unresolved = [name for name in requested if name not in valid]
+    if unresolved:
+        try:
+            from hermes_cli.plugins import discover_plugins
+
+            discover_plugins()
+            plugin_valid = [name for name in unresolved if validate_toolset(name)]
+            valid.extend(plugin_valid)
+            unresolved = [name for name in unresolved if name not in plugin_valid]
+        except Exception:
+            pass
+
+    if unresolved:
+        try:
+            from hermes_cli.config import read_raw_config
+            from hermes_cli.tools_config import _parse_enabled_flag
+
+            raw_cfg = read_raw_config()
+            mcp_servers = (
+                raw_cfg.get("mcp_servers")
+                if isinstance(raw_cfg.get("mcp_servers"), dict)
+                else {}
+            )
+            for name in list(unresolved):
+                server_cfg = mcp_servers.get(name)
+                if isinstance(server_cfg, dict) and _parse_enabled_flag(
+                    server_cfg.get("enabled", True),
+                    default=True,
+                ):
+                    valid.append(name)
+                    unresolved.remove(name)
+        except Exception:
+            pass
+
+    if valid:
+        return True, valid
+    logger.warning(
+        "Cron ignored HERMES_TUI_TOOLSETS=%r because no entries resolved; falling back to cron config",
+        raw,
+    )
+    return False, None
 
 # Valid delivery platforms — used to validate user-supplied platform names
 # in cron delivery targets, preventing env var enumeration via crafted names.
@@ -758,6 +831,150 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     if delivery_errors:
         return "; ".join(delivery_errors)
     return None
+
+
+def _doxie_result_binding(job: dict[str, Any]) -> dict[str, Any]:
+    doxie = job.get("doxie") if isinstance(job.get("doxie"), dict) else {}
+    binding = doxie.get("result_binding") if isinstance(doxie.get("result_binding"), dict) else {}
+    if not binding:
+        binding = doxie.get("resultBinding") if isinstance(doxie.get("resultBinding"), dict) else {}
+    if binding:
+        return binding
+    if str(doxie.get("session_target") or "").strip() == "main":
+        return {
+            "mode": "current-session",
+            "sessionId": str(doxie.get("session_id") or "").strip(),
+        }
+    return {}
+
+
+def _doxie_trigger_content(job: dict[str, Any]) -> str:
+    prompt = str(job.get("prompt") or "").strip()
+    if prompt:
+        return prompt
+    doxie = job.get("doxie") if isinstance(job.get("doxie"), dict) else {}
+    payload = doxie.get("payload") if isinstance(doxie.get("payload"), dict) else {}
+    return str(payload.get("prompt") or payload.get("text") or "").strip()
+
+
+def _append_doxie_session_message(
+    job: dict[str, Any],
+    *,
+    target_session_id: str,
+    mode: str,
+    success: bool,
+    final_response: str,
+    error: str | None,
+) -> str | None:
+    content = (
+        final_response.strip()
+        if success
+        else (
+            f"⚠️ 自动化任务「{job.get('name') or job.get('id')}」执行失败：\n"
+            f"{error or 'unknown error'}"
+        )
+    )
+    if not content or (success and SILENT_MARKER in content.upper()):
+        return None
+
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        db.ensure_session(target_session_id, source="tui", model=job.get("model"))
+        trigger_content = _doxie_trigger_content(job)
+        if trigger_content:
+            db.append_message(
+                target_session_id,
+                "user",
+                trigger_content,
+                metadata={
+                    "source": "doxie_automation_trigger",
+                    "job_id": job.get("id"),
+                    "job_name": job.get("name"),
+                    "runtime_session_id": job.get("_runtime_session_id"),
+                    "result_binding_mode": mode,
+                },
+            )
+        db.append_message(
+            target_session_id,
+            "assistant",
+            content,
+            metadata={
+                "source": "doxie_automation",
+                "job_id": job.get("id"),
+                "job_name": job.get("name"),
+                "runtime_session_id": job.get("_runtime_session_id"),
+                "result_binding_mode": mode,
+                "success": success,
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "Job '%s': failed to append Doxie current-session result to %s: %s",
+            job.get("id", "?"),
+            target_session_id,
+            exc,
+        )
+        return str(exc)
+    return None
+
+
+def _deliver_doxie_bound_result(
+    job: dict[str, Any],
+    *,
+    success: bool,
+    final_response: str,
+    error: str | None,
+) -> str | None:
+    binding = _doxie_result_binding(job)
+    mode = str(binding.get("mode") or "").strip()
+    if mode in {"", "run-log-only", "hermes-native"}:
+        return None
+    if mode == "current-session":
+        target_session_id = str(
+            binding.get("sessionId") or binding.get("session_id") or ""
+        ).strip()
+        if not target_session_id:
+            return "current-session result binding is missing sessionId"
+        return _append_doxie_session_message(
+            job,
+            target_session_id=target_session_id,
+            mode=mode,
+            success=success,
+            final_response=final_response,
+            error=error,
+        )
+    if mode == "new-session":
+        target_session_id = "automation_{job_id}_{ts}".format(
+            job_id=str(job.get("id") or "job"),
+            ts=_hermes_now().strftime("%Y%m%d_%H%M%S"),
+        )
+        return _append_doxie_session_message(
+            job,
+            target_session_id=target_session_id,
+            mode=mode,
+            success=success,
+            final_response=final_response,
+            error=error,
+        )
+    return f"unsupported Doxie result binding mode: {mode}"
+
+
+def _append_doxie_current_session_result(
+    job: dict[str, Any],
+    *,
+    success: bool,
+    final_response: str,
+    error: str | None,
+) -> str | None:
+    """Backward-compatible helper for tests and older monkeypatches."""
+    return _deliver_doxie_bound_result(
+        job,
+        success=success,
+        final_response=final_response,
+        error=error,
+    )
 
 
 _DEFAULT_SCRIPT_TIMEOUT = 120  # seconds
@@ -1900,6 +2117,22 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     except Exception as de:
                         delivery_error = str(de)
                         logger.error("Delivery failed for job %s: %s", job["id"], de)
+
+                doxie_append_error = _deliver_doxie_bound_result(
+                    job,
+                    success=success,
+                    final_response=final_response,
+                    error=error,
+                )
+                if doxie_append_error:
+                    delivery_error = "; ".join(
+                        part
+                        for part in (
+                            delivery_error,
+                            f"doxie current-session append failed: {doxie_append_error}",
+                        )
+                        if part
+                    )
 
                 # Treat empty final_response as a soft failure so last_status
                 # is not "ok" — the agent ran but produced nothing useful.

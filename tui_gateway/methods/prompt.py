@@ -113,6 +113,7 @@ class _MessageDeltaNormalizer:
 
     def __init__(self) -> None:
         self.text = ""
+        self._pending_trailing_newlines = ""
 
     @staticmethod
     def _common_prefix_len(left: str, right: str) -> int:
@@ -131,7 +132,18 @@ class _MessageDeltaNormalizer:
         return 0
 
     def feed(self, value) -> dict | None:
+        if value is None:
+            self.discard_pending_trailing_newlines()
+            return None
         incoming = str(value or "")
+        if not incoming:
+            return None
+        if self._pending_trailing_newlines:
+            incoming = self._pending_trailing_newlines + incoming
+            self._pending_trailing_newlines = ""
+        visible = incoming.rstrip("\n")
+        self._pending_trailing_newlines = incoming[len(visible):]
+        incoming = visible
         if not incoming:
             return None
         current = self.text
@@ -191,6 +203,9 @@ class _MessageDeltaNormalizer:
             "delta": incoming,
             "offset": offset,
         }
+
+    def discard_pending_trailing_newlines(self) -> None:
+        self._pending_trailing_newlines = ""
 
 
 @method("prompt.submit")
@@ -867,11 +882,14 @@ def _run_prompt_submit(
                 payload = delta_normalizer.feed(delta)
                 if payload is None:
                     return
-                if streamer and (r := streamer.feed(delta)) is not None:
+                render_delta = payload.get("delta") or payload.get("snapshot") or payload.get("text") or ""
+                if streamer and (r := streamer.feed(render_delta)) is not None:
                     payload["rendered"] = r
                 _emit("message.delta", sid, payload)
 
             try:
+                previous_inject_tool_breaks = getattr(agent, "_stream_inject_tool_breaks", True)
+                agent._stream_inject_tool_breaks = False
                 result = agent.run_conversation(
                     run_message,
                     conversation_history=list(history),
@@ -887,6 +905,9 @@ def _run_prompt_submit(
                     conversation_history=list(history),
                     stream_callback=_stream,
                 )
+            finally:
+                if "previous_inject_tool_breaks" in locals():
+                    agent._stream_inject_tool_breaks = previous_inject_tool_breaks
 
             if is_turn_interrupted():
                 result_messages = (

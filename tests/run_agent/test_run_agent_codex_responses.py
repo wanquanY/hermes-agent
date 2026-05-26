@@ -22,6 +22,8 @@ def _no_codex_backoff(monkeypatch):
 
 
 def _patch_agent_bootstrap(monkeypatch):
+    import agent.agent_init as agent_init
+
     monkeypatch.setattr(
         run_agent,
         "get_tool_definitions",
@@ -37,6 +39,7 @@ def _patch_agent_bootstrap(monkeypatch):
         ],
     )
     monkeypatch.setattr(run_agent, "check_toolset_requirements", lambda: {})
+    monkeypatch.setattr(agent_init, "query_ollama_num_ctx", lambda *args, **kwargs: None)
 
 
 def _build_agent(monkeypatch):
@@ -1423,6 +1426,33 @@ def test_stream_delta_preserves_mid_stream_leading_newlines(monkeypatch):
 
     combined = "".join(observed)
     assert combined == "Here is a list:\n- first\n- second"
+
+
+def test_stream_delta_injects_tool_break_by_default(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    observed = []
+    agent.stream_delta_callback = observed.append
+    agent._current_streamed_assistant_text = "I will inspect this first."
+    agent._stream_needs_break = True
+
+    agent._fire_stream_delta("Here is the answer.")
+
+    assert observed == ["\n\nHere is the answer."]
+    assert agent._stream_needs_break is False
+
+
+def test_stream_delta_can_disable_tool_break_injection_for_structured_streams(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    observed = []
+    agent.stream_delta_callback = observed.append
+    agent._current_streamed_assistant_text = "I will inspect this first."
+    agent._stream_needs_break = True
+    agent._stream_inject_tool_breaks = False
+
+    agent._fire_stream_delta("## Final answer")
+
+    assert observed == ["## Final answer"]
+    assert agent._stream_needs_break is False
 
 
 def test_stream_delta_preserves_code_fence_newlines(monkeypatch):

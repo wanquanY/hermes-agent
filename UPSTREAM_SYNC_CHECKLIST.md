@@ -16,6 +16,9 @@
 - document parse、prompt attachments、display transcript sanitization、desktop browser bridge 已经属于 Doxie extension 边界；同步时要确认它们仍通过 extension 注册和使用。
 - profile-scoped runtime 现在可由 control plane 通过 `runtime.ensure` 启动 sidecar worker，并把 scoped 请求经 WebSocket bridge 代理到 worker；同步时要特别防止请求被错误留在 control plane 或桥接连接提前关闭。
 - 只读 Gateway 查询不应为了空 profile 创建 SQLite state；否则 Doxie UI 仅查看 session/workspace/artifact 时会制造空 DB 和假状态。
+- Doxie automation 已经替代原生 `cronjob` 模型工具；默认结果绑定当前会话，能力继承当前 Doxie runtime，只有显式 advanced override 才持久化 skills/toolsets。
+- TUI/WebSocket 结构化流使用 tool events 表达工具边界，不能再把 legacy 文本流的工具后空行注入 message delta 或 transcript。
+- Dashboard session 列表会显示 automation badge；session 与 job 的关联来自 Doxie owner/result binding metadata。
 
 ## 10 分钟快速分诊
 
@@ -35,6 +38,9 @@ git diff --cached --check
 - 如果 `run_agent.py`、`agent/conversation_loop.py`、`agent/tool_executor.py`、`model_tools.py` 有改动，优先检查 metadata、parent agent、tool invocation 和 extension tool registration。
 - 如果 `hermes_state.py`、`hermes_state_runs.py` 有改动，优先检查 run registry、run events、message metadata、transient session migration。
 - 如果 `tui_gateway/services/persistence/gateway_store.py`、`tui_gateway/services/session_store.py`、`tui_gateway/services/workspaces/service.py`、`tui_gateway/services/artifact_registry/service.py` 有改动，优先检查只读查询不会创建空 DB。
+- 如果 `cron/scheduler.py`、`tools/cronjob_tools.py`、`tools/doxie_automation_task_tool.py`、`tui_gateway/services/doxie_cron_jobs.py`、`toolsets.py` 有改动，优先检查 Doxie automation contract 是否仍替代原生 cronjob tool。
+- 如果 `run_agent.py`、`tui_gateway/methods/prompt.py`、`doxie_extension/display_transcript.py` 有改动，优先检查结构化 stream delta 和 transcript 展示不会引入工具边界空白。
+- 如果 `hermes_cli/web_server.py` 或 `web/src/pages/SessionsPage.tsx` 有改动，优先检查 session automation badge 是否仍基于 job metadata，而不是猜测 transcript 内容。
 - 如果 `tools/browser_tool.py`、`tools/computer_use/*`、`tools/delegate_tool.py`、`tools/vision_tools.py` 有改动，优先检查 Doxie desktop bridge、vision routing、child progress suppression。
 - 如果新增或移动 Doxie 文件，确认它们在 `doxie_extension` 或 Doxie service 边界内，不要把产品专属逻辑重新混进 Hermes upstream core。
 
@@ -284,20 +290,28 @@ rg "metadata_json|runtime_scope_key|run_events|create_run_if_session_idle|append
 - Doxie 临时 runtime 出现在普通 session list。
 - message metadata 丢失导致 recall / interrupt / client message mapping 失效。
 
-### 10. Doxie Cron / Automation Task 不能脱离 run event 和 approval policy
+### 10. Doxie Cron / Automation Task 不能脱离 run event、会话绑定和能力继承
 
 重点保留：
 
 - `tui_gateway/services/doxie_cron_jobs.py`
 - `tools/doxie_automation_task_tool.py`
+- `cron/scheduler.py`
 - cron job 的 Doxie metadata。
 - cron 运行时的 approval policy override。
 - job run 与 session/run event 的关联。
+- `manage_cron(...)` 在 control plane 中必须通过 active `HERMES_HOME` override 读写当前 profile 的 cron store，不需要先启动 runtime worker。
+- 新建 automation 默认 `resultBinding={"mode": "current-session", "sessionId": sourceSessionId}`，并把 `sessionTarget` 归一为 `main`。
+- 显式 `resultBinding={"mode": "new-session"}` 才创建独立 automation session。
+- future run 结果要按 result binding 写回当前会话或新会话，并保存 trigger user message 与 assistant result metadata。
+- cron job 默认继承 `HERMES_TUI_TOOLSETS` / 当前 agent runtime capabilities；只有显式 `capabilityOverride` 才持久化 `skills` / `enabledToolsets`。
+- `capabilityOverride={}` 必须能清除任务级 override，恢复 agent-runtime inheritance。
+- `cronjob` 原生模型工具不能再注册给模型；`cronjob` toolset 只暴露 `doxie_automation_task_*`。
 
 检查方式：
 
 ```sh
-rg "doxie_automation|approval_policy|cron.manage|trigger_job|request_cron_tick|last_session_id" tui_gateway cron tools tests
+rg "doxie_automation|result_binding|capabilityOverride|HERMES_TUI_TOOLSETS|cronjob|doxie_automation_task" tui_gateway cron tools toolsets.py model_tools.py tests
 ```
 
 常见坏症状：
@@ -306,6 +320,11 @@ rg "doxie_automation|approval_policy|cron.manage|trigger_job|request_cron_tick|l
 - cron run 找不到对应 session。
 - cron job 的 full_access/default approval policy 不生效。
 - automation task tool 不在正确 toolset 中。
+- automation 结果只进 run log，不回到当前会话。
+- 模型同时看到原生 `cronjob` 和 Doxie automation tools，创建出不受 Doxie 约束的任务。
+- 从对话创建的任务错误默认成 isolated/new-session。
+- 用户没有显式高级设置时，任务把当前 runtime skills/toolsets 固化进 job，后续 profile 能力更新不生效。
+- `cron.manage` 在 control plane list/add 时读写 default home，而不是当前 profile home。
 
 ### 11. Runtime Proxy / Scoped Worker 是 profile 执行边界
 
@@ -361,6 +380,54 @@ rg "create_if_missing|_READ_ONLY_DB_METHODS|_current_method|get_gateway_state_st
 - 空 DB 被当成真实历史，Doxie UI 出现无意义 session/workspace。
 - read-only 方法在缺 DB 时返回 500，而不是空结果或 not found。
 
+### 13. 结构化流式输出不能混入 legacy 展示空白
+
+Legacy CLI 文本流需要在工具调用后插入段落空行，但 TUI Gateway / WebSocket 已经用 `tool.start` / `tool.complete` 表达边界。结构化流里再注入空行，会污染 Doxie transcript 和最终消息内容。
+
+重点保留：
+
+- `agent._stream_inject_tool_breaks` 默认 `True`，但 `tui_gateway/methods/prompt.py` 调用 agent 时临时设为 `False`。
+- `_MessageDeltaNormalizer` 暂存 trailing newlines，只有后续文本到来才一起输出；遇到 tool boundary / `feed(None)` 时丢弃 pending trailing newlines。
+- renderer 使用 normalized delta，而不是原始 delta。
+- `doxie_extension/display_transcript.py` 对 assistant text/reasoning 去掉首尾结构性空行，但保留正文内部缩进和换行。
+
+检查方式：
+
+```sh
+rg "_stream_inject_tool_breaks|_MessageDeltaNormalizer|discard_pending_trailing_newlines|sanitize_assistant_display_text" agent run_agent.py tui_gateway doxie_extension tests
+```
+
+常见坏症状：
+
+- Doxie UI 中工具调用后 assistant 消息以多余空白开头。
+- streamed delta 中出现仅用于 legacy display 的 `\n\n`。
+- 工具边界后的第一段正文 offset 错误，客户端 reducer 拼接错乱。
+- transcript sanitization 把正文内部格式也剥掉。
+
+### 14. Dashboard Session Automation Badge 依赖 job metadata
+
+Dashboard 的 session 列表只展示 session 是否有关联 automation task，不负责推断任务语义。
+
+重点保留：
+
+- `hermes_cli/web_server.py` 的 `_session_automation_counts()`。
+- `/api/sessions` 返回 `has_automation_tasks` 和 `automation_task_count`。
+- job 关联来源包括 Doxie owner `sourceSessionId`、result binding `sessionId`、legacy `doxie.session_id`。
+- `web/src/lib/api.ts` 的 session 类型字段。
+- `web/src/pages/SessionsPage.tsx` 的 compact icon badge。
+
+检查方式：
+
+```sh
+rg "automation_task_count|has_automation_tasks|_session_automation_counts|AutomationBadge" hermes_cli web tests
+```
+
+常见坏症状：
+
+- 当前会话已有 automation task，但 session list 没有标记。
+- 一个 session 同时作为 owner 和 result target 时计数漏算。
+- Dashboard 通过扫描消息内容推断 automation，导致历史文案变化影响 UI。
+
 ## 症状到检查点
 
 | 症状 | 先查 |
@@ -383,6 +450,11 @@ rg "create_if_missing|_READ_ONLY_DB_METHODS|_current_method|get_gateway_state_st
 | delegate/profile test 泄漏子代理输出 | `tools/delegate_tool.py`、`tools/doxie_agent_profile_tool.py`、`agent/conversation_loop.py` |
 | model switch 后凭据失效 | `runtime_credentials.py`、`methods/model.py`、`agent/auxiliary_client.py` |
 | session list 多出临时会话 | `hermes_state.py`、`methods/session.py`、allowed sources tests |
+| Doxie automation 结果没回当前会话 | `cron.scheduler._deliver_doxie_bound_result`、`result_binding`、`SessionDB.append_message` |
+| 模型仍能调用原生 `cronjob` | `tools/cronjob_tools.py`、`toolsets.py`、`model_tools._LEGACY_TOOLSET_MAP`、`tests/test_model_tools.py` |
+| automation 固化了 runtime 能力 | `capabilityOverride`、`capabilitySource`、`HERMES_TUI_TOOLSETS`、`doxie_cron_jobs.py` |
+| 工具后消息前有多余空行 | `_stream_inject_tool_breaks`、`_MessageDeltaNormalizer`、`sanitize_assistant_display_text` |
+| Dashboard session 没显示 automation 标记 | `_session_automation_counts`、`has_automation_tasks`、`AutomationBadge` |
 
 ## 最小验证包
 
@@ -397,8 +469,7 @@ scripts/run_tests.sh \
   tests/tui_gateway/test_protocol.py \
   tests/tui_gateway/test_profile_data_context.py \
   tests/tui_gateway/test_tool_events.py \
-  tests/tui_gateway/test_ws_dispatch.py \
-  -q
+  tests/tui_gateway/test_ws_dispatch.py
 ```
 
 ### State / Session / Run Events
@@ -408,8 +479,7 @@ scripts/run_tests.sh \
   tests/test_hermes_state.py \
   tests/test_lazy_session_regressions.py \
   tests/gateway/test_session_list_allowed_sources.py \
-  tests/tui_gateway/test_workspace_context.py \
-  -q
+  tests/tui_gateway/test_workspace_context.py
 ```
 
 ### Prompt / Attachments / Doxie Extension
@@ -419,8 +489,7 @@ scripts/run_tests.sh \
   tests/test_doxie_document_parse_tool.py \
   tests/test_doxie_display_transcript.py \
   tests/tui_gateway/test_protocol.py \
-  tests/test_tui_gateway_server.py \
-  -q
+  tests/test_tui_gateway_server.py
 ```
 
 ### Agent / Tool Invocation / Delegate
@@ -431,8 +500,7 @@ scripts/run_tests.sh \
   tests/tools/test_delegate.py \
   tests/tools/test_doxie_agent_profile_tool.py \
   tests/tools/test_computer_use.py \
-  tests/tools/test_computer_use_vision_routing.py \
-  -q
+  tests/tools/test_computer_use_vision_routing.py
 ```
 
 ### Runtime Model / Credentials
@@ -441,17 +509,34 @@ scripts/run_tests.sh \
 scripts/run_tests.sh \
   tests/tui_gateway/test_make_agent_provider.py \
   tests/agent/test_auxiliary_named_custom_providers.py \
-  tests/tools/test_parse_env_var.py \
-  -q
+  tests/tools/test_parse_env_var.py
 ```
 
 ### Doxie Cron / Automation
 
 ```sh
 scripts/run_tests.sh \
+  tests/cron/test_scheduler.py \
   tests/tui_gateway/test_doxie_cron_jobs.py \
   tests/tui_gateway/test_tool_events.py \
-  -q
+  tests/test_model_tools.py \
+  tests/gateway/test_api_server_toolset.py
+```
+
+### Structured Streaming / Transcript Display
+
+```sh
+scripts/run_tests.sh \
+  tests/run_agent/test_run_agent_codex_responses.py \
+  tests/tui_gateway/test_protocol.py \
+  tests/test_doxie_display_transcript.py
+```
+
+### Dashboard Automation Badge
+
+```sh
+scripts/run_tests.sh \
+  tests/hermes_cli/test_web_session_automation_badges.py
 ```
 
 ### Runtime Proxy / WebSocket Bridge
@@ -460,8 +545,7 @@ scripts/run_tests.sh \
 scripts/run_tests.sh \
   tests/test_doxie_gateway_contract.py \
   tests/tui_gateway/test_ws_dispatch.py \
-  tests/tui_gateway/test_protocol.py \
-  -q
+  tests/tui_gateway/test_protocol.py
 ```
 
 ## 同步后的人工检查
@@ -476,8 +560,12 @@ scripts/run_tests.sh \
 6. 调用 `runtime.ensure`，确认返回 `ready=true`，`worker.running=true`，且 `runtime.status.runtime_proxy` 能看到 worker。
 7. 通过 WebSocket 提交带 `runtime_scope_key` 的 `prompt.submit`，确认 response 和后续 stream events 都从 worker bridge 回到客户端。
 8. 在只读 profile 上调用 `session.list`、`workspace.list`、`artifacts.list`，确认不会创建空 DB。
-9. 在桌面浏览器 bridge 可用时，跑 `browser_tabs` / `browser_new_tab` / `browser_select_tab`。
-10. 跑一次 `computer_use capture`，确认返回窗口元数据和 warnings 字段。
+9. 从一个已有对话创建 automation，确认默认绑定当前 session，任务完成后 assistant result 回写该 session。
+10. 检查模型工具列表，确认没有原生 `cronjob`，只有 `doxie_automation_task_*`。
+11. 在 TUI/WebSocket 跑一次“工具调用后继续回答”的流式场景，确认消息开头没有多余空行。
+12. 打开 Dashboard sessions，确认有关联 automation 的 session 显示 badge。
+13. 在桌面浏览器 bridge 可用时，跑 `browser_tabs` / `browser_new_tab` / `browser_select_tab`。
+14. 跑一次 `computer_use capture`，确认返回窗口元数据和 warnings 字段。
 
 ## 文档维护规则
 
@@ -523,3 +611,11 @@ scripts/run_tests.sh \
 - 修复涉及：`tui_gateway/services/runtime_proxy.py`、`tui_gateway/ws.py`、`tui_gateway/methods/system.py`、`tui_gateway/server.py`、`tui_gateway/services/session_store.py`、`tui_gateway/services/persistence/gateway_store.py`、`tui_gateway/services/workspaces/service.py`、`tui_gateway/services/artifact_registry/service.py`、`run_agent.py`、`doxie_extension/display_transcript.py`、`doxie_extension/manifest.py`、`doxie_extension/gateway_methods.py`。
 - 下次优先检查：`runtime.ensure` 是否仍在 gateway contract；`should_proxy_to_runtime` 是否正确区分 control-plane 和 scoped 方法；WS bridge 是否保持 streaming event 通道；只读 session/workspace/artifact 查询是否使用 `create_if_missing=False`；assistant/tool metadata 是否继承当前 turn identity。
 - 最小验证：优先跑 Runtime Proxy / WebSocket Bridge 包，再跑 Gateway ABI / Run Control、Prompt / Attachments / Doxie Extension、State / Session / Run Events 包。
+
+### 2026-05-26 V0.6.5 同步记录
+
+- 暴露问题：Doxie automation 从原生 Hermes cronjob 语义切到会话绑定任务语义后，风险集中在默认 result binding、runtime capability inheritance、toolset 暴露、结构化流式空白和 Dashboard session 标记。
+- 根因边界：automation 是 Doxie 产品能力，不应让模型直接创建原生 `cronjob`；任务结果默认应回到发起会话，任务能力默认跟随当前 agent runtime，只有用户显式高级配置才持久化 override。
+- 修复涉及：`cron/scheduler.py`、`tui_gateway/services/doxie_cron_jobs.py`、`tools/doxie_automation_task_tool.py`、`tools/cronjob_tools.py`、`toolsets.py`、`model_tools.py`、`run_agent.py`、`tui_gateway/methods/prompt.py`、`doxie_extension/display_transcript.py`、`hermes_cli/web_server.py`、`web/src/lib/api.ts`、`web/src/pages/SessionsPage.tsx`。
+- 下次优先检查：原生 `cronjob` 是否仍未注册；`cronjob` toolset 是否只含 Doxie automation tools；current-session result binding 是否默认生效；`capabilityOverride` 是否只在显式请求时持久化；TUI structured stream 是否禁用工具边界空白注入；session automation badge 是否基于 job metadata。
+- 最小验证：优先跑 Doxie Cron / Automation、Structured Streaming / Transcript Display、Dashboard Automation Badge 三组测试，再按 diff 补跑 Gateway ABI / Run Control 包。

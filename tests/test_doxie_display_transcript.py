@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from doxie_extension.display_transcript import (
+    sanitize_assistant_display_text,
     sanitize_display_text,
     sanitize_session_list_item,
     sanitize_transcript_messages,
@@ -25,6 +26,11 @@ def test_doxie_display_text_strips_cron_delivery_guidance_only():
     assert sanitize_display_text("请写一首短诗") == "请写一首短诗"
 
 
+def test_doxie_assistant_display_text_strips_structural_boundary_blank_lines():
+    assert sanitize_assistant_display_text("\n\n已读取支付协议。\n\n") == "已读取支付协议。"
+    assert sanitize_assistant_display_text("  保留正文缩进\n  第二行") == "  保留正文缩进\n  第二行"
+
+
 def test_doxie_transcript_sanitizer_preserves_raw_message_shape():
     messages = sanitize_transcript_messages(
         [
@@ -45,7 +51,23 @@ def test_doxie_transcript_sanitizer_preserves_raw_message_shape():
             "message_id": "m1",
             "metadata": {"turn_id": "turn-1"},
         },
-        {"role": "assistant", "text": "好的"},
+        {"role": "assistant", "text": "好的", "metadata": {"turn_id": "turn-1"}},
+    ]
+
+
+def test_doxie_transcript_sanitizer_strips_assistant_boundary_blank_lines():
+    messages = sanitize_transcript_messages(
+        [
+            {"role": "assistant", "text": "\n\n已读取支付协议全文。\n\n"},
+            {"role": "tool", "name": "read_file", "context": "读取文件"},
+            {"role": "assistant", "text": "\n\n继续审查产品设计。"},
+        ]
+    )
+
+    assert messages == [
+        {"role": "assistant", "text": "已读取支付协议全文。"},
+        {"role": "tool", "name": "read_file", "context": "读取文件"},
+        {"role": "assistant", "text": "继续审查产品设计。"},
     ]
 
 
@@ -98,6 +120,53 @@ def test_session_messages_returns_doxie_sanitized_cron_prompt(monkeypatch):
     assert response["result"]["messages"] == [
         {"role": "user", "text": "请写一首短诗"},
         {"role": "assistant", "text": "好的"},
+    ]
+
+
+def test_session_messages_strips_assistant_structural_boundary_blank_lines(monkeypatch):
+    from tui_gateway import server
+    from tui_gateway.methods import session as session_methods
+
+    class _DB:
+        def get_session(self, _session_id):
+            return {"id": "spacing-session"}
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def get_messages_page_as_conversation(self, _session_id, **_kwargs):
+            return {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "\n\n已读取支付协议全文。\n\n",
+                        "reasoning_content": "\n\n分析协议结构。\n\n",
+                    },
+                    {"role": "tool", "tool_name": "read_file", "content": ""},
+                    {"role": "assistant", "content": "\n\n继续读取产品文档。"},
+                ],
+                "pageInfo": {"hasMoreBefore": False, "hasMoreAfter": False},
+            }
+
+    monkeypatch.setattr(session_methods, "_get_db", lambda: _DB())
+
+    response = server.handle_request(
+        {
+            "id": "messages",
+            "method": "session.messages",
+            "params": {"session_id": "spacing-session"},
+        }
+    )
+
+    assert "error" not in response
+    assert response["result"]["messages"] == [
+        {
+            "role": "assistant",
+            "text": "已读取支付协议全文。",
+            "reasoning": "分析协议结构。",
+        },
+        {"role": "tool", "name": "read_file", "context": ""},
+        {"role": "assistant", "text": "继续读取产品文档。"},
     ]
 
 

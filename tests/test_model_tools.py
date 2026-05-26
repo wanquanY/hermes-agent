@@ -154,6 +154,36 @@ def test_explicit_doxie_toolset_exposes_design_tools():
 
     assert {"design_agent_profile", "test_agent_profile"} <= names
 
+
+def test_default_tool_definitions_expose_doxie_automation_tools_without_turn_context():
+    names = {
+        tool["function"]["name"]
+        for tool in get_tool_definitions(quiet_mode=True)
+    }
+
+    assert "cronjob" not in names
+    assert "doxie_automation_task_create" in names
+    assert "doxie_automation_task_update" in names
+
+
+def test_cronjob_toolset_exposes_only_doxie_automation_tools():
+    names = {
+        tool["function"]["name"]
+        for tool in get_tool_definitions(enabled_toolsets=["cronjob"], quiet_mode=True)
+    }
+
+    assert names == {
+        "doxie_automation_task_create",
+        "doxie_automation_task_list",
+        "doxie_automation_task_update",
+        "doxie_automation_task_remove",
+    }
+
+
+def test_native_cronjob_tool_is_not_registered_for_model_dispatch():
+    assert "cronjob" not in get_all_tool_names()
+    assert get_toolset_for_tool("cronjob") is None
+
 class TestAgentLoopTools:
     def test_expected_tools_in_set(self):
         assert "todo" in _AGENT_LOOP_TOOLS

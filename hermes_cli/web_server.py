@@ -772,6 +772,56 @@ async def get_action_status(name: str, lines: int = 200):
     }
 
 
+def _session_automation_counts() -> Dict[str, int]:
+    """Return session_id -> number of Doxie automation jobs associated with it."""
+    try:
+        from cron.jobs import list_jobs
+    except Exception:
+        return {}
+
+    counts: Dict[str, int] = {}
+    try:
+        jobs = list_jobs(include_disabled=True)
+    except Exception:
+        _log.debug(
+            "Failed to load cron jobs for session automation badges",
+            exc_info=True,
+        )
+        return counts
+
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        doxie = job.get("doxie") if isinstance(job.get("doxie"), dict) else {}
+        owner = doxie.get("owner") if isinstance(doxie.get("owner"), dict) else {}
+        binding = (
+            doxie.get("result_binding")
+            if isinstance(doxie.get("result_binding"), dict)
+            else {}
+        )
+        if not binding:
+            binding = (
+                doxie.get("resultBinding")
+                if isinstance(doxie.get("resultBinding"), dict)
+                else {}
+            )
+
+        session_ids = {
+            str(value).strip()
+            for value in (
+                owner.get("sourceSessionId"),
+                owner.get("source_session_id"),
+                binding.get("sessionId"),
+                binding.get("session_id"),
+                doxie.get("session_id"),
+            )
+            if str(value or "").strip()
+        }
+        for session_id in session_ids:
+            counts[session_id] = counts.get(session_id, 0) + 1
+    return counts
+
+
 @app.get("/api/sessions")
 async def get_sessions(limit: int = 20, offset: int = 0):
     try:
@@ -781,11 +831,16 @@ async def get_sessions(limit: int = 20, offset: int = 0):
             sessions = db.list_sessions_rich(limit=limit, offset=offset)
             total = db.session_count()
             now = time.time()
+            automation_counts = _session_automation_counts()
             for s in sessions:
+                session_id = str(s.get("id") or "")
+                automation_count = automation_counts.get(session_id, 0)
                 s["is_active"] = (
                     s.get("ended_at") is None
                     and (now - s.get("last_active", s.get("started_at", 0))) < 300
                 )
+                s["has_automation_tasks"] = automation_count > 0
+                s["automation_task_count"] = automation_count
             return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
         finally:
             db.close()

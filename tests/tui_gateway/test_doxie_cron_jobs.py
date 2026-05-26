@@ -38,6 +38,43 @@ def test_status_reports_actual_doxie_ticker_state(cron_env, monkeypatch):
     }
 
 
+def test_manage_cron_uses_active_profile_home_without_runtime_worker(tmp_path):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from tui_gateway.services.doxie_cron_jobs import manage_cron
+
+    default_home = tmp_path / "default"
+    profile_home = tmp_path / "profile-a"
+    default_home.mkdir()
+    profile_home.mkdir()
+
+    default_token = set_hermes_home_override(default_home)
+    try:
+        manage_cron({
+            "action": "add",
+            "name": "Default task",
+            "schedule": {"kind": "every", "everyMs": 3_600_000},
+            "payload": {"kind": "agentTask", "prompt": "default"},
+        })
+    finally:
+        reset_hermes_home_override(default_token)
+
+    profile_token = set_hermes_home_override(profile_home)
+    try:
+        manage_cron({
+            "action": "add",
+            "name": "Profile task",
+            "schedule": {"kind": "every", "everyMs": 3_600_000},
+            "payload": {"kind": "agentTask", "prompt": "profile"},
+        })
+        listed = manage_cron({"action": "list"})
+    finally:
+        reset_hermes_home_override(profile_token)
+
+    assert [job["name"] for job in listed["jobs"]] == ["Profile task"]
+    assert (default_home / "cron" / "jobs.json").exists()
+    assert (profile_home / "cron" / "jobs.json").exists()
+
+
 def test_add_job_with_wake_now_triggers_due_run_and_wakes_ticker(cron_env, monkeypatch):
     from cron.jobs import get_job
     from tui_gateway.services import doxie_cron_runtime
@@ -128,6 +165,73 @@ def test_add_job_persists_doxie_owner_and_result_binding(cron_env):
     assert job["owner"]["workdir"] == "/tmp/workspace"
 
 
+def test_add_job_defaults_owner_session_to_current_session_binding(cron_env):
+    from cron.jobs import get_job
+    from tui_gateway.services.doxie_cron_jobs import add_cron_job
+
+    job = add_cron_job({
+        "name": "Conversation default task",
+        "schedule": {"kind": "every", "everyMs": 3_600_000},
+        "owner": {
+            "agentProfileId": "agent-research",
+            "sourceSessionId": "session-1",
+            "createdBy": "conversation",
+        },
+        "payload": {"kind": "agentTask", "prompt": "check status"},
+    })
+
+    stored = get_job(job["id"])
+
+    assert stored is not None
+    assert stored["doxie"]["result_binding"] == {"mode": "current-session", "sessionId": "session-1"}
+    assert stored["doxie"]["session_target"] == "main"
+    assert job["resultBinding"] == {"mode": "current-session", "sessionId": "session-1"}
+    assert job["sessionTarget"] == "main"
+    assert job["sessionId"] == "session-1"
+    assert job["payload"]["kind"] == "agentTask"
+    assert job["payload"]["prompt"] == "check status"
+
+
+def test_add_job_prefers_owner_session_over_legacy_isolated_target_default(cron_env):
+    from tui_gateway.services.doxie_cron_jobs import add_cron_job
+
+    job = add_cron_job({
+        "name": "Legacy modal default",
+        "schedule": {"kind": "every", "everyMs": 3_600_000},
+        "sessionTarget": "isolated",
+        "owner": {
+            "agentProfileId": "agent-research",
+            "sourceSessionId": "session-1",
+            "createdBy": "conversation",
+        },
+        "payload": {"kind": "agentTask", "prompt": "check status"},
+    })
+
+    assert job["resultBinding"] == {"mode": "current-session", "sessionId": "session-1"}
+    assert job["sessionTarget"] == "main"
+
+
+def test_add_job_honors_explicit_new_session_result_binding(cron_env):
+    from tui_gateway.services.doxie_cron_jobs import add_cron_job
+
+    job = add_cron_job({
+        "name": "Explicit isolated task",
+        "schedule": {"kind": "every", "everyMs": 3_600_000},
+        "sessionTarget": "isolated",
+        "owner": {
+            "agentProfileId": "agent-research",
+            "sourceSessionId": "session-1",
+            "createdBy": "conversation",
+        },
+        "resultBinding": {"mode": "new-session"},
+        "payload": {"kind": "agentTask", "prompt": "check status"},
+    })
+
+    assert job["resultBinding"] == {"mode": "new-session"}
+    assert job["sessionTarget"] == "isolated"
+    assert job["sessionId"] is None
+
+
 def test_doxie_automation_tool_inherits_current_context(cron_env):
     from gateway import session_context
     from tools.doxie_automation_task_tool import doxie_automation_task_create
@@ -165,6 +269,105 @@ def test_doxie_automation_tool_inherits_current_context(cron_env):
     assert jobs[0]["workspaceId"] == "workspace-2"
     assert jobs[0]["workdir"] == str(workspace)
     assert jobs[0]["resultBinding"] == {"mode": "current-session", "sessionId": "session-chat"}
+
+
+def test_doxie_automation_tool_defaults_to_current_session_binding(cron_env):
+    import json
+
+    from gateway import session_context
+    from tools.doxie_automation_task_tool import doxie_automation_task_create
+
+    workspace = cron_env / "workspace"
+    workspace.mkdir()
+    context = {
+        "sourceSessionId": "session-chat",
+        "sourceAgentProfileId": "agent-writer",
+        "sourceAgentProfileName": "Writer",
+        "workspacePath": str(workspace),
+    }
+    tokens = session_context.set_session_vars(doxie_product_context=json.dumps(context))
+    try:
+        created = json.loads(doxie_automation_task_create(
+            name="Default bound follow up",
+            prompt="Summarize updates",
+            schedule={"kind": "every", "everyMs": 900_000},
+        ))["job"]
+    finally:
+        session_context.clear_session_vars(tokens)
+
+    assert created["resultBinding"] == {"mode": "current-session", "sessionId": "session-chat"}
+    assert created["sessionTarget"] == "main"
+
+
+def test_add_job_inherits_runtime_capabilities_without_persisting_skills(cron_env, monkeypatch):
+    from tui_gateway.services.doxie_cron_jobs import add_cron_job
+
+    monkeypatch.setenv("HERMES_TUI_SKILLS", "research, writing, research")
+
+    job = add_cron_job({
+        "name": "Skill bound task",
+        "schedule": {"kind": "every", "everyMs": 900_000},
+        "payload": {"kind": "agentTask", "prompt": "Summarize updates"},
+    })
+
+    assert "skills" not in job["payload"]
+    assert job["capabilitySource"] == "agent-runtime"
+    assert job["capabilityOverride"] is None
+    assert job["raw"]["skills"] == []
+
+
+def test_add_job_persists_explicit_capability_override(cron_env):
+    from tui_gateway.services.doxie_cron_jobs import add_cron_job
+
+    job = add_cron_job({
+        "name": "Pinned capability task",
+        "schedule": {"kind": "every", "everyMs": 900_000},
+        "payload": {"kind": "agentTask", "prompt": "Summarize updates"},
+        "capabilityOverride": {
+            "skills": ["research", "writing", "research"],
+            "enabledToolsets": ["web", "skills"],
+            "reason": "User explicitly limited this task",
+            "createdBy": "user-explicit-advanced-setting",
+        },
+    })
+
+    assert job["capabilitySource"] == "task-override"
+    assert job["capabilityOverride"] == {
+        "skills": ["research", "writing"],
+        "enabledToolsets": ["web", "skills"],
+        "createdBy": "user-explicit-advanced-setting",
+        "reason": "User explicitly limited this task",
+    }
+    assert job["payload"]["capabilityOverride"] == job["capabilityOverride"]
+    assert job["raw"]["skills"] == ["research", "writing"]
+    assert job["raw"]["enabled_toolsets"] == ["web", "skills"]
+
+
+def test_update_job_clears_capability_override_to_runtime_inheritance(cron_env):
+    from tui_gateway.services.doxie_cron_jobs import add_cron_job, update_cron_job
+
+    created = add_cron_job({
+        "name": "Pinned capability task",
+        "schedule": {"kind": "every", "everyMs": 900_000},
+        "payload": {"kind": "agentTask", "prompt": "Summarize updates"},
+        "capabilityOverride": {
+            "skills": ["research"],
+            "enabledToolsets": ["web"],
+            "reason": "User explicitly limited this task",
+            "createdBy": "user-explicit-advanced-setting",
+        },
+    })
+
+    updated = update_cron_job({
+        "id": created["id"],
+        "patch": {"capabilityOverride": {}},
+    })
+
+    assert updated["capabilitySource"] == "agent-runtime"
+    assert updated["capabilityOverride"] is None
+    assert updated["raw"]["skills"] == []
+    assert updated["raw"]["enabled_toolsets"] is None
+    assert updated["raw"]["doxie"]["capability_override"] is None
 
 
 def test_doxie_automation_tools_manage_current_session_bound_tasks(cron_env):

@@ -55,8 +55,8 @@ _HERMES_CORE_TOOLS = [
     "clarify",
     # Code execution + delegation
     "execute_code", "delegate_task",
-    # Cronjob management
-    "cronjob", "doxie_automation_task_create", "doxie_automation_task_list",
+    # Doxie automation task management
+    "doxie_automation_task_create", "doxie_automation_task_list",
     "doxie_automation_task_update", "doxie_automation_task_remove",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
@@ -185,8 +185,13 @@ TOOLSETS = {
     },
     
     "cronjob": {
-        "description": "Cronjob management tool - create, list, update, pause, resume, remove, and trigger scheduled tasks",
-        "tools": ["cronjob"],
+        "description": "Doxie automation task tools - create, list, update, and remove scheduled tasks bound to the active Doxie agent/session context",
+        "tools": [
+            "doxie_automation_task_create",
+            "doxie_automation_task_list",
+            "doxie_automation_task_update",
+            "doxie_automation_task_remove",
+        ],
         "includes": []
     },
     
@@ -386,8 +391,9 @@ TOOLSETS = {
             "session_search",
             # Code execution + delegation
             "execute_code", "delegate_task",
-            # Cronjob management
-            "cronjob",
+            # Doxie automation task management
+            "doxie_automation_task_create", "doxie_automation_task_list",
+            "doxie_automation_task_update", "doxie_automation_task_remove",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
             "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
 

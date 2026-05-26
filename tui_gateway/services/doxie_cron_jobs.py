@@ -1,29 +1,79 @@
 from __future__ import annotations
 
+import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+_cron_path_lock = threading.RLock()
+
 
 def manage_cron(params: dict[str, Any]) -> dict[str, Any]:
-    action = str(params.get("action") or "list").strip().lower()
-    if action == "status":
-        return cron_status()
-    if action == "list":
-        return list_cron_jobs(params)
-    if action == "add":
-        return add_cron_job(params)
-    if action == "update":
-        return update_cron_job(params)
-    if action == "remove":
-        return remove_cron_job(params)
-    if action in {"run", "run_now", "trigger"}:
-        return run_cron_job(params)
-    if action == "runs":
-        return list_cron_runs(params)
-    if action in {"pause", "resume"}:
-        return toggle_cron_job(params, enabled=action == "resume")
-    raise ValueError(f"unknown cron action: {action}")
+    with _profile_cron_storage_scope():
+        action = str(params.get("action") or "list").strip().lower()
+        if action == "status":
+            return cron_status()
+        if action == "list":
+            return list_cron_jobs(params)
+        if action == "add":
+            return add_cron_job(params)
+        if action == "update":
+            return update_cron_job(params)
+        if action == "remove":
+            return remove_cron_job(params)
+        if action in {"run", "run_now", "trigger"}:
+            return run_cron_job(params)
+        if action == "runs":
+            return list_cron_runs(params)
+        if action in {"pause", "resume"}:
+            return toggle_cron_job(params, enabled=action == "resume")
+        raise ValueError(f"unknown cron action: {action}")
+
+
+@contextmanager
+def _profile_cron_storage_scope():
+    """Route legacy cron.jobs module globals to the active profile home.
+
+    cron.jobs predates Doxie's multi-profile control plane and keeps storage
+    paths as module globals computed at import time. Runtime workers used to
+    hide that because each profile ran in a separate process. Control-plane
+    cron.manage must still read/write the active profile's cron store without
+    requiring a runtime worker, so this adapter scopes those legacy globals for
+    the duration of one cron.manage request.
+    """
+    from hermes_constants import get_hermes_home_override
+
+    active_home = get_hermes_home_override()
+    if not active_home:
+        yield
+        return
+
+    import cron.jobs as jobs_mod
+
+    hermes_dir = Path(active_home).expanduser().resolve()
+    cron_dir = hermes_dir / "cron"
+    output_dir = cron_dir / "output"
+    with _cron_path_lock:
+        previous = (
+            getattr(jobs_mod, "HERMES_DIR", None),
+            getattr(jobs_mod, "CRON_DIR", None),
+            getattr(jobs_mod, "JOBS_FILE", None),
+            getattr(jobs_mod, "OUTPUT_DIR", None),
+        )
+        jobs_mod.HERMES_DIR = hermes_dir
+        jobs_mod.CRON_DIR = cron_dir
+        jobs_mod.JOBS_FILE = cron_dir / "jobs.json"
+        jobs_mod.OUTPUT_DIR = output_dir
+        try:
+            yield
+        finally:
+            (
+                jobs_mod.HERMES_DIR,
+                jobs_mod.CRON_DIR,
+                jobs_mod.JOBS_FILE,
+                jobs_mod.OUTPUT_DIR,
+            ) = previous
 
 
 def cron_status() -> dict[str, Any]:
@@ -66,19 +116,20 @@ def add_cron_job(params: dict[str, Any]) -> dict[str, Any]:
     from tui_gateway.services.doxie_cron_runtime import request_cron_tick
 
     payload = _payload_from_params(params)
+    capability_override = _capability_override_from_params(params)
     job = create_job(
         prompt=payload["prompt"],
         schedule=_schedule_to_hermes_string(params.get("schedule") or params.get("scheduleText")),
         name=_text(params.get("name") or "自动化任务"),
         repeat=1 if _bool(params.get("deleteAfterRun"), default=False) else params.get("repeat"),
         deliver=_optional_text(params.get("deliver")) or payload.get("deliver"),
-        skills=_string_list(params.get("skills") or payload.get("skills")),
+        skills=_string_list(capability_override.get("skills")),
         model=_optional_text(params.get("model") or payload.get("model")),
         provider=_optional_text(params.get("provider")),
         base_url=_optional_text(params.get("baseUrl") or params.get("base_url")),
         script=_optional_text(params.get("script")),
         context_from=params.get("contextFrom") or params.get("context_from"),
-        enabled_toolsets=_string_list(params.get("enabledToolsets") or params.get("enabled_toolsets") or payload.get("enabledToolsets") or payload.get("enabled_toolsets")),
+        enabled_toolsets=_string_list(capability_override.get("enabledToolsets")),
         workdir=_optional_text(params.get("workdir")),
         no_agent=_bool(params.get("noAgent") or params.get("no_agent"), default=False),
     )
@@ -131,19 +182,18 @@ def update_cron_job(params: dict[str, Any]) -> dict[str, Any]:
     for source_key, target_key in direct_fields.items():
         if source_key in patch:
             updates[target_key] = patch.get(source_key)
-    if "skills" in patch:
-        updates["skills"] = _string_list(patch.get("skills"))
-    if "enabledToolsets" in patch:
-        updates["enabled_toolsets"] = _string_list(patch.get("enabledToolsets"))
-    if "enabled_toolsets" in patch:
-        updates["enabled_toolsets"] = _string_list(patch.get("enabled_toolsets"))
-    if "enabledToolsets" in payload_patch:
-        updates["enabled_toolsets"] = _string_list(payload_patch.get("enabledToolsets"))
-    if "enabled_toolsets" in payload_patch:
-        updates["enabled_toolsets"] = _string_list(payload_patch.get("enabled_toolsets"))
+    if "capabilityOverride" in patch or "capability_override" in patch or "capabilityOverride" in payload_patch or "capability_override" in payload_patch:
+        capability_override = _capability_override_from_params(patch)
+        updates["skills"] = _string_list(capability_override.get("skills"))
+        updates["enabled_toolsets"] = _string_list(capability_override.get("enabledToolsets")) or None
 
     existing_doxie = current.get("doxie") if isinstance(current.get("doxie"), dict) else {}
-    doxie_patch = {k: v for k, v in _doxie_metadata_from_params(patch, partial=True).items() if v is not None}
+    doxie_patch = _doxie_metadata_from_params(patch, partial=True)
+    doxie_patch = {
+        k: v
+        for k, v in doxie_patch.items()
+        if v is not None or k == "capability_override"
+    }
     updates["doxie"] = {**existing_doxie, **doxie_patch}
 
     updated = update_job(job_id, updates) if updates else current
@@ -229,8 +279,9 @@ def _normalize_job(job: dict[str, Any]) -> dict[str, Any]:
     owner = _owner_from_doxie(job, doxie)
     result_binding = _result_binding_from_doxie(job, doxie)
     target_session_id = _result_binding_session_id(result_binding) or _optional_text(doxie.get("session_id"))
-    payload_kind = "sessionMessage" if result_binding.get("mode") == "current-session" else "agentTask"
+    payload_kind = _payload_kind_from_doxie(job, doxie)
     session_target = "main" if result_binding.get("mode") == "current-session" else "isolated"
+    capability = _capability_projection(job, doxie)
     return {
         "id": job_id,
         "jobId": job_id,
@@ -253,6 +304,8 @@ def _normalize_job(job: dict[str, Any]) -> dict[str, Any]:
         "origin": _created_by_origin(doxie.get("created_by") or owner.get("createdBy")),
         "owner": owner,
         "resultBinding": result_binding,
+        "capabilitySource": capability["source"],
+        "capabilityOverride": capability["override"],
         "schedule": _normalize_schedule(job.get("schedule"), job.get("schedule_display")),
         "scheduleDisplay": _optional_text(job.get("schedule_display")),
         "payload": {
@@ -261,8 +314,7 @@ def _normalize_job(job: dict[str, Any]) -> dict[str, Any]:
             "prompt": _text(job.get("prompt")) if payload_kind != "sessionMessage" else None,
             "model": _optional_text(job.get("model")),
             "provider": _optional_text(job.get("provider")),
-            "skills": _string_list(job.get("skills")),
-            "enabledToolsets": _string_list(job.get("enabled_toolsets")),
+            **({"capabilityOverride": capability["override"]} if capability["override"] else {}),
             "deliver": _optional_text(job.get("deliver")),
         },
         "state": {
@@ -363,13 +415,39 @@ def _run_entries_for_job(job: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _payload_from_params(params: dict[str, Any]) -> dict[str, Any]:
     payload = params.get("payload") if isinstance(params.get("payload"), dict) else params
+    kind = _text(payload.get("kind") or params.get("payloadKind") or params.get("payload_kind") or "agentTask")
+    if kind not in {"agentTask", "sessionMessage"}:
+        kind = "agentTask"
     return {
+        "kind": kind,
         "prompt": _optional_text(payload.get("prompt")) or _optional_text(payload.get("message")) or _optional_text(payload.get("text")) or _optional_text(params.get("prompt")) or _optional_text(params.get("payloadText")) or "",
         "model": _optional_text(payload.get("model") or params.get("model")),
-        "skills": _string_list(payload.get("skills") or params.get("skills")),
-        "enabledToolsets": _string_list(payload.get("enabledToolsets") or payload.get("enabled_toolsets") or params.get("enabledToolsets") or params.get("enabled_toolsets")),
         "deliver": _optional_text(payload.get("deliver") or params.get("deliver")),
     }
+
+
+def _capability_override_from_params(params: dict[str, Any]) -> dict[str, Any]:
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    override = params.get("capabilityOverride") if isinstance(params.get("capabilityOverride"), dict) else {}
+    if not override:
+        override = params.get("capability_override") if isinstance(params.get("capability_override"), dict) else {}
+    if not override:
+        override = payload.get("capabilityOverride") if isinstance(payload.get("capabilityOverride"), dict) else {}
+    if not override:
+        override = payload.get("capability_override") if isinstance(payload.get("capability_override"), dict) else {}
+    if not override:
+        return {}
+    skills = list(dict.fromkeys(_string_list(override.get("skills"))))
+    enabled_toolsets = list(dict.fromkeys(_string_list(override.get("enabledToolsets") or override.get("enabled_toolsets"))))
+    result: dict[str, Any] = {}
+    if skills:
+        result["skills"] = skills
+    if enabled_toolsets:
+        result["enabledToolsets"] = enabled_toolsets
+    if result:
+        result["createdBy"] = _optional_text(override.get("createdBy") or override.get("created_by")) or "user-explicit-advanced-setting"
+        result["reason"] = _optional_text(override.get("reason")) or "Explicit automation task capability override"
+    return result
 
 
 def _owner_from_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -416,12 +494,19 @@ def _result_binding_from_params(params: dict[str, Any]) -> dict[str, Any]:
     binding = params.get("resultBinding") if isinstance(params.get("resultBinding"), dict) else {}
     if not binding:
         binding = params.get("result_binding") if isinstance(params.get("result_binding"), dict) else {}
-    mode = _optional_text(binding.get("mode") or params.get("resultBindingMode") or params.get("result_binding_mode"))
-    session_id = _optional_text(binding.get("sessionId") or binding.get("session_id") or params.get("sessionId") or params.get("sessionKey") or params.get("session_id"))
+    explicit_mode = _optional_text(binding.get("mode") or params.get("resultBindingMode") or params.get("result_binding_mode"))
+    mode = explicit_mode
+    owner = _owner_from_params(params)
+    source_session_id = _optional_text(owner.get("sourceSessionId"))
+    session_id = _optional_text(binding.get("sessionId") or binding.get("session_id") or params.get("sessionId") or params.get("sessionKey") or params.get("session_id") or source_session_id)
     if not mode:
-        session_target = _optional_text(params.get("sessionTarget") or params.get("session_target"))
-        mode = "current-session" if session_target == "main" and session_id else "new-session"
-    mode = mode if mode in {"current-session", "new-session", "run-log-only", "hermes-native"} else "new-session"
+        session_target = _optional_text(params.get("sessionTarget") or params.get("session_target")) or ""
+        if session_id and (session_target in {"", "main", "isolated"}):
+            mode = "current-session"
+        else:
+            mode = "new-session"
+    if mode not in {"current-session", "new-session", "run-log-only", "hermes-native"}:
+        mode = "current-session" if session_id else "new-session"
     result: dict[str, Any] = {"mode": mode}
     if mode == "current-session":
         result["sessionId"] = session_id or ""
@@ -461,6 +546,37 @@ def _result_binding_from_doxie(job: dict[str, Any], doxie: dict[str, Any]) -> di
     return {"mode": "new-session"}
 
 
+def _payload_kind_from_doxie(job: dict[str, Any], doxie: dict[str, Any]) -> str:
+    payload = doxie.get("payload") if isinstance(doxie.get("payload"), dict) else {}
+    kind = _text(payload.get("kind") or job.get("payloadKind") or job.get("payload_kind"))
+    return kind if kind in {"agentTask", "sessionMessage"} else "agentTask"
+
+
+def _capability_projection(job: dict[str, Any], doxie: dict[str, Any]) -> dict[str, Any]:
+    override = doxie.get("capability_override") if isinstance(doxie.get("capability_override"), dict) else {}
+    skills = _string_list(override.get("skills") if override else job.get("skills"))
+    toolsets = _string_list((override.get("enabledToolsets") or override.get("enabled_toolsets")) if override else job.get("enabled_toolsets"))
+    if override:
+        clean: dict[str, Any] = {}
+        if skills:
+            clean["skills"] = skills
+        if toolsets:
+            clean["enabledToolsets"] = toolsets
+        clean["createdBy"] = _optional_text(override.get("createdBy") or override.get("created_by")) or "user-explicit-advanced-setting"
+        clean["reason"] = _optional_text(override.get("reason")) or "Explicit automation task capability override"
+        return {"source": "task-override", "override": clean}
+    if skills or toolsets:
+        clean = {}
+        if skills:
+            clean["skills"] = skills
+        if toolsets:
+            clean["enabledToolsets"] = toolsets
+        clean["createdBy"] = "migration"
+        clean["reason"] = "Legacy Hermes cron job capability fields"
+        return {"source": "hermes-native", "override": clean}
+    return {"source": "agent-runtime", "override": None}
+
+
 def _result_binding_session_id(result_binding: dict[str, Any]) -> str | None:
     if result_binding.get("mode") != "current-session":
         return None
@@ -482,6 +598,8 @@ def _doxie_metadata_from_params(params: dict[str, Any], *, partial: bool = False
     if "approvalPolicy" in params or "approval_policy" in params:
         approval_policy = _normalize_approval_policy(params.get("approvalPolicy") or params.get("approval_policy"))
     owner = _owner_from_params(params)
+    payload = _payload_from_params(params)
+    capability_override = _capability_override_from_params(params)
     has_binding_patch = any(key in params for key in ("resultBinding", "result_binding", "resultBindingMode", "result_binding_mode", "sessionTarget", "session_target", "sessionId", "sessionKey", "session_id"))
     result_binding = _result_binding_from_params(params) if (not partial or has_binding_patch) else {}
     target_session_id = _result_binding_session_id(result_binding)
@@ -506,6 +624,15 @@ def _doxie_metadata_from_params(params: dict[str, Any], *, partial: bool = False
             "session_target": "main" if result_binding.get("mode") == "current-session" else "isolated",
             "session_id": target_session_id,
         })
+    if not partial or "payload" in params or "payloadKind" in params or "payload_kind" in params:
+        metadata["payload"] = {"kind": payload["kind"]}
+    has_capability_patch = any(key in params for key in ("capabilityOverride", "capability_override"))
+    payload_value = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    has_capability_patch = has_capability_patch or any(key in payload_value for key in ("capabilityOverride", "capability_override"))
+    if capability_override:
+        metadata["capability_override"] = capability_override
+    elif not partial or has_capability_patch:
+        metadata["capability_override"] = None
     if not partial or any(value is not None for value in metadata.values()):
         metadata["schema_version"] = 2
     return metadata

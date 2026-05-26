@@ -542,6 +542,11 @@ def init_agent(
     # Deferred paragraph break flag — set after tool iterations so a
     # single "\n\n" is prepended to the next real text delta.
     agent._stream_needs_break = False
+    # Legacy text streams need a visible paragraph break after tool
+    # boundaries. Structured transports (TUI gateway/WebSocket) represent
+    # those boundaries as tool events, so they must not inject display
+    # spacing into message text.
+    agent._stream_inject_tool_breaks = True
     # Stateful scrubber for <memory-context> spans split across stream
     # deltas (#5719).  sanitize_context() alone can't survive chunk
     # boundaries because the block regex needs both tags in one string.

@@ -740,36 +740,10 @@ def check_cronjob_requirements() -> bool:
     )
 
 
-# --- Registry ---
-from tools.registry import registry, tool_error
+from tools.registry import tool_error
 
-registry.register(
-    name="cronjob",
-    toolset="cronjob",
-    schema=CRONJOB_SCHEMA,
-    handler=lambda args, **kw: (lambda _mo=_resolve_model_override(args.get("model")): cronjob(
-        action=args.get("action", ""),
-        job_id=args.get("job_id"),
-        prompt=args.get("prompt"),
-        schedule=args.get("schedule"),
-        name=args.get("name"),
-        repeat=args.get("repeat"),
-        deliver=args.get("deliver"),
-        include_disabled=args.get("include_disabled", True),
-        skill=args.get("skill"),
-        skills=args.get("skills"),
-        model=_mo[1],
-        provider=_mo[0] or args.get("provider"),
-        base_url=args.get("base_url"),
-        reason=args.get("reason"),
-        script=args.get("script"),
-        context_from=args.get("context_from"),
-        enabled_toolsets=args.get("enabled_toolsets"),
-        workdir=args.get("workdir"),
-        profile=args.get("profile"),
-        no_agent=args.get("no_agent"),
-        task_id=kw.get("task_id"),
-    ))(),
-    check_fn=check_cronjob_requirements,
-    emoji="⏰",
-)
+# The native cronjob Python API remains importable for scheduler internals and
+# legacy direct tests, but it is intentionally not registered as a model tool.
+# Doxie sessions expose only doxie_automation_task_* through the "cronjob"
+# toolset so native cronjob semantics cannot compete with Doxie's
+# agent/session-bound automation contract.

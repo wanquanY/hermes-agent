@@ -57,7 +57,6 @@ _RUNTIME_PROXY_CONTROL_METHODS = frozenset(
 _RUNTIME_SCOPED_CONTROL_METHODS = frozenset(
     {
         "clarify.respond",
-        "cron.manage",
         "run.cancel",
         "secret.respond",
         "session.create",

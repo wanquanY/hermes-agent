@@ -24,6 +24,8 @@ _CRON_DELIVERY_GUIDANCE_RE = re.compile(
 )
 
 _TURN_METADATA_KEYS = ("turn_id", "run_id", "client_message_id")
+_BOUNDARY_BLANK_LINES_START_RE = re.compile(r"\A(?:[ \t]*\r?\n)+")
+_BOUNDARY_BLANK_LINES_END_RE = re.compile(r"(?:\r?\n[ \t]*)+\Z")
 
 
 def _turn_metadata(value: Any) -> dict[str, Any]:
@@ -60,6 +62,16 @@ def sanitize_display_text(value: Any) -> str:
     return _CRON_DELIVERY_GUIDANCE_RE.sub("", text, count=1).strip()
 
 
+def sanitize_assistant_display_text(value: Any) -> str:
+    """Remove structural boundary blank lines from assistant transcript text."""
+
+    text = str(value or "")
+    if not text:
+        return ""
+    text = _BOUNDARY_BLANK_LINES_START_RE.sub("", text)
+    return _BOUNDARY_BLANK_LINES_END_RE.sub("", text)
+
+
 def sanitize_transcript_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
     """Return a Doxie-display copy of a transcript message.
 
@@ -68,7 +80,14 @@ def sanitize_transcript_message(message: Mapping[str, Any]) -> dict[str, Any] | 
     """
 
     item = dict(message)
-    if item.get("role") != "user":
+    role = item.get("role")
+    if role == "assistant":
+        item["text"] = sanitize_assistant_display_text(item.get("text"))
+        if item.get("reasoning") is not None:
+            item["reasoning"] = sanitize_assistant_display_text(item.get("reasoning"))
+        return item
+
+    if role != "user":
         return item
 
     raw_text = item.get("text")

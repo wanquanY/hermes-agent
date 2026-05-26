@@ -7,9 +7,122 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt
+from cron.scheduler import (
+    _append_doxie_current_session_result,
+    _build_job_prompt,
+    _deliver_doxie_bound_result,
+    _deliver_result,
+    _resolve_cron_enabled_toolsets,
+    _resolve_delivery_target,
+    _resolve_origin,
+    _send_media_via_adapter,
+    run_job,
+    SILENT_MARKER,
+)
 from tools.env_passthrough import clear_env_passthrough
 from tools.credential_files import clear_credential_files
+
+
+def test_cron_toolsets_inherit_doxie_tui_env(monkeypatch):
+    monkeypatch.setenv("HERMES_TUI_TOOLSETS", "web,terminal")
+
+    assert _resolve_cron_enabled_toolsets({}, {}) == ["web", "terminal"]
+
+
+def test_cron_toolsets_tui_all_means_unrestricted(monkeypatch):
+    monkeypatch.setenv("HERMES_TUI_TOOLSETS", "all")
+
+    assert (
+        _resolve_cron_enabled_toolsets(
+            {},
+            {"platform_toolsets": {"cron": ["memory"]}},
+        )
+        is None
+    )
+
+
+def test_append_doxie_current_session_result(monkeypatch):
+    calls = []
+
+    class FakeSessionDB:
+        def ensure_session(self, session_id, source="unknown", model=None, **kwargs):
+            calls.append(("ensure", session_id, source, model))
+
+        def append_message(self, session_id, role, content, metadata=None, **kwargs):
+            calls.append(("append", session_id, role, content, metadata))
+            return 1
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "hermes_state",
+        type("FakeHermesState", (), {"SessionDB": FakeSessionDB}),
+    )
+
+    error = _append_doxie_current_session_result(
+        {
+            "id": "job-1",
+            "name": "Daily AI news",
+            "model": "gpt-test",
+            "prompt": "整理今天的 AI 资讯",
+            "_runtime_session_id": "cron_job-1_20260526",
+            "doxie": {
+                "result_binding": {"mode": "current-session", "sessionId": "session-1"},
+            },
+        },
+        success=True,
+        final_response="今日 AI 资讯",
+        error=None,
+    )
+
+    assert error is None
+    assert calls[0] == ("ensure", "session-1", "tui", "gpt-test")
+    assert calls[1][0:4] == ("append", "session-1", "user", "整理今天的 AI 资讯")
+    assert calls[1][4]["source"] == "doxie_automation_trigger"
+    assert calls[2][0:4] == ("append", "session-1", "assistant", "今日 AI 资讯")
+    assert calls[2][4]["source"] == "doxie_automation"
+
+
+def test_deliver_doxie_new_session_result(monkeypatch):
+    calls = []
+
+    class FakeSessionDB:
+        def ensure_session(self, session_id, source="unknown", model=None, **kwargs):
+            calls.append(("ensure", session_id, source, model))
+
+        def append_message(self, session_id, role, content, metadata=None, **kwargs):
+            calls.append(("append", session_id, role, content, metadata))
+            return 1
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "hermes_state",
+        type("FakeHermesState", (), {"SessionDB": FakeSessionDB}),
+    )
+
+    error = _deliver_doxie_bound_result(
+        {
+            "id": "job-1",
+            "name": "Daily AI news",
+            "model": "gpt-test",
+            "prompt": "整理今天的 AI 资讯",
+            "_runtime_session_id": "cron_job-1_20260526",
+            "doxie": {
+                "result_binding": {"mode": "new-session"},
+            },
+        },
+        success=True,
+        final_response="今日 AI 资讯",
+        error=None,
+    )
+
+    assert error is None
+    assert calls[0][0] == "ensure"
+    assert calls[0][1].startswith("automation_job-1_")
+    assert calls[0][2:] == ("tui", "gpt-test")
+    assert calls[1][0:4] == ("append", calls[0][1], "user", "整理今天的 AI 资讯")
+    assert calls[1][4]["source"] == "doxie_automation_trigger"
+    assert calls[2][0:4] == ("append", calls[0][1], "assistant", "今日 AI 资讯")
+    assert calls[2][4]["result_binding_mode"] == "new-session"
 
 
 class TestResolveOrigin:

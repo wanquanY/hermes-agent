@@ -254,6 +254,21 @@ function MessageList({
   );
 }
 
+function AutomationBadge({ count }: { count?: number }) {
+  const value = Math.max(1, count ?? 1);
+  const label = `${value} automation task${value === 1 ? "" : "s"}`;
+
+  return (
+    <span
+      className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm border border-warning/30 bg-warning/10 text-warning"
+      title={label}
+      aria-label={label}
+    >
+      <Clock className="h-3 w-3" />
+    </span>
+  );
+}
+
 function SessionRow({
   session,
   snippet,
@@ -326,6 +341,9 @@ function SessionRow({
                   <span className="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
                   {t.common.live}
                 </Badge>
+              )}
+              {session.has_automation_tasks && (
+                <AutomationBadge count={session.automation_task_count} />
               )}
             </div>
             <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
@@ -767,13 +785,18 @@ export default function SessionsPage() {
                   )}
                 </div>
 
-                <Badge
-                  tone="outline"
-                  className="shrink-0 self-start text-[10px] sm:self-center"
-                >
-                  <Database className="mr-1 h-3 w-3" />
-                  {s.source ?? "local"}
-                </Badge>
+                <div className="flex shrink-0 items-center gap-1 self-start sm:self-center">
+                  {s.has_automation_tasks && (
+                    <AutomationBadge count={s.automation_task_count} />
+                  )}
+                  <Badge
+                    tone="outline"
+                    className="shrink-0 text-[10px]"
+                  >
+                    <Database className="mr-1 h-3 w-3" />
+                    {s.source ?? "local"}
+                  </Badge>
+                </div>
               </div>
             ))}
           </CardContent>
