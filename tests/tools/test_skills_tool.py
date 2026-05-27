@@ -323,6 +323,19 @@ class TestSkillsList:
         assert result["skills"] == []
         assert skills_dir.exists()
 
+    def test_empty_repairs_non_directory_skills_path(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.write_text("legacy corrupt file\n")
+
+        with patch("tools.skills_tool.SKILLS_DIR", skills_dir):
+            raw = skills_list()
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["skills"] == []
+        assert skills_dir.is_dir()
+        assert any(path.name.startswith("skills.invalid-") for path in tmp_path.iterdir())
+
     def test_lists_skills(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             _make_skill(tmp_path, "alpha")

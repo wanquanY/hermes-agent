@@ -217,6 +217,20 @@ class TestSyncSkills:
         assert (skills_dir / "old-skill" / "SKILL.md").exists()
         assert (skills_dir / "category" / "DESCRIPTION.md").exists()
 
+    def test_fresh_install_repairs_non_directory_skills_path(self, tmp_path):
+        bundled = self._setup_bundled(tmp_path)
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+        skills_dir.write_text("legacy corrupt file\n")
+
+        with self._patches(bundled, skills_dir, manifest_file):
+            result = sync_skills(quiet=True)
+
+        assert len(result["copied"]) == 2
+        assert skills_dir.is_dir()
+        assert (skills_dir / "category" / "new-skill" / "SKILL.md").exists()
+        assert any(path.name.startswith("user_skills.invalid-") for path in tmp_path.iterdir())
+
     def test_fresh_install_records_origin_hashes(self, tmp_path):
         """After fresh install, manifest should have v2 format with hashes."""
         bundled = self._setup_bundled(tmp_path)

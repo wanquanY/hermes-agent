@@ -25,7 +25,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from hermes_constants import get_hermes_home
+from hermes_constants import ensure_directory_path, get_hermes_home
 from agent.skill_utils import is_excluded_skill_path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -2891,9 +2891,9 @@ def append_audit_log(action: str, skill_name: str, source: str,
 
 def ensure_hub_dirs() -> None:
     """Create the .hub directory structure if it doesn't exist."""
-    HUB_DIR.mkdir(parents=True, exist_ok=True)
-    QUARANTINE_DIR.mkdir(exist_ok=True)
-    INDEX_CACHE_DIR.mkdir(exist_ok=True)
+    ensure_directory_path(HUB_DIR)
+    ensure_directory_path(QUARANTINE_DIR)
+    ensure_directory_path(INDEX_CACHE_DIR)
     if not LOCK_FILE.exists():
         LOCK_FILE.write_text('{"version": 1, "installed": {}}\n')
     if not AUDIT_LOG.exists():

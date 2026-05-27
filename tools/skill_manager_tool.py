@@ -39,7 +39,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from hermes_constants import get_hermes_home, display_hermes_home
+from hermes_constants import ensure_directory_path, get_hermes_home, display_hermes_home
 from typing import Dict, Any, Optional, Tuple
 
 from utils import atomic_replace, is_truthy_value
@@ -347,7 +347,7 @@ def _atomic_write_text(file_path: Path, content: str, encoding: str = "utf-8") -
         content: Content to write
         encoding: Text encoding (default: utf-8)
     """
-    file_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_directory_path(file_path.parent)
     fd, temp_path = tempfile.mkstemp(
         dir=str(file_path.parent),
         prefix=f".{file_path.name}.tmp.",
@@ -400,7 +400,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
 
     # Create the skill directory
     skill_dir = _resolve_skill_dir(name, category)
-    skill_dir.mkdir(parents=True, exist_ok=True)
+    ensure_directory_path(skill_dir)
 
     # Write SKILL.md atomically
     skill_md = skill_dir / "SKILL.md"
@@ -642,7 +642,7 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     target, err = _resolve_skill_target(existing["path"], file_path)
     if err:
         return {"success": False, "error": err}
-    target.parent.mkdir(parents=True, exist_ok=True)
+    ensure_directory_path(target.parent)
     # Back up for rollback
     original_content = target.read_text(encoding="utf-8") if target.exists() else None
     _atomic_write_text(target, file_content)

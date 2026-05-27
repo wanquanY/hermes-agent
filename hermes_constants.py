@@ -6,6 +6,8 @@ without risk of circular imports.
 
 import os
 import sysconfig
+import time
+import uuid
 from contextvars import ContextVar, Token
 from pathlib import Path
 
@@ -379,6 +381,34 @@ def get_config_path() -> Path:
 def get_skills_dir() -> Path:
     """Return the path to the skills directory under HERMES_HOME."""
     return get_hermes_home() / "skills"
+
+
+def ensure_directory_path(path: str | Path) -> Path:
+    """Ensure *path* and every parent component are directories.
+
+    ``Path.mkdir(parents=True, exist_ok=True)`` still raises ``FileExistsError``
+    when any path component already exists as a non-directory. Hermes profile
+    homes are long-lived user data, so recover by moving the invalid filesystem
+    node aside instead of deleting it.
+    """
+    target = Path(path)
+    current = Path(target.anchor) if target.is_absolute() else Path()
+    parts = target.parts[1:] if target.is_absolute() else target.parts
+    for part in parts:
+        current = current / part
+        try:
+            current.mkdir()
+            continue
+        except FileExistsError:
+            pass
+        if current.is_dir():
+            continue
+        backup = current.with_name(
+            f"{current.name}.invalid-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+        )
+        current.rename(backup)
+        current.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 

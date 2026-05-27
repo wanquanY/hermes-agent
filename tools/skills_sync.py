@@ -26,7 +26,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from hermes_constants import get_bundled_skills_dir, get_hermes_home
+from hermes_constants import ensure_directory_path, get_bundled_skills_dir, get_hermes_home
 from agent.skill_utils import is_excluded_skill_path
 from typing import Dict, List, Tuple
 from utils import atomic_replace
@@ -84,7 +84,7 @@ def _write_manifest(entries: Dict[str, str]):
     """
     import tempfile
 
-    MANIFEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ensure_directory_path(MANIFEST_FILE.parent)
     data = "\n".join(f"{name}:{hash_val}" for name, hash_val in sorted(entries.items())) + "\n"
 
     try:
@@ -187,7 +187,7 @@ def sync_skills(quiet: bool = False) -> dict:
             "user_modified": [], "cleaned": [], "total_bundled": 0,
         }
 
-    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_directory_path(SKILLS_DIR)
     manifest = _read_manifest()
     bundled_skills = _discover_bundled_skills(bundled_dir)
     bundled_names = {name for name, _ in bundled_skills}
@@ -225,7 +225,7 @@ def sync_skills(quiet: bool = False) -> dict:
                             f"to replace it with the bundled version."
                         )
                 else:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    ensure_directory_path(dest.parent)
                     shutil.copytree(skill_src, dest)
                     copied.append(skill_name)
                     manifest[skill_name] = bundled_hash
@@ -299,7 +299,7 @@ def sync_skills(quiet: bool = False) -> dict:
         dest_desc = SKILLS_DIR / rel
         if not dest_desc.exists():
             try:
-                dest_desc.parent.mkdir(parents=True, exist_ok=True)
+                ensure_directory_path(dest_desc.parent)
                 shutil.copy2(desc_md, dest_desc)
             except (OSError, IOError) as e:
                 logger.debug("Could not copy %s: %s", desc_md, e)

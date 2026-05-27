@@ -69,7 +69,7 @@ Usage:
 import json
 import logging
 
-from hermes_constants import get_hermes_home, display_hermes_home
+from hermes_constants import ensure_directory_path, get_hermes_home, display_hermes_home
 import os
 import re
 from enum import Enum
@@ -688,8 +688,8 @@ def skills_list(category: str = None, task_id: str = None) -> str:
         JSON string with minimal skill info: name, description, category
     """
     try:
-        if not SKILLS_DIR.exists():
-            SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+        if not SKILLS_DIR.is_dir():
+            ensure_directory_path(SKILLS_DIR)
             return json.dumps(
                 {
                     "success": True,

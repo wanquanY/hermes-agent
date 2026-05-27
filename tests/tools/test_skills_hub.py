@@ -26,6 +26,7 @@ from tools.skills_hub import (
     unified_search,
     append_audit_log,
     _skill_meta_to_dict,
+    ensure_hub_dirs,
     quarantine_bundle,
 )
 
@@ -33,6 +34,26 @@ from tools.skills_hub import (
 # ---------------------------------------------------------------------------
 # GitHubSource._parse_frontmatter_quick
 # ---------------------------------------------------------------------------
+
+
+def test_ensure_hub_dirs_repairs_non_directory_skills_path(tmp_path, monkeypatch):
+    import tools.skills_hub as hub
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.write_text("legacy corrupt file\n")
+    monkeypatch.setattr(hub, "SKILLS_DIR", skills_dir)
+    monkeypatch.setattr(hub, "HUB_DIR", skills_dir / ".hub")
+    monkeypatch.setattr(hub, "LOCK_FILE", skills_dir / ".hub" / "lock.json")
+    monkeypatch.setattr(hub, "QUARANTINE_DIR", skills_dir / ".hub" / "quarantine")
+    monkeypatch.setattr(hub, "AUDIT_LOG", skills_dir / ".hub" / "audit.log")
+    monkeypatch.setattr(hub, "TAPS_FILE", skills_dir / ".hub" / "taps.json")
+    monkeypatch.setattr(hub, "INDEX_CACHE_DIR", skills_dir / ".hub" / "index-cache")
+
+    ensure_hub_dirs()
+
+    assert skills_dir.is_dir()
+    assert (skills_dir / ".hub" / "lock.json").is_file()
+    assert any(path.name.startswith("skills.invalid-") for path in tmp_path.iterdir())
 
 
 class TestParseFrontmatterQuick:
