@@ -65,7 +65,9 @@ _RUNTIME_SCOPED_CONTROL_METHODS = frozenset(
         "run.cancel",
         "secret.respond",
         "session.create",
+        "skills.reload",
         "sudo.respond",
+        "tools.configure",
     }
 )
 _RUNTIME_CONNECT_ATTEMPTS = 40

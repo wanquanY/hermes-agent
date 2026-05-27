@@ -360,12 +360,12 @@ Doxie profile-scoped 请求不能长期跑在 control plane 进程里。control 
 - worker 启动环境中的 `HERMES_HOME`、`DOXIE_HERMES_RUNTIME_SCOPE_KEY`、`DOXIE_AGENT_PROFILE_ID`、`DOXIE_AGENT_PROFILE_VERSION_ID`。
 - WebSocket bridge 读取 worker 的 response/event 后原样写回客户端，并在客户端 WS 关闭时释放 bridge。
 - `bridge_count > 0` 时 idle reclaim 不能杀 worker；idle timeout 到期且无活动 bridge 时才回收。
-- control-plane 方法默认不代理，但 `approval.pending.list`、`approval.policy.get`、`approval.policy.set`、`approval.respond`、`cron.manage`、`run.cancel`、`session.create(control_plane_only)`、clarify/sudo/secret respond 等 scoped 控制动作要按规则处理。
+- control-plane 方法默认不代理，但 `approval.pending.list`、`approval.policy.get`、`approval.policy.set`、`approval.respond`、`cron.manage`、`skills.reload`、`tools.configure`、`run.cancel`、`session.create(control_plane_only)`、clarify/sudo/secret respond 等 scoped 控制动作要按规则处理。
 
 检查方式：
 
 ```sh
-rg "runtime.ensure|RuntimeWorkerPool|RuntimeProxyBridge|should_proxy_to_runtime|proxy_to_runtime|approval.policy|approval.pending|cron.manage|DOXIE_HERMES_RUNTIME_SCOPE_KEY|bridge_count" tui_gateway doxie_extension tests
+rg "runtime.ensure|RuntimeWorkerPool|RuntimeProxyBridge|should_proxy_to_runtime|proxy_to_runtime|approval.policy|approval.pending|cron.manage|skills.reload|tools.configure|DOXIE_HERMES_RUNTIME_SCOPE_KEY|bridge_count" tui_gateway doxie_extension tests
 ```
 
 常见坏症状：
@@ -379,6 +379,8 @@ rg "runtime.ensure|RuntimeWorkerPool|RuntimeProxyBridge|should_proxy_to_runtime|
 - profile-scoped approval policy 设置到了 control plane session，目标 worker 仍然保持默认 approval mode。
 - `approval.pending.list` 在 Doxie profile 下返回空，但 worker 里实际有 pending approval。
 - `cron.manage` 在 profile runtime 下读写了 control plane cron store。
+- `skills.reload` 留在 control plane，导致目标 profile worker 的 skill cache 没刷新。
+- `tools.configure` 留在 control plane，导致工具配置写到错误 profile 或 worker runtime 未生效。
 
 ### 12. 只读 Gateway 查询不能创建空状态库
 
@@ -484,6 +486,7 @@ rg "ensure_directory_path|invalid-" hermes_constants.py tools/skills_hub.py tool
 | `runtime.ensure` 缺失或失败 | `doxie_extension/manifest.py`、`methods/system.py`、`services/runtime_proxy.py`、`tests/test_doxie_gateway_contract.py` |
 | scoped prompt 没有进 profile worker | `runtime_proxy.should_proxy_to_runtime`、`ws.proxy_to_runtime`、`DOXIE_HERMES_RUNTIME_SCOPE_KEY` |
 | scoped approval/cron 留在 control plane | `_RUNTIME_SCOPED_CONTROL_METHODS`、`should_proxy_to_runtime`、`tests/tui_gateway/test_ws_dispatch.py` |
+| scoped skills/tools mutation 留在 control plane | `_RUNTIME_SCOPED_CONTROL_METHODS`、`skills.reload`、`tools.configure`、`tests/tui_gateway/test_ws_dispatch.py` |
 | worker stream 只收到首包 | `RuntimeProxyBridge._read_loop`、`WSTransport.runtime_bridge`、bridge close/release 逻辑 |
 | idle worker 不回收 | `RuntimeWorkerPool.reclaim_idle`、`bridge_count`、WS close cleanup |
 | UI 一直 running | `tui_gateway/methods/run.py`、`tui_gateway/methods/prompt.py`、`tui_gateway/services/run_control.py`、`hermes_state_runs.py` |
@@ -693,8 +696,8 @@ scripts/run_tests.sh \
 
 ### 2026-05-27 同步记录
 
-- 暴露问题：最近提交修复了三个同步后容易遗漏的边界：skills 目录路径被文件占用时需要自愈；Doxie desktop browser 不应只代理 tab API，还要代理 navigate/snapshot/action 到可见桌面 browser session；profile-scoped approval/cron control RPC 必须进 runtime worker。
-- 根因边界：profile home、desktop browser 和 approval/cron state 都是 Doxie 本地运行态的一部分。上游同步如果退回裸目录创建、headless agent-browser 路径或 control-plane approval/cron 处理，会让 profile 初始化失败、browser tool 操作不可见会话，或让 approval/cron 状态写错 runtime。
+- 暴露问题：最近提交修复了三个同步后容易遗漏的边界：skills 目录路径被文件占用时需要自愈；Doxie desktop browser 不应只代理 tab API，还要代理 navigate/snapshot/action 到可见桌面 browser session；profile-scoped approval/cron/skills/tools control RPC 必须进 runtime worker。
+- 根因边界：profile home、desktop browser、approval/cron state 和 runtime skills/tools 配置都是 Doxie 本地运行态的一部分。上游同步如果退回裸目录创建、headless agent-browser 路径或 control-plane scoped mutation 处理，会让 profile 初始化失败、browser tool 操作不可见会话，或让 approval/cron/skills/tools 状态写错 runtime。
 - 修复涉及：`hermes_constants.py`、`tools/skills_hub.py`、`tools/skills_sync.py`、`tools/skills_tool.py`、`tools/skill_manager_tool.py`、`doxie_extension/browser_bridge.py`、`tools/browser_tool.py`、`tui_gateway/services/runtime_proxy.py`、`tests/tools/test_skills_hub.py`、`tests/tools/test_skills_sync.py`、`tests/tools/test_skills_tool.py`、`tests/tools/test_doxie_desktop_browser_bridge.py`、`tests/tui_gateway/test_ws_dispatch.py`。
-- 下次优先检查：skills path 创建是否仍用 `ensure_directory_path`；无效 skills 路径是否移动到 `.invalid-*` 而不是删除；Doxie bridge 可用时 `browser_navigate/snapshot/click/type/scroll/press` 是否仍优先走 `browser_use_*` backend command；Doxie browser tool result 是否带 `provider=doxie_desktop` 和 `browser_session_id`；`_RUNTIME_SCOPED_CONTROL_METHODS` 是否仍包含 approval policy/pending/respond 和 `cron.manage`。
+- 下次优先检查：skills path 创建是否仍用 `ensure_directory_path`；无效 skills 路径是否移动到 `.invalid-*` 而不是删除；Doxie bridge 可用时 `browser_navigate/snapshot/click/type/scroll/press` 是否仍优先走 `browser_use_*` backend command；Doxie browser tool result 是否带 `provider=doxie_desktop` 和 `browser_session_id`；`_RUNTIME_SCOPED_CONTROL_METHODS` 是否仍包含 approval policy/pending/respond、`cron.manage`、`skills.reload`、`tools.configure`。
 - 最小验证：优先跑 Doxie Desktop Browser Bridge、Skills Directory Repair、Runtime Proxy / WebSocket Bridge 三组测试。

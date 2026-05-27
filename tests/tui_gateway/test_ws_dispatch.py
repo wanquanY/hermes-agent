@@ -116,6 +116,30 @@ def test_profile_scoped_approval_methods_are_proxied_to_runtime_worker(method):
     )
 
 
+@pytest.mark.parametrize(
+    "method",
+    [
+        "skills.reload",
+        "tools.configure",
+    ],
+)
+def test_profile_scoped_runtime_mutation_methods_are_proxied_to_runtime_worker(method):
+    assert runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": method,
+            "params": {
+                "session_id": "stored-session-1",
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "runtimeScopeKey": "profile:agent-a",
+                    "hermesHomePath": "/tmp/hermes-agent-a",
+                },
+            },
+        }
+    )
+
+
 def test_runtime_ensure_stays_on_control_plane():
     assert not runtime_proxy.should_proxy_to_runtime(
         {
