@@ -2428,6 +2428,49 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
 # Browser Tool Functions
 # ============================================================================
 
+def _doxie_browser_bridge() -> Any:
+    try:
+        from doxie_extension import browser_bridge as _doxie_browser
+
+        if _doxie_browser.available():
+            return _doxie_browser
+    except Exception as exc:
+        logger.debug("Doxie desktop browser bridge unavailable: %s", exc)
+    return None
+
+
+def _doxie_browser_error(action: str, exc: Exception) -> str:
+    return json.dumps({
+        "success": False,
+        "error": f"Doxie desktop browser {action} failed: {exc}",
+        "provider": "doxie_desktop",
+    }, ensure_ascii=False)
+
+
+def _active_doxie_tab(session: Any) -> Dict[str, Any]:
+    if not isinstance(session, dict):
+        return {}
+    tabs = session.get("tabs")
+    if not isinstance(tabs, list):
+        return {}
+    active_tab_id = str(session.get("activeTabId") or session.get("active_tab_id") or "")
+    for tab in tabs:
+        if isinstance(tab, dict) and active_tab_id and str(tab.get("tabId") or tab.get("tab_id") or "") == active_tab_id:
+            return tab
+    for tab in tabs:
+        if isinstance(tab, dict) and tab.get("active"):
+            return tab
+    return tabs[0] if tabs and isinstance(tabs[0], dict) else {}
+
+
+def _active_tab_url_from_doxie_session(session: Any) -> str:
+    return str(_active_doxie_tab(session).get("url") or "")
+
+
+def _active_tab_title_from_doxie_session(session: Any) -> str:
+    return str(_active_doxie_tab(session).get("title") or "")
+
+
 def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     """
     Navigate to a URL in the browser.
@@ -2496,6 +2539,28 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             "error": blocked["message"],
             "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]},
         })
+
+    doxie_browser = _doxie_browser_bridge()
+    if doxie_browser is not None:
+        try:
+            session = doxie_browser.navigate(url)
+            observation = doxie_browser.observe(max_nodes=200)
+            snapshot = doxie_browser.snapshot_payload_from_observation(observation)
+            snapshot_text = str(snapshot.get("snapshot") or "")
+            if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
+                snapshot_text = _truncate_snapshot(snapshot_text)
+            _last_active_session_key[effective_task_id] = f"doxie:{doxie_browser.browser_session_id()}"
+            return json.dumps({
+                "success": True,
+                "url": snapshot.get("url") or _active_tab_url_from_doxie_session(session) or url,
+                "title": snapshot.get("title") or _active_tab_title_from_doxie_session(session),
+                "snapshot": snapshot_text,
+                "element_count": snapshot.get("element_count", 0),
+                "provider": "doxie_desktop",
+                "browser_session_id": doxie_browser.browser_session_id(),
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _doxie_browser_error("navigate", exc)
 
     # Camofox backend — delegate after safety checks pass
     if _is_camofox_mode():
@@ -2644,6 +2709,21 @@ def browser_snapshot(
     Returns:
         JSON string with page snapshot
     """
+    doxie_browser = _doxie_browser_bridge()
+    if doxie_browser is not None:
+        try:
+            observation = doxie_browser.observe(max_nodes=1000 if full else 200)
+            response = doxie_browser.snapshot_payload_from_observation(observation)
+            snapshot_text = str(response.get("snapshot") or "")
+            if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD and user_task:
+                snapshot_text = _extract_relevant_content(snapshot_text, user_task)
+            elif len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
+                snapshot_text = _truncate_snapshot(snapshot_text)
+            response["snapshot"] = snapshot_text
+            return json.dumps(response, ensure_ascii=False)
+        except Exception as exc:
+            return _doxie_browser_error("snapshot", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_snapshot
         return camofox_snapshot(full, task_id, user_task)
@@ -3007,6 +3087,19 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with click result
     """
+    doxie_browser = _doxie_browser_bridge()
+    if doxie_browser is not None:
+        try:
+            normalized_ref = ref if ref.startswith("@") else f"@{ref}"
+            doxie_browser.action("click", ref=normalized_ref)
+            return json.dumps({
+                "success": True,
+                "clicked": normalized_ref,
+                "provider": "doxie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _doxie_browser_error("click", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_click
         return camofox_click(ref, task_id)
@@ -3045,6 +3138,20 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with type result
     """
+    doxie_browser = _doxie_browser_bridge()
+    if doxie_browser is not None:
+        try:
+            normalized_ref = ref if ref.startswith("@") else f"@{ref}"
+            doxie_browser.action("fill", ref=normalized_ref, text=text)
+            return json.dumps({
+                "success": True,
+                "typed": text,
+                "element": normalized_ref,
+                "provider": "doxie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _doxie_browser_error("type", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_type
         return camofox_type(ref, text, task_id)
@@ -3096,6 +3203,21 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
     # ~500px is roughly half a viewport of travel.
     _SCROLL_PIXELS = 500
 
+    doxie_browser = _doxie_browser_bridge()
+    if doxie_browser is not None:
+        try:
+            doxie_browser.action(
+                "scroll",
+                delta_y=_SCROLL_PIXELS if direction == "down" else -_SCROLL_PIXELS,
+            )
+            return json.dumps({
+                "success": True,
+                "scrolled": direction,
+                "provider": "doxie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _doxie_browser_error("scroll", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_scroll
         # Camofox REST API doesn't support pixel args; use repeated calls
@@ -3132,6 +3254,18 @@ def browser_back(task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with navigation result
     """
+    doxie_browser = _doxie_browser_bridge()
+    if doxie_browser is not None:
+        try:
+            session = doxie_browser.go_back()
+            return json.dumps({
+                "success": True,
+                "url": _active_tab_url_from_doxie_session(session),
+                "provider": "doxie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _doxie_browser_error("back", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_back
         return camofox_back(task_id)
@@ -3165,6 +3299,18 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with key press result
     """
+    doxie_browser = _doxie_browser_bridge()
+    if doxie_browser is not None:
+        try:
+            doxie_browser.action("press", key=key)
+            return json.dumps({
+                "success": True,
+                "pressed": key,
+                "provider": "doxie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _doxie_browser_error("press", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_press
         return camofox_press(key, task_id)
