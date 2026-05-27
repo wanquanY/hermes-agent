@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -73,6 +74,7 @@ _RUNTIME_SCOPED_CONTROL_METHODS = frozenset(
 _RUNTIME_CONNECT_ATTEMPTS = 40
 _RUNTIME_CONNECT_DELAY_S = 0.05
 _DEFAULT_IDLE_TIMEOUT_S = 30 * 60
+_SIDECAR_TOKEN_ENV = "DOXIE_SIDECAR_TOKEN"
 
 
 class AsyncFrameTransport(Protocol):
@@ -108,6 +110,7 @@ class RuntimeWorker:
     bridge_count: int = 0
     last_exit_at: float = 0
     last_error: str = ""
+    launch_fingerprint: str = ""
 
     @property
     def scope_key(self) -> str:
@@ -130,6 +133,7 @@ class RuntimeWorker:
             "port": self.port if running else None,
             "running": running,
             "healthy": running,
+            "launchFingerprint": self.launch_fingerprint[:12] if self.launch_fingerprint else None,
             "bridgeCount": self.bridge_count,
             "createdAt": self.created_at,
             "lastStartedAt": self.last_started_at,
@@ -221,6 +225,25 @@ def _idle_timeout_seconds() -> float:
         return _DEFAULT_IDLE_TIMEOUT_S
 
 
+def _profile_env_from_params(params: dict[str, Any]) -> dict[str, str]:
+    profile = params.get("doxie_profile") if isinstance(params.get("doxie_profile"), dict) else {}
+    profile_env = profile.get("env") if isinstance(profile.get("env"), dict) else {}
+    return {str(k): str(v) for k, v in profile_env.items()}
+
+
+def _launch_fingerprint(scope: RuntimeScope, params: dict[str, Any]) -> str:
+    payload = {
+        "scope": {
+            "agent_profile_id": scope.agent_profile_id,
+            "agent_profile_version_id": scope.agent_profile_version_id,
+            "runtime_scope_key": scope.runtime_scope_key,
+            "hermes_home": scope.hermes_home,
+        },
+        "env": sorted(_profile_env_from_params(params).items()),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 class RuntimeWorkerPool:
     def __init__(self) -> None:
         self._workers: dict[str, RuntimeWorker] = {}
@@ -231,6 +254,19 @@ class RuntimeWorkerPool:
             raise RuntimeError("runtime scope key required")
         async with self._lock:
             await self._reclaim_idle_locked()
+            existing = self._workers.get(scope.runtime_scope_key)
+            target_fingerprint = _launch_fingerprint(scope, params)
+            if existing is not None and existing.running():
+                if existing.launch_fingerprint != target_fingerprint:
+                    _log.info(
+                        "restarting runtime worker %s because its launch environment changed",
+                        scope.runtime_scope_key,
+                    )
+                    self._workers.pop(scope.runtime_scope_key, None)
+                    await self._terminate_worker(existing)
+                else:
+                    existing.mark_used()
+                    return existing
             existing = self._workers.get(scope.runtime_scope_key)
             if existing is not None and existing.running():
                 existing.mark_used()
@@ -331,15 +367,14 @@ class RuntimeWorkerPool:
         port = _reserve_loopback_port()
         token = secrets.token_urlsafe(24)
         env = os.environ.copy()
-        profile = params.get("doxie_profile") if isinstance(params.get("doxie_profile"), dict) else {}
-        profile_env = profile.get("env") if isinstance(profile.get("env"), dict) else {}
-        env.update({str(k): str(v) for k, v in profile_env.items()})
+        env.update(_profile_env_from_params(params))
         env["HERMES_HOME"] = scope.hermes_home
         env["DOXIE_HERMES_RUNTIME_SCOPE_KEY"] = scope.runtime_scope_key
         if scope.agent_profile_id:
             env["DOXIE_AGENT_PROFILE_ID"] = scope.agent_profile_id
         if scope.agent_profile_version_id:
             env["DOXIE_AGENT_PROFILE_VERSION_ID"] = scope.agent_profile_version_id
+        env[_SIDECAR_TOKEN_ENV] = token
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -349,8 +384,6 @@ class RuntimeWorkerPool:
                 "127.0.0.1",
                 "--port",
                 str(port),
-                "--token",
-                token,
             ],
             cwd=os.getcwd(),
             env=env,
@@ -361,6 +394,7 @@ class RuntimeWorkerPool:
         now = time.time()
         return RuntimeWorker(
             scope=scope,
+            launch_fingerprint=_launch_fingerprint(scope, params),
             process=process,
             port=port,
             token=token,

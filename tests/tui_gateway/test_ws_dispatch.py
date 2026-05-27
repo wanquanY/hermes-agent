@@ -156,6 +156,23 @@ def test_runtime_ensure_stays_on_control_plane():
     )
 
 
+def test_doxie_sidecar_host_and_origin_policy():
+    from tui_gateway import doxie_sidecar
+
+    assert doxie_sidecar.is_allowed_host("127.0.0.1:4567")
+    assert doxie_sidecar.is_allowed_host("localhost:4567")
+    assert doxie_sidecar.is_allowed_host("[::1]:4567")
+    assert not doxie_sidecar.is_allowed_host("evil.example")
+
+    assert doxie_sidecar.is_allowed_origin("")
+    assert doxie_sidecar.is_allowed_origin(None)
+    assert doxie_sidecar.is_allowed_origin("doxie://renderer")
+    assert doxie_sidecar.is_allowed_origin("doxie-hermes://gateway")
+    assert not doxie_sidecar.is_allowed_origin("null")
+    assert not doxie_sidecar.is_allowed_origin("http://127.0.0.1:3000")
+    assert not doxie_sidecar.is_allowed_origin("https://evil.example")
+
+
 @pytest.mark.asyncio
 async def test_runtime_proxy_keeps_bridge_open_for_streaming_events(monkeypatch):
     class FakeRuntimeSocket:
@@ -336,12 +353,80 @@ async def test_runtime_worker_pool_reuses_and_reclaims_idle_workers(monkeypatch)
     assert second is first
     assert first.process.kwargs["env"]["HERMES_HOME"] == "/tmp/hermes-agent-a"
     assert first.process.kwargs["env"]["FEISHU_APP_SECRET"] == "secret"
+    assert "--token" not in first.process.args[0]
+    assert first.process.kwargs["env"]["DOXIE_SIDECAR_TOKEN"]
 
     now = 1012.0
     reclaimed = await pool.reclaim_idle()
     assert reclaimed["scopeKeys"] == ["profile:agent-a"]
     assert first.process.terminated
     assert pool.snapshot()["runningWorkerCount"] == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_worker_pool_restarts_when_profile_launch_env_changes(monkeypatch):
+    class FakeProcess:
+        next_pid = 21100
+
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.pid = FakeProcess.next_pid
+            FakeProcess.next_pid += 1
+            self.terminated = False
+            self.killed = False
+
+        def poll(self):
+            return 0 if self.terminated or self.killed else None
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, _timeout=None):
+            self.terminated = True
+            return 0
+
+    monkeypatch.setattr(runtime_proxy.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(runtime_proxy, "_reserve_loopback_port", lambda: 21100)
+
+    pool = runtime_proxy.RuntimeWorkerPool()
+    scope = runtime_proxy.RuntimeScope(
+        agent_profile_id="agent-a",
+        runtime_scope_key="profile:agent-a",
+        hermes_home="/tmp/hermes-agent-a",
+    )
+    first = await pool.ensure_worker(
+        scope,
+        {
+            "doxie_profile": {
+                "id": "agent-a",
+                "hermesHomePath": "/tmp/hermes-agent-a",
+                "env": {},
+            }
+        },
+    )
+    second = await pool.ensure_worker(
+        scope,
+        {
+            "doxie_profile": {
+                "id": "agent-a",
+                "hermesHomePath": "/tmp/hermes-agent-a",
+                "env": {
+                    "DOXIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/doxie/invoke",
+                    "DOXIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
+                },
+            }
+        },
+    )
+
+    assert second is not first
+    assert first.process.terminated
+    assert second.process.kwargs["env"]["DOXIE_BACKEND_BRIDGE_URL"] == "http://127.0.0.1:4567/api/doxie/invoke"
+    assert second.process.kwargs["env"]["DOXIE_BACKEND_BRIDGE_TOKEN"] == "bridge-token"
+    assert pool.snapshot()["runningWorkerCount"] == 1
 
 
 @pytest.mark.asyncio

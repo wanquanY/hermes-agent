@@ -3,15 +3,30 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hmac
+import os
 from urllib.parse import parse_qs, urlparse
+
+SIDECAR_TOKEN_ENV = "DOXIE_SIDECAR_TOKEN"
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+_NATIVE_ELECTRON_ORIGIN_SCHEMES = {"doxie", "doxie-attachment", "doxie-hermes", "file"}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--token", required=True)
+    parser.add_argument("--token", default="")
     return parser.parse_args()
+
+
+def resolve_token(args: argparse.Namespace) -> str:
+    token = os.getenv(SIDECAR_TOKEN_ENV, "").strip()
+    if token:
+        return token
+    legacy = str(getattr(args, "token", "") or "").strip()
+    if legacy:
+        return legacy
+    raise SystemExit(f"Hermes Doxie gateway requires {SIDECAR_TOKEN_ENV}")
 
 
 class HermesWebSocketAdapter:
@@ -45,6 +60,45 @@ def is_authorized(raw_path: str, expected_token: str) -> bool:
     return hmac.compare_digest(token.encode(), expected_token.encode())
 
 
+def _normalize_host(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if raw.startswith("["):
+        end = raw.find("]")
+        return raw[: end + 1] if end >= 0 else raw
+    return raw.split(":", 1)[0]
+
+
+def is_allowed_host(value: str) -> bool:
+    return _normalize_host(value) in _LOOPBACK_HOSTS
+
+
+def is_allowed_origin(value: str | None) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return True
+    if raw == "null":
+        return False
+    parsed = urlparse(raw)
+    return parsed.scheme in _NATIVE_ELECTRON_ORIGIN_SCHEMES
+
+
+def request_header(ws, name: str) -> str:
+    request = getattr(ws, "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        try:
+            return str(headers.get(name, "") or "")
+        except Exception:
+            return ""
+    legacy_headers = getattr(ws, "request_headers", None)
+    if legacy_headers is not None:
+        try:
+            return str(legacy_headers.get(name, "") or "")
+        except Exception:
+            return ""
+    return ""
+
+
 async def main_async(args: argparse.Namespace) -> None:
     try:
         import websockets
@@ -57,6 +111,7 @@ async def main_async(args: argparse.Namespace) -> None:
     from tui_gateway.services.doxie_cron_runtime import start_cron_ticker, stop_cron_ticker
 
     handle_ws = tui_gateway_ws.handle_ws
+    expected_token = resolve_token(args)
 
     class Adapter(HermesWebSocketAdapter):
         async def receive_text(self) -> str:
@@ -66,11 +121,17 @@ async def main_async(args: argparse.Namespace) -> None:
                 raise WebSocketDisconnect(code=exc.code) from exc
 
     async def handler(ws) -> None:
+        if not is_allowed_host(request_header(ws, "Host")):
+            await ws.close(code=1008, reason="forbidden host")
+            return
+        if not is_allowed_origin(request_header(ws, "Origin")):
+            await ws.close(code=1008, reason="forbidden origin")
+            return
         raw_path = request_path(ws)
         if urlparse(raw_path).path != "/api/ws":
             await ws.close(code=1008, reason="unsupported path")
             return
-        if not is_authorized(raw_path, args.token):
+        if not is_authorized(raw_path, expected_token):
             await ws.close(code=1008, reason="unauthorized")
             return
         await handle_ws(Adapter(ws))

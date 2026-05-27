@@ -64,7 +64,7 @@ from agent.prompt_caching import apply_anthropic_cache_control
 from agent.retry_utils import jittered_backoff
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
-from hermes_constants import display_hermes_home as _dhh_fn
+from hermes_constants import display_hermes_home as _dhh_fn, PARTIAL_STREAM_STUB_ID
 from hermes_logging import set_session_context
 from tools.schema_sanitizer import strip_pattern_and_format
 from tools.skill_provenance import set_current_write_origin
@@ -182,6 +182,37 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
                 "miss the prefix cache.",
                 agent.session_id, exc,
             )
+
+
+def _get_continuation_prompt(is_partial_stub: bool, dropped_tools: Optional[List[str]] = None) -> str:
+    if is_partial_stub and dropped_tools:
+        tool_list = ", ".join(dropped_tools[:3])
+        return (
+            "[System: Your previous tool call "
+            f"({tool_list}) was too large and "
+            "the stream timed out before it "
+            "could be delivered. Do NOT retry "
+            "the same tool call with the same "
+            "large content. Instead, break the "
+            "content into multiple smaller tool "
+            "calls (e.g. use multiple patch calls "
+            "or write smaller files). Each tool "
+            "call's arguments must be under ~8K "
+            "tokens to avoid stream timeouts.]"
+        )
+    elif is_partial_stub:
+        return (
+            "[System: The previous response was cut off by a "
+            "network error mid-stream. Continue exactly where "
+            "you left off. Do not restart or repeat prior text. "
+            "Finish the answer directly.]"
+        )
+    else:
+        return (
+            "[System: Your previous response was truncated by the output "
+            "length limit. Continue exactly where you left off. Do not "
+            "restart or repeat prior text. Finish the answer directly.]"
+        )
 
 
 def run_conversation(
@@ -928,6 +959,7 @@ def run_conversation(
         nous_auth_retry_attempted=False
         copilot_auth_retry_attempted=False
         thinking_sig_retry_attempted = False
+        invalid_encrypted_content_retry_attempted = False
         image_shrink_retry_attempted = False
         oauth_1m_beta_retry_attempted = False
         llama_cpp_grammar_retry_attempted = False
@@ -1353,7 +1385,18 @@ def run_conversation(
                         finish_reason = "length"
 
                 if finish_reason == "length":
-                    agent._vprint(f"{agent.log_prefix}⚠️  Response truncated (finish_reason='length') - model hit max output tokens", force=True)
+                    if getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID:
+                        agent._vprint(
+                            f"{agent.log_prefix}⚠️  Stream interrupted by network error "
+                            f"(finish_reason='length' on partial-stream-stub)",
+                            force=True,
+                        )
+                    else:
+                        agent._vprint(
+                            f"{agent.log_prefix}⚠️  Response truncated "
+                            f"(finish_reason='length') - model hit max output tokens",
+                            force=True,
+                        )
 
                     # Normalize the truncated response to a single OpenAI-style
                     # message shape so text-continuation and tool-call retry
@@ -1446,17 +1489,39 @@ def run_conversation(
                                 truncated_response_parts.append(assistant_message.content)
 
                             if length_continue_retries < 3:
-                                agent._vprint(
-                                    f"{agent.log_prefix}↻ Requesting continuation "
-                                    f"({length_continue_retries}/3)..."
+                                _is_partial_stream_stub = (
+                                    getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
+                                )
+                                _dropped_tools = getattr(
+                                    response, "_dropped_tool_names", None
+                                )
+
+                                if _is_partial_stream_stub and _dropped_tools:
+                                    _tool_list = ", ".join(_dropped_tools[:3])
+                                    agent._vprint(
+                                        f"{agent.log_prefix}↻ Stream interrupted mid "
+                                        f"tool-call ({_tool_list}) — requesting "
+                                        f"chunked retry "
+                                        f"({length_continue_retries}/3)..."
+                                    )
+                                elif _is_partial_stream_stub:
+                                    agent._vprint(
+                                        f"{agent.log_prefix}↻ Stream interrupted — "
+                                        f"requesting continuation "
+                                        f"({length_continue_retries}/3)..."
+                                    )
+                                else:
+                                    agent._vprint(
+                                        f"{agent.log_prefix}↻ Requesting continuation "
+                                        f"({length_continue_retries}/3)..."
+                                    )
+
+                                _continue_content = _get_continuation_prompt(
+                                    _is_partial_stream_stub, _dropped_tools
                                 )
                                 continue_msg = {
                                     "role": "user",
-                                    "content": (
-                                        "[System: Your previous response was truncated by the output "
-                                        "length limit. Continue exactly where you left off. Do not "
-                                        "restart or repeat prior text. Finish the answer directly.]"
-                                    ),
+                                    "content": _continue_content,
                                 }
                                 messages.append(continue_msg)
                                 agent._session_messages = messages
@@ -2143,6 +2208,49 @@ def run_conversation(
                         "%sThinking block signature recovery: stripped "
                         "reasoning_details from %d messages",
                         agent.log_prefix, len(messages),
+                    )
+                    continue
+
+                # ── Invalid encrypted reasoning replay recovery ───────
+                # OpenAI Responses API surfaces (and some compatible relays)
+                # return HTTP 400 ``invalid_encrypted_content`` when a
+                # replayed ``codex_reasoning_items`` blob from a previous
+                # turn fails verification (provider rotated the encryption
+                # key, the route doesn't actually persist reasoning state,
+                # etc.).  Recovery: disable replay for the rest of the
+                # session, strip cached items from history, retry once.
+                # One-shot — if a second 400 fires we fall through to the
+                # normal retry/backoff path.  Only fires for codex_responses
+                # mode with at least one assistant message that has cached
+                # ``codex_reasoning_items``; without replay state, the
+                # error is unrelated to our cache so the normal retry path
+                # handles it (the provider is rejecting something else).
+                if (
+                    classified.reason == FailoverReason.invalid_encrypted_content
+                    and not invalid_encrypted_content_retry_attempted
+                    and agent.api_mode == "codex_responses"
+                    and bool(getattr(agent, "_codex_reasoning_replay_enabled", True))
+                    and any(
+                        isinstance(_m, dict)
+                        and _m.get("role") == "assistant"
+                        and isinstance(_m.get("codex_reasoning_items"), list)
+                        and _m.get("codex_reasoning_items")
+                        for _m in messages
+                    )
+                ):
+                    invalid_encrypted_content_retry_attempted = True
+                    replay_stats = agent._disable_codex_reasoning_replay(messages)
+                    agent._vprint(
+                        f"{agent.log_prefix}⚠️  Encrypted reasoning replay was rejected by the provider — "
+                        f"disabled replay and stripped {replay_stats['items']} item(s) from "
+                        f"{replay_stats['messages']} message(s), retrying...",
+                        force=True,
+                    )
+                    logger.warning(
+                        "%sInvalid encrypted reasoning recovery: disabled replay and stripped %d items from %d messages",
+                        agent.log_prefix,
+                        replay_stats["items"],
+                        replay_stats["messages"],
                     )
                     continue
 
@@ -3326,6 +3434,19 @@ def run_conversation(
                         f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}"
                     )
                     messages.append({"role": "assistant", "content": final_response})
+                    # Emit the halt message to the client so it's not
+                    # indistinguishable from a crash.  The stream display
+                    # was flushed (callback(None)) before tool execution,
+                    # but the callback is still alive — fire the text
+                    # through it so SSE/TUI clients see the explanation.
+                    if final_response:
+                        agent._safe_print(f"\n{final_response}\n")
+                        if agent.stream_delta_callback:
+                            try:
+                                agent.stream_delta_callback(final_response)
+                                agent.stream_delta_callback(None)
+                            except Exception:
+                                pass
                     break
 
                 # Reset per-turn retry counters after successful tool
@@ -3917,6 +4038,8 @@ def run_conversation(
         except Exception as _ver_err:
             logger.debug("file-mutation verifier footer failed: %s", _ver_err)
 
+    _response_transformed = False
+
     # Plugin hook: transform_llm_output
     # Fired once per turn after the tool-calling loop completes.
     # Plugins can transform the LLM's output text before it's returned.
@@ -3931,9 +4054,11 @@ def run_conversation(
                 model=agent.model,
                 platform=getattr(agent, "platform", None) or "",
             )
+            _response_transformed = False
             for _hook_result in _transform_results:
                 if isinstance(_hook_result, str) and _hook_result:
                     final_response = _hook_result
+                    _response_transformed = True
                     break  # First non-empty string wins
         except Exception as exc:
             logger.warning("transform_llm_output hook failed: %s", exc)
@@ -3984,6 +4109,7 @@ def run_conversation(
         "turn_exit_reason": _turn_exit_reason,
         "partial": False,  # True only when stopped due to invalid tool calls
         "interrupted": interrupted,
+        "response_transformed": _response_transformed,
         "response_previewed": getattr(agent, "_response_was_previewed", False),
         "model": agent.model,
         "provider": agent.provider,

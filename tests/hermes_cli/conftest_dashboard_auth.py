@@ -1,0 +1,2 @@
+class StubAuthProvider:
+    name = "stub"

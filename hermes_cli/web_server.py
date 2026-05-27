@@ -48,6 +48,7 @@ from hermes_cli.config import (
     redact_key,
 )
 from gateway.status import get_running_pid, read_runtime_status
+from utils import env_var_enabled
 
 try:
     from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -157,6 +158,22 @@ def _require_token(request: Request) -> None:
 _LOOPBACK_HOST_VALUES: frozenset = frozenset({
     "localhost", "127.0.0.1", "::1",
 })
+
+
+def should_require_auth(host: str, allow_public: bool) -> bool:
+    """Return True iff the dashboard OAuth auth gate must be active.
+
+    Truth table:
+      host == loopback                              → False (no auth)
+      host != loopback AND allow_public (--insecure)→ False (legacy escape hatch)
+      host != loopback AND NOT allow_public         → True  (gate engages)
+
+    "Loopback" matches the same set used by ``--insecure`` enforcement in
+    ``start_server``: 127.0.0.1, localhost, ::1. RFC1918 / CGNAT / link-local
+    are deliberately treated as PUBLIC — a hostile device on the same LAN is
+    exactly the threat model the gate is designed for.
+    """
+    return (host not in _LOOPBACK_HOST_VALUES) and (not allow_public)
 
 
 def _is_accepted_host(host_header: str, bound_host: str) -> bool:
@@ -1275,6 +1292,12 @@ async def set_env_var(body: EnvVarUpdate):
     try:
         save_env_value(body.key, body.value)
         return {"ok": True, "key": body.key}
+    except ValueError as exc:
+        # save_env_value raises ValueError for invalid names and for keys
+        # on the denylist (LD_PRELOAD, PATH, PYTHONPATH, …). Surface the
+        # message to the SPA so the user understands why the write was
+        # refused instead of seeing an opaque 500.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception:
         _log.exception("PUT /api/env failed")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -3348,23 +3371,60 @@ _VALID_CHANNEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
 
 
-def _is_public_bind() -> bool:
-    """True when bound to all-interfaces (operator used --insecure)."""
-    return getattr(app.state, "bound_host", "") in {"0.0.0.0", "::"}
-
-
 def _ws_client_is_allowed(ws: "WebSocket") -> bool:
     """Check if the WebSocket client IP is acceptable.
 
-    Allows loopback always; allows any IP when bound to all-interfaces
-    (--insecure mode, guarded by session token auth).
+    Loopback mode: only loopback clients allowed — the legacy
+    ``?token=<_SESSION_TOKEN>`` path is the only auth we have, so we
+    don't want LAN hosts guessing tokens.
+
+    Gated mode: any peer is allowed — uvicorn's ``proxy_headers=True``
+    (enabled when the OAuth gate is active so cookies can pick up
+    ``X-Forwarded-Proto``) rewrites ``ws.client.host`` to the
+    X-Forwarded-For value, which is the real internet client IP. The
+    OAuth gate + single-use ``?ticket=`` is the auth at that point; the
+    Host/Origin guard in :func:`_ws_host_origin_is_allowed` is what
+    blocks DNS-rebinding here, not the peer IP.
     """
-    if _is_public_bind():
+    if getattr(app.state, "auth_required", False):
         return True
     client_host = ws.client.host if ws.client else ""
     if not client_host:
         return True
     return client_host in _LOOPBACK_HOSTS
+
+
+def _ws_host_origin_is_allowed(ws: "WebSocket") -> bool:
+    """Apply the dashboard Host/Origin guard to WebSocket upgrades.
+
+    FastAPI HTTP middleware does not run for WebSocket routes, so the
+    DNS-rebinding Host check used for normal dashboard HTTP requests must be
+    repeated here before accepting the upgrade.  Browsers also send an Origin
+    header on WebSocket handshakes; when present, require it to target the
+    same bound dashboard host.
+    """
+    bound_host = getattr(app.state, "bound_host", None)
+    if not bound_host:
+        return True
+
+    host_header = ws.headers.get("host", "")
+    if not _is_accepted_host(host_header, bound_host):
+        return False
+
+    origin = ws.headers.get("origin", "")
+    if not origin:
+        return True
+
+    parsed = urllib.parse.urlparse(origin)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+
+    return _is_accepted_host(parsed.netloc, bound_host)
+
+
+def _ws_request_is_allowed(ws: "WebSocket") -> bool:
+    """Return True when the WebSocket upgrade matches dashboard boundaries."""
+    return _ws_host_origin_is_allowed(ws) and _ws_client_is_allowed(ws)
 
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
 # and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
@@ -3467,7 +3527,7 @@ async def pty_ws(ws: WebSocket) -> None:
         await ws.close(code=4401)
         return
 
-    if not _ws_client_is_allowed(ws):
+    if not _ws_request_is_allowed(ws):
         await ws.close(code=4403)
         return
 
@@ -3586,7 +3646,7 @@ async def gateway_ws(ws: WebSocket) -> None:
         await ws.close(code=4401)
         return
 
-    if not _ws_client_is_allowed(ws):
+    if not _ws_request_is_allowed(ws):
         await ws.close(code=4403)
         return
 
@@ -3618,7 +3678,7 @@ async def pub_ws(ws: WebSocket) -> None:
         await ws.close(code=4401)
         return
 
-    if not _ws_client_is_allowed(ws):
+    if not _ws_request_is_allowed(ws):
         await ws.close(code=4403)
         return
 
@@ -3647,7 +3707,7 @@ async def events_ws(ws: WebSocket) -> None:
         await ws.close(code=4401)
         return
 
-    if not _ws_client_is_allowed(ws):
+    if not _ws_request_is_allowed(ws):
         await ws.close(code=4403)
         return
 
@@ -3733,14 +3793,33 @@ def mount_spa(application: FastAPI):
 
         ``prefix`` is the normalised ``X-Forwarded-Prefix`` (e.g. ``/hermes``)
         or empty string when served at root.
+
+        When the OAuth auth gate is active (``app.state.auth_required``),
+        the legacy ``_SESSION_TOKEN`` is NOT injected — the SPA reads
+        identity from ``/api/auth/me`` over cookie auth instead.  The
+        ``__HERMES_AUTH_REQUIRED__`` flag lets the SPA pick the right
+        auth scheme for /api/pty and /api/ws (ticket vs token).
         """
         html = _index_path.read_text()
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
-        token_script = (
-            f'<script>window.__HERMES_SESSION_TOKEN__="{_SESSION_TOKEN}";'
-            f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
-            f'window.__HERMES_BASE_PATH__="{prefix}";</script>'
-        )
+        gated = bool(getattr(app.state, "auth_required", False))
+        gated_js = "true" if gated else "false"
+        if gated:
+            bootstrap_script = (
+                f"<script>"
+                f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
+                f'window.__HERMES_BASE_PATH__="{prefix}";'
+                f"window.__HERMES_AUTH_REQUIRED__={gated_js};"
+                f"</script>"
+            )
+        else:
+            bootstrap_script = (
+                f'<script>window.__HERMES_SESSION_TOKEN__="{_SESSION_TOKEN}";'
+                f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
+                f'window.__HERMES_BASE_PATH__="{prefix}";'
+                f"window.__HERMES_AUTH_REQUIRED__={gated_js};"
+                f"</script>"
+            )
         if prefix:
             # Rewrite absolute asset URLs baked into the Vite build so the
             # browser fetches them through the same proxy prefix.
@@ -3750,7 +3829,7 @@ def mount_spa(application: FastAPI):
             html = html.replace('href="/fonts/', f'href="{prefix}/fonts/')
             html = html.replace('href="/ds-assets/', f'href="{prefix}/ds-assets/')
             html = html.replace('src="/ds-assets/', f'src="{prefix}/ds-assets/')
-        html = html.replace("</head>", f"{token_script}</head>", 1)
+        html = html.replace("</head>", f"{bootstrap_script}</head>", 1)
         return HTMLResponse(
             html,
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
@@ -4099,6 +4178,43 @@ async def set_dashboard_theme(body: ThemeSetBody):
 # Dashboard plugin system
 # ---------------------------------------------------------------------------
 
+def _safe_plugin_api_relpath(api_field: Any, *, dashboard_dir: Path) -> Optional[str]:
+    """Validate the manifest's ``api`` field for the plugin loader.
+
+    The web server later imports this file as a Python module via
+    ``importlib.util.spec_from_file_location`` (arbitrary code
+    execution by design — that's how plugins extend the backend).
+    Pre-#29156 the field was used as-is, which meant:
+
+    * An absolute path swallowed the plugin's dashboard directory
+      entirely — ``Path('safe/dashboard') / '/tmp/evil.py'`` resolves
+      to ``/tmp/evil.py``, so any attacker-controlled manifest could
+      point the import at any Python file on disk (GHSA-5qr3-c538-wm9j).
+    * A ``../..`` traversal could climb out of the plugin into
+      neighbouring directories on the search path.
+
+    Return the original string when the resolved path stays under
+    ``dashboard_dir``; return ``None`` (with a warning logged at the
+    call site) otherwise so the plugin still loads its static JS/CSS
+    but its backend ``api`` is rejected.
+    """
+    if not isinstance(api_field, str) or not api_field.strip():
+        return None
+    candidate = Path(api_field)
+    if candidate.is_absolute():
+        return None
+    try:
+        resolved = (dashboard_dir / candidate).resolve()
+        base = dashboard_dir.resolve()
+    except (OSError, RuntimeError):
+        return None
+    try:
+        resolved.relative_to(base)
+    except ValueError:
+        return None
+    return api_field
+
+
 def _discover_dashboard_plugins() -> list:
     """Scan plugins/*/dashboard/manifest.json for dashboard extensions.
 
@@ -4117,7 +4233,16 @@ def _discover_dashboard_plugins() -> list:
         (bundled_root / "memory", "bundled"),
         (bundled_root, "bundled"),
     ]
-    if os.environ.get("HERMES_ENABLE_PROJECT_PLUGINS"):
+    # GHSA-5qr3-c538-wm9j (#29156): the previous ``os.environ.get(...)``
+    # check treated *any* non-empty string as truthy, so ``=0``, ``=false``,
+    # and ``=no`` — all of which the agent loader and operators correctly
+    # read as "disabled" — silently *enabled* the untrusted project source
+    # in the web server.  Combined with the absolute-path RCE primitive on
+    # the manifest's ``api`` field (now patched below), this turned the
+    # opt-in into a sticky always-on switch.  Use the shared truthy
+    # semantics (``1`` / ``true`` / ``yes`` / ``on``) so the gate matches
+    # ``hermes_cli/plugins.py`` and the documented user contract.
+    if env_var_enabled("HERMES_ENABLE_PROJECT_PLUGINS"):
         search_dirs.append((Path.cwd() / ".hermes" / "plugins", "project"))
 
     for plugins_root, source in search_dirs:
@@ -4156,6 +4281,23 @@ def _discover_dashboard_plugins() -> list:
                 slots: List[str] = []
                 if isinstance(slots_src, list):
                     slots = [s for s in slots_src if isinstance(s, str) and s]
+                # Validate ``api`` at discovery time so the value cached
+                # on the plugin entry is already safe to feed into the
+                # importer.  An attacker-controlled manifest can name
+                # any absolute path or ``..`` traversal here — the
+                # web server then imports that file as a Python module
+                # (RCE, GHSA-5qr3-c538-wm9j).
+                raw_api = data.get("api")
+                dashboard_dir = child / "dashboard"
+                safe_api = _safe_plugin_api_relpath(raw_api, dashboard_dir=dashboard_dir)
+                if raw_api and safe_api is None:
+                    _log.warning(
+                        "Plugin %s: refusing unsafe api path %r (must be a "
+                        "relative file inside the plugin's dashboard/ "
+                        "directory); backend routes from this plugin will "
+                        "not be mounted",
+                        name, raw_api,
+                    )
                 plugins.append({
                     "name": name,
                     "label": data.get("label", name),
@@ -4166,10 +4308,10 @@ def _discover_dashboard_plugins() -> list:
                     "slots": slots,
                     "entry": data.get("entry", "dist/index.js"),
                     "css": data.get("css"),
-                    "has_api": bool(data.get("api")),
+                    "has_api": bool(safe_api),
                     "source": source,
-                    "_dir": str(child / "dashboard"),
-                    "_api_file": data.get("api"),
+                    "_dir": str(dashboard_dir),
+                    "_api_file": safe_api,
                 })
             except Exception as exc:
                 _log.warning("Bad dashboard plugin manifest %s: %s", manifest_file, exc)
@@ -4481,6 +4623,17 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
 
     Only serves files from the plugin's ``dashboard/`` subdirectory.
     Path traversal is blocked by checking ``resolve().is_relative_to()``.
+
+    Restricted to a browser-fetchable suffix allowlist (JS/CSS/JSON/HTML/
+    SVG/PNG/JPG/WOFF). The dashboard loads plugin JS via ``<script src>``
+    and CSS via ``<link href>``, neither of which can attach a custom
+    auth header — so this route stays unauthenticated to keep the SPA
+    working. But user-installed plugins ship a ``plugin_api.py``
+    backend module that the browser never fetches; it's only imported
+    by :func:`_mount_plugin_api_routes` at startup. Without a suffix
+    allowlist, anyone on the loopback port can curl the ``.py`` source
+    of a private third-party plugin. Reject everything outside the
+    browser-asset set.
     """
     plugins = _get_dashboard_plugins()
     plugin = next((p for p in plugins if p["name"] == plugin_name), None)
@@ -4495,7 +4648,11 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
-    # Guess content type
+    # Browser-asset suffix allowlist. Everything outside this set is
+    # rejected with 404 so we don't leak ``.py`` backend sources, README
+    # files, ``.env.example`` templates, etc. — none of which the SPA
+    # actually fetches. Add to this set deliberately when a new asset
+    # type comes up; do NOT change the default fallback.
     suffix = target.suffix.lower()
     content_types = {
         ".js": "application/javascript",
@@ -4506,10 +4663,22 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
         ".svg": "image/svg+xml",
         ".png": "image/png",
         ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".ico": "image/x-icon",
         ".woff2": "font/woff2",
         ".woff": "font/woff",
+        ".ttf": "font/ttf",
+        ".otf": "font/otf",
+        ".map": "application/json",
     }
-    media_type = content_types.get(suffix, "application/octet-stream")
+    if suffix not in content_types:
+        raise HTTPException(
+            status_code=404,
+            detail="File not found",
+        )
+    media_type = content_types[suffix]
     return FileResponse(
         target,
         media_type=media_type,
@@ -4523,12 +4692,42 @@ def _mount_plugin_api_routes():
     Each plugin's ``api`` field points to a Python file that must expose
     a ``router`` (FastAPI APIRouter).  Routes are mounted under
     ``/api/plugins/<name>/``.
+
+    Backend import is restricted to ``bundled`` and ``user`` sources.
+    Project plugins (``./.hermes/plugins/``) ship with the CWD and are
+    therefore attacker-controlled in any threat model where the user
+    opens a malicious repo; they can extend the dashboard UI via
+    static JS/CSS but their Python ``api`` file is never auto-imported
+    by the web server.  See GHSA-5qr3-c538-wm9j (#29156).
     """
     for plugin in _get_dashboard_plugins():
         api_file_name = plugin.get("_api_file")
         if not api_file_name:
             continue
-        api_path = Path(plugin["_dir"]) / api_file_name
+        if plugin.get("source") == "project":
+            _log.warning(
+                "Plugin %s: ignoring backend api=%s (project plugins may "
+                "not auto-import Python code; move the plugin to "
+                "~/.hermes/plugins/ if you trust it)",
+                plugin["name"], api_file_name,
+            )
+            continue
+        dashboard_dir = Path(plugin["_dir"])
+        api_path = dashboard_dir / api_file_name
+        try:
+            resolved_api = api_path.resolve()
+            resolved_base = dashboard_dir.resolve()
+            resolved_api.relative_to(resolved_base)
+        except (OSError, RuntimeError, ValueError):
+            # Discovery already filters this, but re-check here in case
+            # ``_dir`` was tampered with after caching or a future caller
+            # bypasses the validator.  Defence in depth keeps the import
+            # primitive contained even if the upstream check regresses.
+            _log.warning(
+                "Plugin %s: refusing to import api file outside its "
+                "dashboard directory (%s)", plugin["name"], api_path,
+            )
+            continue
         if not api_path.exists():
             _log.warning("Plugin %s declares api=%s but file not found", plugin["name"], api_file_name)
             continue
@@ -4580,14 +4779,36 @@ def start_server(
     global _DASHBOARD_EMBEDDED_CHAT_ENABLED
     _DASHBOARD_EMBEDDED_CHAT_ENABLED = embedded_chat
 
-    _LOCALHOST = ("127.0.0.1", "localhost", "::1")
-    if host not in _LOCALHOST and not allow_public:
-        raise SystemExit(
-            f"Refusing to bind to {host} — the dashboard exposes API keys "
-            f"and config without robust authentication.\n"
-            f"Use --insecure to override (NOT recommended on untrusted networks)."
+    # Phase 0: stash the auth-gate flag on app.state so middleware / SPA-token
+    # injection / WS-auth paths can branch on it consistently.  Phase 3.5
+    # uses this to decide whether to refuse the bind, log the gate-on
+    # banner, and enable uvicorn proxy_headers.
+    app.state.auth_required = should_require_auth(host, allow_public)
+
+    if app.state.auth_required:
+        # Phase 3.5: the gate engages on non-loopback binds.  The legacy
+        # "refusing to bind" guard is replaced by "require at least one
+        # provider to be registered, else fail closed".
+        from hermes_cli.dashboard_auth import list_providers
+        if not list_providers():
+            raise SystemExit(
+                f"Refusing to bind dashboard to {host} — the OAuth auth "
+                f"gate engages on non-loopback binds, but no auth providers "
+                f"are registered.\n"
+                f"Install the default Nous provider "
+                f"(plugins/dashboard-auth-nous) or another "
+                f"DashboardAuthProvider plugin.\n"
+                f"Or pass --insecure to skip the auth gate (NOT recommended "
+                f"on untrusted networks)."
+            )
+        _log.info(
+            "Dashboard binding to %s with OAuth auth gate enabled. "
+            "Providers: %s",
+            host,
+            ", ".join(p.name for p in list_providers()),
         )
-    if host not in _LOCALHOST:
+    elif host not in _LOOPBACK_HOST_VALUES and allow_public:
+        # --insecure path — no auth, loud warning.
         _log.warning(
             "Binding to %s with --insecure — the dashboard has no robust "
             "authentication. Only use on trusted networks.", host,
@@ -4632,7 +4853,13 @@ def start_server(
             )
 
     print(f"  Hermes Web UI → http://{host}:{port}")
-    # proxy_headers=False so _ws_client_is_allowed sees the real connection peer
-    # rather than X-Forwarded-For's rewritten value (which would defeat the
-    # loopback gate when behind a reverse proxy).
-    uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=False)
+    # proxy_headers defaults to False so _ws_client_is_allowed sees the real
+    # connection peer rather than X-Forwarded-For's rewritten value (which
+    # would defeat the loopback gate when behind a reverse proxy).  When the
+    # OAuth gate is active we are explicitly running behind a TLS terminator
+    # (Fly.io) and need X-Forwarded-Proto to decide cookie Secure flags, so
+    # we flip proxy_headers on for that mode.
+    uvicorn.run(
+        app, host=host, port=port, log_level="warning",
+        proxy_headers=bool(app.state.auth_required),
+    )
