@@ -56,7 +56,12 @@ _RUNTIME_PROXY_CONTROL_METHODS = frozenset(
 )
 _RUNTIME_SCOPED_CONTROL_METHODS = frozenset(
     {
+        "approval.pending.list",
+        "approval.policy.get",
+        "approval.policy.set",
+        "approval.respond",
         "clarify.respond",
+        "cron.manage",
         "run.cancel",
         "secret.respond",
         "session.create",

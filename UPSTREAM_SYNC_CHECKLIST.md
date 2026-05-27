@@ -19,6 +19,9 @@
 - Doxie automation 已经替代原生 `cronjob` 模型工具；默认结果绑定当前会话，能力继承当前 Doxie runtime，只有显式 advanced override 才持久化 skills/toolsets。
 - TUI/WebSocket 结构化流使用 tool events 表达工具边界，不能再把 legacy 文本流的工具后空行注入 message delta 或 transcript。
 - Dashboard session 列表会显示 automation badge；session 与 job 的关联来自 Doxie owner/result binding metadata。
+- Skills 目录初始化必须能自愈：如果 `$HERMES_HOME/skills` 或 `.hub` 相关路径被历史损坏成文件，应重命名为 `.invalid-*` 再创建目录，不能直接失败或删除用户数据。
+- Doxie desktop browser bridge 不只负责 tab 操作；navigate、snapshot、click、type、scroll、press、back/forward 都必须优先走 Doxie 可见桌面 browser session。
+- profile-scoped approval 和 cron control RPC 必须代理到 runtime worker；否则 approval policy、pending approval 和 cron 管理会读写 control plane，而不是目标 Doxie profile。
 
 ## 10 分钟快速分诊
 
@@ -41,7 +44,9 @@ git diff --cached --check
 - 如果 `cron/scheduler.py`、`tools/cronjob_tools.py`、`tools/doxie_automation_task_tool.py`、`tui_gateway/services/doxie_cron_jobs.py`、`toolsets.py` 有改动，优先检查 Doxie automation contract 是否仍替代原生 cronjob tool。
 - 如果 `run_agent.py`、`tui_gateway/methods/prompt.py`、`doxie_extension/display_transcript.py` 有改动，优先检查结构化 stream delta 和 transcript 展示不会引入工具边界空白。
 - 如果 `hermes_cli/web_server.py` 或 `web/src/pages/SessionsPage.tsx` 有改动，优先检查 session automation badge 是否仍基于 job metadata，而不是猜测 transcript 内容。
-- 如果 `tools/browser_tool.py`、`tools/computer_use/*`、`tools/delegate_tool.py`、`tools/vision_tools.py` 有改动，优先检查 Doxie desktop bridge、vision routing、child progress suppression。
+- 如果 `hermes_constants.py`、`tools/skills_hub.py`、`tools/skills_sync.py`、`tools/skills_tool.py`、`tools/skill_manager_tool.py` 有改动，优先检查 skills path 自愈和 profile-aware skills 目录。
+- 如果 `tools/browser_tool.py` 或 `doxie_extension/browser_bridge.py` 有改动，优先检查 Doxie desktop bridge 是否覆盖可见会话的 navigation、snapshot 和 action 操作。
+- 如果 `tools/computer_use/*`、`tools/delegate_tool.py`、`tools/vision_tools.py` 有改动，优先检查 vision routing、child progress suppression 和 computer-use 元数据。
 - 如果新增或移动 Doxie 文件，确认它们在 `doxie_extension` 或 Doxie service 边界内，不要把产品专属逻辑重新混进 Hermes upstream core。
 
 ## 同步红线
@@ -222,24 +227,40 @@ rg "_invoke_tool|parent_agent|session_cwd|DOXIE_WORKSPACE_ROOT|vision_enabled" a
 
 ### 7. Desktop Browser Bridge 优先于本地 CDP fallback
 
-Doxie desktop browser 可用时，多标签页操作必须通过 Doxie bridge；只有 bridge 不可用时才 fallback 到 native CDP。
+Doxie desktop browser 可用时，浏览器可见会话操作必须通过 Doxie bridge；只有 bridge 不可用时才 fallback 到 agent-browser / native CDP。
 
 重点路径：
 
 - `doxie_extension/browser_bridge.py`
 - `tools/browser_tool.py`
 
+必须保留：
+
+- `browser_session_id()` 先读 `DOXIE_BROWSER_SESSION_ID`，再读 session context，最后才用 `browser:electron:default`。
+- `browser_navigate` 通过 `browser_use_navigate` 导航，再通过 `browser_use_observe_embedded` 返回 snapshot。
+- `browser_snapshot` 通过 `browser_use_observe_embedded` 返回 Doxie desktop snapshot payload。
+- `browser_click`、`browser_type`、`browser_scroll`、`browser_press` 通过 `browser_use_action_embedded` 执行。
+- `browser_back` / `browser_forward` 通过 Doxie bridge 的 history command 执行。
+- Doxie bridge 返回 payload 必须带 `provider="doxie_desktop"` 和 `browser_session_id`，方便客户端和测试分辨路径。
+- ref 入参要兼容 `@e1` 和 `e1`，发给 Doxie backend 前去掉 `@`。
+- observation 要格式化成可读 snapshot，保留 `@ref`、tag、role、state、name/text。
+- bridge 不可用或失败时才进入 agent-browser / Camofox / CDP fallback。
+
 检查方式：
 
 ```sh
-rg "browser_bridge|browser_use_list_sessions|browser_use_create_tab|browser_use_activate_tab|browser_use_close_tab" doxie_extension tools/browser_tool.py
+rg "browser_bridge|browser_use_navigate|browser_use_observe_embedded|browser_use_action_embedded|browser_use_list_sessions|browser_use_create_tab|browser_use_activate_tab|browser_use_close_tab" doxie_extension tools/browser_tool.py tests
 ```
 
 常见坏症状：
 
 - Doxie 桌面浏览器打开了 tab，但 Hermes `browser_tabs` 看不到。
+- Doxie 桌面浏览器已经可用，但 `browser_navigate` 仍启动 agent-browser。
+- `browser_snapshot` 读取的是 headless/agent-browser，而不是用户正在看的桌面页面。
+- click/type/scroll/press 跑到不可见 browser session。
 - `browser_new_tab` 在桌面端错误返回 “native CDP required”。
 - tab id / target id 混乱，后续 snapshot 操作跑到旧标签。
+- tool result 缺 `provider=doxie_desktop`，客户端无法确认是否走可见桌面浏览器。
 
 ### 8. Computer Use 必须保留窗口选择和 vision routing 修复
 
@@ -339,12 +360,12 @@ Doxie profile-scoped 请求不能长期跑在 control plane 进程里。control 
 - worker 启动环境中的 `HERMES_HOME`、`DOXIE_HERMES_RUNTIME_SCOPE_KEY`、`DOXIE_AGENT_PROFILE_ID`、`DOXIE_AGENT_PROFILE_VERSION_ID`。
 - WebSocket bridge 读取 worker 的 response/event 后原样写回客户端，并在客户端 WS 关闭时释放 bridge。
 - `bridge_count > 0` 时 idle reclaim 不能杀 worker；idle timeout 到期且无活动 bridge 时才回收。
-- control-plane 方法默认不代理，但 `cron.manage`、`run.cancel`、`session.create(control_plane_only)`、clarify/sudo/secret respond 等 scoped 控制动作要按规则处理。
+- control-plane 方法默认不代理，但 `approval.pending.list`、`approval.policy.get`、`approval.policy.set`、`approval.respond`、`cron.manage`、`run.cancel`、`session.create(control_plane_only)`、clarify/sudo/secret respond 等 scoped 控制动作要按规则处理。
 
 检查方式：
 
 ```sh
-rg "runtime.ensure|RuntimeWorkerPool|RuntimeProxyBridge|should_proxy_to_runtime|proxy_to_runtime|DOXIE_HERMES_RUNTIME_SCOPE_KEY|bridge_count" tui_gateway doxie_extension tests
+rg "runtime.ensure|RuntimeWorkerPool|RuntimeProxyBridge|should_proxy_to_runtime|proxy_to_runtime|approval.policy|approval.pending|cron.manage|DOXIE_HERMES_RUNTIME_SCOPE_KEY|bridge_count" tui_gateway doxie_extension tests
 ```
 
 常见坏症状：
@@ -355,6 +376,9 @@ rg "runtime.ensure|RuntimeWorkerPool|RuntimeProxyBridge|should_proxy_to_runtime|
 - 首个 response 后 bridge 被关闭，后续 stream event 丢失。
 - 用户关闭 WebSocket 后 worker bridge 计数不释放，idle worker 永远不回收。
 - worker 启动时没有 scoped `HERMES_HOME`，导致 profile 数据写到 control plane home。
+- profile-scoped approval policy 设置到了 control plane session，目标 worker 仍然保持默认 approval mode。
+- `approval.pending.list` 在 Doxie profile 下返回空，但 worker 里实际有 pending approval。
+- `cron.manage` 在 profile runtime 下读写了 control plane cron store。
 
 ### 12. 只读 Gateway 查询不能创建空状态库
 
@@ -428,6 +452,30 @@ rg "automation_task_count|has_automation_tasks|_session_automation_counts|Automa
 - 一个 session 同时作为 owner 和 result target 时计数漏算。
 - Dashboard 通过扫描消息内容推断 automation，导致历史文案变化影响 UI。
 
+### 15. Skills 目录创建必须自愈非目录路径
+
+用户的 profile home 是长期数据目录，旧版本、手工编辑或异常写入可能把 `skills`、`.hub`、manifest/cache 等目录路径变成普通文件。同步上游时不能退回裸 `mkdir(parents=True, exist_ok=True)`，否则 skill hub、sync、list、install 都会在 profile 初始化阶段失败。
+
+重点保留：
+
+- `hermes_constants.ensure_directory_path(...)`。
+- 遇到非目录路径时重命名为 `<name>.invalid-<timestamp>-<id>`，再创建目录。
+- `tools/skills_hub.py`、`tools/skills_sync.py`、`tools/skills_tool.py`、`tools/skill_manager_tool.py` 创建目录时使用该 helper。
+- 只移动无效 filesystem node，不删除用户数据。
+- helper 必须 import-safe，不能引入 heavy deps 或 logging setup。
+
+检查方式：
+
+```sh
+rg "ensure_directory_path|invalid-" hermes_constants.py tools/skills_hub.py tools/skills_sync.py tools/skills_tool.py tools/skill_manager_tool.py tests/tools
+```
+
+常见坏症状：
+
+- `$HERMES_HOME/skills` 被文件占用时，`skills list` / `skills sync` 直接 `FileExistsError`。
+- `.hub` 相关路径异常时，skill search/install 失败且没有自愈。
+- 修复时直接删除冲突文件，造成用户数据不可恢复。
+
 ## 症状到检查点
 
 | 症状 | 先查 |
@@ -435,6 +483,7 @@ rg "automation_task_count|has_automation_tasks|_session_automation_counts|Automa
 | Doxie UI method not found | `doxie_extension/gateway_methods.py`、`tui_gateway/core/method_registration.py`、`gateway.capabilities` |
 | `runtime.ensure` 缺失或失败 | `doxie_extension/manifest.py`、`methods/system.py`、`services/runtime_proxy.py`、`tests/test_doxie_gateway_contract.py` |
 | scoped prompt 没有进 profile worker | `runtime_proxy.should_proxy_to_runtime`、`ws.proxy_to_runtime`、`DOXIE_HERMES_RUNTIME_SCOPE_KEY` |
+| scoped approval/cron 留在 control plane | `_RUNTIME_SCOPED_CONTROL_METHODS`、`should_proxy_to_runtime`、`tests/tui_gateway/test_ws_dispatch.py` |
 | worker stream 只收到首包 | `RuntimeProxyBridge._read_loop`、`WSTransport.runtime_bridge`、bridge close/release 逻辑 |
 | idle worker 不回收 | `RuntimeWorkerPool.reclaim_idle`、`bridge_count`、WS close cleanup |
 | UI 一直 running | `tui_gateway/methods/run.py`、`tui_gateway/methods/prompt.py`、`tui_gateway/services/run_control.py`、`hermes_state_runs.py` |
@@ -445,6 +494,8 @@ rg "automation_task_count|has_automation_tasks|_session_automation_counts|Automa
 | transcript 出现 cron 内部提示 | `display_transcript.py`、`session.messages`、`session.list` |
 | assistant 完成事件不能定位消息 | `_latest_assistant_message_id_for_turn`、`run_agent.py` metadata merge、`display_transcript.py` metadata merge |
 | browser 多 tab 在桌面端不可用 | `browser_bridge.py`、`tools/browser_tool.py` |
+| Doxie browser navigate/snapshot 跑到 headless | `browser_bridge.navigate/observe/action`、`browser_tool._doxie_browser_bridge`、`tests/tools/test_doxie_desktop_browser_bridge.py` |
+| Doxie browser action 点不到可见页面 | `browser_use_action_embedded`、ref normalization、`browser_click/type/scroll/press` |
 | computer use 抓错窗口或坐标错 | `tools/computer_use/cua_backend.py`、`tools/computer_use/tool.py` |
 | 非 vision 模型收到图片 | `agent/image_routing.py`、`tools/computer_use/vision_routing.py`、`model_descriptor.py` |
 | delegate/profile test 泄漏子代理输出 | `tools/delegate_tool.py`、`tools/doxie_agent_profile_tool.py`、`agent/conversation_loop.py` |
@@ -455,6 +506,7 @@ rg "automation_task_count|has_automation_tasks|_session_automation_counts|Automa
 | automation 固化了 runtime 能力 | `capabilityOverride`、`capabilitySource`、`HERMES_TUI_TOOLSETS`、`doxie_cron_jobs.py` |
 | 工具后消息前有多余空行 | `_stream_inject_tool_breaks`、`_MessageDeltaNormalizer`、`sanitize_assistant_display_text` |
 | Dashboard session 没显示 automation 标记 | `_session_automation_counts`、`has_automation_tasks`、`AutomationBadge` |
+| skills 初始化遇到 FileExistsError | `ensure_directory_path`、skills hub/sync/list/install 目录创建路径 |
 
 ## 最小验证包
 
@@ -539,6 +591,22 @@ scripts/run_tests.sh \
   tests/hermes_cli/test_web_session_automation_badges.py
 ```
 
+### Doxie Desktop Browser Bridge
+
+```sh
+scripts/run_tests.sh \
+  tests/tools/test_doxie_desktop_browser_bridge.py
+```
+
+### Skills Directory Repair
+
+```sh
+scripts/run_tests.sh \
+  tests/tools/test_skills_hub.py \
+  tests/tools/test_skills_sync.py \
+  tests/tools/test_skills_tool.py
+```
+
 ### Runtime Proxy / WebSocket Bridge
 
 ```sh
@@ -564,8 +632,11 @@ scripts/run_tests.sh \
 10. 检查模型工具列表，确认没有原生 `cronjob`，只有 `doxie_automation_task_*`。
 11. 在 TUI/WebSocket 跑一次“工具调用后继续回答”的流式场景，确认消息开头没有多余空行。
 12. 打开 Dashboard sessions，确认有关联 automation 的 session 显示 badge。
-13. 在桌面浏览器 bridge 可用时，跑 `browser_tabs` / `browser_new_tab` / `browser_select_tab`。
-14. 跑一次 `computer_use capture`，确认返回窗口元数据和 warnings 字段。
+13. 在 profile-scoped WebSocket 下调用 approval policy/pending/respond 和 `cron.manage`，确认请求代理到 worker。
+14. 在桌面浏览器 bridge 可用时，跑 `browser_navigate` / `browser_snapshot` / `browser_click` / `browser_type`，确认 payload 带 `provider=doxie_desktop`，页面就是用户可见桌面页面。
+15. 在桌面浏览器 bridge 可用时，跑 `browser_tabs` / `browser_new_tab` / `browser_select_tab`。
+16. 临时把测试 profile 的 `skills` 路径做成普通文件，确认 skills sync/list 会把它移动为 `.invalid-*` 并重建目录。
+17. 跑一次 `computer_use capture`，确认返回窗口元数据和 warnings 字段。
 
 ## 文档维护规则
 
@@ -619,3 +690,11 @@ scripts/run_tests.sh \
 - 修复涉及：`cron/scheduler.py`、`tui_gateway/services/doxie_cron_jobs.py`、`tools/doxie_automation_task_tool.py`、`tools/cronjob_tools.py`、`toolsets.py`、`model_tools.py`、`run_agent.py`、`tui_gateway/methods/prompt.py`、`doxie_extension/display_transcript.py`、`hermes_cli/web_server.py`、`web/src/lib/api.ts`、`web/src/pages/SessionsPage.tsx`。
 - 下次优先检查：原生 `cronjob` 是否仍未注册；`cronjob` toolset 是否只含 Doxie automation tools；current-session result binding 是否默认生效；`capabilityOverride` 是否只在显式请求时持久化；TUI structured stream 是否禁用工具边界空白注入；session automation badge 是否基于 job metadata。
 - 最小验证：优先跑 Doxie Cron / Automation、Structured Streaming / Transcript Display、Dashboard Automation Badge 三组测试，再按 diff 补跑 Gateway ABI / Run Control 包。
+
+### 2026-05-27 同步记录
+
+- 暴露问题：最近提交修复了三个同步后容易遗漏的边界：skills 目录路径被文件占用时需要自愈；Doxie desktop browser 不应只代理 tab API，还要代理 navigate/snapshot/action 到可见桌面 browser session；profile-scoped approval/cron control RPC 必须进 runtime worker。
+- 根因边界：profile home、desktop browser 和 approval/cron state 都是 Doxie 本地运行态的一部分。上游同步如果退回裸目录创建、headless agent-browser 路径或 control-plane approval/cron 处理，会让 profile 初始化失败、browser tool 操作不可见会话，或让 approval/cron 状态写错 runtime。
+- 修复涉及：`hermes_constants.py`、`tools/skills_hub.py`、`tools/skills_sync.py`、`tools/skills_tool.py`、`tools/skill_manager_tool.py`、`doxie_extension/browser_bridge.py`、`tools/browser_tool.py`、`tui_gateway/services/runtime_proxy.py`、`tests/tools/test_skills_hub.py`、`tests/tools/test_skills_sync.py`、`tests/tools/test_skills_tool.py`、`tests/tools/test_doxie_desktop_browser_bridge.py`、`tests/tui_gateway/test_ws_dispatch.py`。
+- 下次优先检查：skills path 创建是否仍用 `ensure_directory_path`；无效 skills 路径是否移动到 `.invalid-*` 而不是删除；Doxie bridge 可用时 `browser_navigate/snapshot/click/type/scroll/press` 是否仍优先走 `browser_use_*` backend command；Doxie browser tool result 是否带 `provider=doxie_desktop` 和 `browser_session_id`；`_RUNTIME_SCOPED_CONTROL_METHODS` 是否仍包含 approval policy/pending/respond 和 `cron.manage`。
+- 最小验证：优先跑 Doxie Desktop Browser Bridge、Skills Directory Repair、Runtime Proxy / WebSocket Bridge 三组测试。
