@@ -90,6 +90,18 @@ TOOLSETS = {
         "tools": ["serper_search_tool", "jina_web_parser_tool"],
         "includes": []
     },
+
+    "doxie_image": {
+        "description": "Doxie-managed image generation tools",
+        "tools": ["doxie_image_generate"],
+        "includes": []
+    },
+
+    "doxie_video": {
+        "description": "Doxie-managed video generation tools",
+        "tools": ["doxie_video_generate"],
+        "includes": []
+    },
     
     "search": {
         "description": "Web search only (no content extraction/scraping)",

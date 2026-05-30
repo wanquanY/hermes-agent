@@ -53,6 +53,8 @@ from hermes_cli.cli_output import (  # noqa: E402 — late import block
 # These map to keys in toolsets.py TOOLSETS dict.
 CONFIGURABLE_TOOLSETS = [
     ("doxie_web",       "🔎 Doxie Web Search & Parse", "serper_search_tool, jina_web_parser_tool"),
+    ("doxie_image",     "🎨 Doxie Image Generation",   "doxie_image_generate"),
+    ("doxie_video",     "🎬 Doxie Video Generation",   "doxie_video_generate"),
     ("web",             "🔍 Web Search & Scraping",    "web_search, web_extract"),
     ("browser",         "🌐 Browser Automation",       "navigate, click, type, scroll"),
     ("terminal",        "💻 Terminal & Processes",      "terminal, process"),
@@ -475,7 +477,6 @@ TOOL_CATEGORIES = {
 # Simple env-var requirements for toolsets NOT in TOOL_CATEGORIES.
 # Used as a fallback for tools like vision/moa that just need an API key.
 TOOLSET_ENV_REQUIREMENTS = {
-    "vision":     [("OPENROUTER_API_KEY",   "https://openrouter.ai/keys")],
     "moa":        [("OPENROUTER_API_KEY",   "https://openrouter.ai/keys")],
 }
 

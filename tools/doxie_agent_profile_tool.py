@@ -263,7 +263,7 @@ DESIGN_AGENT_PROFILE_SCHEMA = {
             },
             "catalog_kind": {
                 "type": "string",
-                "enum": ["overview", "toolsets", "skills", "templates", "avatars"],
+                "enum": ["overview", "toolsets", "skills", "skill_categories", "templates", "avatars"],
                 "description": "When operation=inspect_context, choose which catalog slice to inspect. Default overview returns only compact hints.",
             },
             "query": {
@@ -513,6 +513,16 @@ def _list_installed_skills() -> list[dict]:
     return [item for item in result if item["name"]]
 
 
+def _list_doxie_skill_categories() -> list[dict]:
+    try:
+        from tools.doxie_skill_categories import doxie_runtime_mode_enabled, list_doxie_skill_categories
+        if not doxie_runtime_mode_enabled():
+            return []
+        return list_doxie_skill_categories()
+    except Exception as exc:
+        return [{"slug": "categories_unavailable", "name": "categories_unavailable", "description": str(exc), "enabled": False}]
+
+
 def _catalog_limit(value: Any, default: int = 12, maximum: int = 50) -> int:
     try:
         parsed = int(value)
@@ -547,11 +557,12 @@ def _profile_design_context_event(
     limit: Any = None,
 ) -> dict:
     kind = str(catalog_kind or "overview").strip() or "overview"
-    if kind not in {"overview", "toolsets", "skills", "templates", "avatars"}:
+    if kind not in {"overview", "toolsets", "skills", "skill_categories", "templates", "avatars"}:
         kind = "overview"
 
     toolsets = _list_system_toolsets()
     skills = _list_installed_skills()
+    skill_categories = _list_doxie_skill_categories()
     templates = _architecture_templates()
     avatars = _avatar_assets()
 
@@ -561,11 +572,13 @@ def _profile_design_context_event(
         "catalogQueries": {
             "toolsets": "Call design_agent_profile(operation='inspect_context', catalog_kind='toolsets', query='...', limit=...) for detailed toolset choices.",
             "skills": "Use skills_list/skill_view as the authoritative skill catalog; call catalog_kind='skills' only for a compact installed-skill hint page.",
+            "skill_categories": "Call catalog_kind='skill_categories' to list the Doxie admin skill categories that skill_manage(create).category must use.",
             "templates": "Call catalog_kind='templates' for architecture templates.",
             "avatars": "Call catalog_kind='avatars' for avatar candidates.",
         },
         "rules": {
             "allowedCategories": AGENT_PROFILE_CATEGORIES,
+            "allowedSkillCategories": skill_categories,
             "skillCatalogSource": "hermes.skills",
             "useSkillsListForInstalledSkills": True,
             "useSkillManageForCreation": True,
@@ -573,6 +586,7 @@ def _profile_design_context_event(
                 "recommendedToolsets must be selected from systemToolsets.name.",
                 "recommendedSkills must be selected only after verifying with skills_list or skill_view.",
                 "category must be one of 工作, 学习, 创作, 开发, 生活, 其他; do not invent new categories.",
+                "When creating a new skill with skill_manage(action='create'), category must be one of allowedSkillCategories.slug.",
                 "installedSkillsSummary is a non-authoritative hint only.",
                 "If a requested capability is unavailable, put it into missingCapabilities or skillCreationPlans.",
                 "After inspecting context, call this same tool again with operation=create/update/upsert to request the draft.",
@@ -587,10 +601,12 @@ def _profile_design_context_event(
                 "summary": {
                     "toolsetCount": len(toolsets),
                     "installedSkillHintCount": len(skills),
+                    "skillCategoryCount": len([item for item in skill_categories if item.get("enabled", True)]),
                     "architectureTemplateCount": len(templates),
                     "avatarAssetCount": len(avatars),
                 },
                 "systemToolsets": [item["name"] for item in toolsets[:12]],
+                "allowedSkillCategories": skill_categories,
                 "installedSkillsSummary": skills[:8],
                 "architectureTemplates": templates[:3],
                 "avatarAssets": avatars[:6],
@@ -601,6 +617,7 @@ def _profile_design_context_event(
     catalog_map = {
         "toolsets": toolsets,
         "skills": skills,
+        "skill_categories": skill_categories,
         "templates": templates,
         "avatars": avatars,
     }
@@ -741,6 +758,22 @@ def _without_skill_missing_capability(items: Any, skill_name: str) -> list[str]:
     return result
 
 
+def _without_skill_creation_plan(items: Any, skill_name: str) -> list[dict]:
+    normalized = str(skill_name or "").strip().lower()
+    result = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        identifiers = [
+            str(item.get("name") or "").strip().lower(),
+            str(item.get("id") or "").strip().lower(),
+        ]
+        if normalized and normalized in identifiers:
+            continue
+        result.append(item)
+    return result
+
+
 def _install_skill_to_draft_event(**kwargs) -> dict:
     skill_name = _first_non_empty(
         kwargs.get("skill_name"),
@@ -785,6 +818,7 @@ def _install_skill_to_draft_event(**kwargs) -> dict:
             "draftId": draft_id,
             "recommendedSkills": current_skills,
             "missingCapabilities": _without_skill_missing_capability(draft.get("missingCapabilities"), installed["name"]),
+            "skillCreationPlans": _without_skill_creation_plan(draft.get("skillCreationPlans"), installed["name"]),
         }
     )
     updated_draft = _backend_call("doxie_agent_profile_draft_update", update_payload)

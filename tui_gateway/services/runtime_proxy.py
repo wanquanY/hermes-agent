@@ -231,6 +231,25 @@ def _profile_env_from_params(params: dict[str, Any]) -> dict[str, str]:
     return {str(k): str(v) for k, v in profile_env.items()}
 
 
+def _profile_config_fingerprint_from_params(params: dict[str, Any]) -> dict[str, Any]:
+    profile = params.get("doxie_profile") if isinstance(params.get("doxie_profile"), dict) else {}
+    raw_toolsets = profile.get("defaultToolsets") or profile.get("default_toolsets") or []
+    if isinstance(raw_toolsets, str):
+        toolsets = [item.strip() for item in raw_toolsets.replace("\n", ",").split(",") if item.strip()]
+    elif isinstance(raw_toolsets, (list, tuple, set)):
+        toolsets = [str(item).strip() for item in raw_toolsets if str(item).strip()]
+    else:
+        toolsets = []
+    return {
+        "profile_fingerprint": str(
+            profile.get("profileFingerprint")
+            or profile.get("profile_fingerprint")
+            or ""
+        ).strip(),
+        "default_toolsets": sorted(dict.fromkeys(toolsets)),
+    }
+
+
 def _launch_fingerprint(scope: RuntimeScope, params: dict[str, Any]) -> str:
     payload = {
         "scope": {
@@ -239,6 +258,7 @@ def _launch_fingerprint(scope: RuntimeScope, params: dict[str, Any]) -> str:
             "runtime_scope_key": scope.runtime_scope_key,
             "hermes_home": scope.hermes_home,
         },
+        "profile": _profile_config_fingerprint_from_params(params),
         "env": sorted(_profile_env_from_params(params).items()),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
