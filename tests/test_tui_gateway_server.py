@@ -2344,6 +2344,7 @@ def test_skills_reload_runs_in_gateway_process(monkeypatch):
     import agent.skill_commands as skill_commands
 
     called = {}
+    agent = types.SimpleNamespace(_cached_system_prompt="old", _memory_store=None)
     monkeypatch.setattr(
         skill_commands,
         "reload_skills",
@@ -2356,12 +2357,18 @@ def test_skills_reload_runs_in_gateway_process(monkeypatch):
             },
         ),
     )
+    server._sessions["skill-reload-session"] = {"agent": agent}
 
-    resp = server.handle_request({"id": "1", "method": "skills.reload", "params": {}})
+    try:
+        resp = server.handle_request({"id": "1", "method": "skills.reload", "params": {}})
+    finally:
+        server._sessions.pop("skill-reload-session", None)
 
     assert called["result"]["total"] == 42
     assert "new-skill" in resp["result"]["output"]
     assert "42 skill(s) available" in resp["result"]["output"]
+    assert agent._cached_system_prompt is None
+    assert resp["result"]["invalidated_prompt_sessions"] >= 1
 
 
 def test_snapshot_restore_is_blocked_from_tui_worker():

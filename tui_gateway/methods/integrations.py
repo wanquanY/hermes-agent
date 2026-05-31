@@ -1070,6 +1070,28 @@ def _clear_skill_prompt_cache() -> None:
         pass
 
 
+def _invalidate_live_agent_skill_prompts() -> int:
+    """Force existing sessions to rebuild skill-aware system prompts."""
+    try:
+        from agent.system_prompt import invalidate_system_prompt
+    except Exception:
+        return 0
+
+    count = 0
+    for session in list(_sessions.values()):
+        if not isinstance(session, dict):
+            continue
+        agent = session.get("agent")
+        if agent is None:
+            continue
+        try:
+            invalidate_system_prompt(agent)
+            count += 1
+        except Exception:
+            pass
+    return count
+
+
 def _sync_skill_module_paths_to_active_home() -> None:
     """Keep legacy skill modules aligned with the active Doxie profile home.
 
@@ -1498,10 +1520,12 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     try:
         _sync_skill_module_paths_to_active_home()
+        _clear_skill_prompt_cache()
 
         from agent.skill_commands import reload_skills
 
         result = reload_skills()
+        invalidated_prompt_sessions = _invalidate_live_agent_skill_prompts()
         added = result.get("added") or []
         removed = result.get("removed") or []
         total = int(result.get("total") or 0)
@@ -1516,6 +1540,13 @@ def _(rid, params: dict) -> dict:
             lines.append("Removed skills:")
             lines.extend(f"  - {item.get('name', '')}" for item in removed)
         lines.append(f"{total} skill(s) available")
-        return _ok(rid, {"output": "\n".join(lines), "result": result})
+        return _ok(
+            rid,
+            {
+                "output": "\n".join(lines),
+                "result": result,
+                "invalidated_prompt_sessions": invalidated_prompt_sessions,
+            },
+        )
     except Exception as e:
         return _err(rid, 5025, str(e))
