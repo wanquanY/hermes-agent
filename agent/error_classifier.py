@@ -444,14 +444,20 @@ def classify_api_error(
 
     # ── 1. Provider-specific patterns (highest priority) ────────────
 
-    # Anthropic thinking block signature invalid (400).
+    # Anthropic thinking block recovery (400). Two failure modes:
+    #   1. Signature mismatch ("signature" + "thinking")
+    #   2. Frozen-block mutation ("thinking" + "cannot be modified" / "must remain as they were")
     # Don't gate on provider — OpenRouter proxies Anthropic errors, so the
     # provider may be "openrouter" even though the error is Anthropic-specific.
-    # The message pattern ("signature" + "thinking") is unique enough.
+    # The combined patterns are unique enough.
     if (
         status_code == 400
-        and "signature" in error_msg
         and "thinking" in error_msg
+        and (
+            "signature" in error_msg
+            or "cannot be modified" in error_msg
+            or "must remain as they were" in error_msg
+        )
     ):
         return _result(
             FailoverReason.thinking_signature,
