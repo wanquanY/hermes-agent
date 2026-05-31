@@ -86,13 +86,21 @@ def _fetch_categories() -> list[dict[str, Any]]:
         },
         method="GET",
     )
+
+    def _send() -> tuple[bytes, int]:
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                return response.read(), getattr(response, "status", 200)
+        except urllib.error.HTTPError as exc:
+            return exc.read(), exc.code
+
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            raw = response.read()
-            status = getattr(response, "status", 200)
-    except urllib.error.HTTPError as exc:
-        raw = exc.read()
-        status = exc.code
+        from tools.interrupt import run_blocking_interruptibly
+
+        raw, status = run_blocking_interruptibly(
+            _send,
+            interrupted_message="Doxie skill category request interrupted.",
+        )
     except TimeoutError as exc:
         raise RuntimeError("Doxie skill category request timed out.") from exc
     except socket.timeout as exc:

@@ -1,4 +1,5 @@
 import json
+import threading
 
 import tools.doxie_web_tools as doxie_web_tools
 from tools.registry import discover_builtin_tools, registry
@@ -75,6 +76,39 @@ def test_jina_parser_honors_bounded_timeout(monkeypatch):
 
     assert calls[0][3] == 60
     assert calls[1][3] == 5
+
+
+def test_jina_parser_returns_on_interrupt_during_proxy_request(monkeypatch):
+    monkeypatch.setenv("DOXIE_WEB_PARSE_PROXY_URL", "https://doxie.example/api/v1/llm-proxy/v1/web-page-parse")
+    monkeypatch.setenv("DOXIE_LLM_RUNTIME_TOKEN", "runtime-token")
+    started = threading.Event()
+    release = threading.Event()
+    result_holder = {}
+
+    def fake_post_json(url, payload, *, token, timeout):
+        started.set()
+        release.wait(timeout=5)
+        return {"success": True, "content": "# Article", "content_type": "markdown"}
+
+    monkeypatch.setattr(doxie_web_tools, "_post_json", fake_post_json)
+
+    def run_tool():
+        result_holder["value"] = doxie_web_tools.jina_web_parser_tool({"url": "https://example.com/a"})
+
+    worker = threading.Thread(target=run_tool)
+    worker.start()
+    assert started.wait(timeout=1)
+
+    from tools.interrupt import set_interrupt
+
+    set_interrupt(True, thread_id=worker.ident)
+    worker.join(timeout=1)
+    release.set()
+    set_interrupt(False, thread_id=worker.ident)
+
+    assert not worker.is_alive()
+    result = json.loads(result_holder["value"])
+    assert "interrupted" in result["error"].lower()
 
 
 def test_doxie_web_tools_are_registered():

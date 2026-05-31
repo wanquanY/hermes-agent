@@ -55,6 +55,65 @@ class TestInterruptModule:
 
         set_interrupt(False, thread_id=t.ident)
 
+    def test_blocking_call_returns_on_targeted_interrupt(self):
+        from tools.interrupt import run_blocking_interruptibly, set_interrupt
+
+        started = threading.Event()
+        release = threading.Event()
+        result_holder = {}
+
+        def _run():
+            try:
+                run_blocking_interruptibly(
+                    lambda: (started.set(), release.wait(timeout=5), "done")[-1],
+                    interrupted_message="blocked call interrupted",
+                    poll_interval=0.01,
+                )
+            except InterruptedError as exc:
+                result_holder["error"] = str(exc)
+
+        t = threading.Thread(target=_run)
+        t.start()
+        assert started.wait(timeout=1)
+
+        set_interrupt(True, thread_id=t.ident)
+        t.join(timeout=1)
+        release.set()
+        set_interrupt(False, thread_id=t.ident)
+
+        assert not t.is_alive()
+        assert result_holder["error"] == "blocked call interrupted"
+
+    def test_async_tool_bridge_returns_on_targeted_interrupt(self):
+        import asyncio
+        import model_tools
+        from tools.interrupt import set_interrupt
+
+        started = threading.Event()
+        result_holder = {}
+
+        async def _never_finishes():
+            started.set()
+            while True:
+                await asyncio.sleep(0.05)
+
+        def _run():
+            try:
+                model_tools._run_async(_never_finishes())
+            except InterruptedError as exc:
+                result_holder["error"] = str(exc)
+
+        t = threading.Thread(target=_run)
+        t.start()
+        assert started.wait(timeout=2)
+
+        set_interrupt(True, thread_id=t.ident)
+        t.join(timeout=2)
+        set_interrupt(False, thread_id=t.ident)
+
+        assert not t.is_alive()
+        assert result_holder["error"] == "Async tool interrupted"
+
 
 # ---------------------------------------------------------------------------
 # Unit tests: pre-tool interrupt check

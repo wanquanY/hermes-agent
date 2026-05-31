@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 _tool_loop = None          # persistent loop for the main (CLI) thread
 _tool_loop_lock = threading.Lock()
 _worker_thread_local = threading.local()  # per-worker-thread persistent loops
+_ASYNC_TOOL_INTERRUPT_POLL_SECONDS = 0.1
 
 
 def _get_tool_loop():
@@ -79,6 +80,30 @@ def _get_worker_loop():
         asyncio.set_event_loop(loop)
         _worker_thread_local.loop = loop
     return loop
+
+
+def _run_coroutine_interruptibly(loop: asyncio.AbstractEventLoop, coro):
+    """Run a tool coroutine while polling the current thread interrupt flag."""
+    task = asyncio.ensure_future(coro, loop=loop)
+    try:
+        while not task.done():
+            loop.run_until_complete(asyncio.wait({task}, timeout=_ASYNC_TOOL_INTERRUPT_POLL_SECONDS))
+            try:
+                from tools.interrupt import is_interrupted
+            except Exception:
+                interrupted = False
+            else:
+                interrupted = is_interrupted()
+            if interrupted:
+                task.cancel()
+                loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+                raise InterruptedError("Async tool interrupted")
+        return task.result()
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+        raise
 
 
 def _run_async(coro):
@@ -142,7 +167,28 @@ def _run_async(coro):
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         future = pool.submit(_run_in_worker)
         try:
-            return future.result(timeout=300)
+            started_at = time.monotonic()
+            while True:
+                try:
+                    return future.result(timeout=_ASYNC_TOOL_INTERRUPT_POLL_SECONDS)
+                except concurrent.futures.TimeoutError:
+                    try:
+                        from tools.interrupt import is_interrupted
+                    except Exception:
+                        interrupted = False
+                    else:
+                        interrupted = is_interrupted()
+                    if interrupted:
+                        if loop_ready.wait(timeout=1.0) and worker_loop is not None:
+                            try:
+                                for t in asyncio.all_tasks(worker_loop):
+                                    worker_loop.call_soon_threadsafe(t.cancel)
+                            except RuntimeError:
+                                pass
+                        raise InterruptedError("Async tool interrupted")
+                    if time.monotonic() - started_at < 300:
+                        continue
+                    raise
         except concurrent.futures.TimeoutError:
             # Cancel the coroutine inside its own loop so the worker thread
             # can wind down instead of running forever.
@@ -167,10 +213,10 @@ def _run_async(coro):
     # lifetime — preventing "Event loop is closed" on GC cleanup.
     if threading.current_thread() is not threading.main_thread():
         worker_loop = _get_worker_loop()
-        return worker_loop.run_until_complete(coro)
+        return _run_coroutine_interruptibly(worker_loop, coro)
 
     tool_loop = _get_tool_loop()
-    return tool_loop.run_until_complete(coro)
+    return _run_coroutine_interruptibly(tool_loop, coro)
 
 
 # =============================================================================

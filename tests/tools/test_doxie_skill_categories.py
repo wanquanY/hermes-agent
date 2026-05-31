@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import tools.doxie_skill_categories as doxie_categories
 import tools.skill_manager_tool as skill_manager
@@ -91,3 +92,50 @@ def test_skill_manage_create_accepts_enabled_doxie_category(monkeypatch, tmp_pat
     assert result["category"] == "reading"
     assert result["path"] == "reading/reading-helper"
     assert (skills_dir / "reading" / "reading-helper" / "SKILL.md").read_text(encoding="utf-8") == _skill_content()
+
+
+def test_fetch_categories_returns_on_interrupt(monkeypatch):
+    monkeypatch.setenv("DOXIE_SKILL_CATEGORIES_URL", "https://doxie.example/categories")
+    monkeypatch.setenv("DOXIE_LLM_RUNTIME_TOKEN", "runtime-token")
+    started = threading.Event()
+    release = threading.Event()
+    result_holder = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"data": []}'
+
+    def fake_urlopen(_request, *, timeout):
+        started.set()
+        release.wait(timeout=5)
+        return FakeResponse()
+
+    monkeypatch.setattr(doxie_categories.urllib.request, "urlopen", fake_urlopen)
+
+    def run_fetch():
+        try:
+            doxie_categories._fetch_categories()
+        except InterruptedError as exc:
+            result_holder["error"] = str(exc)
+
+    worker = threading.Thread(target=run_fetch)
+    worker.start()
+    assert started.wait(timeout=1)
+
+    from tools.interrupt import set_interrupt
+
+    set_interrupt(True, thread_id=worker.ident)
+    worker.join(timeout=1)
+    release.set()
+    set_interrupt(False, thread_id=worker.ident)
+
+    assert not worker.is_alive()
+    assert result_holder["error"] == "Doxie skill category request interrupted."

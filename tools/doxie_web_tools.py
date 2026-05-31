@@ -196,11 +196,16 @@ def _proxy_result(env_name: str, payload: dict[str, Any]) -> str:
         _env_int("DOXIE_WEB_PROXY_TIMEOUT", DOXIE_WEB_PROXY_DEFAULT_TIMEOUT_SECONDS),
     )
     try:
-        result = _post_json(
-            url,
-            payload,
-            token=token,
-            timeout=timeout,
+        from tools.interrupt import run_blocking_interruptibly
+
+        result = run_blocking_interruptibly(
+            lambda: _post_json(
+                url,
+                payload,
+                token=token,
+                timeout=timeout,
+            ),
+            interrupted_message="Doxie web proxy request interrupted",
         )
     except Exception as exc:
         return tool_error(str(exc))

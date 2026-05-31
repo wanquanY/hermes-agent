@@ -165,12 +165,24 @@ def _backend_call(command: str, payload: dict | None = None) -> Any:
             "content-type": "application/json; charset=utf-8",
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = json.loads(response.read().decode("utf-8") or "{}")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Doxie backend bridge rejected {command}: {detail}") from exc
+
+    def _send() -> tuple[bool, bytes]:
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return True, response.read()
+        except urllib.error.HTTPError as exc:
+            return False, exc.read()
+
+    from tools.interrupt import run_blocking_interruptibly
+
+    ok, raw = run_blocking_interruptibly(
+        _send,
+        interrupted_message="Doxie backend bridge request interrupted",
+    )
+    if not ok:
+        detail = raw.decode("utf-8", errors="replace")
+        raise RuntimeError(f"Doxie backend bridge rejected {command}: {detail}")
+    data = json.loads(raw.decode("utf-8") or "{}")
     if not isinstance(data, dict) or not data.get("ok"):
         raise RuntimeError(str(data.get("error") if isinstance(data, dict) else data))
     return data.get("value")

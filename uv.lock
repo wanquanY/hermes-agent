@@ -1593,6 +1593,7 @@ version = "0.14.0"
 source = { editable = "." }
 dependencies = [
     { name = "croniter" },
+    { name = "defusedxml" },
     { name = "fire" },
     { name = "httpx", extra = ["socks"] },
     { name = "jinja2" },
@@ -1797,6 +1798,7 @@ requires-dist = [
     { name = "croniter", specifier = "==6.0.0" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = "==0.155.0" },
     { name = "debugpy", marker = "extra == 'dev'", specifier = "==1.8.20" },
+    { name = "defusedxml", specifier = "==0.7.1" },
     { name = "dingtalk-stream", marker = "extra == 'dingtalk'", specifier = "==0.24.3" },
     { name = "discord-py", extras = ["voice"], marker = "extra == 'messaging'", specifier = "==2.7.1" },
     { name = "edge-tts", marker = "extra == 'edge-tts'", specifier = "==7.2.7" },

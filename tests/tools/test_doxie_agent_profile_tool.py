@@ -1,5 +1,7 @@
 import json
+import threading
 
+import tools.doxie_agent_profile_tool as doxie_agent_profile_tool
 from tools.doxie_agent_profile_tool import (
     design_agent_profile,
     install_skill_to_agent_profile_draft,
@@ -93,6 +95,51 @@ def test_design_agent_profile_saves_draft_through_backend_bridge(monkeypatch):
     assert calls[0][1]["category"] == "工作"
     assert result["doxie_event"] == "agent_profile_design_draft_saved"
     assert result["draftId"] == "draft-1"
+
+
+def test_backend_bridge_call_returns_on_interrupt(monkeypatch):
+    monkeypatch.setenv("DOXIE_BACKEND_BRIDGE_URL", "http://127.0.0.1:1/api/doxie/invoke")
+    monkeypatch.setenv("DOXIE_BACKEND_BRIDGE_TOKEN", "token")
+    started = threading.Event()
+    release = threading.Event()
+    result_holder = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"ok": true, "value": {"id": "draft-1"}}'
+
+    def fake_urlopen(_request, *, timeout):
+        started.set()
+        release.wait(timeout=5)
+        return FakeResponse()
+
+    monkeypatch.setattr(doxie_agent_profile_tool.urllib.request, "urlopen", fake_urlopen)
+
+    def run_call():
+        try:
+            doxie_agent_profile_tool._backend_call("doxie_agent_profile_draft_get", {"draftId": "draft-1"})
+        except InterruptedError as exc:
+            result_holder["error"] = str(exc)
+
+    worker = threading.Thread(target=run_call)
+    worker.start()
+    assert started.wait(timeout=1)
+
+    from tools.interrupt import set_interrupt
+
+    set_interrupt(True, thread_id=worker.ident)
+    worker.join(timeout=1)
+    release.set()
+    set_interrupt(False, thread_id=worker.ident)
+
+    assert not worker.is_alive()
+    assert result_holder["error"] == "Doxie backend bridge request interrupted"
 
 
 def test_design_agent_profile_creates_revision_from_selected_target(monkeypatch):
