@@ -4098,12 +4098,13 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
 
 
 def test_session_most_recent_returns_first_non_denied(monkeypatch):
-    """Drops `tool` rows like session.list does, returns the first hit."""
+    """Drops internal rows like session.list does, returns the first hit."""
 
     class _DB:
         def list_sessions_rich(self, *, source=None, limit=200):
             return [
                 {"id": "tool-1", "source": "tool", "title": "noise", "started_at": 100},
+                {"id": "cron-1", "source": "cron", "title": "runtime", "started_at": 100},
                 {"id": "tui-1", "source": "tui", "title": "real", "started_at": 99},
             ]
 
@@ -4118,10 +4119,13 @@ def test_session_most_recent_returns_first_non_denied(monkeypatch):
     assert resp["result"]["source"] == "tui"
 
 
-def test_session_most_recent_returns_null_when_only_tool_rows(monkeypatch):
+def test_session_most_recent_returns_null_when_only_internal_rows(monkeypatch):
     class _DB:
         def list_sessions_rich(self, *, source=None, limit=200):
-            return [{"id": "tool-1", "source": "tool", "started_at": 1}]
+            return [
+                {"id": "cron-1", "source": "cron", "started_at": 2},
+                {"id": "tool-1", "source": "tool", "started_at": 1},
+            ]
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
 

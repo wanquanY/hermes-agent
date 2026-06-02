@@ -117,6 +117,15 @@ tests/agent/                       2.3%
 
 但是，这次上游确实有几类和客户端接入相关的更新，适合后续选择性吸收。
 
+### 本地现状更新（2026-06-02）
+
+截至 2026-06-02，本地 Doxie 接入在选择性吸收 P0/P1 后又补齐了两项客户端稳定性行为：
+
+- Doxie automation create / update / remove 工具在返回结构化成功事件后，可以由 `agent/direct_tool_response.py` 直接生成最终 assistant 回复。这个路径只对单个白名单 Doxie automation tool call 生效，失败或非结构化结果仍回到普通模型 follow-up，避免为了确定性工具结果再次请求模型导致额外延迟或 running 状态卡住。
+- TUI Gateway 的会话列表把 `cron` 与 `tool` 一起作为内部 runtime source 排除。Doxie 自动化任务的用户可见结果通过当前会话或新会话 result binding 展示，raw cron execution session 不再污染客户端会话侧栏。
+
+这两项进一步强化了原报告的判断：Doxie automation 和 session/run state 仍是本地客户端 contract，不应被 upstream API server session controls 或原生 cron 流程替代。后续吸收上游时，仍应优先保留本地 run/event binding、profile-scoped runtime worker 和 Doxie automation 工具边界。
+
 ### 对客户端接入有直接价值的上游更新
 
 1. Dashboard / WebSocket 认证链路：

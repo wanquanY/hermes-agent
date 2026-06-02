@@ -21,6 +21,7 @@ from tui_gateway.services.workspace import (
 _server = bind_server_globals(globals())
 _interrupt_work_queue: queue.SimpleQueue = queue.SimpleQueue()
 _agent_interrupt_work_queue: queue.SimpleQueue = queue.SimpleQueue()
+_INTERNAL_SESSION_LIST_SOURCES = ("tool", "cron")
 
 
 def _interrupt_trace(message: str) -> None:
@@ -486,11 +487,17 @@ def _(rid, params: dict) -> dict:
         # user-facing surface — CLI, TUI, all gateway platforms (including new
         # ones not enumerated here), ACP adapter clients, webhook sessions,
         # custom `HERMES_SESSION_SOURCE` values, and older installs with
-        # different source labels. We deny-list only the noisy internal
-        # sources (``tool`` sub-agent runs) rather than allow-listing a
-        # fixed set of platform names that goes stale whenever a new
-        # platform is added or a user names their own source.
-        deny = frozenset({"tool"})
+        # different source labels. We deny-list only noisy internal runtime
+        # sources rather than allow-listing a fixed set of platform names
+        # that goes stale whenever a new platform is added or a user names
+        # their own source.
+        #
+        # ``tool`` rows are sub-agent runs. ``cron`` rows are scheduler
+        # execution contexts; Doxie current-session/new-session result
+        # bindings project their user-visible output into the target
+        # conversation, so surfacing the raw cron session creates duplicate
+        # sidebar conversations that begin with the internal cron prompt.
+        deny = _INTERNAL_SESSION_LIST_SOURCES
 
         limit = _bounded_page_limit(params.get("limit"), default=200, maximum=200)
         cursor = _decode_page_cursor(params.get("cursor"))
@@ -553,8 +560,9 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Return the most recent human-facing session id, or ``None``.
 
-    Mirrors ``session.list``'s deny-list behaviour (drops ``tool``
-    sub-agent rows).  Used by TUI auto-resume when
+    Mirrors ``session.list``'s deny-list behaviour (drops internal
+    runtime rows such as sub-agent and cron execution sessions). Used by
+    TUI auto-resume when
     ``display.tui_auto_resume_recent`` is on; the field is also handy
     for any CLI tooling that wants "latest session" without paginating
     the full list.
@@ -568,7 +576,7 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _ok(rid, {"session_id": None})
     try:
-        deny = frozenset({"tool"})
+        deny = frozenset(_INTERNAL_SESSION_LIST_SOURCES)
         # Over-fetch by a generous bounded amount so heavy sub-agent
         # users (lots of recent ``tool`` rows) don't get a false
         # "no eligible session" answer.  ``session.list`` uses a

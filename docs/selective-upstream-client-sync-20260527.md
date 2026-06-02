@@ -35,6 +35,15 @@ codex/selective-upstream-client-sync-20260527
 - API server session controls / media session chat 的完整实现：本轮只吸收能力发现和安全相关部分，避免绕过 Doxie run control 与 prompt attachment contract。
 - TUI session orchestrator、Docker/s6、website/i18n、optional skills/MCP 大量新增：仍按 P2/P3 暂缓。
 
+## 现状更新（2026-06-02）
+
+本分支在 `doxie-upstream-sync-20260527` 之后继续保留 Doxie 客户端接入边界，并补齐两项本地 runtime 行为：
+
+- Doxie automation 的 create / update / remove 工具结果现在可以走 direct tool response。`agent/direct_tool_response.py` 只对白名单内的 Doxie 自动化工具、单个 tool call、结构化成功事件生效；`agent/conversation_loop.py` 在工具执行后直接生成最终 assistant 回复并结束本轮，避免为了“已创建/已更新/已删除任务”这种确定性结果再请求模型 follow-up，从而减少延迟和二次流式卡住风险。
+- `session.list` 和 `session.most_recent` 现在把 `cron` 与 `tool` 一起视为内部 runtime source。Doxie 自动化任务的用户可见结果应通过 current-session / new-session result binding 投影到目标会话；raw cron execution session 不应作为独立聊天出现在 Doxie 会话侧栏，否则会暴露内部 cron prompt 并造成重复会话。
+
+这两项都不是对上游 API session controls 或原生 `cronjob` 的吸收。它们是本地 Doxie contract 的收敛：自动化任务仍由 `tools/doxie_automation_task_tool.py`、`tui_gateway/services/doxie_cron_jobs.py` 和 Doxie run/event binding 管理，模型不重新获得原生 `cronjob` 工具作为主入口。
+
 ## 逐项核对结果（2026-05-27）
 
 本节记录按本文 P0/P1 清单逐项核对当前工作区后的真实状态。后续再同步上游时，优先看这里，而不是只看提交是否 cherry-pick 成功。
@@ -118,8 +127,9 @@ codex/selective-upstream-client-sync-20260527
 | workspace / artifact API | `tui_gateway/services/workspaces/*`, `artifact_registry/*` | 否 |
 | prompt attachments / document parse | `doxie_extension/prompt_attachments.py`, `document_parse_tool.py` | 否 |
 | desktop visible browser bridge | `doxie_extension/browser_bridge.py`, `tools/browser_tool.py` | 否 |
-| Doxie automation | `tools/doxie_automation_task_tool.py`, `tui_gateway/services/doxie_cron_jobs.py` | 否 |
+| Doxie automation | `tools/doxie_automation_task_tool.py`, `tui_gateway/services/doxie_cron_jobs.py`, `agent/direct_tool_response.py` | 否 |
 | runtime-scoped control RPC | approval / cron / skills / tools proxy to runtime worker | 否 |
+| Doxie session sidebar filtering | `tui_gateway/methods/session.py` 隐藏 `tool` / `cron` 内部 runtime sessions | 否 |
 
 因此，本次不是“上游已经提供客户端接入能力，必须合并”的情况。正确动作是按下面列表挑选。
 

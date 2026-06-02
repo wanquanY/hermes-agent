@@ -7,8 +7,9 @@ History:
   values, newly-added platforms) were silently dropped from the resume
   picker — users reported "lots of sessions are missing from browse
   but exist in .hermes/sessions."
-- The handler now deny-lists only the internal/noisy source ``tool``
-  (sub-agent runs) and surfaces every other source to the picker.
+- The handler now deny-lists only internal/noisy sources such as ``tool``
+  (sub-agent runs) and ``cron`` (scheduler execution contexts), and surfaces
+  every human-facing source to the picker.
 - The handler now exposes backend pagination metadata so clients can keep
   loading older sessions without a fixed fetch cap.
 """
@@ -41,10 +42,11 @@ def _call(limit: int | None = None):
 
 
 def test_session_list_surfaces_all_user_facing_sources(monkeypatch):
-    """acp / webhook / custom sources should all appear; only ``tool`` is hidden."""
+    """acp / webhook / custom sources appear; internal runtime sessions stay hidden."""
     rows = [
         {"id": "tui-1", "source": "tui", "started_at": 9},
         {"id": "tool-1", "source": "tool", "started_at": 8},
+        {"id": "cron-1", "source": "cron", "started_at": 8},
         {"id": "tg-1", "source": "telegram", "started_at": 7},
         {"id": "acp-1", "source": "acp", "started_at": 6},
         {"id": "cli-1", "source": "cli", "started_at": 5},
@@ -66,8 +68,9 @@ def test_session_list_surfaces_all_user_facing_sources(monkeypatch):
     assert "webhook-1" in ids, "webhook sessions were being hidden by the old allow-list"
     assert "custom-1" in ids, "custom HERMES_SESSION_SOURCE values were being hidden"
 
-    # Only internal sub-agent runs stay hidden.
+    # Internal execution contexts stay hidden.
     assert "tool-1" not in ids
+    assert "cron-1" not in ids
 
 
 def test_session_list_default_limit_stays_legacy_compatible(monkeypatch):
@@ -78,7 +81,7 @@ def test_session_list_default_limit_stays_legacy_compatible(monkeypatch):
     _call()  # no explicit limit
     assert db.calls[0].get("limit") == 201, db.calls[0]
     assert db.calls[0].get("order_by_last_active") is True, db.calls[0]
-    assert db.calls[0].get("exclude_sources") == ["tool"], db.calls[0]
+    assert db.calls[0].get("exclude_sources") == ["tool", "cron"], db.calls[0]
 
 
 def test_session_list_returns_last_message_activity_as_updated_at(monkeypatch):
@@ -185,6 +188,7 @@ def test_session_list_preserves_ordering_after_filter(monkeypatch):
     rows = [
         {"id": "newest", "source": "telegram", "started_at": 5},
         {"id": "internal", "source": "tool", "started_at": 4},
+        {"id": "cron-runtime", "source": "cron", "started_at": 4},
         {"id": "middle", "source": "tui", "started_at": 3},
         {"id": "also-visible", "source": "webhook", "started_at": 2},
         {"id": "oldest", "source": "discord", "started_at": 1},

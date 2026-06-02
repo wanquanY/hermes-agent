@@ -178,13 +178,13 @@ def test_session_list_returns_doxie_sanitized_title_and_preview(monkeypatch):
         def list_sessions_rich(self, **_kwargs):
             return [
                 {
-                    "id": "cron-session",
+                    "id": "visible-session",
                     "title": CRON_HINT,
                     "preview": CRON_HINT + "创建自动化任务",
                     "started_at": 1,
                     "last_active": 2,
                     "message_count": 2,
-                    "source": "cron",
+                    "source": "tui",
                 }
             ]
 

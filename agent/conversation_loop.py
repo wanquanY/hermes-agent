@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 from agent.anthropic_adapter import _is_oauth_token
 from agent.auxiliary_client import set_runtime_main
 from agent.codex_responses_adapter import _summarize_user_message_for_log
+from agent.direct_tool_response import build_direct_tool_response
 from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
@@ -3447,6 +3448,23 @@ def run_conversation(
                                 agent.stream_delta_callback(None)
                             except Exception:
                                 pass
+                    break
+
+                direct_tool_response = build_direct_tool_response(
+                    assistant_message.tool_calls,
+                    messages,
+                )
+                if direct_tool_response:
+                    _direct_function = getattr(
+                        assistant_message.tool_calls[0],
+                        "function",
+                        None,
+                    )
+                    _direct_tool_name = getattr(_direct_function, "name", "tool")
+                    _turn_exit_reason = f"direct_tool_response({_direct_tool_name})"
+                    final_response = direct_tool_response
+                    messages.append({"role": "assistant", "content": final_response})
+                    agent._fire_stream_delta(final_response)
                     break
 
                 # Reset per-turn retry counters after successful tool
