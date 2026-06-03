@@ -293,6 +293,102 @@ class TestMessageStorage:
             "totalCount": 5,
         }
 
+    def test_get_messages_page_tail_expands_to_complete_turn_boundary(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="previous request")
+        metadata = {
+            "turn_id": "turn-long",
+            "run_id": "run-long",
+            "client_message_id": "client-message-long",
+        }
+        user_id = db.append_message(
+            "s1",
+            role="user",
+            content="optimize the site",
+            metadata=metadata,
+        )
+        tool_ids = [
+            db.append_message(
+                "s1",
+                role="tool",
+                content=f"tool result {idx}",
+                tool_name="read_file",
+                tool_call_id=f"call-{idx}",
+                metadata=metadata,
+            )
+            for idx in range(4)
+        ]
+        assistant_id = db.append_message(
+            "s1",
+            role="assistant",
+            content="done",
+            metadata=metadata,
+        )
+
+        page = db.get_messages_page_as_conversation("s1", direction="tail", limit=2)
+
+        assert [m["content"] for m in page["messages"]] == [
+            "optimize the site",
+            "tool result 0",
+            "tool result 1",
+            "tool result 2",
+            "tool result 3",
+            "done",
+        ]
+        assert [m["message_id"] for m in page["messages"]] == [
+            str(user_id),
+            *(str(tool_id) for tool_id in tool_ids),
+            str(assistant_id),
+        ]
+        assert page["pageInfo"] == {
+            "prev_cursor_id": user_id,
+            "next_cursor_id": None,
+            "hasMoreBefore": True,
+            "hasMoreAfter": False,
+            "totalCount": 7,
+        }
+
+    def test_get_messages_page_turn_expansion_recovers_unkeyed_user_boundary(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="previous request")
+        user_id = db.append_message("s1", role="user", content="legacy keyed tool request")
+        metadata = {
+            "turn_id": "turn-legacy",
+            "run_id": "run-legacy",
+            "client_message_id": "client-message-legacy",
+        }
+        tool_id = db.append_message(
+            "s1",
+            role="tool",
+            content="tool result",
+            tool_name="read_file",
+            tool_call_id="call-1",
+            metadata=metadata,
+        )
+        assistant_id = db.append_message(
+            "s1",
+            role="assistant",
+            content="done",
+            metadata=metadata,
+        )
+
+        page = db.get_messages_page_as_conversation("s1", direction="tail", limit=1)
+
+        assert [m["content"] for m in page["messages"]] == [
+            "legacy keyed tool request",
+            "tool result",
+            "done",
+        ]
+        assert [m["message_id"] for m in page["messages"]] == [
+            str(user_id),
+            str(tool_id),
+            str(assistant_id),
+        ]
+        assert page["pageInfo"]["prev_cursor_id"] == user_id
+        assert page["pageInfo"]["hasMoreBefore"] is True
+        assert page["pageInfo"]["next_cursor_id"] is None
+        assert page["pageInfo"]["totalCount"] == 4
+
     def test_get_messages_page_before_cursor_returns_older_page(self, db):
         db.create_session(session_id="s1", source="cli")
         ids = [

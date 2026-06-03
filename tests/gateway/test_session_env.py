@@ -8,6 +8,7 @@ from gateway.run import GatewayRunner
 from gateway.session import SessionContext, SessionSource
 from gateway.session_context import (
     get_session_env,
+    get_session_context_env,
     set_session_vars,
     clear_session_vars,
     _VAR_MAP,
@@ -122,6 +123,22 @@ def test_get_session_env_falls_back_to_os_environ(monkeypatch):
     # must not leak through after a gateway session is cleaned up.
     clear_session_vars(tokens)
     assert get_session_env("HERMES_SESSION_PLATFORM") == ""
+
+
+def test_get_session_context_env_never_falls_back_to_os_environ(monkeypatch):
+    """Ownership-sensitive routing must not read another session's env fallback."""
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "discord")
+
+    assert get_session_env("HERMES_SESSION_PLATFORM") == "discord"
+    assert get_session_context_env("HERMES_SESSION_PLATFORM") == ""
+
+    tokens = set_session_vars(platform="telegram")
+    try:
+        assert get_session_context_env("HERMES_SESSION_PLATFORM") == "telegram"
+    finally:
+        clear_session_vars(tokens)
+
+    assert get_session_context_env("HERMES_SESSION_PLATFORM") == ""
 
 
 def test_get_session_env_default_when_nothing_set(monkeypatch):

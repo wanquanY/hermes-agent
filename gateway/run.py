@@ -14449,10 +14449,12 @@ class GatewayRunner:
         )
 
     async def _inject_watch_notification(self, synth_text: str, evt: dict) -> None:
-        """Inject a watch-pattern notification as a synthetic message event.
+        """Deliver a watch-pattern notification as a status message.
 
         Routing must come from the queued watch event itself, not from whatever
         foreground message happened to be active when the queue was drained.
+        Watch-pattern matches are process status events, not user input, so
+        they must not enter ``adapter.handle_message()`` and start an agent turn.
         """
         source = self._build_process_event_source(evt)
         if not source:
@@ -14470,22 +14472,17 @@ class GatewayRunner:
         if not adapter:
             return
         try:
-            synth_event = MessageEvent(
-                text=synth_text,
-                message_type=MessageType.TEXT,
-                source=source,
-                internal=True,
-                message_id=str(evt.get("message_id") or "").strip() or None,
-            )
+            message_id = str(evt.get("message_id") or "").strip() or None
+            metadata = self._thread_metadata_for_source(source, message_id)
             logger.info(
-                "Watch pattern notification — injecting for %s chat=%s thread=%s",
+                "Watch pattern notification — sending for %s chat=%s thread=%s",
                 platform_name,
                 source.chat_id,
                 source.thread_id,
             )
-            await adapter.handle_message(synth_event)
+            await adapter.send(source.chat_id, synth_text, metadata=metadata)
         except Exception as e:
-            logger.error("Watch notification injection error: %s", e)
+            logger.error("Watch notification delivery error: %s", e)
 
     async def _run_process_watcher(self, watcher: dict) -> None:
         """

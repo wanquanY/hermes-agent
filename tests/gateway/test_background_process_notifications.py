@@ -272,15 +272,12 @@ async def test_inject_watch_notification_routes_from_session_store_origin(monkey
 
     await runner._inject_watch_notification("[SYSTEM: Background process matched]", evt)
 
-    adapter.handle_message.assert_awaited_once()
-    synth_event = adapter.handle_message.await_args.args[0]
-    assert synth_event.internal is True
-    assert synth_event.source.platform == Platform.TELEGRAM
-    assert synth_event.source.chat_id == "-100"
-    assert synth_event.source.chat_type == "group"
-    assert synth_event.source.thread_id == "42"
-    assert synth_event.source.user_id == "123"
-    assert synth_event.source.user_name == "Emiliyan"
+    adapter.handle_message.assert_not_awaited()
+    adapter.send.assert_awaited_once_with(
+        "-100",
+        "[SYSTEM: Background process matched]",
+        metadata={"thread_id": "42"},
+    )
 
 
 @pytest.mark.asyncio
@@ -382,10 +379,17 @@ async def test_inject_watch_notification_carries_message_id_reply_anchor(monkeyp
 
     await runner._inject_watch_notification("[SYSTEM: Background process matched]", evt)
 
-    adapter.handle_message.assert_awaited_once()
-    synth_event = adapter.handle_message.await_args.args[0]
-    assert synth_event.message_id == "777"
-    assert synth_event.source.thread_id == "24296"
+    adapter.handle_message.assert_not_awaited()
+    adapter.send.assert_awaited_once_with(
+        "123",
+        "[SYSTEM: Background process matched]",
+        metadata={
+            "thread_id": "24296",
+            "telegram_dm_topic_reply_fallback": True,
+            "direct_messages_topic_id": "24296",
+            "telegram_reply_to_message_id": "777",
+        },
+    )
 
 
 def test_build_process_event_source_falls_back_to_session_key_chat_type(monkeypatch, tmp_path):
@@ -474,11 +478,13 @@ async def test_inject_watch_notification_ignores_foreground_event_source(monkeyp
 
     await runner._inject_watch_notification("[SYSTEM: watch match]", evt)
 
-    adapter.handle_message.assert_awaited_once()
-    synth_event = adapter.handle_message.await_args.args[0]
-    # Must route to thread 42 (process origin), NOT some other thread
-    assert synth_event.source.thread_id == "42"
-    assert synth_event.source.user_id == "proc_owner"
+    adapter.handle_message.assert_not_awaited()
+    # Must route to thread 42 (process origin), NOT some other thread.
+    adapter.send.assert_awaited_once_with(
+        "-100",
+        "[SYSTEM: watch match]",
+        metadata={"thread_id": "42"},
+    )
 
 
 def test_build_process_event_source_returns_none_for_empty_evt(monkeypatch, tmp_path):

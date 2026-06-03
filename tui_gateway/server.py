@@ -35,6 +35,8 @@ from tui_gateway.services.model_descriptor import (
     set_session_model_descriptor as _set_session_model_descriptor,
 )
 from tui_gateway.services.notification_poller import (
+    notification_poller_loop as _notification_poller_loop_service,
+    session_owns_notification_event as _session_owns_notification_event,
     start_notification_poller as _start_notification_poller_service,
 )
 from tui_gateway.services.profile_context import (
@@ -1876,6 +1878,29 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
         session,
         emit=_emit,
         run_prompt_submit=_run_prompt_submit,
+        resolve_event_session=_resolve_notification_event_session,
+    )
+
+
+def _resolve_notification_event_session(evt: dict) -> tuple[str, dict] | None:
+    for candidate_sid, candidate in list(_sessions.items()):
+        if _session_owns_notification_event(candidate, evt):
+            return candidate_sid, candidate
+    return None
+
+
+def _notification_poller_loop(
+    stop_event: threading.Event,
+    sid: str,
+    session: dict,
+) -> None:
+    return _notification_poller_loop_service(
+        stop_event,
+        sid,
+        session,
+        emit=_emit,
+        run_prompt_submit=_run_prompt_submit,
+        resolve_event_session=_resolve_notification_event_session,
     )
 
 

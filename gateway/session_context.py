@@ -172,3 +172,20 @@ def get_session_env(name: str, default: str = "") -> str:
             return value
     # Fall back to os.environ for CLI, cron, and test compatibility
     return os.getenv(name, default)
+
+
+def get_session_context_env(name: str, default: str = "") -> str:
+    """Read session context without falling back to process-global env vars.
+
+    Use this for ownership-sensitive routing metadata.  ``os.environ`` is
+    intentionally process-global, so it can contain another concurrent
+    gateway session's values; falling back to it would make background events
+    appear in the wrong chat/thread.
+    """
+    var = _VAR_MAP.get(name)
+    if var is None:
+        return default
+    value = var.get()
+    if value is _UNSET:
+        return default
+    return value

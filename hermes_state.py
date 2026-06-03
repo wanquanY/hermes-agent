@@ -2109,10 +2109,122 @@ class SessionDB(SessionDBRunMixin):
 
     def _conversation_message_columns(self) -> str:
         return (
-            "id, role, content, tool_call_id, tool_calls, tool_name, timestamp, "
+            "id, session_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, "
             "finish_reason, reasoning, reasoning_content, reasoning_details, "
             "codex_reasoning_items, codex_message_items, platform_message_id, metadata_json"
         )
+
+    @staticmethod
+    def _message_row_turn_metadata(row) -> Dict[str, str]:
+        try:
+            raw_metadata = row["metadata_json"]
+        except (KeyError, IndexError):
+            return {}
+        if not raw_metadata:
+            return {}
+        try:
+            metadata = json.loads(raw_metadata)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Failed to deserialize message metadata for turn expansion")
+            return {}
+        if not isinstance(metadata, dict):
+            return {}
+
+        identity: Dict[str, str] = {}
+        for key in ("turn_id", "run_id", "client_message_id"):
+            value = metadata.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                identity[key] = text
+        return identity
+
+    def _expand_message_page_rows_to_turn_boundaries(
+        self,
+        rows: List[Any],
+        *,
+        session_ids: List[str],
+        columns: str,
+    ) -> List[Any]:
+        if not rows:
+            return rows
+
+        selected_identity_values: Dict[str, set[str]] = {
+            "turn_id": set(),
+            "run_id": set(),
+            "client_message_id": set(),
+        }
+        for row in rows:
+            identity = self._message_row_turn_metadata(row)
+            for key, value in identity.items():
+                selected_identity_values[key].add(value)
+
+        if not any(selected_identity_values.values()):
+            return rows
+
+        placeholders = ",".join("?" for _ in session_ids)
+        candidate_rows = self._conn.execute(
+            f"SELECT {columns} FROM messages "
+            f"WHERE session_id IN ({placeholders}) AND metadata_json IS NOT NULL "
+            "ORDER BY id",
+            tuple(session_ids),
+        ).fetchall()
+
+        rows_by_id = {int(row["id"]): row for row in rows}
+        matched_min_id_by_session: Dict[str, int] = {}
+        matched_user_sessions: set[str] = set()
+
+        for row in candidate_rows:
+            identity = self._message_row_turn_metadata(row)
+            if not any(
+                value in selected_identity_values[key]
+                for key, value in identity.items()
+                if key in selected_identity_values
+            ):
+                continue
+
+            row_id = int(row["id"])
+            rows_by_id[row_id] = row
+            row_session_id = str(row["session_id"])
+            current_min = matched_min_id_by_session.get(row_session_id)
+            if current_min is None or row_id < current_min:
+                matched_min_id_by_session[row_session_id] = row_id
+            if row["role"] == "user":
+                matched_user_sessions.add(row_session_id)
+
+        for row_session_id, first_matched_id in matched_min_id_by_session.items():
+            if row_session_id in matched_user_sessions:
+                continue
+            previous_user = self._conn.execute(
+                f"SELECT {columns} FROM messages "
+                "WHERE session_id = ? AND role = 'user' AND id < ? "
+                "ORDER BY id DESC LIMIT 1",
+                (row_session_id, first_matched_id),
+            ).fetchone()
+            if previous_user is not None:
+                rows_by_id[int(previous_user["id"])] = previous_user
+
+        return [rows_by_id[row_id] for row_id in sorted(rows_by_id)]
+
+    def _has_messages_on_page_side(
+        self,
+        session_ids: List[str],
+        *,
+        row_id: Optional[int],
+        side: str,
+    ) -> bool:
+        if row_id is None:
+            return False
+        placeholders = ",".join("?" for _ in session_ids)
+        operator = "<" if side == "before" else ">"
+        row = self._conn.execute(
+            f"SELECT 1 FROM messages "
+            f"WHERE session_id IN ({placeholders}) AND id {operator} ? "
+            "LIMIT 1",
+            tuple(session_ids) + (row_id,),
+        ).fetchone()
+        return row is not None
 
     def get_messages_as_conversation(
         self,
@@ -2220,6 +2332,24 @@ class SessionDB(SessionDBRunMixin):
                 selected_rows = list(reversed(rows[:page_limit]))
                 has_more_after = False
 
+            selected_rows = self._expand_message_page_rows_to_turn_boundaries(
+                selected_rows,
+                session_ids=session_ids,
+                columns=columns,
+            )
+            first_id = int(selected_rows[0]["id"]) if selected_rows else None
+            last_id = int(selected_rows[-1]["id"]) if selected_rows else None
+            has_more_before = self._has_messages_on_page_side(
+                session_ids,
+                row_id=first_id,
+                side="before",
+            )
+            has_more_after = self._has_messages_on_page_side(
+                session_ids,
+                row_id=last_id,
+                side="after",
+            )
+
         messages = []
         for row in selected_rows:
             msg = self._message_row_as_conversation(
@@ -2230,8 +2360,6 @@ class SessionDB(SessionDBRunMixin):
                 continue
             messages.append(msg)
 
-        first_id = int(selected_rows[0]["id"]) if selected_rows else None
-        last_id = int(selected_rows[-1]["id"]) if selected_rows else None
         return {
             "messages": messages,
             "pageInfo": {

@@ -5068,6 +5068,7 @@ def test_notification_poller_delivers_completion(monkeypatch):
     process_registry.completion_queue.put({
         "type": "completion",
         "session_id": "proc_poller_test",
+        "session_key": "session-key",
         "command": "echo hello",
         "exit_code": 0,
         "output": "hello",
@@ -5157,6 +5158,7 @@ def test_notification_poller_requeues_when_busy(monkeypatch):
     evt = {
         "type": "completion",
         "session_id": "proc_busy_test",
+        "session_key": "session-key",
         "command": "make build",
         "exit_code": 0,
         "output": "ok",
@@ -5179,5 +5181,106 @@ def test_notification_poller_requeues_when_busy(monkeypatch):
         assert requeued["session_id"] == "proc_busy_test"
     finally:
         server._sessions.pop("sid_busy", None)
+        while not process_registry.completion_queue.empty():
+            process_registry.completion_queue.get_nowait()
+
+
+def test_notification_poller_watch_match_is_status_only(monkeypatch):
+    """watch_patterns are status events, not prompts that should run the agent."""
+    from tools.process_registry import process_registry
+
+    turns = []
+    emitted = []
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None):
+            turns.append(prompt)
+            return {"final_response": "ok", "messages": []}
+
+    sess = _session(agent=_Agent())
+    server._sessions["sid_watch"] = sess
+    monkeypatch.setattr(server, "_emit", lambda *a, **kw: emitted.append(a))
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+
+    while not process_registry.completion_queue.empty():
+        process_registry.completion_queue.get_nowait()
+
+    stop = threading.Event()
+    process_registry.completion_queue.put({
+        "type": "watch_match",
+        "session_id": "proc_watch_test",
+        "session_key": "session-key",
+        "command": "tail -f app.log",
+        "pattern": "ready",
+        "output": "ready",
+    })
+    stop.set()
+
+    try:
+        server._notification_poller_loop(stop, "sid_watch", sess)
+
+        status_calls = [a for a in emitted if a[0] == "status.update"]
+        assert len(status_calls) == 1
+        assert status_calls[0][1] == "sid_watch"
+        assert status_calls[0][2]["kind"] == "process"
+        assert "watch pattern" in status_calls[0][2]["text"]
+        assert turns == []
+    finally:
+        server._sessions.pop("sid_watch", None)
+        while not process_registry.completion_queue.empty():
+            process_registry.completion_queue.get_nowait()
+
+
+def test_notification_poller_routes_completion_to_event_owner(monkeypatch):
+    """A poller that wins the global queue must dispatch to the event owner."""
+    from tui_gateway.services.notification_poller import notification_poller_loop
+    from tools.process_registry import process_registry
+
+    submitted = []
+    emitted = []
+    owner = _session(session_key="owner-session")
+    other = _session(session_key="other-session")
+
+    def resolve_event_session(evt):
+        if evt.get("session_key") == "owner-session":
+            return "sid_owner", owner
+        return None
+
+    def run_prompt_submit(rid, sid, session, text):
+        submitted.append((sid, session["session_key"], text))
+
+    while not process_registry.completion_queue.empty():
+        process_registry.completion_queue.get_nowait()
+    process_registry._completion_consumed.discard("proc_owner_test")
+
+    stop = threading.Event()
+    process_registry.completion_queue.put({
+        "type": "completion",
+        "session_id": "proc_owner_test",
+        "session_key": "owner-session",
+        "command": "echo owner",
+        "exit_code": 0,
+        "output": "owner",
+    })
+    stop.set()
+
+    try:
+        notification_poller_loop(
+            stop,
+            "sid_other",
+            other,
+            emit=lambda *a, **kw: emitted.append(a),
+            run_prompt_submit=run_prompt_submit,
+            resolve_event_session=resolve_event_session,
+        )
+
+        assert len(submitted) == 1
+        assert submitted[0][0] == "sid_owner"
+        assert submitted[0][1] == "owner-session"
+        status_calls = [a for a in emitted if a[0] == "status.update"]
+        assert len(status_calls) == 1
+        assert status_calls[0][1] == "sid_owner"
+    finally:
         while not process_registry.completion_queue.empty():
             process_registry.completion_queue.get_nowait()

@@ -1990,6 +1990,7 @@ def terminal_tool(
             from tools.process_registry import process_registry
 
             session_key = get_current_session_key(default="")
+            notification_session_key = session_key
             effective_cwd = workdir or cwd
             try:
                 if env_type == "local":
@@ -2026,14 +2027,17 @@ def terminal_tool(
                 # watch-pattern and completion notifications can be
                 # routed back to the correct chat/thread.
                 if background and (notify_on_complete or watch_patterns):
-                    from gateway.session_context import get_session_env as _gse
-                    _gw_platform = _gse("HERMES_SESSION_PLATFORM", "")
+                    from gateway.session_context import get_session_context_env as _gcse
+
+                    _gw_platform = _gcse("HERMES_SESSION_PLATFORM", "")
+                    notification_session_key = _gcse("HERMES_SESSION_KEY", "")
+                    proc_session.session_key = notification_session_key
                     if _gw_platform:
-                        _gw_chat_id = _gse("HERMES_SESSION_CHAT_ID", "")
-                        _gw_thread_id = _gse("HERMES_SESSION_THREAD_ID", "")
-                        _gw_user_id = _gse("HERMES_SESSION_USER_ID", "")
-                        _gw_user_name = _gse("HERMES_SESSION_USER_NAME", "")
-                        _gw_message_id = _gse("HERMES_SESSION_MESSAGE_ID", "")
+                        _gw_chat_id = _gcse("HERMES_SESSION_CHAT_ID", "")
+                        _gw_thread_id = _gcse("HERMES_SESSION_THREAD_ID", "")
+                        _gw_user_id = _gcse("HERMES_SESSION_USER_ID", "")
+                        _gw_user_name = _gcse("HERMES_SESSION_USER_NAME", "")
+                        _gw_message_id = _gcse("HERMES_SESSION_MESSAGE_ID", "")
                         proc_session.watcher_platform = _gw_platform
                         proc_session.watcher_chat_id = _gw_chat_id
                         proc_session.watcher_user_id = _gw_user_id
@@ -2070,7 +2074,7 @@ def terminal_tool(
                         process_registry.pending_watchers.append({
                             "session_id": proc_session.id,
                             "check_interval": 5,
-                            "session_key": session_key,
+                            "session_key": notification_session_key,
                             "platform": proc_session.watcher_platform,
                             "chat_id": proc_session.watcher_chat_id,
                             "user_id": proc_session.watcher_user_id,

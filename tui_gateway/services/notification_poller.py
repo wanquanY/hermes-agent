@@ -25,6 +25,23 @@ def _dispatch_notification(
     run_prompt_submit(rid, sid, session, text)
 
 
+def _event_session_key(evt: dict) -> str:
+    return str(evt.get("session_key") or "").strip()
+
+
+def _session_notification_keys(session: dict) -> set[str]:
+    keys = {str(session.get("session_key") or "").strip()}
+    agent = session.get("agent")
+    keys.add(str(getattr(agent, "session_id", "") or "").strip())
+    keys.discard("")
+    return keys
+
+
+def session_owns_notification_event(session: dict, evt: dict) -> bool:
+    event_key = _event_session_key(evt)
+    return bool(event_key and event_key in _session_notification_keys(session))
+
+
 def notification_poller_loop(
     stop_event: threading.Event,
     sid: str,
@@ -32,6 +49,7 @@ def notification_poller_loop(
     *,
     emit: Callable[[str, str, dict | None], Any],
     run_prompt_submit: Callable[[str, str, dict, str], Any],
+    resolve_event_session: Callable[[dict], tuple[str, dict] | None] | None = None,
 ) -> None:
     from tools.process_registry import process_registry, format_process_notification
 
@@ -39,15 +57,29 @@ def notification_poller_loop(
         event_sid = evt.get("session_id", "")
         if evt.get("type") == "completion" and process_registry.is_completion_consumed(event_sid):
             return True
+        if not _event_session_key(evt):
+            return True
+
+        target_sid = sid
+        target_session = session
+        if not session_owns_notification_event(session, evt):
+            resolved = resolve_event_session(evt) if resolve_event_session else None
+            if resolved is None:
+                return True
+            target_sid, target_session = resolved
+
         text = format_process_notification(evt)
         if not text:
             return True
 
-        emit("status.update", sid, {"kind": "process", "text": text})
+        emit("status.update", target_sid, {"kind": "process", "text": text})
+        if evt.get("type") in {"watch_match", "watch_disabled"}:
+            return True
+
         try:
             _dispatch_notification(
-                sid=sid,
-                session=session,
+                sid=target_sid,
+                session=target_session,
                 text=text,
                 emit=emit,
                 run_prompt_submit=run_prompt_submit,
@@ -89,12 +121,17 @@ def start_notification_poller(
     *,
     emit: Callable[[str, str, dict | None], Any],
     run_prompt_submit: Callable[[str, str, dict, str], Any],
+    resolve_event_session: Callable[[dict], tuple[str, dict] | None] | None = None,
 ) -> threading.Event:
     stop = threading.Event()
     thread = threading.Thread(
         target=notification_poller_loop,
         args=(stop, sid, session),
-        kwargs={"emit": emit, "run_prompt_submit": run_prompt_submit},
+        kwargs={
+            "emit": emit,
+            "run_prompt_submit": run_prompt_submit,
+            "resolve_event_session": resolve_event_session,
+        },
         daemon=True,
     )
     thread.start()
