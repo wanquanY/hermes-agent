@@ -199,6 +199,107 @@ def _request_agent_interrupt_async(sid: str, agent) -> None:
     _schedule_agent_interrupt_work(run_interrupt)
 
 
+def _safe_subagent_attr(agent, name: str, fallback=None):
+    try:
+        value = getattr(agent, name, fallback)
+    except Exception:
+        return fallback
+    return value if value is not None else fallback
+
+
+def _active_child_agents(agent) -> list:
+    if agent is None:
+        return []
+    lock = _safe_subagent_attr(agent, "_active_children_lock")
+    try:
+        if lock:
+            with lock:
+                return list(_safe_subagent_attr(agent, "_active_children", []) or [])
+        return list(_safe_subagent_attr(agent, "_active_children", []) or [])
+    except Exception:
+        return []
+
+
+def _iter_active_subagent_agents(agent, seen: set[int] | None = None):
+    seen = seen or set()
+    for child in _active_child_agents(agent):
+        marker = id(child)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        yield child
+        yield from _iter_active_subagent_agents(child, seen)
+
+
+def _subagent_task_index(child) -> int:
+    value = _safe_subagent_attr(child, "_subagent_task_index", None)
+    if isinstance(value, int):
+        return max(0, value)
+    subagent_id = str(_safe_subagent_attr(child, "_subagent_id", "") or "")
+    parts = subagent_id.split("-")
+    if len(parts) >= 3 and parts[0] == "sa":
+        try:
+            return max(0, int(parts[1]))
+        except (TypeError, ValueError):
+            pass
+    return 0
+
+
+def _emit_interrupted_subagent_completions(
+    *,
+    sid: str,
+    session: dict,
+    interrupted_run_id: str,
+    interrupted_turn_id: str,
+    completion_status: str,
+) -> None:
+    agent = session.get("agent")
+    emitted: set[str] = set()
+    status = str(completion_status or "interrupted").strip().lower() or "interrupted"
+    if status in {"cancelled", "canceled"}:
+        status = "cancelled"
+    elif status not in {"interrupted", "failed", "timeout"}:
+        status = "interrupted"
+    timestamp = time.time()
+    for child in _iter_active_subagent_agents(agent):
+        subagent_id = str(_safe_subagent_attr(child, "_subagent_id", "") or "").strip()
+        if not subagent_id or subagent_id in emitted:
+            continue
+        emitted.add(subagent_id)
+        task_index = _subagent_task_index(child)
+        task_count = _safe_subagent_attr(child, "_subagent_task_count", None)
+        try:
+            task_count = max(1, int(task_count or 1))
+        except (TypeError, ValueError):
+            task_count = 1
+        delegate_call_id = str(_safe_subagent_attr(child, "_subagent_delegate_call_id", "") or "").strip()
+        toolsets = _safe_subagent_attr(child, "_subagent_toolsets", None)
+        if not isinstance(toolsets, list):
+            toolsets = []
+        payload = {
+            "subagent_id": subagent_id,
+            "parent_id": str(_safe_subagent_attr(child, "_parent_subagent_id", "") or ""),
+            "depth": int(_safe_subagent_attr(child, "_subagent_tui_depth", 0) or 0),
+            "task_index": task_index,
+            "task_count": task_count,
+            "goal": str(_safe_subagent_attr(child, "_subagent_goal", "") or ""),
+            "dispatch_message": str(_safe_subagent_attr(child, "_subagent_goal", "") or ""),
+            "agent_name": str(_safe_subagent_attr(child, "_subagent_name", "") or ""),
+            "model": str(_safe_subagent_attr(child, "model", "") or ""),
+            "role": str(_safe_subagent_attr(child, "_delegate_role", "") or "leaf"),
+            "toolsets": [str(item) for item in toolsets],
+            "status": status,
+            "summary": "任务已终止",
+            "run_id": interrupted_run_id,
+            "turn_id": interrupted_turn_id,
+            "timestamp": timestamp,
+        }
+        if delegate_call_id:
+            payload["delegate_call_id"] = delegate_call_id
+            payload["tool_call_id"] = delegate_call_id
+        _emit("subagent.complete", sid, payload)
+
+
 def _request_session_interrupt_side_effects_async(
     *,
     sid: str,
@@ -239,6 +340,13 @@ def _request_session_interrupt_side_effects_async(
                 resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
             except Exception:
                 pass
+            _emit_interrupted_subagent_completions(
+                sid=sid,
+                session=session,
+                interrupted_run_id=interrupted_run_id,
+                interrupted_turn_id=interrupted_turn_id,
+                completion_status=completion_status,
+            )
             _emit(
                 "message.complete",
                 sid,
@@ -1077,6 +1185,50 @@ def _message_turn_id(message: dict) -> str:
     return ""
 
 
+def _turn_recall_target(params: dict) -> dict[str, str]:
+    return {
+        "turn_id": str(params.get("turn_id") or params.get("turnId") or "").strip(),
+        "run_id": str(params.get("run_id") or params.get("runId") or "").strip(),
+        "client_message_id": str(
+            params.get("client_message_id")
+            or params.get("clientMessageId")
+            or ""
+        ).strip(),
+    }
+
+
+def _message_matches_recall_target(message: dict, target: dict[str, str]) -> bool:
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    metadata = message.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    for key in ("turn_id", "run_id", "client_message_id"):
+        expected = str(target.get(key) or "").strip()
+        if expected and str(metadata.get(key) or "").strip() == expected:
+            return True
+    return False
+
+
+def _pending_turn_matches_recall_target(pending_turn: dict | None, target: dict[str, str]) -> bool:
+    if not isinstance(pending_turn, dict):
+        return False
+    for key in ("turn_id", "run_id", "client_message_id"):
+        expected = str(target.get(key) or "").strip()
+        if expected and str(pending_turn.get(key) or "").strip() == expected:
+            return True
+    return False
+
+
+def _session_active_turn_matches_recall_target(session: dict, target: dict[str, str]) -> bool:
+    active_turn_id = str(session.get("active_turn_id") or "").strip()
+    active_run_id = str(session.get("active_run_id") or "").strip()
+    if active_turn_id and active_turn_id == str(target.get("turn_id") or "").strip():
+        return True
+    if active_run_id and active_run_id == str(target.get("run_id") or "").strip():
+        return True
+    return _pending_turn_matches_recall_target(session.get("pending_turn"), target)
+
+
 def _draft_from_turn_message(message: dict | None, pending_turn: dict | None = None) -> dict:
     metadata = message.get("metadata") if isinstance(message, dict) else {}
     if not isinstance(metadata, dict):
@@ -1120,10 +1272,14 @@ def _rewrite_live_and_persisted_history(session: dict, history: list[dict]) -> N
             pass
 
 
-def _recall_turn_from_history(history: list[dict], turn_id: str, pending_turn: dict | None = None) -> tuple[list[dict], dict, int] | None:
+def _recall_turn_from_history(
+    history: list[dict],
+    target: dict[str, str],
+    pending_turn: dict | None = None,
+) -> tuple[list[dict], dict, int] | None:
     target_idx = None
     for idx, message in enumerate(history):
-        if isinstance(message, dict) and _message_turn_id(message) == turn_id and message.get("role") == "user":
+        if _message_matches_recall_target(message, target):
             target_idx = idx
             break
     if target_idx is None:
@@ -1152,7 +1308,8 @@ def _load_stored_history_for_rewrite(db, session_key: str) -> list[dict]:
         return db.get_messages_as_conversation(session_key, include_ancestors=False)
 
 
-def _recall_stored_turn(rid, sid: str, turn_id: str) -> dict | None:
+def _recall_stored_turn(rid, sid: str, target: dict[str, str]) -> dict | None:
+    turn_id = str(target.get("turn_id") or "")
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5036)
@@ -1166,7 +1323,7 @@ def _recall_stored_turn(rid, sid: str, turn_id: str) -> dict | None:
             return None
     try:
         history = _load_stored_history_for_rewrite(db, session_key)
-        recalled = _recall_turn_from_history(list(history or []), turn_id)
+        recalled = _recall_turn_from_history(list(history or []), target)
         if recalled is None:
             return _err(rid, 4019, "turn not found or already recalled")
         next_history, draft, removed = recalled
@@ -1200,12 +1357,13 @@ def _recall_stored_turn(rid, sid: str, turn_id: str) -> dict | None:
 @method("session.recall_turn")
 def _(rid, params: dict) -> dict:
     sid = str(params.get("session_id") or "").strip()
-    turn_id = str(params.get("turn_id") or "").strip()
+    target = _turn_recall_target(params)
+    turn_id = str(target.get("turn_id") or "")
     if not turn_id:
         return _err(rid, 4006, "turn_id required")
     runtime_sid, live_session = _resolve_runtime_session(sid)
     if live_session is None:
-        stored_result = _recall_stored_turn(rid, sid, turn_id)
+        stored_result = _recall_stored_turn(rid, sid, target)
         if stored_result is not None:
             return stored_result
     session, err = _sess(params, rid)
@@ -1217,9 +1375,10 @@ def _(rid, params: dict) -> dict:
     agent_to_interrupt = None
     with session["history_lock"]:
         active_turn_id = str(session.get("active_turn_id") or "")
-        if session.get("running") and active_turn_id and active_turn_id != turn_id:
+        running_target_matches = _session_active_turn_matches_recall_target(session, target)
+        if session.get("running") and active_turn_id and not running_target_matches:
             return _err(rid, 4009, "session busy with a different turn")
-        if session.get("running") and active_turn_id == turn_id:
+        if session.get("running") and running_target_matches:
             interrupted = True
             session["interrupted_run_id"] = str(session.get("active_run_id") or "")
             session["interrupted_turn_id"] = turn_id
@@ -1236,9 +1395,9 @@ def _(rid, params: dict) -> dict:
     with session["history_lock"]:
         history = list(session.get("history") or [])
         pending_turn = session.get("pending_turn")
-        recalled = _recall_turn_from_history(history, turn_id, pending_turn)
+        recalled = _recall_turn_from_history(history, target, pending_turn)
         if recalled is None:
-            if isinstance(pending_turn, dict) and str(pending_turn.get("turn_id") or "") == turn_id:
+            if _pending_turn_matches_recall_target(pending_turn, target):
                 draft = _draft_from_turn_message(None, pending_turn)
                 session.setdefault("recalled_turn_ids", set()).add(turn_id)
                 session["running"] = False

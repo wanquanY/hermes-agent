@@ -126,6 +126,18 @@ tests/agent/                       2.3%
 
 这两项进一步强化了原报告的判断：Doxie automation 和 session/run state 仍是本地客户端 contract，不应被 upstream API server session controls 或原生 cron 流程替代。后续吸收上游时，仍应优先保留本地 run/event binding、profile-scoped runtime worker 和 Doxie automation 工具边界。
 
+### 本地现状更新（2026-06-04，prodv0.9.0）
+
+截至 2026-06-04，本地分支又补齐了面向 Doxie 生产客户端的运行态可观测性和子 agent 边界：
+
+- 子 agent 工具面从“toolset 粗粒度继承”收敛为“父级已解析工具名 allowlist”。`enabled_tools` 贯穿 `AIAgent` 初始化、`model_tools.get_tool_definitions()` 和 `delegate_task` 子 agent 创建，`tools/delegate_tool_access.py` 负责精确求交、阻断危险/递归 toolset，并兼容 Doxie 托管 web 工具的语义别名。
+- 子 agent 生命周期事件现在带有稳定身份：`delegate_call_id`、`agent_name`、`role`、`context`、`dispatch_message`、tool running/completed 状态和 output delta。Doxie 客户端可以把右侧运行面板绑定到一次 delegate tool call，而不是从主 transcript 里猜测子任务状态。
+- `hermes_state_runs.py` 对高频 stream delta 做存储层合并，并提供 filtered list / compaction API；TUI Gateway 暴露 `subagent.runs.list`、`subagent.events.list`、`events.compact`，把历史 hydration 的成本限制在子 agent 相关事件内。
+- Doxie sidecar 增加父进程 watchdog，runtime proxy 传递 `DOXIE_SIDECAR_PARENT_PID`。这解决 native client / runtime worker 退出后 sidecar 孤儿进程继续占用本地端口的问题。
+- recall / interrupt 路径会按 `turn_id`、`run_id` 或 `client_message_id` 定位 turn，并为活跃子 agent 补发终止事件，防止客户端在取消或撤回后继续显示子任务 running。
+
+这批改动仍不是对上游 session orchestrator 或 API server session controls 的全量吸收，而是本地 Doxie engine contract 的生产化：Hermes 负责 agent loop、delegate 子任务、工具权限和 run event 持久化；Doxie 客户端通过 TUI Gateway / sidecar 查询稳定的 runtime-scoped 视图。后续如果继续同步上游，应把这些边界作为必须保留的本地能力，而不是用上游单文件 TUI gateway 或通用 session API 覆盖。
+
 ### 对客户端接入有直接价值的上游更新
 
 1. Dashboard / WebSocket 认证链路：

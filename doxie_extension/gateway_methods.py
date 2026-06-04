@@ -25,6 +25,7 @@ DOXIE_GATEWAY_METHOD_OVERRIDES = frozenset(
         "artifacts.list",
         "clarify.respond",
         "cron.manage",
+        "events.compact",
         "events.prune",
         "events.subscribe",
         "events.unsubscribe",

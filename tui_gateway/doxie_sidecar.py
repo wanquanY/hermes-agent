@@ -4,9 +4,13 @@ import argparse
 import asyncio
 import hmac
 import os
+import threading
+import time
 from urllib.parse import parse_qs, urlparse
 
 SIDECAR_TOKEN_ENV = "DOXIE_SIDECAR_TOKEN"
+SIDECAR_PARENT_PID_ENV = "DOXIE_SIDECAR_PARENT_PID"
+_PARENT_WATCHDOG_INTERVAL_SECONDS = 2.0
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 _NATIVE_ELECTRON_ORIGIN_SCHEMES = {"doxie", "doxie-attachment", "doxie-hermes", "file"}
 
@@ -27,6 +31,53 @@ def resolve_token(args: argparse.Namespace) -> str:
     if legacy:
         return legacy
     raise SystemExit(f"Hermes Doxie gateway requires {SIDECAR_TOKEN_ENV}")
+
+
+def expected_parent_pid() -> int:
+    raw = os.getenv(SIDECAR_PARENT_PID_ENV, "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
+def parent_process_still_owns_sidecar(parent_pid: int) -> bool:
+    if parent_pid <= 0:
+        return True
+    getppid = getattr(os, "getppid", None)
+    if callable(getppid) and int(getppid()) != parent_pid:
+        return False
+    try:
+        os.kill(parent_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def start_parent_watchdog() -> threading.Thread | None:
+    parent_pid = expected_parent_pid()
+    if parent_pid <= 0:
+        return None
+
+    def watch_parent() -> None:
+        while True:
+            time.sleep(_PARENT_WATCHDOG_INTERVAL_SECONDS)
+            if not parent_process_still_owns_sidecar(parent_pid):
+                os._exit(0)
+
+    thread = threading.Thread(
+        target=watch_parent,
+        daemon=True,
+        name="doxie-sidecar-parent-watchdog",
+    )
+    thread.start()
+    return thread
 
 
 class HermesWebSocketAdapter:
@@ -112,6 +163,7 @@ async def main_async(args: argparse.Namespace) -> None:
 
     handle_ws = tui_gateway_ws.handle_ws
     expected_token = resolve_token(args)
+    start_parent_watchdog()
 
     class Adapter(HermesWebSocketAdapter):
         async def receive_text(self) -> str:

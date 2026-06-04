@@ -875,6 +875,29 @@ class TestInit:
             )
             assert a.valid_tool_names == {"web_search", "terminal"}
 
+    def test_enabled_tools_forwarded_to_tool_loader(self):
+        """Exact tool allowlists should reach the schema loader unchanged."""
+        tools = _make_tool_defs("read_file")
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools) as mock_get_tools,
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            a = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                enabled_toolsets=["file"],
+                enabled_tools=["read_file"],
+            )
+
+        assert a.enabled_tools == ["read_file"]
+        mock_get_tools.assert_called_once()
+        assert mock_get_tools.call_args.kwargs["enabled_toolsets"] == ["file"]
+        assert mock_get_tools.call_args.kwargs["enabled_tools"] == ["read_file"]
+
     def test_session_id_auto_generated(self):
         """Session ID should be auto-generated in YYYYMMDD_HHMMSS_<hex6> format."""
         with (

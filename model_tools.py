@@ -8,8 +8,13 @@ This module triggers discovery (by importing all tool modules), then provides
 the public API that run_agent.py, cli.py, batch_runner.py, and the RL
 environments consume.
 
-Public API (signatures preserved from the original 2,400-line version):
-    get_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode) -> list
+Public API:
+    get_tool_definitions(
+        enabled_toolsets,
+        disabled_toolsets,
+        quiet_mode,
+        enabled_tools,
+    ) -> list
     handle_function_call(function_name, function_args, task_id, user_task) -> str
     TOOL_TO_TOOLSET_MAP: dict          (for batch_runner.py)
     TOOLSET_REQUIREMENTS: dict         (for cli.py, doctor.py)
@@ -298,7 +303,8 @@ _LEGACY_TOOLSET_MAP = {
 # =============================================================================
 
 # Module-level memoization for get_tool_definitions(). Keyed on
-# (frozenset(enabled_toolsets), frozenset(disabled_toolsets), registry._generation).
+# (frozenset(enabled_toolsets), frozenset(enabled_tools),
+#  frozenset(disabled_toolsets), registry._generation).
 # Hot callers (gateway runner, AIAgent.__init__) invoke this on every turn
 # with quiet_mode=True; caching avoids ~7 ms of registry walking + schema
 # filtering + check_fn probing per call. Only active when quiet_mode=True
@@ -322,6 +328,7 @@ def get_tool_definitions(
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
     quiet_mode: bool = False,
+    enabled_tools: List[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Get tool definitions for model API calls with toolset-based filtering.
@@ -330,6 +337,9 @@ def get_tool_definitions(
 
     Args:
         enabled_toolsets: Only include tools from these toolsets.
+        enabled_tools: Exact tool-name allowlist. When provided, this takes
+            precedence over enabled_toolsets and does not expand sibling tools
+            from the same toolset.
         disabled_toolsets: Exclude tools from these toolsets (if enabled_toolsets is None).
         quiet_mode: Suppress status prints.
 
@@ -354,6 +364,7 @@ def get_tool_definitions(
             cfg_fp = None
         cache_key = (
             frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
+            frozenset(enabled_tools) if enabled_tools is not None else None,
             frozenset(disabled_toolsets) if disabled_toolsets else None,
             registry._generation,
             cfg_fp,
@@ -369,7 +380,12 @@ def get_tool_definitions(
             # schemas are treated as read-only by all known callers.
             return list(cached)
 
-    result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode)
+    result = _compute_tool_definitions(
+        enabled_toolsets,
+        disabled_toolsets,
+        quiet_mode,
+        enabled_tools=enabled_tools,
+    )
     if quiet_mode:
         # Cache the freshly-computed list, but hand callers a shallow copy so
         # downstream mutations (e.g. run_agent appending memory/LCM tool
@@ -387,12 +403,27 @@ def _compute_tool_definitions(
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
     quiet_mode: bool = False,
+    enabled_tools: List[str] = None,
 ) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
     # Determine which tool names the caller wants
     tools_to_include: set = set()
 
-    if enabled_toolsets is not None:
+    if enabled_tools is not None:
+        tools_to_include = {
+            str(tool_name).strip()
+            for tool_name in enabled_tools
+            if str(tool_name).strip()
+        }
+        if not quiet_mode:
+            if tools_to_include:
+                print(
+                    "✅ Enabled exact tools: "
+                    + ", ".join(sorted(tools_to_include))
+                )
+            else:
+                print("✅ Enabled exact tools: none")
+    elif enabled_toolsets is not None:
         effective_enabled_toolsets = list(enabled_toolsets)
         if os.environ.get("HERMES_KANBAN_TASK") and "kanban" not in effective_enabled_toolsets:
             # Dispatcher-spawned workers are scoped by HERMES_KANBAN_TASK and
@@ -449,6 +480,15 @@ def _compute_tool_definitions(
 
     # Ask the registry for schemas (only returns tools whose check_fn passes)
     filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
+    return _finalize_tool_definitions(filtered_tools, quiet_mode=quiet_mode)
+
+
+def _finalize_tool_definitions(
+    filtered_tools: List[Dict[str, Any]],
+    *,
+    quiet_mode: bool = False,
+) -> List[Dict[str, Any]]:
+    """Apply dynamic schema adjustments and bookkeeping after name filtering."""
 
     # The set of tool names that actually passed check_fn filtering.
     # Use this (not tools_to_include) for any downstream schema that references

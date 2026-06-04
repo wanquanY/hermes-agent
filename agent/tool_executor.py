@@ -394,7 +394,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 try:
                     agent.tool_progress_callback(
                         "tool.completed", function_name, None, None,
-                        duration=tool_duration, is_error=is_error,
+                        duration=tool_duration, is_error=is_error, result=function_result,
                     )
                 except Exception as cb_err:
                     logging.debug(f"Tool progress callback error: {cb_err}")
@@ -542,6 +542,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         if not _execution_blocked:
             agent._current_tool = function_name
+            agent._current_tool_call_id = tool_call.id
             agent._touch_activity(f"executing tool: {function_name}")
 
         # Set activity callback for long-running tool execution (terminal
@@ -692,7 +693,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             agent._delegate_spinner = spinner
             _delegate_result = None
             try:
-                function_result = agent._dispatch_delegate_task(function_args)
+                function_result = agent._dispatch_delegate_task(function_args, tool_call_id=tool_call.id)
                 _delegate_result = function_result
             finally:
                 agent._delegate_spinner = None
@@ -837,12 +838,13 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             try:
                 agent.tool_progress_callback(
                     "tool.completed", function_name, None, None,
-                    duration=tool_duration, is_error=_is_error_result,
+                    duration=tool_duration, is_error=_is_error_result, result=function_result,
                 )
             except Exception as cb_err:
                 logging.debug(f"Tool progress callback error: {cb_err}")
 
         agent._current_tool = None
+        agent._current_tool_call_id = None
         agent._touch_activity(f"tool completed: {function_name} ({tool_duration:.1f}s)")
 
         if agent.verbose_logging:

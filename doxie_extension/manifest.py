@@ -60,6 +60,7 @@ REQUIRED_EVENTS = [
     "clarify.request",
     "artifact.created",
     "subagent.output_delta",
+    "subagent.reasoning_delta",
     "agent_profile_test.start",
     "agent_profile_test.output_delta",
     "agent_profile_test.thinking",

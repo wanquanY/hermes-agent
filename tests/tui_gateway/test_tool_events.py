@@ -57,7 +57,7 @@ def test_agent_profile_test_uses_dedicated_stream_events():
     )
     bridge.on_tool_progress(
         "sid",
-        "subagent.thinking",
+        "subagent.reasoning_delta",
         "test_agent_profile",
         "thinking",
         None,

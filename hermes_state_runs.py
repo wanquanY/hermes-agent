@@ -21,6 +21,26 @@ TERMINAL_RUN_STATUSES = {"completed", "failed", "interrupted", "cancelled"}
 DEFAULT_RUN_EVENT_RETENTION_DAYS = 14
 DEFAULT_RUN_EVENT_MAX_PER_SESSION = 5000
 RUN_EVENT_PRUNE_INTERVAL_EVENTS = 500
+COALESCIBLE_STREAM_EVENT_TYPES = {
+    "message.delta",
+    "reasoning.delta",
+    "thinking.delta",
+    "subagent.output_delta",
+    "subagent.reasoning_delta",
+    "subagent.thinking",
+    "agent_profile_test.output_delta",
+    "agent_profile_test.thinking",
+}
+STREAM_IDENTITY_PAYLOAD_KEYS = (
+    "subagent_id",
+    "subagentId",
+    "source",
+    "role",
+    "delegate_call_id",
+    "delegateCallId",
+    "tool_call_id",
+    "toolCallId",
+)
 
 
 def _json_dumps(value: Any) -> str:
@@ -82,6 +102,70 @@ def _row_value(row: sqlite3.Row | None, key: str, default: Any = None) -> Any:
         return row[key]
     except Exception:
         return default
+
+
+def _event_subagent_id(event: Dict[str, Any]) -> str:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    return str(
+        payload.get("subagent_id")
+        or payload.get("subagentId")
+        or payload.get("id")
+        or ""
+    ).strip()
+
+
+def _event_text_delta(event: Dict[str, Any]) -> str:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    return str(payload.get("text") or payload.get("delta") or payload.get("output") or "")
+
+
+def _event_stream_mode(event: Dict[str, Any]) -> str:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    return str(payload.get("mode") or "").strip().lower()
+
+
+def _event_is_coalescible_stream_delta(event: Dict[str, Any]) -> bool:
+    event_type = str(event.get("type") or "").strip()
+    if event_type not in COALESCIBLE_STREAM_EVENT_TYPES:
+        return False
+    if not _event_text_delta(event):
+        return False
+    mode = _event_stream_mode(event)
+    if event_type == "message.delta" and mode not in {"", "append"}:
+        return False
+    return True
+
+
+def _event_stream_identity(event: Dict[str, Any]) -> tuple[Any, ...]:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    identity: list[Any] = [
+        str(event.get("type") or "").strip(),
+        _event_run_id(event),
+        _event_turn_id(event),
+        _event_runtime_scope_key(event),
+        _event_stream_mode(event),
+    ]
+    for key in STREAM_IDENTITY_PAYLOAD_KEYS:
+        identity.append(str(payload.get(key) or "").strip())
+    return tuple(identity)
+
+
+def _merge_stream_payload(previous_event: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
+    previous_payload = previous_event.get("payload") if isinstance(previous_event.get("payload"), dict) else {}
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    merged_payload = dict(previous_payload)
+    merged_text = f"{_event_text_delta(previous_event)}{_event_text_delta(event)}"
+    for key in ("text", "delta", "output"):
+        if key in previous_payload or key in payload:
+            merged_payload[key] = merged_text
+    if str(event.get("type") or "") == "message.delta":
+        merged_payload["mode"] = "append"
+        merged_payload.setdefault("offset", previous_payload.get("offset", 0))
+        merged_payload.pop("snapshot", None)
+    # Rendered fragments are live transport hints. After storage coalescing,
+    # the aggregate text is the durable representation.
+    merged_payload.pop("rendered", None)
+    return merged_payload
 
 
 def _pid_is_alive(pid: int, current_pid: int | None = None) -> bool:
@@ -349,28 +433,90 @@ class SessionDBRunMixin:
         event_json = _json_dumps(frame)
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO run_events (
-                    session_id, run_id, turn_id, runtime_session_id, runtime_scope_key, event_type,
-                    seq, timestamp, payload_json, event_json, status
+            inserted_event = frame
+            coalesced = False
+            if _event_is_coalescible_stream_delta(frame):
+                previous = conn.execute(
+                    """
+                    SELECT id, event_json
+                    FROM run_events
+                    WHERE session_id = ?
+                    ORDER BY seq DESC
+                    LIMIT 1
+                    """,
+                    (stable,),
+                ).fetchone()
+                previous_event = _json_loads(_row_value(previous, "event_json", ""), {})
+                if (
+                    isinstance(previous_event, dict)
+                    and _event_is_coalescible_stream_delta(previous_event)
+                    and _event_stream_identity(previous_event) == _event_stream_identity(frame)
+                ):
+                    merged_payload = _merge_stream_payload(previous_event, frame)
+                    merged_event = {
+                        **previous_event,
+                        "session_id": runtime_session_id or previous_event.get("session_id") or "",
+                        "stored_session_id": stable,
+                        "run_id": run_id or previous_event.get("run_id") or "",
+                        "turn_id": turn_id or previous_event.get("turn_id") or "",
+                        "runtime_session_id": runtime_session_id or previous_event.get("runtime_session_id") or "",
+                        "runtime_scope_key": runtime_scope_key,
+                        "seq": seq,
+                        "timestamp": timestamp,
+                        "payload": merged_payload,
+                    }
+                    conn.execute(
+                        """
+                        UPDATE run_events
+                        SET run_id = ?,
+                            turn_id = ?,
+                            runtime_session_id = ?,
+                            runtime_scope_key = ?,
+                            seq = ?,
+                            timestamp = ?,
+                            payload_json = ?,
+                            event_json = ?,
+                            status = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            run_id,
+                            turn_id,
+                            runtime_session_id,
+                            runtime_scope_key,
+                            seq,
+                            timestamp,
+                            _json_dumps(merged_payload),
+                            _json_dumps(merged_event),
+                            terminal_status or "",
+                            previous["id"],
+                        ),
+                    )
+                    inserted_event = merged_event
+                    coalesced = True
+            if not coalesced:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO run_events (
+                        session_id, run_id, turn_id, runtime_session_id, runtime_scope_key, event_type,
+                        seq, timestamp, payload_json, event_json, status
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        stable,
+                        run_id,
+                        turn_id,
+                        runtime_session_id,
+                        runtime_scope_key,
+                        event_type,
+                        seq,
+                        timestamp,
+                        _json_dumps(payload),
+                        event_json,
+                        terminal_status or "",
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    stable,
-                    run_id,
-                    turn_id,
-                    runtime_session_id,
-                    runtime_scope_key,
-                    event_type,
-                    seq,
-                    timestamp,
-                    _json_dumps(payload),
-                    event_json,
-                    terminal_status or "",
-                ),
-            )
             if run_id:
                 existing = conn.execute(
                     "SELECT * FROM runs WHERE run_id = ?",
@@ -464,10 +610,14 @@ class SessionDBRunMixin:
                             run_id,
                         ),
                     )
-            return frame
+            return inserted_event
 
         saved = self._execute_write(_do)
-        if seq > 0 and seq % RUN_EVENT_PRUNE_INTERVAL_EVENTS == 0:
+        should_prune = (
+            (seq > 0 and seq % RUN_EVENT_PRUNE_INTERVAL_EVENTS == 0)
+            or terminal_status in TERMINAL_RUN_STATUSES
+        )
+        if should_prune:
             try:
                 self.prune_run_events(session_id=stable)
             except Exception as exc:
@@ -513,6 +663,75 @@ class SessionDBRunMixin:
                   AND seq > ?
                   {scope_clause}
                   {active_clause}
+                ORDER BY seq ASC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        events = []
+        for row in rows:
+            event = _json_loads(row["event_json"], {})
+            if isinstance(event, dict):
+                events.append(event)
+        return events
+
+    def list_run_events_filtered(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        runtime_scope_key: str = "",
+        event_type_prefix: str = "",
+        event_types: list[str] | tuple[str, ...] | None = None,
+        payload_contains: str = "",
+        limit: int = 2000,
+    ) -> List[Dict[str, Any]]:
+        """Return a persisted event page filtered at the database boundary.
+
+        History views often need a small subset of the durable run event log
+        (for example subagent lifecycle metadata) without replaying every token
+        delta.  Keep that filtering inside the repository so UI hydration does
+        not depend on loading large event pages over the gateway.
+        """
+        stable = str(session_id or "").strip()
+        if not stable:
+            return []
+        bounded_limit = max(1, min(int(limit or 2000), 20000))
+        params: list[Any] = [stable, int(after_seq or 0)]
+        clauses: list[str] = [
+            "session_id = ?",
+            "seq > ?",
+        ]
+        scope = str(runtime_scope_key or "").strip()
+        if scope:
+            clauses.append("COALESCE(runtime_scope_key, session_id) = ?")
+            params.append(scope)
+        normalized_types = [
+            str(item or "").strip()
+            for item in (event_types or ())
+            if str(item or "").strip()
+        ]
+        if normalized_types:
+            placeholders = ", ".join("?" for _ in normalized_types)
+            clauses.append(f"event_type IN ({placeholders})")
+            params.extend(normalized_types)
+        else:
+            prefix = str(event_type_prefix or "").strip()
+            if prefix:
+                clauses.append("event_type LIKE ?")
+                params.append(f"{prefix}%")
+        contains = str(payload_contains or "").strip()
+        if contains:
+            clauses.append("(instr(payload_json, ?) > 0 OR instr(event_json, ?) > 0)")
+            params.extend([contains, contains])
+        params.append(bounded_limit)
+        where_sql = " AND ".join(clauses)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT event_json
+                FROM run_events
+                WHERE {where_sql}
                 ORDER BY seq ASC
                 LIMIT ?
                 """,
@@ -834,6 +1053,134 @@ class SessionDBRunMixin:
             }
 
         return self._execute_write(_do)
+
+    def compact_run_events(
+        self,
+        *,
+        session_id: str = "",
+        vacuum: bool = False,
+    ) -> Dict[str, Any]:
+        """Coalesce already-persisted stream deltas without changing boundaries.
+
+        ``run_events`` is an operational replay log, not the canonical message
+        store.  Token-sized stream rows are useful live but wasteful on disk.
+        This maintenance pass keeps the final sequence point for each
+        contiguous stream segment and removes only redundant preceding delta
+        rows.  Tool/progress/snapshot/terminal boundaries stay intact.  Set
+        ``vacuum`` only during explicit maintenance windows when the caller
+        also wants SQLite to release freed pages back to the filesystem.
+        """
+        stable_filter = str(session_id or "").strip()
+
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            active_statuses = _sql_status_literals(ACTIVE_RUN_STATUSES)
+            params: list[Any] = []
+            session_clause = ""
+            if stable_filter:
+                session_clause = "AND e.session_id = ?"
+                params.append(stable_filter)
+            rows = conn.execute(
+                f"""
+                SELECT e.*
+                FROM run_events e
+                LEFT JOIN runs r ON r.run_id = e.run_id
+                WHERE COALESCE(r.status, '') NOT IN ({active_statuses})
+                  {session_clause}
+                ORDER BY e.session_id ASC, e.seq ASC, e.id ASC
+                """,
+                tuple(params),
+            ).fetchall()
+
+            compacted_segments = 0
+            deleted_events = 0
+            updated_events = 0
+            pending: list[tuple[sqlite3.Row, Dict[str, Any]]] = []
+
+            def flush_pending() -> None:
+                nonlocal compacted_segments, deleted_events, updated_events, pending
+                if len(pending) <= 1:
+                    pending = []
+                    return
+                merged_event = pending[0][1]
+                for _, event in pending[1:]:
+                    merged_payload = _merge_stream_payload(merged_event, event)
+                    merged_event = {
+                        **merged_event,
+                        "session_id": event.get("session_id") or merged_event.get("session_id") or "",
+                        "stored_session_id": event.get("stored_session_id") or merged_event.get("stored_session_id") or "",
+                        "run_id": _event_run_id(event) or _event_run_id(merged_event),
+                        "turn_id": _event_turn_id(event) or _event_turn_id(merged_event),
+                        "runtime_session_id": event.get("runtime_session_id") or merged_event.get("runtime_session_id") or "",
+                        "runtime_scope_key": _event_runtime_scope_key(event, _event_runtime_scope_key(merged_event)),
+                        "seq": int(event.get("seq") or merged_event.get("seq") or 0),
+                        "timestamp": float(event.get("timestamp") or merged_event.get("timestamp") or 0),
+                        "payload": merged_payload,
+                    }
+                keep_row = pending[-1][0]
+                delete_ids = [int(row["id"]) for row, _ in pending[:-1]]
+                for start in range(0, len(delete_ids), 500):
+                    chunk = delete_ids[start:start + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    conn.execute(f"DELETE FROM run_events WHERE id IN ({placeholders})", tuple(chunk))
+                payload = merged_event.get("payload") if isinstance(merged_event.get("payload"), dict) else {}
+                conn.execute(
+                    """
+                    UPDATE run_events
+                    SET run_id = ?,
+                        turn_id = ?,
+                        runtime_session_id = ?,
+                        runtime_scope_key = ?,
+                        seq = ?,
+                        timestamp = ?,
+                        payload_json = ?,
+                        event_json = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        _event_run_id(merged_event),
+                        _event_turn_id(merged_event),
+                        str(merged_event.get("runtime_session_id") or ""),
+                        _event_runtime_scope_key(merged_event),
+                        int(merged_event.get("seq") or 0),
+                        float(merged_event.get("timestamp") or 0),
+                        _json_dumps(payload),
+                        _json_dumps(merged_event),
+                        int(keep_row["id"]),
+                    ),
+                )
+                compacted_segments += 1
+                deleted_events += len(delete_ids)
+                updated_events += 1
+                pending = []
+
+            for row in rows:
+                event = _json_loads(row["event_json"], {})
+                if not isinstance(event, dict) or not _event_is_coalescible_stream_delta(event):
+                    flush_pending()
+                    continue
+                if (
+                    pending
+                    and str(row["session_id"] or "") == str(pending[-1][0]["session_id"] or "")
+                    and _event_stream_identity(event) == _event_stream_identity(pending[-1][1])
+                ):
+                    pending.append((row, event))
+                    continue
+                flush_pending()
+                pending = [(row, event)]
+            flush_pending()
+            return {
+                "compacted_segments": compacted_segments,
+                "deleted_events": deleted_events,
+                "updated_events": updated_events,
+                "vacuumed": False,
+            }
+
+        result = self._execute_write(_do)
+        if vacuum and int(result.get("deleted_events") or 0) > 0:
+            with self._lock:
+                self._conn.execute("VACUUM")
+            result = {**result, "vacuumed": True}
+        return result
 
     def get_session_run_status(self, session_id: str) -> Dict[str, Any]:
         stable = str(session_id or "").strip()

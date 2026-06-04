@@ -114,6 +114,8 @@ _READ_ONLY_DB_METHODS = frozenset(
         "run.events",
         "run.list",
         "run.status",
+        "subagent.events.list",
+        "subagent.runs.list",
         "session.history",
         "session.list",
         "session.messages",

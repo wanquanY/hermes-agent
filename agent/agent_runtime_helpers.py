@@ -1565,7 +1565,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             callback=agent.clarify_callback,
         )
     elif function_name == "delegate_task":
-        return agent._dispatch_delegate_task(function_args)
+        return agent._dispatch_delegate_task(function_args, tool_call_id=tool_call_id)
     else:
         return _ra().handle_function_call(
             function_name, function_args, effective_task_id,

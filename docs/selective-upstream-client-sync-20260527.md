@@ -44,6 +44,19 @@ codex/selective-upstream-client-sync-20260527
 
 这两项都不是对上游 API session controls 或原生 `cronjob` 的吸收。它们是本地 Doxie contract 的收敛：自动化任务仍由 `tools/doxie_automation_task_tool.py`、`tui_gateway/services/doxie_cron_jobs.py` 和 Doxie run/event binding 管理，模型不重新获得原生 `cronjob` 工具作为主入口。
 
+## 现状更新（2026-06-04，prodv0.9.0）
+
+本地工作区在 `doxie-upstream-sync-20260602` 之后继续把 Hermes 作为 Doxie 的 agent engine，而不是切换到上游 API server session controls。当前改动集中在生产版客户端运行态可观测性和子 agent 权限边界：
+
+- `delegate_task` 子 agent 的工具继承从 `tools/delegate_tool.py` 拆到 `tools/delegate_tool_access.py`。父 agent 可以通过 `enabled_tools` 把已经解析过的精确工具名传给子 agent，子 agent 只获得父级真实加载且未被阻断的工具；请求 `web` / `search` 等语义别名时，也会先映射到 Doxie 托管 web 工具再和父级工具面求交，避免因 toolset 粒度过粗获得 sibling tools。
+- 子 agent 身份和展示名由 `tools/subagent_identity.py` 统一清洗、生成和人类可读化。`delegate_task` 现在把 `delegate_call_id`、`agent_name`、`role`、`context`、`dispatch_message`、tool running/completed 状态以及子 agent output delta 一起投递到 gateway event stream，Doxie 右侧运行面板可以稳定关联一次 delegate tool call 下的子任务。
+- `hermes_state_runs.py` 对 token 级 stream delta 做持久化合并，并新增 `list_run_events_filtered()` 与 `compact_run_events()`。这使 `run_events` 既能支撑实时流，又不会因为 message / reasoning / subagent delta 激增而让历史回放和 Doxie hydration 退化。
+- TUI Gateway 新增 `subagent.runs.list`、`subagent.events.list` 和 `events.compact`，实现位于 `tui_gateway/services/subagent_snapshots.py` 与 `tui_gateway/methods/run.py`。客户端可以按 session / runtime scope 拉取子 agent 快照和详情事件，而不是重放整段主会话事件流。
+- Doxie sidecar 通过 `DOXIE_SIDECAR_PARENT_PID` 增加父进程 watchdog；runtime proxy 会把该 PID 传给 sidecar。父 runtime 退出或 sidecar 被错误收养时，sidecar 会主动退出，避免本地桌面客户端留下孤儿 WebSocket 进程。
+- `session.recall_turn` 支持用 `turn_id`、`run_id` 或 `client_message_id` 定位用户轮次；中断运行中 turn 时会为活跃子 agent 补发 `subagent.complete`，避免客户端右侧面板留下永远 running 的子任务。
+
+这些是 Doxie 客户端 contract 的本地生产化收敛，不是对上游 TUI session orchestrator、API server session controls 或完整 dashboard OAuth / WS ticket 链路的吸收。后续合并上游时必须保留：精确工具面继承、runtime-scoped subagent event API、run event compaction、sidecar 父进程生命周期，以及 Doxie 对 recall / interrupt 的子 agent 完结投影。
+
 ## 逐项核对结果（2026-05-27）
 
 本节记录按本文 P0/P1 清单逐项核对当前工作区后的真实状态。后续再同步上游时，优先看这里，而不是只看提交是否 cherry-pick 成功。
@@ -128,6 +141,9 @@ codex/selective-upstream-client-sync-20260527
 | prompt attachments / document parse | `doxie_extension/prompt_attachments.py`, `document_parse_tool.py` | 否 |
 | desktop visible browser bridge | `doxie_extension/browser_bridge.py`, `tools/browser_tool.py` | 否 |
 | Doxie automation | `tools/doxie_automation_task_tool.py`, `tui_gateway/services/doxie_cron_jobs.py`, `agent/direct_tool_response.py` | 否 |
+| 子 agent 精确工具继承 | `tools/delegate_tool_access.py`, `model_tools.py`, `agent/agent_init.py` | 否 |
+| 子 agent run snapshot / detail API | `tui_gateway/services/subagent_snapshots.py`, `tui_gateway/methods/run.py`, `hermes_state_runs.py` | 否 |
+| Doxie sidecar 父进程生命周期 | `tui_gateway/doxie_sidecar.py`, `tui_gateway/services/runtime_proxy.py` | 否 |
 | runtime-scoped control RPC | approval / cron / skills / tools proxy to runtime worker | 否 |
 | Doxie session sidebar filtering | `tui_gateway/methods/session.py` 隐藏 `tool` / `cron` 内部 runtime sessions | 否 |
 

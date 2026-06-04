@@ -413,7 +413,7 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
     assert resp["result"]["messages"] == [
         {"role": "user", "text": "hello"},
         {"role": "assistant", "text": "yo"},
-        {"role": "tool", "name": "tool", "context": ""},
+        {"role": "tool", "name": "tool", "context": "", "result_text": "searched"},
     ]
 
 
@@ -538,6 +538,103 @@ def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server
             "metadata": {"turn_id": "turn-2", "draft_text": "下一条"},
         },
     ]
+
+
+def test_session_recall_turn_matches_stored_client_message_id(server, monkeypatch):
+    class _DB:
+        def __init__(self):
+            self.replaced = None
+
+        def get_session(self, sid):
+            return {"id": sid} if sid == "stored-1" else None
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def get_messages_as_conversation(
+            self,
+            _sid,
+            include_ancestors=False,
+            include_storage_metadata=False,
+        ):
+            return [
+                {
+                    "role": "user",
+                    "content": "hidden attachment context",
+                    "metadata": {
+                        "turn_id": "turn-canonical",
+                        "run_id": "run-canonical",
+                        "client_message_id": "client-msg-1",
+                        "draft_text": "恢复这个草稿",
+                    },
+                },
+                {"role": "assistant", "content": "ok", "metadata": {"turn_id": "turn-canonical"}},
+            ]
+
+        def replace_messages(self, sid, messages):
+            self.replaced = (sid, messages)
+
+    db = _DB()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_make_agent", MagicMock())
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "session.recall_turn",
+            "params": {
+                "session_id": "stored-1",
+                "turn_id": "turn-local",
+                "client_message_id": "client-msg-1",
+            },
+        }
+    )
+
+    assert "error" not in resp
+    assert db.replaced == ("stored-1", [])
+    assert resp["result"]["turn_id"] == "turn-local"
+    assert resp["result"]["draft"]["text"] == "恢复这个草稿"
+
+
+def test_session_recall_turn_matches_live_pending_run_id(server, monkeypatch):
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    live_agent = MagicMock()
+    server._sessions["runtime-live"] = {
+        "agent": live_agent,
+        "session_key": "stored-live",
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": True,
+        "active_run_id": "run-canonical",
+        "active_turn_id": "turn-canonical",
+        "pending_turn": {
+            "turn_id": "turn-canonical",
+            "run_id": "run-canonical",
+            "client_message_id": "client-msg-1",
+            "draft_text": "恢复 pending 草稿",
+        },
+        "run_started_at": 10,
+        "run_updated_at": 20,
+    }
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "session.recall_turn",
+            "params": {
+                "session_id": "runtime-live",
+                "turn_id": "turn-local",
+                "run_id": "run-canonical",
+                "client_message_id": "client-msg-1",
+            },
+        }
+    )
+
+    assert "error" not in resp
+    assert resp["result"]["draft"]["text"] == "恢复 pending 草稿"
+    assert server._sessions["runtime-live"]["running"] is False
+    assert server._sessions["runtime-live"]["pending_turn"] is None
+    live_agent.interrupt.assert_called_once()
 
 
 def test_session_status_returns_machine_readable_run_state(server):

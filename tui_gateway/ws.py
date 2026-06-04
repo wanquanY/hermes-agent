@@ -45,6 +45,7 @@ _log = logging.getLogger(__name__)
 _WS_WRITE_TIMEOUT_S = 10.0
 _WS_CONTROL_METHODS = frozenset(
     {
+        "events.compact",
         "events.prune",
         "events.subscribe",
         "events.unsubscribe",

@@ -16,6 +16,426 @@ def db(tmp_path):
     session_db.close()
 
 
+def test_list_run_events_filtered_filters_subagent_events_at_db_boundary(db):
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "subagent.start",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "runtime_scope_key": "scope-1",
+            "seq": 1,
+            "payload": {"subagent_id": "sa-1", "goal": "查看目录"},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "tool.complete",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "runtime_scope_key": "scope-1",
+            "seq": 2,
+            "payload": {"tool_name": "terminal"},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "subagent.output_delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "runtime_scope_key": "scope-1",
+            "seq": 3,
+            "payload": {"subagent_id": "sa-2", "text": "输出"},
+        },
+    )
+
+    snapshots = db.list_run_events_filtered(
+        "stored-1",
+        runtime_scope_key="scope-1",
+        event_types=["subagent.start", "subagent.complete"],
+    )
+    selected = db.list_run_events_filtered(
+        "stored-1",
+        runtime_scope_key="scope-1",
+        event_type_prefix="subagent.",
+        payload_contains="sa-2",
+    )
+
+    assert [event["type"] for event in snapshots] == ["subagent.start"]
+    assert [event["seq"] for event in selected] == [3]
+
+
+def test_append_run_event_coalesces_adjacent_subagent_output_deltas(db):
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "subagent.output_delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "seq": 1,
+            "payload": {"subagent_id": "sa-1", "text": "第一"},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "subagent.output_delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "seq": 2,
+            "payload": {"subagent_id": "sa-1", "text": "段"},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "subagent.tool",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "seq": 3,
+            "payload": {"subagent_id": "sa-1", "tool_name": "terminal"},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "subagent.output_delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "seq": 4,
+            "payload": {"subagent_id": "sa-1", "text": "第二段"},
+        },
+    )
+
+    events = db.list_run_events_filtered("stored-1", event_type_prefix="subagent.", limit=10)
+
+    assert [event["type"] for event in events] == [
+        "subagent.output_delta",
+        "subagent.tool",
+        "subagent.output_delta",
+    ]
+    assert [event["seq"] for event in events] == [2, 3, 4]
+    assert events[0]["payload"]["text"] == "第一段"
+    assert events[2]["payload"]["text"] == "第二段"
+
+
+def test_append_run_event_coalesces_adjacent_subagent_reasoning_deltas(db):
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "subagent.reasoning_delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "seq": 1,
+            "payload": {
+                "subagent_id": "sa-1",
+                "source": "provider_reasoning",
+                "text": "先分析",
+            },
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "subagent.reasoning_delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "seq": 2,
+            "payload": {
+                "subagent_id": "sa-1",
+                "source": "provider_reasoning",
+                "text": "再验证",
+            },
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "subagent.reasoning_delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "seq": 3,
+            "payload": {
+                "subagent_id": "sa-2",
+                "source": "provider_reasoning",
+                "text": "另一个子 agent",
+            },
+        },
+    )
+
+    events = db.list_run_events_filtered("stored-1", event_types=["subagent.reasoning_delta"], limit=10)
+
+    assert [event["seq"] for event in events] == [2, 3]
+    assert events[0]["payload"]["text"] == "先分析再验证"
+    assert events[0]["payload"]["subagent_id"] == "sa-1"
+    assert events[1]["payload"]["text"] == "另一个子 agent"
+    assert events[1]["payload"]["subagent_id"] == "sa-2"
+
+
+def test_append_run_event_coalesces_adjacent_main_message_deltas(db):
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 1,
+            "payload": {"mode": "append", "text": "你", "delta": "你", "offset": 0},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 2,
+            "payload": {"mode": "append", "text": "好", "delta": "好", "offset": 1},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 3,
+            "payload": {"mode": "snapshot", "text": "你好啊", "snapshot": "你好啊", "offset": 0},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 4,
+            "payload": {"mode": "append", "text": "。", "delta": "。", "offset": 3},
+        },
+    )
+
+    events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
+
+    assert [event["seq"] for event in events] == [2, 3, 4]
+    assert events[0]["payload"] == {"mode": "append", "text": "你好", "delta": "你好", "offset": 0}
+    assert events[1]["payload"]["mode"] == "snapshot"
+    assert events[1]["payload"]["snapshot"] == "你好啊"
+    assert events[2]["payload"]["text"] == "。"
+
+
+def test_append_run_event_coalesces_adjacent_reasoning_deltas_by_source(db):
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "reasoning.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 1,
+            "payload": {"text": "思考", "source": "provider_reasoning"},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "reasoning.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 2,
+            "payload": {"text": "过程", "source": "provider_reasoning"},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "reasoning.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 3,
+            "payload": {"text": "不同来源", "source": "other"},
+        },
+    )
+
+    events = db.list_run_events_filtered("stored-1", event_types=["reasoning.delta"], limit=10)
+
+    assert [event["seq"] for event in events] == [2, 3]
+    assert events[0]["payload"] == {"text": "思考过程", "source": "provider_reasoning"}
+    assert events[1]["payload"] == {"text": "不同来源", "source": "other"}
+
+
+def test_append_run_event_prunes_on_terminal_event(db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        db,
+        "prune_run_events",
+        lambda **kwargs: calls.append(kwargs) or {"deleted_events": 0},
+    )
+
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "seq": 7,
+            "payload": {"text": "still running"},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.complete",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "seq": 8,
+            "payload": {"status": "completed", "text": "done"},
+        },
+    )
+
+    assert calls == [{"session_id": "stored-1"}]
+
+
+def test_compact_run_events_coalesces_existing_stream_rows(db):
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 1,
+            "payload": {"mode": "append", "text": "A", "delta": "A", "offset": 0},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "tool.start",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 2,
+            "payload": {"tool_name": "terminal"},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 3,
+            "payload": {"mode": "append", "text": "B", "delta": "B", "offset": 1},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 4,
+            "payload": {"mode": "append", "text": "C", "delta": "C", "offset": 2},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.complete",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 5,
+            "payload": {"status": "completed", "text": "ABC"},
+        },
+    )
+
+    # Insert raw rows after append-time coalescing to mimic an old database.
+    db._conn.execute(
+        """
+        INSERT INTO run_events (
+            session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+            event_type, seq, timestamp, payload_json, event_json, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "stored-1",
+            "run-1",
+            "turn-1",
+            "runtime-1",
+            "stored-1",
+            "message.delta",
+            6,
+            6.0,
+            '{"mode":"append","text":"D","delta":"D","offset":3}',
+            '{"type":"message.delta","session_id":"runtime-1","stored_session_id":"stored-1","run_id":"run-1","turn_id":"turn-1","runtime_scope_key":"stored-1","seq":6,"timestamp":6.0,"payload":{"mode":"append","text":"D","delta":"D","offset":3}}',
+            "",
+        ),
+    )
+    db._conn.execute(
+        """
+        INSERT INTO run_events (
+            session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+            event_type, seq, timestamp, payload_json, event_json, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "stored-1",
+            "run-1",
+            "turn-1",
+            "runtime-1",
+            "stored-1",
+            "message.delta",
+            7,
+            7.0,
+            '{"mode":"append","text":"E","delta":"E","offset":4}',
+            '{"type":"message.delta","session_id":"runtime-1","stored_session_id":"stored-1","run_id":"run-1","turn_id":"turn-1","runtime_scope_key":"stored-1","seq":7,"timestamp":7.0,"payload":{"mode":"append","text":"E","delta":"E","offset":4}}',
+            "",
+        ),
+    )
+
+    result = db.compact_run_events(session_id="stored-1")
+    events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
+
+    assert result["deleted_events"] == 1
+    assert [event["seq"] for event in events] == [1, 4, 7]
+    assert events[-1]["payload"] == {"mode": "append", "text": "DE", "delta": "DE", "offset": 3}
+
+
 # =========================================================================
 # Session lifecycle
 # =========================================================================

@@ -12,6 +12,12 @@ from tui_gateway.services.runtime_pool import (
     RuntimeLeaseError,
     acquire_runtime_lease,
 )
+from tui_gateway.services.subagent_snapshots import (
+    SUBAGENT_SNAPSHOT_EVENT_TYPES,
+    build_subagent_run_snapshots,
+    compact_subagent_detail_events,
+    filter_subagent_events,
+)
 
 _server = bind_server_globals(globals())
 
@@ -478,6 +484,124 @@ def _(rid, params: dict) -> dict:
     )
 
 
+def _list_filtered_run_events(
+    *,
+    stored_session_id: str,
+    after_seq: int = 0,
+    runtime_scope_key: str = "",
+    event_type_prefix: str = "",
+    event_types: tuple[str, ...] | list[str] | None = None,
+    payload_contains: str = "",
+    limit: int = 2000,
+) -> list[dict]:
+    db = _get_db()
+    if db is None:
+        return []
+    list_filtered = getattr(db, "list_run_events_filtered", None)
+    if callable(list_filtered):
+        return list_filtered(
+            stored_session_id,
+            after_seq=after_seq,
+            runtime_scope_key=runtime_scope_key,
+            event_type_prefix=event_type_prefix,
+            event_types=event_types,
+            payload_contains=payload_contains,
+            limit=limit,
+        )
+    list_events = getattr(db, "list_run_events", None)
+    if not callable(list_events):
+        return []
+    events = list_events(
+        stored_session_id,
+        after_seq=after_seq,
+        runtime_scope_key=runtime_scope_key,
+        limit=limit,
+    )
+    normalized_types = {
+        str(item or "").strip()
+        for item in (event_types or ())
+        if str(item or "").strip()
+    }
+    prefix = str(event_type_prefix or "").strip()
+    out = []
+    for event in events:
+        event_type = str((event or {}).get("type") or "").strip()
+        if normalized_types and event_type not in normalized_types:
+            continue
+        if prefix and not event_type.startswith(prefix):
+            continue
+        out.append(event)
+    return out
+
+
+@method("subagent.runs.list")
+def _(rid, params: dict) -> dict:
+    stable_session_id = _stored_session_id_from_params(params)
+    if not stable_session_id:
+        return _err(rid, 4006, "stored_session_id required")
+    runtime_scope_key = str(
+        params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
+    ).strip()
+    try:
+        after_seq = int(params.get("after_seq") or params.get("afterSeq") or 0)
+    except (TypeError, ValueError):
+        after_seq = 0
+    limit = _bounded_limit(params.get("limit"), default=5000, maximum=20000)
+    events = _list_filtered_run_events(
+        stored_session_id=stable_session_id,
+        after_seq=after_seq,
+        runtime_scope_key=runtime_scope_key,
+        event_types=SUBAGENT_SNAPSHOT_EVENT_TYPES,
+        limit=limit,
+    )
+    runs = build_subagent_run_snapshots(events, stored_session_id=stable_session_id)
+    return _ok(
+        rid,
+        {
+            "stored_session_id": stable_session_id,
+            "runs": runs,
+            "last_event_seq": max([int(event.get("seq") or 0) for event in events], default=after_seq),
+        },
+    )
+
+
+@method("subagent.events.list")
+def _(rid, params: dict) -> dict:
+    stable_session_id = _stored_session_id_from_params(params)
+    if not stable_session_id:
+        return _err(rid, 4006, "stored_session_id required")
+    subagent_id = str(params.get("subagent_id") or params.get("subagentId") or "").strip()
+    if not subagent_id:
+        return _err(rid, 4006, "subagent_id required")
+    runtime_scope_key = str(
+        params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
+    ).strip()
+    try:
+        after_seq = int(params.get("after_seq") or params.get("afterSeq") or 0)
+    except (TypeError, ValueError):
+        after_seq = 0
+    limit = _bounded_limit(params.get("limit"), default=5000, maximum=20000)
+    events = _list_filtered_run_events(
+        stored_session_id=stable_session_id,
+        after_seq=after_seq,
+        runtime_scope_key=runtime_scope_key,
+        event_type_prefix="subagent.",
+        payload_contains=subagent_id,
+        limit=limit,
+    )
+    events = filter_subagent_events(events, subagent_id)
+    events = compact_subagent_detail_events(events)
+    return _ok(
+        rid,
+        {
+            "stored_session_id": stable_session_id,
+            "subagent_id": subagent_id,
+            "events": events,
+            "last_event_seq": max([int(event.get("seq") or 0) for event in events], default=after_seq),
+        },
+    )
+
+
 @method("events.unsubscribe")
 def _(rid, params: dict) -> dict:
     subscription_id = str(params.get("subscription_id") or params.get("subscriptionId") or "").strip()
@@ -507,5 +631,20 @@ def _(rid, params: dict) -> dict:
         session_id=stable_session_id,
         retention_days=int(params.get("retention_days") or params.get("retentionDays") or 14),
         max_events_per_session=int(params.get("max_events_per_session") or params.get("maxEventsPerSession") or 5000),
+    )
+    return _ok(rid, result)
+
+
+@method("events.compact")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5006)
+    compact = getattr(db, "compact_run_events", None)
+    if not callable(compact):
+        return _err(rid, 5006, "run event compaction is not available")
+    result = compact(
+        session_id=_stored_session_id_from_params(params),
+        vacuum=bool(params.get("vacuum")),
     )
     return _ok(rid, result)

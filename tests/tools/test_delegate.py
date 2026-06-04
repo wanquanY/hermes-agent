@@ -29,6 +29,8 @@ from tools.delegate_tool import (
     _build_child_agent,
     _build_child_progress_callback,
     _build_child_system_prompt,
+    _clean_subagent_name,
+    _humanize_subagent_name,
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
@@ -66,9 +68,11 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertEqual(DELEGATE_TASK_SCHEMA["name"], "delegate_task")
         props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
         self.assertIn("goal", props)
+        self.assertIn("name", props)
         self.assertIn("tasks", props)
         self.assertIn("context", props)
         self.assertIn("toolsets", props)
+        self.assertIn("name", props["tasks"]["items"]["properties"])
         # max_iterations is intentionally NOT exposed to the model — it's
         # config-authoritative via delegation.max_iterations so users get
         # predictable budgets.
@@ -155,6 +159,26 @@ class TestStripBlockedTools(unittest.TestCase):
     def test_empty_input(self):
         result = _strip_blocked_tools([])
         self.assertEqual(result, [])
+
+
+class TestSubagentDisplayName(unittest.TestCase):
+    def test_clean_subagent_name_trims_quotes_and_length(self):
+        self.assertEqual(_clean_subagent_name('  "目录巡检员"  '), "目录巡检员")
+        self.assertEqual(len(_clean_subagent_name("很长" * 20)), 24)
+
+    def test_humanized_name_fallbacks_from_task_intent(self):
+        self.assertEqual(
+            _humanize_subagent_name("示例任务 1：用 terminal 执行 `pwd` 查看当前工作目录，并返回结果。"),
+            "目录巡检员",
+        )
+        self.assertEqual(
+            _humanize_subagent_name("用 terminal 执行 `date` 获取当前系统日期时间"),
+            "时间校准员",
+        )
+        self.assertEqual(
+            _humanize_subagent_name("运行 python3 -c 'print(2468*1357)' 做简单计算"),
+            "计算核对员",
+        )
 
 
 class TestDelegateTask(unittest.TestCase):
@@ -411,7 +435,61 @@ class TestDelegateTask(unittest.TestCase):
             )
 
         self.assertIsNone(MockAgent.call_args.kwargs.get("thinking_callback"))
-        parent.tool_progress_callback.assert_not_called()
+        progress_calls = [
+            mock_call
+            for mock_call in parent.tool_progress_callback.mock_calls
+            if mock_call[0] == ""
+        ]
+        self.assertEqual(len(progress_calls), 1)
+        event_type, tool_name, preview, args = progress_calls[0].args[:4]
+        self.assertEqual(event_type, "subagent.spawn_requested")
+        self.assertIsNone(tool_name)
+        self.assertEqual(preview, "Avoid fake child thinking")
+        self.assertIsNone(args)
+
+    def test_child_relay_provider_reasoning_delta_to_gateway_parent(self):
+        parent = _make_mock_parent(depth=0)
+        parent.tool_progress_callback = MagicMock()
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Analyze Python 3.13",
+                context=None,
+                toolsets=["terminal"],
+                model="deepseek-v4-pro",
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=2,
+                delegate_call_id="call-delegate-1",
+                agent_name="技术调研员",
+            )
+
+        reasoning_callback = MockAgent.call_args.kwargs.get("reasoning_callback")
+        self.assertIsNotNone(reasoning_callback)
+
+        reasoning_callback("先确认版本。")
+
+        reasoning_calls = [
+            call
+            for call in parent.tool_progress_callback.mock_calls
+            if call.args and call.args[0] == "subagent.reasoning_delta"
+        ]
+        self.assertEqual(len(reasoning_calls), 1)
+        event_type, tool_name, preview, args = reasoning_calls[0].args[:4]
+        self.assertEqual(event_type, "subagent.reasoning_delta")
+        self.assertIsNone(tool_name)
+        self.assertEqual(preview, "先确认版本。")
+        self.assertIsNone(args)
+        self.assertEqual(reasoning_calls[0].kwargs["source"], "provider_reasoning")
+        self.assertTrue(reasoning_calls[0].kwargs["subagent_id"].startswith("sa-0-"))
+        self.assertEqual(reasoning_calls[0].kwargs["task_index"], 0)
+        self.assertEqual(reasoning_calls[0].kwargs["task_count"], 2)
+        self.assertEqual(reasoning_calls[0].kwargs["delegate_call_id"], "call-delegate-1")
+        self.assertEqual(reasoning_calls[0].kwargs["tool_call_id"], "call-delegate-1")
 
 
 class TestToolNamePreservation(unittest.TestCase):
@@ -512,6 +590,123 @@ class TestToolNamePreservation(unittest.TestCase):
 
 class TestDelegateObservability(unittest.TestCase):
     """Tests for enriched metadata returned by _run_single_child."""
+
+    def test_progress_callback_carries_delegate_group_identity(self):
+        parent = _make_mock_parent(depth=0)
+        captured = []
+
+        def progress_cb(event_type, tool_name=None, preview=None, args=None, **kwargs):
+            captured.append((event_type, tool_name, preview, args, kwargs))
+
+        parent.tool_progress_callback = progress_cb
+
+        callback = _build_child_progress_callback(
+            0,
+            "Write Python code",
+            parent,
+            task_count=2,
+            subagent_id="sa-0-test",
+            model="gpt-test",
+            toolsets=["terminal"],
+            role="leaf",
+            context="Use fibonacci.",
+            delegate_call_id="call-delegate-1",
+            agent_name="代码助手",
+        )
+        self.assertIsNotNone(callback)
+
+        callback("subagent.spawn_requested", preview="Write Python code")
+
+        self.assertEqual(captured[0][0], "subagent.spawn_requested")
+        payload = captured[0][4]
+        self.assertEqual(payload["subagent_id"], "sa-0-test")
+        self.assertEqual(payload["delegate_call_id"], "call-delegate-1")
+        self.assertEqual(payload["tool_call_id"], "call-delegate-1")
+        self.assertEqual(payload["dispatch_message"], "Write Python code\n\nUse fibonacci.")
+        self.assertEqual(payload["context"], "Use fibonacci.")
+        self.assertEqual(payload["role"], "leaf")
+        self.assertEqual(payload["agent_name"], "代码助手")
+
+    def test_delegate_task_emits_explicit_agent_name(self):
+        parent = _make_mock_parent(depth=0)
+        captured = []
+
+        def progress_cb(event_type, tool_name=None, preview=None, args=None, **kwargs):
+            captured.append((event_type, preview, kwargs))
+
+        parent.tool_progress_callback = progress_cb
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.model = "test-model"
+            mock_child.session_prompt_tokens = 0
+            mock_child.session_completion_tokens = 0
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "api_calls": 1,
+                "messages": [],
+            }
+            MockAgent.return_value = mock_child
+
+            result = json.loads(
+                delegate_task(
+                    goal="查看当前工作目录",
+                    name="目录巡检员",
+                    parent_agent=parent,
+                )
+            )
+
+        self.assertEqual(mock_child._subagent_name, "目录巡检员")
+        self.assertEqual(result["results"][0]["agent_name"], "目录巡检员")
+        self.assertTrue(captured)
+        self.assertTrue(all(kwargs.get("agent_name") == "目录巡检员" for _, _, kwargs in captured))
+
+    def test_subagent_complete_event_carries_full_summary(self):
+        from tools.delegate_tool import _run_single_child
+
+        parent = _make_mock_parent(depth=0)
+        captured = []
+
+        def progress_cb(event_type, tool_name=None, preview=None, args=None, **kwargs):
+            captured.append((event_type, preview, kwargs))
+
+        parent.tool_progress_callback = progress_cb
+        long_summary = "子 agent 最终输出" + ("x" * 700)
+        mock_child = MagicMock()
+        mock_child.model = "test-model"
+        mock_child.session_prompt_tokens = 0
+        mock_child.session_completion_tokens = 0
+        mock_child.session_reasoning_tokens = 0
+        mock_child.session_estimated_cost_usd = 0
+        mock_child._credential_pool = None
+        mock_child._delegate_saved_tool_names = []
+        mock_child._delegate_role = "leaf"
+        mock_child.tool_progress_callback = _build_child_progress_callback(
+            0,
+            "输出长文本",
+            parent,
+            task_count=1,
+            subagent_id="sa-summary",
+        )
+        mock_child.run_conversation.return_value = {
+            "final_response": long_summary,
+            "completed": True,
+            "api_calls": 1,
+            "messages": [],
+        }
+
+        _run_single_child(0, "输出长文本", mock_child, parent)
+
+        complete_events = [
+            (preview, kwargs)
+            for event_type, preview, kwargs in captured
+            if event_type == "subagent.complete"
+        ]
+        self.assertEqual(len(complete_events), 1)
+        complete_preview, complete_kwargs = complete_events[0]
+        self.assertEqual(complete_kwargs["summary"], long_summary)
+        self.assertLess(len(complete_preview), len(long_summary))
 
     def test_observability_fields_present(self):
         """Completed child should return tool_trace, tokens, model, exit_reason."""
@@ -1476,6 +1671,238 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
             self.assertEqual(mock_child._credential_pool, mock_pool)
 
     @patch("tools.delegate_tool._load_config", return_value={})
+    def test_build_child_agent_accepts_exact_tool_names(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["file", "skills", "delegation", "code_execution"]
+        parent.valid_tool_names = {
+            "read_file",
+            "search_files",
+            "skill_view",
+            "skills_list",
+            "skill_manage",
+            "delegate_task",
+            "execute_code",
+        }
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Use exact tools",
+                context=None,
+                toolsets=["search_files", "skill_view"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        enabled_tools = set(MockAgent.call_args[1]["enabled_tools"])
+        self.assertEqual(enabled_tools, {"search_files", "skill_view"})
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_build_child_agent_maps_web_request_to_parent_doxie_web_tools(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["doxie_web", "delegation"]
+        parent.valid_tool_names = {
+            "serper_search_tool",
+            "jina_web_parser_tool",
+            "delegate_task",
+        }
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Research current news",
+                context=None,
+                toolsets=["web"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        enabled_tools = set(MockAgent.call_args[1]["enabled_tools"])
+        self.assertEqual(enabled_tools, {"serper_search_tool", "jina_web_parser_tool"})
+        self.assertEqual(MockAgent.call_args[1]["enabled_toolsets"], ["doxie_web"])
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_build_child_agent_maps_search_request_to_parent_serper_tool(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["doxie_web", "delegation"]
+        parent.valid_tool_names = {
+            "serper_search_tool",
+            "jina_web_parser_tool",
+            "delegate_task",
+        }
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Search current news",
+                context=None,
+                toolsets=["search"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        enabled_tools = set(MockAgent.call_args[1]["enabled_tools"])
+        self.assertEqual(enabled_tools, {"serper_search_tool"})
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_build_child_agent_maps_native_web_tool_to_parent_doxie_tool(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["doxie_web", "delegation"]
+        parent.valid_tool_names = {
+            "serper_search_tool",
+            "jina_web_parser_tool",
+            "delegate_task",
+        }
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Use native web tool wording",
+                context=None,
+                toolsets=["web_search", "web_extract"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        enabled_tools = set(MockAgent.call_args[1]["enabled_tools"])
+        self.assertEqual(enabled_tools, {"serper_search_tool", "jina_web_parser_tool"})
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_build_child_agent_inherits_parent_exact_tools_by_default(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = None
+        parent.valid_tool_names = {
+            "read_file",
+            "search_files",
+            "skill_view",
+            "skills_list",
+            "skill_manage",
+            "delegate_task",
+            "execute_code",
+            "memory",
+            "send_message",
+            "clarify",
+        }
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Inherit tools",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        enabled_tools = set(MockAgent.call_args[1]["enabled_tools"])
+        self.assertTrue(
+            {"read_file", "search_files", "skill_view", "skills_list", "skill_manage"}
+            <= enabled_tools
+        )
+        self.assertFalse(
+            {"delegate_task", "execute_code", "memory", "send_message", "clarify"}
+            & enabled_tools
+        )
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_build_child_agent_toolset_request_does_not_gain_parent_siblings(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["file"]
+        parent.valid_tool_names = {"read_file"}
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Read only",
+                context=None,
+                toolsets=["file"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        self.assertEqual(MockAgent.call_args[1]["enabled_tools"], ["read_file"])
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_build_child_agent_inherits_parent_runtime_prompt(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["file"]
+        parent.valid_tool_names = {"read_file"}
+        parent.ephemeral_system_prompt = "你是主分身的数据分析专家。"
+        parent.skip_context_files = False
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Check prompt inheritance",
+                context=None,
+                toolsets=["read_file"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        kwargs = MockAgent.call_args[1]
+        self.assertIn("你是主分身的数据分析专家。", kwargs["ephemeral_system_prompt"])
+        self.assertFalse(kwargs["skip_context_files"])
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_build_child_agent_preserves_explicit_no_tools_sentinel(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["file", "skills"]
+        parent.valid_tool_names = {"read_file", "skill_view"}
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="No tools",
+                context=None,
+                toolsets=["__doxie_no_tools__"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        self.assertEqual(MockAgent.call_args[1]["enabled_tools"], [])
+
+    @patch("tools.delegate_tool._load_config", return_value={})
     def test_build_child_agent_preserves_mcp_toolsets_by_default(self, mock_cfg):
         parent = _make_mock_parent()
         parent.enabled_toolsets = ["web", "browser", "mcp-MiniMax"]
@@ -1560,10 +1987,66 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
 
         args, kwargs = parent.tool_progress_callback.call_args
         self.assertEqual(args[:4], ("subagent.output_delta", "test_agent_profile", "hello", None))
-        self.assertEqual(kwargs["goal"], "test goal")
+        self.assertNotIn("goal", kwargs)
+        self.assertNotIn("dispatch_message", kwargs)
+        self.assertNotIn("context", kwargs)
         self.assertEqual(kwargs["task_index"], 0)
         self.assertEqual(kwargs["task_count"], 1)
         self.assertEqual(kwargs["depth"], 0)
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_build_child_agent_relay_output_delta_by_default_for_gateway_parent(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.tool_progress_callback = MagicMock()
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="stream child output",
+                context=None,
+                toolsets=[],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        output_delta_cb = MockAgent.call_args[1]["stream_delta_callback"]
+        self.assertIsNotNone(output_delta_cb)
+
+        output_delta_cb("child chunk")
+
+        args, kwargs = parent.tool_progress_callback.call_args
+        self.assertEqual(args[:4], ("subagent.output_delta", None, "child chunk", None))
+        self.assertNotIn("goal", kwargs)
+        self.assertNotIn("dispatch_message", kwargs)
+        self.assertNotIn("context", kwargs)
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_build_child_agent_can_disable_output_delta_relay(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.tool_progress_callback = MagicMock()
+        parent._delegate_child_output_delta_enabled = False
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="no child stream",
+                context=None,
+                toolsets=[],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        self.assertIsNone(MockAgent.call_args[1]["stream_delta_callback"])
 
 
 class TestChildCredentialLeasing(unittest.TestCase):
@@ -1985,8 +2468,8 @@ class TestDelegateEventEnum(unittest.TestCase):
         cb("reasoning.available", tool_name=None, preview="hmm")
         assert any("💭" in str(c) for c in parent._delegate_spinner.print_above.call_args_list)
 
-    def test_progress_callback_tool_completed_is_noop(self):
-        """tool.completed is normalised but produces no display output."""
+    def test_progress_callback_tool_completed_is_noop_without_parent_callback(self):
+        """tool.completed remains display-silent when only the CLI spinner is active."""
         parent = _make_mock_parent()
         parent._delegate_spinner = MagicMock()
         parent.tool_progress_callback = None
@@ -1994,6 +2477,24 @@ class TestDelegateEventEnum(unittest.TestCase):
         cb = _build_child_progress_callback(0, "test goal", parent, task_count=1)
         cb("tool.completed", tool_name="terminal")
         parent._delegate_spinner.print_above.assert_not_called()
+
+    def test_progress_callback_tool_completed_relays_result_to_gateway(self):
+        parent = _make_mock_parent()
+        parent._delegate_spinner = None
+        parent.tool_progress_callback = MagicMock()
+
+        cb = _build_child_progress_callback(0, "test goal", parent, task_count=1, subagent_id="sa-1")
+        cb("tool.started", tool_name="terminal", preview="pwd", args={"command": "pwd"})
+        cb("tool.completed", tool_name="terminal", duration=0.42, is_error=False, result="/tmp/workspace\n")
+
+        assert parent.tool_progress_callback.call_args_list[0].args[0] == "subagent.tool"
+        start_kwargs = parent.tool_progress_callback.call_args_list[0].kwargs
+        complete_call = parent.tool_progress_callback.call_args_list[1]
+        assert complete_call.args[0] == "subagent.tool"
+        assert complete_call.kwargs["tool_id"] == start_kwargs["tool_id"]
+        assert complete_call.kwargs["status"] == "completed"
+        assert complete_call.kwargs["result"] == "/tmp/workspace\n"
+        assert complete_call.kwargs["duration_seconds"] == 0.42
 
     def test_progress_callback_ignores_unknown_events(self):
         """Unknown event types are silently ignored."""

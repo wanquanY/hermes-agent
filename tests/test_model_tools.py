@@ -184,6 +184,17 @@ def test_native_cronjob_tool_is_not_registered_for_model_dispatch():
     assert "cronjob" not in get_all_tool_names()
     assert get_toolset_for_tool("cronjob") is None
 
+
+def test_exact_enabled_tools_do_not_expand_toolset_siblings():
+    names = {
+        tool["function"]["name"]
+        for tool in get_tool_definitions(enabled_tools=["read_file"], quiet_mode=True)
+    }
+
+    assert "read_file" in names
+    assert "search_files" not in names
+    assert "write_file" not in names
+
 class TestAgentLoopTools:
     def test_expected_tools_in_set(self):
         assert "todo" in _AGENT_LOOP_TOOLS

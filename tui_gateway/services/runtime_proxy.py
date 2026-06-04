@@ -24,6 +24,7 @@ _RUNTIME_PROXY_CONTROL_METHODS = frozenset(
         "artifacts.list",
         "clarify.respond",
         "cron.manage",
+        "events.compact",
         "events.prune",
         "events.subscribe",
         "events.unsubscribe",
@@ -38,6 +39,8 @@ _RUNTIME_PROXY_CONTROL_METHODS = frozenset(
         "run.status",
         "runtime.status",
         "secret.respond",
+        "subagent.events.list",
+        "subagent.runs.list",
         "session.create",
         "session.delete",
         "session.list",
@@ -75,6 +78,8 @@ _RUNTIME_CONNECT_ATTEMPTS = 40
 _RUNTIME_CONNECT_DELAY_S = 0.05
 _DEFAULT_IDLE_TIMEOUT_S = 30 * 60
 _SIDECAR_TOKEN_ENV = "DOXIE_SIDECAR_TOKEN"
+_SIDECAR_PARENT_PID_ENV = "DOXIE_SIDECAR_PARENT_PID"
+_CRON_CONTROL_PLANE_READ_ACTIONS = frozenset({"", "list", "status", "runs"})
 
 
 class AsyncFrameTransport(Protocol):
@@ -191,6 +196,30 @@ def runtime_scope_from_params(params: dict[str, Any]) -> RuntimeScope:
     )
 
 
+def _truthy_param(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _cron_control_plane_read_requested(method: str, params: dict[str, Any]) -> bool:
+    if method != "cron.manage":
+        return False
+    action = str(params.get("action") or "").strip().lower()
+    if action not in _CRON_CONTROL_PLANE_READ_ACTIONS:
+        return False
+    return (
+        _truthy_param(params.get("controlPlaneOnly"))
+        or _truthy_param(params.get("control_plane_only"))
+        or _truthy_param(params.get("readOnly"))
+        or _truthy_param(params.get("read_only"))
+    )
+
+
 def should_proxy_to_runtime(req: dict[str, Any]) -> bool:
     method = str((req or {}).get("method") or "").strip()
     if not method:
@@ -201,6 +230,8 @@ def should_proxy_to_runtime(req: dict[str, Any]) -> bool:
         return False
     current_scope = str(os.environ.get("DOXIE_HERMES_RUNTIME_SCOPE_KEY") or "").strip()
     if current_scope and current_scope == scope.runtime_scope_key:
+        return False
+    if _cron_control_plane_read_requested(method, params):
         return False
     if method == "session.create" and not (params.get("control_plane_only") or params.get("controlPlaneOnly")):
         return False
@@ -395,6 +426,7 @@ class RuntimeWorkerPool:
         if scope.agent_profile_version_id:
             env["DOXIE_AGENT_PROFILE_VERSION_ID"] = scope.agent_profile_version_id
         env[_SIDECAR_TOKEN_ENV] = token
+        env[_SIDECAR_PARENT_PID_ENV] = str(os.getpid())
         process = subprocess.Popen(
             [
                 sys.executable,

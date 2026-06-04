@@ -6,6 +6,9 @@ sessions. This replaces the earlier per-session JSONL file approach.
 
 Source file: `hermes_state.py`
 
+Run/event persistence is split into `hermes_state_runs.py`, which is mixed into
+`SessionDB`.
+
 
 ## Architecture Overview
 
@@ -15,6 +18,8 @@ Source file: `hermes_state.py`
 ├── messages              — Full message history per session
 ├── messages_fts          — FTS5 virtual table (content + tool_name + tool_calls)
 ├── messages_fts_trigram  — FTS5 virtual table with trigram tokenizer (CJK / substring search)
+├── runs                  — Runtime turn/run status and terminal outcomes
+├── run_events            — Durable runtime event log for replay and client hydration
 ├── state_meta            — Key/value metadata table
 └── schema_version        — Single-row table tracking migration state
 ```
@@ -24,6 +29,9 @@ Key design decisions:
 - **FTS5 virtual table** for fast text search across all session messages
 - **Session lineage** via `parent_session_id` chains (compression-triggered splits)
 - **Source tagging** (`cli`, `telegram`, `discord`, etc.) for platform filtering
+- **Run/event log** separated from transcript messages so clients can replay
+  running state, tool progress, subagent panels, approvals, and terminal status
+  without rewriting assistant messages
 - Batch runner and RL trajectories are NOT stored here (separate systems)
 
 
@@ -218,6 +226,55 @@ msg_id = db.append_message(
     reasoning="Let me think about this...",
 )
 ```
+
+## Run Event Storage
+
+Gateway and Doxie clients use `run_events` as the durable event stream for
+runtime-scoped UI state. Transcript messages answer "what did the conversation
+say?", while run events answer "what happened while the turn was running?".
+
+Important APIs live in `hermes_state_runs.py`:
+
+- `append_run_event(...)` stores one runtime event and updates `runs` when the
+  event belongs to a run.
+- `list_run_events(...)` returns replay pages for a session and optional runtime
+  scope.
+- `list_run_events_filtered(...)` filters at the SQLite boundary by event type,
+  prefix, runtime scope, and payload substring. Use this for narrow hydration
+  views such as subagent panels instead of loading the full event log.
+- `compact_run_events(...)` rewrites stored events to reduce replay cost and can
+  optionally run SQLite vacuum.
+- `prune_run_events(...)` applies retention limits by age and per-session event
+  count.
+
+`append_run_event(...)` coalesces adjacent token-level stream deltas before they
+hit storage. Coalesced event types include main assistant deltas, reasoning and
+thinking deltas, subagent output/reasoning/thinking deltas, and Doxie profile
+test deltas. Coalescing only happens when the stream identity matches: event
+type, run id, turn id, runtime scope, mode, and identity payload fields such as
+`subagent_id`, `delegate_call_id`, and `tool_call_id`.
+
+This keeps live streaming granular while keeping history replay bounded. New
+event types should only be added to the coalescing set when adjacent text
+fragments are semantically append-only and no UI boundary would be lost.
+
+## Subagent Event Hydration
+
+Subagent history is derived from persisted run events rather than stored as a
+second transcript. The TUI Gateway exposes:
+
+- `subagent.runs.list` — returns compact snapshots for each subagent run in a
+  stored session.
+- `subagent.events.list` — returns filtered and compacted detail events for a
+  single subagent id.
+- `events.compact` — asks the storage layer to compact durable run events.
+
+Snapshot construction is implemented in
+`tui_gateway/services/subagent_snapshots.py`. It consumes subagent lifecycle,
+tool, progress, output, reasoning, and completion events, then derives client
+fields such as status, tool count, model, role, `agent_name`, summary, and
+timing. Keep UI-specific grouping in that service; do not duplicate subagent
+state into the `messages` table.
 
 ### Retrieve Messages
 

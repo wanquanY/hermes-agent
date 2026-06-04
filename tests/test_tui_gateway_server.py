@@ -112,6 +112,219 @@ def test_tui_verbose_tool_events_omit_details_when_redaction_fails(monkeypatch):
     assert "result_text" not in events[1][2]
 
 
+def test_tool_complete_emits_result_text_for_regular_progress(monkeypatch):
+    events: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server, "_emit", lambda event_type, sid, payload: events.append((event_type, sid, payload))
+    )
+    monkeypatch.setitem(
+        server._sessions,
+        "regular-progress-test",
+        {"tool_progress_mode": "all", "tool_started_at": {}},
+    )
+
+    callbacks = server._agent_cbs("regular-progress-test")
+    callbacks["tool_complete_callback"](
+        "tool-1",
+        "terminal",
+        {"command": "pwd"},
+        "workspace path",
+    )
+
+    assert events[0][0] == "tool.complete"
+    assert events[0][2]["result_text"] == "workspace path"
+
+
+def test_subagent_progress_payload_includes_turn_and_delegate_identity(monkeypatch):
+    events: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server, "_emit", lambda event_type, sid, payload: events.append((event_type, sid, payload))
+    )
+    monkeypatch.setitem(
+        server._sessions,
+        "subagent-identity-test",
+        {
+            "tool_progress_mode": "all",
+            "active_run_id": "run-1",
+            "active_turn_id": "turn-1",
+            "pending_turn": {"client_message_id": "client-1"},
+        },
+    )
+
+    callbacks = server._agent_cbs("subagent-identity-test")
+    callbacks["tool_progress_callback"](
+        "subagent.start",
+        None,
+        "Build a Fibonacci helper",
+        None,
+        subagent_id="sa-0-test",
+        delegate_call_id="call-delegate-1",
+        tool_call_id="call-delegate-1",
+        dispatch_message="Build a Fibonacci helper",
+        context="Use Python.",
+        role="leaf",
+    )
+
+    assert events[0][0] == "subagent.start"
+    payload = events[0][2]
+    assert payload["run_id"] == "run-1"
+    assert payload["turn_id"] == "turn-1"
+    assert payload["client_message_id"] == "client-1"
+    assert payload["subagent_id"] == "sa-0-test"
+    assert payload["delegate_call_id"] == "call-delegate-1"
+    assert payload["tool_call_id"] == "call-delegate-1"
+    assert payload["dispatch_message"] == "Build a Fibonacci helper"
+    assert payload["context"] == "Use Python."
+    assert payload["role"] == "leaf"
+
+    events.clear()
+    callbacks["tool_progress_callback"](
+        "subagent.tool",
+        "terminal",
+        "pwd",
+        {"command": "pwd"},
+        subagent_id="sa-0-test",
+        delegate_call_id="call-delegate-1",
+        tool_call_id="call-delegate-1",
+    )
+
+    assert events[0][0] == "subagent.tool"
+    payload = events[0][2]
+    assert payload["tool_name"] == "terminal"
+    assert payload["arguments"] == {"command": "pwd"}
+
+    events.clear()
+    callbacks["tool_progress_callback"](
+        "subagent.tool",
+        "terminal",
+        "pwd",
+        {"command": "pwd"},
+        subagent_id="sa-0-test",
+        delegate_call_id="call-delegate-1",
+        tool_call_id="call-delegate-1",
+        tool_id="subagent-tool:sa-0-test:1:terminal",
+        status="completed",
+        duration_seconds=0.42,
+        result="workspace path",
+    )
+
+    assert events[0][0] == "subagent.tool"
+    payload = events[0][2]
+    assert payload["tool_id"] == "subagent-tool:sa-0-test:1:terminal"
+    assert payload["status"] == "completed"
+    assert payload["duration_seconds"] == 0.42
+    assert payload["result_text"] == "workspace path"
+
+
+def test_subagent_runs_list_returns_lightweight_snapshots(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _FakeDB:
+        def list_run_events_filtered(self, session_id, **kwargs):
+            captured["session_id"] = session_id
+            captured["kwargs"] = kwargs
+            return [
+                {
+                    "type": "subagent.start",
+                    "stored_session_id": "stored-1",
+                    "run_id": "run-1",
+                    "seq": 10,
+                    "timestamp": 100.0,
+                    "payload": {
+                        "subagent_id": "sa-1",
+                        "delegate_call_id": "call-delegate-1",
+                        "goal": "查看当前目录",
+                        "agent_name": "目录巡检员",
+                        "agent_avatar": "robot-blue",
+                        "task_index": 0,
+                        "task_count": 2,
+                    },
+                },
+                {
+                    "type": "subagent.complete",
+                    "stored_session_id": "stored-1",
+                    "run_id": "run-1",
+                    "seq": 12,
+                    "timestamp": 120.0,
+                    "payload": {
+                        "subagent_id": "sa-1",
+                        "status": "completed",
+                        "summary": "已完成目录检查",
+                    },
+                },
+            ]
+
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+
+    resp = server.handle_request({
+        "id": "1",
+        "method": "subagent.runs.list",
+        "params": {"stored_session_id": "stored-1", "runtime_scope_key": "scope-1"},
+    })
+
+    assert captured["session_id"] == "stored-1"
+    assert captured["kwargs"]["event_types"]
+    assert resp["result"]["last_event_seq"] == 12
+    run = resp["result"]["runs"][0]
+    assert run["subagent_id"] == "sa-1"
+    assert run["delegate_call_id"] == "call-delegate-1"
+    assert run["agent_name"] == "目录巡检员"
+    assert run["agent_avatar"] == "robot-blue"
+    assert run["status"] == "completed"
+    assert run["summary"] == "已完成目录检查"
+    assert run["details_loaded"] is False
+
+
+def test_subagent_events_list_filters_selected_subagent(monkeypatch):
+    class _FakeDB:
+        def list_run_events_filtered(self, session_id, **kwargs):
+            assert session_id == "stored-1"
+            assert kwargs["event_type_prefix"] == "subagent."
+            assert kwargs["payload_contains"] == "sa-2"
+            return [
+                {"type": "subagent.output_delta", "seq": 1, "payload": {"subagent_id": "sa-1", "text": "skip"}},
+                {"type": "subagent.output_delta", "seq": 2, "payload": {"subagent_id": "sa-2", "text": "keep"}},
+                {"type": "subagent.output_delta", "seq": 3, "payload": {"subagent_id": "sa-2", "text": " going"}},
+                {"type": "subagent.tool", "seq": 4, "payload": {"subagent_id": "sa-2", "tool_name": "terminal"}},
+                {"type": "subagent.output_delta", "seq": 5, "payload": {"subagent_id": "sa-2", "text": " after tool"}},
+            ]
+
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+
+    resp = server.handle_request({
+        "id": "1",
+        "method": "subagent.events.list",
+        "params": {"stored_session_id": "stored-1", "subagent_id": "sa-2"},
+    })
+
+    assert resp["result"]["events"] == [
+        {"type": "subagent.output_delta", "seq": 3, "payload": {"subagent_id": "sa-2", "text": "keep going"}},
+        {"type": "subagent.tool", "seq": 4, "payload": {"subagent_id": "sa-2", "tool_name": "terminal"}},
+        {"type": "subagent.output_delta", "seq": 5, "payload": {"subagent_id": "sa-2", "text": " after tool"}},
+    ]
+    assert resp["result"]["last_event_seq"] == 5
+
+
+def test_events_compact_invokes_run_event_compaction(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _FakeDB:
+        def compact_run_events(self, **kwargs):
+            captured.update(kwargs)
+            return {"compacted_segments": 2, "deleted_events": 10, "updated_events": 2}
+
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+
+    resp = server.handle_request({
+        "id": "1",
+        "method": "events.compact",
+        "params": {"stored_session_id": "stored-1", "vacuum": True},
+    })
+
+    assert captured == {"session_id": "stored-1", "vacuum": True}
+    assert resp["result"] == {"compacted_segments": 2, "deleted_events": 10, "updated_events": 2}
+
+
 def test_dispatch_rejects_non_object_request():
     resp = server.dispatch([])
 
@@ -566,7 +779,16 @@ def test_history_to_messages_preserves_tool_calls_for_resume_display():
                 }
             ],
         },
-        {"role": "tool", "content": "{}", "tool_call_id": "call_1"},
+        {
+            "role": "tool",
+            "content": "{}",
+            "tool_call_id": "call_1",
+            "metadata": {
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "client_message_id": "client-1",
+            },
+        },
         {"role": "assistant", "content": "first answer"},
         {"role": "user", "content": "second prompt"},
     ]
@@ -576,8 +798,15 @@ def test_history_to_messages_preserves_tool_calls_for_resume_display():
         {
             "arguments": {"pattern": "resume"},
             "context": "resume",
+            "metadata": {
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "client_message_id": "client-1",
+            },
             "name": "search_files",
+            "result_text": "{}",
             "role": "tool",
+            "tool_call_id": "call_1",
         },
         {"role": "assistant", "text": "first answer"},
         {"role": "user", "text": "second prompt"},
@@ -2924,6 +3153,62 @@ def test_interrupt_clears_multiple_own_pending():
         for key in ("r1", "r2"):
             server._pending.pop(key, None)
             server._answers.pop(key, None)
+
+
+def test_interrupt_emits_terminal_events_for_active_subagents(monkeypatch):
+    from tui_gateway.methods import session as session_methods
+
+    events = []
+    monkeypatch.setattr(
+        session_methods,
+        "_emit",
+        lambda event_type, sid, payload=None: events.append(
+            (event_type, sid, payload or {})
+        ),
+    )
+    child = types.SimpleNamespace(
+        _subagent_id="sa-1-active",
+        _parent_subagent_id="",
+        _subagent_task_index=1,
+        _subagent_task_count=3,
+        _subagent_goal="整理资料",
+        _subagent_name="资料整理员",
+        _subagent_delegate_call_id="call-delegate-1",
+        _subagent_toolsets=["terminal", "read_file"],
+        _subagent_tui_depth=0,
+        _delegate_role="leaf",
+        model="deepseek-v4-pro",
+        _active_children=[],
+        _active_children_lock=threading.Lock(),
+    )
+    agent = types.SimpleNamespace(
+        _active_children=[child],
+        _active_children_lock=threading.Lock(),
+    )
+
+    session_methods._emit_interrupted_subagent_completions(
+        sid="runtime-1",
+        session={"agent": agent},
+        interrupted_run_id="run-1",
+        interrupted_turn_id="turn-1",
+        completion_status="cancelled",
+    )
+
+    assert len(events) == 1
+    event_type, sid, payload = events[0]
+    assert event_type == "subagent.complete"
+    assert sid == "runtime-1"
+    assert payload["subagent_id"] == "sa-1-active"
+    assert payload["status"] == "cancelled"
+    assert payload["summary"] == "任务已终止"
+    assert payload["run_id"] == "run-1"
+    assert payload["turn_id"] == "turn-1"
+    assert payload["task_index"] == 1
+    assert payload["task_count"] == 3
+    assert payload["delegate_call_id"] == "call-delegate-1"
+    assert payload["tool_call_id"] == "call-delegate-1"
+    assert payload["agent_name"] == "资料整理员"
+    assert payload["toolsets"] == ["terminal", "read_file"]
 
 
 def test_clear_pending_without_sid_clears_all():

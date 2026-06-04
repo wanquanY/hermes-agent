@@ -150,6 +150,7 @@ def init_agent(
     max_iterations: int = 90,  # Default tool-calling iterations (shared with subagents)
     tool_delay: float = 1.0,
     enabled_toolsets: List[str] = None,
+    enabled_tools: List[str] = None,
     disabled_toolsets: List[str] = None,
     save_trajectories: bool = False,
     verbose_logging: bool = False,
@@ -216,6 +217,9 @@ def init_agent(
         max_iterations (int): Maximum number of tool calling iterations (default: 90)
         tool_delay (float): Delay between tool calls in seconds (default: 1.0)
         enabled_toolsets (List[str]): Only enable tools from these toolsets (optional)
+        enabled_tools (List[str]): Exact tool names to expose. When provided,
+            toolset expansion is bypassed so callers can inherit a parent's
+            already-resolved tool surface without gaining sibling tools.
         disabled_toolsets (List[str]): Disable tools from these toolsets (optional)
         save_trajectories (bool): Whether to save conversation trajectories to JSONL files (default: False)
         verbose_logging (bool): Enable verbose logging for debugging (default: False)
@@ -454,7 +458,17 @@ def init_agent(
 
     # Store toolset filtering options
     agent.enabled_toolsets = enabled_toolsets
+    agent.enabled_tools = enabled_tools
     agent.disabled_toolsets = disabled_toolsets
+    agent._enabled_tool_names_filter = (
+        {
+            str(tool_name).strip()
+            for tool_name in enabled_tools
+            if str(tool_name).strip()
+        }
+        if enabled_tools is not None
+        else None
+    )
     
     # Model response configuration
     agent.max_tokens = max_tokens  # None = use model default
@@ -504,6 +518,7 @@ def init_agent(
     agent._last_activity_ts: float = time.time()
     agent._last_activity_desc: str = "initializing"
     agent._current_tool: str | None = None
+    agent._current_tool_call_id: str | None = None
     agent._api_call_count: int = 0
 
     # Rate limit tracking — updated from x-ratelimit-* response headers
@@ -891,6 +906,7 @@ def init_agent(
         enabled_toolsets=enabled_toolsets,
         disabled_toolsets=disabled_toolsets,
         quiet_mode=agent.quiet_mode,
+        enabled_tools=enabled_tools,
     )
     
     # Show tool configuration and store valid tool names for validation
@@ -903,6 +919,8 @@ def init_agent(
             # Show filtering info if applied
             if enabled_toolsets:
                 print(f"   ✅ Enabled toolsets: {', '.join(enabled_toolsets)}")
+            if enabled_tools is not None:
+                print(f"   ✅ Enabled exact tools: {', '.join(sorted(agent._enabled_tool_names_filter))}")
             if disabled_toolsets:
                 print(f"   ❌ Disabled toolsets: {', '.join(disabled_toolsets)}")
     elif not agent.quiet_mode:
@@ -1147,6 +1165,11 @@ def init_agent(
         }
         for _schema in agent._memory_manager.get_all_tool_schemas():
             _tname = _schema.get("name", "")
+            if (
+                agent._enabled_tool_names_filter is not None
+                and (not _tname or _tname not in agent._enabled_tool_names_filter)
+            ):
+                continue
             if _tname and _tname in _existing_tool_names:
                 continue  # already registered via plugin path
             _wrapped = {"type": "function", "function": _schema}
@@ -1458,6 +1481,11 @@ def init_agent(
         }
         for _schema in agent.context_compressor.get_tool_schemas():
             _tname = _schema.get("name", "")
+            if (
+                agent._enabled_tool_names_filter is not None
+                and (not _tname or _tname not in agent._enabled_tool_names_filter)
+            ):
+                continue
             if _tname and _tname in _existing_tool_names:
                 continue  # already registered via plugin/cache path
             _wrapped = {"type": "function", "function": _schema}

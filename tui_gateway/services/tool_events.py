@@ -221,7 +221,7 @@ class GatewayToolEventBridge:
         summary = _tool_summary(name, result, duration_s)
         if summary:
             payload["summary"] = summary
-        if self._session_verbose(sid) and self._tool_result_text:
+        if self._tool_result_text:
             result_text = self._tool_result_text(result)
             if result_text:
                 payload["result_text"] = result_text
@@ -299,7 +299,8 @@ class GatewayToolEventBridge:
         _args: dict | None = None,
         **kwargs,
     ) -> None:
-        if session_interrupted(self._sessions.get(sid)) or not self._tool_progress_enabled(sid):
+        session = self._sessions.get(sid)
+        if session_interrupted(session) or not self._tool_progress_enabled(sid):
             return
         if event_type == "tool.started" and name:
             self._emit("tool.progress", sid, {"name": name, "preview": preview or ""})
@@ -312,12 +313,38 @@ class GatewayToolEventBridge:
             return
         if not event_type.startswith("subagent."):
             return
+        pending_turn = session.get("pending_turn") if isinstance(session, dict) else {}
+        pending_turn = pending_turn if isinstance(pending_turn, dict) else {}
         payload = {
-            "goal": str(kwargs.get("goal") or ""),
-            "task_count": int(kwargs.get("task_count") or 1),
-            "task_index": int(kwargs.get("task_index") or 0),
+            key: value
+            for key, value in {
+                "goal": str(kwargs.get("goal") or ""),
+                "task_count": int(kwargs.get("task_count") or 1),
+                "task_index": int(kwargs.get("task_index") or 0),
+                "run_id": str((session or {}).get("active_run_id") or ""),
+                "turn_id": str((session or {}).get("active_turn_id") or ""),
+                "client_message_id": str(pending_turn.get("client_message_id") or ""),
+            }.items()
+            if value != ""
         }
-        for field in ("subagent_id", "parent_id", "model", "status", "summary"):
+        for field in (
+            "subagent_id",
+            "parent_id",
+            "model",
+            "provider",
+            "status",
+            "summary",
+            "role",
+            "context",
+            "dispatch_message",
+            "delegate_call_id",
+            "tool_call_id",
+            "tool_id",
+            "agent_profile_id",
+            "agent_profile_version_id",
+            "agent_name",
+            "agent_avatar",
+        ):
             if kwargs.get(field):
                 payload[field] = str(kwargs[field])
         if kwargs.get("depth") is not None:
@@ -345,16 +372,46 @@ class GatewayToolEventBridge:
             payload["output_tail"] = list(kwargs["output_tail"])
         if name:
             payload["tool_name"] = str(name)
+        if _args:
+            payload["arguments"] = self._tool_args_payload(_args)
         if preview:
             payload["text"] = str(preview)
         if kwargs.get("duration_seconds") is not None:
             payload["duration_seconds"] = float(kwargs["duration_seconds"])
+        raw_result = kwargs.get("result")
+        if event_type == "subagent.tool" and raw_result is not None:
+            result_str = raw_result if isinstance(raw_result, str) else str(raw_result)
+            summary = _tool_summary(str(name or ""), result_str, payload.get("duration_seconds"))
+            if summary:
+                payload["summary"] = summary
+            if self._tool_result_text:
+                result_text = self._tool_result_text(result_str)
+                if result_text:
+                    payload["result_text"] = result_text
+            doxie_result = _doxie_structured_tool_result(str(name or ""), result_str)
+            if doxie_result:
+                payload["result"] = doxie_result
+            try:
+                from agent.display import render_edit_diff_with_delta
+
+                rendered: list[str] = []
+                if render_edit_diff_with_delta(
+                    str(name or ""),
+                    result_str,
+                    function_args=_args,
+                    snapshot=None,
+                    print_fn=rendered.append,
+                ):
+                    payload["inline_diff"] = "\n".join(rendered)
+            except Exception:
+                pass
         if preview and event_type == "subagent.tool":
             payload["tool_preview"] = str(preview)
             payload["text"] = str(preview)
         if name == "test_agent_profile":
             mapped_type = {
                 "subagent.output_delta": "agent_profile_test.output_delta",
+                "subagent.reasoning_delta": "agent_profile_test.thinking",
                 "subagent.thinking": "agent_profile_test.thinking",
                 "subagent.tool": "agent_profile_test.tool",
                 "subagent.progress": "agent_profile_test.progress",

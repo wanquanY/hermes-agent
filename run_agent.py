@@ -360,6 +360,7 @@ class AIAgent:
         max_iterations: int = 90,  # Default tool-calling iterations (shared with subagents)
         tool_delay: float = 1.0,
         enabled_toolsets: List[str] = None,
+        enabled_tools: List[str] = None,
         disabled_toolsets: List[str] = None,
         save_trajectories: bool = False,
         verbose_logging: bool = False,
@@ -430,6 +431,7 @@ class AIAgent:
             max_iterations=max_iterations,
             tool_delay=tool_delay,
             enabled_toolsets=enabled_toolsets,
+            enabled_tools=enabled_tools,
             disabled_toolsets=disabled_toolsets,
             save_trajectories=save_trajectories,
             verbose_logging=verbose_logging,
@@ -3952,13 +3954,14 @@ class AIAgent:
         finally:
             self._executing_tools = False
 
-    def _dispatch_delegate_task(self, function_args: dict) -> str:
+    def _dispatch_delegate_task(self, function_args: dict, tool_call_id: str | None = None) -> str:
         """Single call site for delegate_task dispatch.
 
         New DELEGATE_TASK_SCHEMA fields only need to be added here to reach all
         invocation paths (concurrent, sequential, inline).
         """
         from tools.delegate_tool import delegate_task as _delegate_task
+        delegate_call_id = str(tool_call_id or getattr(self, "_current_tool_call_id", "") or "").strip()
         return _delegate_task(
             goal=function_args.get("goal"),
             context=function_args.get("context"),
@@ -3969,6 +3972,7 @@ class AIAgent:
             acp_args=function_args.get("acp_args"),
             role=function_args.get("role"),
             parent_agent=self,
+            delegate_call_id=delegate_call_id,
         )
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,

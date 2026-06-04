@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 import types
 
@@ -90,6 +91,46 @@ def test_profile_scoped_cron_manage_is_proxied_to_runtime_worker():
     )
 
 
+@pytest.mark.parametrize("action", ["list", "status", "runs", ""])
+def test_profile_scoped_cron_control_plane_reads_are_not_proxied_to_runtime_worker(action):
+    assert not runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": "cron.manage",
+            "params": {
+                "action": action,
+                "controlPlaneOnly": True,
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "runtimeScopeKey": "profile:agent-a:version:v1",
+                    "agentProfileVersionId": "v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                },
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize("action", ["add", "update", "remove", "run", "pause", "resume"])
+def test_profile_scoped_cron_control_plane_flag_does_not_bypass_runtime_mutations(action):
+    assert runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": "cron.manage",
+            "params": {
+                "action": action,
+                "controlPlaneOnly": True,
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "runtimeScopeKey": "profile:agent-a:version:v1",
+                    "agentProfileVersionId": "v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                },
+            },
+        }
+    )
+
+
 @pytest.mark.parametrize(
     "method",
     [
@@ -171,6 +212,16 @@ def test_doxie_sidecar_host_and_origin_policy():
     assert not doxie_sidecar.is_allowed_origin("null")
     assert not doxie_sidecar.is_allowed_origin("http://127.0.0.1:3000")
     assert not doxie_sidecar.is_allowed_origin("https://evil.example")
+
+
+def test_doxie_sidecar_parent_watchdog_detects_reparented_process(monkeypatch):
+    from tui_gateway import doxie_sidecar
+
+    monkeypatch.setenv(doxie_sidecar.SIDECAR_PARENT_PID_ENV, "12345")
+    monkeypatch.setattr(doxie_sidecar.os, "getppid", lambda: 1)
+
+    assert doxie_sidecar.expected_parent_pid() == 12345
+    assert not doxie_sidecar.parent_process_still_owns_sidecar(12345)
 
 
 @pytest.mark.asyncio
@@ -355,6 +406,7 @@ async def test_runtime_worker_pool_reuses_and_reclaims_idle_workers(monkeypatch)
     assert first.process.kwargs["env"]["FEISHU_APP_SECRET"] == "secret"
     assert "--token" not in first.process.args[0]
     assert first.process.kwargs["env"]["DOXIE_SIDECAR_TOKEN"]
+    assert first.process.kwargs["env"]["DOXIE_SIDECAR_PARENT_PID"] == str(os.getpid())
 
     now = 1012.0
     reclaimed = await pool.reclaim_idle()

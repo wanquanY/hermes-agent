@@ -95,12 +95,18 @@ def history_to_messages(history: list[dict]) -> list[dict]:
                 "name": name,
                 "context": tool_context(name, args),
             }
+            if tool_call_id:
+                item["tool_call_id"] = str(tool_call_id)
             if args:
                 item["arguments"] = serializable_tool_args(args)
+            if content_text.strip():
+                item["result_text"] = content_text
             if message.get("id") is not None:
                 item["message_id"] = str(message.get("id"))
             if message.get("timestamp") is not None:
                 item["timestamp"] = message.get("timestamp")
+            if isinstance(message.get("metadata"), dict):
+                item["metadata"] = dict(message["metadata"])
             messages.append(item)
             continue
         if not content_text.strip() and not reasoning_text.strip():
