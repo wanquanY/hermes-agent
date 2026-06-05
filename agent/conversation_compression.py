@@ -514,24 +514,40 @@ def try_shrink_image_parts_in_messages(api_messages: list) -> bool:
     # much larger; shrinking to 4 MB here loses quality but only fires
     # after a confirmed provider rejection, so the alternative is failure.
     target_bytes = 4 * 1024 * 1024
+    max_dimension = 8000
     changed_count = 0
 
     def _shrink_data_url(url: str) -> Optional[str]:
         """Return a smaller data URL, or None if shrink can't help."""
         if not isinstance(url, str) or not url.startswith("data:"):
             return None
-        if len(url) <= target_bytes:
-            # This specific image wasn't the oversized one.
+        header, _, data = url.partition(",")
+        if not data:
+            return None
+        needs_shrink = len(url) > target_bytes
+        raw: Optional[bytes] = None
+        if not needs_shrink:
+            try:
+                import base64 as _b64_dim
+                import io as _io_dim
+                from PIL import Image as _PILImage
+
+                raw = _b64_dim.b64decode(data)
+                with _PILImage.open(_io_dim.BytesIO(raw)) as _img:
+                    needs_shrink = max(_img.size) > max_dimension
+            except Exception:
+                return None
+        if not needs_shrink:
             return None
         try:
-            header, _, data = url.partition(",")
             mime = "image/jpeg"
             if header.startswith("data:"):
                 mime_part = header[len("data:"):].split(";", 1)[0].strip()
                 if mime_part.startswith("image/"):
                     mime = mime_part
             import base64 as _b64
-            raw = _b64.b64decode(data)
+            if raw is None:
+                raw = _b64.b64decode(data)
             suffix = {
                 "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
                 "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/bmp": ".bmp",
@@ -546,6 +562,7 @@ def try_shrink_image_parts_in_messages(api_messages: list) -> bool:
                     Path(tmp.name),
                     mime_type=mime,
                     max_base64_bytes=target_bytes,
+                    max_dimension=max_dimension,
                 )
             finally:
                 try:

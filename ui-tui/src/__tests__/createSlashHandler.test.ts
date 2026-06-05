@@ -606,6 +606,37 @@ describe('createSlashHandler', () => {
     expect(ctx.transcript.send).toHaveBeenCalledWith(skillMessage)
   })
 
+  it('falls through to command.dispatch prefill without sending', async () => {
+    patchUiState({ sid: 'sid-abc' })
+    const ctx = buildCtx({
+      gateway: {
+        gw: {
+          getLogTail: vi.fn(() => ''),
+          request: vi.fn((method: string) => {
+            if (method === 'slash.exec') {
+              return Promise.reject(new Error('pending-input command'))
+            }
+
+            if (method === 'command.dispatch') {
+              return Promise.resolve({ type: 'prefill', message: 'edit this prompt', notice: 'rewound' })
+            }
+
+            return Promise.resolve({})
+          })
+        },
+        rpc: vi.fn(() => Promise.resolve({}))
+      }
+    })
+
+    const h = createSlashHandler(ctx)
+    expect(h('/undo')).toBe(true)
+    await vi.waitFor(() => {
+      expect(ctx.composer.setInput).toHaveBeenCalledWith('edit this prompt')
+    })
+    expect(ctx.transcript.sys).toHaveBeenCalledWith('rewound')
+    expect(ctx.transcript.send).not.toHaveBeenCalled()
+  })
+
   it('/history pages the current TUI transcript (user + assistant)', () => {
     const ctx = buildCtx({
       local: {

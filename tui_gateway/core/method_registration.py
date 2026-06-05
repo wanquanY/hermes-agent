@@ -10,6 +10,7 @@ from doxie_extension import load_extension
 
 METHOD_MODULES = (
     "session",
+    "session_branch",
     "prompt",
     "run",
     "config",

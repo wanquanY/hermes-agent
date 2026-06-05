@@ -125,6 +125,24 @@ def test_get_session_env_falls_back_to_os_environ(monkeypatch):
     assert get_session_env("HERMES_SESSION_PLATFORM") == ""
 
 
+def test_doxie_browser_session_id_is_session_scoped(monkeypatch):
+    """Doxie browser automation must bind to the active gateway session."""
+    monkeypatch.setenv("DOXIE_BROWSER_SESSION_ID", "browser:electron:global")
+
+    assert get_session_env("DOXIE_BROWSER_SESSION_ID") == "browser:electron:global"
+
+    tokens = set_session_vars(
+        session_key="session-a",
+        doxie_browser_session_id="browser:hermes:session-a",
+    )
+    try:
+        assert get_session_env("DOXIE_BROWSER_SESSION_ID") == "browser:hermes:session-a"
+    finally:
+        clear_session_vars(tokens)
+
+    assert get_session_env("DOXIE_BROWSER_SESSION_ID") == ""
+
+
 def test_get_session_context_env_never_falls_back_to_os_environ(monkeypatch):
     """Ownership-sensitive routing must not read another session's env fallback."""
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "discord")

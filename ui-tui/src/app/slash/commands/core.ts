@@ -598,27 +598,6 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'undo last exchange',
-    name: 'undo',
-    run: (_arg, ctx) => {
-      if (!ctx.sid) {
-        return ctx.transcript.sys('nothing to undo')
-      }
-
-      ctx.gateway.rpc<SessionUndoResponse>('session.undo', { session_id: ctx.sid }).then(
-        ctx.guarded<SessionUndoResponse>(r => {
-          if ((r.removed ?? 0) > 0) {
-            ctx.transcript.setHistoryItems((prev: Msg[]) => ctx.transcript.trimLastExchange(prev))
-            ctx.transcript.sys(`undid ${r.removed} messages`)
-          } else {
-            ctx.transcript.sys('nothing to undo')
-          }
-        })
-      )
-    }
-  },
-
-  {
     help: 'retry last user message',
     name: 'retry',
     run: (_arg, ctx) => {

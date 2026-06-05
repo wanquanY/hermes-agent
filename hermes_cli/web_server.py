@@ -868,13 +868,112 @@ async def get_sessions(limit: int = 20, offset: int = 0):
 
 @app.get("/api/sessions/search")
 async def search_sessions(q: str = "", limit: int = 20):
-    """Full-text search across session message content using FTS5."""
+    """Search sessions by ID plus full-text message content using FTS5."""
     if not q or not q.strip():
         return {"results": []}
     try:
         from hermes_state import SessionDB
         db = SessionDB()
         try:
+            try:
+                safe_limit = max(1, min(int(limit or 20), 100))
+            except (TypeError, ValueError):
+                safe_limit = 20
+
+            root_cache: dict = {}
+
+            def compression_root(session_id: str) -> str:
+                if not session_id:
+                    return session_id
+                if session_id in root_cache:
+                    return root_cache[session_id]
+                chain = []
+                cur = session_id
+                visited = set()
+                root = session_id
+                while cur and cur not in visited:
+                    visited.add(cur)
+                    chain.append(cur)
+                    if cur in root_cache:
+                        root = root_cache[cur]
+                        break
+                    try:
+                        session = db.get_session(cur)
+                    except Exception:
+                        session = None
+                    if not session:
+                        root = cur
+                        break
+                    parent = session.get("parent_session_id") if isinstance(session, dict) else None
+                    if not parent:
+                        root = cur
+                        break
+                    try:
+                        parent_session = db.get_session(parent)
+                    except Exception:
+                        parent_session = None
+                    if not parent_session:
+                        root = cur
+                        break
+                    parent_ended_at = parent_session.get("ended_at")
+                    started_at = session.get("started_at")
+                    is_compression_edge = (
+                        parent_session.get("end_reason") == "compression"
+                        and parent_ended_at is not None
+                        and started_at is not None
+                        and started_at >= parent_ended_at
+                    )
+                    if not is_compression_edge:
+                        root = cur
+                        break
+                    cur = parent
+                for node in chain:
+                    root_cache[node] = root
+                return root
+
+            tip_cache: dict = {}
+
+            def lineage_tip(root_id: str) -> str:
+                if root_id in tip_cache:
+                    return tip_cache[root_id]
+                tip = root_id
+                try:
+                    resolved = db.get_compression_tip(root_id)
+                    if resolved:
+                        tip = resolved
+                except Exception:
+                    pass
+                tip_cache[root_id] = tip
+                return tip
+
+            seen: dict = {}
+
+            def add_lineage_result(raw_sid: str, payload: dict) -> None:
+                if not raw_sid:
+                    return
+                root = compression_root(raw_sid)
+                if root in seen or len(seen) >= safe_limit:
+                    return
+                payload = dict(payload)
+                payload["session_id"] = lineage_tip(root)
+                payload["lineage_root"] = root
+                seen[root] = payload
+
+            for row in db.search_sessions_by_id(q, limit=safe_limit):
+                sid = row.get("id")
+                preview = (row.get("preview") or "").strip()
+                snippet = preview or f"Session ID: {sid}"
+                add_lineage_result(
+                    sid,
+                    {
+                        "snippet": snippet,
+                        "role": None,
+                        "source": row.get("source"),
+                        "model": row.get("model"),
+                        "session_started": row.get("started_at"),
+                    },
+                )
+
             # Auto-add prefix wildcards so partial words match
             # e.g. "nimb" → "nimb*" matches "nimby"
             # Preserve quoted phrases and existing wildcards as-is
@@ -886,20 +985,21 @@ async def search_sessions(q: str = "", limit: int = 20):
                 else:
                     terms.append(token + "*")
             prefix_query = " ".join(terms)
-            matches = db.search_messages(query=prefix_query, limit=limit)
-            # Group by session_id — return unique sessions with their best snippet
-            seen: dict = {}
+            fetch_limit = max(safe_limit * 5, 50)
+            matches = db.search_messages(query=prefix_query, limit=fetch_limit)
             for m in matches:
-                sid = m["session_id"]
-                if sid not in seen:
-                    seen[sid] = {
-                        "session_id": sid,
+                if len(seen) >= safe_limit:
+                    break
+                add_lineage_result(
+                    m["session_id"],
+                    {
                         "snippet": m.get("snippet", ""),
                         "role": m.get("role"),
                         "source": m.get("source"),
                         "model": m.get("model"),
                         "session_started": m.get("session_started"),
-                    }
+                    },
+                )
             return {"results": list(seen.values())}
         finally:
             db.close()

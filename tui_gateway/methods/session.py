@@ -127,9 +127,7 @@ def _session_run_snapshot(runtime_sid: str, session: dict | None, db=None) -> di
 
 
 def _live_sessions_by_stored_key() -> dict[str, tuple[str, dict]]:
-    try:
-        snapshot = list(_sessions.items())
-    except RuntimeError:
+    with _sessions_lock:
         snapshot = list(_sessions.items())
     live: dict[str, tuple[str, dict]] = {}
     for sid, session in snapshot:
@@ -154,6 +152,43 @@ def _live_sessions_by_stored_key() -> dict[str, tuple[str, dict]]:
         if candidate_rank > current_rank:
             live[key] = (sid, session)
     return live
+
+
+def _find_live_session_by_key(session_key: str) -> tuple[str, dict] | None:
+    key = str(session_key or "").strip()
+    if not key:
+        return None
+    with _sessions_lock:
+        snapshot = list(_sessions.items())
+    candidates = [
+        (sid, session)
+        for sid, session in snapshot
+        if not (session or {}).get("_finalized")
+        and str((session or {}).get("session_key") or "") == key
+    ]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda item: (
+            bool((item[1] or {}).get("running")),
+            float((item[1] or {}).get("run_updated_at") or 0),
+            float((item[1] or {}).get("run_started_at") or 0),
+        ),
+        reverse=True,
+    )
+    return candidates[0]
+
+
+def _live_scope_matches(session: dict, runtime_scope_key: str) -> bool:
+    requested = str(runtime_scope_key or "").strip()
+    if not requested:
+        return True
+    live_scope = str(
+        session.get("runtime_scope_key")
+        or session.get("active_runtime_scope_key")
+        or ""
+    ).strip()
+    return not live_scope or live_scope == requested
 
 
 def _is_empty_stored_conversation(row: dict) -> bool:
@@ -448,6 +483,73 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
     return messages, page_info
 
 
+def _display_history_conversation(db, session_id: str) -> list[dict]:
+    try:
+        return db.get_messages_as_conversation(
+            session_id,
+            include_ancestors=True,
+            include_storage_metadata=True,
+        )
+    except TypeError:
+        return db.get_messages_as_conversation(
+            session_id,
+            include_ancestors=True,
+        )
+
+
+def _page_live_history(history: list[dict], hydrate: str, limit: int) -> tuple[list[dict], dict]:
+    mode = hydrate if hydrate in {"full", "tail", "none"} else "full"
+    total = len(history)
+    if mode == "none":
+        page = []
+    elif mode == "tail" and total > limit:
+        page = history[-limit:]
+    else:
+        page = history
+    return page, {
+        "prevCursor": "",
+        "nextCursor": "",
+        "hasMoreBefore": mode == "tail" and total > len(page),
+        "hasMoreAfter": False,
+        "totalCount": total,
+    }
+
+
+def _live_session_payload(
+    sid: str,
+    target: str,
+    session: dict,
+    *,
+    cols: int,
+    cwd: str,
+    workspace: dict,
+    runtime_scope_key: str,
+    hydrate: str,
+    message_limit: int,
+    db=None,
+) -> dict:
+    with session["history_lock"]:
+        session["cols"] = cols
+        session["transport"] = current_transport() or session.get("transport") or _stdio_transport
+        session["cwd"] = cwd
+        session["workspace"] = workspace
+        if runtime_scope_key:
+            session["runtime_scope_key"] = runtime_scope_key
+        history = list(session.get("display_history_prefix") or []) + list(
+            session.get("history") or []
+        )
+    page, page_info = _page_live_history(history, hydrate, message_limit)
+    return {
+        "session_id": sid,
+        "resumed": target,
+        "message_count": page_info.get("totalCount") or len(page),
+        "messages": sanitize_transcript_messages(_history_to_messages(page)),
+        "messagePageInfo": page_info,
+        "info": _session_info(session.get("agent"), session),
+        **_session_run_snapshot(sid, session, db=db),
+    }
+
+
 @method("session.create")
 def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
@@ -507,7 +609,7 @@ def _(rid, params: dict) -> dict:
     _enable_gateway_prompts()
     ready = threading.Event()
 
-    _sessions[sid] = {
+    session_record = {
         "agent": None,
         "agent_error": None,
         "agent_ready": ready,
@@ -542,6 +644,8 @@ def _(rid, params: dict) -> dict:
         "transient": transient,
         "workspace": workspace,
     }
+    with _sessions_lock:
+        _sessions[sid] = session_record
 
     if not control_plane_only:
         # Legacy TUI compatibility: return the lightweight session first, then
@@ -549,7 +653,8 @@ def _(rid, params: dict) -> dict:
         # callers should pass control_plane_only/defer_agent_build and let
         # run.submit lazily attach the runtime.
         def _deferred_build() -> None:
-            session = _sessions.get(sid)
+            with _sessions_lock:
+                session = _sessions.get(sid)
             if session is not None:
                 _start_agent_build(sid, session)
 
@@ -557,6 +662,8 @@ def _(rid, params: dict) -> dict:
         build_timer.daemon = True
         build_timer.start()
 
+    with _sessions_lock:
+        session = _sessions.get(sid)
     return _ok(
         rid,
         {
@@ -742,8 +849,6 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as exc:
         return _err(rid, 5012, f"workspace bind failed: {exc}")
-    sid = uuid.uuid4().hex[:8]
-    _enable_gateway_prompts()
     hydrate = str(params.get("hydrate") or "full").strip().lower()
     runtime_scope_key = _requested_runtime_scope_key(params)
     message_limit = _bounded_page_limit(
@@ -752,46 +857,40 @@ def _(rid, params: dict) -> dict:
         maximum=200,
     )
     try:
-        db.reopen_session(target)
-        history = db.get_messages_as_conversation(target)
-        messages, message_page_info = _display_history_page(db, target, hydrate, message_limit)
-        live_sid, live_session = _resolve_runtime_session(target)
-        if live_session is not None:
-            live_runtime_scope_key = str(
-                live_session.get("runtime_scope_key")
-                or live_session.get("active_runtime_scope_key")
-                or ""
-            ).strip()
-            if (
-                params.get("_runtime_attach")
-                and runtime_scope_key
-                and live_runtime_scope_key
-                and live_runtime_scope_key != runtime_scope_key
-            ):
-                live_session = None
-            else:
-                live_session["transport"] = (
-                    current_transport()
-                    or live_session.get("transport")
-                    or _stdio_transport
-                )
-                live_session["cwd"] = cwd
-                live_session["workspace"] = workspace
-                if runtime_scope_key:
-                    live_session["runtime_scope_key"] = runtime_scope_key
-                live_state = _session_run_snapshot(live_sid, live_session, db=db)
+        cols = int(params.get("cols", 80))
+    except (TypeError, ValueError):
+        cols = 80
+    with _session_resume_lock:
+        live = _find_live_session_by_key(target)
+        if live is not None:
+            live_sid, live_session = live
+            if not (params.get("_runtime_attach") and not _live_scope_matches(live_session, runtime_scope_key)):
                 return _ok(
                     rid,
-                    {
-                        "session_id": live_sid,
-                        "resumed": target,
-                        "message_count": message_page_info.get("totalCount") or len(messages),
-                        "messages": messages,
-                        "messagePageInfo": message_page_info,
-                        "info": _session_info(live_session.get("agent"), live_session),
-                        **live_state,
-                    },
+                    _live_session_payload(
+                        live_sid,
+                        target,
+                        live_session,
+                        cols=cols,
+                        cwd=cwd,
+                        workspace=workspace,
+                        runtime_scope_key=runtime_scope_key,
+                        hydrate=hydrate,
+                        message_limit=message_limit,
+                        db=db,
+                    ),
                 )
+
+    sid = uuid.uuid4().hex[:8]
+    _enable_gateway_prompts()
+    try:
+        db.reopen_session(target)
+        history = db.get_messages_as_conversation(target)
+        display_history = _display_history_conversation(db, target)
+        display_history_prefix = display_history[
+            : max(0, len(display_history) - len(history))
+        ]
+        messages, message_page_info = _display_history_page(db, target, hydrate, message_limit)
         profile_context = _profile_context_for_params(params)
         profile_tokens = _enter_profile_context(profile_context)
         tokens = _set_session_context(target, terminal_cwd=cwd)
@@ -805,13 +904,41 @@ def _(rid, params: dict) -> dict:
         finally:
             _clear_session_context(tokens)
             _leave_profile_context(profile_tokens)
+    except Exception as e:
+        return _err(rid, 5000, f"resume failed: {e}")
+
+    with _session_resume_lock:
+        live = _find_live_session_by_key(target)
+        if live is not None:
+            live_sid, live_session = live
+            if not (params.get("_runtime_attach") and not _live_scope_matches(live_session, runtime_scope_key)):
+                try:
+                    if hasattr(agent, "close"):
+                        agent.close()
+                except Exception:
+                    pass
+                return _ok(
+                    rid,
+                    _live_session_payload(
+                        live_sid,
+                        target,
+                        live_session,
+                        cols=cols,
+                        cwd=cwd,
+                        workspace=workspace,
+                        runtime_scope_key=runtime_scope_key,
+                        hydrate=hydrate,
+                        message_limit=message_limit,
+                        db=db,
+                    ),
+                )
         try:
             _init_session(
                 sid,
                 target,
                 agent,
                 history,
-                cols=int(params.get("cols", 80)),
+                cols=cols,
                 cwd=cwd,
                 workspace=workspace,
                 profile_context=profile_context,
@@ -819,11 +946,13 @@ def _(rid, params: dict) -> dict:
         except TypeError as exc:
             if "unexpected keyword argument" not in str(exc):
                 raise
-            _init_session(sid, target, agent, history, cols=int(params.get("cols", 80)))
-        if sid in _sessions:
-            _sessions[sid]["runtime_scope_key"] = runtime_scope_key
-    except Exception as e:
-        return _err(rid, 5000, f"resume failed: {e}")
+            _init_session(sid, target, agent, history, cols=cols)
+        with _sessions_lock:
+            if sid in _sessions:
+                _sessions[sid]["runtime_scope_key"] = runtime_scope_key
+                _sessions[sid]["display_history_prefix"] = display_history_prefix
+    with _sessions_lock:
+        session = _sessions.get(sid)
     return _ok(
         rid,
         {
@@ -833,11 +962,11 @@ def _(rid, params: dict) -> dict:
             "messages": messages,
             "messagePageInfo": message_page_info,
             "info": (
-                _session_info(agent, _sessions.get(sid))
-                if _sessions.get(sid) is not None
+                _session_info(agent, session)
+                if session is not None
                 else _session_info(agent)
             ),
-            **_session_run_snapshot(sid, _sessions.get(sid), db=db),
+            **_session_run_snapshot(sid, session, db=db),
         },
     )
 
@@ -870,7 +999,8 @@ def _(rid, params: dict) -> dict:
     # dictionary changed size during iteration``.  If even the snapshot
     # raises, fail closed (refuse the delete) rather than fail open.
     try:
-        snapshot = list(_sessions.values())
+        with _sessions_lock:
+            snapshot = list(_sessions.values())
     except Exception as e:
         return _err(rid, 5036, f"could not enumerate active sessions: {e}")
     active = {s.get("session_key") for s in snapshot if s.get("session_key")}
@@ -1146,6 +1276,7 @@ def _(rid, params: dict) -> dict:
             "messages": sanitize_transcript_messages(_history_to_messages(page.get("messages") or [])),
             "runEvents": run_events,
             "pageInfo": _message_page_info(page.get("pageInfo")),
+            "branchInfo": db.get_session_branch_info(target) if hasattr(db, "get_session_branch_info") else None,
         },
     )
 
@@ -1590,16 +1721,19 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     sid = params.get("session_id", "")
     runtime_sid = sid
-    session = _sessions.pop(runtime_sid, None)
+    with _sessions_lock:
+        session = _sessions.pop(runtime_sid, None)
     if not session and sid:
         try:
-            snapshot = list(_sessions.items())
+            with _sessions_lock:
+                snapshot = list(_sessions.items())
         except Exception:
             snapshot = []
         for candidate_sid, candidate in snapshot:
             if candidate.get("session_key") == sid:
                 runtime_sid = candidate_sid
-                session = _sessions.pop(candidate_sid, None)
+                with _sessions_lock:
+                    session = _sessions.pop(candidate_sid, None)
                 break
     if not session:
         return _ok(rid, {"closed": False})
@@ -1630,79 +1764,6 @@ def _(rid, params: dict) -> dict:
             "stored_session_id": session.get("session_key") or sid,
         },
     )
-
-
-@method("session.branch")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    db = _get_db()
-    if db is None:
-        return _db_unavailable_error(rid, code=5008)
-    old_key = session["session_key"]
-    with session["history_lock"]:
-        history = [dict(msg) for msg in session.get("history", [])]
-    if not history:
-        return _err(rid, 4008, "nothing to branch — send a message first")
-    new_key = _new_session_key()
-    branch_name = params.get("name", "")
-    try:
-        if branch_name:
-            title = branch_name
-        else:
-            current = db.get_session_title(old_key) or "branch"
-            title = (
-                db.get_next_title_in_lineage(current)
-                if hasattr(db, "get_next_title_in_lineage")
-                else f"{current} (branch)"
-            )
-        db.create_session(
-            new_key, source="tui", model=_resolve_model(), parent_session_id=old_key
-        )
-        for msg in history:
-            db.append_message(
-                session_id=new_key,
-                role=msg.get("role", "user"),
-                content=msg.get("content"),
-            )
-        db.set_session_title(new_key, title)
-    except Exception as e:
-        return _err(rid, 5008, f"branch failed: {e}")
-    new_sid = uuid.uuid4().hex[:8]
-    try:
-        cwd = _session_cwd(session)
-        workspace = _workspace_from_params(
-            {"workspace": session.get("workspace") or {}},
-            cwd,
-        )
-        workspace = _bind_session_workspace(
-            session_id=new_key,
-            cwd=cwd,
-            workspace=workspace,
-        )
-        tokens = _set_session_context(new_key, terminal_cwd=cwd)
-        try:
-            agent = _make_agent(
-                new_sid,
-                new_key,
-                session_id=new_key,
-                cwd=cwd,
-            )
-        finally:
-            _clear_session_context(tokens)
-        _init_session(
-            new_sid,
-            new_key,
-            agent,
-            list(history),
-            cols=session.get("cols", 80),
-            cwd=cwd,
-            workspace=workspace,
-        )
-    except Exception as e:
-        return _err(rid, 5000, f"agent init failed on branch: {e}")
-    return _ok(rid, {"session_id": new_sid, "title": title, "parent": old_key})
 
 
 @method("session.interrupt")

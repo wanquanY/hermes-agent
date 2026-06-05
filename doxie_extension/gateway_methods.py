@@ -9,6 +9,7 @@ from typing import Any
 DOXIE_GATEWAY_METHOD_MODULES = (
     "tui_gateway.methods.system",
     "tui_gateway.methods.session",
+    "tui_gateway.methods.session_branch",
     "tui_gateway.methods.run",
     "tui_gateway.methods.model",
     "tui_gateway.methods.prompt",
@@ -45,6 +46,7 @@ DOXIE_GATEWAY_METHOD_OVERRIDES = frozenset(
         "runtime.status",
         "secret.respond",
         "session.create",
+        "session.branch",
         "session.delete",
         "session.list",
         "session.messages",

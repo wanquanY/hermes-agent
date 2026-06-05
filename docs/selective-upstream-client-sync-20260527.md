@@ -57,6 +57,18 @@ codex/selective-upstream-client-sync-20260527
 
 这些是 Doxie 客户端 contract 的本地生产化收敛，不是对上游 TUI session orchestrator、API server session controls 或完整 dashboard OAuth / WS ticket 链路的吸收。后续合并上游时必须保留：精确工具面继承、runtime-scoped subagent event API、run event compaction、sidecar 父进程生命周期，以及 Doxie 对 recall / interrupt 的子 agent 完结投影。
 
+## 现状更新（2026-06-05，0.9.2）
+
+本地工作区在 `prodv0.9.0` 之后继续按“手工迁移、保留 Doxie contract”的方式吸收上游 `4feb181eb..96cd37e21` 中的稳定性和安全修复。详细分析见 `UPSTREAM_UPDATE_REPORT_2026-06-05.md`。
+
+当前 0.9.2 发布节点包括：
+
+- P0 稳定性和安全：TUI/Gateway 并发锁与 resume/close race、Zombie agent/session reset 清理、approval 与 file tools 对 Hermes config/env 写入防护、Cron 非阻塞 tick / parallel pool / profile cwd、State/WAL 可靠性、MCP probe/shutdown fast-fail、Vision pixel cap。
+- P1 Branch / Session / Search：`messages.active` soft-delete、Doxie `session_lineage` branch primitives、`session.branch` 模块化实现、`/undo [N]` 和 `/rewind` prefill 合同、SQL-bounded session-id search、Web session search 的 ID 优先和 compression-lineage 去重。
+- P1/P2 局部工具和客户端体验：Doxie visible browser bridge source URL、`system.search`、MCP HTML/non-MCP endpoint preflight、Vision native provider shrink recovery、slash command prefill 在 TUI 和 Web 前端统一。
+
+仍未吸收：上游 React Desktop、Bootstrap installer、完整 Dashboard OAuth / remote gateway auth、Channels UI、Skills 全量 catalog 和 progressive tool disclosure。这些需要另行按 Doxie profile/runtime_scope、云端模型代理和技能市场生命周期设计。
+
 ## 逐项核对结果（2026-05-27）
 
 本节记录按本文 P0/P1 清单逐项核对当前工作区后的真实状态。后续再同步上游时，优先看这里，而不是只看提交是否 cherry-pick 成功。

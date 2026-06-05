@@ -982,6 +982,137 @@ class TestMessageStorage:
 
         assert [m["content"] for m in conv if m["role"] == "user"] == ["same prompt", "next prompt"]
 
+    def test_user_branch_materializes_prefix_without_parent_replay(self, db):
+        db.create_session(
+            "source",
+            "tui",
+            model="gpt-test",
+            system_prompt="system",
+        )
+        db.set_session_title("source", "需求评审")
+        db.append_message("source", role="user", content="prelude")
+        metadata = {
+            "turn_id": "turn-1",
+            "run_id": "run-1",
+            "client_message_id": "client-1",
+        }
+        db.append_message("source", role="user", content="target prompt", metadata=metadata)
+        tool_calls = [
+            {"id": "call-1", "function": {"name": "read_file", "arguments": "{}"}},
+        ]
+        assistant_id = db.append_message(
+            "source",
+            role="assistant",
+            content="target answer",
+            tool_calls=tool_calls,
+            finish_reason="stop",
+            reasoning="checked files",
+            reasoning_details={"summary": "details"},
+            codex_reasoning_items=[{"id": "reasoning-1"}],
+            codex_message_items=[{"id": "message-1"}],
+            platform_message_id="platform-assistant-1",
+            metadata=metadata,
+        )
+        db.append_message("source", role="user", content="future prompt")
+
+        result = db.branch_session(
+            source_session_id="source",
+            new_session_id="branch-1",
+            branch_point={"turn_id": "turn-1"},
+            idempotency_key="branch-key-1",
+        )
+
+        assert result["stored_session_id"] == "branch-1"
+        assert result["parent_session_id"] == "source"
+        assert result["root_session_id"] == "source"
+        assert result["branch_mode"] == "materialized_prefix"
+        assert result["branch_point"]["included_message_row_id"] == assistant_id
+
+        source = db.get_session("source")
+        branch = db.get_session("branch-1")
+        assert source["end_reason"] is None
+        assert branch["parent_session_id"] is None
+        assert branch["title"] == "需求评审 #2"
+        assert branch["message_count"] == 3
+        assert branch["tool_call_count"] == 1
+
+        listed_ids = [session["id"] for session in db.list_sessions_rich(limit=10)]
+        assert "source" in listed_ids
+        assert "branch-1" in listed_ids
+
+        conv = db.get_messages_as_conversation(
+            "branch-1",
+            include_ancestors=True,
+            include_storage_metadata=True,
+        )
+        assert [message["content"] for message in conv] == [
+            "prelude",
+            "target prompt",
+            "target answer",
+        ]
+        assert len({message["message_id"] for message in conv}) == 3
+        assert conv[-1]["tool_calls"] == tool_calls
+        assert conv[-1]["finish_reason"] == "stop"
+        assert conv[-1]["reasoning"] == "checked files"
+        assert conv[-1]["reasoning_details"] == {"summary": "details"}
+        assert conv[-1]["codex_reasoning_items"] == [{"id": "reasoning-1"}]
+        assert conv[-1]["codex_message_items"] == [{"id": "message-1"}]
+        assert conv[-1]["metadata"] == metadata
+
+        with db._lock:
+            lineage = db._conn.execute(
+                "SELECT * FROM session_lineage WHERE session_id = ?",
+                ("branch-1",),
+            ).fetchone()
+            copied_assistant = db._conn.execute(
+                "SELECT platform_message_id FROM messages "
+                "WHERE session_id = ? AND role = 'assistant'",
+                ("branch-1",),
+            ).fetchone()
+
+        assert lineage["parent_session_id"] == "source"
+        assert lineage["root_session_id"] == "source"
+        assert lineage["branch_origin"] == "user_message_action"
+        assert lineage["branch_depth"] == 1
+        assert copied_assistant["platform_message_id"] == "platform-assistant-1"
+
+        branch_info = db.get_session_branch_info("branch-1")
+        assert branch_info["parent_session_id"] == "source"
+        assert branch_info["branch_origin"] == "user_message_action"
+        assert branch_info["branch_from_message_row_id"] == assistant_id
+
+    def test_branch_session_idempotency_returns_existing_result_and_rejects_conflicts(self, db):
+        db.create_session("source", "tui")
+        db.set_session_title("source", "Branch Source")
+        first_id = db.append_message("source", role="user", content="first")
+        second_id = db.append_message("source", role="assistant", content="second")
+
+        created = db.branch_session(
+            source_session_id="source",
+            new_session_id="branch-1",
+            branch_point={"message_id": str(second_id)},
+            idempotency_key="branch-key-1",
+        )
+        replayed = db.branch_session(
+            source_session_id="source",
+            new_session_id="branch-duplicate",
+            branch_point={"message_id": str(second_id)},
+            idempotency_key="branch-key-1",
+        )
+
+        assert created["stored_session_id"] == "branch-1"
+        assert replayed["stored_session_id"] == "branch-1"
+        assert replayed["replayed"] is True
+        assert db.get_session("branch-duplicate") is None
+
+        with pytest.raises(ValueError, match="idempotency key conflicts"):
+            db.branch_session(
+                source_session_id="source",
+                new_session_id="branch-conflict",
+                branch_point={"message_id": str(first_id)},
+                idempotency_key="branch-key-1",
+            )
+
     def test_finish_reason_stored(self, db):
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="assistant", content="Done", finish_reason="stop")
@@ -3656,3 +3787,125 @@ class TestFTS5ToolCallMigration:
             assert version == SCHEMA_VERSION
         finally:
             session_db.close()
+
+
+class TestSessionRewindSoftDelete:
+    """Rewind keeps an audit trail while active transcript reads move back."""
+
+    def test_rewind_soft_deletes_target_and_tail(self, db):
+        db.create_session(session_id="rewind-s1", source="tui")
+        db.append_message("rewind-s1", role="user", content="question 1")
+        db.append_message("rewind-s1", role="assistant", content="answer 1")
+        target_id = db.append_message("rewind-s1", role="user", content="question 2")
+        db.append_message("rewind-s1", role="assistant", content="answer 2")
+
+        result = db.rewind_to_message("rewind-s1", target_id)
+
+        assert result["rewound_count"] == 2
+        assert result["target_message"]["content"] == "question 2"
+        assert result["new_head_id"] == target_id - 1
+        assert [m["content"] for m in db.get_messages("rewind-s1")] == [
+            "question 1",
+            "answer 1",
+        ]
+        all_rows = db.get_messages("rewind-s1", include_inactive=True)
+        assert [row["active"] for row in all_rows] == [1, 1, 0, 0]
+        assert db.get_session("rewind-s1")["rewind_count"] == 1
+
+    def test_rewind_requires_user_target(self, db):
+        db.create_session(session_id="rewind-s2", source="tui")
+        target_id = db.append_message("rewind-s2", role="assistant", content="answer")
+
+        with pytest.raises(ValueError, match="user"):
+            db.rewind_to_message("rewind-s2", target_id)
+
+    def test_rewound_rows_are_hidden_from_search_by_default(self, db):
+        db.create_session(session_id="rewind-s3", source="tui")
+        db.append_message("rewind-s3", role="user", content="keep this")
+        target_id = db.append_message("rewind-s3", role="user", content="UNIQUE_REWIND_TOKEN")
+
+        db.rewind_to_message("rewind-s3", target_id)
+
+        assert db.search_messages("UNIQUE_REWIND_TOKEN") == []
+        assert len(db.search_messages("UNIQUE_REWIND_TOKEN", include_inactive=True)) == 1
+
+    def test_list_recent_user_messages_defaults_to_active_rows(self, db):
+        db.create_session(session_id="rewind-s4", source="tui")
+        db.append_message("rewind-s4", role="user", content="old prompt")
+        target_id = db.append_message("rewind-s4", role="user", content="new prompt")
+        db.rewind_to_message("rewind-s4", target_id)
+
+        assert [row["preview"] for row in db.list_recent_user_messages("rewind-s4")] == [
+            "old prompt"
+        ]
+        assert [
+            row["preview"]
+            for row in db.list_recent_user_messages("rewind-s4", include_inactive=True)
+        ] == ["new prompt", "old prompt"]
+
+
+class TestSessionIdSearch:
+    """Session id search backs desktop/web session search without O(n) scans."""
+
+    def _seed(self, db, sid, *, content="ordinary message"):
+        db.create_session(session_id=sid, source="cli", model="test-model")
+        db.append_message(session_id=sid, role="user", content=content)
+
+    def test_search_sessions_by_id_matches_exact_prefix_and_substring(self, db):
+        self._seed(db, "20260603_090200_abcd12")
+        self._seed(db, "20260602_111111_other99")
+
+        assert [s["id"] for s in db.search_sessions_by_id("20260603_090200_abcd12")] == [
+            "20260603_090200_abcd12"
+        ]
+        assert [s["id"] for s in db.search_sessions_by_id("20260603")] == [
+            "20260603_090200_abcd12"
+        ]
+        assert [s["id"] for s in db.search_sessions_by_id("ABCD12")] == [
+            "20260603_090200_abcd12"
+        ]
+
+    def test_search_sessions_by_id_prioritizes_exact_then_prefix(self, db):
+        self._seed(db, "20260603_090200_abcd12")
+        self._seed(db, "20260603_090200_abcd12_child")
+        self._seed(db, "x_20260603_090200_abcd12")
+
+        ids = [s["id"] for s in db.search_sessions_by_id("20260603_090200_abcd12", limit=2)]
+
+        assert ids == ["20260603_090200_abcd12", "20260603_090200_abcd12_child"]
+
+    def test_search_sessions_by_id_matches_projected_compression_root(self, db):
+        root = "20260602_235959_root99"
+        tip = "20260603_010000_tip01"
+        db.create_session(session_id=root, source="cli")
+        db.append_message(root, role="user", content="root conversation")
+        db.end_session(root, "compression")
+        db.create_session(session_id=tip, source="cli", parent_session_id=root)
+        db.append_message(tip, role="user", content="continued conversation")
+
+        matches = db.search_sessions_by_id("root99")
+
+        assert [s["id"] for s in matches] == [tip]
+        assert matches[0]["_lineage_root_id"] == root
+
+
+class TestDoxieLineageBranchListing:
+    def test_session_lineage_branch_stays_visible_after_parent_reopen(self, db):
+        db.create_session("source-reopen", "tui")
+        db.set_session_title("source-reopen", "Source")
+        target_id = db.append_message("source-reopen", role="user", content="branch point")
+        db.append_message("source-reopen", role="assistant", content="answer")
+
+        db.branch_session(
+            source_session_id="source-reopen",
+            new_session_id="branch-reopen",
+            branch_point={"message_id": str(target_id)},
+            idempotency_key="branch-reopen-key",
+        )
+        db.reopen_session("source-reopen")
+        db.end_session("source-reopen", "user_exit")
+
+        ids = {row["id"] for row in db.list_sessions_rich(limit=10)}
+
+        assert "source-reopen" in ids
+        assert "branch-reopen" in ids

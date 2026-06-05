@@ -171,6 +171,29 @@ _SENSITIVE_PATH_PREFIXES = (
 )
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 
+_hermes_config_resolved: str | None = None
+_hermes_config_resolved_loaded = False
+
+
+def _get_hermes_config_resolved() -> str | None:
+    """Return the resolved Hermes config path, cached for this process."""
+    global _hermes_config_resolved, _hermes_config_resolved_loaded
+    if _hermes_config_resolved_loaded:
+        return _hermes_config_resolved
+    _hermes_config_resolved_loaded = True
+    try:
+        from hermes_cli.config import get_config_path
+
+        _hermes_config_resolved = str(get_config_path().resolve())
+    except Exception:
+        try:
+            _hermes_config_resolved = str(
+                Path("~/.hermes/config.yaml").expanduser().resolve()
+            )
+        except Exception:
+            _hermes_config_resolved = None
+    return _hermes_config_resolved
+
 
 def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:
     """Return an error message if the path targets a sensitive system location."""
@@ -188,6 +211,13 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
             return _err
     if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
         return _err
+    hermes_config = _get_hermes_config_resolved()
+    if hermes_config and (resolved == hermes_config or normalized == hermes_config):
+        return (
+            f"Refusing to write to Hermes config file: {filepath}\n"
+            "Agent cannot modify security-sensitive configuration. "
+            "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead."
+        )
     return None
 
 

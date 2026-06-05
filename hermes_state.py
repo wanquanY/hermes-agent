@@ -25,6 +25,7 @@ from pathlib import Path
 
 from agent.memory_manager import sanitize_context
 from hermes_constants import get_hermes_home
+from hermes_state_branch import SessionDBBranchMixin
 from hermes_state_runs import SessionDBRunMixin
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
@@ -34,7 +35,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 14
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -219,6 +220,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     handoff_state TEXT,
     handoff_platform TEXT,
     handoff_error TEXT,
+    rewind_count INTEGER NOT NULL DEFAULT 0,
     transient INTEGER DEFAULT 0,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
@@ -240,7 +242,34 @@ CREATE TABLE IF NOT EXISTS messages (
     codex_reasoning_items TEXT,
     codex_message_items TEXT,
     platform_message_id TEXT,
-    metadata_json TEXT
+    metadata_json TEXT,
+    active INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS session_lineage (
+    session_id TEXT PRIMARY KEY,
+    parent_session_id TEXT,
+    root_session_id TEXT NOT NULL,
+    branch_from_message_row_id INTEGER,
+    branch_from_turn_id TEXT,
+    branch_from_run_id TEXT,
+    branch_from_client_message_id TEXT,
+    branch_origin TEXT NOT NULL,
+    branch_mode TEXT NOT NULL,
+    branch_depth INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id),
+    FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
+);
+
+CREATE TABLE IF NOT EXISTS session_branch_requests (
+    idempotency_key TEXT PRIMARY KEY,
+    source_session_id TEXT NOT NULL,
+    branch_fingerprint TEXT NOT NULL,
+    result_session_id TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (source_session_id) REFERENCES sessions(id),
+    FOREIGN KEY (result_session_id) REFERENCES sessions(id)
 );
 
 CREATE TABLE IF NOT EXISTS state_meta (
@@ -297,12 +326,22 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_session_lineage_parent ON session_lineage(parent_session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_lineage_root ON session_lineage(root_session_id, branch_depth, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_lineage_branch_point ON session_lineage(branch_from_message_row_id);
 CREATE INDEX IF NOT EXISTS idx_runs_session_status ON runs(session_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_scope_status ON runs(runtime_scope_key, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_run_events_session_seq ON run_events(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_run_events_scope_seq ON run_events(runtime_scope_key, session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_run_event_archives_session ON run_event_archives(session_id, archived_at DESC);
+"""
+
+# Indexes that reference reconciler-added columns must be created after
+# _reconcile_columns() runs, otherwise legacy DBs fail while parsing SCHEMA_SQL.
+DEFERRED_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_messages_session_active
+    ON messages(session_id, active, timestamp);
 """
 
 FTS_SQL = """
@@ -361,7 +400,7 @@ END;
 """
 
 
-class SessionDB(SessionDBRunMixin):
+class SessionDB(SessionDBRunMixin, SessionDBBranchMixin):
     """
     SQLite-backed session storage with FTS5 search.
 
@@ -381,7 +420,7 @@ class SessionDB(SessionDBRunMixin):
     _WRITE_MAX_RETRIES = 15
     _WRITE_RETRY_MIN_S = 0.020   # 20ms
     _WRITE_RETRY_MAX_S = 0.150   # 150ms
-    # Attempt a PASSIVE WAL checkpoint every N successful writes.
+    # Attempt a TRUNCATE WAL checkpoint every N successful writes.
     _CHECKPOINT_EVERY_N_WRITES = 50
 
     def __init__(self, db_path: Path = None):
@@ -480,17 +519,23 @@ class SessionDB(SessionDBRunMixin):
         )
 
     def _try_wal_checkpoint(self) -> None:
-        """Best-effort PASSIVE WAL checkpoint.  Never blocks, never raises.
+        """Best-effort TRUNCATE WAL checkpoint.  Never raises.
 
-        Flushes committed WAL frames back into the main DB file for any
-        frames that no other connection currently needs.  Keeps the WAL
-        from growing unbounded when many processes hold persistent
+        Flushes committed WAL frames back into the main DB file and
+        truncates the WAL file to zero bytes.  Keeps the WAL from
+        growing unbounded when many processes hold persistent
         connections.
+
+        PASSIVE checkpoint never truncates the WAL file; it leaves the file
+        at its high-water mark until an explicit TRUNCATE checkpoint runs.
+        This method is already off the hot write path and protected by
+        ``self._lock``, so a short TRUNCATE checkpoint is the right tradeoff
+        for long-lived desktop/gateway processes.
         """
         try:
             with self._lock:
                 result = self._conn.execute(
-                    "PRAGMA wal_checkpoint(PASSIVE)"
+                    "PRAGMA wal_checkpoint(TRUNCATE)"
                 ).fetchone()
                 if result and result[1] > 0:
                     logger.debug(
@@ -503,13 +548,13 @@ class SessionDB(SessionDBRunMixin):
     def close(self):
         """Close the database connection.
 
-        Attempts a PASSIVE WAL checkpoint first so that exiting processes
-        help keep the WAL file from growing unbounded.
+        Attempts a TRUNCATE WAL checkpoint first so that exiting processes
+        help shrink the WAL file.
         """
         with self._lock:
             if self._conn:
                 try:
-                    self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 except Exception:
                     pass
                 self._conn.close()
@@ -639,6 +684,11 @@ class SessionDB(SessionDBRunMixin):
         except sqlite3.OperationalError as exc:
             logger.debug("idx_messages_platform_msg_id create skipped: %s", exc)
 
+        try:
+            cursor.executescript(DEFERRED_INDEX_SQL)
+        except sqlite3.OperationalError as exc:
+            logger.debug("deferred message indexes create skipped: %s", exc)
+
         # ── Schema version bookkeeping ─────────────────────────────────
         # Bump to current so future data migrations (if any) can gate on
         # version.  No version-gated column additions remain.
@@ -716,6 +766,11 @@ class SessionDB(SessionDBRunMixin):
                     "COALESCE(tool_calls, '') "
                     "FROM messages"
                 )
+            if current_version < 14:
+                try:
+                    cursor.execute("UPDATE messages SET active = 1 WHERE active IS NULL")
+                except sqlite3.OperationalError:
+                    pass
             if current_version < SCHEMA_VERSION:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
@@ -784,6 +839,7 @@ class SessionDB(SessionDBRunMixin):
         """Create a new session record. Returns the session_id."""
         self._insert_session_row(session_id, source, **kwargs)
         return session_id
+
     def end_session(self, session_id: str, end_reason: str) -> None:
         """Mark a session as ended.
 
@@ -1239,6 +1295,7 @@ class SessionDB(SessionDBRunMixin):
         project_compression_tips: bool = True,
         order_by_last_active: bool = False,
         page_cursor: Optional[Dict[str, Any]] = None,
+        id_query: str = None,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview (first user message) and last active timestamp.
 
@@ -1275,13 +1332,16 @@ class SessionDB(SessionDBRunMixin):
         params = []
 
         if not include_children:
-            # Show root sessions and branch sessions (whose parent ended with
-            # end_reason='branched' before the child was created), while still
-            # hiding sub-agent runs and compression continuations (which also
-            # carry a parent_session_id but were spawned while the parent was
-            # still live — i.e., started_at < parent.ended_at).
+            # Show root sessions and explicit user branches, while still
+            # hiding sub-agent runs and compression continuations. Modern
+            # non-destructive branches live in session_lineage and do not use
+            # sessions.parent_session_id for transcript replay. The legacy
+            # end_reason='branched' predicate is retained for old CLI rows.
             where_clauses.append(
                 "(s.parent_session_id IS NULL"
+                " OR EXISTS (SELECT 1 FROM session_lineage l"
+                "            WHERE l.session_id = s.id"
+                "            AND l.branch_origin = 'user_message_action')"
                 " OR EXISTS (SELECT 1 FROM sessions p"
                 "            WHERE p.id = s.parent_session_id"
                 "            AND p.end_reason = 'branched'"
@@ -1295,6 +1355,15 @@ class SessionDB(SessionDBRunMixin):
             placeholders = ",".join("?" for _ in exclude_sources)
             where_clauses.append(f"s.source NOT IN ({placeholders})")
             params.extend(exclude_sources)
+
+        id_needle = (id_query or "").strip().lower()
+        id_like_pattern = (
+            "%"
+            + id_needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            + "%"
+            if id_needle
+            else ""
+        )
 
         def _cursor_number(key: str) -> float:
             if not page_cursor:
@@ -1336,6 +1405,13 @@ class SessionDB(SessionDBRunMixin):
                         cursor_id,
                     ]
                 )
+            if id_needle:
+                outer_where_clauses.append(
+                    "EXISTS (SELECT 1 FROM chain cq "
+                    "WHERE cq.root_id = s.id "
+                    "AND LOWER(cq.cur_id) LIKE ? ESCAPE '\\')"
+                )
+                outer_params.append(id_like_pattern)
             outer_where_sql = (
                 f"WHERE {' AND '.join(outer_where_clauses)}"
                 if outer_where_clauses
@@ -1367,7 +1443,7 @@ class SessionDB(SessionDBRunMixin):
                     SELECT
                         root_id,
                         MAX(COALESCE(
-                            (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = cur_id),
+                            (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = cur_id AND m.active = 1),
                             (SELECT started_at FROM sessions ss WHERE ss.id = cur_id)
                         )) AS effective_last_active
                     FROM chain
@@ -1377,12 +1453,12 @@ class SessionDB(SessionDBRunMixin):
                     COALESCE(
                         (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                          FROM messages m
-                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                         WHERE m.session_id = s.id AND m.active = 1 AND m.role = 'user' AND m.content IS NOT NULL
                          ORDER BY m.timestamp, m.id LIMIT 1),
                         ''
                     ) AS _preview_raw,
                     COALESCE(
-                        (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
+                        (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id AND m2.active = 1),
                         s.started_at
                     ) AS last_active,
                     COALESCE(cm.effective_last_active, s.started_at) AS _effective_last_active
@@ -1404,6 +1480,9 @@ class SessionDB(SessionDBRunMixin):
                     "(s.started_at < ? OR (s.started_at = ? AND s.id < ?))"
                 )
                 outer_params.extend([cursor_started_at, cursor_started_at, cursor_id])
+            if id_needle:
+                outer_where_clauses.append("LOWER(s.id) LIKE ? ESCAPE '\\'")
+                outer_params.append(id_like_pattern)
             outer_where_sql = (
                 f"WHERE {' AND '.join(outer_where_clauses)}"
                 if outer_where_clauses
@@ -1414,12 +1493,12 @@ class SessionDB(SessionDBRunMixin):
                     COALESCE(
                         (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                          FROM messages m
-                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                         WHERE m.session_id = s.id AND m.active = 1 AND m.role = 'user' AND m.content IS NOT NULL
                          ORDER BY m.timestamp, m.id LIMIT 1),
                         ''
                     ) AS _preview_raw,
                     COALESCE(
-                        (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
+                        (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id AND m2.active = 1),
                         s.started_at
                     ) AS last_active
                 FROM sessions s
@@ -1497,12 +1576,12 @@ class SessionDB(SessionDBRunMixin):
                 COALESCE(
                     (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                      FROM messages m
-                     WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                     WHERE m.session_id = s.id AND m.active = 1 AND m.role = 'user' AND m.content IS NOT NULL
                      ORDER BY m.timestamp, m.id LIMIT 1),
                     ''
                 ) AS _preview_raw,
                 COALESCE(
-                    (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
+                    (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id AND m2.active = 1),
                     s.started_at
                 ) AS last_active
             FROM sessions s
@@ -1753,11 +1832,21 @@ class SessionDB(SessionDBRunMixin):
 
         self._execute_write(_do)
 
-    def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
-        """Load all messages for a session, ordered by insertion order."""
+    def get_messages(
+        self,
+        session_id: str,
+        include_inactive: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Load messages for a session, ordered by insertion order.
+
+        Soft-deleted rewind rows are hidden by default and remain available via
+        ``include_inactive=True`` for audit/debug views.
+        """
+        active_clause = "" if include_inactive else " AND active = 1"
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
+                "SELECT * FROM messages WHERE session_id = ?"
+                f"{active_clause} ORDER BY id",
                 (session_id,),
             )
             rows = cursor.fetchall()
@@ -1786,6 +1875,7 @@ class SessionDB(SessionDBRunMixin):
         session_id: str,
         around_message_id: int,
         window: int = 5,
+        include_inactive: bool = False,
     ) -> Dict[str, Any]:
         """Load a window of messages anchored on a specific message id.
 
@@ -1808,10 +1898,12 @@ class SessionDB(SessionDBRunMixin):
         """
         if window < 0:
             window = 0
+        active_clause = "" if include_inactive else " AND active = 1"
         with self._lock:
             # Confirm the anchor exists in this session.
             anchor_exists = self._conn.execute(
-                "SELECT 1 FROM messages WHERE id = ? AND session_id = ? LIMIT 1",
+                "SELECT 1 FROM messages WHERE id = ? AND session_id = ?"
+                f"{active_clause} LIMIT 1",
                 (around_message_id, session_id),
             ).fetchone()
             if not anchor_exists:
@@ -1822,12 +1914,14 @@ class SessionDB(SessionDBRunMixin):
             before_rows = self._conn.execute(
                 "SELECT * FROM messages "
                 "WHERE session_id = ? AND id <= ? "
+                f"{active_clause} "
                 "ORDER BY id DESC LIMIT ?",
                 (session_id, around_message_id, window + 1),
             ).fetchall()
             after_rows = self._conn.execute(
                 "SELECT * FROM messages "
                 "WHERE session_id = ? AND id > ? "
+                f"{active_clause} "
                 "ORDER BY id ASC LIMIT ?",
                 (session_id, around_message_id, window),
             ).fetchall()
@@ -1866,6 +1960,7 @@ class SessionDB(SessionDBRunMixin):
         window: int = 5,
         bookend: int = 3,
         keep_roles: Optional[Tuple[str, ...]] = ("user", "assistant"),
+        include_inactive: bool = False,
     ) -> Dict[str, Any]:
         """Return an anchored window plus session bookends.
 
@@ -1899,7 +1994,10 @@ class SessionDB(SessionDBRunMixin):
         # Reuse the primitive — handles anchor-existence, content decoding,
         # tool_calls deserialisation, and boundary counts.
         primitive = self.get_messages_around(
-            session_id, around_message_id, window=window
+            session_id,
+            around_message_id,
+            window=window,
+            include_inactive=include_inactive,
         )
         window_rows = primitive["window"]
         if not window_rows:
@@ -1932,6 +2030,7 @@ class SessionDB(SessionDBRunMixin):
         bookend_end_rows: List[Any] = []
         if bookend > 0:
             with self._lock:
+                active_clause = "" if include_inactive else " AND active = 1"
                 role_clause = ""
                 role_params: list = []
                 if keep_roles is not None:
@@ -1941,7 +2040,7 @@ class SessionDB(SessionDBRunMixin):
 
                 bookend_start_rows = self._conn.execute(
                     f"SELECT * FROM messages "
-                    f"WHERE session_id = ? AND id < ?{role_clause} "
+                    f"WHERE session_id = ? AND id < ?{active_clause}{role_clause} "
                     f"AND length(content) > 0 "
                     f"ORDER BY id ASC LIMIT ?",
                     (session_id, window_min_id, *role_params, bookend),
@@ -1949,7 +2048,7 @@ class SessionDB(SessionDBRunMixin):
 
                 bookend_end_rows = self._conn.execute(
                     f"SELECT * FROM messages "
-                    f"WHERE session_id = ? AND id > ?{role_clause} "
+                    f"WHERE session_id = ? AND id > ?{active_clause}{role_clause} "
                     f"AND length(content) > 0 "
                     f"ORDER BY id DESC LIMIT ?",
                     (session_id, window_max_id, *role_params, bookend),
@@ -2004,7 +2103,7 @@ class SessionDB(SessionDBRunMixin):
             # If this session already has messages, nothing to redirect.
             try:
                 row = self._conn.execute(
-                    "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
+                    "SELECT 1 FROM messages WHERE session_id = ? AND active = 1 LIMIT 1",
                     (session_id,),
                 ).fetchone()
             except Exception:
@@ -2034,7 +2133,7 @@ class SessionDB(SessionDBRunMixin):
                 seen.add(child_id)
                 try:
                     msg_row = self._conn.execute(
-                        "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
+                        "SELECT 1 FROM messages WHERE session_id = ? AND active = 1 LIMIT 1",
                         (child_id,),
                     ).fetchone()
                 except Exception:
@@ -2146,6 +2245,7 @@ class SessionDB(SessionDBRunMixin):
         *,
         session_ids: List[str],
         columns: str,
+        include_inactive: bool = False,
     ) -> List[Any]:
         if not rows:
             return rows
@@ -2164,9 +2264,11 @@ class SessionDB(SessionDBRunMixin):
             return rows
 
         placeholders = ",".join("?" for _ in session_ids)
+        active_clause = "" if include_inactive else " AND active = 1"
         candidate_rows = self._conn.execute(
             f"SELECT {columns} FROM messages "
             f"WHERE session_id IN ({placeholders}) AND metadata_json IS NOT NULL "
+            f"{active_clause} "
             "ORDER BY id",
             tuple(session_ids),
         ).fetchall()
@@ -2199,6 +2301,7 @@ class SessionDB(SessionDBRunMixin):
             previous_user = self._conn.execute(
                 f"SELECT {columns} FROM messages "
                 "WHERE session_id = ? AND role = 'user' AND id < ? "
+                f"{active_clause} "
                 "ORDER BY id DESC LIMIT 1",
                 (row_session_id, first_matched_id),
             ).fetchone()
@@ -2213,14 +2316,17 @@ class SessionDB(SessionDBRunMixin):
         *,
         row_id: Optional[int],
         side: str,
+        include_inactive: bool = False,
     ) -> bool:
         if row_id is None:
             return False
         placeholders = ",".join("?" for _ in session_ids)
         operator = "<" if side == "before" else ">"
+        active_clause = "" if include_inactive else " AND active = 1"
         row = self._conn.execute(
             f"SELECT 1 FROM messages "
             f"WHERE session_id IN ({placeholders}) AND id {operator} ? "
+            f"{active_clause} "
             "LIMIT 1",
             tuple(session_ids) + (row_id,),
         ).fetchone()
@@ -2231,6 +2337,7 @@ class SessionDB(SessionDBRunMixin):
         session_id: str,
         include_ancestors: bool = False,
         include_storage_metadata: bool = False,
+        include_inactive: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Load messages in the OpenAI conversation format (role + content dicts).
@@ -2240,11 +2347,13 @@ class SessionDB(SessionDBRunMixin):
         if include_ancestors:
             session_ids = self._session_lineage_root_to_tip(session_id)
 
+        active_clause = "" if include_inactive else " AND active = 1"
         with self._lock:
             placeholders = ",".join("?" for _ in session_ids)
             rows = self._conn.execute(
                 f"SELECT {self._conversation_message_columns()} "
-                f"FROM messages WHERE session_id IN ({placeholders}) ORDER BY id",
+                f"FROM messages WHERE session_id IN ({placeholders})"
+                f"{active_clause} ORDER BY id",
                 tuple(session_ids),
             ).fetchall()
 
@@ -2266,6 +2375,7 @@ class SessionDB(SessionDBRunMixin):
         cursor_id: Optional[int] = None,
         limit: int = 50,
         include_ancestors: bool = False,
+        include_inactive: bool = False,
     ) -> Dict[str, Any]:
         """Load one stable page of conversation messages with storage cursors.
 
@@ -2295,8 +2405,10 @@ class SessionDB(SessionDBRunMixin):
         with self._lock:
             placeholders = ",".join("?" for _ in session_ids)
             base_params: Tuple[Any, ...] = tuple(session_ids)
+            active_clause = "" if include_inactive else " AND active = 1"
             total_count = self._conn.execute(
-                f"SELECT COUNT(*) FROM messages WHERE session_id IN ({placeholders})",
+                f"SELECT COUNT(*) FROM messages WHERE session_id IN ({placeholders})"
+                f"{active_clause}",
                 base_params,
             ).fetchone()[0]
 
@@ -2305,6 +2417,7 @@ class SessionDB(SessionDBRunMixin):
                 rows = self._conn.execute(
                     f"SELECT {columns} FROM messages "
                     f"WHERE session_id IN ({placeholders}) AND id < ? "
+                    f"{active_clause} "
                     "ORDER BY id DESC LIMIT ?",
                     base_params + (cursor_id, page_limit + 1),
                 ).fetchall()
@@ -2315,6 +2428,7 @@ class SessionDB(SessionDBRunMixin):
                 rows = self._conn.execute(
                     f"SELECT {columns} FROM messages "
                     f"WHERE session_id IN ({placeholders}) AND id > ? "
+                    f"{active_clause} "
                     "ORDER BY id ASC LIMIT ?",
                     base_params + (cursor_id, page_limit + 1),
                 ).fetchall()
@@ -2325,6 +2439,7 @@ class SessionDB(SessionDBRunMixin):
                 rows = self._conn.execute(
                     f"SELECT {columns} FROM messages "
                     f"WHERE session_id IN ({placeholders}) "
+                    f"{active_clause} "
                     "ORDER BY id DESC LIMIT ?",
                     base_params + (page_limit + 1,),
                 ).fetchall()
@@ -2336,6 +2451,7 @@ class SessionDB(SessionDBRunMixin):
                 selected_rows,
                 session_ids=session_ids,
                 columns=columns,
+                include_inactive=include_inactive,
             )
             first_id = int(selected_rows[0]["id"]) if selected_rows else None
             last_id = int(selected_rows[-1]["id"]) if selected_rows else None
@@ -2343,11 +2459,13 @@ class SessionDB(SessionDBRunMixin):
                 session_ids,
                 row_id=first_id,
                 side="before",
+                include_inactive=include_inactive,
             )
             has_more_after = self._has_messages_on_page_side(
                 session_ids,
                 row_id=last_id,
                 side="after",
+                include_inactive=include_inactive,
             )
 
         messages = []
@@ -2375,23 +2493,8 @@ class SessionDB(SessionDBRunMixin):
         if not session_id:
             return [session_id]
 
-        chain = []
-        current = session_id
-        seen = set()
         with self._lock:
-            for _ in range(100):
-                if not current or current in seen:
-                    break
-                seen.add(current)
-                chain.append(current)
-                row = self._conn.execute(
-                    "SELECT parent_session_id FROM sessions WHERE id = ?",
-                    (current,),
-                ).fetchone()
-                if row is None:
-                    break
-                current = row["parent_session_id"] if hasattr(row, "keys") else row[0]
-        return list(reversed(chain)) or [session_id]
+            return self._replayable_lineage_root_to_tip_conn(self._conn, session_id)
 
     @staticmethod
     def _is_duplicate_replayed_user_message(messages: List[Dict[str, Any]], msg: Dict[str, Any]) -> bool:
@@ -2406,6 +2509,146 @@ class SessionDB(SessionDBRunMixin):
             if prev.get("role") == "assistant" and (prev.get("content") or prev.get("tool_calls")):
                 return False
         return False
+
+    # =========================================================================
+    # Rewind (soft-delete)
+    # =========================================================================
+
+    def rewind_to_message(
+        self,
+        session_id: str,
+        target_message_id: int,
+    ) -> Dict[str, Any]:
+        """Soft-delete the target user message and every following row.
+
+        The rows remain on disk with ``active=0`` for audit/debug views. Normal
+        transcript reads, search, resume and pagination ignore inactive rows by
+        default. The target row is included in the soft-delete so callers can
+        prefill it into the composer without duplicating it in the replayed
+        context.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM messages WHERE id = ? AND session_id = ?",
+                (target_message_id, session_id),
+            ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"message {target_message_id} not found in session {session_id}"
+            )
+
+        target_row = dict(row)
+        if target_row.get("role") != "user":
+            raise ValueError(
+                "rewind target must be a 'user' message "
+                f"(got role={target_row.get('role')!r}, id={target_message_id})"
+            )
+        target_row["content"] = self._decode_content(target_row.get("content"))
+
+        def _do(conn):
+            cursor = conn.execute(
+                "SELECT id FROM messages "
+                "WHERE session_id = ? AND id >= ? AND active = 1",
+                (session_id, target_message_id),
+            )
+            ids = [int(r[0]) for r in cursor.fetchall()]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                conn.execute(
+                    f"UPDATE messages SET active = 0 WHERE id IN ({placeholders})",
+                    ids,
+                )
+            conn.execute(
+                "UPDATE sessions "
+                "SET rewind_count = COALESCE(rewind_count, 0) + 1 "
+                "WHERE id = ?",
+                (session_id,),
+            )
+            return ids
+
+        rewound_ids = self._execute_write(_do)
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(id) FROM messages WHERE session_id = ? AND active = 1",
+                (session_id,),
+            ).fetchone()
+        new_head_id = row[0] if row and row[0] is not None else None
+
+        return {
+            "rewound_count": len(rewound_ids),
+            "target_message": target_row,
+            "new_head_id": new_head_id,
+        }
+
+    def restore_rewound(self, session_id: str, since_message_id: int) -> int:
+        """Restore inactive rows from ``since_message_id`` onward."""
+
+        def _do(conn):
+            cursor = conn.execute(
+                "SELECT id FROM messages "
+                "WHERE session_id = ? AND id >= ? AND active = 0",
+                (session_id, since_message_id),
+            )
+            ids = [int(r[0]) for r in cursor.fetchall()]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                conn.execute(
+                    f"UPDATE messages SET active = 1 WHERE id IN ({placeholders})",
+                    ids,
+                )
+            return len(ids)
+
+        return self._execute_write(_do)
+
+    def list_recent_user_messages(
+        self,
+        session_id: str,
+        limit: int = 20,
+        include_inactive: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return recent user messages newest-first for undo/rewind selection."""
+        try:
+            bounded_limit = max(1, min(int(limit), 500))
+        except (TypeError, ValueError):
+            bounded_limit = 20
+        active_clause = "" if include_inactive else " AND active = 1"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, timestamp, content FROM messages "
+                "WHERE session_id = ? AND role = 'user'"
+                f"{active_clause} "
+                "ORDER BY id DESC LIMIT ?",
+                (session_id, bounded_limit),
+            ).fetchall()
+
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            decoded = self._decode_content(row["content"])
+            if isinstance(decoded, list):
+                text_parts = [
+                    part.get("text", "")
+                    for part in decoded
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ]
+                preview = " ".join(part for part in text_parts if part).strip()
+                if not preview:
+                    preview = "[multimodal content]"
+            elif isinstance(decoded, str):
+                preview = decoded
+            else:
+                preview = ""
+            preview = " ".join(preview.split())
+            if len(preview) > 80:
+                preview = preview[:77] + "..."
+            result.append(
+                {
+                    "id": row["id"],
+                    "timestamp": row["timestamp"],
+                    "preview": preview,
+                }
+            )
+        return result
 
     # =========================================================================
     # Search
@@ -2504,6 +2747,7 @@ class SessionDB(SessionDBRunMixin):
         limit: int = 20,
         offset: int = 0,
         sort: str = None,
+        include_inactive: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Full-text search across session messages using FTS5.
@@ -2555,6 +2799,8 @@ class SessionDB(SessionDBRunMixin):
         # Build WHERE clauses dynamically
         where_clauses = ["messages_fts MATCH ?"]
         params: list = [query]
+        if not include_inactive:
+            where_clauses.append("m.active = 1")
 
         if source_filter is not None:
             source_placeholders = ",".join("?" for _ in source_filter)
@@ -2634,6 +2880,8 @@ class SessionDB(SessionDBRunMixin):
                 trigram_query = " ".join(parts)
                 tri_where = ["messages_fts_trigram MATCH ?"]
                 tri_params: list = [trigram_query]
+                if not include_inactive:
+                    tri_where.append("m.active = 1")
                 if source_filter is not None:
                     tri_where.append(f"s.source IN ({','.join('?' for _ in source_filter)})")
                     tri_params.extend(source_filter)
@@ -2689,6 +2937,8 @@ class SessionDB(SessionDBRunMixin):
                     )
                     like_params += [f"%{esc}%", f"%{esc}%", f"%{esc}%"]
                 like_where = [f"({' OR '.join(token_clauses)})"]
+                if not include_inactive:
+                    like_where.append("m.active = 1")
                 if source_filter is not None:
                     like_where.append(f"s.source IN ({','.join('?' for _ in source_filter)})")
                     like_params.extend(source_filter)
@@ -2732,34 +2982,42 @@ class SessionDB(SessionDBRunMixin):
         for match in matches:
             try:
                 with self._lock:
+                    target_active_clause = "" if include_inactive else " AND active = 1"
+                    neighbor_active_clause = "" if include_inactive else " AND m.active = 1"
                     ctx_cursor = self._conn.execute(
-                        """WITH target AS (
+                        f"""WITH target AS (
                                SELECT session_id, timestamp, id
                                FROM messages
-                               WHERE id = ?
+                               WHERE id = ?{target_active_clause}
                            )
                            SELECT role, content
                            FROM (
                                SELECT m.id, m.timestamp, m.role, m.content
                                FROM messages m
                                JOIN target t ON t.session_id = m.session_id
-                               WHERE (m.timestamp < t.timestamp)
-                                  OR (m.timestamp = t.timestamp AND m.id < t.id)
+                               WHERE (
+                                   (m.timestamp < t.timestamp)
+                                   OR (m.timestamp = t.timestamp AND m.id < t.id)
+                               )
+                               {neighbor_active_clause}
                                ORDER BY m.timestamp DESC, m.id DESC
                                LIMIT 1
                            )
                            UNION ALL
                            SELECT role, content
                            FROM messages
-                           WHERE id = ?
+                           WHERE id = ?{target_active_clause}
                            UNION ALL
                            SELECT role, content
                            FROM (
                                SELECT m.id, m.timestamp, m.role, m.content
                                FROM messages m
                                JOIN target t ON t.session_id = m.session_id
-                               WHERE (m.timestamp > t.timestamp)
-                                  OR (m.timestamp = t.timestamp AND m.id > t.id)
+                               WHERE (
+                                   (m.timestamp > t.timestamp)
+                                   OR (m.timestamp = t.timestamp AND m.id > t.id)
+                               )
+                               {neighbor_active_clause}
                                ORDER BY m.timestamp ASC, m.id ASC
                                LIMIT 1
                            )""",
@@ -2795,6 +3053,47 @@ class SessionDB(SessionDBRunMixin):
 
         return matches
 
+    def search_sessions_by_id(
+        self,
+        query: str,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Search surfaced sessions by exact/prefix/substring session id.
+
+        Matching checks each surfaced row's id and projected compression root
+        id, while ``list_sessions_rich(id_query=...)`` pushes the candidate
+        filter into SQL so desktop/web search does not scan every session row.
+        """
+        needle = (query or "").strip().lower()
+        try:
+            bounded_limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            bounded_limit = 20
+        if not needle:
+            return []
+
+        candidates = self.list_sessions_rich(
+            limit=max(bounded_limit * 4, bounded_limit),
+            offset=0,
+            order_by_last_active=True,
+            id_query=needle,
+        )
+
+        def score(row: Dict[str, Any]) -> int:
+            ids = [str(row.get("id") or ""), str(row.get("_lineage_root_id") or "")]
+            normalized = [value.lower() for value in ids if value]
+            if any(value == needle for value in normalized):
+                return 0
+            if any(value.startswith(needle) for value in normalized):
+                return 1
+            return 2
+
+        ranked = sorted(
+            enumerate(candidates),
+            key=lambda item: (score(item[1]), item[0]),
+        )
+        return [row for _, row in ranked[:bounded_limit]]
+
     def search_sessions(
         self,
         source: str = None,
@@ -2812,7 +3111,7 @@ class SessionDB(SessionDBRunMixin):
             "FROM sessions s "
             "LEFT JOIN ("
             "SELECT session_id, MAX(timestamp) AS last_active "
-            "FROM messages GROUP BY session_id"
+            "FROM messages WHERE active = 1 GROUP BY session_id"
             ") m ON m.session_id = s.id "
         )
         with self._lock:

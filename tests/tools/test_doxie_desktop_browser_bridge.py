@@ -40,6 +40,30 @@ def test_doxie_browser_bridge_uses_desktop_browser_commands(monkeypatch):
     assert "@e1 <a> - More" in snapshot["snapshot"]
 
 
+def test_doxie_browser_bridge_prefers_session_context(monkeypatch):
+    from doxie_extension import browser_bridge
+    from gateway import session_context
+
+    monkeypatch.setenv("DOXIE_BROWSER_SESSION_ID", "browser:electron:global")
+    tokens = session_context.set_session_vars(
+        session_key="session-a",
+        doxie_browser_session_id="browser:hermes:session-a",
+    )
+    try:
+        assert browser_bridge.browser_session_id() == "browser:hermes:session-a"
+    finally:
+        session_context.clear_session_vars(tokens)
+        for var in session_context._VAR_MAP.values():
+            var.set(session_context._UNSET)
+
+
+def test_doxie_browser_session_id_for_gateway_session_is_stable():
+    from doxie_extension import browser_bridge
+
+    assert browser_bridge.browser_session_id_for_gateway_session("session-1") == "browser:hermes:session-1"
+    assert browser_bridge.browser_session_id_for_gateway_session(" session/中文 key ") == "browser:hermes:session-key"
+
+
 def test_browser_navigate_prefers_doxie_desktop_bridge(monkeypatch):
     from doxie_extension import browser_bridge
     from tools import browser_tool

@@ -1259,6 +1259,41 @@ class TestShutdown:
 
         assert len(_servers) == 0
 
+    def test_shutdown_handles_base_exception_from_future(self, monkeypatch):
+        """shutdown_mcp_servers should not leak BaseException from scheduler future."""
+        import tools.mcp_tool as mcp_mod
+        from tools.mcp_tool import shutdown_mcp_servers, _servers
+
+        class FakeLoop:
+            def is_running(self):
+                return True
+
+        class FakeFuture:
+            def result(self, timeout=None):
+                raise KeyboardInterrupt()
+
+        _servers.clear()
+        mock_server = MagicMock()
+        mock_server.name = "base-exc"
+        mock_server.shutdown = AsyncMock()
+        _servers["base-exc"] = mock_server
+
+        def fake_schedule(coro, *args, **kwargs):
+            coro.close()
+            return FakeFuture()
+
+        monkeypatch.setattr(mcp_mod, "_mcp_loop", FakeLoop())
+        monkeypatch.setattr(
+            "agent.async_utils.safe_schedule_threadsafe",
+            fake_schedule,
+        )
+        monkeypatch.setattr(mcp_mod, "_stop_mcp_loop", lambda: None)
+
+        try:
+            shutdown_mcp_servers()
+        finally:
+            _servers.clear()
+
     def test_shutdown_is_parallel(self):
         """Multiple servers are shut down in parallel via asyncio.gather."""
         import tools.mcp_tool as mcp_mod

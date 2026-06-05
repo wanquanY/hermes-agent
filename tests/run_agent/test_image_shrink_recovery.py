@@ -139,13 +139,61 @@ class TestShrinkImagePartsHelper:
         # URL unchanged.
         assert msgs[0]["content"][1]["image_url"]["url"] == small_url
 
+    def test_small_byte_tall_image_shrunk_for_dimension_cap(self, monkeypatch):
+        """An under-4MB image still shrinks when its longest side exceeds 8000px."""
+        try:
+            from PIL import Image
+        except ImportError:
+            pytest.skip("Pillow not installed")
+
+        import io
+
+        agent = _make_agent()
+        img = Image.new("RGB", (120, 8500), (30, 30, 30))
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        tall_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+        assert len(tall_url) < 4 * 1024 * 1024
+
+        shrunk = "data:image/jpeg;base64," + "D" * 1000
+        calls = []
+
+        def _fake_resize(path, mime_type=None, max_base64_bytes=None, max_dimension=None):
+            calls.append({
+                "mime_type": mime_type,
+                "max_base64_bytes": max_base64_bytes,
+                "max_dimension": max_dimension,
+            })
+            return shrunk
+
+        monkeypatch.setattr(
+            "tools.vision_tools._resize_image_for_vision",
+            _fake_resize,
+            raising=False,
+        )
+
+        msgs = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": tall_url}},
+            ],
+        }]
+        assert agent._try_shrink_image_parts_in_messages(msgs) is True
+        assert msgs[0]["content"][1]["image_url"]["url"] == shrunk
+        assert calls == [{
+            "mime_type": "image/png",
+            "max_base64_bytes": 4 * 1024 * 1024,
+            "max_dimension": 8000,
+        }]
+
     def test_oversized_image_url_dict_shape_rewritten(self, monkeypatch):
         """OpenAI chat.completions shape: {image_url: {url: data:...}}."""
         agent = _make_agent()
         oversized_url = _big_png_data_url(5000)  # ~5 MB raw → ~6.7 MB b64
         shrunk = "data:image/jpeg;base64," + "A" * 1000  # small
 
-        def _fake_resize(path, mime_type=None, max_base64_bytes=None):
+        def _fake_resize(path, mime_type=None, max_base64_bytes=None, max_dimension=None):
             return shrunk
 
         monkeypatch.setattr(

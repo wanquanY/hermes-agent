@@ -283,6 +283,13 @@ def _image_to_base64_data_url(image_path: Path, mime_type: Optional[str] = None)
 # major provider (Gemini inline data limit).  Images above this are rejected.
 _MAX_BASE64_BYTES = 20 * 1024 * 1024
 
+# Proactive embed cap. Native vision results are persisted into conversation
+# history, so resize with headroom before provider-specific hard limits can
+# wedge a session on every subsequent turn.
+_EMBED_TARGET_BYTES = 4 * 1024 * 1024
+_PROVIDER_MAX_DIMENSION = 8000
+_EMBED_MAX_DIMENSION = 7900
+
 # Target size when auto-resizing on API failure (5 MB).  After a provider
 # rejects an image, we downscale to this target and retry once.
 _RESIZE_TARGET_BYTES = 5 * 1024 * 1024
@@ -294,17 +301,37 @@ def _is_image_size_error(error: Exception) -> bool:
     return any(hint in err_str for hint in (
         "too large", "payload", "413", "content_too_large",
         "request_too_large", "image_url", "invalid_request",
-        "exceeds", "size limit",
+        "exceeds", "size limit", "image dimensions exceed",
+        "dimensions exceed max allowed size", "max allowed size: 8000",
     ))
 
 
+def _image_exceeds_dimension(image_path: Path, max_dimension: int) -> bool:
+    """Return True when the image's longest side exceeds ``max_dimension``.
+
+    Providers such as Anthropic enforce an 8000px per-side cap separately from
+    encoded byte limits. If Pillow is unavailable or the file is unreadable,
+    return False so the existing byte-based checks still decide the path.
+    """
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(image_path) as _img:
+            return max(_img.size) > max_dimension
+    except Exception:
+        return False
+
+
 def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
-                              max_base64_bytes: int = _RESIZE_TARGET_BYTES) -> str:
+                              max_base64_bytes: int = _RESIZE_TARGET_BYTES,
+                              max_dimension: Optional[int] = None) -> str:
     """Convert an image to a base64 data URL, auto-resizing if too large.
 
     Tries Pillow first to progressively downscale oversized images.  If Pillow
     is not installed or resizing still exceeds the limit, falls back to the raw
     bytes and lets the caller handle the size check.
+
+    ``max_dimension`` guards provider pixel caps that are independent of byte
+    size, e.g. tall screenshots that compress well but exceed 8000px.
 
     Returns the base64 data URL string.
     """
@@ -312,7 +339,13 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
     # Skip the expensive full-read + encode if Pillow can resize directly.
     file_size = image_path.stat().st_size
     estimated_b64 = (file_size * 4) // 3 + 100  # ~header overhead
-    if estimated_b64 <= max_base64_bytes:
+    needs_resize_for_bytes = estimated_b64 > max_base64_bytes
+    needs_resize_for_dims = (
+        max_dimension is not None
+        and _image_exceeds_dimension(image_path, max_dimension)
+    )
+
+    if not needs_resize_for_bytes and not needs_resize_for_dims:
         # Small enough — just encode directly.
         data_url = _image_to_base64_data_url(image_path, mime_type=mime_type)
         if len(data_url) <= max_base64_bytes:
@@ -330,9 +363,9 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
             data_url = _image_to_base64_data_url(image_path, mime_type=mime_type)
         return data_url  # caller will raise the size error
 
-    logger.info("Image file is %.1f MB (estimated base64 %.1f MB, limit %.1f MB), auto-resizing...",
+    logger.info("Image file is %.1f MB (estimated base64 %.1f MB, limit %.1f MB, max_dimension=%s), auto-resizing...",
                 file_size / (1024 * 1024), estimated_b64 / (1024 * 1024),
-                max_base64_bytes / (1024 * 1024))
+                max_base64_bytes / (1024 * 1024), max_dimension)
 
     mime = mime_type or _determine_mime_type(image_path)
     # Choose output format: JPEG for photos (smaller), PNG for transparency
@@ -349,6 +382,16 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
     # Convert RGBA to RGB for JPEG output
     if pil_format == "JPEG" and img.mode in {"RGBA", "P"}:
         img = img.convert("RGB")
+
+    def _dims_ok(w: int, h: int) -> bool:
+        return max_dimension is None or max(w, h) <= max_dimension
+
+    if max_dimension is not None and not _dims_ok(img.width, img.height):
+        scale = max_dimension / max(img.width, img.height)
+        new_w = max(int(img.width * scale), 1)
+        new_h = max(int(img.height * scale), 1)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        logger.info("Resized to %dx%d for vision dimension cap", new_w, new_h)
 
     # Strategy: halve dimensions until base64 fits, up to 4 rounds.
     # For JPEG, also try reducing quality at each size step.
@@ -387,7 +430,7 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
             img.save(buf, **save_kwargs)
             encoded = base64.b64encode(buf.getvalue()).decode("ascii")
             candidate = f"data:{out_mime};base64,{encoded}"
-            if len(candidate) <= max_base64_bytes:
+            if len(candidate) <= max_base64_bytes and _dims_ok(img.width, img.height):
                 logger.info("Auto-resized image fits: %.1f MB (quality=%s, %dx%d)",
                             len(candidate) / (1024 * 1024), q,
                             img.width, img.height)
@@ -597,10 +640,18 @@ async def _vision_analyze_native(
             temp_image_path, mime_type=detected_mime_type,
         )
 
-        # Honour the same hard cap as the legacy path. Resize if needed.
-        if len(image_data_url) > _MAX_BASE64_BYTES:
+        # Native vision embeds this image into the conversation history. Resize
+        # proactively when either byte size or pixel dimensions exceed provider
+        # limits, otherwise one bad image can wedge every later turn.
+        if (
+            len(image_data_url) > _EMBED_TARGET_BYTES
+            or _image_exceeds_dimension(temp_image_path, _EMBED_MAX_DIMENSION)
+        ):
             image_data_url = _resize_image_for_vision(
-                temp_image_path, mime_type=detected_mime_type,
+                temp_image_path,
+                mime_type=detected_mime_type,
+                max_base64_bytes=_EMBED_TARGET_BYTES,
+                max_dimension=_EMBED_MAX_DIMENSION,
             )
             if len(image_data_url) > _MAX_BASE64_BYTES:
                 return tool_error(
@@ -745,7 +796,10 @@ async def vision_analyze_tool(
         if len(image_data_url) > _MAX_BASE64_BYTES:
             # Try to resize down to 5 MB before giving up.
             image_data_url = _resize_image_for_vision(
-                temp_image_path, mime_type=detected_mime_type)
+                temp_image_path,
+                mime_type=detected_mime_type,
+                max_dimension=_PROVIDER_MAX_DIMENSION,
+            )
             if len(image_data_url) > _MAX_BASE64_BYTES:
                 raise ValueError(
                     f"Image too large for vision API: base64 payload is "
@@ -812,16 +866,25 @@ async def vision_analyze_tool(
         try:
             response = await async_call_llm(**call_kwargs)
         except Exception as _api_err:
-            if (_is_image_size_error(_api_err)
-                    and len(image_data_url) > _RESIZE_TARGET_BYTES):
+            _over_retry_bytes = len(image_data_url) > _RESIZE_TARGET_BYTES
+            _over_retry_dims = _image_exceeds_dimension(
+                temp_image_path, _PROVIDER_MAX_DIMENSION,
+            )
+            if _is_image_size_error(_api_err) and (
+                _over_retry_bytes or _over_retry_dims
+            ):
                 logger.info(
                     "API rejected image (%.1f MB, likely too large); "
-                    "auto-resizing to ~%.0f MB and retrying...",
+                    "auto-resizing to ~%.0f MB / %dpx and retrying...",
                     len(image_data_url) / (1024 * 1024),
                     _RESIZE_TARGET_BYTES / (1024 * 1024),
+                    _PROVIDER_MAX_DIMENSION,
                 )
                 image_data_url = _resize_image_for_vision(
-                    temp_image_path, mime_type=detected_mime_type)
+                    temp_image_path,
+                    mime_type=detected_mime_type,
+                    max_dimension=_PROVIDER_MAX_DIMENSION,
+                )
                 messages[0]["content"][1]["image_url"]["url"] = image_data_url
                 response = await async_call_llm(**call_kwargs)
             else:

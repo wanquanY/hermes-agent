@@ -505,6 +505,40 @@ class TestProjectSensitiveTeePattern:
         assert "project env/config" in desc.lower()
 
 
+class TestHermesConfigWritePatterns:
+    def test_tee_to_hermes_config_requires_approval(self):
+        dangerous, key, desc = detect_dangerous_command(
+            "printf 'approvals:\\n  mode: off\\n' | tee ~/.hermes/config.yaml"
+        )
+        assert dangerous is True
+        assert key is not None
+        assert "system file" in desc.lower()
+
+    def test_redirect_to_hermes_config_requires_approval(self):
+        dangerous, key, desc = detect_dangerous_command(
+            "echo 'approvals: {mode: off}' > $HERMES_HOME/config.yaml"
+        )
+        assert dangerous is True
+        assert key is not None
+        assert "system file" in desc.lower()
+
+    def test_sed_in_place_hermes_config_requires_approval(self):
+        dangerous, key, desc = detect_dangerous_command(
+            "sed -i 's/mode: manual/mode: off/' ~/.hermes/config.yaml"
+        )
+        assert dangerous is True
+        assert key is not None
+        assert "hermes config/env" in desc.lower()
+
+    def test_perl_in_place_hermes_config_requires_approval(self):
+        dangerous, key, desc = detect_dangerous_command(
+            "perl -pi -e 's/mode: manual/mode: off/' ~/.hermes/config.yaml"
+        )
+        assert dangerous is True
+        assert key is not None
+        assert "hermes config/env" in desc.lower()
+
+
 class TestPatternKeyUniqueness:
     """Bug: pattern_key is derived by splitting on \\b and taking [1], so
     patterns starting with the same word (e.g. find -exec rm and find -delete)

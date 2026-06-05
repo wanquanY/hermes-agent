@@ -260,6 +260,8 @@ _PENDING_INPUT_COMMANDS: frozenset[str] = frozenset(
         "steer",
         "plan",
         "goal",
+        "undo",
+        "rewind",
     }
 )
 
@@ -438,6 +440,128 @@ def _resolve_name(name: str) -> str:
         return r.name if r else name
     except Exception:
         return name
+
+
+def _prefill_text_from_content(content) -> str:
+    if isinstance(content, list):
+        parts = [
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        return "\n".join(text for text in parts if text)
+    return content if isinstance(content, str) else ""
+
+
+def _dispatch_rewind_command(rid, session: dict | None, name: str, arg: str) -> dict:
+    label = "undo" if name == "undo" else "rewind"
+    if not session:
+        return _err(rid, 4001, f"no active session to {label}")
+    if session.get("running"):
+        return _err(
+            rid,
+            4009,
+            f"session busy — /interrupt the current turn before /{label}",
+        )
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    session_key = str(session.get("session_key") or "")
+    if not session_key:
+        return _err(rid, 4001, f"no session key for {label}")
+
+    count = 1
+    arg_text = (arg or "").strip()
+    if arg_text:
+        try:
+            count = int(arg_text.split()[0])
+        except (ValueError, IndexError):
+            return _err(
+                rid,
+                4004,
+                f"{label}: invalid count {arg_text!r} — use /{label} or /{label} N",
+            )
+    count = max(count, 1)
+
+    try:
+        recents = db.list_recent_user_messages(session_key, limit=max(count, 10))
+    except Exception as exc:
+        return _err(rid, 5008, f"{label}: failed to load history: {exc}")
+    if not recents:
+        return _err(rid, 4018, f"no user messages to {label}")
+
+    target_index = min(count - 1, len(recents) - 1)
+    target_id = recents[target_index]["id"]
+    try:
+        result = db.rewind_to_message(session_key, target_id)
+    except ValueError as exc:
+        return _err(rid, 4004, f"{label}: {exc}")
+    except Exception as exc:
+        return _err(rid, 5008, f"{label}: {exc}")
+
+    try:
+        active_history = db.get_messages_as_conversation(
+            session_key,
+            include_ancestors=False,
+        )
+    except Exception:
+        active_history = []
+    history_lock = session.get("history_lock")
+    if history_lock is None:
+        return _err(rid, 5008, f"{label}: session history lock unavailable")
+    with history_lock:
+        session["history"] = list(active_history)
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+
+    agent = session.get("agent")
+    if agent is not None:
+        memory_manager = getattr(agent, "_memory_manager", None)
+        if memory_manager is not None:
+            try:
+                memory_manager.on_session_switch(
+                    session_key,
+                    parent_session_id="",
+                    reset=False,
+                    rewound=True,
+                )
+            except Exception:
+                pass
+        for attr in ("_invalidate_system_prompt",):
+            fn = getattr(agent, attr, None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:
+                    pass
+        try:
+            agent._session_messages = list(active_history)
+        except Exception:
+            pass
+        try:
+            agent._last_flushed_db_idx = len(active_history)
+        except Exception:
+            pass
+        try:
+            agent._cached_system_prompt = None
+        except Exception:
+            pass
+
+    target_message = result.get("target_message") or {}
+    target_text = _prefill_text_from_content(target_message.get("content"))
+    rewound_count = int(result.get("rewound_count") or 0)
+    turns = target_index + 1
+    if label == "undo":
+        turn_word = "turn" if turns == 1 else "turns"
+        notice = (
+            f"↶ Undid {turns} {turn_word} ({rewound_count} message(s)). "
+            "Edit and resubmit, or send a new message."
+        )
+    else:
+        notice = (
+            f"↶ Rewound {rewound_count} message(s). "
+            "Edit and resubmit, or send a new message."
+        )
+    return _ok(rid, {"type": "prefill", "message": target_text, "notice": notice})
 
 
 @method("command.dispatch")
@@ -644,6 +768,9 @@ def _(rid, params: dict) -> dict:
             rid,
             {"type": "send", "notice": notice, "message": state.goal},
         )
+
+    if name in {"undo", "rewind"}:
+        return _dispatch_rewind_command(rid, session, name, arg)
 
     if name in {"snapshot", "snap"}:
         subcommand = arg.split(maxsplit=1)[0].lower() if arg else ""

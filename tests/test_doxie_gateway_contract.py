@@ -65,7 +65,9 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "events.unsubscribe" in server._methods
     assert "session.usage" in server._methods
     assert "session.status" in server._methods
+    assert "session.branch" in server._methods
     assert server._methods["session.status"].__module__ == "tui_gateway.methods.session"
+    assert server._methods["session.branch"].__module__ == "tui_gateway.methods.session_branch"
     assert server._methods["prompt.submit"].__module__ == "tui_gateway.methods.prompt"
     assert "model.set" in server._methods
     assert "model.options" in server._methods
@@ -88,6 +90,7 @@ def test_extracted_gateway_methods_own_registered_handlers():
     assert server._methods["run.events"].__module__ == "tui_gateway.methods.run"
     assert server._methods["events.unsubscribe"].__module__ == "tui_gateway.methods.run"
     assert server._methods["session.resume"].__module__ == "tui_gateway.methods.session"
+    assert server._methods["session.branch"].__module__ == "tui_gateway.methods.session_branch"
     assert server._methods["config.show"].__module__ == "tui_gateway.methods.integrations"
     assert server._methods["skills.reload"].__module__ == "tui_gateway.methods.integrations"
     assert {

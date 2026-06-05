@@ -21,6 +21,12 @@ class ServerProxy:
     def __bool__(self):
         return bool(self._target())
 
+    def __enter__(self):
+        return self._target().__enter__()
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._target().__exit__(exc_type, exc, tb)
+
     def __len__(self):
         return len(self._target())
 
@@ -51,7 +57,17 @@ def bind_server_globals(target: dict[str, Any]):
     """
     from tui_gateway import server
 
-    dynamic_names = {"_sessions", "_pending", "_answers", "_methods", "_db", "_db_error"}
+    dynamic_names = {
+        "_sessions",
+        "_sessions_lock",
+        "_session_resume_lock",
+        "_pending",
+        "_prompt_lock",
+        "_answers",
+        "_methods",
+        "_db",
+        "_db_error",
+    }
     target.update(
         {
             name: ServerProxy(name) if callable(value) or name in dynamic_names else value

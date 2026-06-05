@@ -82,6 +82,8 @@ firecrawl = ["firecrawl-py==4.17.0"]
 parallel-web = ["parallel-web==0.4.2"]
 # Image generation backends
 fal = ["fal-client==0.13.1"]
+# Vision image resizing recovery.
+vision = ["Pillow==12.2.0"]
 # Edge TTS — default TTS provider but still optional (users can pick
 # ElevenLabs / OpenAI / MiniMax instead).
 edge-tts = ["edge-tts==7.2.7"]

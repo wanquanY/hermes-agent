@@ -97,6 +97,9 @@ _db_error_by_home: dict[str, str] = {}
 _GATEWAY_INSTANCE_ID = uuid.uuid4().hex
 _stdout_lock = threading.Lock()
 _cfg_lock = threading.Lock()
+_sessions_lock = threading.Lock()
+_prompt_lock = threading.Lock()
+_session_resume_lock = threading.Lock()
 _profile_env_lock = threading.RLock()
 _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
@@ -238,7 +241,9 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
 
 
 def _shutdown_sessions() -> None:
-    for session in list(_sessions.values()):
+    with _sessions_lock:
+        sessions = list(_sessions.values())
+    for session in sessions:
         _finalize_session(session, end_reason="tui_shutdown")
         try:
             worker = session.get("slash_worker")
@@ -302,8 +307,10 @@ def write_json(obj: dict) -> bool:
     """
     if obj.get("method") == "event":
         sid = ((obj.get("params") or {}).get("session_id")) or ""
-        if sid and (t := (_sessions.get(sid) or {}).get("transport")) is not None:
-            return t.write(obj)
+        with _sessions_lock:
+            transport = (_sessions.get(sid) or {}).get("transport") if sid else None
+        if transport is not None:
+            return transport.write(obj)
 
     return (current_transport() or _stdio_transport).write(obj)
 
@@ -314,7 +321,8 @@ def _emit(event: str, sid: str, payload: dict | None = None):
     try:
         from tui_gateway.services import run_control
 
-        session = _sessions.get(sid) or {}
+        with _sessions_lock:
+            session = _sessions.get(sid) or {}
         stable_session_id = str(session.get("session_key") or sid or "")
         run_id = str(event_payload.get("run_id") or session.get("active_run_id") or "")
         turn_id = str(event_payload.get("turn_id") or session.get("active_turn_id") or "")
@@ -516,7 +524,8 @@ def _start_agent_build(sid: str, session: dict) -> None:
     key = session["session_key"]
 
     def _build() -> None:
-        current = _sessions.get(sid)
+        with _sessions_lock:
+            current = _sessions.get(sid)
         if current is None:
             ready.set()
             return
@@ -556,7 +565,9 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 pass
 
             _wire_callbacks(sid)
-            _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
+            with _sessions_lock:
+                if sid in _sessions:
+                    _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
             _notify_session_boundary("on_session_reset", key)
 
             info = _session_info(agent, current)
@@ -572,7 +583,9 @@ def _start_agent_build(sid: str, session: dict) -> None:
             current["agent_error"] = str(e)
             _emit("error", sid, {"message": f"agent init failed: {e}"})
         finally:
-            if _sessions.get(sid) is not current:
+            with _sessions_lock:
+                replaced = _sessions.get(sid) is not current
+            if replaced:
                 if worker is not None:
                     try:
                         worker.close()
@@ -666,10 +679,11 @@ def _set_session_context(
     try:
         from gateway.session_context import set_session_vars
 
-        session = next(
-            (value for value in _sessions.values() if value.get("session_key") == session_key),
-            {},
-        )
+        with _sessions_lock:
+            session = next(
+                (value for value in _sessions.values() if value.get("session_key") == session_key),
+                {},
+            )
         return set_session_vars(
             session_key=session_key,
             terminal_cwd=str(terminal_cwd if terminal_cwd is not None else session.get("cwd") or ""),
@@ -678,9 +692,16 @@ def _set_session_context(
                 if doxie_product_context is not None
                 else session.get("doxie_product_context") or ""
             ),
+            doxie_browser_session_id=_doxie_browser_session_id(session_key),
         )
     except Exception:
         return []
+
+
+def _doxie_browser_session_id(session_key: str) -> str:
+    from doxie_extension.browser_bridge import browser_session_id_for_gateway_session
+
+    return browser_session_id_for_gateway_session(session_key)
 
 
 def _clear_session_context(tokens: list) -> None:
@@ -713,12 +734,14 @@ def _enable_gateway_prompts() -> None:
 def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
     rid = uuid.uuid4().hex[:8]
     ev = threading.Event()
-    _pending[rid] = (sid, ev)
-    payload["request_id"] = rid
+    with _prompt_lock:
+        _pending[rid] = (sid, ev)
+        payload["request_id"] = rid
     _emit(event, sid, payload)
     ev.wait(timeout=timeout)
-    _pending.pop(rid, None)
-    return _answers.pop(rid, "")
+    with _prompt_lock:
+        _pending.pop(rid, None)
+        return _answers.pop(rid, "")
 
 
 def _clear_pending(sid: str | None = None) -> None:
@@ -730,10 +753,11 @@ def _clear_pending(sid: str | None = None) -> None:
     sessions sharing the same tui_gateway process.  When *sid* is
     None, every pending prompt is released (used during shutdown).
     """
-    for rid, (owner_sid, ev) in list(_pending.items()):
-        if sid is None or owner_sid == sid:
-            _answers[rid] = ""
-            ev.set()
+    with _prompt_lock:
+        for rid, (owner_sid, ev) in list(_pending.items()):
+            if sid is None or owner_sid == sid:
+                _answers[rid] = ""
+                ev.set()
 
 
 # ── Agent factory ────────────────────────────────────────────────────
@@ -1655,7 +1679,7 @@ def _init_session(
     workspace: dict | None = None,
     profile_context: dict | None = None,
 ):
-    _sessions[sid] = {
+    session_record = {
         "agent": agent,
         "session_key": key,
         "cwd": cwd or getattr(agent, "session_cwd", ""),
@@ -1677,13 +1701,20 @@ def _init_session(
         # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
         "transport": current_transport() or _stdio_transport,
     }
+    with _sessions_lock:
+        _sessions[sid] = session_record
     try:
-        _sessions[sid]["slash_worker"] = _SlashWorker(
+        slash_worker = _SlashWorker(
             key, getattr(agent, "model", _resolve_model())
         )
+        with _sessions_lock:
+            if sid in _sessions:
+                _sessions[sid]["slash_worker"] = slash_worker
     except Exception:
         # Defer hard-failure to slash.exec; chat still works without slash worker.
-        _sessions[sid]["slash_worker"] = None
+        with _sessions_lock:
+            if sid in _sessions:
+                _sessions[sid]["slash_worker"] = None
     try:
         from tools.approval import register_gateway_notify, load_permanent_allowlist
 
@@ -1705,9 +1736,14 @@ def _init_session(
         # session startup resilient).
         pass
     _wire_callbacks(sid)
-    _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
+    with _sessions_lock:
+        session = _sessions.get(sid)
+        if session is not None:
+            session["_notif_stop"] = _start_notification_poller(sid, session)
     _notify_session_boundary("on_session_reset", key)
-    _emit("session.info", sid, _session_info(agent, _sessions[sid]))
+    with _sessions_lock:
+        session = _sessions.get(sid, {})
+    _emit("session.info", sid, _session_info(agent, session))
 
 
 def _new_session_key() -> str:
@@ -1719,16 +1755,18 @@ def _resolve_runtime_session(target: str) -> tuple[str, dict | None]:
     if not requested:
         return "", None
 
-    session = _sessions.get(requested)
+    with _sessions_lock:
+        session = _sessions.get(requested)
     if session is not None:
         return requested, session
 
     try:
-        snapshot = [
-            (runtime_sid, candidate)
-            for runtime_sid, candidate in _sessions.items()
-            if str((candidate or {}).get("session_key") or "") == requested
-        ]
+        with _sessions_lock:
+            snapshot = [
+                (runtime_sid, candidate)
+                for runtime_sid, candidate in _sessions.items()
+                if str((candidate or {}).get("session_key") or "") == requested
+            ]
     except Exception:
         snapshot = []
     if snapshot:
@@ -1885,7 +1923,9 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
 
 
 def _resolve_notification_event_session(evt: dict) -> tuple[str, dict] | None:
-    for candidate_sid, candidate in list(_sessions.items()):
+    with _sessions_lock:
+        snapshot = list(_sessions.items())
+    for candidate_sid, candidate in snapshot:
         if _session_owns_notification_event(candidate, evt):
             return candidate_sid, candidate
     return None
@@ -1946,6 +1986,8 @@ _PENDING_INPUT_COMMANDS: frozenset[str] = frozenset(
         "steer",
         "plan",
         "goal",
+        "undo",
+        "rewind",
     }
 )
 

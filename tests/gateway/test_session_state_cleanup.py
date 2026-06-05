@@ -229,3 +229,44 @@ class TestSessionDbCloseOnShutdown:
 
         flaky_db.close.assert_called_once()
         healthy_db.close.assert_called_once()
+
+
+class TestSessionResetZombieRace:
+    """A session reset racing an in-flight run must not leave a dead busy slot."""
+
+    def test_generation_guard_blocks_then_unconditional_release_evicts(self):
+        runner = _make_runner()
+        runner._session_run_generation = {}
+        key = "agent:main:telegram:private:1"
+
+        gen_n = runner._begin_session_run_generation(key)
+        dead_agent = MagicMock()
+        runner._running_agents[key] = dead_agent
+        runner._running_agents_ts[key] = 1.0
+        runner._busy_ack_ts[key] = 1.0
+
+        runner._invalidate_session_run_generation(key, reason="session_reset")
+
+        assert runner._release_running_agent_state(key, run_generation=gen_n) is False
+        assert runner._running_agents.get(key) is dead_agent
+
+        assert runner._release_running_agent_state(key) is True
+        assert key not in runner._running_agents
+        assert key not in runner._running_agents_ts
+        assert key not in runner._busy_ack_ts
+
+    def test_normal_completion_tolerates_outer_unconditional_release(self):
+        runner = _make_runner()
+        runner._session_run_generation = {}
+        key = "agent:main:telegram:private:2"
+
+        gen = runner._begin_session_run_generation(key)
+        runner._running_agents[key] = MagicMock()
+        runner._running_agents_ts[key] = 1.0
+        runner._busy_ack_ts[key] = 1.0
+
+        assert runner._release_running_agent_state(key, run_generation=gen) is True
+        assert key not in runner._running_agents
+        assert runner._release_running_agent_state(key) is True
+        assert key not in runner._running_agents_ts
+        assert key not in runner._busy_ack_ts

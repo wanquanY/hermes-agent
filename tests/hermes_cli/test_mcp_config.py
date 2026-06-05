@@ -11,7 +11,7 @@ import os
 import types
 from pathlib import Path
 from typing import Any, Dict, List
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 import pytest
 
@@ -70,6 +70,35 @@ class FakeTool:
     def __init__(self, name: str, description: str = ""):
         self.name = name
         self.description = description
+
+
+def test_probe_single_server_shutdowns_when_tool_iteration_fails(monkeypatch):
+    """Temporary MCP probe connections must close even when tool metadata fails."""
+    import asyncio
+
+    from hermes_cli import mcp_config
+
+    class BrokenTools:
+        def __iter__(self):
+            raise RuntimeError("tool metadata broke")
+
+    server = types.SimpleNamespace(_tools=BrokenTools(), shutdown=AsyncMock())
+
+    async def fake_connect(name, config):
+        return server
+
+    monkeypatch.setattr("tools.mcp_tool._ensure_mcp_loop", lambda: None)
+    monkeypatch.setattr("tools.mcp_tool._stop_mcp_loop", lambda: None)
+    monkeypatch.setattr("tools.mcp_tool._connect_server", fake_connect)
+    monkeypatch.setattr(
+        "tools.mcp_tool._run_on_mcp_loop",
+        lambda coro, timeout=None: asyncio.run(coro),
+    )
+
+    with pytest.raises(RuntimeError, match="tool metadata broke"):
+        mcp_config._probe_single_server("broken", {"command": "fake"})
+
+    server.shutdown.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -599,4 +628,3 @@ class TestMcpLogin:
         cmd_mcp_login(_make_args(name="srv"))
         out = capsys.readouterr().out
         assert "no URL" in out or "not an OAuth" in out
-

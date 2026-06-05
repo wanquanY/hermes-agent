@@ -507,6 +507,17 @@ class InvalidMcpUrlError(ValueError):
     """
 
 
+class NonMcpEndpointError(ConnectionError):
+    """Raised when an HTTP MCP URL clearly serves a non-MCP response.
+
+    A Streamable HTTP MCP endpoint should answer initial probes with
+    ``application/json`` or ``text/event-stream``. A successful response with
+    another concrete content type is deterministic configuration error, so it
+    should fail once with an actionable message instead of entering the MCP
+    reconnect loop.
+    """
+
+
 def _validate_remote_mcp_url(server_name: str, url: Any) -> str:
     """Return the URL as a string if it's a valid http(s) remote MCP URL.
 
@@ -1067,6 +1078,55 @@ class MCPServerTask:
         """Check if this server uses HTTP transport."""
         return "url" in self._config
 
+    _MCP_CONTENT_TYPES = ("application/json", "text/event-stream")
+
+    async def _preflight_content_type(
+        self,
+        url: str,
+        *,
+        headers: Optional[dict] = None,
+        ssl_verify: bool = True,
+        timeout: float = 5.0,
+    ) -> None:
+        """Reject clear non-MCP HTTP endpoints before the SDK connects.
+
+        This is intentionally best-effort: only a successful response with a
+        concrete non-MCP content type is rejected. Missing content type, 4xx/5xx,
+        and network errors remain the SDK handshake's responsibility.
+        """
+        try:
+            import httpx as _httpx
+        except ImportError:
+            return
+
+        probe_headers = dict(headers) if headers else {}
+        try:
+            async with _httpx.AsyncClient(
+                verify=ssl_verify,
+                follow_redirects=True,
+                timeout=_httpx.Timeout(timeout),
+            ) as client:
+                resp = await client.head(url, headers=probe_headers)
+                if resp.status_code in (405, 501):
+                    resp = await client.get(url, headers=probe_headers)
+        except _httpx.HTTPError:
+            return
+
+        if not (200 <= resp.status_code < 300):
+            return
+
+        ct_base = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if not ct_base or ct_base in self._MCP_CONTENT_TYPES:
+            return
+
+        raise NonMcpEndpointError(
+            f"MCP server '{self.name}' at {url} returned Content-Type "
+            f"'{ct_base}', not an MCP response (expected one of: "
+            f"{', '.join(self._MCP_CONTENT_TYPES)}). The URL most likely "
+            "points at a web page rather than a Streamable HTTP MCP endpoint "
+            "(for example https://host/mcp, not https://host/)."
+        )
+
     # ----- Dynamic tool discovery (notifications/tools/list_changed) -----
 
     async def _refresh_tools_task(self):
@@ -1540,6 +1600,24 @@ class MCPServerTask:
                 self._error = exc
                 self._ready.set()
                 return
+            if config.get("transport") != "sse":
+                try:
+                    _probe_headers = dict(config.get("headers") or {})
+                    if not any(
+                        key.lower() == "mcp-protocol-version"
+                        for key in _probe_headers
+                    ):
+                        _probe_headers["mcp-protocol-version"] = LATEST_PROTOCOL_VERSION
+                    await self._preflight_content_type(
+                        config["url"],
+                        headers=_probe_headers,
+                        ssl_verify=config.get("ssl_verify", True),
+                    )
+                except NonMcpEndpointError as exc:
+                    logger.warning("%s", exc)
+                    self._error = exc
+                    self._ready.set()
+                    return
 
         retries = 0
         initial_retries = 0
@@ -3494,7 +3572,7 @@ def shutdown_mcp_servers():
         if future is not None:
             try:
                 future.result(timeout=15)
-            except Exception as exc:
+            except BaseException as exc:
                 logger.debug("Error during MCP shutdown: %s", exc)
 
     _stop_mcp_loop()

@@ -11,6 +11,29 @@ from typing import Any
 DEFAULT_BROWSER_SESSION_ID = "browser:electron:default"
 
 
+def _safe_browser_session_segment(value: str) -> str:
+    chars: list[str] = []
+    last_dash = False
+    for char in str(value or "").strip():
+        ascii_alnum = (
+            "a" <= char <= "z"
+            or "A" <= char <= "Z"
+            or "0" <= char <= "9"
+        )
+        if ascii_alnum or char in "_.:-":
+            chars.append(char)
+            last_dash = False
+        elif not last_dash:
+            chars.append("-")
+            last_dash = True
+    return "".join(chars).strip("-")[:160]
+
+
+def browser_session_id_for_gateway_session(session_key: str) -> str:
+    segment = _safe_browser_session_segment(session_key) or "default"
+    return f"browser:hermes:{segment}"
+
+
 def _backend_bridge_config() -> tuple[str, str]:
     return (
         os.getenv("DOXIE_BACKEND_BRIDGE_URL", "").strip(),
@@ -24,9 +47,6 @@ def available() -> bool:
 
 
 def browser_session_id() -> str:
-    explicit = os.getenv("DOXIE_BROWSER_SESSION_ID", "").strip()
-    if explicit:
-        return explicit
     try:
         from gateway.session_context import get_session_env
 
@@ -35,6 +55,9 @@ def browser_session_id() -> str:
             return scoped
     except Exception:
         pass
+    explicit = os.getenv("DOXIE_BROWSER_SESSION_ID", "").strip()
+    if explicit:
+        return explicit
     return DEFAULT_BROWSER_SESSION_ID
 
 
