@@ -100,6 +100,7 @@ def set_session_vars(
     terminal_cwd: str = "",
     dovie_product_context: str = "",
     dovie_browser_session_id: str = "",
+    session_id: str = "",
     message_id: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.
@@ -121,6 +122,7 @@ def set_session_vars(
         _DOVIE_PRODUCT_CONTEXT.set(dovie_product_context),
         _DOVIE_BROWSER_SESSION_ID.set(dovie_browser_session_id),
         _TERMINAL_CWD.set(terminal_cwd),
+        _SESSION_ID.set(session_id),
         _SESSION_MESSAGE_ID.set(message_id),
     ]
     return tokens
@@ -148,6 +150,7 @@ def clear_session_vars(tokens: list) -> None:
         _DOVIE_PRODUCT_CONTEXT,
         _DOVIE_BROWSER_SESSION_ID,
         _TERMINAL_CWD,
+        _SESSION_ID,
         _SESSION_MESSAGE_ID,
     ):
         var.set("")
