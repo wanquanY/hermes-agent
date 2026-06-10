@@ -1242,6 +1242,30 @@ async def set_model_assignment(body: ModelAssignment):
     try:
         cfg = load_config()
 
+        if model and not body.confirm_expensive_model:
+            try:
+                from hermes_cli.model_cost_guard import expensive_model_warning
+
+                # Pricing lookup can hit models.dev / a /models endpoint on a
+                # cache miss — keep it off the event loop.
+                warning = await asyncio.to_thread(
+                    expensive_model_warning,
+                    model,
+                    provider=provider,
+                    base_url=base_url,
+                )
+            except Exception:
+                warning = None
+            if warning is not None:
+                return {
+                    "ok": False,
+                    "scope": scope,
+                    "provider": provider,
+                    "model": model,
+                    "confirm_required": True,
+                    "confirm_message": warning.message,
+                }
+
         if scope == "main":
             if not provider or not model:
                 raise HTTPException(status_code=400, detail="provider and model required for main")
