@@ -355,7 +355,7 @@ def _emit(event: str, sid: str, payload: dict | None = None):
             }
             frame["seq"] = run_control.next_event_seq(stable_session_id, db=_get_db())
             params["seq"] = frame["seq"]
-            run_control.record_event(
+            run_control.publish_recorded_event(
                 frame,
                 db=_get_db(),
                 owner_transport=current_transport(),
@@ -1067,6 +1067,24 @@ def _load_enabled_toolsets() -> list[str] | None:
         return None
 
 
+def _load_disabled_toolsets() -> list[str] | None:
+    raw = (_load_cfg().get("agent") or {}).get("disabled_toolsets") or []
+    if isinstance(raw, str):
+        values = raw.replace("\n", ",").split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        values = raw
+    else:
+        values = [raw]
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        name = str(item or "").strip()
+        if name and name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result or None
+
+
 def _session_tool_progress_mode(sid: str) -> str:
     return str(_sessions.get(sid, {}).get("tool_progress_mode", "all") or "all")
 
@@ -1651,6 +1669,12 @@ def _make_agent(sid: str, key: str, session_id: str | None = None, cwd: str | No
             if isinstance(_sessions.get(sid), dict)
             and "enabled_toolsets_override" in _sessions.get(sid, {})
             else _load_enabled_toolsets()
+        ),
+        disabled_toolsets=(
+            _sessions.get(sid, {}).get("disabled_toolsets_override")
+            if isinstance(_sessions.get(sid), dict)
+            and "disabled_toolsets_override" in _sessions.get(sid, {})
+            else _load_disabled_toolsets()
         ),
         platform="tui",
         session_id=session_id or key,

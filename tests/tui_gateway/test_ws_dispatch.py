@@ -26,6 +26,14 @@ def test_session_list_uses_control_plane_executor():
     assert executor is ws._ws_control_executor  # noqa: SLF001
 
 
+def test_session_title_uses_control_plane_executor():
+    executor = ws._executor_for_request(  # noqa: SLF001
+        {"id": "1", "method": "session.title", "params": {"stored_session_id": "s"}}
+    )
+
+    assert executor is ws._ws_control_executor  # noqa: SLF001
+
+
 def test_run_status_uses_control_plane_executor():
     executor = ws._executor_for_request(  # noqa: SLF001
         {"id": "1", "method": "run.status", "params": {"stored_session_id": "s"}}
@@ -68,6 +76,25 @@ def test_control_plane_session_list_is_not_proxied_to_runtime_worker():
                 "doxie_profile": {
                     "id": "agent-a",
                     "hermesHomePath": "/tmp/hermes-agent-a",
+                },
+            },
+        }
+    )
+
+
+def test_control_plane_session_title_is_not_proxied_to_runtime_worker():
+    assert not runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": "session.title",
+            "params": {
+                "stored_session_id": "stored-session-1",
+                "runtime_scope_key": "profile:agent-a:version:v1",
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "runtimeScopeKey": "profile:agent-a:version:v1",
+                    "agentProfileVersionId": "v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
                 },
             },
         }

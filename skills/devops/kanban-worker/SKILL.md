@@ -170,6 +170,7 @@ You can configure the gateway to receive cross-profile Kanban task notifications
 - Modify files outside `$HERMES_KANBAN_WORKSPACE` unless the task body says to.
 - Create follow-up tasks assigned to yourself — assign to the right specialist.
 - Complete a task you didn't actually finish. Block it instead.
+- Inspect, open, or mutate `kanban.db`, `$HERMES_KANBAN_DB`, `tasks`, or `task_events` with sqlite3, Python, shell, or raw SQL. If `kanban_*` tools report disk I/O, corrupt database, or rollback errors, stop and report the storage failure; never self-repair the board.
 
 ## Pitfalls
 

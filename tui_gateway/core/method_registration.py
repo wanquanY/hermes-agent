@@ -13,6 +13,7 @@ METHOD_MODULES = (
     "session_branch",
     "prompt",
     "run",
+    "team_mission",
     "config",
     "system",
     "paste",

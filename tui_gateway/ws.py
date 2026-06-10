@@ -57,7 +57,9 @@ _WS_CONTROL_METHODS = frozenset(
         "run.status",
         "session.list",
         "session.messages",
+        "session.message_metadata.merge",
         "session.status",
+        "session.title",
         "workspace.current",
         "workspace.list",
     }

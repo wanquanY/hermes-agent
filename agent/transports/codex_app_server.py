@@ -30,6 +30,26 @@ from typing import Any, Callable, Optional
 MIN_CODEX_VERSION = (0, 125, 0)
 
 
+def _kanban_writable_root(spawn_env: dict[str, str]) -> str:
+    """Return the narrow Kanban board root for Codex workspace-write workers."""
+    legacy_db = spawn_env.get("HERMES_KANBAN_DB", "").strip()
+    if legacy_db:
+        return os.path.dirname(legacy_db)
+
+    explicit_root = spawn_env.get("HERMES_KANBAN_ROOT", "").strip()
+    if explicit_root:
+        return explicit_root
+
+    kanban_home = spawn_env.get("HERMES_KANBAN_HOME", "").strip() or spawn_env.get(
+        "HERMES_HOME",
+        os.path.expanduser("~/.hermes"),
+    )
+    board = spawn_env.get("HERMES_KANBAN_BOARD", "").strip()
+    if board and board != "default":
+        return os.path.join(kanban_home, "kanban", "boards", board)
+    return kanban_home
+
+
 @dataclass
 class CodexAppServerError(RuntimeError):
     """Raised on JSON-RPC errors from the app-server."""
@@ -87,18 +107,7 @@ class CodexAppServerClient:
         # root. Without this, codex-runtime workers finish their actual work
         # but crash/block when kanban_complete/kanban_block writes SQLite.
         if spawn_env.get("HERMES_KANBAN_TASK"):
-            kanban_db = spawn_env.get("HERMES_KANBAN_DB")
-            kanban_root = (
-                os.path.dirname(kanban_db)
-                if kanban_db
-                else spawn_env.get(
-                    "HERMES_KANBAN_ROOT",
-                    os.path.join(
-                        spawn_env.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
-                        "kanban",
-                    ),
-                )
-            )
+            kanban_root = _kanban_writable_root(spawn_env)
             app_server_args.extend(
                 [
                     "-c",

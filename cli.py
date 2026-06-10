@@ -2906,6 +2906,7 @@ class HermesCLI:
             timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
             short_uuid = uuid.uuid4().hex[:6]
             self.session_id = f"{timestamp_str}_{short_uuid}"
+        self._kanban_runtime_event_sink = self._create_kanban_runtime_event_sink()
         
         # History file for persistent input recall across sessions
         self._history_file = _hermes_home / ".hermes_history"
@@ -3714,11 +3715,127 @@ class HermesCLI:
 
     def _current_reasoning_callback(self):
         """Return the active reasoning display callback for the current mode."""
+        callbacks = []
+        if self._kanban_runtime_event_sink is not None:
+            callbacks.append(self._kanban_runtime_event_sink.on_reasoning_delta)
         if self.show_reasoning and self.streaming_enabled:
-            return self._stream_reasoning_delta
-        if self.verbose and not self.show_reasoning:
-            return self._on_reasoning
-        return None
+            callbacks.append(self._stream_reasoning_delta)
+        elif self.verbose and not self.show_reasoning:
+            callbacks.append(self._on_reasoning)
+        return self._combine_single_arg_callbacks(callbacks)
+
+    def _current_stream_delta_callback(self):
+        callbacks = []
+        if self._kanban_runtime_event_sink is not None:
+            callbacks.append(self._kanban_runtime_event_sink.on_message_delta)
+        if self.streaming_enabled:
+            callbacks.append(self._stream_delta)
+        return self._combine_single_arg_callbacks(callbacks)
+
+    def _current_tool_gen_callback(self):
+        callbacks = []
+        if self._kanban_runtime_event_sink is not None:
+            callbacks.append(self._kanban_runtime_event_sink.on_tool_generating)
+        if self.streaming_enabled:
+            callbacks.append(self._on_tool_gen_start)
+        return self._combine_single_arg_callbacks(callbacks)
+
+    def _current_tool_progress_callback(self):
+        sink = self._kanban_runtime_event_sink
+
+        def _callback(event_type: str, function_name: str = None, preview: str = None, function_args: dict = None, **kwargs):
+            if sink is not None:
+                try:
+                    sink.on_tool_progress(event_type, function_name, preview, function_args, **kwargs)
+                except Exception:
+                    logger.debug("kanban runtime tool progress callback failed", exc_info=True)
+            self._on_tool_progress(event_type, function_name, preview, function_args, **kwargs)
+
+        return _callback
+
+    def _current_tool_start_callback(self):
+        callbacks = []
+        if self._kanban_runtime_event_sink is not None:
+            callbacks.append(self._kanban_runtime_event_sink.on_tool_start)
+        if self._inline_diffs_enabled:
+            callbacks.append(self._on_tool_start)
+        return self._combine_multi_arg_callbacks(callbacks)
+
+    def _current_tool_complete_callback(self):
+        callbacks = []
+        if self._kanban_runtime_event_sink is not None:
+            callbacks.append(self._kanban_runtime_event_sink.on_tool_complete)
+        if self._inline_diffs_enabled:
+            callbacks.append(self._on_tool_complete)
+        return self._combine_multi_arg_callbacks(callbacks)
+
+    def _combine_single_arg_callbacks(self, callbacks):
+        active = [cb for cb in callbacks if cb is not None]
+        if not active:
+            return None
+
+        def _callback(value):
+            for cb in active:
+                try:
+                    cb(value)
+                except Exception:
+                    logger.debug("combined callback failed", exc_info=True)
+
+        return _callback
+
+    def _combine_multi_arg_callbacks(self, callbacks):
+        active = [cb for cb in callbacks if cb is not None]
+        if not active:
+            return None
+
+        def _callback(*args, **kwargs):
+            for cb in active:
+                try:
+                    cb(*args, **kwargs)
+                except Exception:
+                    logger.debug("combined callback failed", exc_info=True)
+
+        return _callback
+
+    def _create_kanban_runtime_event_sink(self):
+        try:
+            from hermes_cli.kanban_runtime_events import KanbanRuntimeEventSink
+
+            sink = KanbanRuntimeEventSink.from_env(
+                session_id=self.session_id,
+                runtime_scope_key=os.environ.get("HERMES_KANBAN_RUNTIME_SCOPE_KEY") or self.session_id,
+            )
+            if sink is None:
+                return None
+            sink.start(
+                profile=os.environ.get("HERMES_PROFILE") or "",
+                workspace=os.environ.get("HERMES_KANBAN_WORKSPACE") or os.getcwd(),
+            )
+            return sink
+        except Exception:
+            logger.debug("kanban runtime event sink unavailable", exc_info=True)
+            return None
+
+    def _sync_kanban_runtime_event_sink_session(self):
+        sink = self._kanban_runtime_event_sink
+        if sink is None:
+            return
+        try:
+            sink.update_session(
+                session_id=self.session_id,
+                runtime_scope_key=os.environ.get("HERMES_KANBAN_RUNTIME_SCOPE_KEY") or self.session_id,
+            )
+        except Exception:
+            logger.debug("kanban runtime event sink session sync failed", exc_info=True)
+
+    def _complete_kanban_runtime_event_sink(self, response: str, *, status: str) -> None:
+        sink = self._kanban_runtime_event_sink
+        if sink is None:
+            return
+        try:
+            sink.complete(text=response or "", status=status)
+        except Exception:
+            logger.debug("kanban runtime event sink completion failed", exc_info=True)
 
     def _emit_reasoning_preview(self, reasoning_text: str) -> None:
         """Render a buffered reasoning preview as a single [thinking] block."""
@@ -4617,11 +4734,11 @@ class HermesCLI:
                 pass_session_id=self.pass_session_id,
                 skip_context_files=self.ignore_rules,
                 skip_memory=self.ignore_rules,
-                tool_progress_callback=self._on_tool_progress,
-                tool_start_callback=self._on_tool_start if self._inline_diffs_enabled else None,
-                tool_complete_callback=self._on_tool_complete if self._inline_diffs_enabled else None,
-                stream_delta_callback=self._stream_delta if self.streaming_enabled else None,
-                tool_gen_callback=self._on_tool_gen_start if self.streaming_enabled else None,
+                tool_progress_callback=self._current_tool_progress_callback(),
+                tool_start_callback=self._current_tool_start_callback(),
+                tool_complete_callback=self._current_tool_complete_callback(),
+                stream_delta_callback=self._current_stream_delta_callback(),
+                tool_gen_callback=self._current_tool_gen_callback(),
             )
             # Store reference for atexit memory provider shutdown
             global _active_agent_ref
@@ -11382,6 +11499,7 @@ class HermesCLI:
             ):
                 self.session_id = self.agent.session_id
                 self._pending_title = None
+                self._sync_kanban_runtime_event_sink_session()
 
             # Get the final response
             response = result.get("final_response", "") if result else ""
@@ -11440,6 +11558,10 @@ class HermesCLI:
                     response = response + "\n\n---\n_[Interrupted - processing new message]_"
 
             response_previewed = result.get("response_previewed", False) if result else False
+            kanban_status = "interrupted" if _interrupted_this_turn else (
+                "failed" if result and result.get("failed") else "completed"
+            )
+            self._complete_kanban_runtime_event_sink(response, status=kanban_status)
 
             # Display reasoning (thinking) box if enabled and available.
             # Skip when streaming already showed reasoning live.  Use the

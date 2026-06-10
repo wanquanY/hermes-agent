@@ -1,0 +1,2297 @@
+# ruff: noqa: F401,F403,F405,F821,ARG001
+from __future__ import annotations
+
+import json
+import uuid
+from pathlib import Path
+
+from hermes_constants import get_hermes_home
+from hermes_team_mission_conversation_utils import append_user_task_message as _append_team_user_task_message
+from hermes_team_mission_conversation_utils import conversation_session_id as _team_conversation_session_id
+from hermes_team_mission_modes import strategy_for_mode
+from tui_gateway.methods._shared import bind_server_globals
+from tui_gateway.services import run_control
+from tui_gateway.services.team_mission_scheduler import TeamMissionReadyScheduler
+
+_server = bind_server_globals(globals())
+
+_TEAM_LEADER_TOOLSET_SCOPE = "exact"
+_TEAM_LEADER_DISABLED_TOOLSETS = ("delegation",)
+_TEAM_LEADER_BLOCKED_TOOLS = ("delegate_task",)
+
+
+def _mission_id_from_params(params: dict) -> str:
+    return str(
+        params.get("mission_id")
+        or params.get("missionId")
+        or ""
+    ).strip()
+
+
+def _bounded_limit(value, default: int = 2000, maximum: int = 10000) -> int:
+    try:
+        parsed = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(parsed, maximum))
+
+
+def _run_id_from_params(params: dict) -> str:
+    return str(params.get("run_id") or params.get("runId") or "").strip()
+
+
+def _node_payload_from_params(params: dict) -> dict:
+    node = params.get("node")
+    if isinstance(node, dict):
+        return node
+    return params
+
+
+def _node_id_from_params(params: dict) -> str:
+    payload = _node_payload_from_params(params)
+    return str(payload.get("node_id") or payload.get("nodeId") or payload.get("id") or "").strip()
+
+
+def _default_node_session_id(mission_id: str, node_id: str) -> str:
+    safe_node_id = str(node_id or "").replace(":", "_")
+    return f"team:{mission_id}:node:{safe_node_id}"
+
+
+def _edge_payload_from_params(params: dict) -> dict:
+    edge = params.get("edge")
+    if isinstance(edge, dict):
+        return edge
+    return params
+
+
+def _workspace_payload(params: dict) -> dict:
+    workspace = params.get("workspace")
+    return workspace if isinstance(workspace, dict) else {}
+
+
+def _workspace_id_from_params(params: dict) -> str:
+    workspace = _workspace_payload(params)
+    return str(
+        params.get("workspace_id")
+        or params.get("workspaceId")
+        or workspace.get("workspace_id")
+        or workspace.get("workspaceId")
+        or workspace.get("id")
+        or ""
+    ).strip()
+
+
+def _workspace_path_from_params(params: dict) -> str:
+    workspace = _workspace_payload(params)
+    return str(
+        params.get("workspace_path")
+        or params.get("workspacePath")
+        or workspace.get("workspace_path")
+        or workspace.get("workspacePath")
+        or workspace.get("path")
+        or ""
+    ).strip()
+
+
+def _team_capability_payload(params: dict) -> dict:
+    raw = (
+        params.get("team_capability")
+        or params.get("teamCapability")
+        or params.get("team_capability_snapshot")
+        or params.get("teamCapabilitySnapshot")
+        or params.get("capability_snapshot")
+        or params.get("capabilitySnapshot")
+        or {}
+    )
+    return raw if isinstance(raw, dict) else {}
+
+
+def _team_capability_source_packet(params: dict) -> dict:
+    payload = _team_capability_payload(params)
+    source_packet = (
+        payload.get("source_packet")
+        or payload.get("sourcePacket")
+        or params.get("team_capability_source_packet")
+        or params.get("teamCapabilitySourcePacket")
+        or {}
+    )
+    return source_packet if isinstance(source_packet, dict) else {}
+
+
+def _team_capability_snapshot_id(params: dict) -> str:
+    payload = _team_capability_payload(params)
+    return str(
+        payload.get("snapshot_id")
+        or payload.get("snapshotId")
+        or params.get("snapshot_id")
+        or params.get("snapshotId")
+        or params.get("team_capability_snapshot_id")
+        or params.get("teamCapabilitySnapshotId")
+        or ""
+    ).strip()
+
+
+def _team_capability_source_digest(params: dict) -> str:
+    payload = _team_capability_payload(params)
+    return str(
+        payload.get("source_digest")
+        or payload.get("sourceDigest")
+        or params.get("team_capability_source_digest")
+        or params.get("teamCapabilitySourceDigest")
+        or ""
+    ).strip()
+
+
+def _team_capability_force_refresh(params: dict) -> bool:
+    payload = _team_capability_payload(params)
+    return _truthy(
+        payload.get("force_refresh")
+        or payload.get("forceRefresh")
+        or payload.get("refresh")
+        or params.get("team_capability_force_refresh")
+        or params.get("teamCapabilityForceRefresh")
+    )
+
+
+def _snapshot_binding_metadata(snapshot: dict) -> dict:
+    if not isinstance(snapshot, dict) or not snapshot:
+        return {}
+    return {
+        "snapshot_id": str(snapshot.get("snapshot_id") or ""),
+        "snapshot_version": int(snapshot.get("version") or 0),
+        "source_digest": str(snapshot.get("source_digest") or ""),
+        "status": str(snapshot.get("status") or ""),
+    }
+
+
+def _member_capability_by_id(snapshot: dict) -> dict[str, dict]:
+    member_profiles = snapshot.get("member_profiles") if isinstance(snapshot.get("member_profiles"), list) else []
+    result: dict[str, dict] = {}
+    for profile in member_profiles:
+        if not isinstance(profile, dict):
+            continue
+        member_id = str(profile.get("member_id") or "").strip()
+        profile_id = str(profile.get("agent_profile_id") or "").strip()
+        if member_id:
+            result[member_id] = profile
+        if profile_id:
+            result.setdefault(profile_id, profile)
+    return result
+
+
+def _members_with_capability_snapshot(members: list, snapshot: dict) -> list:
+    if not isinstance(snapshot, dict) or not snapshot:
+        return members
+    capabilities = _member_capability_by_id(snapshot)
+    if not capabilities:
+        return members
+    enriched = []
+    for item in members:
+        if not isinstance(item, dict):
+            enriched.append(item)
+            continue
+        member_id = str(item.get("member_id") or item.get("memberId") or item.get("id") or "").strip()
+        profile_id = str(item.get("profile_id") or item.get("profileId") or item.get("agent_profile_id") or item.get("agentProfileId") or "").strip()
+        capability = capabilities.get(member_id) or capabilities.get(profile_id) or {}
+        if not capability:
+            enriched.append(item)
+            continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        enriched.append({
+            **item,
+            "capability_tags": item.get("capability_tags") or item.get("capabilityTags") or capability.get("capability_tags") or [],
+            "profile_summary": capability.get("profile_description") or "",
+            "best_for_tasks": capability.get("best_for_tasks") or [],
+            "avoid_tasks": capability.get("avoid_tasks") or [],
+            "strengths": capability.get("strengths") or [],
+            "limitations": capability.get("limitations") or [],
+            "default_toolsets": capability.get("default_toolsets") or [],
+            "recommended_skills": capability.get("recommended_skills") or [],
+            "radar_scores": capability.get("radar_scores") or [],
+            "metadata": {
+                **metadata,
+                "team_capability_snapshot_id": snapshot.get("snapshot_id") or "",
+                "team_capability_snapshot_version": snapshot.get("version") or 0,
+            },
+        })
+    return enriched
+
+
+def _resolve_team_capability_snapshot_for_params(db, params: dict, *, team_id: str = "") -> dict:
+    snapshot_id = _team_capability_snapshot_id(params)
+    if snapshot_id:
+        return db.get_team_capability_snapshot(snapshot_id)
+    source_packet = _team_capability_source_packet(params)
+    if not source_packet:
+        return {}
+    return db.resolve_team_capability_snapshot(
+        team_id=team_id or str(params.get("team_id") or params.get("teamId") or ""),
+        source_packet=source_packet,
+        source_digest_value=_team_capability_source_digest(params),
+        force_refresh=_team_capability_force_refresh(params),
+    )
+
+
+def _bind_team_capability_snapshot_for_mission(db, *, mission_id: str, conversation_id: str, snapshot: dict) -> dict:
+    snapshot_id = str((snapshot or {}).get("snapshot_id") or "").strip()
+    if not snapshot_id:
+        return {}
+    return db.bind_team_capability_snapshot(
+        mission_id=mission_id,
+        conversation_id=conversation_id,
+        snapshot_id=snapshot_id,
+    )
+
+
+def _conversation_session_id_from_params(params: dict, metadata: dict | None = None) -> str:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return str(
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
+        or params.get("stable_team_session_id")
+        or params.get("stableTeamSessionId")
+        or params.get("team_session_id")
+        or params.get("teamSessionId")
+        or params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or params.get("session_id")
+        or params.get("sessionId")
+        or metadata.get("conversation_session_id")
+        or metadata.get("conversationSessionId")
+        or metadata.get("stable_team_session_id")
+        or metadata.get("stableTeamSessionId")
+        or metadata.get("team_session_id")
+        or metadata.get("teamSessionId")
+        or ""
+    ).strip()
+
+
+def _conversation_id_from_params(params: dict, metadata: dict | None = None) -> str:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return str(
+        params.get("conversation_id")
+        or params.get("conversationId")
+        or params.get("team_conversation_id")
+        or params.get("teamConversationId")
+        or metadata.get("conversation_id")
+        or metadata.get("conversationId")
+        or metadata.get("team_conversation_id")
+        or metadata.get("teamConversationId")
+        or ""
+    ).strip()
+
+
+def _normalize_mission_metadata(params: dict, metadata: dict) -> dict:
+    normalized = dict(metadata or {})
+    conversation_id = _conversation_id_from_params(params, normalized)
+    if conversation_id:
+        normalized.setdefault("conversation_id", conversation_id)
+        normalized.setdefault("conversationId", conversation_id)
+    conversation_session_id = _conversation_session_id_from_params(params, normalized)
+    if conversation_session_id:
+        normalized.setdefault("conversation_session_id", conversation_session_id)
+        normalized.setdefault("stableTeamSessionId", conversation_session_id)
+    return normalized
+
+
+def _normalize_toolsets(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = value.replace("\n", ",").split(",")
+    elif isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = [value]
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        name = str(item or "").strip()
+        if name and name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
+
+
+def _merge_toolsets(*values) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for name in _normalize_toolsets(value):
+            if name not in seen:
+                seen.add(name)
+                merged.append(name)
+    return merged
+
+
+def _leader_disabled_toolsets(params: dict) -> list[str]:
+    return _merge_toolsets(
+        params.get("disabled_toolsets") or params.get("disabledToolsets"),
+        _TEAM_LEADER_DISABLED_TOOLSETS,
+    )
+
+
+def _team_leader_tool_policy(*, surface: str) -> dict:
+    return {
+        "surface": surface,
+        "role": "leader",
+        "toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE,
+        "disabled_toolsets": list(_TEAM_LEADER_DISABLED_TOOLSETS),
+        "blocked_tools": list(_TEAM_LEADER_BLOCKED_TOOLS),
+        "reason": "team_leader_control_plane",
+    }
+
+
+def _is_team_leader_control_node(node: dict) -> bool:
+    return _node_role(node) == "leader" and _node_phase(node) in {
+        "planning",
+        "change_request",
+        "discussion",
+    }
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _conversation_only_from_params(params: dict) -> bool:
+    return _truthy(
+        params.get("conversation_only")
+        or params.get("conversationOnly")
+        or params.get("create_conversation_only")
+        or params.get("createConversationOnly")
+    )
+
+
+def _falsey(value) -> bool:
+    if isinstance(value, bool):
+        return not value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"0", "false", "no", "off"}
+
+
+def _node_role(node: dict) -> str:
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+    return str(metadata.get("role") or node.get("kind") or "worker").strip()
+
+
+def _node_phase(node: dict) -> str:
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+    return str(metadata.get("phase") or "").strip()
+
+
+def _task_id_from_metadata(metadata: dict) -> str:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return str(
+        metadata.get("task_id")
+        or metadata.get("taskId")
+        or metadata.get("submitted_task_id")
+        or metadata.get("submittedTaskId")
+        or ""
+    ).strip()
+
+
+def _is_root_planning_node(node: dict) -> bool:
+    return (
+        isinstance(node, dict)
+        and str(node.get("kind") or "") == "root"
+        and _node_role(node) in {"leader", "lead", "root"}
+        and _node_phase(node) in {"planning", "change_request", "discussion"}
+    )
+
+
+def _activate_mission_task(db, mission: dict, node: dict, *, source: str = "") -> dict:
+    if not isinstance(mission, dict) or not mission or not _is_root_planning_node(node):
+        return mission if isinstance(mission, dict) else {}
+    metadata = dict(mission.get("metadata") or {})
+    node_metadata = dict(node.get("metadata") or {})
+    task_id = _task_id_from_metadata(node_metadata)
+    title = str(node.get("title") or mission.get("title") or "").strip()
+    objective = str(node.get("objective") or mission.get("objective") or title or "").strip()
+    node_id = str(node.get("node_id") or "").strip()
+    active_task = {
+        "task_id": task_id,
+        "title": title,
+        "objective": objective,
+        "root_node_id": node_id,
+        "source": str(source or "").strip(),
+    }
+    next_metadata = {
+        **metadata,
+        "active_task": active_task,
+        "active_task_id": task_id,
+        "active_task_title": title,
+        "active_task_objective": objective,
+        "active_task_root_node_id": node_id,
+    }
+    if task_id:
+        next_metadata.setdefault("task_id", task_id)
+        next_metadata["activeTaskId"] = task_id
+    updated = db.upsert_team_mission(
+        mission_id=str(mission.get("mission_id") or ""),
+        team_id=str(mission.get("team_id") or ""),
+        title=title or str(mission.get("title") or ""),
+        objective=objective or str(mission.get("objective") or ""),
+        workspace_id=str(mission.get("workspace_id") or ""),
+        workspace_path=str(mission.get("workspace_path") or ""),
+        mode=str(mission.get("mode") or ""),
+        status=str(mission.get("status") or "draft"),
+        leader_session_id=str(mission.get("leader_session_id") or ""),
+        metadata=next_metadata,
+    )
+    return updated if isinstance(updated, dict) and updated else mission
+
+
+def _should_use_strategy_start_text(params: dict, mission: dict, node: dict) -> bool:
+    if params.get("text") or params.get("prompt"):
+        return False
+    role = _node_role(node)
+    phase = _node_phase(node)
+    is_strategy_node = (
+        role == "leader"
+        and str(node.get("kind") or "") == "root"
+        and phase in {"planning", "change_request", "discussion"}
+        and bool(mission)
+    )
+    if bool(params.get("use_strategy_prompt") or params.get("useStrategyPrompt")):
+        return is_strategy_node
+    return is_strategy_node
+
+
+def _strategy_start_text(params: dict, mission: dict, node: dict) -> str:
+    explicit_text = str(params.get("text") or params.get("prompt") or "").strip()
+    if explicit_text and not _should_use_strategy_start_text(params, mission, node):
+        return explicit_text
+    if _should_use_strategy_start_text(params, mission, node):
+        strategy = strategy_for_mode(str(mission.get("mode") or "supervised_mission"))
+        title = str(node.get("title") or mission.get("title") or "").strip()
+        objective = str(node.get("objective") or mission.get("objective") or "").strip()
+        return strategy.leader_start_text(
+            mission_id=str(mission.get("mission_id") or ""),
+            title=title,
+            objective=objective,
+            members=params.get("members") or (mission.get("metadata") or {}).get("members") or (),
+        )
+    return str(explicit_text or node.get("objective") or node.get("title") or "").strip()
+
+
+def _start_toolsets(params: dict, mission: dict, node: dict) -> list[str]:
+    if _is_team_leader_control_node(node):
+        if _node_phase(node) in {"planning", "change_request"}:
+            return ["team_mission_planning"]
+        return []
+    toolsets = _normalize_toolsets(params.get("enabled_toolsets") or params.get("enabledToolsets"))
+    if _should_use_strategy_start_text(params, mission, node) and _node_phase(node) in {"planning", "change_request"}:
+        if "team_mission_planning" not in toolsets:
+            toolsets.append("team_mission_planning")
+    return toolsets
+
+
+def _team_memory_disabled(params: dict, mission: dict) -> bool:
+    if _truthy(params.get("disable_team_memory") or params.get("disableTeamMemory")):
+        return True
+    if _falsey(params.get("use_team_memory") if "use_team_memory" in params else params.get("useTeamMemory")):
+        return True
+    metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+    policy = metadata.get("memory") if isinstance(metadata.get("memory"), dict) else {}
+    if _truthy(policy.get("disabled")):
+        return True
+    return False
+
+
+def _team_memory_include_team_scope(params: dict, mission: dict) -> bool:
+    metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+    policy = metadata.get("memory") if isinstance(metadata.get("memory"), dict) else {}
+    explicit_scope = str(
+        params.get("memory_scope")
+        or params.get("memoryScope")
+        or policy.get("scope")
+        or ""
+    ).strip().lower()
+    if explicit_scope in {"team", "team_wide", "cross_conversation", "workspace"}:
+        return True
+    if explicit_scope in {"conversation", "session", "mission"}:
+        return False
+    return _truthy(
+        params.get("include_team_memory")
+        or params.get("includeTeamMemory")
+        or params.get("cross_conversation_memory")
+        or params.get("crossConversationMemory")
+        or policy.get("include_team_memory")
+        or policy.get("includeTeamMemory")
+        or policy.get("cross_conversation")
+        or policy.get("crossConversation")
+    )
+
+
+def _memory_items_from_payload(payload: dict) -> list[dict]:
+    if not isinstance(payload, dict):
+        return []
+    memory = payload.get("memory_pack") or payload.get("memory_slice") or {}
+    items = memory.get("items") if isinstance(memory, dict) else []
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _memory_context_text(*, label: str, payload: dict) -> str:
+    items = _memory_items_from_payload(payload)
+    if not items:
+        return ""
+    lines = [
+        f"{label} (Hermes structured background; not new user input)",
+        "Current user objective has highest priority. Use memory only as background, reusable artifacts, risks, and constraints. If memory conflicts with the current objective, surface the conflict and follow the current objective.",
+        "",
+        "Relevant memory:",
+    ]
+    for item in items[:12]:
+        item_id = str(item.get("id") or "").strip()
+        kind = str(item.get("kind") or "summary").strip()
+        content = str(item.get("content") or "").strip()
+        if len(content) > 700:
+            content = content[:697].rstrip() + "..."
+        sources = []
+        source_nodes = item.get("source_node_ids") if isinstance(item.get("source_node_ids"), list) else []
+        source_runs = item.get("source_run_ids") if isinstance(item.get("source_run_ids"), list) else []
+        artifacts = item.get("artifact_refs") if isinstance(item.get("artifact_refs"), list) else []
+        if source_nodes:
+            sources.append("nodes=" + ",".join(str(node_id) for node_id in source_nodes[:4]))
+        if source_runs:
+            sources.append("runs=" + ",".join(str(run_id) for run_id in source_runs[:4]))
+        if artifacts:
+            artifact_uris = []
+            for artifact in artifacts[:3]:
+                if isinstance(artifact, dict):
+                    artifact_uris.append(str(artifact.get("uri") or artifact.get("path") or artifact.get("id") or ""))
+            artifact_uris = [uri for uri in artifact_uris if uri]
+            if artifact_uris:
+                sources.append("artifacts=" + ",".join(artifact_uris))
+        source_text = f" Sources: {'; '.join(sources)}." if sources else ""
+        id_text = f"{item_id} " if item_id else ""
+        lines.append(f"- [{id_text}{kind}] {content}{source_text}")
+    return "\n".join(lines).strip()
+
+
+def _team_memory_for_node(db, params: dict, mission: dict, node: dict, *, objective: str) -> tuple[dict, str]:
+    if _team_memory_disabled(params, mission):
+        return {"disabled": True, "reason": "disabled_by_request_or_policy"}, ""
+    mission_id = str(mission.get("mission_id") or "").strip()
+    node_id = str(node.get("node_id") or "").strip()
+    if not mission_id or not node_id:
+        return {}, ""
+    role = _node_role(node)
+    kind = str(node.get("kind") or "").strip()
+    phase = _node_phase(node)
+    try:
+        if role == "leader" and kind == "root" and phase in {"planning", "change_request", "discussion"}:
+            payload = db.build_team_mission_memory_pack(
+                mission_id=mission_id,
+                objective=objective or str(mission.get("objective") or ""),
+                workspace_id=str(mission.get("workspace_id") or ""),
+                limit=int(params.get("memory_limit") or params.get("memoryLimit") or 8),
+                include_team_scope=_team_memory_include_team_scope(params, mission),
+            )
+            text = _memory_context_text(label="Team Conversation Memory Pack", payload=payload)
+            memory = payload.get("memory_pack") if isinstance(payload, dict) else {}
+            return {
+                "kind": "leader_memory_pack",
+                "conversation_session_id": str(payload.get("conversation_session_id") or "") if isinstance(payload, dict) else "",
+                "item_ids": list((memory or {}).get("item_ids") or []),
+                "artifact_refs": list((memory or {}).get("artifact_refs") or []),
+            }, text
+        payload = db.build_team_mission_memory_slice(
+            mission_id=mission_id,
+            node_id=node_id,
+            objective=objective or str(node.get("objective") or ""),
+            limit=int(params.get("memory_limit") or params.get("memoryLimit") or 5),
+            include_team_scope=_team_memory_include_team_scope(params, mission),
+        )
+        text = _memory_context_text(label="Team Conversation Memory Slice", payload=payload)
+        memory = payload.get("memory_slice") if isinstance(payload, dict) else {}
+        return {
+            "kind": "worker_memory_slice",
+            "conversation_session_id": str(payload.get("conversation_session_id") or "") if isinstance(payload, dict) else "",
+            "item_ids": list((memory or {}).get("item_ids") or []),
+            "artifact_refs": list((memory or {}).get("artifact_refs") or []),
+            "dependency_node_ids": list((memory or {}).get("dependency_node_ids") or []),
+        }, text
+    except Exception as exc:
+        return {"disabled": True, "reason": f"memory_build_failed: {exc}"}, ""
+
+
+def _message_text_from_params(params: dict) -> str:
+    return str(
+        params.get("text")
+        or params.get("message")
+        or params.get("prompt")
+        or params.get("objective")
+        or ""
+    ).strip()
+
+
+def _root_leader_node(graph: dict) -> dict:
+    nodes = graph.get("nodes") if isinstance(graph, dict) else []
+    for node in nodes if isinstance(nodes, list) else []:
+        if not isinstance(node, dict):
+            continue
+        metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        if str(node.get("kind") or "") == "root" and str(metadata.get("role") or "leader") in {"leader", "lead", "root"}:
+            return node
+    for node in nodes if isinstance(nodes, list) else []:
+        if isinstance(node, dict) and str(node.get("kind") or "") == "root":
+            return node
+    return {}
+
+
+def _leader_members_from_params(params: dict, mission: dict) -> list[dict]:
+    members = params.get("members")
+    if not isinstance(members, list):
+        metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+        members = metadata.get("members") if isinstance(metadata.get("members"), list) else []
+    return [dict(item) for item in members if isinstance(item, dict)]
+
+
+def _leader_profile_params(params: dict, graph: dict) -> dict:
+    explicit = {}
+    for source_key, target_key in (
+        ("agent_profile_id", "agent_profile_id"),
+        ("agentProfileId", "agent_profile_id"),
+        ("agent_profile_version_id", "agent_profile_version_id"),
+        ("agentProfileVersionId", "agent_profile_version_id"),
+        ("runtime_scope_key", "runtime_scope_key"),
+        ("runtimeScopeKey", "runtime_scope_key"),
+    ):
+        value = str(params.get(source_key) or "").strip()
+        if value:
+            explicit[target_key] = value
+    if explicit:
+        return explicit
+    root = _root_leader_node(graph)
+    mission = graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
+    mission_id = str(mission.get("mission_id") or "").strip()
+    conversation_id = _conversation_id_from_params(params, {}) or _conversation_session_id_from_params(params, {})
+    scope_subject = mission_id or conversation_id
+    members = params.get("members") if isinstance(params.get("members"), list) else []
+    leader = next(
+        (
+            item for item in members
+            if isinstance(item, dict) and str(item.get("role") or "").strip() in {"lead", "leader"}
+        ),
+        None,
+    ) or next((item for item in members if isinstance(item, dict)), {})
+    if leader:
+        return {
+            "agent_profile_id": str(leader.get("profile_id") or leader.get("agent_profile_id") or "").strip(),
+            "agent_profile_version_id": str(leader.get("profile_version_id") or leader.get("agent_profile_version_id") or "").strip(),
+            "runtime_scope_key": str(leader.get("runtime_scope_key") or f"team:{scope_subject}:leader-conversation").strip(),
+        }
+    return {
+        "agent_profile_id": str(root.get("assignee_profile_id") or "").strip(),
+        "agent_profile_version_id": str(root.get("assignee_profile_version_id") or "").strip(),
+        "runtime_scope_key": str(root.get("runtime_scope_key") or f"team:{scope_subject}:leader-conversation").strip(),
+    }
+
+
+def _compact_graph_context(graph: dict) -> dict:
+    mission = graph.get("mission") if isinstance(graph, dict) else {}
+    conversation = graph.get("conversation") if isinstance(graph, dict) and isinstance(graph.get("conversation"), dict) else {}
+    nodes = graph.get("nodes") if isinstance(graph, dict) else []
+    edges = graph.get("edges") if isinstance(graph, dict) else []
+    compact_nodes = []
+    for node in nodes[:24] if isinstance(nodes, list) else []:
+        if not isinstance(node, dict):
+            continue
+        metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        compact_nodes.append({
+            "id": str(node.get("node_id") or ""),
+            "kind": str(node.get("kind") or ""),
+            "title": str(node.get("title") or "")[:120],
+            "status": str(node.get("status") or ""),
+            "role": str(metadata.get("role") or ""),
+            "phase": str(metadata.get("phase") or ""),
+        })
+    return {
+        "conversation": {
+            "id": str((conversation or {}).get("conversation_id") or ""),
+            "title": str((conversation or {}).get("title") or "")[:160],
+            "stable_session_id": str((conversation or {}).get("stable_session_id") or ""),
+            "active_mission_id": str((conversation or {}).get("active_mission_id") or ""),
+        },
+        "mission": {
+            "id": str((mission or {}).get("mission_id") or ""),
+            "title": str((mission or {}).get("title") or "")[:160],
+            "objective": str((mission or {}).get("objective") or "")[:500],
+            "mode": str((mission or {}).get("mode") or ""),
+            "status": str((mission or {}).get("status") or ""),
+        },
+        "node_count": len(nodes) if isinstance(nodes, list) else 0,
+        "edge_count": len(edges) if isinstance(edges, list) else 0,
+        "nodes": compact_nodes,
+    }
+
+
+def _team_memory_for_leader_message(db, params: dict, mission: dict, *, objective: str) -> tuple[dict, str]:
+    if _team_memory_disabled(params, mission):
+        return {"disabled": True, "reason": "disabled_by_request_or_policy"}, ""
+    mission_id = str(mission.get("mission_id") or "").strip()
+    if not mission_id:
+        return {}, ""
+    try:
+        payload = db.build_team_mission_memory_pack(
+            mission_id=mission_id,
+            objective=objective,
+            workspace_id=str(mission.get("workspace_id") or ""),
+            limit=int(params.get("memory_limit") or params.get("memoryLimit") or 8),
+            include_team_scope=_team_memory_include_team_scope(params, mission),
+        )
+        text = _memory_context_text(label="Team Conversation Memory Pack", payload=payload)
+        memory = payload.get("memory_pack") if isinstance(payload, dict) else {}
+        return {
+            "kind": "leader_conversation_memory_pack",
+            "conversation_session_id": str(payload.get("conversation_session_id") or "") if isinstance(payload, dict) else "",
+            "item_ids": list((memory or {}).get("item_ids") or []),
+            "artifact_refs": list((memory or {}).get("artifact_refs") or []),
+        }, text
+    except Exception as exc:
+        return {"disabled": True, "reason": f"memory_build_failed: {exc}"}, ""
+
+
+def _leader_router_prompt(*, user_text: str, graph: dict, memory_text: str = "") -> str:
+    context_json = json.dumps(_compact_graph_context(graph), ensure_ascii=False, indent=2)
+    parts = [
+        "You are the Team Leader for a Hermes Team Mission conversation.",
+        "",
+        "Route this user message before acting:",
+        "- Answer directly for greetings, status questions, explanations, follow-up questions, clarifications, or requests about prior/current work.",
+        "- Use team_mission_status when you need fresh mission graph or memory context to answer.",
+        "- Call team_mission_start_task only when the user is asking to start a new substantive executable team task that benefits from planning, multi-agent work, workspace changes, research, verification, or a deliverable.",
+        "- Do not call team_mission_start_task for greetings, lightweight Q&A, status checks, or discussion that can be answered by the Leader.",
+        "- Do not call delegate_task or ordinary subagents. In Team Mission, the Leader is the control plane: communicate with the user, plan the Mission Graph, and coordinate member nodes.",
+        "- If you start a task, keep your visible reply brief and tell the user that planning has started.",
+        "- After team_mission_start_task succeeds, stop the current turn. Do not continue with research, file work, terminal commands, or deliverable execution.",
+        "- Reply in the user's language.",
+        "",
+        "Current team conversation context. The active mission may be empty until a team task is started:",
+        context_json,
+        "",
+        "A Team Mission is created only when you call team_mission_start_task. "
+        "For a new task, derive the mission title and objective from the current User message, not from the conversation title.",
+    ]
+    if memory_text:
+        parts.extend(["", memory_text])
+    parts.extend(["", "User message:", user_text])
+    return "\n".join(parts).strip()
+
+
+def _leader_message_toolsets(params: dict) -> list[str]:
+    return ["team_mission_leader"]
+
+
+def _ensure_team_conversation_session(db, conversation_session_id: str) -> bool:
+    conversation_session_id = str(conversation_session_id or "").strip()
+    if not conversation_session_id:
+        raise ValueError("conversation_session_id required")
+    if db.get_session(conversation_session_id):
+        return False
+    ensure_session = getattr(db, "ensure_session", None)
+    if callable(ensure_session):
+        ensure_session(conversation_session_id, source="team_mission", transient=False)
+    else:
+        db.create_session(conversation_session_id, source="team_mission", transient=False)
+    return True
+
+
+def _schedule_ready_nodes(
+    *,
+    db,
+    rid,
+    params: dict,
+    trigger: str = "team_mission.schedule.ready",
+) -> dict:
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return {}
+    scheduler = TeamMissionReadyScheduler(
+        db=db,
+        start_node=lambda start_rid, start_params: _methods["team_mission.node.start"](start_rid, start_params),
+    )
+    return scheduler.schedule_ready_nodes(
+        mission_id=mission_id,
+        rid=rid,
+        params=params,
+        limit=_bounded_limit(params.get("limit"), default=10, maximum=50),
+        dry_run=bool(params.get("dry_run") or params.get("dryRun")),
+        trigger=trigger,
+    )
+
+
+def _schedule_ready_nodes_from_runtime_event(
+    *,
+    mission_id: str,
+    db=None,
+    trigger_event: str = "",
+    run_id: str = "",
+) -> dict:
+    active_db = db or _get_db()
+    if active_db is None:
+        return {}
+    return _schedule_ready_nodes(
+        db=active_db,
+        rid=None,
+        params={"mission_id": mission_id},
+        trigger=f"run_event:{trigger_event or 'terminal'}:{run_id or ''}",
+    )
+
+
+run_control.register_team_mission_ready_scheduler(_schedule_ready_nodes_from_runtime_event)
+
+
+@method("team_capability.snapshot.get")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    source_packet = _team_capability_source_packet(params) or (
+        params.get("source_packet") if isinstance(params.get("source_packet"), dict) else {}
+    ) or (
+        params.get("sourcePacket") if isinstance(params.get("sourcePacket"), dict) else {}
+    )
+    snapshot_id = _team_capability_snapshot_id(params) or str(params.get("snapshot_id") or params.get("snapshotId") or "").strip()
+    if snapshot_id and not source_packet:
+        snapshot = db.get_team_capability_snapshot(snapshot_id)
+        if not snapshot:
+            return _err(rid, 4040, "team capability snapshot not found")
+        return _ok(rid, {"snapshot": snapshot})
+    team_id = str(params.get("team_id") or params.get("teamId") or "").strip()
+    if not source_packet:
+        return _err(rid, 4006, "source_packet required")
+    try:
+        snapshot = db.resolve_team_capability_snapshot(
+            team_id=team_id,
+            source_packet=source_packet,
+            source_digest_value=_team_capability_source_digest(params) or str(params.get("source_digest") or params.get("sourceDigest") or ""),
+            force_refresh=False,
+        )
+    except ValueError as exc:
+        return _err(rid, 4006, str(exc))
+    except Exception as exc:
+        return _err(rid, 5008, f"team capability snapshot unavailable: {exc}")
+    return _ok(rid, {"snapshot": snapshot})
+
+
+@method("team_capability.snapshot.refresh")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    source_packet = _team_capability_source_packet(params) or (
+        params.get("source_packet") if isinstance(params.get("source_packet"), dict) else {}
+    ) or (
+        params.get("sourcePacket") if isinstance(params.get("sourcePacket"), dict) else {}
+    )
+    if not source_packet:
+        return _err(rid, 4006, "source_packet required")
+    try:
+        snapshot = db.resolve_team_capability_snapshot(
+            team_id=str(params.get("team_id") or params.get("teamId") or ""),
+            source_packet=source_packet,
+            source_digest_value=_team_capability_source_digest(params) or str(params.get("source_digest") or params.get("sourceDigest") or ""),
+            force_refresh=True,
+        )
+    except ValueError as exc:
+        return _err(rid, 4006, str(exc))
+    except Exception as exc:
+        return _err(rid, 5008, f"team capability snapshot refresh failed: {exc}")
+    return _ok(rid, {"snapshot": snapshot})
+
+
+@method("team_capability.snapshot.bind")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    try:
+        snapshot = _resolve_team_capability_snapshot_for_params(
+            db,
+            params,
+            team_id=str(params.get("team_id") or params.get("teamId") or ""),
+        )
+        if not snapshot:
+            return _err(rid, 4006, "snapshot_id or source_packet required")
+        binding = _bind_team_capability_snapshot_for_mission(
+            db,
+            mission_id=mission_id,
+            conversation_id=_conversation_id_from_params(params, {}),
+            snapshot=snapshot,
+        )
+    except ValueError as exc:
+        return _err(rid, 4006, str(exc))
+    except Exception as exc:
+        return _err(rid, 5008, f"team capability snapshot bind failed: {exc}")
+    return _ok(rid, {"snapshot": snapshot, "binding": binding})
+
+
+@method("team_mission.team_profile.get")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    snapshot_id = _team_capability_snapshot_id(params) or str(params.get("snapshot_id") or params.get("snapshotId") or "").strip()
+    if not mission_id:
+        identifier = (
+            _conversation_id_from_params(params, {})
+            or _conversation_session_id_from_params(params, {})
+            or str(params.get("identifier") or params.get("id") or "").strip()
+        )
+        resolved = db.resolve_team_mission_conversation(identifier) if identifier else {}
+        mission = resolved.get("mission") if isinstance(resolved, dict) and isinstance(resolved.get("mission"), dict) else {}
+        mission_id = str(mission.get("mission_id") or "").strip()
+    try:
+        snapshot = db.get_team_capability_snapshot(snapshot_id) if snapshot_id else {}
+        binding = {}
+        if mission_id:
+            binding = db.get_team_capability_snapshot_binding(mission_id)
+            if not snapshot:
+                snapshot = db.get_bound_team_capability_snapshot(mission_id)
+    except Exception as exc:
+        return _err(rid, 5008, f"team profile unavailable: {exc}")
+    if not snapshot:
+        return _err(rid, 4040, "team capability snapshot not found")
+    return _ok(rid, {"mission_id": mission_id, "binding": binding, "snapshot": snapshot})
+
+
+@method("team_mission.create")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    mode = str(params.get("mode") or "supervised_mission").strip()
+    members = params.get("members")
+    if members is None:
+        members = []
+    if not isinstance(members, list):
+        return _err(rid, 4004, "members must be a list")
+    graph_payload = (
+        params.get("graph_payload")
+        or params.get("graphPayload")
+        or {}
+    )
+    if not isinstance(graph_payload, dict):
+        return _err(rid, 4004, "graph_payload must be an object")
+    metadata = params.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return _err(rid, 4004, "metadata must be an object")
+    metadata = _normalize_mission_metadata(params, metadata)
+    conversation_id = _conversation_id_from_params(params, metadata) or mission_id
+    leader_session_id = str(params.get("leader_session_id") or params.get("leaderSessionId") or "").strip()
+    if not leader_session_id:
+        leader_session_id = _conversation_session_id_from_params(params, metadata)
+    if _conversation_only_from_params(params):
+        metadata = {
+            **metadata,
+            "conversation_only": True,
+            "start_leader": False,
+        }
+        if not conversation_id:
+            return _err(rid, 4006, "conversation_id required")
+        conversation_session_id = _conversation_session_id_from_params(params, metadata) or conversation_id
+        try:
+            conversation = db.ensure_team_mission_conversation(
+                conversation_id=conversation_id,
+                stable_session_id=conversation_session_id,
+                team_id=str(params.get("team_id") or params.get("teamId") or ""),
+                title=str(params.get("title") or ""),
+                objective=str(params.get("conversation_objective") or params.get("conversationObjective") or ""),
+                workspace_id=_workspace_id_from_params(params),
+                workspace_path=_workspace_path_from_params(params),
+                created_by_user_id=str(params.get("created_by_user_id") or params.get("createdByUserId") or ""),
+                metadata=metadata,
+            )
+        except ValueError as exc:
+            return _err(rid, 4004, str(exc))
+        except Exception as exc:
+            return _err(rid, 5008, f"team mission conversation create failed: {exc}")
+        return _ok(rid, {
+            "mission_id": "",
+            "conversation_id": conversation_id,
+            "conversation_session_id": conversation_session_id,
+            "conversation": conversation,
+            "graph": {
+                "mission": {},
+                "conversation": conversation,
+                "nodes": [],
+                "edges": [],
+                "run_bindings": [],
+            },
+        })
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    capability_snapshot = {}
+    try:
+        capability_snapshot = _resolve_team_capability_snapshot_for_params(
+            db,
+            params,
+            team_id=str(params.get("team_id") or params.get("teamId") or ""),
+        )
+    except ValueError as exc:
+        return _err(rid, 4006, str(exc))
+    except Exception as exc:
+        return _err(rid, 5008, f"team capability snapshot unavailable: {exc}")
+    if capability_snapshot:
+        metadata["team_capability_snapshot"] = _snapshot_binding_metadata(capability_snapshot)
+        members = _members_with_capability_snapshot(members, capability_snapshot)
+    try:
+        graph = db.initialize_team_mission_from_strategy(
+            mission_id=mission_id,
+            conversation_id=conversation_id,
+            team_id=str(params.get("team_id") or params.get("teamId") or ""),
+            title=str(params.get("title") or ""),
+            objective=str(params.get("objective") or params.get("prompt") or ""),
+            workspace_id=_workspace_id_from_params(params),
+            workspace_path=_workspace_path_from_params(params),
+            mode=mode,
+            members=members,
+            graph_payload=graph_payload,
+            leader_session_id=leader_session_id,
+            metadata=metadata,
+        )
+    except ValueError as exc:
+        return _err(rid, 4004, str(exc))
+    except Exception as exc:
+        return _err(rid, 5008, f"team mission create failed: {exc}")
+    if capability_snapshot:
+        try:
+            _bind_team_capability_snapshot_for_mission(
+                db,
+                mission_id=mission_id,
+                conversation_id=conversation_id,
+                snapshot=capability_snapshot,
+            )
+            graph = db.get_team_mission_graph(mission_id)
+        except Exception as exc:
+            return _err(rid, 5008, f"team capability snapshot bind failed: {exc}")
+    mission = graph.get("mission") if isinstance(graph, dict) else {}
+    metadata = mission.get("metadata") if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict) else {}
+    root_node = next(
+        (
+            node for node in graph.get("nodes", [])
+            if isinstance(node, dict) and str(node.get("kind") or "") == "root"
+        ),
+        None,
+    )
+    task_id = str(params.get("task_id") or params.get("taskId") or "").strip()
+    if root_node and task_id:
+        root_metadata = root_node.get("metadata") if isinstance(root_node.get("metadata"), dict) else {}
+        root_metadata = {
+            **root_metadata,
+            "submitted_task_id": task_id,
+            "task_id": task_id,
+            "task_title": str(params.get("title") or root_node.get("title") or ""),
+            "task_objective": str(params.get("objective") or params.get("prompt") or root_node.get("objective") or ""),
+        }
+        root_node = db.upsert_team_mission_node(
+            mission_id=mission_id,
+            node_id=str(root_node.get("node_id") or ""),
+            kind=str(root_node.get("kind") or "root"),
+            title=str(root_node.get("title") or ""),
+            objective=str(root_node.get("objective") or ""),
+            status=str(root_node.get("status") or "running"),
+            assignee_profile_id=str(root_node.get("assignee_profile_id") or ""),
+            assignee_profile_version_id=str(root_node.get("assignee_profile_version_id") or ""),
+            runtime_scope_key=str(root_node.get("runtime_scope_key") or ""),
+            output_contract=root_node.get("output_contract") if isinstance(root_node.get("output_contract"), dict) else {},
+            metadata=root_metadata,
+            position_x=float(root_node.get("position_x") or 0),
+            position_y=float(root_node.get("position_y") or 0),
+        )
+        graph = db.get_team_mission_graph(mission_id)
+        mission = graph.get("mission") if isinstance(graph, dict) else {}
+    if (
+        isinstance(mission, dict)
+        and mission
+        and not _falsey(params.get("record_user_task_message") if "record_user_task_message" in params else params.get("recordUserTaskMessage"))
+    ):
+        _append_team_user_task_message(
+            db,
+            mission=mission,
+            objective=str(params.get("objective") or params.get("prompt") or ""),
+            node_id=str((root_node or {}).get("node_id") or ""),
+            task_id=task_id or mission_id,
+        )
+    start_response = None
+    if root_node and metadata.get("start_leader") is True:
+        start_response = _methods["team_mission.node.start"](
+            rid,
+            {
+                "mission_id": mission_id,
+                "node_id": str(root_node.get("node_id") or ""),
+                "use_strategy_prompt": True,
+                "record_user_task_message": params.get("record_user_task_message") if "record_user_task_message" in params else params.get("recordUserTaskMessage"),
+                "members": members,
+            },
+        )
+        if isinstance(start_response, dict) and start_response.get("error"):
+            return start_response
+        graph = db.get_team_mission_graph(mission_id)
+    result = {"mission_id": mission_id, "conversation_id": conversation_id, "graph": graph}
+    if isinstance(start_response, dict):
+        result["leader_start"] = start_response.get("result") or {}
+    return _ok(rid, result)
+
+
+@method("team_mission.conversation.ensure")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    graph = db.get_team_mission_graph(mission_id) if mission_id else {}
+    mission = graph.get("mission") if isinstance(graph, dict) else {}
+    metadata = mission.get("metadata") if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict) else {}
+    conversation_id = (
+        _conversation_id_from_params(params, metadata)
+        or (str(mission.get("conversation_id") or "").strip() if isinstance(mission, dict) else "")
+        or mission_id
+    )
+    conversation_session_id = _conversation_session_id_from_params(params, metadata)
+    if not conversation_session_id and isinstance(mission, dict) and mission:
+        conversation_session_id = _team_conversation_session_id(mission)
+    if not conversation_id and conversation_session_id:
+        conversation_id = conversation_session_id
+    if not conversation_id:
+        return _err(rid, 4006, "conversation_id required")
+    try:
+        before = db.get_team_mission_conversation(conversation_id)
+        bound_mission_id = mission_id if isinstance(mission, dict) and mission else ""
+        conversation = db.ensure_team_mission_conversation(
+            conversation_id=conversation_id,
+            stable_session_id=conversation_session_id,
+            mission=mission if isinstance(mission, dict) else {},
+            mission_id=bound_mission_id,
+            team_id=str(params.get("team_id") or params.get("teamId") or ""),
+            title=str(params.get("title") or ""),
+            objective=str(params.get("objective") or params.get("prompt") or ""),
+            workspace_id=_workspace_id_from_params(params),
+            workspace_path=_workspace_path_from_params(params),
+            created_by_user_id=str(params.get("created_by_user_id") or params.get("createdByUserId") or ""),
+            metadata=metadata,
+        )
+        created = not bool(before)
+    except Exception as exc:
+        return _err(rid, 5008, f"team mission conversation unavailable: {exc}")
+    conversation_session_id = str(
+        (conversation or {}).get("stable_session_id")
+        or conversation_session_id
+        or ""
+    )
+    graph = db.get_team_mission_graph(mission_id) if mission_id else {}
+    return _ok(
+        rid,
+        {
+            "mission_id": mission_id,
+            "conversation_id": conversation_id,
+            "conversation_session_id": conversation_session_id,
+            "created": created,
+            "conversation": conversation,
+            "session": db.get_session(conversation_session_id) or {},
+            "graph": graph if isinstance(graph, dict) else {},
+        },
+    )
+
+
+@method("team_mission.conversation.resolve")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    identifier = str(
+        params.get("identifier")
+        or params.get("id")
+        or _conversation_id_from_params(params, metadata)
+        or _mission_id_from_params(params)
+        or _conversation_session_id_from_params(params, metadata)
+        or ""
+    ).strip()
+    if not identifier:
+        return _err(rid, 4006, "conversation identifier required")
+    result = db.resolve_team_mission_conversation(identifier)
+    if not result:
+        return _err(rid, 4040, "team mission conversation not found")
+    return _ok(rid, result)
+
+
+@method("team_mission.conversation.list")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    conversations = db.list_team_mission_conversations(
+        team_id=str(params.get("team_id") or params.get("teamId") or ""),
+        workspace_id=_workspace_id_from_params(params),
+        status=str(params.get("status") or ""),
+        limit=_bounded_limit(params.get("limit"), default=100, maximum=500),
+    )
+    return _ok(rid, {"conversations": conversations})
+
+
+@method("team_mission.conversation.rename")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    identifier = str(
+        params.get("identifier")
+        or params.get("id")
+        or _conversation_id_from_params(params, metadata)
+        or _mission_id_from_params(params)
+        or _conversation_session_id_from_params(params, metadata)
+        or ""
+    ).strip()
+    title = str(params.get("title") or "").strip()
+    if not identifier:
+        return _err(rid, 4006, "conversation identifier required")
+    if not title:
+        return _err(rid, 4021, "title required")
+    try:
+        result = db.rename_team_mission_conversation(identifier, title)
+    except ValueError as exc:
+        return _err(rid, 4021, str(exc))
+    except Exception as exc:
+        return _err(rid, 5008, f"team mission conversation rename failed: {exc}")
+    if not result:
+        return _err(rid, 4040, "team mission conversation not found")
+    return _ok(rid, result)
+
+
+@method("team_mission.conversation.delete")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    identifier = str(
+        params.get("identifier")
+        or params.get("id")
+        or _conversation_id_from_params(params, metadata)
+        or _mission_id_from_params(params)
+        or _conversation_session_id_from_params(params, metadata)
+        or ""
+    ).strip()
+    if not identifier:
+        return _err(rid, 4006, "conversation identifier required")
+    resolved = db.resolve_team_mission_conversation(identifier)
+    conversation = resolved.get("conversation") if isinstance(resolved, dict) else {}
+    if not conversation:
+        return _err(rid, 4040, "team mission conversation not found")
+    stable_session_id = str(conversation.get("stable_session_id") or "").strip()
+    if stable_session_id:
+        run_state = run_control.session_status(stable_session_id, db=db)
+        if run_state.get("running"):
+            return _err(rid, 4023, "cannot delete a conversation with an active leader run")
+    try:
+        result = db.delete_team_mission_conversation(identifier)
+        if stable_session_id:
+            db.delete_session(stable_session_id, sessions_dir=Path(get_hermes_home()) / "sessions")
+    except Exception as exc:
+        return _err(rid, 5008, f"team mission conversation delete failed: {exc}")
+    if not result:
+        return _err(rid, 4040, "team mission conversation not found")
+    return _ok(rid, result)
+
+
+@method("team_mission.message.submit")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    text = _message_text_from_params(params)
+    if not text:
+        return _err(rid, 4006, "text required")
+    conversation_id = _conversation_id_from_params(params, {})
+    conversation_session_id = _conversation_session_id_from_params(params, {})
+    if not mission_id and not conversation_id and not conversation_session_id:
+        return _err(rid, 4006, "mission_id or conversation_id required")
+    graph = db.get_team_mission_graph(mission_id) if mission_id else {}
+    mission = graph.get("mission") if isinstance(graph, dict) else {}
+    if mission_id and (not isinstance(mission, dict) or not mission):
+        if not conversation_id and not conversation_session_id:
+            return _err(rid, 4040, "team mission not found")
+        mission_id = ""
+        graph = {}
+        mission = {}
+    conversation = {}
+    if not mission:
+        resolved_identifier = conversation_id or conversation_session_id
+        resolved = db.resolve_team_mission_conversation(resolved_identifier) if resolved_identifier else {}
+        if isinstance(resolved, dict):
+            conversation = resolved.get("conversation") if isinstance(resolved.get("conversation"), dict) else {}
+            resolved_graph = resolved.get("graph") if isinstance(resolved.get("graph"), dict) else {}
+            resolved_mission = resolved.get("mission") if isinstance(resolved.get("mission"), dict) else {}
+            if resolved_mission:
+                mission = resolved_mission
+                graph = resolved_graph
+                mission_id = str(mission.get("mission_id") or "").strip()
+    metadata = mission.get("metadata") if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict) else {}
+    conversation_id = (
+        conversation_id
+        or str((conversation or {}).get("conversation_id") or "").strip()
+        or str((mission or {}).get("conversation_id") or "").strip()
+        or mission_id
+    )
+    conversation_session_id = (
+        conversation_session_id
+        or str((conversation or {}).get("stable_session_id") or "").strip()
+        or (_team_conversation_session_id(mission) if mission else "")
+        or conversation_id
+    )
+    if not conversation_session_id:
+        return _err(rid, 4006, "conversation_session_id required")
+    try:
+        conversation = db.ensure_team_mission_conversation(
+            conversation_id=conversation_id,
+            stable_session_id=conversation_session_id,
+            mission=mission if isinstance(mission, dict) and mission else {},
+            mission_id=mission_id if isinstance(mission, dict) and mission else "",
+            team_id=str(params.get("team_id") or params.get("teamId") or (mission or {}).get("team_id") or ""),
+            workspace_id=_workspace_id_from_params(params) or str((mission or {}).get("workspace_id") or ""),
+            workspace_path=_workspace_path_from_params(params) or str((mission or {}).get("workspace_path") or ""),
+        )
+    except Exception as exc:
+        return _err(rid, 5008, f"team conversation session unavailable: {exc}")
+    if not graph:
+        graph = {
+            "mission": mission if isinstance(mission, dict) else {},
+            "conversation": conversation,
+            "nodes": [],
+            "edges": [],
+            "run_bindings": [],
+        }
+    memory_context, memory_text = (
+        _team_memory_for_leader_message(db, params, mission, objective=text)
+        if isinstance(mission, dict) and mission
+        else ({}, "")
+    )
+    profile_params = _leader_profile_params(params, graph)
+    runtime_scope_key = str(
+        params.get("runtime_scope_key")
+        or params.get("runtimeScopeKey")
+        or profile_params.get("runtime_scope_key")
+        or f"team:{conversation_id or mission_id}:leader-conversation"
+    ).strip()
+    run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
+    turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
+    team_context = {
+        "kind": "leader_conversation",
+        "conversation_id": conversation_id,
+        "conversation_session_id": conversation_session_id,
+        "team_id": str(params.get("team_id") or params.get("teamId") or (mission or {}).get("team_id") or (conversation or {}).get("team_id") or ""),
+        "mode": (mission or {}).get("mode") or str(params.get("mode") or ""),
+        "status": (mission or {}).get("status") or "",
+        "workspace_id": _workspace_id_from_params(params) or str((mission or {}).get("workspace_id") or (conversation or {}).get("workspace_id") or ""),
+        "workspace_path": _workspace_path_from_params(params) or str((mission or {}).get("workspace_path") or (conversation or {}).get("workspace_path") or ""),
+        "memory": memory_context,
+        "members": _leader_members_from_params(params, mission if isinstance(mission, dict) else {}),
+        "tool_policy": _team_leader_tool_policy(surface="leader_conversation"),
+    }
+    team_capability_payload = _team_capability_payload(params)
+    if team_capability_payload:
+        team_context["team_capability"] = team_capability_payload
+    source_packet = _team_capability_source_packet(params)
+    if source_packet:
+        team_context["team_capability_source_packet"] = source_packet
+    snapshot_id = _team_capability_snapshot_id(params)
+    if snapshot_id:
+        team_context["team_capability_snapshot_id"] = snapshot_id
+    if mission_id:
+        team_context["mission_id"] = mission_id
+    submit_params = {
+        **params,
+        **profile_params,
+        "stored_session_id": conversation_session_id,
+        "session_id": conversation_session_id,
+        "client_run_id": run_id,
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "runtime_scope_key": runtime_scope_key,
+        "text": _leader_router_prompt(user_text=text, graph=graph, memory_text=memory_text),
+        "persist_user_message": text,
+        "draft_text": str(params.get("draft_text") or params.get("draftText") or text),
+        "enabled_toolsets": _leader_message_toolsets(params),
+        "disabled_toolsets": _leader_disabled_toolsets(params),
+        "toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE,
+        "doxie_product_context": {
+            **(params.get("doxie_product_context") if isinstance(params.get("doxie_product_context"), dict) else {}),
+            "team_mission": team_context,
+        },
+    }
+    response = _methods["run.submit"](rid, submit_params)
+    if isinstance(response, dict) and response.get("error"):
+        return response
+    result = response.get("result") if isinstance(response, dict) else {}
+    return _ok(
+        rid,
+        {
+            "mission_id": mission_id,
+            "conversation_id": conversation_id,
+            "conversation_session_id": conversation_session_id,
+            "conversation": conversation,
+            "leader_turn": result or {},
+            "graph": db.get_team_mission_graph(mission_id) if mission_id else graph,
+        },
+    )
+
+
+@method("team_mission.graph")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    graph = db.get_team_mission_graph(mission_id)
+    if not graph:
+        return _err(rid, 4040, "team mission not found")
+    return _ok(rid, {"mission_id": mission_id, "graph": graph})
+
+
+@method("team_mission.graph.reduce")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    result = db.reduce_team_mission_graph(mission_id)
+    if not result:
+        return _err(rid, 4040, "team mission not found")
+    return _ok(rid, result)
+
+
+@method("team_mission.events")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    try:
+        after_seq = int(params.get("after_seq") or params.get("afterSeq") or 0)
+    except (TypeError, ValueError):
+        after_seq = 0
+    events = db.list_team_mission_run_events(
+        mission_id,
+        after_seq=after_seq,
+        limit=_bounded_limit(params.get("limit"), default=2000, maximum=10000),
+    )
+    return _ok(
+        rid,
+        {
+            "mission_id": mission_id,
+            "events": events,
+            "last_event_seq": max([int(event.get("seq") or 0) for event in events], default=after_seq),
+        },
+    )
+
+
+@method("team_mission.subscribe")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    try:
+        after_seq = int(params.get("after_seq") or params.get("afterSeq") or 0)
+    except (TypeError, ValueError):
+        after_seq = 0
+    subscription_id, events = run_control.subscribe_team_mission_with_id(
+        mission_id=mission_id,
+        transport=current_transport(),
+        after_seq=after_seq,
+        limit=_bounded_limit(params.get("limit"), default=2000, maximum=10000),
+        db=db,
+    )
+    return _ok(
+        rid,
+        {
+            "mission_id": mission_id,
+            "subscription_id": subscription_id,
+            "events": events,
+            "last_event_seq": max([int(event.get("seq") or 0) for event in events], default=after_seq),
+        },
+    )
+
+
+@method("team_mission.node.create")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    payload = _node_payload_from_params(params)
+    node_id = str(payload.get("node_id") or payload.get("nodeId") or payload.get("id") or "").strip()
+    if not node_id:
+        return _err(rid, 4006, "node_id required")
+    graph = db.get_team_mission_graph(mission_id)
+    mission = graph.get("mission") if isinstance(graph, dict) else {}
+    if not isinstance(mission, dict) or not mission:
+        return _err(rid, 4040, "team mission not found")
+    metadata = payload.get("metadata") or {}
+    output_contract = payload.get("output_contract") or payload.get("outputContract") or {}
+    if not isinstance(metadata, dict):
+        return _err(rid, 4004, "node.metadata must be an object")
+    if not isinstance(output_contract, dict):
+        return _err(rid, 4004, "node.output_contract must be an object")
+    metadata = dict(metadata)
+    assignee_member_id = str(payload.get("assignee_member_id") or payload.get("assigneeMemberId") or "").strip()
+    assignee_role = str(payload.get("assignee_role") or payload.get("assigneeRole") or "").strip()
+    if assignee_member_id:
+        metadata.setdefault("assignee_member_id", assignee_member_id)
+    if assignee_role:
+        metadata.setdefault("assignee_role", assignee_role)
+    node = db.upsert_team_mission_node(
+        mission_id=mission_id,
+        node_id=node_id,
+        kind=str(payload.get("kind") or "worker"),
+        title=str(payload.get("title") or ""),
+        objective=str(payload.get("objective") or ""),
+        status=str(payload.get("status") or "ready"),
+        assignee_profile_id=str(payload.get("assignee_profile_id") or payload.get("assigneeProfileId") or ""),
+        assignee_profile_version_id=str(
+            payload.get("assignee_profile_version_id") or payload.get("assigneeProfileVersionId") or ""
+        ),
+        runtime_scope_key=str(payload.get("runtime_scope_key") or payload.get("runtimeScopeKey") or ""),
+        output_contract=output_contract,
+        metadata=metadata,
+        position_x=float(payload.get("position_x") or payload.get("x") or 0),
+        position_y=float(payload.get("position_y") or payload.get("y") or 0),
+    )
+    run_id = _run_id_from_params(params)
+    if run_id:
+        db.append_team_mission_run_event(
+            mission_id=mission_id,
+            run_id=run_id,
+            event={"type": "mission.node.created", "payload": {"node": node}},
+        )
+    graph = db.get_team_mission_graph(mission_id)
+    mission = graph.get("mission") if isinstance(graph, dict) else {}
+    node_metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+    if isinstance(mission, dict) and _is_root_planning_node(node):
+        mission = _activate_mission_task(db, mission, node, source="team_mission.node.create")
+        graph = db.get_team_mission_graph(mission_id)
+    if (
+        isinstance(mission, dict)
+        and _is_root_planning_node(node)
+        and not _falsey(params.get("record_user_task_message") if "record_user_task_message" in params else params.get("recordUserTaskMessage"))
+    ):
+        _append_team_user_task_message(
+            db,
+            mission=mission,
+            objective=str(node.get("objective") or node.get("title") or ""),
+            node_id=str(node.get("node_id") or ""),
+            task_id=str(node_metadata.get("submitted_task_id") or node_metadata.get("task_id") or ""),
+        )
+    return _ok(rid, {"mission_id": mission_id, "node": node, "graph": graph})
+
+
+@method("team_mission.edge.create")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    payload = _edge_payload_from_params(params)
+    from_node_id = str(payload.get("from_node_id") or payload.get("fromNodeId") or payload.get("source") or "").strip()
+    to_node_id = str(payload.get("to_node_id") or payload.get("toNodeId") or payload.get("target") or "").strip()
+    if not from_node_id or not to_node_id:
+        return _err(rid, 4006, "from_node_id and to_node_id required")
+    metadata = payload.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return _err(rid, 4004, "edge.metadata must be an object")
+    edge = db.upsert_team_mission_edge(
+        mission_id=mission_id,
+        edge_id=str(payload.get("edge_id") or payload.get("edgeId") or payload.get("id") or ""),
+        from_node_id=from_node_id,
+        to_node_id=to_node_id,
+        kind=str(payload.get("kind") or "depends_on"),
+        metadata=metadata,
+    )
+    run_id = _run_id_from_params(params)
+    if run_id:
+        db.append_team_mission_run_event(
+            mission_id=mission_id,
+            run_id=run_id,
+            event={"type": "mission.edge.created", "payload": {"edge": edge}},
+        )
+    return _ok(rid, {"mission_id": mission_id, "edge": edge, "graph": db.get_team_mission_graph(mission_id)})
+
+
+@method("team_mission.node.update")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    payload = _node_payload_from_params(params)
+    node_id = str(payload.get("node_id") or payload.get("nodeId") or payload.get("id") or "").strip()
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    if not node_id:
+        return _err(rid, 4006, "node_id required")
+    existing = db.get_team_mission_node(mission_id, node_id)
+    if not existing:
+        return _err(rid, 4040, "team mission node not found")
+    metadata = dict(existing.get("metadata") or {})
+    if isinstance(payload.get("metadata"), dict):
+        metadata.update(payload.get("metadata") or {})
+    assignee_member_id = str(payload.get("assignee_member_id") or payload.get("assigneeMemberId") or "").strip()
+    assignee_role = str(payload.get("assignee_role") or payload.get("assigneeRole") or "").strip()
+    if assignee_member_id:
+        metadata.setdefault("assignee_member_id", assignee_member_id)
+    if assignee_role:
+        metadata.setdefault("assignee_role", assignee_role)
+    output_contract = dict(existing.get("output_contract") or {})
+    if isinstance(payload.get("output_contract") or payload.get("outputContract"), dict):
+        output_contract.update(payload.get("output_contract") or payload.get("outputContract") or {})
+    node = db.upsert_team_mission_node(
+        mission_id=mission_id,
+        node_id=node_id,
+        kind=str(payload.get("kind") or existing.get("kind") or "worker"),
+        title=str(payload.get("title") or existing.get("title") or ""),
+        objective=str(payload.get("objective") or existing.get("objective") or ""),
+        status=str(payload.get("status") or existing.get("status") or "todo"),
+        assignee_profile_id=str(
+            payload.get("assignee_profile_id") or payload.get("assigneeProfileId") or existing.get("assignee_profile_id") or ""
+        ),
+        assignee_profile_version_id=str(
+            payload.get("assignee_profile_version_id")
+            or payload.get("assigneeProfileVersionId")
+            or existing.get("assignee_profile_version_id")
+            or ""
+        ),
+        runtime_scope_key=str(payload.get("runtime_scope_key") or payload.get("runtimeScopeKey") or existing.get("runtime_scope_key") or ""),
+        output_contract=output_contract,
+        metadata=metadata,
+        position_x=float(payload.get("position_x") or payload.get("x") or existing.get("position_x") or 0),
+        position_y=float(payload.get("position_y") or payload.get("y") or existing.get("position_y") or 0),
+    )
+    run_id = _run_id_from_params(params)
+    if run_id:
+        db.append_team_mission_run_event(
+            mission_id=mission_id,
+            run_id=run_id,
+            event={"type": "mission.node.updated", "payload": {"node": node}},
+        )
+    schedule_result = {}
+    if str(node.get("status") or "") in {"completed", "verified"}:
+        schedule_result = _schedule_ready_nodes(
+            db=db,
+            rid=rid,
+            params={"mission_id": mission_id},
+            trigger="node.update",
+        )
+    return _ok(
+        rid,
+        {
+            "mission_id": mission_id,
+            "node": node,
+            "scheduled": schedule_result,
+            "graph": (schedule_result.get("graph") if isinstance(schedule_result, dict) else None) or db.get_team_mission_graph(mission_id),
+        },
+    )
+
+
+@method("team_mission.plan.complete")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    graph = db.get_team_mission_graph(mission_id)
+    mission = graph.get("mission") if isinstance(graph, dict) else None
+    if not isinstance(mission, dict):
+        return _err(rid, 4040, "team mission not found")
+    result = db.complete_team_mission_plan(
+        mission_id=mission_id,
+        run_id=_run_id_from_params(params),
+        task_id=str(params.get("task_id") or params.get("taskId") or ""),
+        event_source="plan.complete",
+    )
+    if not result:
+        return _err(rid, 4040, "team mission not found")
+    schedule_result = {}
+    if bool(result.get("auto_start_ready_nodes")):
+        schedule_result = _schedule_ready_nodes(
+            db=db,
+            rid=rid,
+            params={"mission_id": mission_id},
+            trigger="plan.complete",
+        )
+    return _ok(
+        rid,
+        {
+            "mission_id": mission_id,
+            "mission_status": result.get("mission_status") or "",
+            "approval_requests": list(result.get("approval_requests") or []),
+            "auto_start_ready_nodes": bool(result.get("auto_start_ready_nodes")),
+            "scheduled": schedule_result,
+            "graph": (schedule_result.get("graph") if isinstance(schedule_result, dict) else None) or result.get("graph") or {},
+        },
+    )
+
+
+@method("team_mission.plan.reject")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    result = db.reject_team_mission_plan(
+        mission_id=mission_id,
+        task_id=str(params.get("task_id") or params.get("taskId") or ""),
+        rejected_by=str(params.get("rejected_by") or params.get("rejectedBy") or "user"),
+        reason=str(params.get("reason") or ""),
+        run_id=_run_id_from_params(params),
+    )
+    if not result:
+        return _err(rid, 4040, "team mission not found")
+    return _ok(
+        rid,
+        {
+            "mission_id": mission_id,
+            "task_id": result.get("task_id") or "",
+            "canceled_nodes": list(result.get("canceled_nodes") or []),
+            "graph": result.get("graph") or {},
+        },
+    )
+
+
+@method("team_mission.cancel")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    reason = str(params.get("reason") or "").strip() or "Team Mission cancelled by user."
+    result = db.cancel_team_mission(
+        mission_id=mission_id,
+        canceled_by=str(params.get("canceled_by") or params.get("canceledBy") or "user"),
+        reason=reason,
+    )
+    if not result:
+        return _err(rid, 4040, "team mission not found")
+    canceled_runs: list[dict] = []
+    cancel_errors: list[dict] = []
+    seen_run_ids: set[str] = set()
+    for binding in result.get("cancel_run_bindings") or []:
+        if not isinstance(binding, dict):
+            continue
+        run_id = str(binding.get("run_id") or "").strip()
+        if not run_id or run_id in seen_run_ids:
+            continue
+        seen_run_ids.add(run_id)
+        stored_session_id = str(binding.get("session_id") or binding.get("stored_session_id") or "").strip()
+        cancel_params = {
+            "run_id": run_id,
+            "stored_session_id": stored_session_id,
+            "runtime_session_id": str(binding.get("runtime_session_id") or ""),
+            "runtime_scope_key": str(binding.get("runtime_scope_key") or stored_session_id),
+            "reason": reason,
+        }
+        try:
+            response = _methods["run.cancel"](rid, cancel_params)
+        except Exception as exc:
+            cancel_errors.append({"run_id": run_id, "message": str(exc)})
+            continue
+        if isinstance(response, dict) and response.get("error"):
+            error = response.get("error") if isinstance(response.get("error"), dict) else {}
+            cancel_errors.append({
+                "run_id": run_id,
+                "message": str(error.get("message") or response.get("error") or "run cancel failed"),
+            })
+            continue
+        response_result = response.get("result") if isinstance(response, dict) and isinstance(response.get("result"), dict) else {}
+        canceled_runs.append({
+            "run_id": run_id,
+            "stored_session_id": stored_session_id,
+            "status": str(response_result.get("status") or "cancelled"),
+            "turn_id": str(response_result.get("turn_id") or ""),
+        })
+    return _ok(
+        rid,
+        {
+            "mission_id": mission_id,
+            "mission_status": result.get("mission_status") or "cancelled",
+            "canceled_nodes": list(result.get("canceled_nodes") or []),
+            "canceled_runs": canceled_runs,
+            "cancel_errors": cancel_errors,
+            "graph": db.get_team_mission_graph(mission_id),
+        },
+    )
+
+
+@method("team_mission.node.bind_run")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    node_id = _node_id_from_params(params)
+    run_id = _run_id_from_params(params)
+    stored_session_id = str(
+        params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or params.get("session_id")
+        or params.get("sessionId")
+        or ""
+    ).strip()
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    if not node_id:
+        return _err(rid, 4006, "node_id required")
+    if not run_id or not stored_session_id:
+        return _err(rid, 4006, "run_id and stored_session_id required")
+    node = db.get_team_mission_node(mission_id, node_id)
+    if not node:
+        return _err(rid, 4040, "team mission node not found")
+    runtime_scope_key = str(
+        params.get("runtime_scope_key")
+        or params.get("runtimeScopeKey")
+        or node.get("runtime_scope_key")
+        or stored_session_id
+    ).strip()
+    binding = db.bind_team_mission_run(
+        mission_id=mission_id,
+        node_id=node_id,
+        run_id=run_id,
+        session_id=stored_session_id,
+        runtime_session_id=str(params.get("runtime_session_id") or params.get("runtimeSessionId") or ""),
+        runtime_scope_key=runtime_scope_key,
+        role=str(params.get("role") or node.get("kind") or "worker"),
+        metadata={"source": "team_mission.node.bind_run"},
+    )
+    node = db.upsert_team_mission_node(
+        mission_id=mission_id,
+        node_id=node_id,
+        kind=str(node.get("kind") or "worker"),
+        title=str(node.get("title") or ""),
+        objective=str(node.get("objective") or ""),
+        status=str(params.get("status") or "running"),
+        assignee_profile_id=str(node.get("assignee_profile_id") or ""),
+        assignee_profile_version_id=str(node.get("assignee_profile_version_id") or ""),
+        runtime_scope_key=runtime_scope_key,
+        output_contract=dict(node.get("output_contract") or {}),
+        metadata={**dict(node.get("metadata") or {}), "stored_session_id": stored_session_id, "run_id": run_id},
+        position_x=float(node.get("position_x") or 0),
+        position_y=float(node.get("position_y") or 0),
+    )
+    db.append_team_mission_run_event(
+        mission_id=mission_id,
+        run_id=run_id,
+        event={
+            "type": "mission.node.run.bound",
+            "payload": {"node": node, "binding": binding},
+        },
+    )
+    return _ok(rid, {"mission_id": mission_id, "node": node, "binding": binding})
+
+
+@method("team_mission.node.start")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    node_id = _node_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    if not node_id:
+        return _err(rid, 4006, "node_id required")
+    node = db.get_team_mission_node(mission_id, node_id)
+    if not node:
+        return _err(rid, 4040, "team mission node not found")
+    graph = db.get_team_mission_graph(mission_id)
+    mission = graph.get("mission") if isinstance(graph, dict) else {}
+    metadata = dict(node.get("metadata") or {})
+    mission_metadata = mission.get("metadata") if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict) else {}
+    conversation_id = _conversation_id_from_params(params, mission_metadata) or str((mission or {}).get("conversation_id") or mission_id)
+    conversation_session_id = _conversation_session_id_from_params(params, mission_metadata) or _team_conversation_session_id(mission if isinstance(mission, dict) else {})
+    if isinstance(mission, dict) and mission:
+        db.ensure_team_mission_conversation(
+            conversation_id=conversation_id,
+            stable_session_id=conversation_session_id,
+            mission=mission,
+        )
+    if isinstance(mission, dict) and _is_root_planning_node(node):
+        mission = _activate_mission_task(db, mission, node, source="team_mission.node.start")
+        graph = db.get_team_mission_graph(mission_id)
+    if (
+        isinstance(mission, dict)
+        and _is_root_planning_node(node)
+        and not _falsey(params.get("record_user_task_message") if "record_user_task_message" in params else params.get("recordUserTaskMessage"))
+    ):
+        _append_team_user_task_message(
+            db,
+            mission=mission,
+            objective=str(node.get("objective") or node.get("title") or mission.get("objective") or ""),
+            node_id=node_id,
+            task_id=str(metadata.get("submitted_task_id") or metadata.get("task_id") or ""),
+        )
+    stored_session_id = str(
+        params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or metadata.get("stored_session_id")
+        or _default_node_session_id(mission_id, node_id)
+    ).strip()
+    runtime_scope_key = str(
+        params.get("runtime_scope_key")
+        or params.get("runtimeScopeKey")
+        or node.get("runtime_scope_key")
+        or stored_session_id
+    ).strip()
+    run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
+    turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
+    if not db.get_session(stored_session_id):
+        db.create_session(stored_session_id, source="team_mission", transient=False)
+    text = _strategy_start_text(params, mission if isinstance(mission, dict) else {}, node)
+    memory_context, memory_text = _team_memory_for_node(
+        db,
+        params,
+        mission if isinstance(mission, dict) else {},
+        node,
+        objective=text,
+    )
+    if memory_text:
+        text = f"{text}\n\n{memory_text}"
+    enabled_toolsets = _start_toolsets(params, mission if isinstance(mission, dict) else {}, node)
+    leader_control_node = _is_team_leader_control_node(node)
+    submit_params = {
+        **params,
+        "stored_session_id": stored_session_id,
+        "session_id": stored_session_id,
+        "client_run_id": run_id,
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "runtime_scope_key": runtime_scope_key,
+        "agent_profile_id": str(params.get("agent_profile_id") or params.get("agentProfileId") or node.get("assignee_profile_id") or "").strip(),
+        "agent_profile_version_id": str(
+            params.get("agent_profile_version_id") or params.get("agentProfileVersionId") or node.get("assignee_profile_version_id") or ""
+        ).strip(),
+        "text": text,
+        "enabled_toolsets": enabled_toolsets,
+        **({"disabled_toolsets": _leader_disabled_toolsets(params)} if leader_control_node else {}),
+        **({"toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE} if leader_control_node else {}),
+        "doxie_product_context": {
+            **(params.get("doxie_product_context") if isinstance(params.get("doxie_product_context"), dict) else {}),
+            "team_mission": {
+                "mission_id": mission_id,
+                "conversation_id": conversation_id,
+                "conversation_session_id": conversation_session_id,
+                "node_id": node_id,
+                "node_title": node.get("title") or "",
+                "node_kind": node.get("kind") or "",
+                "node_role": _node_role(node),
+                "node_phase": _node_phase(node),
+                "output_contract": node.get("output_contract") or {},
+                "memory": memory_context,
+                **({"tool_policy": _team_leader_tool_policy(surface="leader_node")} if leader_control_node else {}),
+            },
+        },
+    }
+    response = _methods["run.submit"](rid, submit_params)
+    if isinstance(response, dict) and response.get("error"):
+        node = db.upsert_team_mission_node(
+            mission_id=mission_id,
+            node_id=node_id,
+            kind=str(node.get("kind") or "worker"),
+            title=str(node.get("title") or ""),
+            objective=str(node.get("objective") or ""),
+            status="blocked",
+            assignee_profile_id=str(node.get("assignee_profile_id") or ""),
+            assignee_profile_version_id=str(node.get("assignee_profile_version_id") or ""),
+            runtime_scope_key=runtime_scope_key,
+            output_contract=dict(node.get("output_contract") or {}),
+            metadata={**metadata, "stored_session_id": stored_session_id, "start_error": response.get("error", {}).get("message") or ""},
+            position_x=float(node.get("position_x") or 0),
+            position_y=float(node.get("position_y") or 0),
+        )
+        return response
+    result = response.get("result") if isinstance(response, dict) else {}
+    result_run_id = str((result or {}).get("run_id") or run_id).strip()
+    result_turn_id = str((result or {}).get("turn_id") or turn_id).strip()
+    result_scope = str((result or {}).get("runtime_scope_key") or runtime_scope_key).strip()
+    task_id = str(
+        metadata.get("task_id")
+        or metadata.get("taskId")
+        or metadata.get("submitted_task_id")
+        or metadata.get("submittedTaskId")
+        or ""
+    ).strip()
+    binding_metadata = {"turn_id": result_turn_id, "source": "team_mission.node.start"}
+    if task_id:
+        binding_metadata["task_id"] = task_id
+    binding = db.bind_team_mission_run(
+        mission_id=mission_id,
+        node_id=node_id,
+        run_id=result_run_id,
+        session_id=stored_session_id,
+        runtime_session_id=str((result or {}).get("session_id") or ""),
+        runtime_scope_key=result_scope,
+        role=_node_role(node),
+        metadata=binding_metadata,
+    )
+    node = db.upsert_team_mission_node(
+        mission_id=mission_id,
+        node_id=node_id,
+        kind=str(node.get("kind") or "worker"),
+        title=str(node.get("title") or ""),
+        objective=str(node.get("objective") or ""),
+        status="running",
+        assignee_profile_id=str(node.get("assignee_profile_id") or ""),
+        assignee_profile_version_id=str(node.get("assignee_profile_version_id") or ""),
+        runtime_scope_key=result_scope,
+        output_contract=dict(node.get("output_contract") or {}),
+        metadata={**metadata, "stored_session_id": stored_session_id, "run_id": result_run_id, "turn_id": result_turn_id},
+        position_x=float(node.get("position_x") or 0),
+        position_y=float(node.get("position_y") or 0),
+    )
+    if (
+        isinstance(mission, dict)
+        and str(mission.get("status") or "") == "draft"
+        and str(node.get("kind") or "") == "root"
+        and _node_phase(node) == "planning"
+    ):
+        db.upsert_team_mission(
+            mission_id=mission_id,
+            team_id=str(mission.get("team_id") or ""),
+            title=str(mission.get("title") or ""),
+            objective=str(mission.get("objective") or ""),
+            workspace_id=str(mission.get("workspace_id") or ""),
+            workspace_path=str(mission.get("workspace_path") or ""),
+            mode=str(mission.get("mode") or ""),
+            status="planning",
+            leader_session_id=str(mission.get("leader_session_id") or ""),
+            metadata=dict(mission.get("metadata") or {}),
+        )
+    db.append_team_mission_run_event(
+        mission_id=mission_id,
+        run_id=result_run_id,
+        event={
+            "type": "mission.node.started",
+            "payload": {"node": node, "binding": binding},
+        },
+    )
+    return _ok(
+        rid,
+        {
+            "mission_id": mission_id,
+            "node": node,
+            "binding": binding,
+            "run": result,
+            "stored_session_id": stored_session_id,
+        },
+    )
+
+
+@method("team_mission.schedule.ready")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    result = _schedule_ready_nodes(
+        db=db,
+        rid=rid,
+        params=params,
+        trigger="team_mission.schedule.ready",
+    )
+    if not result:
+        return _err(rid, 4040, "team mission not found")
+    return _ok(rid, result)
+
+
+@method("team_mission.memory.compile")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    try:
+        result = db.compile_team_mission_memory(
+            mission_id=mission_id,
+            task_id=str(params.get("task_id") or params.get("taskId") or ""),
+            mode=str(params.get("mode") or "final"),
+            source_run_ids=_normalize_toolsets(params.get("source_run_ids") or params.get("sourceRunIds")),
+            emit_event=not _falsey(params.get("emit_event") if "emit_event" in params else params.get("emitEvent")),
+        )
+    except Exception as exc:
+        return _err(rid, 5008, f"team mission memory compile failed: {exc}")
+    if not result:
+        return _err(rid, 4040, "team mission not found")
+    return _ok(rid, result)
+
+
+@method("team_mission.memory.pack")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    result = db.build_team_mission_memory_pack(
+        mission_id=mission_id,
+        objective=str(params.get("objective") or ""),
+        workspace_id=str(params.get("workspace_id") or params.get("workspaceId") or ""),
+        limit=_bounded_limit(params.get("limit"), default=8, maximum=50),
+        include_team_scope=_team_memory_include_team_scope(params, {}),
+    )
+    if not result:
+        return _err(rid, 4040, "team mission not found")
+    return _ok(rid, result)
+
+
+@method("team_mission.memory.slice")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    node_id = _node_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    if not node_id:
+        return _err(rid, 4006, "node_id required")
+    result = db.build_team_mission_memory_slice(
+        mission_id=mission_id,
+        node_id=node_id,
+        objective=str(params.get("objective") or ""),
+        limit=_bounded_limit(params.get("limit"), default=5, maximum=50),
+        include_team_scope=_team_memory_include_team_scope(params, {}),
+    )
+    if not result:
+        return _err(rid, 4040, "team mission or node not found")
+    return _ok(rid, result)
+
+
+@method("team_mission.memory.list")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    items = db.list_team_mission_memory_items(
+        mission_id=_mission_id_from_params(params),
+        conversation_session_id=str(
+            params.get("conversation_session_id")
+            or params.get("conversationSessionId")
+            or ""
+        ),
+        team_id=str(params.get("team_id") or params.get("teamId") or ""),
+        task_id=str(params.get("task_id") or params.get("taskId") or ""),
+        kinds=_normalize_toolsets(params.get("kinds") or params.get("kind")),
+        statuses=_normalize_toolsets(params.get("statuses") or params.get("status")),
+        visibility=_normalize_toolsets(params.get("visibility")),
+        include_deleted=bool(params.get("include_deleted") or params.get("includeDeleted")),
+        limit=_bounded_limit(params.get("limit"), default=200, maximum=1000),
+    )
+    return _ok(rid, {"items": items})
+
+
+@method("team_mission.memory.update")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    memory_id = str(params.get("memory_id") or params.get("memoryId") or params.get("id") or "").strip()
+    if not memory_id:
+        return _err(rid, 4006, "memory_id required")
+    structured_payload = params.get("structured_payload") or params.get("structuredPayload")
+    if structured_payload is not None and not isinstance(structured_payload, dict):
+        return _err(rid, 4004, "structured_payload must be an object")
+    try:
+        item = db.update_team_mission_memory_item(
+            memory_id,
+            content=params.get("content") if "content" in params else None,
+            structured_payload=structured_payload,
+            visibility=params.get("visibility") if "visibility" in params else None,
+            status=params.get("status") if "status" in params else None,
+            confidence=float(params["confidence"]) if "confidence" in params else None,
+        )
+    except Exception as exc:
+        return _err(rid, 5008, f"team mission memory update failed: {exc}")
+    if not item:
+        return _err(rid, 4040, "team mission memory item not found")
+    return _ok(rid, {"item": item})
+
+
+@method("team_mission.memory.delete")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    memory_id = str(params.get("memory_id") or params.get("memoryId") or params.get("id") or "").strip()
+    if not memory_id:
+        return _err(rid, 4006, "memory_id required")
+    item = db.delete_team_mission_memory_item(memory_id)
+    if not item:
+        return _err(rid, 4040, "team mission memory item not found")
+    return _ok(rid, {"item": item})
+
+
+@method("team_mission.memory.events")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    try:
+        after_seq = int(params.get("after_seq") or params.get("afterSeq") or 0)
+    except (TypeError, ValueError):
+        after_seq = 0
+    events = [
+        event for event in db.list_team_mission_run_events(
+            mission_id,
+            after_seq=after_seq,
+            limit=_bounded_limit(params.get("limit"), default=2000, maximum=10000),
+        )
+        if str((event or {}).get("type") or "").startswith("mission.memory.")
+    ]
+    return _ok(
+        rid,
+        {
+            "mission_id": mission_id,
+            "events": events,
+            "last_event_seq": max([int(event.get("seq") or 0) for event in events], default=after_seq),
+        },
+    )

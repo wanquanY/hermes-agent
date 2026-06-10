@@ -30,8 +30,8 @@ Board resolution order (highest precedence first, all optional):
 * ``HERMES_KANBAN_BOARD`` env var (used by the dispatcher to pin workers
   to the board their task lives on — workers cannot see other boards).
 * ``HERMES_KANBAN_DB`` env var (pins the DB file path directly — legacy
-  override still honoured; highest precedence when the file path itself
-  is what the caller wants to force).
+  override still honoured for explicit human/test callers; dispatcher
+  workers are pinned by board/root instead of receiving the raw DB path).
 * ``<root>/kanban/current`` — a one-line text file holding the slug of
   the "currently selected" board. Written by ``hermes kanban boards
   switch <slug>``. When absent, the active board is ``default``.
@@ -46,11 +46,11 @@ overrides still work:
 * ``HERMES_KANBAN_HOME`` — pin the umbrella root that anchors kanban
   paths. Useful for tests and unusual deployments.
 
-The dispatcher injects ``HERMES_KANBAN_DB``,
+The dispatcher injects ``HERMES_KANBAN_HOME``,
 ``HERMES_KANBAN_WORKSPACES_ROOT``, and ``HERMES_KANBAN_BOARD`` into
-worker subprocess env so workers converge on the exact DB the
-dispatcher used to claim their task — even under unusual symlink or
-Docker layouts.
+worker subprocess env so workers converge on the exact board the
+dispatcher used to claim their task without exposing a raw SQLite file
+path to the model process.
 
 Schema is intentionally small: tasks, task_links, task_comments,
 task_events.  The ``workspace_kind`` field decouples coordination from git
@@ -314,10 +314,10 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
 
     Resolution (highest precedence first):
 
-    1. ``HERMES_KANBAN_DB`` env var — pins the path directly. Honoured for
-       back-compat and for the dispatcher→worker handoff (defense in
-       depth: dispatcher injects this into worker env so workers are
-       immune to any path-resolution disagreement).
+    1. ``HERMES_KANBAN_DB`` env var — pins the path directly for legacy
+       callers, tests, and explicit human overrides. Worker agents should
+       not receive this raw file path; dispatcher-spawned workers are pinned
+       with ``HERMES_KANBAN_HOME`` + ``HERMES_KANBAN_BOARD`` instead.
     2. When ``board`` arg is None, the active board from
        :func:`get_current_board` is used.
     3. Board ``default`` → ``<root>/kanban.db`` (back-compat path).
@@ -952,6 +952,8 @@ CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_
 _INITIALIZED_PATHS: set[str] = set()
 _INIT_LOCK = threading.RLock()
 _SQLITE_HEADER = b"SQLite format 3\x00"
+_QUICK_CHECK_MAX_PROBLEMS = 5
+_TASK_ID_FILE_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
 
 
 def _looks_like_tls_record_at(data: bytes, offset: int) -> bool:
@@ -1003,6 +1005,27 @@ def _validate_sqlite_header(path: Path) -> None:
         "file is not a database: invalid SQLite header for "
         f"{path}{signature}; first_32={head[:32].hex(' ')}"
     )
+
+
+def _validate_sqlite_integrity(conn: sqlite3.Connection, path: Path) -> None:
+    """Fail closed when an existing board has structural SQLite damage."""
+    try:
+        rows = conn.execute("PRAGMA quick_check").fetchall()
+    except sqlite3.Error as exc:
+        raise sqlite3.DatabaseError(
+            f"database disk image is malformed: kanban DB quick_check failed "
+            f"for {path}: {exc}"
+        ) from exc
+
+    problems = [str(row[0]) for row in rows if str(row[0]).lower() != "ok"]
+    if problems:
+        shown = "; ".join(problems[:_QUICK_CHECK_MAX_PROBLEMS])
+        if len(problems) > _QUICK_CHECK_MAX_PROBLEMS:
+            shown += f"; ... ({len(problems)} problems total)"
+        raise sqlite3.DatabaseError(
+            f"database disk image is malformed: kanban DB quick_check failed "
+            f"for {path}: {shown}"
+        )
 
 
 def connect(
@@ -1060,10 +1083,62 @@ def connect(
                 conn.executescript(SCHEMA_SQL)
                 _migrate_add_optional_columns(conn)
                 _INITIALIZED_PATHS.add(resolved)
+            _validate_sqlite_integrity(conn, path)
     except Exception:
         conn.close()
         raise
     return conn
+
+
+def runtime_events_dir(board: Optional[str] = None) -> Path:
+    """Append-only runtime telemetry directory for a Kanban board.
+
+    Runtime token/tool streams are intentionally outside ``kanban.db``. The
+    SQLite database is the low-frequency coordination state; high-frequency UI
+    telemetry lives in per-task NDJSON files so streaming cannot corrupt or
+    contend with the board's task/event indexes.
+    """
+    slug = _normalize_board_slug(board) if board is not None else get_current_board()
+    if slug == DEFAULT_BOARD:
+        return kanban_home() / "kanban" / "runtime-events"
+    return board_dir(slug) / "runtime-events"
+
+
+def runtime_event_log_path(board: Optional[str], task_id: str) -> Path:
+    safe_task = _TASK_ID_FILE_RE.sub("_", str(task_id or "").strip()) or "unknown"
+    return runtime_events_dir(board) / f"{safe_task}.ndjson"
+
+
+def append_runtime_event(
+    *,
+    board: Optional[str],
+    task_id: str,
+    kind: str,
+    payload: Optional[dict] = None,
+    run_id: Optional[int] = None,
+    event_id: Optional[int] = None,
+    created_at: Optional[float] = None,
+) -> int:
+    """Append one runtime event to the board's side-channel NDJSON stream."""
+    now = time.time() if created_at is None else float(created_at)
+    eid = int(event_id or (now * 1_000_000))
+    record = {
+        "id": eid,
+        "task_id": str(task_id),
+        "run_id": int(run_id) if run_id is not None else None,
+        "kind": str(kind),
+        "payload": payload or None,
+        "created_at": now,
+    }
+    path = runtime_event_log_path(board, task_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    return eid
 
 
 def init_db(
@@ -1345,7 +1420,14 @@ def write_txn(conn: sqlite3.Connection):
     try:
         yield conn
     except Exception:
-        conn.execute("ROLLBACK")
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            # Preserve the original storage/write failure. After disk I/O or
+            # corruption errors SQLite may have already ended the transaction;
+            # surfacing "cannot rollback - no transaction is active" hides the
+            # real root issue and encourages unsafe manual DB workarounds.
+            pass
         raise
     else:
         conn.execute("COMMIT")
@@ -1934,6 +2016,25 @@ def _append_event(
         "VALUES (?, ?, ?, ?, ?)",
         (task_id, run_id, kind, pl, now),
     )
+
+
+def append_task_event(
+    conn: sqlite3.Connection,
+    task_id: str,
+    kind: str,
+    payload: Optional[dict] = None,
+    *,
+    run_id: Optional[int] = None,
+) -> None:
+    """Public task-event append surface for worker runtime telemetry.
+
+    Kanban task lifecycle mutations keep using the private ``_append_event``
+    helper from within their own transactions. Runtime callbacks, however,
+    need a small public surface because they run from the spawned worker's
+    agent callbacks rather than from a task state transition.
+    """
+    with write_txn(conn):
+        _append_event(conn, task_id, kind, payload, run_id=run_id)
 
 
 def _end_run(
@@ -5277,10 +5378,10 @@ def _default_spawn(
     via the ``complete`` / ``block`` transitions the worker writes itself;
     the PID check is a safety net for crashes, OOM kills, and Ctrl+C.
 
-    ``board`` pins the child's kanban context to that board: the child's
-    ``HERMES_KANBAN_DB`` / ``HERMES_KANBAN_BOARD`` / workspaces_root env
-    vars all resolve to the same board the dispatcher claimed the task
-    from. Workers cannot accidentally see other boards.
+    ``board`` pins the child's kanban context to that board via
+    ``HERMES_KANBAN_HOME``, ``HERMES_KANBAN_BOARD``, and workspaces_root.
+    Workers cannot accidentally see other boards and do not receive the raw
+    SQLite DB path.
     """
     import subprocess
     if not task.assignee:
@@ -5333,19 +5434,23 @@ def _default_spawn(
     )
     if foreground_timeout is not None:
         env["TERMINAL_MAX_FOREGROUND_TIMEOUT"] = foreground_timeout
-    # Pin the shared board + workspaces root the dispatcher resolved, so
+    # Pin the shared board root + workspaces root the dispatcher resolved, so
     # that even when the worker activates a profile (`hermes -p <name>`
-    # rewrites HERMES_HOME), its kanban paths still match the
-    # dispatcher's. Belt-and-braces with the `get_default_hermes_root()`
-    # resolution in `kanban_home()` — symmetric resolution is the norm,
-    # but unusual symlink / Docker layouts are caught here too.
-    env["HERMES_KANBAN_DB"] = str(kanban_db_path(board=board))
+    # rewrites HERMES_HOME), its kanban paths still match the dispatcher's.
+    # Deliberately do not expose HERMES_KANBAN_DB to worker agents: the raw
+    # SQLite path invites unsafe sqlite3/python fallbacks that bypass the
+    # kanban_* API invariants.
+    env.pop("HERMES_KANBAN_DB", None)
+    env["HERMES_KANBAN_HOME"] = str(kanban_home())
     env["HERMES_KANBAN_WORKSPACES_ROOT"] = str(workspaces_root(board=board))
     # Board slug — the final defense-in-depth pin. If the worker ever
     # resolves kanban paths without the DB / workspaces env vars, the
     # board slug still forces it to the right directory.
     resolved_board = _normalize_board_slug(board) or get_current_board()
     env["HERMES_KANBAN_BOARD"] = resolved_board
+    env["HERMES_KANBAN_RUNTIME_EVENTS"] = "1"
+    env["HERMES_KANBAN_RUNTIME_SCOPE_KEY"] = f"kanban:{resolved_board}:{task.id}"
+    env.setdefault("HERMES_SESSION_SOURCE", "kanban-worker")
     # HERMES_PROFILE is the author the kanban_comment tool defaults to.
     # `hermes -p <assignee>` activates the profile, but the env var is
     # what the tool reads — set it explicitly here so comments are

@@ -380,7 +380,7 @@ class TestConnectionIsolation:
 # ---------------------------------------------------------------------------
 
 class TestWorkerSpawnEnv:
-    """Ensure the dispatcher pins ``HERMES_KANBAN_BOARD`` / DB / workspaces on spawn.
+    """Ensure the dispatcher pins board/root/workspaces on spawn.
 
     We monkey-patch ``subprocess.Popen`` to capture the child env without
     actually spawning anything.
@@ -423,9 +423,8 @@ class TestWorkerSpawnEnv:
         env = captured["env"]
         assert env["HERMES_KANBAN_BOARD"] == "spawntest"
         assert env["HERMES_KANBAN_TASK"] == "t_abc"
-        # DB path should match the per-board DB, not the legacy default.
-        expected_db = fresh_home / "kanban" / "boards" / "spawntest" / "kanban.db"
-        assert env["HERMES_KANBAN_DB"] == str(expected_db)
+        assert "HERMES_KANBAN_DB" not in env
+        assert env["HERMES_KANBAN_HOME"] == str(fresh_home)
         expected_ws = fresh_home / "kanban" / "boards" / "spawntest" / "workspaces"
         assert env["HERMES_KANBAN_WORKSPACES_ROOT"] == str(expected_ws)
 
@@ -460,7 +459,8 @@ class TestWorkerSpawnEnv:
         kb._default_spawn(task, str(fresh_home / "ws"), board=None)
         env = captured["env"]
         assert env["HERMES_KANBAN_BOARD"] == "default"
-        assert env["HERMES_KANBAN_DB"] == str(fresh_home / "kanban.db")
+        assert "HERMES_KANBAN_DB" not in env
+        assert env["HERMES_KANBAN_HOME"] == str(fresh_home)
 
 
 # ---------------------------------------------------------------------------

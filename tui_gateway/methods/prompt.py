@@ -243,6 +243,13 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
     turn_id = str(params.get("turn_id") or uuid.uuid4().hex).strip()
     runtime_scope_key = str(params.get("runtime_scope_key") or params.get("runtimeScopeKey") or "").strip()
     client_message_id = str(params.get("client_message_id") or "").strip()
+    persist_user_message = str(
+        params.get("persist_user_message")
+        or params.get("persistUserMessage")
+        or params.get("transcript_text")
+        or params.get("transcriptText")
+        or ""
+    )
     raw_doxie_context = params.get("doxie_product_context") or params.get("doxieProductContext") or ""
     doxie_product_context = (
         json.dumps(raw_doxie_context, ensure_ascii=False)
@@ -325,6 +332,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             "text": text,
             "attachments": submitted_attachments,
             "draft_text": str(params.get("draft_text") or text or ""),
+            "persist_user_message": persist_user_message,
             "model": requested_model,
             "model_descriptor": model_descriptor,
             "doxie_product_context": doxie_product_context,
@@ -389,6 +397,14 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             "session.info",
             event_sid,
             _session_info(agent, _sessions.get(event_sid)),
+        ),
+        requested_disabled_toolsets=params.get("disabled_toolsets") or params.get("disabledToolsets"),
+        load_disabled_toolsets=_load_disabled_toolsets,
+        toolset_scope=(
+            params.get("toolset_scope")
+            or params.get("toolsetScope")
+            or params.get("toolset_mode")
+            or params.get("toolsetMode")
         ),
     )
     _start_agent_build(sid, session)
@@ -468,6 +484,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 "client_message_id": client_message_id,
                 "attachments": submitted_attachments,
                 "draft_text": str(params.get("draft_text") or text or ""),
+                "persist_user_message": persist_user_message,
                 "model": requested_model,
                 "model_descriptor": model_descriptor,
                 "doxie_product_context": doxie_product_context,
@@ -767,7 +784,7 @@ def _run_prompt_submit(
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
             prompt = text
-            clean_prompt = prompt
+            clean_prompt = str((turn_metadata or {}).get("persist_user_message") or prompt or "")
 
             if isinstance(prompt, str) and "@" in prompt:
                 from agent.context_references import preprocess_context_references
@@ -799,7 +816,8 @@ def _run_prompt_submit(
                     )
                     return
                 prompt = ctx.message
-                clean_prompt = prompt
+                if not str((turn_metadata or {}).get("persist_user_message") or "").strip():
+                    clean_prompt = prompt
 
             try:
                 from doxie_extension.prompt_attachments import enrich_prompt_with_document_attachments
@@ -887,9 +905,16 @@ def _run_prompt_submit(
                     payload["rendered"] = r
                 _emit("message.delta", sid, payload)
 
+            active_context_missing = object()
+            previous_active_run_id = getattr(agent, "_hermes_active_run_id", active_context_missing)
+            previous_active_turn_id = getattr(agent, "_hermes_active_turn_id", active_context_missing)
+            previous_active_runtime_scope_key = getattr(agent, "_hermes_active_runtime_scope_key", active_context_missing)
             try:
                 previous_inject_tool_breaks = getattr(agent, "_stream_inject_tool_breaks", True)
                 agent._stream_inject_tool_breaks = False
+                agent._hermes_active_run_id = turn_run_id
+                agent._hermes_active_turn_id = turn_id
+                agent._hermes_active_runtime_scope_key = str(session.get("runtime_scope_key") or "")
                 result = agent.run_conversation(
                     run_message,
                     conversation_history=list(history),
@@ -908,6 +933,27 @@ def _run_prompt_submit(
             finally:
                 if "previous_inject_tool_breaks" in locals():
                     agent._stream_inject_tool_breaks = previous_inject_tool_breaks
+                if previous_active_run_id is active_context_missing:
+                    try:
+                        delattr(agent, "_hermes_active_run_id")
+                    except AttributeError:
+                        pass
+                else:
+                    agent._hermes_active_run_id = previous_active_run_id
+                if previous_active_turn_id is active_context_missing:
+                    try:
+                        delattr(agent, "_hermes_active_turn_id")
+                    except AttributeError:
+                        pass
+                else:
+                    agent._hermes_active_turn_id = previous_active_turn_id
+                if previous_active_runtime_scope_key is active_context_missing:
+                    try:
+                        delattr(agent, "_hermes_active_runtime_scope_key")
+                    except AttributeError:
+                        pass
+                else:
+                    agent._hermes_active_runtime_scope_key = previous_active_runtime_scope_key
 
             if is_turn_interrupted():
                 result_messages = (

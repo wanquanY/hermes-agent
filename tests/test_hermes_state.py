@@ -602,6 +602,50 @@ class TestMessageStorage:
         conversation = db.get_messages_as_conversation("s1", include_storage_metadata=True)
         assert conversation[0]["metadata"] == metadata
 
+    def test_merge_message_metadata_by_message_id(self, db):
+        db.create_session(session_id="s1", source="cli")
+        message_id = db.append_message(
+            "s1",
+            role="assistant",
+            content="Done",
+            metadata={"run_id": "run-1", "nested": {"a": 1}},
+        )
+
+        updated = db.merge_message_metadata(
+            "s1",
+            {
+                "agentProfileDrafts": [{"draftId": "draft-1", "name": "产品经理分身"}],
+                "nested": {"b": 2},
+            },
+            message_id=message_id,
+            role="assistant",
+        )
+
+        assert updated["message_id"] == str(message_id)
+        assert updated["metadata"] == {
+            "run_id": "run-1",
+            "nested": {"a": 1, "b": 2},
+            "agentProfileDrafts": [{"draftId": "draft-1", "name": "产品经理分身"}],
+        }
+
+    def test_merge_message_metadata_by_latest_turn_identity(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="assistant", content="older", metadata={"run_id": "run-1"})
+        target_id = db.append_message("s1", role="assistant", content="newer", metadata={"run_id": "run-1"})
+
+        updated = db.merge_message_metadata(
+            "s1",
+            {"agentProfileDrafts": [{"draftId": "draft-1", "name": "产品经理分身"}]},
+            role="assistant",
+            run_id="run-1",
+        )
+
+        assert updated["message_id"] == str(target_id)
+        conversation = db.get_messages_as_conversation("s1", include_storage_metadata=True)
+        assert conversation[-1]["metadata"]["agentProfileDrafts"] == [
+            {"draftId": "draft-1", "name": "产品经理分身"}
+        ]
+
     def test_message_increments_session_count(self, db):
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="Hello")
@@ -2651,6 +2695,93 @@ class TestSchemaInit:
         assert row is not None
         assert row[0] == "assistant"
         assert row[3] is None  # reasoning_content NULL for old rows
+
+        migrated_db.close()
+
+    def test_reconciliation_defers_indexes_that_reference_new_columns(self, tmp_path):
+        """Indexes that reference newly declared columns must run after reconcile.
+
+        Team mission conversations added team_missions.conversation_id after
+        the original team_missions table shipped. Keeping the index in
+        SCHEMA_SQL made existing databases fail during executescript() before
+        _reconcile_columns() could add the missing column.
+        """
+        import sqlite3
+
+        db_path = tmp_path / "team_mission_old_schema.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (16);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            );
+
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                timestamp REAL NOT NULL
+            );
+
+            CREATE TABLE team_missions (
+                mission_id TEXT PRIMARY KEY,
+                team_id TEXT,
+                title TEXT NOT NULL,
+                objective TEXT,
+                workspace_id TEXT,
+                workspace_path TEXT,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                leader_session_id TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                completed_at REAL,
+                metadata_json TEXT
+            );
+        """)
+        conn.execute(
+            """
+            INSERT INTO team_missions (
+                mission_id, team_id, title, mode, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("mission-1", "team-1", "Legacy mission", "supervised", "completed", 1.0, 1.0),
+        )
+        conn.commit()
+        conn.close()
+
+        migrated_db = SessionDB(db_path=db_path)
+
+        mission_cols = {
+            r[1]
+            for r in migrated_db._conn.execute(
+                "PRAGMA table_info(team_missions)"
+            ).fetchall()
+        }
+        assert "conversation_id" in mission_cols
+
+        indexes = {
+            row[1]
+            for row in migrated_db._conn.execute(
+                "PRAGMA index_list(team_missions)"
+            ).fetchall()
+        }
+        assert "idx_team_missions_conversation" in indexes
+
+        cursor = migrated_db._conn.execute(
+            """
+            SELECT mission_id
+            FROM team_missions
+            WHERE conversation_id IS NULL
+            ORDER BY updated_at DESC
+            """
+        )
+        assert cursor.fetchone()[0] == "mission-1"
 
         migrated_db.close()
 

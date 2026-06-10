@@ -1415,6 +1415,51 @@ def test_session_title_get_retries_pending_even_when_db_has_title(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_session_title_updates_stored_session_without_live_runtime(monkeypatch):
+    class _FakeDB:
+        def __init__(self):
+            self.row = {"id": "stored-only", "title": "old title"}
+
+        def get_session_title(self, key):
+            return self.row["title"] if key == self.row["id"] else None
+
+        def get_session(self, key):
+            return self.row if key == self.row["id"] else None
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def set_session_title(self, key, title):
+            if key != self.row["id"]:
+                return False
+            self.row["title"] = title
+            return True
+
+    db = _FakeDB()
+    server._sessions.pop("stored-only", None)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    set_resp = server.handle_request(
+        {
+            "id": "1",
+            "method": "session.title",
+            "params": {"stored_session_id": "stored-only", "title": "renamed"},
+        }
+    )
+    get_resp = server.handle_request(
+        {
+            "id": "2",
+            "method": "session.title",
+            "params": {"session_id": "stored-only"},
+        }
+    )
+
+    assert set_resp["result"]["pending"] is False
+    assert set_resp["result"]["title"] == "renamed"
+    assert get_resp["result"]["title"] == "renamed"
+    assert get_resp["result"]["session_key"] == "stored-only"
+
+
 def test_session_title_rejects_empty_title_with_specific_error_code(monkeypatch):
     class _FakeDB:
         def get_session_title(self, _key):
@@ -3873,6 +3918,80 @@ def test_session_turn_toolsets_are_added_to_prewarmed_agent(monkeypatch):
     assert emits[-1][0] == "sid-design"
 
 
+def test_session_turn_exact_toolsets_replace_prewarmed_agent(monkeypatch):
+    from tui_gateway.services.toolset_scope import ensure_session_turn_toolsets
+
+    class _FakeAgent:
+        quiet_mode = True
+        disabled_toolsets = None
+
+        def __init__(self):
+            self.enabled_toolsets = ["web", "memory", "delegation"]
+            self.tools = []
+            self.valid_tool_names = set()
+
+    emits = []
+    agent = _FakeAgent()
+    session = {
+        "agent": agent,
+        "enabled_toolsets_override": ["web", "memory", "delegation"],
+    }
+
+    ensure_session_turn_toolsets(
+        sid="sid-team-leader",
+        session=session,
+        requested_toolsets=["team_mission_leader"],
+        requested_disabled_toolsets=["delegation"],
+        toolset_scope="exact",
+        load_enabled_toolsets=lambda: ["web", "memory", "delegation"],
+        load_disabled_toolsets=lambda: None,
+        emit_session_info=lambda sid, agent: emits.append((sid, sorted(agent.valid_tool_names))),
+    )
+
+    assert agent.enabled_toolsets == ["team_mission_leader"]
+    assert agent.disabled_toolsets == ["delegation"]
+    assert session["enabled_toolsets_override"] == ["team_mission_leader"]
+    assert session["disabled_toolsets_override"] == ["delegation"]
+    assert {"team_mission_status", "team_mission_start_task"} <= agent.valid_tool_names
+    assert "web_search" not in agent.valid_tool_names
+    assert "write_file" not in agent.valid_tool_names
+    assert "delegate_task" not in agent.valid_tool_names
+    assert emits[-1][0] == "sid-team-leader"
+
+
+def test_session_turn_disabled_toolsets_are_applied_to_prewarmed_agent(monkeypatch):
+    from tui_gateway.services.toolset_scope import ensure_session_turn_toolsets
+
+    class _FakeAgent:
+        quiet_mode = True
+        disabled_toolsets = None
+
+        def __init__(self):
+            self.enabled_toolsets = ["doxie", "memory"]
+            self.tools = []
+            self.valid_tool_names = set()
+
+    emits = []
+    agent = _FakeAgent()
+    session = {"agent": agent, "enabled_toolsets_override": ["doxie", "memory"]}
+
+    ensure_session_turn_toolsets(
+        sid="sid-design",
+        session=session,
+        requested_toolsets=[],
+        requested_disabled_toolsets=["doxie"],
+        load_enabled_toolsets=lambda: ["doxie", "memory"],
+        load_disabled_toolsets=lambda: None,
+        emit_session_info=lambda sid, agent: emits.append((sid, sorted(agent.valid_tool_names))),
+    )
+
+    assert agent.enabled_toolsets == ["doxie", "memory"]
+    assert agent.disabled_toolsets == ["doxie"]
+    assert "design_agent_profile" not in agent.valid_tool_names
+    assert "memory" in agent.valid_tool_names
+    assert emits[-1][0] == "sid-design"
+
+
 def test_session_turn_toolsets_are_used_when_agent_builds_after_submit(monkeypatch):
     from tui_gateway.services.toolset_scope import ensure_session_turn_toolsets
 
@@ -3887,6 +4006,44 @@ def test_session_turn_toolsets_are_used_when_agent_builds_after_submit(monkeypat
     )
 
     assert session["enabled_toolsets_override"] == ["memory", "doxie"]
+
+
+def test_session_turn_exact_toolsets_are_used_when_agent_builds_after_submit(monkeypatch):
+    from tui_gateway.services.toolset_scope import ensure_session_turn_toolsets
+
+    session = {}
+
+    ensure_session_turn_toolsets(
+        sid="sid-team-leader",
+        session=session,
+        requested_toolsets=["team_mission_planning"],
+        requested_disabled_toolsets=["delegation"],
+        toolset_scope="exact",
+        load_enabled_toolsets=lambda: ["web", "memory", "delegation"],
+        load_disabled_toolsets=lambda: None,
+        emit_session_info=lambda *_args: None,
+    )
+
+    assert session["enabled_toolsets_override"] == ["team_mission_planning"]
+    assert session["disabled_toolsets_override"] == ["delegation"]
+
+
+def test_session_turn_disabled_toolsets_are_used_when_agent_builds_after_submit(monkeypatch):
+    from tui_gateway.services.toolset_scope import ensure_session_turn_toolsets
+
+    session = {}
+
+    ensure_session_turn_toolsets(
+        sid="sid-design",
+        session=session,
+        requested_toolsets=[],
+        requested_disabled_toolsets=["delegation"],
+        load_enabled_toolsets=lambda: ["memory"],
+        load_disabled_toolsets=lambda: None,
+        emit_session_info=lambda *_args: None,
+    )
+
+    assert session["disabled_toolsets_override"] == ["delegation"]
 
 
 def test_session_list_returns_clean_error_when_state_db_is_unavailable(monkeypatch):

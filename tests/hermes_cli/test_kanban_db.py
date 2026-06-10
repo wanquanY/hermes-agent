@@ -39,6 +39,28 @@ def test_init_db_is_idempotent(kanban_home):
     assert tasks[0].title == "persisted"
 
 
+def test_write_txn_preserves_original_error_when_rollback_fails():
+    """Rollback errors must not mask disk/corruption failures.
+
+    When SQLite aborts a transaction internally because the DB hit disk I/O or
+    structural corruption, a later explicit ROLLBACK can fail with
+    "cannot rollback - no transaction is active". The caller needs the original
+    storage error so workers fail closed instead of inventing DB workarounds.
+    """
+
+    class RollbackFailingConnection:
+        def execute(self, sql):
+            if sql == "ROLLBACK":
+                raise sqlite3.OperationalError(
+                    "cannot rollback - no transaction is active"
+                )
+            return None
+
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+        with kb.write_txn(RollbackFailingConnection()):
+            raise sqlite3.OperationalError("disk I/O error")
+
+
 def test_init_creates_expected_tables(kanban_home):
     with kb.connect() as conn:
         rows = conn.execute(
@@ -67,6 +89,38 @@ def test_connect_rejects_tls_record_in_sqlite_header(tmp_path, monkeypatch):
     assert "file is not a database" in msg
     assert "TLS record header detected at byte offset 5" in msg
     assert "53 51 4c 69 74 17 03 03 00 13" in msg
+
+
+def test_sqlite_integrity_guard_rejects_quick_check_rows():
+    """Structural corruption must fail closed before later write attempts."""
+
+    class QuickCheckRows:
+        def fetchall(self):
+            return [("wrong # of entries in index idx_events_task",)]
+
+    class QuickCheckFailingConnection:
+        def execute(self, sql):
+            assert sql == "PRAGMA quick_check"
+            return QuickCheckRows()
+
+    with pytest.raises(sqlite3.DatabaseError, match="quick_check failed"):
+        kb._validate_sqlite_integrity(
+            QuickCheckFailingConnection(), Path("/tmp/kanban.db")
+        )
+
+
+def test_sqlite_integrity_guard_preserves_quick_check_exception():
+    """Malformed btrees that make quick_check raise get a clear corrupt-DB error."""
+
+    class QuickCheckRaisingConnection:
+        def execute(self, sql):
+            assert sql == "PRAGMA quick_check"
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+    with pytest.raises(sqlite3.DatabaseError, match="database disk image is malformed"):
+        kb._validate_sqlite_integrity(
+            QuickCheckRaisingConnection(), Path("/tmp/kanban.db")
+        )
 
 
 def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
@@ -1833,13 +1887,14 @@ class TestSharedBoardPaths:
         assert kb.kanban_db_path() == default_home / "kanban.db"
         assert kb.workspaces_root() == default_home / "kanban" / "workspaces"
 
-    def test_dispatcher_spawn_injects_kanban_db_and_workspaces_root(
+    def test_dispatcher_spawn_injects_kanban_home_and_workspaces_root(
         self, tmp_path, monkeypatch
     ):
-        # The dispatcher's `_default_spawn` must inject HERMES_KANBAN_DB
+        # The dispatcher's `_default_spawn` must inject HERMES_KANBAN_HOME
         # and HERMES_KANBAN_WORKSPACES_ROOT into the worker env so the
         # worker converges on the dispatcher's paths even when the
-        # `-p <profile>` flag rewrites HERMES_HOME.
+        # `-p <profile>` flag rewrites HERMES_HOME, without exposing the raw
+        # DB path to worker-controlled shell/Python code.
         default_home = tmp_path / ".hermes"
         default_home.mkdir()
         self._set_home(monkeypatch, tmp_path, default_home)
@@ -1875,7 +1930,8 @@ class TestSharedBoardPaths:
         kb._default_spawn(task, str(tmp_path / "ws"))
 
         env = captured["env"]
-        assert env["HERMES_KANBAN_DB"] == str(default_home / "kanban.db")
+        assert "HERMES_KANBAN_DB" not in env
+        assert env["HERMES_KANBAN_HOME"] == str(default_home)
         assert env["HERMES_KANBAN_WORKSPACES_ROOT"] == str(
             default_home / "kanban" / "workspaces"
         )

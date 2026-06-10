@@ -1142,8 +1142,18 @@ def test_kanban_guidance_in_worker_prompt(monkeypatch, tmp_path):
     assert "kanban_complete" in prompt
     assert "kanban_block" in prompt
     assert "kanban_create" in prompt
+    # Observable-work contract
+    assert "do not finish with only a status sentence" in prompt
+    assert "kanban_comment" in prompt
+    assert "expected deliverable" in prompt
+    assert "artifacts" in prompt
     # Anti-shell guidance
     assert "Do not shell out" in prompt or "tools — they work" in prompt
+    # Raw DB access must stay fail-closed. This prevents model workers from
+    # self-repairing board storage with ad-hoc SQLite writes after tool errors.
+    assert "Do not inspect, open, or mutate `kanban.db`" in prompt
+    assert "$HERMES_KANBAN_DB" in prompt
+    assert "never self-repair the board" in prompt
 
 
 def test_kanban_guidance_prompt_size_bounded(monkeypatch, tmp_path):

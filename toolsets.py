@@ -144,6 +144,26 @@ TOOLSETS = {
         "includes": []
     },
 
+    "team_mission_planning": {
+        "description": "Internal Hermes Team Mission graph planning tools for Leader planning runs",
+        "tools": [
+            "team_mission_node_create",
+            "team_mission_edge_create",
+            "team_mission_plan_complete",
+        ],
+        "includes": []
+    },
+
+    "team_mission_leader": {
+        "description": "Internal Hermes Team Mission Leader conversation routing tools",
+        "tools": [
+            "team_mission_status",
+            "team_mission_team_profile",
+            "team_mission_start_task",
+        ],
+        "includes": []
+    },
+
     "video_gen": {
         "description": (
             "Video generation tools. Single ``video_generate`` tool covers "
@@ -567,7 +587,7 @@ TOOLSETS = {
     }
 }
 
-INTERNAL_TOOLSETS = {"doxie"}
+INTERNAL_TOOLSETS = {"doxie", "team_mission_planning"}
 
 
 def is_internal_toolset(name: str) -> bool:

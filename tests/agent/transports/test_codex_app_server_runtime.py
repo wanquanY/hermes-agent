@@ -296,3 +296,48 @@ class TestSpawnEnvIsolation:
         )
         assert "sandbox_workspace_write.network_access=false" in cmd
         assert all("danger" not in part for part in cmd)
+
+    def test_kanban_worker_writable_root_does_not_require_raw_db_path(self, monkeypatch):
+        """Normal dispatcher workers derive the sandbox root from board pins."""
+        import subprocess
+        from agent.transports import codex_app_server as cas
+
+        captured = {}
+
+        class FakePopen:
+            def __init__(self, cmd, *args, **kwargs):
+                captured["cmd"] = list(cmd)
+                captured["env"] = kwargs.get("env", {}).copy()
+                self.stdin = None
+                self.stdout = None
+                self.stderr = None
+                self.pid = 1
+                self.returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(subprocess, "Popen", FakePopen)
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_smoke")
+        monkeypatch.setenv("HERMES_KANBAN_HOME", "/users/alice/.hermes")
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "smoke")
+
+        client = cas.CodexAppServerClient(codex_bin="codex")
+        client._closed = True
+
+        cmd = captured["cmd"]
+        assert (
+            'sandbox_workspace_write.writable_roots=["/users/alice/.hermes/kanban/boards/smoke"]'
+            in cmd
+        )
+        assert "HERMES_KANBAN_DB" not in captured["env"]

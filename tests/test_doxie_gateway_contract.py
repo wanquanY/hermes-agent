@@ -13,7 +13,7 @@ def test_doxie_gateway_capabilities_reports_complete_gateway_abi():
     manifest = gateway_capabilities()
 
     assert manifest["ok"] is True
-    assert manifest["protocolVersion"] == "2026-05-23"
+    assert manifest["protocolVersion"] == "2026-06-10"
     for method in REQUIRED_METHODS:
         assert method in manifest["methods"]
     assert "message.delta" in manifest["events"]
@@ -22,6 +22,10 @@ def test_doxie_gateway_capabilities_reports_complete_gateway_abi():
     assert "state:session_search" in manifest["stateFeatures"]
     assert "state:run_registry" in manifest["stateFeatures"]
     assert "state:run_event_log" in manifest["stateFeatures"]
+    assert "state:team_mission_graph" in manifest["stateFeatures"]
+    assert "state:team_mission_conversation" in manifest["stateFeatures"]
+    assert "state:team_mission_memory" in manifest["stateFeatures"]
+    assert "state:team_capability_snapshot" in manifest["stateFeatures"]
     assert "state:runtime_scope_key" in manifest["stateFeatures"]
     assert "state:transient_session" in manifest["stateFeatures"]
     assert manifest["missingCapabilities"] == []
@@ -44,12 +48,43 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     importlib.import_module("tui_gateway.methods.run")
     response = server._methods["gateway.capabilities"](1, {})
 
-    assert response["result"]["protocolVersion"] == "2026-05-23"
+    assert response["result"]["protocolVersion"] == "2026-06-10"
     assert "run.submit" in response["result"]["methods"]
     assert "run.events" in response["result"]["methods"]
     assert "events.unsubscribe" in response["result"]["methods"]
+    assert "team_mission.create" in response["result"]["methods"]
+    assert "team_mission.graph" in response["result"]["methods"]
+    assert "team_mission.graph.reduce" in response["result"]["methods"]
+    assert "team_mission.events" in response["result"]["methods"]
+    assert "team_mission.subscribe" in response["result"]["methods"]
+    assert "team_capability.snapshot.get" in response["result"]["methods"]
+    assert "team_capability.snapshot.refresh" in response["result"]["methods"]
+    assert "team_capability.snapshot.bind" in response["result"]["methods"]
+    assert "team_mission.team_profile.get" in response["result"]["methods"]
+    assert "team_mission.conversation.ensure" in response["result"]["methods"]
+    assert "team_mission.conversation.resolve" in response["result"]["methods"]
+    assert "team_mission.conversation.list" in response["result"]["methods"]
+    assert "team_mission.conversation.rename" in response["result"]["methods"]
+    assert "team_mission.conversation.delete" in response["result"]["methods"]
+    assert "team_mission.message.submit" in response["result"]["methods"]
+    assert "team_mission.cancel" in response["result"]["methods"]
+    assert "team_mission.node.create" in response["result"]["methods"]
+    assert "team_mission.edge.create" in response["result"]["methods"]
+    assert "team_mission.node.update" in response["result"]["methods"]
+    assert "team_mission.node.bind_run" in response["result"]["methods"]
+    assert "team_mission.node.start" in response["result"]["methods"]
+    assert "team_mission.plan.complete" in response["result"]["methods"]
+    assert "team_mission.schedule.ready" in response["result"]["methods"]
+    assert "team_mission.memory.compile" in response["result"]["methods"]
+    assert "team_mission.memory.pack" in response["result"]["methods"]
+    assert "team_mission.memory.slice" in response["result"]["methods"]
+    assert "team_mission.memory.list" in response["result"]["methods"]
+    assert "team_mission.memory.update" in response["result"]["methods"]
+    assert "team_mission.memory.delete" in response["result"]["methods"]
+    assert "team_mission.memory.events" in response["result"]["methods"]
     assert "session.usage" in response["result"]["methods"]
     assert "session.status" in response["result"]["methods"]
+    assert "session.message_metadata.merge" in response["result"]["methods"]
     assert "prompt.submit" in response["result"]["methods"]
     assert "model.set" in response["result"]["methods"]
     assert "model.options" in response["result"]["methods"]
@@ -62,7 +97,38 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "secret.respond" in response["result"]["methods"]
     assert "clarify.respond" in response["result"]["methods"]
     assert "run.events" in server._methods
+    assert "session.message_metadata.merge" in server._methods
     assert "events.unsubscribe" in server._methods
+    assert "team_mission.create" in server._methods
+    assert "team_mission.graph" in server._methods
+    assert "team_mission.graph.reduce" in server._methods
+    assert "team_mission.events" in server._methods
+    assert "team_mission.subscribe" in server._methods
+    assert "team_capability.snapshot.get" in server._methods
+    assert "team_capability.snapshot.refresh" in server._methods
+    assert "team_capability.snapshot.bind" in server._methods
+    assert "team_mission.team_profile.get" in server._methods
+    assert "team_mission.conversation.ensure" in server._methods
+    assert "team_mission.conversation.resolve" in server._methods
+    assert "team_mission.conversation.list" in server._methods
+    assert "team_mission.conversation.rename" in server._methods
+    assert "team_mission.conversation.delete" in server._methods
+    assert "team_mission.message.submit" in server._methods
+    assert "team_mission.cancel" in server._methods
+    assert "team_mission.node.create" in server._methods
+    assert "team_mission.edge.create" in server._methods
+    assert "team_mission.node.update" in server._methods
+    assert "team_mission.node.bind_run" in server._methods
+    assert "team_mission.node.start" in server._methods
+    assert "team_mission.plan.complete" in server._methods
+    assert "team_mission.schedule.ready" in server._methods
+    assert "team_mission.memory.compile" in server._methods
+    assert "team_mission.memory.pack" in server._methods
+    assert "team_mission.memory.slice" in server._methods
+    assert "team_mission.memory.list" in server._methods
+    assert "team_mission.memory.update" in server._methods
+    assert "team_mission.memory.delete" in server._methods
+    assert "team_mission.memory.events" in server._methods
     assert "session.usage" in server._methods
     assert "session.status" in server._methods
     assert "session.branch" in server._methods
@@ -89,6 +155,36 @@ def test_extracted_gateway_methods_own_registered_handlers():
     assert server._methods["model.options"].__module__ == "tui_gateway.methods.model"
     assert server._methods["run.events"].__module__ == "tui_gateway.methods.run"
     assert server._methods["events.unsubscribe"].__module__ == "tui_gateway.methods.run"
+    assert server._methods["team_mission.create"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.graph"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.graph.reduce"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.events"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.subscribe"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_capability.snapshot.get"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_capability.snapshot.refresh"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_capability.snapshot.bind"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.team_profile.get"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.conversation.ensure"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.conversation.resolve"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.conversation.list"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.conversation.rename"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.conversation.delete"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.message.submit"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.cancel"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.node.create"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.edge.create"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.node.update"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.node.bind_run"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.node.start"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.plan.complete"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.schedule.ready"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.memory.compile"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.memory.pack"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.memory.slice"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.memory.list"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.memory.update"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.memory.delete"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.memory.events"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["session.resume"].__module__ == "tui_gateway.methods.session"
     assert server._methods["session.branch"].__module__ == "tui_gateway.methods.session_branch"
     assert server._methods["config.show"].__module__ == "tui_gateway.methods.integrations"
@@ -98,6 +194,49 @@ def test_extracted_gateway_methods_own_registered_handlers():
         for name, handler in server._methods.items()
         if not name.startswith("_")
     }.isdisjoint({"tui_gateway.server"})
+
+
+def test_session_message_metadata_merge_json_rpc_persists_transcript_metadata(tmp_path, monkeypatch):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session(session_id="stored-1", source="tui")
+        message_id = db.append_message(
+            "stored-1",
+            role="assistant",
+            content="已创建分身草案",
+            metadata={"run_id": "run-1"},
+        )
+        monkeypatch.setattr(session_methods, "_get_db", lambda: db)
+
+        response = server._methods["session.message_metadata.merge"](
+            101,
+            {
+                "session_id": "stored-1",
+                "message_id": str(message_id),
+                "role": "assistant",
+                "metadata": {
+                    "agentProfileDrafts": [
+                        {"draftId": "draft-1", "name": "产品经理分身"},
+                    ],
+                },
+            },
+        )
+
+        assert response["result"]["message"]["metadata"]["agentProfileDrafts"] == [
+            {"draftId": "draft-1", "name": "产品经理分身"},
+        ]
+        messages = db.get_messages_as_conversation("stored-1", include_storage_metadata=True)
+        assert messages[0]["metadata"]["agentProfileDrafts"] == [
+            {"draftId": "draft-1", "name": "产品经理分身"},
+        ]
+    finally:
+        db.close()
 
 
 def test_model_set_gateway_method_uses_stable_params(monkeypatch):

@@ -1018,31 +1018,58 @@ def _(rid, params: dict) -> dict:
 
 @method("session.title")
 def _(rid, params: dict) -> dict:
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5007)
-    key = session["session_key"]
+    requested = str(
+        params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or params.get("session_id")
+        or ""
+    ).strip()
+    if not requested:
+        return _err(rid, 4006, "session_id required")
+
+    _runtime_sid, session = _resolve_runtime_session(requested)
+    key = str((session or {}).get("session_key") or requested).strip()
+    title = (params.get("title", "") or "").strip() if "title" in params else None
+    if title is not None and not title:
+        return _err(rid, 4021, "title required")
+
+    if not session:
+        try:
+            stored_row = db.get_session(key)
+            if not stored_row:
+                by_title = db.get_session_by_title(key)
+                if by_title:
+                    key = str(by_title.get("id") or key)
+                    stored_row = by_title
+            if not stored_row:
+                return _err(rid, 4007, "session not found")
+        except Exception as e:
+            return _err(rid, 5007, str(e))
+
     if "title" not in params:
-        fallback = session.get("pending_title") or ""
+        fallback = (session or {}).get("pending_title") or ""
         try:
             resolved_title = db.get_session_title(key) or ""
             if fallback:
                 if db.set_session_title(key, fallback):
-                    session["pending_title"] = None
+                    if session:
+                        session["pending_title"] = None
                     resolved_title = fallback
                 else:
                     existing_row = db.get_session(key)
                     existing_title = ((existing_row or {}).get("title") or "").strip()
                     if existing_title == fallback:
-                        session["pending_title"] = None
+                        if session:
+                            session["pending_title"] = None
                         resolved_title = fallback
                     elif not resolved_title:
                         resolved_title = fallback
             elif resolved_title:
-                session["pending_title"] = None
+                if session:
+                    session["pending_title"] = None
         except Exception:
             resolved_title = fallback
         return _ok(
@@ -1052,18 +1079,17 @@ def _(rid, params: dict) -> dict:
                 "session_key": key,
             },
         )
-    title = (params.get("title", "") or "").strip()
-    if not title:
-        return _err(rid, 4021, "title required")
     try:
         if db.set_session_title(key, title):
-            session["pending_title"] = None
+            if session:
+                session["pending_title"] = None
             return _ok(rid, {"pending": False, "title": title})
         # rowcount == 0 can mean "same value" as well as "missing row".
         # Queue only when the session row truly does not exist yet.
         existing_row = db.get_session(key)
         if existing_row:
-            session["pending_title"] = None
+            if session:
+                session["pending_title"] = None
             return _ok(
                 rid,
                 {
@@ -1071,6 +1097,8 @@ def _(rid, params: dict) -> dict:
                     "title": (existing_row.get("title") or title),
                 },
             )
+        if not session:
+            return _err(rid, 4007, "session not found")
         session["pending_title"] = title
         return _ok(rid, {"pending": True, "title": title})
     except ValueError as e:
@@ -1277,6 +1305,51 @@ def _(rid, params: dict) -> dict:
             "runEvents": run_events,
             "pageInfo": _message_page_info(page.get("pageInfo")),
             "branchInfo": db.get_session_branch_info(target) if hasattr(db, "get_session_branch_info") else None,
+        },
+    )
+
+
+@method("session.message_metadata.merge")
+def _(rid, params: dict) -> dict:
+    target = str(params.get("session_id") or "").strip()
+    if not target:
+        return _err(rid, 4006, "session_id required")
+    metadata = params.get("metadata")
+    if not isinstance(metadata, dict) or not metadata:
+        return _err(rid, 4006, "metadata object required")
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5000)
+    found = db.get_session(target)
+    if not found:
+        found = db.get_session_by_title(target)
+        if found:
+            target = found["id"]
+        else:
+            return _err(rid, 4007, "session not found")
+    merge_message_metadata = getattr(db, "merge_message_metadata", None)
+    if not callable(merge_message_metadata):
+        return _err(rid, 5000, "message metadata merge is not available")
+    try:
+        message = merge_message_metadata(
+            target,
+            metadata,
+            message_id=params.get("message_id") or params.get("messageId"),
+            role=params.get("role"),
+            run_id=params.get("run_id") or params.get("runId"),
+            turn_id=params.get("turn_id") or params.get("turnId"),
+            client_message_id=params.get("client_message_id") or params.get("clientMessageId"),
+        )
+    except Exception as exc:
+        return _err(rid, 5000, f"message metadata merge failed: {exc}")
+    if not message:
+        return _err(rid, 4007, "message not found")
+    messages = sanitize_transcript_messages(_history_to_messages([message]))
+    return _ok(
+        rid,
+        {
+            "session_id": target,
+            "message": messages[0] if messages else message,
         },
     )
 

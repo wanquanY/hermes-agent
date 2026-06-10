@@ -69,6 +69,21 @@ codex/selective-upstream-client-sync-20260527
 
 仍未吸收：上游 React Desktop、Bootstrap installer、完整 Dashboard OAuth / remote gateway auth、Channels UI、Skills 全量 catalog 和 progressive tool disclosure。这些需要另行按 Doxie profile/runtime_scope、云端模型代理和技能市场生命周期设计。
 
+## 现状更新（2026-06-10，Team Mission runtime）
+
+本地工作区当前 staged 代码把 Doxie Team Mission 从产品层 Kanban projection 推进为 Hermes 原生运行时。详细设计和实现快照见 `docs/team-mission-runtime-architecture.zh-CN.md`。
+
+当前新增能力：
+
+- Hermes state.db 增加 Team Mission 原生状态：conversation、mission、node、edge、run binding、artifact、team memory、capability snapshot。`hermes_state.py` schema version 提升到 `16`，并通过 `hermes_state_team_missions.py` / `hermes_state_team_capabilities.py` 拆分职责。
+- Doxie gateway contract 更新到 `2026-06-10`，新增 `team_mission.*`、`team_capability.snapshot.*` 和 `session.message_metadata.merge` 等 required methods。
+- TUI Gateway 新增 `tui_gateway/methods/team_mission.py`，覆盖 conversation ensure/resolve/list/rename/delete、message submit、graph/node/edge mutation、node run binding/start、schedule ready、memory pack/slice/list/update/delete/events、capability snapshot get/refresh/bind。
+- Team Mission runtime events 继续复用普通 `runs/run_events/messages`，通过 `team_mission_run_bindings` 聚合到 mission/node；`run_control` 支持 mission subscription，并对已合并存储的 stream delta 做实时差量投递。
+- 新增内部 toolsets：`team_mission_leader` 给稳定 Leader conversation 使用，`team_mission_planning` 给绑定到 planning run 的 Leader planner 使用；普通 worker 和普通聊天不会获得 graph mutation tools。
+- Kanban 仍作为 Hermes 内部调度器存在，但新增 `kanban_runtime_events.py` 和 scheduler bridge 后，Doxie 不需要读取 Kanban SQLite 作为 Team Mission 事实源。
+
+这不是对上游 React Desktop / Dashboard / Kanban UI 的吸收。它是 Doxie 客户端 contract 的本地原生化：Hermes 是 Team Mission graph/history/stream 的事实源，Doxie 只消费 Hermes API 和 event stream。
+
 ## 逐项核对结果（2026-05-27）
 
 本节记录按本文 P0/P1 清单逐项核对当前工作区后的真实状态。后续再同步上游时，优先看这里，而不是只看提交是否 cherry-pick 成功。
@@ -156,6 +171,7 @@ codex/selective-upstream-client-sync-20260527
 | 子 agent 精确工具继承 | `tools/delegate_tool_access.py`, `model_tools.py`, `agent/agent_init.py` | 否 |
 | 子 agent run snapshot / detail API | `tui_gateway/services/subagent_snapshots.py`, `tui_gateway/methods/run.py`, `hermes_state_runs.py` | 否 |
 | Doxie sidecar 父进程生命周期 | `tui_gateway/doxie_sidecar.py`, `tui_gateway/services/runtime_proxy.py` | 否 |
+| Team Mission 原生运行时 | `tui_gateway/methods/team_mission.py`, `hermes_state_team_missions.py`, `hermes_state_team_capabilities.py`, `tools/team_mission_*_tools.py` | 否 |
 | runtime-scoped control RPC | approval / cron / skills / tools proxy to runtime worker | 否 |
 | Doxie session sidebar filtering | `tui_gateway/methods/session.py` 隐藏 `tool` / `cron` 内部 runtime sessions | 否 |
 

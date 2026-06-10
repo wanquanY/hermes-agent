@@ -27,6 +27,8 @@ from agent.memory_manager import sanitize_context
 from hermes_constants import get_hermes_home
 from hermes_state_branch import SessionDBBranchMixin
 from hermes_state_runs import SessionDBRunMixin
+from hermes_state_team_capabilities import SessionDBTeamCapabilityMixin
+from hermes_state_team_missions import SessionDBTeamMissionMixin
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -35,7 +37,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 16
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -322,26 +324,222 @@ CREATE TABLE IF NOT EXISTS run_event_archives (
     metadata_json TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
-CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
-CREATE INDEX IF NOT EXISTS idx_session_lineage_parent ON session_lineage(parent_session_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_session_lineage_root ON session_lineage(root_session_id, branch_depth, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_session_lineage_branch_point ON session_lineage(branch_from_message_row_id);
-CREATE INDEX IF NOT EXISTS idx_runs_session_status ON runs(session_id, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_runs_scope_status ON runs(runtime_scope_key, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_run_events_session_seq ON run_events(session_id, seq);
-CREATE INDEX IF NOT EXISTS idx_run_events_scope_seq ON run_events(runtime_scope_key, session_id, seq);
-CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, id);
-CREATE INDEX IF NOT EXISTS idx_run_event_archives_session ON run_event_archives(session_id, archived_at DESC);
+CREATE TABLE IF NOT EXISTS team_mission_conversations (
+    conversation_id TEXT PRIMARY KEY,
+    team_id TEXT,
+    stable_session_id TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    objective TEXT,
+    workspace_id TEXT,
+    workspace_path TEXT,
+    status TEXT NOT NULL,
+    active_mission_id TEXT,
+    created_by_user_id TEXT,
+    metadata_json TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_missions (
+    mission_id TEXT PRIMARY KEY,
+    conversation_id TEXT,
+    team_id TEXT,
+    title TEXT NOT NULL,
+    objective TEXT,
+    workspace_id TEXT,
+    workspace_path TEXT,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    leader_session_id TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    completed_at REAL,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS team_mission_nodes (
+    node_id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    objective TEXT,
+    status TEXT NOT NULL,
+    assignee_profile_id TEXT,
+    assignee_profile_version_id TEXT,
+    runtime_scope_key TEXT,
+    output_contract_json TEXT,
+    metadata_json TEXT,
+    position_x REAL NOT NULL DEFAULT 0,
+    position_y REAL NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_mission_edges (
+    edge_id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
+    from_node_id TEXT NOT NULL,
+    to_node_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    metadata_json TEXT,
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_mission_run_bindings (
+    run_id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
+    node_id TEXT,
+    session_id TEXT NOT NULL,
+    runtime_session_id TEXT,
+    runtime_scope_key TEXT,
+    role TEXT NOT NULL,
+    metadata_json TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_mission_artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
+    node_id TEXT,
+    run_id TEXT,
+    tool_call_id TEXT,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    uri TEXT NOT NULL,
+    mime_type TEXT,
+    metadata_json TEXT,
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_mission_memory_items (
+    id TEXT PRIMARY KEY,
+    team_id TEXT NOT NULL,
+    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
+    conversation_session_id TEXT NOT NULL,
+    task_id TEXT,
+    scope TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    content TEXT NOT NULL,
+    structured_payload_json TEXT,
+    source_node_ids_json TEXT,
+    source_run_ids_json TEXT,
+    artifact_refs_json TEXT,
+    workspace_refs_json TEXT,
+    confidence REAL NOT NULL,
+    visibility TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    invalidated_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS team_mission_memory_edges (
+    id TEXT PRIMARY KEY,
+    from_memory_id TEXT NOT NULL,
+    to_memory_id TEXT,
+    relation TEXT NOT NULL,
+    metadata_json TEXT,
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_capability_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    team_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    source_packet_digest TEXT NOT NULL,
+    team_profile_json TEXT NOT NULL,
+    member_profiles_json TEXT NOT NULL,
+    capability_axes_json TEXT NOT NULL,
+    assignment_policy_json TEXT NOT NULL,
+    evidence_refs_json TEXT NOT NULL,
+    stale_reason TEXT,
+    generated_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(team_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS team_capability_snapshot_bindings (
+    binding_id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
+    conversation_id TEXT,
+    snapshot_id TEXT NOT NULL REFERENCES team_capability_snapshots(snapshot_id) ON DELETE CASCADE,
+    snapshot_version INTEGER NOT NULL,
+    source_digest TEXT NOT NULL,
+    pinned_at REAL NOT NULL,
+    UNIQUE(mission_id)
+);
+
 """
 
-# Indexes that reference reconciler-added columns must be created after
-# _reconcile_columns() runs, otherwise legacy DBs fail while parsing SCHEMA_SQL.
+# Indexes must be created after _reconcile_columns() runs. SQLite parses index
+# definitions immediately; if an existing table is missing an indexed column,
+# CREATE INDEX fails before the reconciler can add that column.
 DEFERRED_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_sessions_source
+    ON sessions(source);
+CREATE INDEX IF NOT EXISTS idx_sessions_parent
+    ON sessions(parent_session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_started
+    ON sessions(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_session
+    ON messages(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_session_active
     ON messages(session_id, active, timestamp);
+CREATE INDEX IF NOT EXISTS idx_session_lineage_parent
+    ON session_lineage(parent_session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_lineage_root
+    ON session_lineage(root_session_id, branch_depth, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_lineage_branch_point
+    ON session_lineage(branch_from_message_row_id);
+CREATE INDEX IF NOT EXISTS idx_runs_session_status
+    ON runs(session_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_scope_status
+    ON runs(runtime_scope_key, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_events_session_seq
+    ON run_events(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_events_scope_seq
+    ON run_events(runtime_scope_key, session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_events_run
+    ON run_events(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_run_event_archives_session
+    ON run_event_archives(session_id, archived_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_conversations_team
+    ON team_mission_conversations(team_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_conversations_workspace
+    ON team_mission_conversations(workspace_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_missions_conversation
+    ON team_missions(conversation_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_missions_status_updated
+    ON team_missions(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_nodes_mission
+    ON team_mission_nodes(mission_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_edges_mission
+    ON team_mission_edges(mission_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_run_bindings_mission
+    ON team_mission_run_bindings(mission_id, node_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_run_bindings_session
+    ON team_mission_run_bindings(session_id, run_id);
+CREATE INDEX IF NOT EXISTS idx_team_mission_artifacts_mission
+    ON team_mission_artifacts(mission_id, node_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_mission
+    ON team_mission_memory_items(mission_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_conversation
+    ON team_mission_memory_items(conversation_session_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_team
+    ON team_mission_memory_items(team_id, scope, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_memory_edges_from
+    ON team_mission_memory_edges(from_memory_id, relation, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_memory_edges_to
+    ON team_mission_memory_edges(to_memory_id, relation, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_capability_snapshots_team
+    ON team_capability_snapshots(team_id, version DESC);
+CREATE INDEX IF NOT EXISTS idx_team_capability_snapshot_bindings_mission
+    ON team_capability_snapshot_bindings(mission_id);
+CREATE INDEX IF NOT EXISTS idx_team_capability_snapshot_bindings_conversation
+    ON team_capability_snapshot_bindings(conversation_id);
 """
 
 FTS_SQL = """
@@ -400,7 +598,7 @@ END;
 """
 
 
-class SessionDB(SessionDBRunMixin, SessionDBBranchMixin):
+class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBRunMixin, SessionDBBranchMixin):
     """
     SQLite-backed session storage with FTS5 search.
 
@@ -1869,6 +2067,118 @@ class SessionDB(SessionDBRunMixin, SessionDBBranchMixin):
                     msg["metadata"] = None
             result.append(msg)
         return result
+
+    @staticmethod
+    def _merge_message_metadata(current: Any, patch: Dict[str, Any]) -> Dict[str, Any]:
+        base = dict(current) if isinstance(current, dict) else {}
+        for key, value in patch.items():
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                base[key] = SessionDB._merge_message_metadata(base[key], value)
+            else:
+                base[key] = value
+        return base
+
+    @staticmethod
+    def _metadata_matches_turn(metadata: Any, *, run_id: str, turn_id: str, client_message_id: str) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        return any(
+            expected and str(metadata.get(key) or "").strip() == expected
+            for key, expected in (
+                ("run_id", run_id),
+                ("turn_id", turn_id),
+                ("client_message_id", client_message_id),
+            )
+        )
+
+    def merge_message_metadata(
+        self,
+        session_id: str,
+        metadata: Dict[str, Any],
+        *,
+        message_id: str | int | None = None,
+        role: str | None = None,
+        run_id: str | None = None,
+        turn_id: str | None = None,
+        client_message_id: str | None = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Merge metadata into a stored message and return the updated message."""
+        if not isinstance(metadata, dict) or not metadata:
+            return None
+        target_role = str(role or "").strip()
+        target_run_id = str(run_id or "").strip()
+        target_turn_id = str(turn_id or "").strip()
+        target_client_message_id = str(client_message_id or "").strip()
+        target_message_id = str(message_id or "").strip()
+
+        def _row_metadata(row) -> Dict[str, Any]:
+            raw = row["metadata_json"]
+            if not raw:
+                return {}
+            try:
+                value = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Failed to deserialize message metadata for merge")
+                return {}
+            return value if isinstance(value, dict) else {}
+
+        def _select_target_row(conn):
+            if target_message_id:
+                try:
+                    numeric_message_id = int(target_message_id)
+                except (TypeError, ValueError):
+                    numeric_message_id = None
+                if numeric_message_id is not None:
+                    row = conn.execute(
+                        "SELECT * FROM messages WHERE id = ? AND session_id = ?",
+                        (numeric_message_id, session_id),
+                    ).fetchone()
+                    if row is not None:
+                        return row
+
+            if not (target_run_id or target_turn_id or target_client_message_id):
+                return None
+
+            active_clause = "AND role = ?" if target_role else ""
+            params: list[Any] = [session_id]
+            if target_role:
+                params.append(target_role)
+            rows = conn.execute(
+                "SELECT * FROM messages WHERE session_id = ? "
+                f"{active_clause} "
+                "AND metadata_json IS NOT NULL ORDER BY id DESC",
+                tuple(params),
+            ).fetchall()
+            for row in rows:
+                if self._metadata_matches_turn(
+                    _row_metadata(row),
+                    run_id=target_run_id,
+                    turn_id=target_turn_id,
+                    client_message_id=target_client_message_id,
+                ):
+                    return row
+            return None
+
+        def _do(conn):
+            row = _select_target_row(conn)
+            if row is None:
+                return None
+            next_metadata = self._merge_message_metadata(_row_metadata(row), metadata)
+            conn.execute(
+                "UPDATE messages SET metadata_json = ? WHERE id = ?",
+                (
+                    json.dumps(next_metadata, ensure_ascii=False),
+                    row["id"],
+                ),
+            )
+            updated = dict(row)
+            updated["metadata_json"] = json.dumps(next_metadata, ensure_ascii=False)
+            return self._message_row_as_conversation(
+                updated,
+                include_storage_metadata=True,
+            )
+
+        return self._execute_write(_do)
 
     def get_messages_around(
         self,
