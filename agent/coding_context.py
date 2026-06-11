@@ -40,11 +40,17 @@ Activation (config ``agent.coding_context``):
 
   * ``auto`` (default) — posture (brief + snapshot) on an interactive coding
     surface sitting in a code workspace (git repo or recognised project root).
+<<<<<<< HEAD
     Prompt-only; toolsets and the skill index untouched.
   * ``focus`` — like ``auto``, but additionally collapses the toolset to the
     ``coding`` set + enabled MCP servers and demotes non-coding skill
     categories to names-only in the prompt's skill index (no skill is ever
     hidden). Explicit opt-in for a lean schema.
+=======
+    Prompt-only; toolsets untouched.
+  * ``focus`` — like ``auto``, but additionally collapses the toolset to the
+    ``coding`` set + enabled MCP servers. Explicit opt-in for a lean schema.
+>>>>>>> 3e74f75e4 (feat(agent): coding-context posture across CLI/TUI/desktop/ACP (#43316))
   * ``on`` — force the posture anywhere (incl. non-workspaces). Prompt-only.
   * ``off`` — disable entirely.
 """
@@ -117,8 +123,14 @@ _EDIT_FORMAT_GUIDANCE: dict[str, tuple[tuple[str, ...], str]] = {
     "patch": (
         ("gpt", "codex"),
         "- Edit format: author new files with `write_file`; for edits to "
+<<<<<<< HEAD
         "existing code use `patch` with `mode='patch'` (V4A diff) — including "
         "single-file edits. It's the edit format you handle most reliably.",
+=======
+        "existing code prefer `patch` with `mode='patch'` (V4A multi-file diff) "
+        "for structured or multi-file changes — it's the diff format you handle "
+        "most reliably. Use `mode='replace'` for a single small swap.",
+>>>>>>> 3e74f75e4 (feat(agent): coding-context posture across CLI/TUI/desktop/ACP (#43316))
     ),
     "replace": (
         ("claude", "sonnet", "opus", "haiku",
@@ -220,6 +232,7 @@ class ContextProfile:
     ``model_hint``   — routing preference key for smart model routing
                        (extension seam; not yet consumed by the router).
     ``memory_policy``— memory namespace/weighting hint (extension seam).
+<<<<<<< HEAD
     ``compact_skill_categories`` — skill categories DEMOTED to names-only in
                        the system-prompt skill index under the opt-in ``focus``
                        mode. Never hidden: every skill name stays visible
@@ -227,6 +240,13 @@ class ContextProfile:
                        descriptions are dropped to cut index noise. Deny-list
                        semantics so unknown/custom categories keep full
                        entries.
+=======
+    ``hidden_skill_categories`` — skill categories pruned from the system-prompt
+                       skill index while this posture is active. Discovery-only:
+                       nothing is disabled — ``skills_list`` still returns the
+                       full catalog and ``skill_view`` loads anything. Deny-list
+                       semantics so unknown/custom categories stay visible.
+>>>>>>> 3e74f75e4 (feat(agent): coding-context posture across CLI/TUI/desktop/ACP (#43316))
     """
 
     name: str
@@ -234,6 +254,7 @@ class ContextProfile:
     guidance: str = ""
     model_hint: Optional[str] = None
     memory_policy: str = "default"
+<<<<<<< HEAD
     compact_skill_categories: tuple[str, ...] = ()
 
 
@@ -242,6 +263,16 @@ class ContextProfile:
 # (deny-list — anything not listed here, incl. custom user categories, keeps
 # full entries). Coding-adjacent categories (devops, github, mcp,
 # data-science, diagramming, research, security, …) are intentionally absent.
+=======
+    hidden_skill_categories: tuple[str, ...] = ()
+
+
+# Skill categories that are clearly not part of a coding workflow. Hidden from
+# the prompt's skill index in the coding posture (deny-list — anything not
+# listed here, incl. custom user categories, stays visible). Coding-adjacent
+# categories (devops, github, mcp, data-science, diagramming, research,
+# security, …) are intentionally absent.
+>>>>>>> 3e74f75e4 (feat(agent): coding-context posture across CLI/TUI/desktop/ACP (#43316))
 _NON_CODING_SKILL_CATEGORIES = (
     "apple", "communication", "cooking", "creative", "email", "finance",
     "gaming", "gifs", "health", "media", "music", "note-taking",
@@ -257,7 +288,11 @@ CODING_PROFILE = ContextProfile(
     guidance=CODING_AGENT_GUIDANCE,
     model_hint="coding",
     memory_policy="project",
+<<<<<<< HEAD
     compact_skill_categories=_NON_CODING_SKILL_CATEGORIES,
+=======
+    hidden_skill_categories=_NON_CODING_SKILL_CATEGORIES,
+>>>>>>> 3e74f75e4 (feat(agent): coding-context posture across CLI/TUI/desktop/ACP (#43316))
 )
 
 _PROFILES: dict[str, ContextProfile] = {
@@ -442,6 +477,7 @@ class RuntimeMode:
             blocks.append(workspace)
         return blocks
 
+<<<<<<< HEAD
     def compact_skill_categories(self) -> frozenset[str]:
         """Skill categories to demote to names-only in the prompt's skill index.
 
@@ -463,6 +499,11 @@ class RuntimeMode:
         if not self.is_coding or self.config_mode != "focus":
             return frozenset()
         return frozenset(self.profile.compact_skill_categories)
+=======
+    def hidden_skill_categories(self) -> frozenset[str]:
+        """Skill categories to prune from the prompt's skill index (may be empty)."""
+        return frozenset(self.profile.hidden_skill_categories)
+>>>>>>> 3e74f75e4 (feat(agent): coding-context posture across CLI/TUI/desktop/ACP (#43316))
 
 
 def resolve_runtime_mode(
@@ -540,12 +581,17 @@ def coding_system_blocks(
     ).system_blocks()
 
 
+<<<<<<< HEAD
 def coding_compact_skill_categories(
+=======
+def coding_hidden_skill_categories(
+>>>>>>> 3e74f75e4 (feat(agent): coding-context posture across CLI/TUI/desktop/ACP (#43316))
     *,
     platform: Optional[str] = None,
     cwd: Optional[str | Path] = None,
     config: Optional[dict[str, Any]] = None,
 ) -> frozenset[str]:
+<<<<<<< HEAD
     """Skill categories the active posture demotes to names-only in the index.
 
     Empty outside the coding posture and outside the opt-in ``focus`` mode —
@@ -557,6 +603,16 @@ def coding_compact_skill_categories(
     return resolve_runtime_mode(
         platform=platform, cwd=cwd, config=config
     ).compact_skill_categories()
+=======
+    """Skill categories the active posture prunes from the prompt's skill index.
+
+    Empty outside the coding posture. Discovery-only: hidden skills remain
+    loadable via ``skills_list`` / ``skill_view``.
+    """
+    return resolve_runtime_mode(
+        platform=platform, cwd=cwd, config=config
+    ).hidden_skill_categories()
+>>>>>>> 3e74f75e4 (feat(agent): coding-context posture across CLI/TUI/desktop/ACP (#43316))
 
 
 def _enabled_mcp_servers(config: Optional[dict[str, Any]]) -> list[str]:
