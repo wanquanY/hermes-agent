@@ -14,6 +14,7 @@ METHOD_MODULES = (
     "prompt",
     "run",
     "team_mission",
+    "team_mission_history",
     "config",
     "system",
     "paste",

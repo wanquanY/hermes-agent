@@ -72,6 +72,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.edge.create" in response["result"]["methods"]
     assert "team_mission.node.update" in response["result"]["methods"]
     assert "team_mission.node.bind_run" in response["result"]["methods"]
+    assert "team_mission.node.history" in response["result"]["methods"]
     assert "team_mission.node.start" in response["result"]["methods"]
     assert "team_mission.plan.complete" in response["result"]["methods"]
     assert "team_mission.schedule.ready" in response["result"]["methods"]
@@ -119,6 +120,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.edge.create" in server._methods
     assert "team_mission.node.update" in server._methods
     assert "team_mission.node.bind_run" in server._methods
+    assert "team_mission.node.history" in server._methods
     assert "team_mission.node.start" in server._methods
     assert "team_mission.plan.complete" in server._methods
     assert "team_mission.schedule.ready" in server._methods
@@ -175,6 +177,7 @@ def test_extracted_gateway_methods_own_registered_handlers():
     assert server._methods["team_mission.edge.create"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.node.update"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.node.bind_run"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.node.history"].__module__ == "tui_gateway.methods.team_mission_history"
     assert server._methods["team_mission.node.start"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.plan.complete"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.schedule.ready"].__module__ == "tui_gateway.methods.team_mission"
@@ -503,6 +506,97 @@ def test_session_db_keeps_terminal_run_closed_after_late_delta(tmp_path):
         )
         assert second["created"] is True
         assert second["conflict"] is None
+    finally:
+        db.close()
+
+
+def test_session_db_does_not_open_active_run_for_team_mission_control_events(tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("team-session-1", "tui")
+        db.append_run_event(
+            "team-session-1",
+            {
+                "type": "mission.approval.requested",
+                "session_id": "runtime-control",
+                "run_id": "team-mission:mission-1:conversation:plan",
+                "runtime_scope_key": "team_mission:mission-1",
+                "seq": 1,
+                "payload": {"mission_id": "mission-1"},
+            },
+        )
+        db.append_run_event(
+            "team-session-1",
+            {
+                "type": "mission.strategy.actions",
+                "session_id": "runtime-control",
+                "run_id": "team-mission:mission-1:conversation:plan",
+                "runtime_scope_key": "team_mission:mission-1",
+                "seq": 2,
+                "payload": {"mission_id": "mission-1"},
+            },
+        )
+
+        assert db.get_run("team-mission:mission-1:conversation:plan") is None
+        assert db.get_session_run_status("team-session-1")["running"] is False
+
+        next_run = db.create_run_if_session_idle(
+            run_id="leader-run-2",
+            session_id="team-session-1",
+            runtime_scope_key="team:conversation-1:leader-conversation",
+            turn_id="leader-turn-2",
+            runtime_session_id="runtime-2",
+        )
+        assert next_run["created"] is True
+        assert next_run["conflict"] is None
+    finally:
+        db.close()
+
+
+def test_session_db_repairs_legacy_control_only_active_runs(tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("team-session-1", "tui")
+        db.upsert_run(
+            run_id="team-mission:mission-1:conversation:legacy",
+            session_id="team-session-1",
+            runtime_scope_key="team_mission:mission-1",
+            runtime_session_id="runtime-control",
+            status="running",
+        )
+        db.append_run_event(
+            "team-session-1",
+            {
+                "type": "mission.approval.requested",
+                "session_id": "runtime-control",
+                "run_id": "team-mission:mission-1:conversation:legacy",
+                "runtime_scope_key": "team_mission:mission-1",
+                "seq": 1,
+                "payload": {"mission_id": "mission-1"},
+            },
+        )
+        assert db.get_run("team-mission:mission-1:conversation:legacy")["status"] == "running"
+
+        status = db.get_session_run_status("team-session-1")
+
+        assert status["running"] is False
+        repaired = db.get_run("team-mission:mission-1:conversation:legacy")
+        assert repaired["status"] == "completed"
+        assert repaired["metadata"]["recovery_reason"] == "control-only run events are not active runtime runs"
+
+        next_run = db.create_run_if_session_idle(
+            run_id="leader-run-2",
+            session_id="team-session-1",
+            runtime_scope_key="team:conversation-1:leader-conversation",
+            turn_id="leader-turn-2",
+            runtime_session_id="runtime-2",
+        )
+        assert next_run["created"] is True
+        assert next_run["conflict"] is None
     finally:
         db.close()
 

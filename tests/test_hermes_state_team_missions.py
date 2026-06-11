@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from hermes_state import SessionDB
@@ -114,6 +115,96 @@ def test_team_mission_conversation_rename_updates_canonical_session_without_muta
     assert result["conversation"]["title"] == "新团队任务"
     assert db.get_team_mission_graph("mission-1")["mission"]["title"] == "旧标题"
     assert db.get_session("team-session-1")["title"] == "新团队任务"
+
+
+def test_team_mission_task_binding_preserves_existing_conversation_title(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.ensure_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        title="正常生成的会话标题",
+        objective="和 Leader 日常沟通",
+    )
+
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="用户第一条任务消息",
+        objective="执行一个团队任务",
+        mode="supervised_mission",
+        leader_session_id="team-session-1",
+        metadata={"stableTeamSessionId": "team-session-1"},
+    )
+
+    resolved = db.resolve_team_mission_conversation("conversation-1")
+
+    assert resolved["conversation"]["title"] == "正常生成的会话标题"
+    assert resolved["conversation"]["active_mission_id"] == "mission-1"
+    assert resolved["mission"]["title"] == "用户第一条任务消息"
+
+
+def test_team_mission_conversation_ensure_does_not_touch_activity_time(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        title="历史团队会话",
+        created_at=100,
+        updated_at=100,
+    )
+
+    db.ensure_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        mission_id="mission-1",
+        title="打开历史时不应该触活",
+    )
+
+    conversation = db.get_team_mission_conversation("conversation-1")
+
+    assert conversation["updated_at"] == 100
+    assert conversation["active_mission_id"] == "mission-1"
+    assert conversation["title"] == "历史团队会话"
+
+
+def test_team_mission_conversation_list_uses_message_activity_like_normal_sessions(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="old-conversation",
+        stable_session_id="old-team-session",
+        team_id="team-1",
+        title="旧团队会话",
+        created_at=100,
+        updated_at=10_000,
+    )
+    db.upsert_team_mission_conversation(
+        conversation_id="newer-created-conversation",
+        stable_session_id="newer-team-session",
+        team_id="team-1",
+        title="创建时间较新的团队会话",
+        created_at=200,
+        updated_at=200,
+    )
+
+    assert [item["conversation_id"] for item in db.list_team_mission_conversations()] == [
+        "newer-created-conversation",
+        "old-conversation",
+    ]
+
+    db.create_session("old-team-session", source="team_mission", transient=False)
+    db.append_message("old-team-session", role="user", content="真实新消息")
+
+    conversations = db.list_team_mission_conversations()
+
+    assert [item["conversation_id"] for item in conversations] == [
+        "old-conversation",
+        "newer-created-conversation",
+    ]
+    assert conversations[0]["updated_at"] > conversations[1]["updated_at"]
 
 
 def test_team_mission_conversation_delete_removes_canonical_graph_and_returns_runtime_sessions(tmp_path: Path):
@@ -841,6 +932,161 @@ def test_team_mission_graph_reducer_creates_verifier_and_synthesis_for_execution
     assert synthesis_nodes[0]["assignee_member_id"] == "leader"
     assert synthesis_nodes[0]["assignee_profile_id"] == "profile-leader"
     assert synthesis_step["ready_node_ids"] == ["team-mission:mission-1:synthesis"]
+
+
+def test_team_mission_node_upsert_normalizes_kind_and_replaces_invalid_member_assignee(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="Mission",
+        mode="autonomous_mission",
+        metadata={
+            "members": [
+                {"member_id": "leader", "profile_id": "profile-leader", "role": "leader"},
+                {"member_id": "builder", "profile_id": "profile-builder", "role": "builder"},
+            ],
+        },
+    )
+
+    node = db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-legacy-summary",
+        kind="synthesizer",
+        title="Legacy summary",
+        status="ready",
+        metadata={
+            "assignee_member_id": "run-leader",
+            "assigneeMemberId": "run-leader",
+        },
+    )
+
+    assert node["kind"] == "synthesis"
+    assert node["metadata"]["original_kind"] == "synthesizer"
+    assert node["assignee_member_id"] == "leader"
+    assert node["assignee_profile_id"] == "profile-leader"
+    assert node["metadata"]["assignee_member_id"] == "leader"
+    assert node["metadata"]["assigneeMemberId"] == "leader"
+    assert node["metadata"]["assignee_resolved_by"] == "default_leader"
+
+
+def test_team_mission_graph_read_resolves_legacy_invalid_member_assignee(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="Mission",
+        mode="autonomous_mission",
+        metadata={
+            "members": [
+                {"member_id": "leader", "profile_id": "profile-leader", "role": "leader"},
+                {"member_id": "builder", "profile_id": "profile-builder", "role": "builder"},
+            ],
+        },
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-summary",
+        kind="synthesis",
+        title="Summary",
+        status="ready",
+    )
+
+    def _corrupt_assignee(conn):
+        conn.execute(
+            """
+            UPDATE team_mission_nodes
+               SET assignee_profile_id = ?,
+                   assignee_profile_version_id = ?,
+                   runtime_scope_key = ?,
+                   metadata_json = ?
+             WHERE mission_id = ? AND node_id = ?
+            """,
+            (
+                "",
+                "",
+                "",
+                json.dumps({
+                    "assignee_member_id": "run-leader",
+                    "assigneeMemberId": "run-leader",
+                }),
+                "mission-1",
+                "node-summary",
+            ),
+        )
+
+    db._execute_write(_corrupt_assignee)
+
+    node = db.get_team_mission_node("mission-1", "node-summary")
+    graph_node = next(item for item in db.get_team_mission_graph("mission-1")["nodes"] if item["node_id"] == "node-summary")
+
+    assert node["assignee_member_id"] == "leader"
+    assert node["assignee_profile_id"] == "profile-leader"
+    assert node["metadata"]["assigneeMemberId"] == "leader"
+    assert graph_node["assignee_member_id"] == "leader"
+    assert graph_node["assignee_profile_id"] == "profile-leader"
+
+
+def test_team_mission_graph_reducer_treats_verification_kind_as_worker_work_type(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="Mission",
+        mode="autonomous_mission",
+        metadata={
+            "members": [
+                {"member_id": "leader", "profile_id": "profile-leader", "role": "leader"},
+                {"member_id": "builder", "profile_id": "profile-builder", "role": "builder"},
+            ],
+        },
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-verification-work",
+        kind="verification",
+        title="Verification work",
+        status="completed",
+        assignee_profile_id="profile-builder",
+    )
+
+    work_node = db.get_team_mission_node("mission-1", "node-verification-work")
+    assert work_node["kind"] == "worker"
+    assert work_node["metadata"]["work_type"] == "verification"
+
+    reduced = db.reduce_team_mission_graph("mission-1")
+    verifier_nodes = [node for node in reduced["graph"]["nodes"] if node["kind"] == "verifier"]
+
+    assert [node["node_id"] for node in verifier_nodes] == ["team-mission:mission-1:verifier"]
+    assert verifier_nodes[0]["assignee_member_id"] == "leader"
+
+
+def test_team_mission_graph_reducer_does_not_duplicate_legacy_synthesis_alias(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-worker",
+        kind="worker",
+        title="Worker",
+        status="completed",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-verifier",
+        kind="verifier",
+        title="Verifier",
+        status="completed",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-legacy-synthesis",
+        kind="synthesizer",
+        title="Legacy synthesis",
+        status="ready",
+    )
+
+    reduced = db.reduce_team_mission_graph("mission-1")
+    synthesis_nodes = [node for node in reduced["graph"]["nodes"] if node["kind"] == "synthesis"]
+
+    assert [node["node_id"] for node in synthesis_nodes] == ["node-legacy-synthesis"]
 
 
 def test_team_mission_graph_reducer_scopes_finalizers_to_active_task(tmp_path: Path):

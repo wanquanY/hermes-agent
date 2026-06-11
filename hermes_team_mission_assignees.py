@@ -6,10 +6,11 @@ from typing import Any
 
 from hermes_team_mission_memory_utils import text as _text
 from hermes_team_mission_modes import TeamMissionMember
+from hermes_team_mission_node_kinds import is_team_mission_control_node_kind
+from hermes_team_mission_node_kinds import normalize_team_mission_node_kind
 
 
 _LEADER_ROLES = {"leader", "lead", "root"}
-_CONTROL_NODE_KINDS = {"root", "approval_gate", "verifier", "verification", "synthesis", "synthesizer", "summary"}
 
 
 @dataclass(frozen=True)
@@ -70,13 +71,22 @@ def node_metadata_with_assignee(metadata: Mapping[str, Any] | None, assignee: Te
     normalized = dict(metadata or {})
     if assignee.member_id:
         normalized["assignee_member_id"] = assignee.member_id
-        normalized.setdefault("assigneeMemberId", assignee.member_id)
+        normalized["assigneeMemberId"] = assignee.member_id
+    else:
+        normalized.pop("assignee_member_id", None)
+        normalized.pop("assigneeMemberId", None)
     if assignee.display_name:
         normalized["assignee_display_name"] = assignee.display_name
-        normalized.setdefault("assigneeDisplayName", assignee.display_name)
+        normalized["assigneeDisplayName"] = assignee.display_name
+    else:
+        normalized.pop("assignee_display_name", None)
+        normalized.pop("assigneeDisplayName", None)
     if assignee.role:
         normalized["assignee_role"] = assignee.role
-        normalized.setdefault("assigneeRole", assignee.role)
+        normalized["assigneeRole"] = assignee.role
+    else:
+        normalized.pop("assignee_role", None)
+        normalized.pop("assigneeRole", None)
     if assignee.resolved_by:
         normalized["assignee_resolved_by"] = assignee.resolved_by
     return normalized
@@ -184,7 +194,7 @@ def _explicit_assignee(
         member = _find_member(members, member_id=member_id)
         if member:
             return TeamMissionAssignee(**{**member.__dict__, "resolved_by": "explicit_member"})
-        return TeamMissionAssignee(member_id=member_id, role=_text(metadata.get("assignee_role") or metadata.get("assigneeRole")), resolved_by="explicit_member")
+        return TeamMissionAssignee()
     if profile_id:
         member = _find_member(members, profile_id=profile_id, profile_version_id=profile_version_id)
         if member:
@@ -272,8 +282,7 @@ def _assignee_from_node(node: Mapping[str, Any]) -> TeamMissionAssignee:
 
 
 def _is_leader_owned_node(*, kind: str, metadata: Mapping[str, Any]) -> bool:
-    normalized_kind = _text(kind)
-    if normalized_kind in _CONTROL_NODE_KINDS:
+    if is_team_mission_control_node_kind(kind):
         return True
     role = _text(metadata.get("role"))
     phase = _text(metadata.get("phase"))
@@ -282,7 +291,7 @@ def _is_leader_owned_node(*, kind: str, metadata: Mapping[str, Any]) -> bool:
 
 def _default_runtime_scope(*, mission_id: str, node_id: str, kind: str, assignee: TeamMissionAssignee) -> str:
     del assignee
-    if kind in {"root"}:
+    if normalize_team_mission_node_kind(kind) in {"root"}:
         return f"team:{mission_id}:leader"
     suffix = (_text(node_id) or kind or "node").replace(":", "_")
     return f"team:{mission_id}:node:{suffix}"

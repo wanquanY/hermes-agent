@@ -406,6 +406,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             or params.get("toolset_mode")
             or params.get("toolsetMode")
         ),
+        persist_session_id=None if session.get("transient") else stable_session_id,
     )
     _start_agent_build(sid, session)
 

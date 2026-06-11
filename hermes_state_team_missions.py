@@ -17,6 +17,9 @@ import hermes_team_mission_graph_state as _graph_state
 from hermes_team_mission_assignees import assignee_public_fields as _assignee_public_fields
 from hermes_team_mission_assignees import mission_metadata_with_members as _mission_metadata_with_members
 from hermes_team_mission_assignees import resolve_node_assignee as _resolve_node_assignee
+from hermes_team_mission_node_kinds import TEAM_MISSION_CONTROL_NODE_KINDS
+from hermes_team_mission_node_kinds import metadata_with_normalized_node_kind as _metadata_with_normalized_node_kind
+from hermes_team_mission_node_kinds import normalize_team_mission_node_kind as _normalize_node_kind
 from hermes_team_mission_modes import TeamMissionEdgeSpec
 from hermes_team_mission_modes import TeamMissionNodeSpec
 from hermes_team_mission_modes import TeamMissionStrategyActions
@@ -71,7 +74,7 @@ _ACTIVE_RUN_STATUSES = {
 }
 _TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 _EXECUTION_MODES_REQUIRE_FINALIZERS = {"supervised_mission", "autonomous_mission", "manual_graph"}
-_NON_WORK_NODE_KINDS = {"root", "approval_gate", "verifier", "synthesis"}
+_NON_WORK_NODE_KINDS = TEAM_MISSION_CONTROL_NODE_KINDS
 _TEAM_MISSION_EVENT_SEQ_FACTOR = 1_000_000_000
 
 
@@ -111,7 +114,7 @@ def _conversation_status(value: str | None) -> str:
 def _node_spec_from_graph_node(node: Dict[str, Any]) -> TeamMissionNodeSpec:
     return TeamMissionNodeSpec(
         node_id=str(node.get("node_id") or ""),
-        kind=str(node.get("kind") or "worker"),
+        kind=_normalize_node_kind(node.get("kind")),
         title=str(node.get("title") or ""),
         objective=str(node.get("objective") or ""),
         status=str(node.get("status") or "todo"),
@@ -252,6 +255,7 @@ class SessionDBTeamMissionMixin:
         if row is None:
             return None
         metadata = _json_loads(_row_value(row, "metadata_json", ""), {})
+        updated_at = _row_value(row, "activity_updated_at", _row_value(row, "updated_at", 0))
         return {
             "conversation_id": str(_row_value(row, "conversation_id", "") or ""),
             "team_id": str(_row_value(row, "team_id", "") or ""),
@@ -265,7 +269,7 @@ class SessionDBTeamMissionMixin:
             "created_by_user_id": str(_row_value(row, "created_by_user_id", "") or ""),
             "metadata": metadata if isinstance(metadata, dict) else {},
             "created_at": float(_row_value(row, "created_at", 0) or 0),
-            "updated_at": float(_row_value(row, "updated_at", 0) or 0),
+            "updated_at": float(updated_at or 0),
         }
 
     def _team_mission_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
@@ -292,10 +296,13 @@ class SessionDBTeamMissionMixin:
         if row is None:
             return None
         metadata = _json_loads(row["metadata_json"], {})
+        raw_kind = str(row["kind"] or "")
+        kind = _normalize_node_kind(raw_kind)
+        metadata = _metadata_with_normalized_node_kind(metadata, raw_kind=raw_kind, canonical_kind=kind)
         return {
             "node_id": str(row["node_id"] or ""),
             "mission_id": str(row["mission_id"] or ""),
-            "kind": str(row["kind"] or ""),
+            "kind": kind,
             "title": str(row["title"] or ""),
             "objective": str(row["objective"] or ""),
             "status": str(row["status"] or ""),
@@ -310,6 +317,53 @@ class SessionDBTeamMissionMixin:
             "created_at": float(row["created_at"] or 0),
             "updated_at": float(row["updated_at"] or 0),
         }
+
+    def _team_mission_node_with_resolved_assignee(
+        self,
+        node: Dict[str, Any] | None,
+        *,
+        mission_metadata: Dict[str, Any] | None = None,
+        leader_node: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        if not isinstance(node, dict) or not node:
+            return {}
+        resolved_profile_id, resolved_profile_version_id, resolved_runtime_scope_key, resolved_metadata = _resolve_node_assignee(
+            mission_id=str(node.get("mission_id") or ""),
+            node_id=str(node.get("node_id") or ""),
+            kind=_normalize_node_kind(node.get("kind")),
+            incoming_profile_id=str(node.get("assignee_profile_id") or ""),
+            incoming_profile_version_id=str(node.get("assignee_profile_version_id") or ""),
+            incoming_runtime_scope_key=str(node.get("runtime_scope_key") or ""),
+            metadata=dict(node.get("metadata") or {}),
+            mission_metadata=mission_metadata if isinstance(mission_metadata, dict) else {},
+            existing_node=node,
+            leader_node=leader_node if isinstance(leader_node, dict) else {},
+        )
+        resolved_node = {
+            **node,
+            "assignee_profile_id": resolved_profile_id,
+            "assignee_profile_version_id": resolved_profile_version_id,
+            "runtime_scope_key": resolved_runtime_scope_key,
+            "metadata": resolved_metadata,
+        }
+        resolved_node.update(_assignee_public_fields(resolved_metadata))
+        return resolved_node
+
+    def _team_mission_nodes_with_resolved_assignees(
+        self,
+        nodes: List[Dict[str, Any]],
+        *,
+        mission_metadata: Dict[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]:
+        leader_node = next((_node for _node in nodes if _normalize_node_kind(_node.get("kind")) == "root"), {})
+        return [
+            self._team_mission_node_with_resolved_assignee(
+                node,
+                mission_metadata=mission_metadata,
+                leader_node=leader_node,
+            )
+            for node in nodes
+        ]
 
     def _team_mission_edge_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
         if row is None:
@@ -393,6 +447,8 @@ class SessionDBTeamMissionMixin:
         created_at: float | None = None,
         updated_at: float | None = None,
         metadata: Dict[str, Any] | None = None,
+        replace_title: bool = False,
+        touch: bool = False,
     ) -> Dict[str, Any]:
         conversation_id = _text(conversation_id)
         if not conversation_id:
@@ -400,11 +456,11 @@ class SessionDBTeamMissionMixin:
         stable_session_id = _text(stable_session_id) or conversation_id
         now = time.time()
         created = float(created_at or now)
-        updated = float(updated_at or now)
+        requested_updated = float(updated_at if updated_at is not None else now)
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
             existing = conn.execute(
-                "SELECT metadata_json, title, created_at FROM team_mission_conversations WHERE conversation_id = ?",
+                "SELECT metadata_json, title, created_at, updated_at FROM team_mission_conversations WHERE conversation_id = ?",
                 (conversation_id,),
             ).fetchone()
             merged_metadata = _json_loads(_row_value(existing, "metadata_json", ""), {})
@@ -413,7 +469,11 @@ class SessionDBTeamMissionMixin:
             merged_metadata["conversation_id"] = conversation_id
             merged_metadata["stable_session_id"] = stable_session_id
             existing_title = _text(_row_value(existing, "title", ""))
-            insert_title = _text(title) or existing_title or "Team Mission"
+            requested_title = _text(title)
+            insert_title = requested_title or existing_title or "Team Mission"
+            update_title = requested_title if (replace_title or not existing_title) else ""
+            existing_updated = float(_row_value(existing, "updated_at", requested_updated) or requested_updated)
+            update_updated = requested_updated if (updated_at is not None or touch or existing is None) else existing_updated
             conn.execute(
                 """
                 INSERT INTO team_mission_conversations (
@@ -425,7 +485,7 @@ class SessionDBTeamMissionMixin:
                 ON CONFLICT(conversation_id) DO UPDATE SET
                     team_id = COALESCE(NULLIF(excluded.team_id, ''), team_id),
                     stable_session_id = excluded.stable_session_id,
-                    title = COALESCE(NULLIF(excluded.title, ''), title),
+                    title = COALESCE(NULLIF(?, ''), title),
                     objective = COALESCE(NULLIF(excluded.objective, ''), objective),
                     workspace_id = COALESCE(NULLIF(excluded.workspace_id, ''), workspace_id),
                     workspace_path = COALESCE(NULLIF(excluded.workspace_path, ''), workspace_path),
@@ -448,7 +508,8 @@ class SessionDBTeamMissionMixin:
                     _text(created_by_user_id),
                     _json_dumps(merged_metadata if isinstance(merged_metadata, dict) else {}),
                     float(_row_value(existing, "created_at", created) or created),
-                    updated,
+                    update_updated,
+                    update_title,
                 ),
             )
             return self._team_mission_conversation_from_row(conn.execute(
@@ -472,6 +533,8 @@ class SessionDBTeamMissionMixin:
         workspace_path: str = "",
         created_by_user_id: str = "",
         metadata: Dict[str, Any] | None = None,
+        updated_at: float | None = None,
+        touch: bool = False,
     ) -> Dict[str, Any]:
         mission = mission if isinstance(mission, dict) else {}
         mission_metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
@@ -517,7 +580,9 @@ class SessionDBTeamMissionMixin:
             status="active",
             active_mission_id=resolved_mission_id,
             created_by_user_id=_text(created_by_user_id),
+            updated_at=updated_at,
             metadata=merged_metadata,
+            touch=touch,
         )
         if resolved_mission_id:
             def _bind(conn: sqlite3.Connection) -> None:
@@ -624,9 +689,20 @@ class SessionDBTeamMissionMixin:
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                SELECT * FROM team_mission_conversations
+                SELECT *,
+                    MAX(
+                        COALESCE(
+                            (SELECT MAX(m.timestamp)
+                             FROM messages m
+                             WHERE m.session_id = team_mission_conversations.stable_session_id
+                               AND m.active = 1),
+                            0
+                        ),
+                        COALESCE(created_at, 0)
+                    ) AS activity_updated_at
+                FROM team_mission_conversations
                 {where_sql}
-                ORDER BY updated_at DESC
+                ORDER BY activity_updated_at DESC, created_at DESC, conversation_id ASC
                 LIMIT ?
                 """,
                 (*params, bounded_limit),
@@ -855,6 +931,8 @@ class SessionDBTeamMissionMixin:
         now = time.time()
         created = float(created_at or now)
         updated = float(updated_at or now)
+        raw_kind = str(kind or "worker")
+        canonical_kind = _normalize_node_kind(raw_kind)
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
             existing = conn.execute(
@@ -864,6 +942,11 @@ class SessionDBTeamMissionMixin:
             merged_metadata = _json_loads(_row_value(existing, "metadata_json", ""), {})
             if isinstance(metadata, dict):
                 merged_metadata.update(metadata)
+            merged_metadata = _metadata_with_normalized_node_kind(
+                merged_metadata if isinstance(merged_metadata, dict) else {},
+                raw_kind=raw_kind,
+                canonical_kind=canonical_kind,
+            )
             mission_row = conn.execute(
                 "SELECT * FROM team_missions WHERE mission_id = ?",
                 (mission_id,),
@@ -883,7 +966,7 @@ class SessionDBTeamMissionMixin:
             resolved_profile_id, resolved_profile_version_id, resolved_runtime_scope_key, resolved_metadata = _resolve_node_assignee(
                 mission_id=mission_id,
                 node_id=node_id,
-                kind=str(kind or "worker"),
+                kind=canonical_kind,
                 incoming_profile_id=str(assignee_profile_id or ""),
                 incoming_profile_version_id=str(assignee_profile_version_id or ""),
                 incoming_runtime_scope_key=str(runtime_scope_key or ""),
@@ -919,7 +1002,7 @@ class SessionDBTeamMissionMixin:
                 (
                     node_id,
                     mission_id,
-                    str(kind or "worker"),
+                    canonical_kind,
                     str(title or ""),
                     str(objective or ""),
                     str(status or "todo"),
@@ -951,7 +1034,25 @@ class SessionDBTeamMissionMixin:
                 "SELECT * FROM team_mission_nodes WHERE mission_id = ? AND node_id = ?",
                 (mission_id, node_id),
             ).fetchone()
-        return self._team_mission_node_from_row(row) or {}
+            mission_row = self._conn.execute(
+                "SELECT * FROM team_missions WHERE mission_id = ?",
+                (mission_id,),
+            ).fetchone()
+            leader_row = self._conn.execute(
+                """
+                SELECT * FROM team_mission_nodes
+                 WHERE mission_id = ? AND kind = ?
+                 ORDER BY created_at ASC
+                 LIMIT 1
+                """,
+                (mission_id, "root"),
+            ).fetchone()
+        mission = self._team_mission_from_row(mission_row) or {}
+        return self._team_mission_node_with_resolved_assignee(
+            self._team_mission_node_from_row(row) or {},
+            mission_metadata=dict(mission.get("metadata") or {}),
+            leader_node=self._team_mission_node_from_row(leader_row) or {},
+        )
 
     def claim_team_mission_node_start(
         self,
@@ -1612,6 +1713,10 @@ class SessionDBTeamMissionMixin:
                     ).fetchall()
                 ) if node is not None
             ]
+            nodes = self._team_mission_nodes_with_resolved_assignees(
+                nodes,
+                mission_metadata=dict(mission.get("metadata") or {}),
+            )
             edges = [
                 edge for edge in (
                     self._team_mission_edge_from_row(row)

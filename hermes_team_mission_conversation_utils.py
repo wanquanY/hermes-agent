@@ -3,6 +3,9 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from hermes_team_mission_node_kinds import is_team_mission_synthesis_node_kind
+from hermes_team_mission_node_kinds import normalize_team_mission_node_kind
+
 
 _CONTROL_MIRROR_EVENT_TYPES = {
     "mission.approval.requested",
@@ -151,13 +154,13 @@ def _is_final_deliverable_node(node: dict[str, Any], binding: dict[str, Any]) ->
     node = node if isinstance(node, dict) else {}
     binding = binding if isinstance(binding, dict) else {}
     metadata = mapping(node.get("metadata"))
-    node_kind = text(node.get("kind")).lower()
+    node_kind = normalize_team_mission_node_kind(node.get("kind"))
     phase = text(metadata.get("phase")).lower()
     node_role = text(metadata.get("role")).lower()
     binding_role = text(binding.get("role")).lower()
     final_roles = {"synthesis", "synthesizer", "finalizer"}
     return (
-        node_kind in final_roles
+        is_team_mission_synthesis_node_kind(node_kind)
         or phase == "synthesis"
         or node_role in final_roles
         or binding_role in final_roles

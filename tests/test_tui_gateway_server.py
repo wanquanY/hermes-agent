@@ -3940,7 +3940,13 @@ def test_session_turn_exact_toolsets_replace_prewarmed_agent(monkeypatch):
     ensure_session_turn_toolsets(
         sid="sid-team-leader",
         session=session,
-        requested_toolsets=["team_mission_leader"],
+        requested_toolsets=[
+            "team_mission_leader",
+            "clarify",
+            "file",
+            "terminal",
+            "todo",
+        ],
         requested_disabled_toolsets=["delegation"],
         toolset_scope="exact",
         load_enabled_toolsets=lambda: ["web", "memory", "delegation"],
@@ -3948,13 +3954,25 @@ def test_session_turn_exact_toolsets_replace_prewarmed_agent(monkeypatch):
         emit_session_info=lambda sid, agent: emits.append((sid, sorted(agent.valid_tool_names))),
     )
 
-    assert agent.enabled_toolsets == ["team_mission_leader"]
+    assert agent.enabled_toolsets == [
+        "team_mission_leader",
+        "clarify",
+        "file",
+        "terminal",
+        "todo",
+    ]
     assert agent.disabled_toolsets == ["delegation"]
-    assert session["enabled_toolsets_override"] == ["team_mission_leader"]
+    assert session["enabled_toolsets_override"] == [
+        "team_mission_leader",
+        "clarify",
+        "file",
+        "terminal",
+        "todo",
+    ]
     assert session["disabled_toolsets_override"] == ["delegation"]
-    assert {"team_mission_status", "team_mission_start_task"} <= agent.valid_tool_names
+    assert {"team_mission_status", "team_mission_team_profile", "team_mission_start_task"} <= agent.valid_tool_names
+    assert {"clarify", "read_file", "write_file", "search_files", "terminal", "process", "todo"} <= agent.valid_tool_names
     assert "web_search" not in agent.valid_tool_names
-    assert "write_file" not in agent.valid_tool_names
     assert "delegate_task" not in agent.valid_tool_names
     assert emits[-1][0] == "sid-team-leader"
 

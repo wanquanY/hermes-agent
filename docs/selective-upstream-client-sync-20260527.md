@@ -84,6 +84,22 @@ codex/selective-upstream-client-sync-20260527
 
 这不是对上游 React Desktop / Dashboard / Kanban UI 的吸收。它是 Doxie 客户端 contract 的本地原生化：Hermes 是 Team Mission graph/history/stream 的事实源，Doxie 只消费 Hermes API 和 event stream。
 
+## 现状更新（2026-06-11，prodv0.9.3）
+
+本地工作区当前 staged 代码继续收敛 Team Mission 生产运行边界，目标是让 Doxie 的 Team Mission 详情面板、Leader 工具面和任务图状态都以 Hermes 为事实源。
+
+当前 prodv0.9.3 发布节点包括：
+
+- `team_mission.node.history`：新增 `tui_gateway/methods/team_mission_history.py` 与 `tui_gateway/services/team_mission_runtime_history.py`，按 mission/node/session 读取 run binding、messages、run events、tool events 和 artifacts，Doxie 不需要扫描 Kanban SQLite 或普通 session 猜节点历史。
+- canonical node kind：新增 `hermes_team_mission_node_kinds.py`，把专业分工标签归一化为 `worker` + metadata，把 `synthesizer` / `summary` 归一化为 `synthesis`，并明确 `root` / `approval_gate` / `verifier` / `synthesis` 是 Leader-owned control nodes。
+- assignee 校验：planning tools 对不存在的 `assignee_member_id` 直接拒绝；state upsert 遇到历史无效 member id 会丢弃并按默认负责人规则解析，避免 graph 中出现不可解析负责人。
+- Team profile tools：新增 `hermes_team_mission_profile_tools.py` 和 `tools/team_mission_profile_tools.py`，`team_mission_team_profile` 通过工具读取 capability snapshot，Leader prompt 不再内联团队成员画像、profile id 或 member id 清单。
+- run 状态修复：`hermes_state_runs.py` 区分 ordinary runtime lifecycle events 与 `mission.*` control events；control-only event 保留在 `run_events` 中用于 replay，但不会让普通 session 误判为 active/busy。
+- toolset scope 持久化：`gateway_session_toolsets` 持久化非 exact 的 session toolset overrides，runtime rebuild 后能恢复 Leader conversation 工具面；`exact` scope 仍只用于本次控制平面权限边界。
+- scheduler 稳定性：ready-node 启动失败时节点进入 `blocked` 并记录 `start_error`，不再让调度异常吞掉 graph 状态。
+
+Tag 计划：`prodv0.9.3`。该节点仍不是上游 full merge；它是 Doxie Team Mission runtime 的本地生产化补齐。
+
 ## 逐项核对结果（2026-05-27）
 
 本节记录按本文 P0/P1 清单逐项核对当前工作区后的真实状态。后续再同步上游时，优先看这里，而不是只看提交是否 cherry-pick 成功。

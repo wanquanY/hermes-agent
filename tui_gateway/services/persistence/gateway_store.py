@@ -54,6 +54,14 @@ CREATE TABLE IF NOT EXISTS gateway_session_artifacts (
     FOREIGN KEY (artifact_id) REFERENCES gateway_artifacts(id)
 );
 
+CREATE TABLE IF NOT EXISTS gateway_session_toolsets (
+    session_id TEXT PRIMARY KEY,
+    enabled_toolsets_json TEXT,
+    disabled_toolsets_json TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_gateway_artifacts_workspace
     ON gateway_artifacts(workspace_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gateway_session_artifacts_session
@@ -182,6 +190,84 @@ class GatewayStateStore:
                 (session_id,),
             ).fetchone()
         return self._row_to_dict(row)
+
+    @staticmethod
+    def _encode_toolsets(toolsets: list[str] | None) -> str | None:
+        if toolsets is None:
+            return None
+        return json.dumps(toolsets, ensure_ascii=False)
+
+    @staticmethod
+    def _decode_toolsets(raw: str | None) -> list[str] | None:
+        if raw is None:
+            return None
+        try:
+            values = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(values, list):
+            return None
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            name = str(value or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                result.append(name)
+        return result
+
+    def upsert_session_toolsets(
+        self,
+        *,
+        session_id: str,
+        enabled_toolsets: list[str] | None,
+        disabled_toolsets: list[str] | None,
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO gateway_session_toolsets
+                    (session_id, enabled_toolsets_json, disabled_toolsets_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    enabled_toolsets_json = excluded.enabled_toolsets_json,
+                    disabled_toolsets_json = excluded.disabled_toolsets_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_id,
+                    self._encode_toolsets(enabled_toolsets),
+                    self._encode_toolsets(disabled_toolsets),
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM gateway_session_toolsets WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return self._session_toolsets_row_to_payload(row)
+
+    def get_session_toolsets(self, session_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM gateway_session_toolsets WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return self._session_toolsets_row_to_payload(row) if row else None
+
+    def _session_toolsets_row_to_payload(self, row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        payload = dict(row)
+        payload["enabled_toolsets"] = self._decode_toolsets(
+            payload.pop("enabled_toolsets_json", None)
+        )
+        payload["disabled_toolsets"] = self._decode_toolsets(
+            payload.pop("disabled_toolsets_json", None)
+        )
+        return payload
 
     def list_workspaces(self, *, limit: int = 200) -> list[dict[str, Any]]:
         with self._connect() as conn:

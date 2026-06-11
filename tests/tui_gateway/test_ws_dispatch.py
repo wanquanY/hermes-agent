@@ -188,10 +188,11 @@ def test_profile_scoped_approval_methods_are_proxied_to_runtime_worker(method):
     "method",
     [
         "skills.reload",
+        "toolsets.list",
         "tools.configure",
     ],
 )
-def test_profile_scoped_runtime_mutation_methods_are_proxied_to_runtime_worker(method):
+def test_profile_scoped_runtime_tool_methods_are_proxied_to_runtime_worker(method):
     assert runtime_proxy.should_proxy_to_runtime(
         {
             "id": "1",

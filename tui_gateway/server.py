@@ -125,6 +125,8 @@ _READ_ONLY_DB_METHODS = frozenset(
         "session.most_recent",
         "session.status",
         "session.usage",
+        "team_mission.conversation.list",
+        "team_mission.conversation.resolve",
         "spawn_tree.list",
         "workspace.current",
         "workspace.list",
@@ -1627,6 +1629,7 @@ def _make_agent(sid: str, key: str, session_id: str | None = None, cwd: str | No
     from run_agent import AIAgent
     from hermes_cli.runtime_provider import resolve_runtime_provider
     from tui_gateway.services.runtime_credentials import remember_requested_runtime_provider
+    from tui_gateway.services.toolset_scope import resolve_session_toolsets
 
     cfg = _load_cfg()
     agent_cfg = cfg.get("agent") or {}
@@ -1650,6 +1653,12 @@ def _make_agent(sid: str, key: str, session_id: str | None = None, cwd: str | No
         requested=requested_provider,
         target_model=model or None,
     )
+    enabled_toolsets, disabled_toolsets = resolve_session_toolsets(
+        session=_sessions.get(sid),
+        session_id=session_id or key,
+        load_enabled_toolsets=_load_enabled_toolsets,
+        load_disabled_toolsets=_load_disabled_toolsets,
+    )
     agent = AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
@@ -1664,18 +1673,8 @@ def _make_agent(sid: str, key: str, session_id: str | None = None, cwd: str | No
         verbose_logging=_load_tool_progress_mode() == "verbose",
         reasoning_config=_load_reasoning_config(),
         service_tier=_load_service_tier(),
-        enabled_toolsets=(
-            _sessions.get(sid, {}).get("enabled_toolsets_override")
-            if isinstance(_sessions.get(sid), dict)
-            and "enabled_toolsets_override" in _sessions.get(sid, {})
-            else _load_enabled_toolsets()
-        ),
-        disabled_toolsets=(
-            _sessions.get(sid, {}).get("disabled_toolsets_override")
-            if isinstance(_sessions.get(sid), dict)
-            and "disabled_toolsets_override" in _sessions.get(sid, {})
-            else _load_disabled_toolsets()
-        ),
+        enabled_toolsets=enabled_toolsets,
+        disabled_toolsets=disabled_toolsets,
         platform="tui",
         session_id=session_id or key,
         session_db=_get_db(),

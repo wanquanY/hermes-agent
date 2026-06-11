@@ -12,7 +12,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from hermes_state import SessionDB
+from hermes_team_mission_assignees import normalized_member_dicts
 from hermes_team_mission_modes import strategy_for_mode
+from hermes_team_mission_node_kinds import metadata_with_normalized_node_kind
+from hermes_team_mission_node_kinds import normalize_team_mission_node_kind
 from tools.registry import registry, tool_error, tool_result
 
 
@@ -162,6 +165,91 @@ def _normalize_node_id(value: Any) -> str:
     return node_id
 
 
+def _mission_members(mission: Mapping[str, Any]) -> list[dict[str, Any]]:
+    mission_metadata = _metadata(mission.get("metadata"))
+    raw_members = mission_metadata.get("members")
+    return normalized_member_dicts(raw_members if isinstance(raw_members, list) else [])
+
+
+def _member_ids_hint(members: list[dict[str, Any]]) -> str:
+    if not members:
+        return "none"
+    return ", ".join(
+        f"{_text(member.get('member_id'))}({_text(member.get('role')) or 'member'})"
+        for member in members
+        if _text(member.get("member_id"))
+    ) or "none"
+
+
+def _leader_member_id(members: list[dict[str, Any]]) -> str:
+    for member in members:
+        if _text(member.get("role")) in {"leader", "lead", "root"}:
+            return _text(member.get("member_id"))
+    return _text((members[0] if members else {}).get("member_id"))
+
+
+def _member_by_id(members: list[dict[str, Any]], member_id: str) -> dict[str, Any]:
+    normalized = _text(member_id)
+    for member in members:
+        if _text(member.get("member_id")) == normalized:
+            return member
+    return {}
+
+
+def _member_by_profile(members: list[dict[str, Any]], profile_id: str, version_id: str) -> dict[str, Any]:
+    normalized_profile = _text(profile_id)
+    normalized_version = _text(version_id)
+    for member in members:
+        if _text(member.get("profile_id")) != normalized_profile:
+            continue
+        member_version = _text(member.get("profile_version_id"))
+        if not normalized_version or not member_version or member_version == normalized_version:
+            return member
+    return {}
+
+
+def _member_by_role(members: list[dict[str, Any]], role: str) -> dict[str, Any]:
+    normalized = _text(role)
+    for member in members:
+        if _text(member.get("role")) == normalized:
+            return member
+    return {}
+
+
+def _validate_assignee_reference(
+    *,
+    mission: Mapping[str, Any],
+    assignee_member_id: str,
+    assignee_profile_id: str,
+    assignee_profile_version_id: str,
+    assignee_role: str,
+) -> str:
+    members = _mission_members(mission)
+    member_hint = _member_ids_hint(members)
+    leader_hint = _leader_member_id(members)
+    control_hint = (
+        f"; for verifier/synthesis nodes omit assignee fields or use Leader member_id '{leader_hint}'"
+        if leader_hint
+        else "; for verifier/synthesis nodes omit assignee fields"
+    )
+    if assignee_member_id and not _member_by_id(members, assignee_member_id):
+        return (
+            f"assignee_member_id '{assignee_member_id}' is not a Team Mission member. "
+            f"Allowed member ids: {member_hint}{control_hint}."
+        )
+    if assignee_profile_id and members and not _member_by_profile(members, assignee_profile_id, assignee_profile_version_id):
+        return (
+            f"assignee_profile_id '{assignee_profile_id}' does not belong to a Team Mission member. "
+            f"Allowed member ids: {member_hint}{control_hint}."
+        )
+    if assignee_role and members and not _member_by_role(members, assignee_role):
+        return (
+            f"assignee_role '{assignee_role}' does not match a Team Mission member role. "
+            f"Allowed member ids: {member_hint}{control_hint}."
+        )
+    return ""
+
+
 def _handle_node_create(args: dict[str, Any], parent_agent=None, **_kwargs) -> str:
     ctx = _authorized_context(args, parent_agent)
     if isinstance(ctx, str):
@@ -180,7 +268,8 @@ def _handle_node_create(args: dict[str, Any], parent_agent=None, **_kwargs) -> s
         return tool_error("title is required.")
     if not objective:
         return tool_error("objective is required.")
-    kind = _text(args.get("kind")) or "worker"
+    raw_kind = _text(args.get("kind")) or "worker"
+    kind = normalize_team_mission_node_kind(raw_kind)
     if kind in _RESERVED_NODE_KINDS:
         return tool_error(f"node kind '{kind}' is reserved for Hermes runtime.")
     status = _text(args.get("status")) or "ready"
@@ -193,8 +282,27 @@ def _handle_node_create(args: dict[str, Any], parent_agent=None, **_kwargs) -> s
     if not isinstance(metadata, Mapping):
         return tool_error("metadata must be an object.")
     metadata = dict(metadata)
-    assignee_member_id = _text(args.get("assignee_member_id") or args.get("assigneeMemberId"))
-    assignee_role = _text(args.get("assignee_role") or args.get("assigneeRole"))
+    metadata = metadata_with_normalized_node_kind(metadata, raw_kind=raw_kind, canonical_kind=kind)
+    assignee_member_id = _text(
+        args.get("assignee_member_id")
+        or args.get("assigneeMemberId")
+        or metadata.get("assignee_member_id")
+        or metadata.get("assigneeMemberId")
+        or metadata.get("member_id")
+        or metadata.get("memberId")
+    )
+    assignee_profile_id = _text(args.get("assignee_profile_id") or args.get("assigneeProfileId"))
+    assignee_profile_version_id = _text(args.get("assignee_profile_version_id") or args.get("assigneeProfileVersionId"))
+    assignee_role = _text(args.get("assignee_role") or args.get("assigneeRole") or metadata.get("assignee_role") or metadata.get("assigneeRole"))
+    assignee_error = _validate_assignee_reference(
+        mission=mission,
+        assignee_member_id=assignee_member_id,
+        assignee_profile_id=assignee_profile_id,
+        assignee_profile_version_id=assignee_profile_version_id,
+        assignee_role=assignee_role,
+    )
+    if assignee_error:
+        return tool_error(assignee_error)
     if assignee_member_id:
         metadata.setdefault("assignee_member_id", assignee_member_id)
     if assignee_role:
@@ -206,8 +314,8 @@ def _handle_node_create(args: dict[str, Any], parent_agent=None, **_kwargs) -> s
         title=title,
         objective=objective,
         status=status,
-        assignee_profile_id=_text(args.get("assignee_profile_id") or args.get("assigneeProfileId")),
-        assignee_profile_version_id=_text(args.get("assignee_profile_version_id") or args.get("assigneeProfileVersionId")),
+        assignee_profile_id=assignee_profile_id,
+        assignee_profile_version_id=assignee_profile_version_id,
         runtime_scope_key=_text(args.get("runtime_scope_key") or args.get("runtimeScopeKey")),
         output_contract=dict(output_contract),
         metadata=_metadata_with_task_context(
@@ -321,8 +429,7 @@ registry.register(
         "description": (
             "Create a non-running node in the current Hermes Team Mission graph during "
             "Leader planning. Use this to decompose the mission before approval. "
-            "Every node must have an execution owner; pass assignee_member_id or "
-            "assignee_profile_id whenever you choose a member."
+            "Use canonical node kinds and valid Team Mission members only."
         ),
         "parameters": {
             "type": "object",
@@ -330,7 +437,7 @@ registry.register(
                 "node_id": {"type": "string", "description": "Stable unique node id inside this mission graph."},
                 "kind": {
                     "type": "string",
-                    "description": "Node kind such as worker, research, analysis, verification, or synthesis. Root and approval_gate are reserved.",
+                    "description": "Canonical node kind: worker, verifier, or synthesis. Put specialties such as research, analysis, testing, or verification in metadata.work_type. Root and approval_gate are reserved.",
                 },
                 "title": {"type": "string", "description": "Short user-visible task title."},
                 "objective": {"type": "string", "description": "Detailed objective for this node."},
@@ -340,7 +447,7 @@ registry.register(
                 },
                 "assignee_profile_id": {"type": "string", "description": "Optional Hermes profile id assigned to this node."},
                 "assignee_profile_version_id": {"type": "string", "description": "Optional Hermes profile version id assigned to this node."},
-                "assignee_member_id": {"type": "string", "description": "Team member id assigned to execute or own this node. Use the Leader member id for synthesis, verification, approval, and orchestration nodes."},
+                "assignee_member_id": {"type": "string", "description": "Team member id assigned to execute or own this node. Must match the Team Mission member list; never pass a run_id, session_id, or node_id. Omit for verifier/synthesis nodes unless using the Leader member id."},
                 "assignee_role": {"type": "string", "description": "Optional role hint when assigning by team role instead of member id."},
                 "runtime_scope_key": {"type": "string", "description": "Optional runtime scope key. Leave empty unless the plan requires a fixed scope."},
                 "output_contract": {"type": "object", "description": "Expected output shape/contract for the node."},

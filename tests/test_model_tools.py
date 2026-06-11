@@ -152,7 +152,20 @@ def test_explicit_doxie_toolset_exposes_design_tools():
         for tool in get_tool_definitions(enabled_toolsets=["doxie"], quiet_mode=True)
     }
 
-    assert {"design_agent_profile", "test_agent_profile"} <= names
+    assert {
+        "create_agent_profile_revision_draft",
+        "design_agent_profile",
+        "get_agent_profile",
+        "get_agent_profile_draft",
+        "get_agent_profile_version",
+        "install_skill_to_agent_profile_draft",
+        "list_agent_profile_drafts",
+        "list_agent_profile_versions",
+        "list_agent_profiles",
+        "prepare_agent_profile_draft_runtime",
+        "resolve_agent_profile_draft",
+        "test_agent_profile",
+    } <= names
 
 
 def test_default_tool_definitions_expose_doxie_automation_tools_without_turn_context():

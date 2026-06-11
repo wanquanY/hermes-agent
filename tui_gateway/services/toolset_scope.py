@@ -75,6 +75,104 @@ def merge_disabled_toolsets(base: list[str] | None, extra: list[str]) -> list[st
     return merged or None
 
 
+def _valid_toolsets(raw: Any) -> list[str]:
+    from toolsets import validate_toolset
+
+    return [name for name in normalize_toolsets(raw) if validate_toolset(name)]
+
+
+def load_session_toolset_overrides(session_id: str) -> dict[str, list[str] | None]:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return {}
+    try:
+        from tui_gateway.services.persistence.gateway_store import get_gateway_state_store
+
+        store = get_gateway_state_store(create_if_missing=False)
+        payload = store.get_session_toolsets(session_id) if store is not None else None
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    enabled = _valid_toolsets(payload.get("enabled_toolsets"))
+    disabled = _valid_toolsets(payload.get("disabled_toolsets"))
+    result: dict[str, list[str] | None] = {}
+    if payload.get("enabled_toolsets") is not None:
+        result["enabled_toolsets"] = enabled
+    if payload.get("disabled_toolsets") is not None:
+        result["disabled_toolsets"] = disabled or None
+    return result
+
+
+def hydrate_session_toolset_overrides(
+    session: dict[str, Any],
+    session_id: str,
+) -> dict[str, list[str] | None]:
+    overrides = load_session_toolset_overrides(session_id)
+    if not overrides:
+        return {}
+    if (
+        "enabled_toolsets" in overrides
+        and "enabled_toolsets_override" not in session
+    ):
+        session["enabled_toolsets_override"] = overrides["enabled_toolsets"]
+    if (
+        "disabled_toolsets" in overrides
+        and "disabled_toolsets_override" not in session
+    ):
+        session["disabled_toolsets_override"] = overrides["disabled_toolsets"]
+    return overrides
+
+
+def resolve_session_toolsets(
+    *,
+    session: dict[str, Any] | None,
+    session_id: str,
+    load_enabled_toolsets: Callable[[], list[str] | None],
+    load_disabled_toolsets: Callable[[], list[str] | None],
+) -> tuple[list[str] | None, list[str] | None]:
+    if isinstance(session, dict):
+        persisted_toolsets = hydrate_session_toolset_overrides(session, session_id)
+    else:
+        persisted_toolsets = load_session_toolset_overrides(session_id)
+    if isinstance(session, dict) and "enabled_toolsets_override" in session:
+        enabled_toolsets = session.get("enabled_toolsets_override")
+    elif "enabled_toolsets" in persisted_toolsets:
+        enabled_toolsets = persisted_toolsets["enabled_toolsets"]
+    else:
+        enabled_toolsets = load_enabled_toolsets()
+    if isinstance(session, dict) and "disabled_toolsets_override" in session:
+        disabled_toolsets = session.get("disabled_toolsets_override")
+    elif "disabled_toolsets" in persisted_toolsets:
+        disabled_toolsets = persisted_toolsets["disabled_toolsets"]
+    else:
+        disabled_toolsets = load_disabled_toolsets()
+    return enabled_toolsets, disabled_toolsets
+
+
+def persist_session_toolset_overrides(
+    session_id: str,
+    *,
+    enabled_toolsets: list[str] | None,
+    disabled_toolsets: list[str] | None,
+) -> None:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return
+    try:
+        from tui_gateway.services.persistence.gateway_store import get_gateway_state_store
+
+        store = get_gateway_state_store(create_if_missing=True)
+        if store is not None:
+            store.upsert_session_toolsets(
+                session_id=session_id,
+                enabled_toolsets=enabled_toolsets,
+                disabled_toolsets=disabled_toolsets,
+            )
+    except Exception:
+        return
+
+
 _UNCHANGED = object()
 
 
@@ -112,13 +210,15 @@ def ensure_session_turn_toolsets(
     requested_disabled_toolsets: Any = None,
     load_disabled_toolsets: Callable[[], list[str] | None] | None = None,
     toolset_scope: Any = None,
+    persist_session_id: str | None = None,
 ) -> None:
-    """Apply run-scoped toolset grants/denials to a session's tool surface.
+    """Apply requested toolset grants/denials to a session's tool surface.
 
     The default ``merge`` scope preserves the historical behavior: requested
-    toolsets are additive grants on top of the session/profile defaults.  Some
-    control-plane runs need an authority boundary instead of an additive grant;
-    ``exact`` replaces the enabled toolset surface with the requested list.
+    toolsets are additive grants on top of the session/profile defaults and may
+    be persisted for future runtime rebuilds.  Some control-plane runs need an
+    authority boundary instead of an additive grant; ``exact`` replaces the
+    enabled toolset surface with the requested list for the live runtime only.
     """
     extras = normalize_enabled_toolsets(requested_toolsets)
     disabled_extras = normalize_disabled_toolsets(requested_disabled_toolsets)
@@ -159,6 +259,13 @@ def ensure_session_turn_toolsets(
     effective_disabled = merge_disabled_toolsets(disabled_base, valid_disabled_extras)
     if valid_disabled_extras:
         session["disabled_toolsets_override"] = effective_disabled
+
+    if persist_session_id and scope != "exact":
+        persist_session_toolset_overrides(
+            persist_session_id,
+            enabled_toolsets=effective_enabled,
+            disabled_toolsets=effective_disabled,
+        )
 
     if agent is None:
         return

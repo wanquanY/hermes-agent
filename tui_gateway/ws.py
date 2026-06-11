@@ -60,6 +60,12 @@ _WS_CONTROL_METHODS = frozenset(
         "session.message_metadata.merge",
         "session.status",
         "session.title",
+        "team_mission.conversation.delete",
+        "team_mission.conversation.ensure",
+        "team_mission.conversation.list",
+        "team_mission.conversation.rename",
+        "team_mission.conversation.resolve",
+        "team_mission.node.history",
         "workspace.current",
         "workspace.list",
     }

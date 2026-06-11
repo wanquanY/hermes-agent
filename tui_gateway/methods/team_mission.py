@@ -16,6 +16,13 @@ from tui_gateway.services.team_mission_scheduler import TeamMissionReadySchedule
 _server = bind_server_globals(globals())
 
 _TEAM_LEADER_TOOLSET_SCOPE = "exact"
+_TEAM_LEADER_CONVERSATION_TOOLSETS = (
+    "team_mission_leader",
+    "clarify",
+    "file",
+    "terminal",
+    "todo",
+)
 _TEAM_LEADER_DISABLED_TOOLSETS = ("delegation",)
 _TEAM_LEADER_BLOCKED_TOOLS = ("delegate_task",)
 
@@ -221,6 +228,10 @@ def _resolve_team_capability_snapshot_for_params(db, params: dict, *, team_id: s
     snapshot_id = _team_capability_snapshot_id(params)
     if snapshot_id:
         return db.get_team_capability_snapshot(snapshot_id)
+    return _resolve_team_capability_snapshot_from_source_packet(db, params, team_id=team_id)
+
+
+def _resolve_team_capability_snapshot_from_source_packet(db, params: dict, *, team_id: str = "") -> dict:
     source_packet = _team_capability_source_packet(params)
     if not source_packet:
         return {}
@@ -230,6 +241,23 @@ def _resolve_team_capability_snapshot_for_params(db, params: dict, *, team_id: s
         source_digest_value=_team_capability_source_digest(params),
         force_refresh=_team_capability_force_refresh(params),
     )
+
+
+def _team_id_for_profile(params: dict, *, mission: dict | None = None, conversation: dict | None = None) -> str:
+    mission = mission if isinstance(mission, dict) else {}
+    conversation = conversation if isinstance(conversation, dict) else {}
+    source_packet = _team_capability_source_packet(params)
+    return str(
+        params.get("team_id")
+        or params.get("teamId")
+        or mission.get("team_id")
+        or mission.get("teamId")
+        or conversation.get("team_id")
+        or conversation.get("teamId")
+        or source_packet.get("teamId")
+        or source_packet.get("team_id")
+        or ""
+    ).strip()
 
 
 def _bind_team_capability_snapshot_for_mission(db, *, mission_id: str, conversation_id: str, snapshot: dict) -> dict:
@@ -343,11 +371,7 @@ def _team_leader_tool_policy(*, surface: str) -> dict:
 
 
 def _is_team_leader_control_node(node: dict) -> bool:
-    return _node_role(node) == "leader" and _node_phase(node) in {
-        "planning",
-        "change_request",
-        "discussion",
-    }
+    return _node_role(node) in {"leader", "lead", "root"} or str(node.get("kind") or "").strip() == "root"
 
 
 def _truthy(value) -> bool:
@@ -482,9 +506,10 @@ def _strategy_start_text(params: dict, mission: dict, node: dict) -> str:
 
 def _start_toolsets(params: dict, mission: dict, node: dict) -> list[str]:
     if _is_team_leader_control_node(node):
+        toolsets = ["team_mission_leader"]
         if _node_phase(node) in {"planning", "change_request"}:
-            return ["team_mission_planning"]
-        return []
+            toolsets.append("team_mission_planning")
+        return toolsets
     toolsets = _normalize_toolsets(params.get("enabled_toolsets") or params.get("enabledToolsets"))
     if _should_use_strategy_start_text(params, mission, node) and _node_phase(node) in {"planning", "change_request"}:
         if "team_mission_planning" not in toolsets:
@@ -766,6 +791,7 @@ def _leader_router_prompt(*, user_text: str, graph: dict, memory_text: str = "")
         "",
         "Route this user message before acting:",
         "- Answer directly for greetings, status questions, explanations, follow-up questions, clarifications, or requests about prior/current work.",
+        "- Use clarify, file, terminal, or todo tools when they help you understand the user's request, inspect the workspace, validate local context, or organize the plan before deciding whether to start a Team Mission.",
         "- Use team_mission_status when you need fresh mission graph or memory context to answer.",
         "- Call team_mission_start_task only when the user is asking to start a new substantive executable team task that benefits from planning, multi-agent work, workspace changes, research, verification, or a deliverable.",
         "- Do not call team_mission_start_task for greetings, lightweight Q&A, status checks, or discussion that can be answered by the Leader.",
@@ -787,7 +813,10 @@ def _leader_router_prompt(*, user_text: str, graph: dict, memory_text: str = "")
 
 
 def _leader_message_toolsets(params: dict) -> list[str]:
-    return ["team_mission_leader"]
+    return _merge_toolsets(
+        _TEAM_LEADER_CONVERSATION_TOOLSETS,
+        params.get("enabled_toolsets") or params.get("enabledToolsets"),
+    )
 
 
 def _ensure_team_conversation_session(db, conversation_session_id: str) -> bool:
@@ -944,6 +973,11 @@ def _(rid, params: dict) -> dict:
         return _db_unavailable_error(rid, code=5008)
     mission_id = _mission_id_from_params(params)
     snapshot_id = _team_capability_snapshot_id(params) or str(params.get("snapshot_id") or params.get("snapshotId") or "").strip()
+    mission = {}
+    conversation = {}
+    if mission_id:
+        graph = db.get_team_mission_graph(mission_id)
+        mission = graph.get("mission") if isinstance(graph, dict) and isinstance(graph.get("mission"), dict) else {}
     if not mission_id:
         identifier = (
             _conversation_id_from_params(params, {})
@@ -951,20 +985,33 @@ def _(rid, params: dict) -> dict:
             or str(params.get("identifier") or params.get("id") or "").strip()
         )
         resolved = db.resolve_team_mission_conversation(identifier) if identifier else {}
+        conversation = resolved.get("conversation") if isinstance(resolved, dict) and isinstance(resolved.get("conversation"), dict) else {}
         mission = resolved.get("mission") if isinstance(resolved, dict) and isinstance(resolved.get("mission"), dict) else {}
         mission_id = str(mission.get("mission_id") or "").strip()
     try:
+        team_id = _team_id_for_profile(params, mission=mission, conversation=conversation)
         snapshot = db.get_team_capability_snapshot(snapshot_id) if snapshot_id else {}
         binding = {}
+        source = "snapshot_id" if snapshot else ""
         if mission_id:
             binding = db.get_team_capability_snapshot_binding(mission_id)
             if not snapshot:
                 snapshot = db.get_bound_team_capability_snapshot(mission_id)
+                if snapshot:
+                    source = "mission_binding"
+        if not snapshot:
+            snapshot = _resolve_team_capability_snapshot_from_source_packet(db, params, team_id=team_id)
+            if snapshot:
+                source = "source_packet"
+        if not snapshot and team_id:
+            snapshot = db.get_latest_team_capability_snapshot(team_id)
+            if snapshot:
+                source = "latest_team_snapshot"
     except Exception as exc:
         return _err(rid, 5008, f"team profile unavailable: {exc}")
     if not snapshot:
         return _err(rid, 4040, "team capability snapshot not found")
-    return _ok(rid, {"mission_id": mission_id, "binding": binding, "snapshot": snapshot})
+    return _ok(rid, {"mission_id": mission_id, "team_id": team_id, "binding": binding, "snapshot": snapshot, "source": source})
 
 
 @method("team_mission.create")
@@ -1233,7 +1280,7 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
-        return _db_unavailable_error(rid, code=5008)
+        return _ok(rid, {"conversations": []})
     conversations = db.list_team_mission_conversations(
         team_id=str(params.get("team_id") or params.get("teamId") or ""),
         workspace_id=_workspace_id_from_params(params),

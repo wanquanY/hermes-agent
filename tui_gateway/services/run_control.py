@@ -33,6 +33,24 @@ except Exception:  # pragma: no cover - keeps gateway importable in mocked tests
 
 _MAX_EVENTS_PER_SESSION = 2000
 _POLL_INTERVAL_SECONDS = 0.25
+_RUN_OPENING_EVENT_TYPES = {
+    "message.start",
+    "message.delta",
+    "reasoning.delta",
+    "thinking.delta",
+    "tool.start",
+    "tool.generating",
+    "tool.progress",
+    "approval.request",
+    "secret.request",
+    "sudo.request",
+    "input_approval.request",
+    "subagent.output_delta",
+    "subagent.reasoning_delta",
+    "subagent.thinking",
+    "agent_profile_test.output_delta",
+    "agent_profile_test.thinking",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +234,10 @@ def _terminal_status(event_type: str, payload: dict[str, Any]) -> str | None:
     if status in {"error", "failed"}:
         return "failed"
     return "completed"
+
+
+def _event_opens_active_run(event_type: str) -> bool:
+    return str(event_type or "").strip() in _RUN_OPENING_EVENT_TYPES
 
 
 def _payload_status(status: str) -> str:
@@ -645,21 +667,32 @@ def record_event(
                 int(frame.get("seq") or 0),
             )
         if stable and run_id:
-            state = _ensure_run(
-                stable_session_id=stable,
-                run_id=run_id,
-                runtime_scope_key=str((payload or {}).get("runtime_scope_key") or frame.get("runtime_scope_key") or ""),
-                turn_id=turn_id,
-                runtime_session_id=runtime_session_id,
+            existing_state = _run_state_by_id.get(run_id)
+            should_track_run = bool(
+                existing_state is not None
+                or terminal_event
+                or _event_opens_active_run(event_type)
             )
-            state["last_seq"] = int(frame.get("seq") or state.get("last_seq") or 0)
-            if terminal_event:
-                state["status"] = terminal_event
-                if terminal_event == "failed":
-                    state["error"] = str(payload.get("message") or "")
-            elif event_type in {"message.start", "tool.start", "tool.generating"}:
-                state["status"] = "running"
-            state["updated_at"] = now
+            if should_track_run:
+                state = _ensure_run(
+                    stable_session_id=stable,
+                    run_id=run_id,
+                    runtime_scope_key=str(
+                        (payload or {}).get("runtime_scope_key")
+                        or frame.get("runtime_scope_key")
+                        or ""
+                    ),
+                    turn_id=turn_id,
+                    runtime_session_id=runtime_session_id,
+                )
+                state["last_seq"] = int(frame.get("seq") or state.get("last_seq") or 0)
+                if terminal_event:
+                    state["status"] = terminal_event
+                    if terminal_event == "failed":
+                        state["error"] = str(payload.get("message") or "")
+                elif _event_opens_active_run(event_type):
+                    state["status"] = "running"
+                state["updated_at"] = now
 
         subscribers = set()
         if stable:

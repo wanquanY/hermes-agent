@@ -102,7 +102,12 @@ def test_supervised_strategy_waits_for_whole_graph_approval_after_planning():
         members=MEMBERS,
     )
     assert "team_mission_node_create" in leader_text
+    assert "team_mission_team_profile" in leader_text
     assert "team_mission_plan_complete" in leader_text
+    assert "worker-a" not in leader_text
+    assert "profile-worker-a" not in leader_text
+    assert "Worker A" not in leader_text
+    assert "best_for=" not in leader_text
     assert leader_text != "规划后审批再执行"
     assert strategy.can_mutate_graph(actor="leader", phase="planning") is True
     assert strategy.can_mutate_graph(actor="leader", phase="running") is False

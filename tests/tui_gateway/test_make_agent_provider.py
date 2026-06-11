@@ -94,6 +94,44 @@ def test_make_agent_remembers_requested_runtime_provider():
     assert agent._gateway_runtime_requested_provider == "doxie-cloud"
 
 
+def test_make_agent_restores_persisted_session_toolsets():
+    fake_runtime = {
+        "provider": None,
+        "base_url": None,
+        "api_key": None,
+        "api_mode": None,
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+    }
+    fake_cfg = {"agent": {"system_prompt": ""}}
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=None),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="off"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=["memory"]),
+        patch("tui_gateway.server._load_disabled_toolsets", return_value=None),
+        patch(
+            "tui_gateway.services.toolset_scope.load_session_toolset_overrides",
+            return_value={
+                "enabled_toolsets": ["memory", "doxie"],
+                "disabled_toolsets": ["delegation"],
+            },
+        ),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime),
+        patch("run_agent.AIAgent") as mock_agent,
+    ):
+        from tui_gateway.server import _make_agent
+
+        _make_agent("sid-restored", "stored-design", session_id="stored-design")
+
+    assert mock_agent.call_args.kwargs["enabled_toolsets"] == ["memory", "doxie"]
+    assert mock_agent.call_args.kwargs["disabled_toolsets"] == ["delegation"]
+
+
 def test_ensure_agent_runtime_current_rebinds_stale_session_credentials():
     from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
 

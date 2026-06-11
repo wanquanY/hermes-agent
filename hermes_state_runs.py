@@ -31,6 +31,35 @@ COALESCIBLE_STREAM_EVENT_TYPES = {
     "agent_profile_test.output_delta",
     "agent_profile_test.thinking",
 }
+RUNTIME_LIFECYCLE_EVENT_PREFIXES = (
+    "message.",
+    "tool.",
+    "subagent.",
+    "approval.",
+    "secret.",
+    "sudo.",
+    "input_approval.",
+    "agent_profile_test.",
+)
+RUNTIME_LIFECYCLE_EVENT_TYPES = {
+    "error",
+    "reasoning.delta",
+    "thinking.delta",
+}
+RUN_OPENING_EVENT_TYPES = {
+    "message.start",
+    "message.delta",
+    "reasoning.delta",
+    "thinking.delta",
+    "tool.start",
+    "tool.generating",
+    "tool.progress",
+    "approval.request",
+    "secret.request",
+    "sudo.request",
+    "input_approval.request",
+    *COALESCIBLE_STREAM_EVENT_TYPES,
+}
 STREAM_IDENTITY_PAYLOAD_KEYS = (
     "subagent_id",
     "subagentId",
@@ -93,6 +122,26 @@ def _event_status(event_type: str, payload: Dict[str, Any]) -> str | None:
     if status in {"error", "failed"}:
         return "failed"
     return "completed"
+
+
+def _event_opens_active_run(event_type: str) -> bool:
+    return str(event_type or "").strip() in RUN_OPENING_EVENT_TYPES
+
+
+def _runtime_lifecycle_event_sql(column: str) -> str:
+    escaped_prefixes = [prefix.replace("'", "''") for prefix in RUNTIME_LIFECYCLE_EVENT_PREFIXES]
+    prefix_checks = " OR ".join(f"{column} LIKE '{prefix}%'" for prefix in escaped_prefixes)
+    exact_values = _sql_status_literals(RUNTIME_LIFECYCLE_EVENT_TYPES)
+    return f"({column} IN ({exact_values}) OR {prefix_checks})"
+
+
+def _active_runtime_run_sql(run_column: str) -> str:
+    lifecycle_sql = _runtime_lifecycle_event_sql("e.event_type")
+    return (
+        f"(NOT EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = {run_column}) "
+        f"OR EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = {run_column} "
+        f"AND {lifecycle_sql}))"
+    )
 
 
 def _row_value(row: sqlite3.Row | None, key: str, default: Any = None) -> Any:
@@ -196,6 +245,87 @@ class SessionDBRunMixin:
         if not run.get("runtime_scope_key"):
             run["runtime_scope_key"] = run.get("session_id") or ""
         return run
+
+    def _repair_control_only_active_runs_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        session_id: str = "",
+        now: float | None = None,
+    ) -> int:
+        """Close active rows that were opened only by mission control events.
+
+        ``runs`` models live runtime turns.  Team Mission control events such as
+        ``mission.approval.requested`` must remain in ``run_events`` for graph
+        replay, but they must not make the leader conversation busy.
+        """
+        active_statuses = _sql_status_literals(ACTIVE_RUN_STATUSES)
+        lifecycle_sql = _runtime_lifecycle_event_sql("e.event_type")
+        session_clause = ""
+        params: list[Any] = []
+        stable = str(session_id or "").strip()
+        if stable:
+            session_clause = "AND r.session_id = ?"
+            params.append(stable)
+        rows = conn.execute(
+            f"""
+            SELECT r.*
+            FROM runs r
+            WHERE r.status IN ({active_statuses})
+              {session_clause}
+              AND EXISTS (
+                SELECT 1 FROM run_events e
+                WHERE e.run_id = r.run_id
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM run_events e
+                WHERE e.run_id = r.run_id
+                  AND {lifecycle_sql}
+              )
+            """,
+            tuple(params),
+        ).fetchall()
+        if not rows:
+            return 0
+        repaired_at = float(now or time.time())
+        for row in rows:
+            metadata = _json_loads(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["recovery_reason"] = "control-only run events are not active runtime runs"
+            metadata["recovered_at"] = repaired_at
+            conn.execute(
+                """
+                UPDATE runs
+                SET status = 'completed',
+                    updated_at = ?,
+                    completed_at = COALESCE(completed_at, updated_at, ?),
+                    error = COALESCE(error, ''),
+                    metadata_json = ?
+                WHERE run_id = ?
+                """,
+                (
+                    repaired_at,
+                    repaired_at,
+                    _json_dumps(metadata),
+                    row["run_id"],
+                ),
+            )
+        return len(rows)
+
+    def repair_control_only_active_runs(
+        self,
+        *,
+        session_id: str = "",
+        now: float | None = None,
+    ) -> int:
+        return self._execute_write(
+            lambda conn: self._repair_control_only_active_runs_locked(
+                conn,
+                session_id=session_id,
+                now=now,
+            )
+        )
 
     def next_run_event_seq(self, session_id: str, fallback_seq: int = 0) -> int:
         stable = str(session_id or "").strip()
@@ -344,8 +474,10 @@ class SessionDBRunMixin:
         started = float(started_at or now)
         updated = float(updated_at or now)
         active_placeholders = ",".join("?" for _ in ACTIVE_RUN_STATUSES)
+        active_runtime_sql = _active_runtime_run_sql("runs.run_id")
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            self._repair_control_only_active_runs_locked(conn, session_id=stable, now=now)
             existing = conn.execute(
                 "SELECT * FROM runs WHERE run_id = ?",
                 (normalized_run_id,),
@@ -359,6 +491,7 @@ class SessionDBRunMixin:
                 FROM runs
                 WHERE session_id = ?
                   AND status IN ({active_placeholders})
+                  AND {active_runtime_sql}
                 ORDER BY updated_at DESC, started_at DESC
                 LIMIT 1
                 """,
@@ -396,6 +529,7 @@ class SessionDBRunMixin:
                     FROM runs
                     WHERE session_id = ?
                       AND status IN ({active_placeholders})
+                      AND {active_runtime_sql}
                     ORDER BY updated_at DESC, started_at DESC
                     LIMIT 1
                     """,
@@ -522,15 +656,27 @@ class SessionDBRunMixin:
                     "SELECT * FROM runs WHERE run_id = ?",
                     (run_id,),
                 ).fetchone()
+                should_track_run = bool(
+                    existing is not None
+                    or terminal_status
+                    or _event_opens_active_run(event_type)
+                )
+                if not should_track_run:
+                    return inserted_event
                 existing_status = str(_row_value(existing, "status", "") or "")
                 next_status = terminal_status or existing_status or "running"
                 if existing_status in TERMINAL_RUN_STATUSES and terminal_status is None:
                     next_status = existing_status
-                if event_type in {"message.start", "tool.start", "tool.generating"} and existing_status not in TERMINAL_RUN_STATUSES:
+                if (
+                    _event_opens_active_run(event_type)
+                    and existing_status not in TERMINAL_RUN_STATUSES
+                ):
                     next_status = "running"
                 rejected_duplicate_active = ""
                 if existing is None and next_status in ACTIVE_RUN_STATUSES:
+                    self._repair_control_only_active_runs_locked(conn, session_id=stable, now=timestamp)
                     active_statuses = _sql_status_literals(ACTIVE_RUN_STATUSES)
+                    active_runtime_sql = _active_runtime_run_sql("runs.run_id")
                     active = conn.execute(
                         f"""
                         SELECT run_id
@@ -538,6 +684,7 @@ class SessionDBRunMixin:
                         WHERE session_id = ?
                           AND run_id != ?
                           AND status IN ({active_statuses})
+                          AND {active_runtime_sql}
                         ORDER BY updated_at DESC, started_at DESC
                         LIMIT 1
                         """,
@@ -785,6 +932,11 @@ class SessionDBRunMixin:
             placeholders = ",".join("?" for _ in normalized_statuses)
             clauses.append(f"status IN ({placeholders})")
             params.extend(normalized_statuses)
+            if any(status in ACTIVE_RUN_STATUSES for status in normalized_statuses):
+                active_statuses = _sql_status_literals(ACTIVE_RUN_STATUSES)
+                clauses.append(
+                    f"(status NOT IN ({active_statuses}) OR {_active_runtime_run_sql('runs.run_id')})"
+                )
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(bounded_limit)
         with self._lock:
@@ -1194,12 +1346,18 @@ class SessionDBRunMixin:
                 "run_updated_at": 0,
                 "last_event_seq": 0,
             }
+        try:
+            self.repair_control_only_active_runs(session_id=stable)
+        except Exception as exc:
+            logger.debug("control-only active run repair skipped for %s: %s", stable, exc)
+        active_runtime_sql = _active_runtime_run_sql("runs.run_id")
         with self._lock:
             active = self._conn.execute(
                 f"""
                 SELECT * FROM runs
                 WHERE session_id = ?
                   AND status IN ({_sql_status_literals(ACTIVE_RUN_STATUSES)})
+                  AND {active_runtime_sql}
                 ORDER BY updated_at DESC, started_at DESC
                 LIMIT 1
                 """,

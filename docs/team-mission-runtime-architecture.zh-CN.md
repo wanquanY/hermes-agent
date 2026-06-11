@@ -198,14 +198,24 @@ Gateway：
 14. `created_at REAL`
 15. `updated_at REAL`
 
-节点类型：
+节点类型必须是 Hermes 运行时生命周期语义，不承载专业分工标签。持久化层只允许 canonical kind：
 
 1. `root`
-2. `planner`
-3. `worker`
+2. `worker`
+3. `discussion`
 4. `verifier`
-5. `synthesizer`
+5. `synthesis`
 6. `approval_gate`
+
+`research`、`analysis`、`implementation`、`testing`、`verification`、`quality` 等专业分工只能作为 `metadata.work_type`、`output_contract.focus` 或 capability 线索保存，写库前必须归一化为 `worker`。`synthesizer`、`summary` 只能作为客户端或旧数据别名，进入 Hermes 运行时后必须归一化为 `synthesis`。`verification` 不等价于 `verifier`：前者是工作类型，后者是 Hermes 控制节点。
+
+负责人规则：
+
+1. `assignee_member_id` 必须引用当前 mission metadata 中存在且未禁用的 team member。
+2. `assignee_profile_id` 必须能解析到某个 team member，或明确表示外部 profile ownership。
+3. `root`、`approval_gate`、`verifier`、`synthesis` 属于 Leader-owned control nodes；如果调用方没有显式给出有效负责人，Hermes 必须默认分配给 Leader。
+4. planning tool 遇到不存在的 `assignee_member_id` 必须拒绝本次 mutation，不能把 run id、node id、profile id 或任意字符串持久化为 member id。
+5. 数据库内部 upsert 遇到历史或内部调用带来的无效显式 member id 时，必须丢弃该无效显式值并按默认负责人规则解析，保证 graph 中不出现不可解析负责人。
 
 ### 6.4 `team_mission_edges`
 
@@ -505,7 +515,7 @@ Hermes 行为：
 
 1. 创建 root planning node。
 2. Leader 流式输出规划过程。
-3. Leader 创建 worker/verifier/synthesizer nodes 和 edges。
+3. Leader 创建 `worker`、`verifier`、`synthesis` nodes 和 edges。
 4. Hermes 创建 approval gate node。
 5. `mission.plan.completed` 后 mission 进入 `waiting_approval`。
 6. 用户调用 `team_mission.approve` 后，Hermes 释放 approval gate 的下游节点。
@@ -520,7 +530,7 @@ Hermes 行为：
 
 1. approval 前 worker 不启动。
 2. approval 后按依赖启动 worker。
-3. verifier 通过后进入 synthesis。
+3. `verifier` 通过后进入 `synthesis`。
 4. synthesis 完成后 mission 为 `completed`。
 
 ### 9.3 `autonomous_mission`
@@ -1207,8 +1217,11 @@ DoXie 不应该：
    - `team_mission_node_create`
    - `team_mission_edge_create`
    - `team_mission_plan_complete`
-8. planner tools 通过当前 run binding 校验 actor、node kind、phase 和 mode strategy；只有绑定到 mission root/Leader planning run 的上下文可以改图。
-9. planner tools 创建的 worker node 会继承当前 task context，避免跨任务污染。
+8. `team_mission_leader` 是 Team Mission Leader 的基础工具集，不随 phase 收窄；稳定 Leader conversation 和任意绑定到 Leader/root node 的运行都应具备 Leader 工具能力。
+9. Leader 基础工具包含 `team_mission_status` 和 `team_mission_team_profile`；规划/改图阶段在此基础上额外叠加 `team_mission_planning`。
+10. Leader 规划启动 prompt 不能内联团队成员画像、能力标签、profile id 或 member id 清单；成员能力必须通过 `team_mission_team_profile` 工具读取。
+11. planner tools 通过当前 run binding 校验 actor、node kind、phase 和 mode strategy；只有绑定到 mission root/Leader planning run 的上下文可以改图。
+12. planner tools 创建的 worker node 会继承当前 task context，避免跨任务污染。
 
 待实现：
 
@@ -1256,7 +1269,8 @@ DoXie 不应该：
     - `team_mission_status`
     - `team_mission_team_profile`
     - `team_mission_start_task`
-11. capability snapshot 可通过 `team_capability.snapshot.*` API 绑定到 conversation/mission，Leader 和 worker 可读取经过快照固定的团队能力。
+11. `team_mission_start_task` 只在稳定 Leader conversation 中用于把用户消息提升为新 mission；`team_mission_status` 和 `team_mission_team_profile` 同时支持稳定 Leader conversation 和绑定到 mission node 的 Leader run。
+12. capability snapshot 可通过 `team_capability.snapshot.*` API 绑定到 conversation/mission，Leader 和 worker 可读取经过快照固定的团队能力。
 
 要求：
 
@@ -1297,13 +1311,43 @@ DoXie 不应该：
    - `TeamMissionReadyScheduler` 通过 `run_control.register_team_mission_ready_scheduler()` 接入 terminal event 后的 ready-node 调度。
    - `kanban_runtime_events.py` 将 Kanban worker lifecycle 投影为 runtime event，而不是让 DoXie 读取 Kanban SQLite。
 4. Tool 层：
-   - `team_mission_leader` toolset 只给稳定 Team Mission Leader conversation 使用。
-   - `team_mission_planning` toolset 是 internal toolset，只给绑定到 mission planning run 的 Leader planner 使用。
+   - `team_mission_leader` toolset 是 Leader 基础工具集，给稳定 Team Mission Leader conversation 和任意绑定到 Leader/root node 的 Team Mission run 使用。
+   - `team_mission_planning` toolset 是 internal toolset，只在允许规划/改图的 Leader run 上叠加使用。
    - 普通 worker 和 DoXie 对话不会获得 planner graph mutation tools。
 5. DoXie contract：
    - `doxie_extension/manifest.py` contract/version 更新到 `2026-06-10`。
    - Doxie gateway manifest 暴露 Team Mission、Team Capability、message metadata merge 等 required methods。
    - `team_mission` methods 作为 Doxie extension override 注册，仍保持 Doxie client -> Hermes Gateway 的单一事实源。
+
+### 2026-06-11 prodv0.9.3 当前落地快照
+
+本批 staged 代码继续补齐 Team Mission 生产运行边界，重点是节点历史、profile tool、节点类型规范、负责人校验和控制事件不会污染普通运行状态：
+
+1. Node runtime history：
+   - 新增 `tui_gateway/methods/team_mission_history.py`。
+   - 新增 `tui_gateway/services/team_mission_runtime_history.py`。
+   - `team_mission.node.history` 按 mission/node/session 解析 run binding，返回节点关联的 transcript messages、runtime events、tool events、artifacts 和 run binding 摘要。
+   - 该方法加入 Doxie extension required methods 和 runtime proxy control allowlist，Doxie 右侧节点详情不需要扫描普通 session 或 Kanban SQLite。
+2. Node kind 和 assignee 规范：
+   - 新增 `hermes_team_mission_node_kinds.py`，将 `research`、`analysis`、`implementation`、`testing`、`verification` 等专业分工统一归一化为 `worker`，并把原始语义保存到 metadata。
+   - `synthesizer` / `summary` 等旧别名统一归一化为 `synthesis`。
+   - `root`、`approval_gate`、`verifier`、`synthesis` 是 Leader-owned control nodes；无有效负责人时默认归属 Leader。
+   - 无效 `assignee_member_id` 不允许进入 graph。planning tools 遇到不存在 member 必须拒绝，内部 upsert 遇到历史无效值必须丢弃并按默认负责人规则解析。
+3. Team profile tools：
+   - 新增 `hermes_team_mission_profile_tools.py` 和 `tools/team_mission_profile_tools.py`。
+   - `team_mission_team_profile` 读取并压缩 capability snapshot，Leader 不再通过 prompt 内联团队成员画像、profile id 或 member id 清单。
+   - `team_mission_leader` 是 Leader 基础 toolset；`team_mission_planning` 只在 planning / change-request 阶段叠加。
+4. Active run 修复：
+   - `hermes_state_runs.py` 区分 runtime lifecycle events 和 mission control events。
+   - `mission.*` 控制事件仍写入 `run_events` 供 Team Mission replay，但不会单独打开或保持 ordinary run active，避免 Leader conversation 因 control-only event 显示 busy。
+   - 新增 `repair_control_only_active_runs()` 兜底修复历史脏 active rows。
+5. Toolset scope 持久化：
+   - `gateway_session_toolsets` 记录 session 级 enabled / disabled toolset overrides。
+   - `resolve_session_toolsets()` 在 agent rebuild 时恢复非 exact 的 toolset scope，避免 runtime 重建后丢失 Leader conversation 的 Team Mission 工具面。
+   - `exact` scope 仍只作为本次控制平面的权限边界，不持久化为会话默认工具面。
+6. Scheduler 稳定性：
+   - `TeamMissionReadyScheduler` 启动节点失败时会把节点标记为 `blocked` 并记录 `start_error`，不会让 scheduler 异常吞掉 ready graph 状态。
+   - scheduler 统一使用 canonical node kind 判断 approval gate / verifier / synthesis。
 
 ## 17. 验收标准
 

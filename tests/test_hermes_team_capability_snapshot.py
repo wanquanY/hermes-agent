@@ -57,6 +57,10 @@ def test_team_capability_snapshot_is_canonical_hermes_state(tmp_path: Path):
     assert snapshot["version"] == 1
     assert snapshot["status"] == "ready"
     assert snapshot["team_profile"]["collaboration_mode"] == "supervised_mission"
+    assert any(
+        score["axis_id"] == "engineering" and score["score"] >= 3
+        for score in snapshot["team_profile"]["radar_scores"]
+    )
     builder = snapshot["member_profiles"][0]
     assert builder["member_id"] == "member-builder"
     assert "适合承担" in builder["best_for_tasks"][0]

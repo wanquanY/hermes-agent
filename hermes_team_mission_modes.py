@@ -4,6 +4,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from hermes_team_mission_node_kinds import metadata_with_normalized_node_kind
+from hermes_team_mission_node_kinds import normalize_team_mission_node_kind
+
 
 MODE_DISCUSSION = "discussion"
 MODE_SUPERVISED_MISSION = "supervised_mission"
@@ -427,8 +430,8 @@ class SupervisedMissionStrategy(TeamMissionModeStrategy):
         objective: str,
         members: Sequence[Mapping[str, Any] | TeamMissionMember] = (),
     ) -> str:
-        normalized = _normalize_members(members)
-        worker_hint = _member_prompt_hint(_worker_members(normalized))
+        del members
+        profile_hint = _team_profile_prompt_hint()
         return "\n".join([
             "You are the Hermes Team Mission Leader Planner for supervised execution.",
             "Your current phase is planning only. Do not execute the user task directly and do not provide the final answer.",
@@ -438,14 +441,15 @@ class SupervisedMissionStrategy(TeamMissionModeStrategy):
             f"Mission id: {mission_id}",
             f"Mission title: {str(title or '').strip()}",
             f"Mission objective: {str(objective or '').strip()}",
-            worker_hint,
+            profile_hint,
             "",
             "Required graph protocol:",
-            "1. Use team_mission_node_create to create the worker/verifier/synthesis nodes needed for the plan.",
-            "2. Use team_mission_edge_create to connect dependencies between the planned nodes.",
-            "3. Keep executable worker nodes in ready/todo states; do not start them.",
-            "4. When the whole graph is planned, call team_mission_plan_complete.",
-            "5. After plan completion, stop. The user approval gate must release execution later.",
+            "1. Review team/member capabilities with team_mission_team_profile before deciding assignees and creating the task graph.",
+            "2. Use team_mission_node_create to create the worker/verifier/synthesis nodes needed for the plan.",
+            "3. Use team_mission_edge_create to connect dependencies between the planned nodes.",
+            "4. Keep executable worker nodes in ready/todo states; do not start them.",
+            "5. When the whole graph is planned, call team_mission_plan_complete.",
+            "6. After plan completion, stop. The user approval gate must release execution later.",
         ]).strip()
 
     def requires_whole_graph_approval(self) -> bool:
@@ -463,7 +467,7 @@ class SupervisedMissionStrategy(TeamMissionModeStrategy):
     ) -> TeamMissionStrategyActions:
         work_nodes = tuple(
             node for node in planned_nodes
-            if node.kind not in {"root", "approval_gate"}
+            if normalize_team_mission_node_kind(node.kind) not in {"root", "approval_gate"}
         )
         approval = TeamMissionNodeSpec(
             node_id=_node_id(mission_id, "approval-plan"),
@@ -561,8 +565,8 @@ class AutonomousMissionStrategy(TeamMissionModeStrategy):
         objective: str,
         members: Sequence[Mapping[str, Any] | TeamMissionMember] = (),
     ) -> str:
-        normalized = _normalize_members(members)
-        worker_hint = _member_prompt_hint(_worker_members(normalized))
+        del members
+        profile_hint = _team_profile_prompt_hint()
         return "\n".join([
             "You are the Hermes Team Mission Leader Planner for autonomous execution.",
             "Your first phase is planning. Do not execute worker tasks inside the root planning node.",
@@ -572,13 +576,14 @@ class AutonomousMissionStrategy(TeamMissionModeStrategy):
             f"Mission id: {mission_id}",
             f"Mission title: {str(title or '').strip()}",
             f"Mission objective: {str(objective or '').strip()}",
-            worker_hint,
+            profile_hint,
             "",
             "Required graph protocol:",
-            "1. Use team_mission_node_create to create worker/verifier/synthesis nodes.",
-            "2. Use team_mission_edge_create to connect dependencies.",
-            "3. Mark high-risk nodes with metadata.risk_level='high' or 'critical'.",
-            "4. When the graph is planned, call team_mission_plan_complete so Hermes can release low-risk ready nodes.",
+            "1. Review team/member capabilities with team_mission_team_profile before deciding assignees and creating the task graph.",
+            "2. Use team_mission_node_create to create worker/verifier/synthesis nodes.",
+            "3. Use team_mission_edge_create to connect dependencies.",
+            "4. Mark high-risk nodes with metadata.risk_level='high' or 'critical'.",
+            "5. When the graph is planned, call team_mission_plan_complete so Hermes can release low-risk ready nodes.",
         ]).strip()
 
     def allow_automatic_graph_mutation(self, *, phase: str = "") -> bool:
@@ -705,31 +710,16 @@ def _worker_members(members: Sequence[TeamMissionMember]) -> tuple[TeamMissionMe
     return tuple(member for member in members if member.role not in {"leader", "lead"})
 
 
-def _member_prompt_hint(members: Sequence[TeamMissionMember]) -> str:
-    if not members:
-        return "Available worker members: none configured; Hermes will assign leader ownership for any node that cannot be matched to a member."
-    lines = ["Available worker members:"]
-    for member in members:
-        label = member.display_name or member.member_id or member.profile_id
-        profile = member.profile_id or ""
-        version = member.profile_version_id or ""
-        capability_parts: list[str] = []
-        if member.best_for_tasks:
-            capability_parts.append("best_for=" + "; ".join(member.best_for_tasks[:4]))
-        if member.avoid_tasks:
-            capability_parts.append("avoid=" + "; ".join(member.avoid_tasks[:3]))
-        if member.strengths:
-            capability_parts.append("strengths=" + ", ".join(member.strengths[:4]))
-        if member.capability_tags:
-            capability_parts.append("tags=" + ", ".join(member.capability_tags[:5]))
-        capability_text = "; " + "; ".join(capability_parts) if capability_parts else ""
-        lines.append(
-            f"- {label}: member_id={member.member_id}, role={member.role}, "
-            f"profile_id={profile}, profile_version_id={version}{capability_text}"
-        )
-    lines.append("Every planned node must name its execution owner with assignee_member_id or assignee_profile_id; use the Leader for synthesis, verification, approval, and orchestration nodes.")
-    lines.append("Use team_mission_team_profile from the Leader conversation when detailed capability evidence is needed; planning nodes should follow the capability matrix provided here.")
-    return "\n".join(lines)
+def _team_profile_prompt_hint() -> str:
+    return "\n".join([
+        "Team capability guidance:",
+        "1. Use team_mission_team_profile to understand the current team and member capabilities; do not infer capabilities from prompt text.",
+        "2. Select worker assignee_member_id only from team_mission_team_profile.snapshot.member_profiles[].member_id.",
+        "3. Never use run_id, session_id, node_id, profile_id, or profile_version_id as assignee_member_id.",
+        "4. For verifier, synthesis, approval, and orchestration nodes, omit assignee fields unless the profile tool result identifies the Leader member_id.",
+        "5. Use canonical node kinds only: worker, verifier, synthesis. Root and approval_gate are reserved for Hermes runtime.",
+        "6. Put specialties such as research, coding, testing, quality, or verification in metadata.work_type or output_contract; do not use them as kind.",
+    ])
 
 
 def _node_id(mission_id: str, suffix: str) -> str:
@@ -751,11 +741,26 @@ def _manual_graph_specs(
             node_id = str(raw_node.get("node_id") or raw_node.get("id") or _node_id(mission_id, f"manual-{index}")).strip()
             if not node_id:
                 continue
+            raw_kind = str(raw_node.get("kind") or "worker")
+            kind = normalize_team_mission_node_kind(raw_kind)
+            metadata = metadata_with_normalized_node_kind(
+                {
+                    **dict(raw_node.get("metadata") or {}),
+                    "mode": MODE_MANUAL_GRAPH,
+                    **(
+                        {"assignee_member_id": str(raw_node.get("assignee_member_id") or raw_node.get("assigneeMemberId") or "")}
+                        if raw_node.get("assignee_member_id") or raw_node.get("assigneeMemberId")
+                        else {}
+                    ),
+                },
+                raw_kind=raw_kind,
+                canonical_kind=kind,
+            )
             known_node_ids.add(node_id)
             nodes.append(
                 TeamMissionNodeSpec(
                     node_id=node_id,
-                    kind=str(raw_node.get("kind") or "worker"),
+                    kind=kind,
                     title=str(raw_node.get("title") or f"任务节点 {index + 1}"),
                     objective=str(raw_node.get("objective") or raw_node.get("description") or ""),
                     status=str(raw_node.get("status") or "ready"),
@@ -765,15 +770,7 @@ def _manual_graph_specs(
                     ),
                     runtime_scope_key=str(raw_node.get("runtime_scope_key") or raw_node.get("runtimeScopeKey") or ""),
                     output_contract=dict(raw_node.get("output_contract") or raw_node.get("outputContract") or {}),
-                    metadata={
-                        **dict(raw_node.get("metadata") or {}),
-                        "mode": MODE_MANUAL_GRAPH,
-                        **(
-                            {"assignee_member_id": str(raw_node.get("assignee_member_id") or raw_node.get("assigneeMemberId") or "")}
-                            if raw_node.get("assignee_member_id") or raw_node.get("assigneeMemberId")
-                            else {}
-                        ),
-                    },
+                    metadata=metadata,
                     position_x=float(raw_node.get("position_x") or raw_node.get("x") or 0),
                     position_y=float(raw_node.get("position_y") or raw_node.get("y") or 0),
                 )

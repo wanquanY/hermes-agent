@@ -1,9 +1,9 @@
-"""Hermes Team Mission Leader conversation tools.
+"""Hermes Team Mission Leader tools.
 
-These tools are only exposed to the stable Team Mission conversation Leader
-turn.  They let the Leader inspect mission state and explicitly promote a user
-message into a new planning node. Graph decomposition remains owned by the
-separate ``team_mission_planning`` toolset on the planning node run.
+These tools are exposed to Team Mission Leaders. Conversation turns can route a
+user message into a new mission task; bound Leader node runs can inspect mission
+state and team capability context while phase-specific mutation remains owned by
+the separate ``team_mission_planning`` toolset.
 """
 
 from __future__ import annotations
@@ -14,7 +14,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from hermes_state import SessionDB
+from hermes_team_mission_profile_tools import gateway_call as _gateway_call
+from hermes_team_mission_profile_tools import team_capability_payload as _team_capability_payload
+from hermes_team_mission_profile_tools import unwrap_response as _unwrap_response
 from tools.registry import registry, tool_error, tool_result
+from tools.team_mission_profile_tools import _handle_team_profile  # compatibility export
+from tools.team_mission_profile_tools import _leader_run_context
 
 
 _TOOLSET = "team_mission_leader"
@@ -153,88 +158,31 @@ def _leader_member(team_context: dict[str, Any]) -> dict[str, Any]:
     ) or next((dict(item) for item in members if isinstance(item, Mapping)), {})
 
 
-def _team_capability_payload(team_context: dict[str, Any]) -> dict[str, Any]:
-    payload = team_context.get("team_capability") if isinstance(team_context.get("team_capability"), Mapping) else {}
-    source_packet = team_context.get("team_capability_source_packet") if isinstance(team_context.get("team_capability_source_packet"), Mapping) else {}
-    snapshot_id = _text(team_context.get("team_capability_snapshot_id") or team_context.get("teamCapabilitySnapshotId"))
-    result = dict(payload)
-    if source_packet:
-        result.setdefault("source_packet", dict(source_packet))
-    if snapshot_id:
-        result.setdefault("snapshot_id", snapshot_id)
-    return result
-
-
-def _gateway_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
-    try:
-        from tui_gateway import server
-
-        fn = server._methods.get(method)
-        if not callable(fn):
-            return {"error": {"message": f"Gateway method {method} is unavailable."}}
-        return fn(None, params)
-    except Exception as exc:
-        return {"error": {"message": str(exc)}}
-
-
-def _unwrap_response(response: dict[str, Any]) -> tuple[dict[str, Any], str]:
-    if not isinstance(response, dict):
-        return {}, "Gateway returned an invalid response."
-    error = response.get("error")
-    if isinstance(error, Mapping):
-        return {}, _text(error.get("message")) or "Gateway method failed."
-    result = response.get("result")
-    return (dict(result), "") if isinstance(result, Mapping) else ({}, "")
-
-
 def _handle_status(args: dict[str, Any], parent_agent=None, **_kwargs) -> str:
-    del args
+    args = args if isinstance(args, dict) else {}
     ctx = _team_context()
-    if isinstance(ctx, str):
-        return tool_error(ctx)
-    team_context = ctx
     db = _get_db(parent_agent)
-    mission_id, graph = _active_mission_graph(db, team_context)
-    memory = team_context.get("memory") if isinstance(team_context.get("memory"), Mapping) else {}
+    if not isinstance(ctx, str):
+        team_context = ctx
+        mission_id, graph = _active_mission_graph(db, team_context)
+        memory = team_context.get("memory") if isinstance(team_context.get("memory"), Mapping) else {}
+        return tool_result(
+            success=True,
+            mission_id=mission_id,
+            graph_summary=_graph_summary(graph),
+            memory=memory,
+        )
+    leader_run_ctx = _leader_run_context(args, parent_agent)
+    if isinstance(leader_run_ctx, str):
+        return tool_error(f"{ctx} Leader run context: {leader_run_ctx}")
+    _db, _run_id, binding, _mission, _node = leader_run_ctx
+    mission_id = _text(binding.get("mission_id"))
+    graph = db.get_team_mission_graph(mission_id)
     return tool_result(
         success=True,
         mission_id=mission_id,
         graph_summary=_graph_summary(graph),
-        memory=memory,
-    )
-
-
-def _handle_team_profile(args: dict[str, Any], parent_agent=None, **_kwargs) -> str:
-    del args
-    ctx = _team_context()
-    if isinstance(ctx, str):
-        return tool_error(ctx)
-    team_context = ctx
-    db = _get_db(parent_agent)
-    mission_id, _graph = _active_mission_graph(db, team_context)
-    params: dict[str, Any] = {}
-    if mission_id:
-        params["mission_id"] = mission_id
-    else:
-        conversation_id = _text(team_context.get("conversation_id") or team_context.get("conversationId"))
-        conversation_session_id = _text(team_context.get("conversation_session_id") or team_context.get("conversationSessionId"))
-        if conversation_id:
-            params["conversation_id"] = conversation_id
-        if conversation_session_id:
-            params["conversation_session_id"] = conversation_session_id
-    snapshot_id = _text(team_context.get("team_capability_snapshot_id") or team_context.get("teamCapabilitySnapshotId"))
-    if snapshot_id:
-        params["snapshot_id"] = snapshot_id
-    response = _gateway_call("team_mission.team_profile.get", params)
-    result, error = _unwrap_response(response)
-    if error:
-        return tool_error(error)
-    snapshot = result.get("snapshot") if isinstance(result.get("snapshot"), Mapping) else {}
-    return tool_result(
-        success=True,
-        mission_id=mission_id,
-        binding=result.get("binding") if isinstance(result.get("binding"), Mapping) else {},
-        snapshot=snapshot,
+        memory={},
     )
 
 
@@ -320,7 +268,7 @@ registry.register(
     toolset=_TOOLSET,
     schema={
         "name": "team_mission_status",
-        "description": "Read the current Hermes Team Mission graph and memory summary for a Leader conversation answer.",
+        "description": "Read the current Hermes Team Mission graph and memory summary for a Team Mission Leader.",
         "parameters": {
             "type": "object",
             "properties": {},
@@ -332,32 +280,14 @@ registry.register(
 )
 
 registry.register(
-    name="team_mission_team_profile",
-    toolset=_TOOLSET,
-    schema={
-        "name": "team_mission_team_profile",
-        "description": (
-            "Read the canonical Hermes Team Capability Snapshot bound to this Team Mission. "
-            "Use this before planning when member capability, constraints, or assignment evidence is needed."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    handler=_handle_team_profile,
-    emoji="",
-)
-
-registry.register(
     name="team_mission_start_task",
     toolset=_TOOLSET,
     schema={
         "name": "team_mission_start_task",
         "description": (
             "Start a new Hermes Team Mission planning task from the current Leader conversation. "
-            "Use only when the user is clearly asking for a substantive executable team task."
+            "Use only in the stable Leader conversation, and only when the user is clearly asking "
+            "for a substantive executable team task."
         ),
         "parameters": {
             "type": "object",

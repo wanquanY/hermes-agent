@@ -831,6 +831,39 @@ def test_run_control_replays_events_and_tracks_status(capture):
     assert done["result"]["run"]["status"] == "completed"
 
 
+def test_run_control_control_events_do_not_mark_session_busy(capture):
+    server, _buf = capture
+    agent = MagicMock(model="gpt-test", provider="test-provider")
+    agent.context_compressor = None
+    server._sessions["runtime-control"] = {
+        "agent": agent,
+        "session_key": "stored-control",
+        "running": False,
+        "history": [],
+        "history_lock": threading.Lock(),
+    }
+
+    server._emit(
+        "mission.approval.requested",
+        "runtime-control",
+        {
+            "run_id": "team-mission:mission-1:conversation:plan",
+            "mission_id": "mission-1",
+        },
+    )
+    status = server.handle_request(
+        {
+            "id": "control-status",
+            "method": "session.status",
+            "params": {"stored_session_id": "stored-control"},
+        }
+    )
+
+    assert "error" not in status
+    assert status["result"]["running"] is False
+    assert status["result"]["active_run_id"] == ""
+
+
 def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
     class _RunDB:
         def get_session_run_status(self, _session_id):

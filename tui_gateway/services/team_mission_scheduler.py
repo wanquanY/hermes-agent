@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from typing import Any, Callable
 
 from hermes_team_mission_modes import strategy_for_mode
+from hermes_team_mission_node_kinds import normalize_team_mission_node_kind
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,7 @@ def _graph_nodes(graph: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _node_kind(node: dict[str, Any]) -> str:
-    return str((node or {}).get("kind") or "").strip()
+    return normalize_team_mission_node_kind((node or {}).get("kind"))
 
 
 def _node_metadata(node: dict[str, Any]) -> dict[str, Any]:
@@ -108,7 +110,7 @@ def _approval_pending(mission: dict[str, Any], graph: dict[str, Any]) -> bool:
     if str((mission or {}).get("mode") or "") != "supervised_mission":
         return False
     return any(
-        str(node.get("kind") or "") == "approval_gate"
+        _node_kind(node) == "approval_gate"
         and _node_status(node) not in _TERMINAL_DEPENDENCY_STATUSES
         for node in _graph_nodes(graph)
     )
@@ -232,18 +234,36 @@ class TeamMissionReadyScheduler:
                     "status": claimed_status,
                 })
                 continue
-            response = self._start_node(
-                rid,
-                self._node_start_params(
-                    base_params=schedule_params,
-                    mission_id=normalized_mission_id,
-                    node_id=node_id,
+            try:
+                response = self._start_node(
+                    rid,
+                    self._node_start_params(
+                        base_params=schedule_params,
+                        mission_id=normalized_mission_id,
+                        node_id=node_id,
+                        trigger=trigger,
+                        ready_count=len(ready_node_ids),
+                    ),
+                )
+            except Exception as exc:
+                logger.exception("Team Mission scheduler failed to start node %s", node_id)
+                self._mark_node_start_failed(
+                    normalized_mission_id,
+                    node_id,
+                    error=f"{type(exc).__name__}: {exc}",
                     trigger=trigger,
-                    ready_count=len(ready_node_ids),
-                ),
-            )
+                )
+                errors.append({"node_id": node_id, "error": f"{type(exc).__name__}: {exc}"})
+                continue
             if isinstance(response, dict) and response.get("error"):
-                errors.append({"node_id": node_id, "error": response.get("error")})
+                error = response.get("error")
+                self._mark_node_start_failed(
+                    normalized_mission_id,
+                    node_id,
+                    error=str(error),
+                    trigger=trigger,
+                )
+                errors.append({"node_id": node_id, "error": error})
                 continue
             started.append({"node_id": node_id, "result": response.get("result") if isinstance(response, dict) else {}})
         return {
@@ -311,6 +331,35 @@ class TeamMissionReadyScheduler:
             )
         logger.debug("Team Mission scheduler db has no claim method; starting without atomic claim")
         return self._db.get_team_mission_node(mission_id, node_id)
+
+    def _mark_node_start_failed(self, mission_id: str, node_id: str, *, error: str, trigger: str = "") -> dict[str, Any]:
+        node = self._db.get_team_mission_node(mission_id, node_id)
+        if not node:
+            return {}
+        metadata = dict(node.get("metadata") or {})
+        metadata.update({
+            "start_error": str(error or "node start failed"),
+            "start_failed_at": time.time(),
+            "scheduler_trigger": str(trigger or "team_mission.scheduler"),
+        })
+        upsert = getattr(self._db, "upsert_team_mission_node", None)
+        if not callable(upsert):
+            return node
+        return upsert(
+            mission_id=mission_id,
+            node_id=node_id,
+            kind=str(node.get("kind") or "worker"),
+            title=str(node.get("title") or ""),
+            objective=str(node.get("objective") or ""),
+            status="blocked",
+            assignee_profile_id=str(node.get("assignee_profile_id") or ""),
+            assignee_profile_version_id=str(node.get("assignee_profile_version_id") or ""),
+            runtime_scope_key=str(node.get("runtime_scope_key") or ""),
+            output_contract=dict(node.get("output_contract") or {}),
+            metadata=metadata,
+            position_x=float(node.get("position_x") or 0),
+            position_y=float(node.get("position_y") or 0),
+        )
 
     @staticmethod
     def _node_start_params(

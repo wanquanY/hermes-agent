@@ -155,7 +155,7 @@ TOOLSETS = {
     },
 
     "team_mission_leader": {
-        "description": "Internal Hermes Team Mission Leader conversation routing tools",
+        "description": "Hermes Team Mission Leader baseline tools for conversation and bound Leader node runs",
         "tools": [
             "team_mission_status",
             "team_mission_team_profile",

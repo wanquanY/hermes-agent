@@ -3,6 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
+from hermes_team_mission_node_kinds import TEAM_MISSION_CONTROL_NODE_KINDS
+from hermes_team_mission_node_kinds import normalize_team_mission_node_kind
+
 
 _DEPENDENCY_EDGE_KINDS = {"depends_on", "dependency", "blocks", "delegates"}
 _DEPENDENCY_SATISFIED_STATUSES = {"completed", "verified"}
@@ -10,7 +13,7 @@ _STARTABLE_NODE_STATUSES = {"ready"}
 _WAITING_DEPENDENCY_STATUSES = {"todo", "waiting_dependency", "blocked_waiting_dependency"}
 _ACTIVE_NODE_STATUSES = {"running", "starting", "waiting_approval"}
 _EXECUTION_MODES_REQUIRE_FINALIZERS = {"supervised_mission", "autonomous_mission", "manual_graph"}
-_NON_WORK_NODE_KINDS = {"root", "approval_gate", "verifier", "synthesis"}
+_NON_WORK_NODE_KINDS = TEAM_MISSION_CONTROL_NODE_KINDS
 
 
 def _task_id_from_metadata(metadata: Dict[str, Any] | None) -> str:
@@ -96,7 +99,7 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
             node = db.upsert_team_mission_node(
                 mission_id=mission_id,
                 node_id=node_id,
-                kind=str(node.get("kind") or "worker"),
+                kind=normalize_team_mission_node_kind(node.get("kind")),
                 title=str(node.get("title") or ""),
                 objective=str(node.get("objective") or ""),
                 status=next_status,
@@ -138,7 +141,7 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
     approval_pending = (
         mode == "supervised_mission"
         and any(
-            str(node.get("kind") or "") == "approval_gate"
+            normalize_team_mission_node_kind(node.get("kind")) == "approval_gate"
             and str(node.get("status") or "") not in _DEPENDENCY_SATISFIED_STATUSES
             for node in updated_nodes
         )
@@ -200,10 +203,10 @@ def ensure_team_mission_finalizers(
     for node in nodes:
         if active_task_id and not _node_matches_task(node, active_task_id):
             continue
-        nodes_by_kind.setdefault(str(node.get("kind") or ""), []).append(node)
+        nodes_by_kind.setdefault(normalize_team_mission_node_kind(node.get("kind")), []).append(node)
     work_nodes = [
         node for node in nodes
-        if str(node.get("kind") or "") not in _NON_WORK_NODE_KINDS
+        if normalize_team_mission_node_kind(node.get("kind")) not in _NON_WORK_NODE_KINDS
         and _node_matches_task(node, active_task_id)
     ]
     if not work_nodes:

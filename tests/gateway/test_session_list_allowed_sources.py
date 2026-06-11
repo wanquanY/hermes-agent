@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from hermes_state import SessionDB
 from tui_gateway import server
+from tui_gateway.services import runtime_proxy
 
 
 class _StubDB:
@@ -234,6 +235,93 @@ def test_session_list_reads_requested_doxie_profile_home(tmp_path, monkeypatch):
     finally:
         for db in list(server._db_by_home.values()):
             db.close()
+
+
+def test_team_conversation_list_reads_requested_doxie_profile_home(tmp_path, monkeypatch):
+    """Team conversation history must use the same profile-home routing as session.list."""
+    profile_home = tmp_path / "profile-home"
+    seed_db = SessionDB(profile_home / "state.db")
+    try:
+        seed_db.upsert_team_mission_conversation(
+            conversation_id="conversation-1",
+            team_id="team-1",
+            stable_session_id="team-session-1",
+            title="Profile scoped team conversation",
+            workspace_id="workspace-1",
+            workspace_path="/tmp/workspace",
+            updated_at=200,
+        )
+    finally:
+        seed_db.close()
+
+    monkeypatch.setattr(server, "_db_by_home", {})
+    monkeypatch.setattr(server, "_db_error_by_home", {})
+    try:
+        resp = server.handle_request({
+            "id": "1",
+            "method": "team_mission.conversation.list",
+            "params": {
+                "agentProfileId": "agent-a",
+                "agentProfileVersionId": "version-1",
+                "runtimeScopeKey": "profile:agent-a:version:version-1",
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "agentProfileVersionId": "version-1",
+                    "runtimeScopeKey": "profile:agent-a:version:version-1",
+                    "hermesHomePath": str(profile_home),
+                },
+            },
+        })
+        assert resp["result"]["conversations"][0]["conversation_id"] == "conversation-1"
+        assert resp["result"]["conversations"][0]["title"] == "Profile scoped team conversation"
+    finally:
+        for db in list(server._db_by_home.values()):
+            db.close()
+
+
+def test_team_conversation_list_returns_empty_for_profile_home_without_state_db(tmp_path, monkeypatch):
+    """Enumerating every profile/version scope should not turn unused homes into UI errors."""
+    profile_home = tmp_path / "empty-profile-home"
+
+    monkeypatch.setattr(server, "_db_by_home", {})
+    monkeypatch.setattr(server, "_db_error_by_home", {})
+    try:
+        resp = server.handle_request({
+            "id": "1",
+            "method": "team_mission.conversation.list",
+            "params": {
+                "agentProfileId": "agent-a",
+                "agentProfileVersionId": "version-empty",
+                "runtimeScopeKey": "profile:agent-a:version:version-empty",
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "agentProfileVersionId": "version-empty",
+                    "runtimeScopeKey": "profile:agent-a:version:version-empty",
+                    "hermesHomePath": str(profile_home),
+                },
+            },
+        })
+        assert "error" not in resp
+        assert resp["result"]["conversations"] == []
+        assert not (profile_home / "state.db").exists()
+    finally:
+        for db in list(server._db_by_home.values()):
+            db.close()
+
+
+def test_team_conversation_list_is_control_plane_read_for_profile_scope():
+    assert runtime_proxy.should_proxy_to_runtime({
+        "id": "1",
+        "method": "team_mission.conversation.list",
+        "params": {
+            "agentProfileId": "agent-a",
+            "runtimeScopeKey": "profile:agent-a",
+            "doxie_profile": {
+                "id": "agent-a",
+                "hermesHomePath": "/tmp/hermes-agent-a",
+            },
+        },
+    }) is False
 
 
 def test_session_messages_returns_paged_transcript(monkeypatch):
