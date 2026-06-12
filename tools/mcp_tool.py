@@ -1134,54 +1134,25 @@ class MCPServerTask:
         """Check if this server uses HTTP transport."""
         return "url" in self._config
 
-    _MCP_CONTENT_TYPES = ("application/json", "text/event-stream")
+    def _advertises_tools(self) -> bool:
+        """Whether the server advertises the ``tools`` capability.
 
-    async def _preflight_content_type(
-        self,
-        url: str,
-        *,
-        headers: Optional[dict] = None,
-        ssl_verify: bool = True,
-        timeout: float = 5.0,
-    ) -> None:
-        """Reject clear non-MCP HTTP endpoints before the SDK connects.
+        Per the MCP spec, ``InitializeResult.capabilities.tools`` is non-None
+        iff the server implements the ``tools/*`` request family. Prompt-only
+        or resource-only servers omit it, and calling ``tools/list`` against
+        them raises ``McpError(-32601 Method not found)`` — which previously
+        killed the connection during discovery and made every keepalive fail.
+        (Ported from anomalyco/opencode#31271.)
 
-        This is intentionally best-effort: only a successful response with a
-        concrete non-MCP content type is rejected. Missing content type, 4xx/5xx,
-        and network errors remain the SDK handshake's responsibility.
+        Returns True when no capability info was captured (legacy fallback:
+        preserve the old always-call-list_tools behavior rather than regress
+        any server that was working before this gate).
         """
-        try:
-            import httpx as _httpx
-        except ImportError:
-            return
-
-        probe_headers = dict(headers) if headers else {}
-        try:
-            async with _httpx.AsyncClient(
-                verify=ssl_verify,
-                follow_redirects=True,
-                timeout=_httpx.Timeout(timeout),
-            ) as client:
-                resp = await client.head(url, headers=probe_headers)
-                if resp.status_code in (405, 501):
-                    resp = await client.get(url, headers=probe_headers)
-        except _httpx.HTTPError:
-            return
-
-        if not (200 <= resp.status_code < 300):
-            return
-
-        ct_base = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-        if not ct_base or ct_base in self._MCP_CONTENT_TYPES:
-            return
-
-        raise NonMcpEndpointError(
-            f"MCP server '{self.name}' at {url} returned Content-Type "
-            f"'{ct_base}', not an MCP response (expected one of: "
-            f"{', '.join(self._MCP_CONTENT_TYPES)}). The URL most likely "
-            "points at a web page rather than a Streamable HTTP MCP endpoint "
-            "(for example https://host/mcp, not https://host/)."
-        )
+        init_result = self.initialize_result
+        caps = getattr(init_result, "capabilities", None) if init_result is not None else None
+        if caps is None:
+            return True
+        return getattr(caps, "tools", None) is not None
 
     # ----- Dynamic tool discovery (notifications/tools/list_changed) -----
 
@@ -1253,6 +1224,12 @@ class MCPServerTask:
         — atomic from the event loop's perspective.
         """
         from tools.registry import registry
+
+        if not self._advertises_tools():
+            # A server that doesn't implement tools/* should never send
+            # tools/list_changed, but guard anyway — calling tools/list
+            # would raise McpError(-32601).
+            return
 
         async with self._refresh_lock:
             # Capture old tool names for change diff
@@ -1395,17 +1372,24 @@ class MCPServerTask:
                 if done:
                     break
 
-                # Timeout — no lifecycle event fired.  Probe the connection
-                # to detect stale/expired sessions. Prefer ``ping`` (MCP base
-                # protocol liveness): it works uniformly and stays a few bytes
-                # regardless of tool count, unlike ``list_tools`` (~1 MB on an
-                # 830-tool server). ``ping`` is an OPTIONAL utility, so a
-                # tool-capable server that doesn't implement it answers -32601;
-                # in that case fall back to the pre-ping ``list_tools`` probe
-                # for the rest of this connection rather than reconnect-looping.
+                # Timeout — no lifecycle event fired.  Send a keepalive
+                # to exercise the connection and detect stale sockets.
+                # Prompt-only / resource-only servers don't implement
+                # ``tools/list`` (McpError -32601), so use the universal
+                # ``ping`` request for them instead — otherwise every
+                # keepalive cycle would trigger a spurious reconnect.
                 if self.session:
                     try:
-                        await self._keepalive_probe()
+                        if self._advertises_tools():
+                            await asyncio.wait_for(
+                                self.session.list_tools(),
+                                timeout=30.0,
+                            )
+                        else:
+                            await asyncio.wait_for(
+                                self.session.send_ping(),
+                                timeout=30.0,
+                            )
                     except Exception as exc:
                         logger.warning(
                             "MCP server '%s' keepalive failed, "
@@ -1679,6 +1663,14 @@ class MCPServerTask:
         # ping support across the reconnect.
         self._ping_unsupported = False
         if self.session is None:
+            return
+        if not self._advertises_tools():
+            logger.info(
+                "MCP server '%s': does not advertise 'tools' capability — "
+                "skipping tools/list (prompts/resources remain available)",
+                self.name,
+            )
+            self._tools = []
             return
         async with self._rpc_lock:
             tools_result = await self.session.list_tools()
