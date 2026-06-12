@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from agent.doxie_diagnostics import emit_doxie_diagnostic
 from hermes_constants import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
@@ -45,6 +46,7 @@ from tui_gateway.services.profile_context import (
     leave_profile_context as _leave_profile_context,
     profile_context_for_params as _profile_context_for_params,
 )
+from tui_gateway.services import run_control
 from tui_gateway.services.session_store import (
     db_unavailable_detail as _db_unavailable_detail,
     get_session_db_for_home as _get_session_db_for_home,
@@ -132,6 +134,62 @@ _READ_ONLY_DB_METHODS = frozenset(
         "workspace.list",
     }
 )
+
+
+def _agent_context_mode_from_params(params: dict | None = None) -> str:
+    raw = (
+        (params or {}).get("agent_context_mode")
+        or (params or {}).get("agentContextMode")
+        or (params or {}).get("runtime_context_mode")
+        or (params or {}).get("runtimeContextMode")
+        or ""
+    )
+    mode = str(raw or "").strip().lower().replace("-", "_")
+    if mode in {"team_leader", "leader_conversation"}:
+        return "team_leader"
+    if mode in {"profile", "profile_conversation", "default"}:
+        return "profile"
+    return ""
+
+
+def _agent_context_options_for_session(session: dict | None) -> dict:
+    """Resolve semantic context loading policy for a gateway runtime session."""
+
+    mode = _agent_context_mode_from_params(session)
+    if mode == "team_leader":
+        return {
+            "skip_context_files": True,
+            "skip_memory": True,
+            "load_soul_identity": False,
+        }
+    ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
+    return {
+        "skip_context_files": ignore_rules,
+        "skip_memory": ignore_rules,
+    }
+
+
+def _log_agent_build_stage(sid: str, session: dict | None, stage: str, **fields: Any) -> None:
+    session = session or {}
+    runtime_scope_key = str(
+        session.get("active_runtime_scope_key")
+        or session.get("runtime_scope_key")
+        or session.get("session_key")
+        or sid
+    )
+    run_id = str(session.get("active_run_id") or "")
+    if not run_id and not runtime_scope_key.startswith("team:"):
+        return
+    pairs = {
+        "stage": stage,
+        "sid": sid,
+        "stored_session_id": str(session.get("session_key") or sid),
+        "run_id": run_id,
+        "turn_id": str(session.get("active_turn_id") or ""),
+        "runtime_scope_key": runtime_scope_key,
+        **fields,
+    }
+    emit_doxie_diagnostic("[doxie-agent-build-stage]", pairs)
 _current_method: contextvars.ContextVar[str] = contextvars.ContextVar(
     "tui_gateway_current_method",
     default="",
@@ -203,50 +261,128 @@ def _notify_session_boundary(event_type: str, session_id: str | None) -> None:
         pass
 
 
-def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
+def _finalize_session(
+    session: dict | None,
+    end_reason: str = "tui_close",
+    *,
+    runtime_sid: str = "",
+) -> None:
     """Best-effort finalize hook + memory commit for a session."""
     if not session or session.get("_finalized"):
         return
     session["_finalized"] = True
+    profile_tokens = _enter_profile_context(session.get("profile_context"), apply_env=False)
     stop_event = session.get("_notif_stop")
-    if stop_event is not None:
-        stop_event.set()
+    try:
+        if stop_event is not None:
+            stop_event.set()
 
-    agent = session.get("agent")
-    lock = session.get("history_lock")
-    if lock is not None:
-        with lock:
+        _terminalize_active_run_for_shutdown(
+            session,
+            end_reason=end_reason,
+            runtime_sid=runtime_sid,
+        )
+
+        agent = session.get("agent")
+        lock = session.get("history_lock")
+        if lock is not None:
+            with lock:
+                history = list(session.get("history", []))
+        else:
             history = list(session.get("history", []))
-    else:
-        history = list(session.get("history", []))
-    if agent is not None and history and hasattr(agent, "commit_memory_session"):
-        try:
-            agent.commit_memory_session(history)
-        except Exception:
-            pass
+        if agent is not None and history and hasattr(agent, "commit_memory_session"):
+            try:
+                agent.commit_memory_session(history)
+            except Exception:
+                pass
 
-    session_key = session.get("session_key")
-    session_id = getattr(agent, "session_id", None) or session_key
-    _notify_session_boundary("on_session_finalize", session_id)
+        session_key = session.get("session_key")
+        session_id = getattr(agent, "session_id", None) or session_key
+        _notify_session_boundary("on_session_finalize", session_id)
 
-    # Mark session ended in DB so it doesn't linger as a ghost row in /resume.
-    # Use session_id (from agent.session_id) not session_key — after compression,
-    # session_key may be stale (the ended parent) while session_id is the live
-    # continuation. Fix for #20001.
-    if session_id:
+        # Mark session ended in DB so it doesn't linger as a ghost row in /resume.
+        # Use session_id (from agent.session_id) not session_key — after compression,
+        # session_key may be stale (the ended parent) while session_id is the live
+        # continuation. Fix for #20001.
+        if session_id:
+            try:
+                db = _get_db()
+                if db is not None:
+                    db.end_session(session_id, end_reason)
+            except Exception:
+                pass
+    finally:
+        _leave_profile_context(profile_tokens)
+
+
+def _terminalize_active_run_for_shutdown(
+    session: dict,
+    *,
+    end_reason: str,
+    runtime_sid: str = "",
+) -> None:
+    stable_session_id = str(session.get("session_key") or runtime_sid or "").strip()
+    if not stable_session_id:
+        return
+    db = _get_db()
+    if db is None:
+        return
+    run_id = str(session.get("active_run_id") or "").strip()
+    turn_id = str(session.get("active_turn_id") or "").strip()
+    runtime_scope_key = str(
+        session.get("active_runtime_scope_key")
+        or session.get("runtime_scope_key")
+        or stable_session_id
+    ).strip()
+    if not run_id:
         try:
-            db = _get_db()
-            if db is not None:
-                db.end_session(session_id, end_reason)
+            status = run_control.session_status(
+                stable_session_id,
+                db=db,
+                current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+            )
+            run_id = str(status.get("active_run_id") or "").strip()
+            turn_id = str(status.get("active_turn_id") or turn_id or "").strip()
+            runtime_scope_key = str(
+                status.get("runtime_scope_key")
+                or runtime_scope_key
+                or stable_session_id
+            ).strip()
         except Exception:
-            pass
+            logger.warning(
+                "[doxie-gateway] shutdown active-run lookup failed session_id=%s",
+                stable_session_id,
+                exc_info=True,
+            )
+            return
+    if not run_id:
+        return
+    message = f"gateway {end_reason} before run reached terminal state"
+    logger.warning(
+        "[doxie-gateway] terminalizing active run during shutdown session_id=%s run_id=%s turn_id=%s reason=%s",
+        stable_session_id,
+        run_id,
+        turn_id,
+        end_reason,
+    )
+    run_control.publish_run_terminal_event(
+        stored_session_id=stable_session_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        runtime_scope_key=runtime_scope_key or stable_session_id,
+        runtime_session_id=str(runtime_sid or "").strip(),
+        status="interrupted",
+        message=message,
+        db=db,
+        owner_transport=current_transport(),
+    )
 
 
 def _shutdown_sessions() -> None:
     with _sessions_lock:
-        sessions = list(_sessions.values())
-    for session in sessions:
-        _finalize_session(session, end_reason="tui_shutdown")
+        sessions = list(_sessions.items())
+    for runtime_sid, session in sessions:
+        _finalize_session(session, end_reason="tui_shutdown", runtime_sid=runtime_sid)
         try:
             worker = session.get("slash_worker")
             if worker:
@@ -320,6 +456,10 @@ def write_json(obj: dict) -> bool:
 def _emit(event: str, sid: str, payload: dict | None = None):
     params = {"type": event, "session_id": sid}
     event_payload = payload or {}
+    stable_session_id = ""
+    run_id = ""
+    turn_id = ""
+    runtime_scope_key = ""
     try:
         from tui_gateway.services import run_control
 
@@ -353,20 +493,63 @@ def _emit(event: str, sid: str, payload: dict | None = None):
                 "turn_id": turn_id,
                 "runtime_session_id": sid,
                 "runtime_scope_key": runtime_scope_key,
+                "owner_metadata": {
+                    "gateway_pid": os.getpid(),
+                    "gateway_instance_id": _GATEWAY_INSTANCE_ID,
+                },
                 "payload": event_payload,
             }
             frame["seq"] = run_control.next_event_seq(stable_session_id, db=_get_db())
             params["seq"] = frame["seq"]
+            terminal_event = _is_terminal_run_event(event)
             run_control.publish_recorded_event(
                 frame,
                 db=_get_db(),
                 owner_transport=current_transport(),
+                before_deliver=(lambda: _release_terminal_session_run(sid, run_id))
+                if terminal_event
+                else None,
             )
     except Exception:
-        pass
+        logger.warning(
+            "[doxie-gateway] emit record failed event=%s session_id=%s stored_session_id=%s run_id=%s turn_id=%s runtime_scope_key=%s",
+            event,
+            sid,
+            stable_session_id,
+            run_id,
+            turn_id,
+            runtime_scope_key,
+            exc_info=True,
+        )
     if payload is not None:
         params["payload"] = payload
     write_json({"jsonrpc": "2.0", "method": "event", "params": params})
+
+
+def _is_terminal_run_event(event: str) -> bool:
+    return str(event or "").strip() in {
+        "message.complete",
+        "error",
+        "session.interrupted",
+    }
+
+
+def _release_terminal_session_run(sid: str, run_id: str) -> None:
+    runtime_sid = str(sid or "").strip()
+    completed_run_id = str(run_id or "").strip()
+    if not runtime_sid or not completed_run_id:
+        return
+    with _sessions_lock:
+        session = _sessions.get(runtime_sid)
+    if not isinstance(session, dict):
+        return
+    if str(session.get("active_run_id") or "") != completed_run_id:
+        return
+    session["running"] = False
+    session["active_run_id"] = None
+    session["active_turn_id"] = None
+    session["pending_turn"] = None
+    session["run_updated_at"] = time.time()
 
 
 def _active_hermes_home():
@@ -499,9 +682,15 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
 
 def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
     ready = session.get("agent_ready")
-    if ready is not None and not ready.wait(timeout=timeout):
-        return _err(rid, 5032, "agent initialization timed out")
+    if ready is not None:
+        _log_agent_build_stage(str(session.get("runtime_session_id") or ""), session, "wait-start", timeout=timeout)
+        if not ready.wait(timeout=timeout):
+            _log_agent_build_stage(str(session.get("runtime_session_id") or ""), session, "wait-timeout", timeout=timeout)
+            return _err(rid, 5032, "agent initialization timed out")
+        _log_agent_build_stage(str(session.get("runtime_session_id") or ""), session, "wait-end")
     err = session.get("agent_error")
+    if err:
+        _log_agent_build_stage(str(session.get("runtime_session_id") or ""), session, "wait-error", error=err)
     return _err(rid, 5032, err) if err else None
 
 
@@ -521,14 +710,19 @@ def _start_agent_build(sid: str, session: dict) -> None:
     lock = session.setdefault("agent_build_lock", threading.Lock())
     with lock:
         if ready.is_set() or session.get("agent_build_started"):
+            _log_agent_build_stage(sid, session, "start-skip", ready=ready.is_set(), started=bool(session.get("agent_build_started")))
             return
         session["agent_build_started"] = True
     key = session["session_key"]
+    session["runtime_session_id"] = sid
+    _log_agent_build_stage(sid, session, "start")
 
     def _build() -> None:
+        started_at = time.time()
         with _sessions_lock:
             current = _sessions.get(sid)
         if current is None:
+            _log_agent_build_stage(sid, session, "session-missing")
             ready.set()
             return
 
@@ -536,20 +730,38 @@ def _start_agent_build(sid: str, session: dict) -> None:
         notify_registered = False
         try:
             cwd = current.get("cwd")
+            _log_agent_build_stage(sid, current, "thread-entry", cwd=cwd)
+            _log_agent_build_stage(sid, current, "profile-context-enter-start")
+            profile_tokens = _enter_profile_context(current.get("profile_context"))
+            _log_agent_build_stage(sid, current, "profile-context-enter-end")
+            _log_agent_build_stage(sid, current, "session-context-enter-start")
             tokens = _set_session_context(key, terminal_cwd=cwd)
             try:
+                _log_agent_build_stage(sid, current, "make-agent-start")
                 agent = _make_agent(sid, key, cwd=cwd)
+                _log_agent_build_stage(
+                    sid,
+                    current,
+                    "make-agent-end",
+                    model=str(getattr(agent, "model", "") or ""),
+                    agent_session_id=str(getattr(agent, "session_id", "") or ""),
+                )
             finally:
                 _clear_session_context(tokens)
+                _leave_profile_context(profile_tokens)
+                _log_agent_build_stage(sid, current, "context-exit")
 
             # Session DB row deferred to first run_conversation() call.
             # pending_title applied post-first-message (see cli.exec handler).
             current["agent"] = agent
 
             try:
+                _log_agent_build_stage(sid, current, "slash-worker-start")
                 worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
                 current["slash_worker"] = worker
+                _log_agent_build_stage(sid, current, "slash-worker-end")
             except Exception:
+                _log_agent_build_stage(sid, current, "slash-worker-error")
                 pass
 
             try:
@@ -566,23 +778,42 @@ def _start_agent_build(sid: str, session: dict) -> None:
             except Exception:
                 pass
 
+            _log_agent_build_stage(sid, current, "wire-callbacks-start")
             _wire_callbacks(sid)
+            _log_agent_build_stage(sid, current, "wire-callbacks-end")
             with _sessions_lock:
                 if sid in _sessions:
+                    _log_agent_build_stage(sid, current, "notification-poller-start")
                     _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
+                    _log_agent_build_stage(sid, current, "notification-poller-end")
+            _log_agent_build_stage(sid, current, "session-boundary-notify-start")
             _notify_session_boundary("on_session_reset", key)
+            _log_agent_build_stage(sid, current, "session-boundary-notify-end")
 
+            _log_agent_build_stage(sid, current, "session-info-start")
             info = _session_info(agent, current)
+            _log_agent_build_stage(sid, current, "credential-probe-start")
             warn = _probe_credentials(agent)
+            _log_agent_build_stage(sid, current, "credential-probe-end", has_warning=bool(warn))
             if warn:
                 info["credential_warning"] = warn
+            _log_agent_build_stage(sid, current, "config-health-probe-start")
             cfg_warn = _probe_config_health(_load_cfg())
+            _log_agent_build_stage(sid, current, "config-health-probe-end", has_warning=bool(cfg_warn))
             if cfg_warn:
                 info["config_warning"] = cfg_warn
                 logger.warning(cfg_warn)
+            _log_agent_build_stage(sid, current, "session-info-emit-start")
             _emit("session.info", sid, info)
+            _log_agent_build_stage(
+                sid,
+                current,
+                "thread-complete",
+                elapsed_ms=int((time.time() - started_at) * 1000),
+            )
         except Exception as e:
             current["agent_error"] = str(e)
+            _log_agent_build_stage(sid, current, "thread-error", error=str(e))
             _emit("error", sid, {"message": f"agent init failed: {e}"})
         finally:
             with _sessions_lock:
@@ -601,6 +832,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
                     except Exception:
                         pass
             ready.set()
+            _log_agent_build_stage(sid, current, "ready-set")
 
     threading.Thread(target=_build, daemon=True).start()
 
@@ -1625,7 +1857,13 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     return info
 
 
-def _make_agent(sid: str, key: str, session_id: str | None = None, cwd: str | None = None):
+def _make_agent(
+    sid: str,
+    key: str,
+    session_id: str | None = None,
+    cwd: str | None = None,
+    agent_context_mode: str | None = None,
+):
     from run_agent import AIAgent
     from hermes_cli.runtime_provider import resolve_runtime_provider
     from tui_gateway.services.runtime_credentials import remember_requested_runtime_provider
@@ -1659,6 +1897,10 @@ def _make_agent(sid: str, key: str, session_id: str | None = None, cwd: str | No
         load_enabled_toolsets=_load_enabled_toolsets,
         load_disabled_toolsets=_load_disabled_toolsets,
     )
+    session_context = dict(_sessions.get(sid) or {})
+    if agent_context_mode:
+        session_context["agent_context_mode"] = agent_context_mode
+    context_options = _agent_context_options_for_session(session_context)
     agent = AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
@@ -1682,8 +1924,7 @@ def _make_agent(sid: str, key: str, session_id: str | None = None, cwd: str | No
         cwd=cwd,
         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
-        skip_context_files=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
-        skip_memory=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
+        **context_options,
         **_agent_cbs(sid),
     )
     if cwd:
@@ -1701,6 +1942,7 @@ def _init_session(
     cwd: str | None = None,
     workspace: dict | None = None,
     profile_context: dict | None = None,
+    agent_context_mode: str | None = None,
 ):
     session_record = {
         "agent": agent,
@@ -1708,6 +1950,7 @@ def _init_session(
         "cwd": cwd or getattr(agent, "session_cwd", ""),
         "workspace": dict(workspace or {}),
         "profile_context": profile_context,
+        "agent_context_mode": _agent_context_mode_from_params({"agent_context_mode": agent_context_mode}),
         "history": history,
         "history_lock": threading.Lock(),
         "history_version": 0,
@@ -1809,7 +2052,11 @@ def _session_run_snapshot(runtime_sid: str, session: dict | None, db=None) -> di
 
     session = session or {}
     stable_session_id = str(session.get("session_key") or runtime_sid or "")
-    control_state = run_control.session_status(stable_session_id, db=db)
+    control_state = run_control.session_status(
+        stable_session_id,
+        db=db,
+        current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+    )
     running = bool(session.get("running") or control_state.get("running"))
     return {
         "session_id": runtime_sid or "",

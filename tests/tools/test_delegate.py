@@ -1830,6 +1830,56 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
         )
 
     @patch("tools.delegate_tool._load_config", return_value={})
+    def test_build_child_agent_team_mission_inherits_parent_tools_except_delegate(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = None
+        parent._delegate_inherits_parent_tools = True
+        parent.valid_tool_names = {
+            "read_file",
+            "search_files",
+            "skill_view",
+            "skills_list",
+            "skill_manage",
+            "execute_code",
+            "memory",
+            "send_message",
+            "clarify",
+            "delegate_task",
+        }
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Verify with the same tools as the team member",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        enabled_tools = set(MockAgent.call_args[1]["enabled_tools"])
+        self.assertTrue(
+            {
+                "read_file",
+                "search_files",
+                "skill_view",
+                "skills_list",
+                "skill_manage",
+                "execute_code",
+                "memory",
+                "send_message",
+                "clarify",
+            }
+            <= enabled_tools
+        )
+        self.assertNotIn("delegate_task", enabled_tools)
+
+    @patch("tools.delegate_tool._load_config", return_value={})
     def test_build_child_agent_toolset_request_does_not_gain_parent_siblings(self, mock_cfg):
         parent = _make_mock_parent()
         parent.enabled_toolsets = ["file"]

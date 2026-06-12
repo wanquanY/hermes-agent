@@ -286,6 +286,42 @@ def test_make_agent_honors_tui_launch_env_flags():
         assert kwargs["skip_memory"] is True
 
 
+def test_make_agent_team_leader_context_disables_profile_identity_loading():
+    fake_runtime = {
+        "provider": "openrouter",
+        "base_url": "https://api.synthetic.new/v1",
+        "api_key": "sk-test",
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+    }
+    fake_cfg = {"agent": {"system_prompt": ""}, "model": {"default": "glm-5"}}
+
+    with (
+        patch.dict(os.environ, {"HERMES_IGNORE_RULES": "0"}, clear=False),
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value=fake_runtime,
+        ),
+        patch("run_agent.AIAgent") as mock_agent,
+    ):
+        from tui_gateway.server import _make_agent
+
+        _make_agent(
+            "sid-team-leader",
+            "team-session-1",
+            agent_context_mode="team_leader",
+        )
+
+        kwargs = mock_agent.call_args.kwargs
+        assert kwargs["skip_context_files"] is True
+        assert kwargs["skip_memory"] is True
+        assert kwargs["load_soul_identity"] is False
+
+
 def test_probe_config_health_flags_null_sections():
     """Bare YAML keys (`agent:` with no value) parse as None and silently
     drop nested settings; probe must surface them so users can fix."""

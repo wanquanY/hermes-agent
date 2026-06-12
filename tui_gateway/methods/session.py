@@ -112,7 +112,11 @@ def _requested_tool_progress_mode(params: dict | None = None) -> str:
 def _session_run_snapshot(runtime_sid: str, session: dict | None, db=None) -> dict:
     session = session or {}
     stable_session_id = str(session.get("session_key") or runtime_sid or "")
-    control_state = run_control.session_status(stable_session_id, db=db)
+    control_state = run_control.session_status(
+        stable_session_id,
+        db=db,
+        current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+    )
     running = bool(session.get("running") or control_state.get("running"))
     return {
         "running": running,
@@ -207,6 +211,55 @@ def _is_empty_stored_conversation(row: dict) -> bool:
         and not (row.get("title") or "").strip()
         and not (row.get("preview") or "").strip()
     )
+
+
+def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str] | None = None) -> dict | None:
+    """Overlay Hermes team-conversation identity onto its backing session row."""
+
+    session_id = str(row.get("id") or "").strip()
+    getter = getattr(db, "get_team_mission_conversation_by_session", None)
+    conversation = getter(session_id) if callable(getter) and session_id else {}
+    if conversation:
+        conversation_id = str(conversation.get("conversation_id") or "").strip()
+        stable_session_id = str(conversation.get("stable_session_id") or row.get("id") or "").strip()
+        if not conversation_id or not stable_session_id:
+            return None
+        updated_at = conversation.get("updated_at") or row.get("last_active") or row.get("started_at") or 0
+        created_at = conversation.get("created_at") or row.get("started_at") or updated_at
+        return {
+            **row,
+            "id": stable_session_id,
+            "stored_session_id": stable_session_id,
+            "session_id": stable_session_id,
+            "session_kind": "team_mission",
+            "source": "team_mission",
+            "conversation_id": conversation_id,
+            "team_id": str(conversation.get("team_id") or "").strip(),
+            "active_mission_id": str(conversation.get("active_mission_id") or "").strip(),
+            "mission_id": str(conversation.get("active_mission_id") or "").strip(),
+            "status": str(conversation.get("status") or "").strip(),
+            "title": str(conversation.get("title") or row.get("title") or "").strip(),
+            "preview": str(conversation.get("objective") or row.get("preview") or "").strip(),
+            "workspace": {
+                "id": str(conversation.get("workspace_id") or "").strip(),
+                "path": str(conversation.get("workspace_path") or "").strip(),
+                "kind": "local",
+            },
+            "started_at": created_at,
+            "updated_at": updated_at,
+        }
+
+    if team_run_session_ids is not None and session_id in team_run_session_ids:
+        return None
+    if team_run_session_ids is None:
+        is_run_session = getattr(db, "is_team_mission_run_session", None)
+        if callable(is_run_session) and is_run_session(session_id):
+            return None
+    if session_id.startswith("team:") and ":node:" in session_id:
+        return None
+    if (row.get("source") or "").strip().lower() == "team_mission":
+        return None
+    return row
 
 
 def _request_agent_interrupt_async(sid: str, agent) -> None:
@@ -564,6 +617,7 @@ def _(rid, params: dict) -> dict:
     )
     tool_progress_mode = _requested_tool_progress_mode(params)
     runtime_scope_key = _requested_runtime_scope_key(params)
+    agent_context_mode = _agent_context_mode_from_params(params)
     try:
         cwd = _normalize_session_cwd(params.get("cwd"))
         workspace = _workspace_from_params(params, cwd)
@@ -623,6 +677,7 @@ def _(rid, params: dict) -> dict:
         "image_counter": 0,
         "pending_title": None,
         "profile_context": _profile_context_for_params(params),
+        "agent_context_mode": agent_context_mode,
         "runtime_scope_key": runtime_scope_key,
         "running": False,
         "active_run_id": None,
@@ -729,9 +784,20 @@ def _(rid, params: dict) -> dict:
         ]
         has_more = len(rows) > limit
         page_rows = rows[:limit]
+        team_run_session_ids = set()
+        team_run_session_ids_getter = getattr(db, "team_mission_run_session_ids", None)
+        if callable(team_run_session_ids_getter):
+            team_run_session_ids = team_run_session_ids_getter([
+                str(s.get("id") or "").strip()
+                for s in page_rows
+                if str(s.get("id") or "").strip()
+            ])
         live_by_key = _live_sessions_by_stored_key()
         session_items = []
         for s in page_rows:
+            s = _team_mission_session_list_item(db, s, team_run_session_ids)
+            if s is None:
+                continue
             live_sid, live_session = live_by_key.get(s["id"], ("", None))
             live_state = _session_run_snapshot(live_sid, live_session, db=db)
             if not live_sid and _is_empty_stored_conversation(s):
@@ -742,10 +808,16 @@ def _(rid, params: dict) -> dict:
                     "title": s.get("title") or "",
                     "preview": s.get("preview") or "",
                     "started_at": s.get("started_at") or 0,
-                    "updated_at": s.get("last_active") or s.get("started_at") or 0,
+                    "updated_at": s.get("updated_at") or s.get("last_active") or s.get("started_at") or 0,
                     "message_count": s.get("message_count") or 0,
                     "source": s.get("source") or "",
-                    "workspace": _stored_workspace(s["id"]),
+                    "workspace": s.get("workspace") or _stored_workspace(s["id"]),
+                    "session_kind": s.get("session_kind") or "",
+                    "conversation_id": s.get("conversation_id") or "",
+                    "team_id": s.get("team_id") or "",
+                    "active_mission_id": s.get("active_mission_id") or "",
+                    "mission_id": s.get("mission_id") or "",
+                    "status": s.get("status") or "",
                     **live_state,
                 })
             )
@@ -892,15 +964,32 @@ def _(rid, params: dict) -> dict:
         ]
         messages, message_page_info = _display_history_page(db, target, hydrate, message_limit)
         profile_context = _profile_context_for_params(params)
+        agent_context_mode = _agent_context_mode_from_params(params)
         profile_tokens = _enter_profile_context(profile_context)
         tokens = _set_session_context(target, terminal_cwd=cwd)
         try:
             try:
-                agent = _make_agent(sid, target, session_id=target, cwd=cwd)
+                agent = _make_agent(
+                    sid,
+                    target,
+                    session_id=target,
+                    cwd=cwd,
+                    agent_context_mode=agent_context_mode,
+                )
             except TypeError as exc:
-                if "unexpected keyword argument 'cwd'" not in str(exc):
+                if "unexpected keyword argument" not in str(exc):
                     raise
-                agent = _make_agent(sid, target, session_id=target)
+                try:
+                    agent = _make_agent(
+                        sid,
+                        target,
+                        session_id=target,
+                        agent_context_mode=agent_context_mode,
+                    )
+                except TypeError as nested_exc:
+                    if "unexpected keyword argument" not in str(nested_exc):
+                        raise
+                    agent = _make_agent(sid, target, session_id=target)
         finally:
             _clear_session_context(tokens)
             _leave_profile_context(profile_tokens)
@@ -940,9 +1029,10 @@ def _(rid, params: dict) -> dict:
                 history,
                 cols=cols,
                 cwd=cwd,
-                workspace=workspace,
-                profile_context=profile_context,
-            )
+                    workspace=workspace,
+                    profile_context=profile_context,
+                    agent_context_mode=agent_context_mode,
+                )
         except TypeError as exc:
             if "unexpected keyword argument" not in str(exc):
                 raise
@@ -988,7 +1078,11 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5036)
-    run_state = run_control.session_status(target, db=db)
+    run_state = run_control.session_status(
+        target,
+        db=db,
+        current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+    )
     if run_state.get("running"):
         return _err(rid, 4023, "cannot delete a session with an active run")
     # Block deletion of any session currently bound to a live TUI session

@@ -18,6 +18,12 @@ ACTIVE_RUN_STATUSES = {
     "finalizing",
 }
 TERMINAL_RUN_STATUSES = {"completed", "failed", "interrupted", "cancelled"}
+TERMINAL_RUN_STATUS_RANK = {
+    "cancelled": 1,
+    "interrupted": 1,
+    "failed": 1,
+    "completed": 2,
+}
 DEFAULT_RUN_EVENT_RETENTION_DAYS = 14
 DEFAULT_RUN_EVENT_MAX_PER_SESSION = 5000
 RUN_EVENT_PRUNE_INTERVAL_EVENTS = 500
@@ -122,6 +128,18 @@ def _event_status(event_type: str, payload: Dict[str, Any]) -> str | None:
     if status in {"error", "failed"}:
         return "failed"
     return "completed"
+
+
+def _prefer_terminal_run_status(existing_status: str, next_status: str) -> str:
+    existing = str(existing_status or "").strip().lower()
+    incoming = str(next_status or "").strip().lower()
+    if existing not in TERMINAL_RUN_STATUSES or incoming not in TERMINAL_RUN_STATUSES:
+        return incoming or existing
+    existing_rank = TERMINAL_RUN_STATUS_RANK.get(existing, 0)
+    incoming_rank = TERMINAL_RUN_STATUS_RANK.get(incoming, 0)
+    if incoming_rank > existing_rank:
+        return incoming
+    return existing
 
 
 def _event_opens_active_run(event_type: str) -> bool:
@@ -400,6 +418,8 @@ class SessionDBRunMixin:
                 next_status = normalized_status
                 if existing_status in TERMINAL_RUN_STATUSES and normalized_status not in TERMINAL_RUN_STATUSES:
                     next_status = existing_status
+                elif existing_status in TERMINAL_RUN_STATUSES and normalized_status in TERMINAL_RUN_STATUSES:
+                    next_status = _prefer_terminal_run_status(existing_status, normalized_status)
                 next_completed_at = completed_at
                 if next_completed_at is None:
                     next_completed_at = existing["completed_at"]
@@ -408,6 +428,12 @@ class SessionDBRunMixin:
                 merged_metadata = _json_loads(existing["metadata_json"], {})
                 if isinstance(metadata, dict):
                     merged_metadata.update(metadata)
+                if next_status == "failed":
+                    next_error = error or str(existing["error"] or "")
+                elif next_status in TERMINAL_RUN_STATUSES:
+                    next_error = ""
+                else:
+                    next_error = error or str(existing["error"] or "")
                 conn.execute(
                     """
                     UPDATE runs
@@ -419,7 +445,7 @@ class SessionDBRunMixin:
                         updated_at = ?,
                         completed_at = ?,
                         last_seq = MAX(COALESCE(last_seq, 0), ?),
-                        error = COALESCE(NULLIF(?, ''), error),
+                        error = ?,
                         metadata_json = ?
                     WHERE run_id = ?
                     """,
@@ -432,7 +458,7 @@ class SessionDBRunMixin:
                         updated,
                         next_completed_at,
                         int(last_seq or 0),
-                        error,
+                        next_error,
                         _json_dumps(merged_metadata if isinstance(merged_metadata, dict) else {}),
                         run_id,
                     ),
@@ -563,6 +589,8 @@ class SessionDBRunMixin:
             seq = self.next_run_event_seq(stable)
             frame["seq"] = seq
         terminal_status = _event_status(event_type, payload)
+        owner_metadata = frame.get("owner_metadata")
+        owner_metadata = owner_metadata if isinstance(owner_metadata, dict) else {}
         frame["timestamp"] = timestamp
         event_json = _json_dumps(frame)
 
@@ -667,6 +695,8 @@ class SessionDBRunMixin:
                 next_status = terminal_status or existing_status or "running"
                 if existing_status in TERMINAL_RUN_STATUSES and terminal_status is None:
                     next_status = existing_status
+                elif existing_status in TERMINAL_RUN_STATUSES and terminal_status in TERMINAL_RUN_STATUSES:
+                    next_status = _prefer_terminal_run_status(existing_status, terminal_status)
                 if (
                     _event_opens_active_run(event_type)
                     and existing_status not in TERMINAL_RUN_STATUSES
@@ -701,6 +731,9 @@ class SessionDBRunMixin:
                 metadata = {}
                 if existing is not None:
                     metadata = _json_loads(existing["metadata_json"], {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                metadata.update(owner_metadata)
                 if existing is None:
                     conn.execute(
                         """
@@ -724,12 +757,18 @@ class SessionDBRunMixin:
                             seq,
                             rejected_duplicate_active
                             or (str(payload.get("message") or "") if next_status == "failed" else ""),
-                            _json_dumps(metadata if isinstance(metadata, dict) else {}),
+                            _json_dumps(metadata),
                         ),
                     )
                 else:
                     if completed_at is None:
                         completed_at = existing["completed_at"]
+                    if next_status == "failed":
+                        next_error = str(payload.get("message") or "") or str(existing["error"] or "")
+                    elif next_status in TERMINAL_RUN_STATUSES:
+                        next_error = ""
+                    else:
+                        next_error = str(payload.get("message") or "") or str(existing["error"] or "")
                     conn.execute(
                         """
                         UPDATE runs
@@ -741,7 +780,8 @@ class SessionDBRunMixin:
                             updated_at = ?,
                             completed_at = ?,
                             last_seq = MAX(COALESCE(last_seq, 0), ?),
-                            error = COALESCE(NULLIF(?, ''), error)
+                            error = ?,
+                            metadata_json = ?
                         WHERE run_id = ?
                         """,
                         (
@@ -753,7 +793,8 @@ class SessionDBRunMixin:
                             timestamp,
                             completed_at,
                             seq,
-                            str(payload.get("message") or "") if next_status == "failed" else "",
+                            next_error,
+                            _json_dumps(metadata),
                             run_id,
                         ),
                     )
@@ -778,6 +819,7 @@ class SessionDBRunMixin:
         after_seq: int = 0,
         active_only: bool = False,
         runtime_scope_key: str = "",
+        run_id: str = "",
         limit: int = 2000,
     ) -> List[Dict[str, Any]]:
         stable = str(session_id or "").strip()
@@ -790,6 +832,11 @@ class SessionDBRunMixin:
         if scope:
             scope_clause = "AND COALESCE(runtime_scope_key, session_id) = ?"
             params.append(scope)
+        run_clause = ""
+        normalized_run_id = str(run_id or "").strip()
+        if normalized_run_id:
+            run_clause = "AND run_id = ?"
+            params.append(normalized_run_id)
         active_clause = ""
         if active_only:
             active_statuses = _sql_status_literals(ACTIVE_RUN_STATUSES)
@@ -809,6 +856,7 @@ class SessionDBRunMixin:
                 WHERE session_id = ?
                   AND seq > ?
                   {scope_clause}
+                  {run_clause}
                   {active_clause}
                 ORDER BY seq ASC
                 LIMIT ?
@@ -821,6 +869,52 @@ class SessionDBRunMixin:
             if isinstance(event, dict):
                 events.append(event)
         return events
+
+    def has_run_event_source(
+        self,
+        session_id: str,
+        *,
+        run_id: str = "",
+        runtime_session_id: str = "",
+        event_type: str = "",
+        runtime_source_seq: int = 0,
+    ) -> bool:
+        stable = str(session_id or "").strip()
+        try:
+            source_seq = int(runtime_source_seq or 0)
+        except (TypeError, ValueError):
+            source_seq = 0
+        if not stable or source_seq <= 0:
+            return False
+        source_token = f'"runtime_source_seq":{source_seq}'
+        clauses = [
+            "session_id = ?",
+            "(instr(payload_json, ?) > 0 OR instr(event_json, ?) > 0)",
+        ]
+        params: list[Any] = [stable, source_token, source_token]
+        normalized_run_id = str(run_id or "").strip()
+        if normalized_run_id:
+            clauses.append("run_id = ?")
+            params.append(normalized_run_id)
+        normalized_runtime_session_id = str(runtime_session_id or "").strip()
+        if normalized_runtime_session_id:
+            clauses.append("runtime_session_id = ?")
+            params.append(normalized_runtime_session_id)
+        normalized_type = str(event_type or "").strip()
+        if normalized_type:
+            clauses.append("event_type = ?")
+            params.append(normalized_type)
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT 1
+                FROM run_events
+                WHERE {" AND ".join(clauses)}
+                LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+        return row is not None
 
     def list_run_events_filtered(
         self,
@@ -958,6 +1052,7 @@ class SessionDBRunMixin:
         current_pid: int | None = None,
         current_gateway_instance_id: str = "",
         stale_after_seconds: float = 300.0,
+        owner_dead_grace_seconds: float = 2.0,
         reason: str = "runtime owner is no longer available",
     ) -> int:
         """Fail active runs whose runtime owner cannot be reached.
@@ -974,15 +1069,33 @@ class SessionDBRunMixin:
         }
         now = time.time()
         stale_after = max(0.0, float(stale_after_seconds or 0))
+        owner_dead_grace = max(0.0, float(owner_dead_grace_seconds or 0))
         active_statuses = _sql_status_literals(ACTIVE_RUN_STATUSES)
         instance_id = str(current_gateway_instance_id or "").strip()
 
-        def _should_fail(row: sqlite3.Row) -> bool:
-            runtime_session_id = str(row["runtime_session_id"] or "").strip()
-            if runtime_session_id and runtime_session_id in live_runtime_session_ids:
-                return False
+        def _row_diagnostic(row: sqlite3.Row, decision: str, should_fail: bool) -> dict[str, Any]:
             metadata = _json_loads(row["metadata_json"], {})
             metadata = metadata if isinstance(metadata, dict) else {}
+            return {
+                "run_id": str(row["run_id"] or ""),
+                "session_id": str(row["session_id"] or ""),
+                "runtime_scope_key": str(row["runtime_scope_key"] or ""),
+                "runtime_session_id": str(row["runtime_session_id"] or ""),
+                "status": str(row["status"] or ""),
+                "updated_age_seconds": round(now - float(row["updated_at"] or row["started_at"] or 0), 3),
+                "owner_pid": metadata.get("gateway_pid"),
+                "owner_instance": metadata.get("gateway_instance_id"),
+                "current_pid": current_pid,
+                "current_gateway_instance_id": instance_id,
+                "decision": decision,
+                "should_fail": should_fail,
+            }
+
+        def _should_fail(row: sqlite3.Row) -> tuple[bool, str]:
+            metadata = _json_loads(row["metadata_json"], {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            updated_at = float(row["updated_at"] or row["started_at"] or 0)
+            updated_age = now - updated_at
             owner_instance = str(metadata.get("gateway_instance_id") or "").strip()
             try:
                 owner_pid = int(metadata.get("gateway_pid") or 0)
@@ -995,10 +1108,18 @@ class SessionDBRunMixin:
                     and owner_instance
                     and owner_instance != instance_id
                 ):
-                    return True
-                return not _pid_is_alive(owner_pid, current_pid=current_pid)
-            updated_at = float(row["updated_at"] or row["started_at"] or 0)
-            return now - updated_at >= stale_after
+                    return True, "same-pid-different-gateway-instance"
+                if _pid_is_alive(owner_pid, current_pid=current_pid):
+                    return False, "owner-pid-alive"
+                if updated_age < owner_dead_grace:
+                    return False, "owner-pid-dead-fresh"
+                return True, "owner-pid-dead"
+            runtime_session_id = str(row["runtime_session_id"] or "").strip()
+            if runtime_session_id and runtime_session_id in live_runtime_session_ids:
+                return False, "live-runtime-session"
+            if updated_age >= stale_after:
+                return True, "legacy-owner-metadata-stale"
+            return False, "legacy-owner-metadata-fresh"
 
         def _do(conn: sqlite3.Connection) -> int:
             rows = conn.execute(
@@ -1009,8 +1130,11 @@ class SessionDBRunMixin:
                 """
             ).fetchall()
             failed = 0
+            diagnostics: list[dict[str, Any]] = []
             for row in rows:
-                if not _should_fail(row):
+                should_fail, decision = _should_fail(row)
+                diagnostics.append(_row_diagnostic(row, decision, should_fail))
+                if not should_fail:
                     continue
                 metadata = _json_loads(row["metadata_json"], {})
                 if not isinstance(metadata, dict):
@@ -1082,6 +1206,32 @@ class SessionDBRunMixin:
                     ),
                 )
                 failed += 1
+            if diagnostics and (failed or logger.isEnabledFor(logging.DEBUG)):
+                log_active_scan = logger.warning if failed else logger.debug
+                try:
+                    log_active_scan(
+                        "[doxie-run-recovery] active-run-scan %s",
+                        json.dumps(
+                            {
+                                "db": str(getattr(self, "db_path", "") or ""),
+                                "active": len(diagnostics),
+                                "failed": failed,
+                                "current_pid": current_pid,
+                                "current_gateway_instance_id": instance_id,
+                                "live_runtime_session_ids": sorted(live_runtime_session_ids),
+                                "decisions": diagnostics,
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            default=str,
+                        ),
+                    )
+                except Exception:
+                    log_active_scan(
+                        "[doxie-run-recovery] active-run-scan active=%s failed=%s",
+                        len(diagnostics),
+                        failed,
+                    )
             return failed
 
         return self._execute_write(_do)

@@ -1096,11 +1096,16 @@ def _build_child_agent(
 
     delegation_cfg = _load_config()
 
+    blocked_tools = (
+        frozenset(["delegate_task"])
+        if getattr(parent_agent, "_delegate_inherits_parent_tools", False) is True
+        else DELEGATE_BLOCKED_TOOLS
+    )
     child_toolsets, child_tool_names = _resolve_child_tool_access(
         parent_agent,
         toolsets,
         role=effective_role,
-        blocked_tools=DELEGATE_BLOCKED_TOOLS,
+        blocked_tools=blocked_tools,
         default_toolsets=DEFAULT_TOOLSETS,
         inherit_mcp_toolsets=_get_inherit_mcp_toolsets(),
     )

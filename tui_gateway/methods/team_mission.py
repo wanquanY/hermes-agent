@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -11,6 +12,10 @@ from hermes_team_mission_conversation_utils import conversation_session_id as _t
 from hermes_team_mission_modes import strategy_for_mode
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
+from tui_gateway.services.profile_context import enter_profile_context as _enter_profile_context_for_team
+from tui_gateway.services.profile_context import leave_profile_context as _leave_profile_context_for_team
+from tui_gateway.services.profile_context import profile_context_for_params as _profile_context_for_params
+from tui_gateway.services.team_mission_leader_runs import ensure_team_leader_message_run_state
 from tui_gateway.services.team_mission_scheduler import TeamMissionReadyScheduler
 
 _server = bind_server_globals(globals())
@@ -504,13 +509,61 @@ def _strategy_start_text(params: dict, mission: dict, node: dict) -> str:
     return str(explicit_text or node.get("objective") or node.get("title") or "").strip()
 
 
-def _start_toolsets(params: dict, mission: dict, node: dict) -> list[str]:
+def _member_default_toolsets(member: dict) -> list[str]:
+    if not isinstance(member, dict):
+        return []
+    profile = (
+        member.get("doxie_profile")
+        if isinstance(member.get("doxie_profile"), dict)
+        else member.get("doxieProfile")
+        if isinstance(member.get("doxieProfile"), dict)
+        else {}
+    )
+    metadata = member.get("metadata") if isinstance(member.get("metadata"), dict) else {}
+    return _normalize_toolsets(
+        member.get("default_toolsets")
+        or member.get("defaultToolsets")
+        or profile.get("defaultToolsets")
+        or profile.get("default_toolsets")
+        or metadata.get("defaultToolsets")
+        or metadata.get("default_toolsets")
+    )
+
+
+def _member_for_node(params: dict, mission: dict, node: dict) -> dict:
+    for member in _leader_members_from_params(params, mission if isinstance(mission, dict) else {}):
+        if _member_matches_node_profile(member, node):
+            return member
+    return {}
+
+
+def _profile_current_toolsets(profile_params: dict) -> list[str]:
+    context = _profile_context_for_params(profile_params)
+    if not isinstance(context, dict):
+        return []
+    loader = globals().get("_load_enabled_toolsets")
+    if not callable(loader):
+        return []
+    token = _enter_profile_context_for_team(context)
+    try:
+        return _normalize_toolsets(loader())
+    except Exception:
+        return []
+    finally:
+        _leave_profile_context_for_team(token)
+
+
+def _start_toolsets(params: dict, mission: dict, node: dict, *, profile_params: dict | None = None) -> list[str]:
     if _is_team_leader_control_node(node):
         toolsets = ["team_mission_leader"]
         if _node_phase(node) in {"planning", "change_request"}:
             toolsets.append("team_mission_planning")
         return toolsets
     toolsets = _normalize_toolsets(params.get("enabled_toolsets") or params.get("enabledToolsets"))
+    if not toolsets:
+        toolsets = _profile_current_toolsets(profile_params or {})
+    if not toolsets:
+        toolsets = _member_default_toolsets(_member_for_node(params, mission, node))
     if _should_use_strategy_start_text(params, mission, node) and _node_phase(node) in {"planning", "change_request"}:
         if "team_mission_planning" not in toolsets:
             toolsets.append("team_mission_planning")
@@ -679,26 +732,177 @@ def _leader_members_from_params(params: dict, mission: dict) -> list[dict]:
     return [dict(item) for item in members if isinstance(item, dict)]
 
 
+def _recover_conversation_active_run(db, conversation: dict | None) -> None:
+    if not isinstance(conversation, dict):
+        return
+    stable_session_id = str(
+        conversation.get("stable_session_id")
+        or conversation.get("stableSessionId")
+        or ""
+    ).strip()
+    if not stable_session_id:
+        return
+    run_control.session_status(
+        stable_session_id,
+        db=db,
+        current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+    )
+
+
+def _profile_params_from_payload(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        return {}
+    profile_payload = dict(payload)
+    profile = profile_payload.get("doxie_profile") or profile_payload.get("doxieProfile") or profile_payload.get("profile")
+    profile = profile if isinstance(profile, dict) else {}
+    requested_scope_key = str(
+        profile_payload.get("runtime_scope_key")
+        or profile_payload.get("runtimeScopeKey")
+        or ""
+    ).strip()
+    explicit_profile_scope_key = str(
+        profile_payload.get("profile_runtime_scope_key")
+        or profile_payload.get("profileRuntimeScopeKey")
+        or profile.get("profileRuntimeScopeKey")
+        or profile.get("profile_runtime_scope_key")
+        or ""
+    ).strip()
+    if requested_scope_key.startswith(("team:", "team_mission:")):
+        if explicit_profile_scope_key:
+            profile_payload["runtime_scope_key"] = explicit_profile_scope_key
+            profile_payload["runtimeScopeKey"] = explicit_profile_scope_key
+        else:
+            profile_payload.pop("runtime_scope_key", None)
+            profile_payload.pop("runtimeScopeKey", None)
+    context = _profile_context_for_params(profile_payload)
+    if not isinstance(context, dict):
+        return {}
+    profile_id = str(context.get("id") or "").strip()
+    version_id = str(context.get("agent_profile_version_id") or "").strip()
+    draft_id = str(context.get("agent_profile_draft_id") or "").strip()
+    hermes_home = str(context.get("hermes_home") or "").strip()
+    runtime_scope_key = str(context.get("runtime_scope_key") or "").strip()
+    result = {}
+    if profile_id:
+        result["agent_profile_id"] = profile_id
+    if version_id:
+        result["agent_profile_version_id"] = version_id
+    if draft_id:
+        result["agent_profile_draft_id"] = draft_id
+    if runtime_scope_key:
+        result["runtime_scope_key"] = runtime_scope_key
+    if hermes_home:
+        result["hermesHomePath"] = hermes_home
+        result["doxie_profile"] = {
+            "id": profile_id,
+            "hermesHomePath": hermes_home,
+            **({"agentProfileVersionId": version_id} if version_id else {}),
+            **({"agentProfileDraftId": draft_id} if draft_id else {}),
+            **({"runtimeScopeKey": runtime_scope_key} if runtime_scope_key else {}),
+        }
+    return result
+
+
+def _profile_params_from_member(member: dict) -> dict:
+    if not isinstance(member, dict):
+        return {}
+    profile = (
+        member.get("doxie_profile")
+        if isinstance(member.get("doxie_profile"), dict)
+        else member.get("doxieProfile")
+        if isinstance(member.get("doxieProfile"), dict)
+        else {}
+    )
+    payload = {
+        "agent_profile_id": str(member.get("profile_id") or member.get("agent_profile_id") or profile.get("id") or "").strip(),
+        "agent_profile_version_id": str(
+            member.get("profile_version_id")
+            or member.get("agent_profile_version_id")
+            or profile.get("agentProfileVersionId")
+            or profile.get("agent_profile_version_id")
+            or ""
+        ).strip(),
+        "agent_profile_draft_id": str(
+            member.get("profile_draft_id")
+            or member.get("agent_profile_draft_id")
+            or profile.get("agentProfileDraftId")
+            or profile.get("agent_profile_draft_id")
+            or ""
+        ).strip(),
+        "runtime_scope_key": str(
+            member.get("runtime_scope_key")
+            or member.get("runtimeScopeKey")
+            or profile.get("runtimeScopeKey")
+            or profile.get("runtime_scope_key")
+            or ""
+        ).strip(),
+    }
+    hermes_home = str(
+        member.get("hermes_home_path")
+        or member.get("hermesHomePath")
+        or profile.get("hermesHomePath")
+        or profile.get("hermes_home_path")
+        or profile.get("hermes_home")
+        or ""
+    ).strip()
+    if hermes_home:
+        payload["doxie_profile"] = {
+            **profile,
+            "id": payload["agent_profile_id"] or str(profile.get("id") or "").strip(),
+            "hermesHomePath": hermes_home,
+            **({"agentProfileVersionId": payload["agent_profile_version_id"]} if payload["agent_profile_version_id"] else {}),
+            **({"agentProfileDraftId": payload["agent_profile_draft_id"]} if payload["agent_profile_draft_id"] else {}),
+            **({"runtimeScopeKey": payload["runtime_scope_key"]} if payload["runtime_scope_key"] else {}),
+        }
+    return _profile_params_from_payload(payload)
+
+
+def _member_matches_node_profile(member: dict, node: dict) -> bool:
+    profile = (
+        member.get("doxie_profile")
+        if isinstance(member.get("doxie_profile"), dict)
+        else member.get("doxieProfile")
+        if isinstance(member.get("doxieProfile"), dict)
+        else {}
+    )
+    member_profile_id = str(member.get("profile_id") or member.get("agent_profile_id") or profile.get("id") or "").strip()
+    node_profile_id = str(node.get("assignee_profile_id") or "").strip()
+    if node_profile_id and member_profile_id == node_profile_id:
+        return True
+    role = str(member.get("role") or "").strip()
+    return _node_role(node) == "leader" and role in {"lead", "leader"}
+
+
+def _node_profile_params(params: dict, mission: dict, node: dict) -> dict:
+    explicit = _profile_params_from_payload(params)
+    if explicit:
+        return explicit
+    members = _leader_members_from_params(params, mission if isinstance(mission, dict) else {})
+    for member in members:
+        if _member_matches_node_profile(member, node):
+            profile_params = _profile_params_from_member(member)
+            if profile_params:
+                return profile_params
+    return _profile_params_from_payload({
+        "agent_profile_id": str(node.get("assignee_profile_id") or "").strip(),
+        "agent_profile_version_id": str(node.get("assignee_profile_version_id") or "").strip(),
+        "runtime_scope_key": str(node.get("runtime_scope_key") or "").strip(),
+    })
+
+
 def _leader_profile_params(params: dict, graph: dict) -> dict:
-    explicit = {}
-    for source_key, target_key in (
-        ("agent_profile_id", "agent_profile_id"),
-        ("agentProfileId", "agent_profile_id"),
-        ("agent_profile_version_id", "agent_profile_version_id"),
-        ("agentProfileVersionId", "agent_profile_version_id"),
-        ("runtime_scope_key", "runtime_scope_key"),
-        ("runtimeScopeKey", "runtime_scope_key"),
-    ):
-        value = str(params.get(source_key) or "").strip()
-        if value:
-            explicit[target_key] = value
+    explicit = _profile_params_from_payload(params)
     if explicit:
         return explicit
     root = _root_leader_node(graph)
     mission = graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
     mission_id = str(mission.get("mission_id") or "").strip()
     conversation_id = _conversation_id_from_params(params, {}) or _conversation_session_id_from_params(params, {})
-    scope_subject = mission_id or conversation_id
+    scope_subject = (
+        conversation_id
+        or str(mission.get("conversation_id") or "").strip()
+        or mission_id
+    )
     members = params.get("members") if isinstance(params.get("members"), list) else []
     leader = next(
         (
@@ -708,16 +912,78 @@ def _leader_profile_params(params: dict, graph: dict) -> dict:
         None,
     ) or next((item for item in members if isinstance(item, dict)), {})
     if leader:
-        return {
-            "agent_profile_id": str(leader.get("profile_id") or leader.get("agent_profile_id") or "").strip(),
-            "agent_profile_version_id": str(leader.get("profile_version_id") or leader.get("agent_profile_version_id") or "").strip(),
-            "runtime_scope_key": str(leader.get("runtime_scope_key") or f"team:{scope_subject}:leader-conversation").strip(),
-        }
+        profile_params = _profile_params_from_member(leader)
+        if not profile_params.get("runtime_scope_key"):
+            profile_params["runtime_scope_key"] = str(f"team:{scope_subject}:leader-conversation").strip()
+        return profile_params
     return {
         "agent_profile_id": str(root.get("assignee_profile_id") or "").strip(),
         "agent_profile_version_id": str(root.get("assignee_profile_version_id") or "").strip(),
         "runtime_scope_key": str(root.get("runtime_scope_key") or f"team:{scope_subject}:leader-conversation").strip(),
     }
+
+
+def _profile_runtime_owned(profile_params: dict) -> bool:
+    if not isinstance(profile_params, dict):
+        return False
+    scope_key = str(profile_params.get("runtime_scope_key") or "").strip()
+    return bool(
+        scope_key.startswith(("profile:", "draft:"))
+        or profile_params.get("agent_profile_draft_id")
+        or profile_params.get("doxie_profile")
+        or profile_params.get("hermesHomePath")
+    )
+
+
+def _leader_conversation_runtime_scope_key(params: dict, *, conversation_id: str = "", mission_id: str = "") -> str:
+    requested = str(params.get("runtime_scope_key") or params.get("runtimeScopeKey") or "").strip()
+    if requested.startswith("team:"):
+        return requested
+    return str(
+        params.get("leader_runtime_scope_key")
+        or params.get("leaderRuntimeScopeKey")
+        or params.get("leaderRuntimeScopeKey")
+        or params.get("conversation_runtime_scope_key")
+        or params.get("conversationRuntimeScopeKey")
+        or params.get("team_leader_runtime_scope_key")
+        or params.get("teamLeaderRuntimeScopeKey")
+        or f"team:{conversation_id or mission_id}:leader-conversation"
+    ).strip()
+
+
+def _leader_conversation_runtime_scope_contract_error(params: dict, expected_scope_key: str) -> str:
+    requested = str(params.get("runtime_scope_key") or params.get("runtimeScopeKey") or "").strip()
+    if not requested:
+        return ""
+    if requested == expected_scope_key:
+        return ""
+    if requested.startswith("team:"):
+        return (
+            "team leader conversation runtime scope mismatch; "
+            f"expected {expected_scope_key}, received {requested}"
+        )
+    return (
+        "team leader conversation must use the team conversation runtime scope as runtimeScopeKey; "
+        f"received {requested}, expected {expected_scope_key}. "
+        "Pass the leader profile scope as profileRuntimeScopeKey or doxie_profile.runtimeScopeKey instead."
+    )
+
+
+def _leader_runtime_owner_error(profile_params: dict, *, leader_runtime_scope_key: str = "") -> str:
+    if not _profile_runtime_owned(profile_params):
+        return ""
+    expected = str(profile_params.get("runtime_scope_key") or "").strip()
+    leader_expected = str(leader_runtime_scope_key or "").strip()
+    if not expected and not leader_expected:
+        return ""
+    current = str(os.environ.get("DOXIE_HERMES_RUNTIME_SCOPE_KEY") or "").strip()
+    if current and current in {expected, leader_expected}:
+        return ""
+    expected_desc = leader_expected or expected
+    return (
+        "team leader conversation must run inside its owner runtime scope "
+        f"{expected_desc}; current scope is {current or 'control-plane'}"
+    )
 
 
 def _compact_graph_context(graph: dict) -> dict:
@@ -1215,6 +1481,18 @@ def _(rid, params: dict) -> dict:
         conversation_id = conversation_session_id
     if not conversation_id:
         return _err(rid, 4006, "conversation_id required")
+    profile_params = _leader_profile_params(params, graph if isinstance(graph, dict) else {})
+    runtime_scope_key = _leader_conversation_runtime_scope_key(
+        params,
+        conversation_id=conversation_id,
+        mission_id=mission_id,
+    )
+    contract_error = _leader_conversation_runtime_scope_contract_error(params, runtime_scope_key)
+    if contract_error:
+        return _err(rid, 4094, contract_error)
+    owner_error = _leader_runtime_owner_error(profile_params, leader_runtime_scope_key=runtime_scope_key)
+    if owner_error:
+        return _err(rid, 4094, owner_error)
     try:
         before = db.get_team_mission_conversation(conversation_id)
         bound_mission_id = mission_id if isinstance(mission, dict) and mission else ""
@@ -1272,7 +1550,11 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4006, "conversation identifier required")
     result = db.resolve_team_mission_conversation(identifier)
     if not result:
-        return _err(rid, 4040, "team mission conversation not found")
+        return _ok(rid, {"conversation": {}, "mission": {}, "graph": {}})
+    _recover_conversation_active_run(
+        db,
+        result.get("conversation") if isinstance(result, dict) else None,
+    )
     return _ok(rid, result)
 
 
@@ -1287,6 +1569,8 @@ def _(rid, params: dict) -> dict:
         status=str(params.get("status") or ""),
         limit=_bounded_limit(params.get("limit"), default=100, maximum=500),
     )
+    for conversation in conversations if isinstance(conversations, list) else []:
+        _recover_conversation_active_run(db, conversation)
     return _ok(rid, {"conversations": conversations})
 
 
@@ -1342,7 +1626,11 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4040, "team mission conversation not found")
     stable_session_id = str(conversation.get("stable_session_id") or "").strip()
     if stable_session_id:
-        run_state = run_control.session_status(stable_session_id, db=db)
+        run_state = run_control.session_status(
+            stable_session_id,
+            db=db,
+            current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+        )
         if run_state.get("running"):
             return _err(rid, 4023, "cannot delete a conversation with an active leader run")
     try:
@@ -1404,6 +1692,18 @@ def _(rid, params: dict) -> dict:
     )
     if not conversation_session_id:
         return _err(rid, 4006, "conversation_session_id required")
+    profile_params = _leader_profile_params(params, graph if isinstance(graph, dict) else {})
+    runtime_scope_key = _leader_conversation_runtime_scope_key(
+        params,
+        conversation_id=conversation_id,
+        mission_id=mission_id,
+    )
+    contract_error = _leader_conversation_runtime_scope_contract_error(params, runtime_scope_key)
+    if contract_error:
+        return _err(rid, 4094, contract_error)
+    owner_error = _leader_runtime_owner_error(profile_params, leader_runtime_scope_key=runtime_scope_key)
+    if owner_error:
+        return _err(rid, 4094, owner_error)
     try:
         conversation = db.ensure_team_mission_conversation(
             conversation_id=conversation_id,
@@ -1411,8 +1711,11 @@ def _(rid, params: dict) -> dict:
             mission=mission if isinstance(mission, dict) and mission else {},
             mission_id=mission_id if isinstance(mission, dict) and mission else "",
             team_id=str(params.get("team_id") or params.get("teamId") or (mission or {}).get("team_id") or ""),
+            title=str(params.get("title") or (mission or {}).get("title") or text),
+            objective=str(params.get("objective") or params.get("prompt") or (mission or {}).get("objective") or text),
             workspace_id=_workspace_id_from_params(params) or str((mission or {}).get("workspace_id") or ""),
             workspace_path=_workspace_path_from_params(params) or str((mission or {}).get("workspace_path") or ""),
+            created_by_user_id=str(params.get("created_by_user_id") or params.get("createdByUserId") or (mission or {}).get("created_by_user_id") or ""),
         )
     except Exception as exc:
         return _err(rid, 5008, f"team conversation session unavailable: {exc}")
@@ -1429,13 +1732,6 @@ def _(rid, params: dict) -> dict:
         if isinstance(mission, dict) and mission
         else ({}, "")
     )
-    profile_params = _leader_profile_params(params, graph)
-    runtime_scope_key = str(
-        params.get("runtime_scope_key")
-        or params.get("runtimeScopeKey")
-        or profile_params.get("runtime_scope_key")
-        or f"team:{conversation_id or mission_id}:leader-conversation"
-    ).strip()
     run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
     turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
     team_context = {
@@ -1471,6 +1767,7 @@ def _(rid, params: dict) -> dict:
         "run_id": run_id,
         "turn_id": turn_id,
         "runtime_scope_key": runtime_scope_key,
+        "agent_context_mode": "team_leader",
         "text": _leader_router_prompt(user_text=text, graph=graph, memory_text=memory_text),
         "persist_user_message": text,
         "draft_text": str(params.get("draft_text") or params.get("draftText") or text),
@@ -1486,6 +1783,7 @@ def _(rid, params: dict) -> dict:
     if isinstance(response, dict) and response.get("error"):
         return response
     result = response.get("result") if isinstance(response, dict) else {}
+    ensure_team_leader_message_run_state(db, run_id=run_id, session_id=conversation_session_id, runtime_scope_key=runtime_scope_key, result=result)
     return _ok(
         rid,
         {
@@ -2015,9 +2313,11 @@ def _(rid, params: dict) -> dict:
         or metadata.get("stored_session_id")
         or _default_node_session_id(mission_id, node_id)
     ).strip()
+    profile_params = _node_profile_params(params, mission if isinstance(mission, dict) else {}, node)
     runtime_scope_key = str(
         params.get("runtime_scope_key")
         or params.get("runtimeScopeKey")
+        or profile_params.get("runtime_scope_key")
         or node.get("runtime_scope_key")
         or stored_session_id
     ).strip()
@@ -2035,24 +2335,42 @@ def _(rid, params: dict) -> dict:
     )
     if memory_text:
         text = f"{text}\n\n{memory_text}"
-    enabled_toolsets = _start_toolsets(params, mission if isinstance(mission, dict) else {}, node)
+    enabled_toolsets = _start_toolsets(
+        params,
+        mission if isinstance(mission, dict) else {},
+        node,
+        profile_params=profile_params,
+    )
     leader_control_node = _is_team_leader_control_node(node)
+    agent_profile_id = str(
+        profile_params.get("agent_profile_id")
+        or params.get("agent_profile_id")
+        or params.get("agentProfileId")
+        or node.get("assignee_profile_id")
+        or ""
+    ).strip()
+    agent_profile_version_id = str(
+        profile_params.get("agent_profile_version_id")
+        or params.get("agent_profile_version_id")
+        or params.get("agentProfileVersionId")
+        or node.get("assignee_profile_version_id")
+        or ""
+    ).strip()
     submit_params = {
         **params,
+        **profile_params,
         "stored_session_id": stored_session_id,
         "session_id": stored_session_id,
         "client_run_id": run_id,
         "run_id": run_id,
         "turn_id": turn_id,
         "runtime_scope_key": runtime_scope_key,
-        "agent_profile_id": str(params.get("agent_profile_id") or params.get("agentProfileId") or node.get("assignee_profile_id") or "").strip(),
-        "agent_profile_version_id": str(
-            params.get("agent_profile_version_id") or params.get("agentProfileVersionId") or node.get("assignee_profile_version_id") or ""
-        ).strip(),
+        "agent_profile_id": agent_profile_id,
+        "agent_profile_version_id": agent_profile_version_id,
         "text": text,
         "enabled_toolsets": enabled_toolsets,
         **({"disabled_toolsets": _leader_disabled_toolsets(params)} if leader_control_node else {}),
-        **({"toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE} if leader_control_node else {}),
+        **({"toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE} if leader_control_node or enabled_toolsets else {}),
         "doxie_product_context": {
             **(params.get("doxie_product_context") if isinstance(params.get("doxie_product_context"), dict) else {}),
             "team_mission": {
@@ -2066,6 +2384,7 @@ def _(rid, params: dict) -> dict:
                 "node_phase": _node_phase(node),
                 "output_contract": node.get("output_contract") or {},
                 "memory": memory_context,
+                "delegate_inherits_parent_tools": not leader_control_node,
                 **({"tool_policy": _team_leader_tool_policy(surface="leader_node")} if leader_control_node else {}),
             },
         },
@@ -2083,7 +2402,12 @@ def _(rid, params: dict) -> dict:
             assignee_profile_version_id=str(node.get("assignee_profile_version_id") or ""),
             runtime_scope_key=runtime_scope_key,
             output_contract=dict(node.get("output_contract") or {}),
-            metadata={**metadata, "stored_session_id": stored_session_id, "start_error": response.get("error", {}).get("message") or ""},
+            metadata={
+                **metadata,
+                "stored_session_id": stored_session_id,
+                "start_error": response.get("error", {}).get("message") or "",
+                "effective_toolsets": enabled_toolsets,
+            },
             position_x=float(node.get("position_x") or 0),
             position_y=float(node.get("position_y") or 0),
         )
@@ -2123,7 +2447,13 @@ def _(rid, params: dict) -> dict:
         assignee_profile_version_id=str(node.get("assignee_profile_version_id") or ""),
         runtime_scope_key=result_scope,
         output_contract=dict(node.get("output_contract") or {}),
-        metadata={**metadata, "stored_session_id": stored_session_id, "run_id": result_run_id, "turn_id": result_turn_id},
+        metadata={
+            **metadata,
+            "stored_session_id": stored_session_id,
+            "run_id": result_run_id,
+            "turn_id": result_turn_id,
+            "effective_toolsets": enabled_toolsets,
+        },
         position_x=float(node.get("position_x") or 0),
         position_y=float(node.get("position_y") or 0),
     )

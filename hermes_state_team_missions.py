@@ -11,7 +11,9 @@ from hermes_team_mission_memory_utils import stable_id as _stable_id
 from hermes_team_mission_memory_utils import text as _text
 from hermes_team_mission_conversation_utils import mirror_event_to_conversation as _mirror_team_mission_event
 from hermes_team_mission_conversation_state import delete_team_mission_conversation as _delete_team_mission_conversation
+from hermes_team_mission_conversation_state import is_routeable_team_mission_conversation as _conversation_routeable
 from hermes_team_mission_conversation_state import rename_team_mission_conversation as _rename_team_mission_conversation
+from hermes_team_mission_conversation_state import team_mission_conversation_history_sql as _conversation_history_sql
 import hermes_team_mission_memory_state as _memory_state
 import hermes_team_mission_graph_state as _graph_state
 from hermes_team_mission_assignees import assignee_public_fields as _assignee_public_fields
@@ -64,6 +66,14 @@ _CANCELLABLE_NODE_STATUSES = {
     "blocked",
 }
 _TERMINAL_NODE_STATUSES = {"completed", "verified", "failed", "cancelled", "canceled", "interrupted"}
+_TERMINAL_NODE_STATUS_RANK = {
+    "cancelled": 1,
+    "canceled": 1,
+    "interrupted": 1,
+    "failed": 1,
+    "completed": 2,
+    "verified": 2,
+}
 _ACTIVE_RUN_STATUSES = {
     "queued",
     "starting",
@@ -76,6 +86,55 @@ _TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "i
 _EXECUTION_MODES_REQUIRE_FINALIZERS = {"supervised_mission", "autonomous_mission", "manual_graph"}
 _NON_WORK_NODE_KINDS = TEAM_MISSION_CONTROL_NODE_KINDS
 _TEAM_MISSION_EVENT_SEQ_FACTOR = 1_000_000_000
+
+
+def _event_seq(event: Dict[str, Any] | None) -> int:
+    event = event if isinstance(event, dict) else {}
+    for key in ("source_seq", "seq"):
+        try:
+            value = int(event.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def _payload_text_value(payload: Dict[str, Any] | None) -> str:
+    payload = payload if isinstance(payload, dict) else {}
+    for key in ("delta", "text", "output", "content", "final_response", "finalResponse", "summary"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    message = payload.get("message")
+    if isinstance(message, dict):
+        for key in ("content", "text", "output"):
+            value = message.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _event_has_deliverable_text(event_type: str, payload: Dict[str, Any] | None) -> bool:
+    event_type = _text(event_type)
+    if event_type not in {"message.delta", "message.complete", "subagent.output_delta"}:
+        return False
+    payload = payload if isinstance(payload, dict) else {}
+    if event_type == "message.complete" and _text(payload.get("status")).lower() in {"error", "failed"}:
+        return False
+    return bool(_payload_text_value(payload))
+
+
+def _prefer_terminal_node_status(existing_status: str, next_status: str) -> str:
+    existing = str(existing_status or "").strip().lower()
+    incoming = str(next_status or "").strip().lower()
+    if existing not in _TERMINAL_NODE_STATUSES or incoming not in _TERMINAL_NODE_STATUSES:
+        return incoming or existing
+    existing_rank = _TERMINAL_NODE_STATUS_RANK.get(existing, 0)
+    incoming_rank = _TERMINAL_NODE_STATUS_RANK.get(incoming, 0)
+    if incoming_rank > existing_rank:
+        return incoming
+    return existing
 
 
 def _conversation_id_from_metadata(metadata: Dict[str, Any] | None, fallback: str = "") -> str:
@@ -629,6 +688,8 @@ class SessionDBTeamMissionMixin:
         if not identifier:
             return {}
         conversation = self.get_team_mission_conversation(identifier) or self.get_team_mission_conversation_by_session(identifier)
+        if conversation and not _conversation_routeable(self, conversation.get("conversation_id")):
+            conversation = {}
         if not conversation:
             with self._lock:
                 mission = self._team_mission_from_row(self._conn.execute(
@@ -684,6 +745,7 @@ class SessionDBTeamMissionMixin:
         if _text(status):
             clauses.append("status = ?")
             params.append(_conversation_status(status))
+        clauses.append(_conversation_history_sql())
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         bounded_limit = max(1, min(int(limit or 100), 500))
         with self._lock:
@@ -1580,6 +1642,57 @@ class SessionDBTeamMissionMixin:
             ).fetchone()
         return self._team_mission_run_binding_from_row(row) or {}
 
+    def team_mission_run_session_ids(self, session_ids: list[str]) -> set[str]:
+        normalized = [str(session_id or "").strip() for session_id in session_ids]
+        normalized = [session_id for session_id in normalized if session_id]
+        if not normalized:
+            return set()
+        placeholders = ",".join("?" for _ in normalized)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT DISTINCT session_id, runtime_session_id
+                FROM team_mission_run_bindings
+                WHERE session_id IN ({placeholders})
+                   OR runtime_session_id IN ({placeholders})
+                """,
+                tuple(normalized + normalized),
+            ).fetchall()
+        requested = set(normalized)
+        internal_ids: set[str] = set()
+        for row in rows:
+            for key in ("session_id", "runtime_session_id"):
+                value = str(_row_value(row, key, "") or "").strip()
+                if value and value in requested:
+                    internal_ids.add(value)
+        return internal_ids
+
+    def is_team_mission_run_session(self, session_id: str) -> bool:
+        session_id = str(session_id or "").strip()
+        return bool(session_id and session_id in self.team_mission_run_session_ids([session_id]))
+
+    def _team_mission_run_has_deliverable_text(self, run_id: str, *, max_seq: int = 0) -> bool:
+        run_id = str(run_id or "").strip()
+        if not run_id:
+            return False
+        sql = "SELECT event_type, payload_json, event_json, seq FROM run_events WHERE run_id = ?"
+        params: list[Any] = [run_id]
+        if max_seq > 0:
+            sql += " AND seq <= ?"
+            params.append(max_seq)
+        sql += " ORDER BY seq ASC, id ASC"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        for row in rows:
+            event_type = _text(_row_value(row, "event_type"))
+            payload = _json_loads(_row_value(row, "payload_json", ""), None)
+            if not isinstance(payload, dict):
+                event = _json_loads(_row_value(row, "event_json", ""), {})
+                payload = event.get("payload") if isinstance(event, dict) and isinstance(event.get("payload"), dict) else {}
+            if _event_has_deliverable_text(event_type, payload):
+                return True
+        return False
+
     def reduce_team_mission_run_event(self, *, run_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
         run_id = str(run_id or "").strip()
         if not run_id:
@@ -1599,7 +1712,10 @@ class SessionDBTeamMissionMixin:
             elif status == "interrupted":
                 next_status = "interrupted"
             elif status in {"failed", "error"}:
-                next_status = "failed"
+                if self._team_mission_run_has_deliverable_text(run_id, max_seq=_event_seq(event)):
+                    next_status = "completed"
+                else:
+                    next_status = "failed"
             else:
                 next_status = "completed"
         if not next_status:
@@ -1607,6 +1723,24 @@ class SessionDBTeamMissionMixin:
         node = self.get_team_mission_node(str(binding.get("mission_id") or ""), str(binding.get("node_id") or ""))
         if not node:
             return {}
+        metadata = dict(node.get("metadata") or {})
+        event_seq = _event_seq(event)
+        existing_terminal_run_id = str(metadata.get("last_run_id") or "").strip()
+        existing_terminal_status = str(
+            metadata.get("last_run_terminal_status")
+            or node.get("status")
+            or ""
+        ).strip().lower()
+        try:
+            existing_terminal_seq = int(metadata.get("last_run_terminal_seq") or 0)
+        except (TypeError, ValueError):
+            existing_terminal_seq = 0
+        if existing_terminal_run_id == run_id and existing_terminal_status in _TERMINAL_NODE_STATUSES:
+            if event_seq > 0 and existing_terminal_seq >= event_seq:
+                return node
+            preferred_status = _prefer_terminal_node_status(existing_terminal_status, next_status)
+            if preferred_status != next_status:
+                return node
         updated = self.upsert_team_mission_node(
             mission_id=str(binding.get("mission_id") or ""),
             node_id=str(binding.get("node_id") or ""),
@@ -1619,9 +1753,11 @@ class SessionDBTeamMissionMixin:
             runtime_scope_key=str(node.get("runtime_scope_key") or binding.get("runtime_scope_key") or ""),
             output_contract=dict(node.get("output_contract") or {}),
             metadata={
-                **dict(node.get("metadata") or {}),
+                **metadata,
                 "last_run_id": run_id,
                 "last_run_terminal_event": event_type,
+                "last_run_terminal_status": next_status,
+                "last_run_terminal_seq": event_seq,
             },
             position_x=float(node.get("position_x") or 0),
             position_y=float(node.get("position_y") or 0),

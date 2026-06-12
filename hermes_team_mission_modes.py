@@ -45,6 +45,9 @@ class TeamMissionMember:
     member_id: str
     profile_id: str = ""
     profile_version_id: str = ""
+    runtime_scope_key: str = ""
+    hermes_home_path: str = ""
+    doxie_profile: dict[str, Any] = field(default_factory=dict)
     display_name: str = ""
     role: str = "worker"
     status: str = "active"
@@ -75,6 +78,9 @@ class TeamMissionMember:
             member_id=member_id,
             profile_id=profile_id,
             profile_version_id=str(raw.get("profile_version_id") or raw.get("profileVersionId") or ""),
+            runtime_scope_key=str(raw.get("runtime_scope_key") or raw.get("runtimeScopeKey") or ""),
+            hermes_home_path=str(raw.get("hermes_home_path") or raw.get("hermesHomePath") or ""),
+            doxie_profile=dict(raw.get("doxie_profile") or raw.get("doxieProfile") or {}),
             display_name=str(raw.get("display_name") or raw.get("displayName") or raw.get("name") or member_id),
             role=str(raw.get("role") or "worker"),
             status=str(raw.get("status") or "active"),

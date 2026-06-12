@@ -23,6 +23,11 @@ from tools.team_mission_profile_tools import _leader_run_context
 
 
 _TOOLSET = "team_mission_leader"
+_START_TASK_HANDOFF_MESSAGE = (
+    "Team mission accepted; planning has started. This is the task-start "
+    "state, not the final result. The final deliverable will be written "
+    "back here when the mission graph completes."
+)
 
 
 def _text(value: Any) -> str:
@@ -251,15 +256,30 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
     graph = db.get_team_mission_graph(mission_id)
     started = created.get("leader_start") if isinstance(created.get("leader_start"), Mapping) else {}
     node = started.get("node") if isinstance(started.get("node"), Mapping) else _root_leader_node(graph)
+    mission = graph.get("mission") if isinstance(graph, dict) and isinstance(graph.get("mission"), Mapping) else {}
+    mission_status = _text(mission.get("status")) or "planning"
     return tool_result(
         success=True,
         intent="start_team_task",
+        submission_status="accepted",
+        task_status=mission_status,
+        completion_status="pending",
+        final_result_available=False,
+        await_final_deliverable=True,
         mission_id=mission_id,
         conversation_id=conversation_id,
         task_id=task_id,
         node=node or {},
         run=started.get("run") if isinstance(started, Mapping) else {},
         graph_summary=_graph_summary(graph),
+        message=_START_TASK_HANDOFF_MESSAGE,
+        hermes_control={
+            "kind": "team_mission_started",
+            "end_current_turn": True,
+            "await_final_deliverable": True,
+            "mission_status": mission_status,
+            "assistant_response": _START_TASK_HANDOFF_MESSAGE,
+        },
     )
 
 

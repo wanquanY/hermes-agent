@@ -12,6 +12,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
+from agent.doxie_diagnostics import emit_doxie_diagnostic
 from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
 from typing import Optional
 
@@ -50,6 +51,21 @@ _CONTEXT_INVISIBLE_CHARS = {
     '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff',
     '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
 }
+
+
+def _log_doxie_prompt_builder_stage(stage: str, **fields) -> None:
+    """Emit focused diagnostics for prompt-builder stalls in DoXie runs."""
+    try:
+        from hermes_constants import get_hermes_home_override
+        has_scoped_home = bool(get_hermes_home_override())
+    except Exception:
+        has_scoped_home = False
+    if not has_scoped_home and not os.environ.get("DOXIE_PROCESS_ROLE"):
+        return
+    emit_doxie_diagnostic(
+        "[doxie-prompt-builder-stage]",
+        {"stage": stage, **fields},
+    )
 
 
 def _scan_context_content(content: str, filename: str) -> str:
@@ -1331,23 +1347,49 @@ def load_soul_md() -> Optional[str]:
     returns content, ``build_context_files_prompt`` should be called with
     ``skip_soul=True`` so SOUL.md isn't injected twice.
     """
-    try:
-        from hermes_cli.config import ensure_hermes_home
-        ensure_hermes_home()
-    except Exception as e:
-        logger.debug("Could not ensure HERMES_HOME before loading SOUL.md: %s", e)
-
+    _log_doxie_prompt_builder_stage("load-soul-enter")
     soul_path = get_hermes_home() / "SOUL.md"
-    if not soul_path.exists():
-        return None
+    _log_doxie_prompt_builder_stage("load-soul-path", path=str(soul_path))
     try:
+        soul_stat = soul_path.stat()
+    except FileNotFoundError:
+        _log_doxie_prompt_builder_stage("load-soul-missing")
+        return None
+    except Exception as e:
+        _log_doxie_prompt_builder_stage("load-soul-stat-error", error=str(e))
+        logger.debug("Could not stat SOUL.md at %s: %s", soul_path, e)
+        return None
+
+    if not soul_path.is_file():
+        _log_doxie_prompt_builder_stage("load-soul-not-file")
+        logger.debug("SOUL.md at %s is not a regular file", soul_path)
+        return None
+
+    if soul_stat.st_size > CONTEXT_FILE_MAX_CHARS * 16:
+        _log_doxie_prompt_builder_stage("load-soul-too-large", size=soul_stat.st_size)
+        logger.warning(
+            "SOUL.md at %s is too large to load safely (%s bytes)",
+            soul_path,
+            soul_stat.st_size,
+        )
+        return None
+
+    try:
+        _log_doxie_prompt_builder_stage("load-soul-read-start", size=soul_stat.st_size)
         content = soul_path.read_text(encoding="utf-8").strip()
+        _log_doxie_prompt_builder_stage("load-soul-read-end", chars=len(content))
         if not content:
+            _log_doxie_prompt_builder_stage("load-soul-empty")
             return None
+        _log_doxie_prompt_builder_stage("load-soul-scan-start")
         content = _scan_context_content(content, "SOUL.md")
+        _log_doxie_prompt_builder_stage("load-soul-scan-end", chars=len(content))
+        _log_doxie_prompt_builder_stage("load-soul-truncate-start")
         content = _truncate_content(content, "SOUL.md")
+        _log_doxie_prompt_builder_stage("load-soul-truncate-end", chars=len(content))
         return content
     except Exception as e:
+        _log_doxie_prompt_builder_stage("load-soul-error", error=str(e))
         logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
         return None
 

@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import json
+import time
+from typing import Any
 
+from agent.doxie_diagnostics import emit_doxie_diagnostic
+from hermes_team_mission_conversation_state import normalize_team_mission_conversation_session
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
 from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
@@ -13,6 +17,55 @@ _server = bind_server_globals(globals())
 
 
 # ── Methods: prompt ──────────────────────────────────────────────────
+
+
+def _log_prompt_stage(session: dict, sid: str, stage: str, **fields: Any) -> None:
+    run_id = str(session.get("active_run_id") or fields.pop("run_id", "") or "")
+    turn_id = str(session.get("active_turn_id") or fields.pop("turn_id", "") or "")
+    runtime_scope_key = str(
+        session.get("active_runtime_scope_key")
+        or session.get("runtime_scope_key")
+        or session.get("session_key")
+        or sid
+    )
+    if not run_id and not runtime_scope_key.startswith("team:"):
+        return
+    pairs = {
+        "stage": stage,
+        "sid": sid,
+        "stored_session_id": str(session.get("session_key") or sid),
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "runtime_scope_key": runtime_scope_key,
+        **fields,
+    }
+    emit_doxie_diagnostic("[doxie-prompt-stage]", pairs)
+
+
+def _apply_doxie_product_runtime_policy(agent: Any, raw_context: Any) -> None:
+    if agent is None or not isinstance(raw_context, dict):
+        return
+    team_mission = raw_context.get("team_mission") or raw_context.get("teamMission")
+    team_mission = team_mission if isinstance(team_mission, dict) else {}
+    setattr(
+        agent,
+        "_delegate_inherits_parent_tools",
+        bool(team_mission.get("delegate_inherits_parent_tools") or team_mission.get("delegateInheritsParentTools")),
+    )
+
+
+def _prompt_terminal_status_from_result(result: dict, raw: Any) -> str:
+    if result.get("interrupted"):
+        return "interrupted"
+    error = str(result.get("error") or "").strip()
+    if not error:
+        return "complete"
+    raw_text = str(raw or "").strip()
+    if not raw_text:
+        return "error"
+    if bool(result.get("failed")) and raw_text.lower().startswith(("error:", "failed:", "exception:")):
+        return "error"
+    return "complete"
 
 
 def _mark_prompt_run_failed(
@@ -349,6 +402,20 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 flush=True,
             )
         if not session.get("transient"):
+            db = _get_db()
+            if db is not None:
+                try:
+                    normalize_team_mission_conversation_session(
+                        db,
+                        session_id=stable_session_id,
+                        metadata={"doxie_product_context": doxie_product_context},
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "team mission conversation session normalization skipped sid=%s: %s",
+                        stable_session_id,
+                        exc,
+                    )
             run_control.mark_run_started(
                 stored_session_id=stable_session_id,
                 runtime_session_id=sid,
@@ -359,7 +426,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                     "gateway_pid": os.getpid(),
                     "gateway_instance_id": _GATEWAY_INSTANCE_ID,
                 },
-                db=_get_db(),
+                db=db,
             )
 
     if requested_model:
@@ -471,6 +538,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                     message=f"runtime auth rebind failed: {e}",
                 )
                 return
+            _apply_doxie_product_runtime_policy(session.get("agent"), raw_doxie_context)
             with session["history_lock"]:
                 if (
                     str(session.get("interrupted_run_id") or "") == run_id
@@ -649,6 +717,7 @@ def _run_prompt_submit(
         session["attached_images"] = []
     agent = session.get("agent")
     if agent is None:
+        _log_prompt_stage(session, sid, "agent-missing", run_id=turn_run_id, turn_id=turn_id)
         _fail_unavailable_runtime_agent(
             sid=sid,
             session=session,
@@ -656,7 +725,64 @@ def _run_prompt_submit(
             turn_id=turn_id,
         )
         return
+    _log_prompt_stage(
+        session,
+        sid,
+        "before-message-start",
+        run_id=turn_run_id,
+        turn_id=turn_id,
+        history_count=len(history),
+        image_count=len(images),
+        text_len=len(str(text or "")),
+    )
     _emit("message.start", sid)
+    _log_prompt_stage(session, sid, "after-message-start", run_id=turn_run_id, turn_id=turn_id)
+
+    def terminalize_if_still_active(reason: str) -> None:
+        if session.get("transient") or not turn_run_id:
+            return
+        db = _get_db()
+        if db is None:
+            return
+        try:
+            get_run = getattr(db, "get_run", None)
+            state = get_run(turn_run_id) if callable(get_run) else {}
+        except Exception as exc:
+            logger.warning(
+                "[doxie-prompt] terminal fallback state lookup failed sid=%s run_id=%s error=%s",
+                sid,
+                turn_run_id,
+                exc,
+            )
+            return
+        status = str(state.get("status") or "").strip()
+        if status not in run_control.ACTIVE_RUN_STATUSES:
+            return
+        logger.warning(
+            "[doxie-prompt] terminal fallback for active run sid=%s stored_session_id=%s run_id=%s turn_id=%s status=%s reason=%s",
+            sid,
+            session.get("session_key") or sid,
+            turn_run_id,
+            turn_id,
+            status,
+            reason,
+        )
+        run_control.publish_run_terminal_event(
+            stored_session_id=str(session.get("session_key") or sid),
+            run_id=turn_run_id,
+            turn_id=turn_id,
+            runtime_scope_key=str(
+                session.get("active_runtime_scope_key")
+                or session.get("runtime_scope_key")
+                or session.get("session_key")
+                or sid
+            ),
+            runtime_session_id=sid,
+            status="failed",
+            message=reason,
+            db=db,
+            owner_transport=current_transport(),
+        )
 
     def is_turn_interrupted() -> bool:
         with session["history_lock"]:
@@ -761,20 +887,33 @@ def _run_prompt_submit(
                 )
 
     def run():
+        worker_started_at = time.time()
         approval_token = None
         session_tokens = []
         profile_tokens = []
         goal_followup = None  # set by the post-turn goal hook below
+        post_turn_history = list(history)
+        terminal_attempted = False
         try:
+            _log_prompt_stage(
+                session,
+                sid,
+                "worker-entry",
+                run_id=turn_run_id,
+                turn_id=turn_id,
+            )
+            _log_prompt_stage(session, sid, "profile-context-enter-start", run_id=turn_run_id, turn_id=turn_id)
             profile_tokens = _enter_profile_context(
                 session.get("profile_context"),
                 apply_env=False,
             )
+            _log_prompt_stage(session, sid, "profile-context-enter-end", run_id=turn_run_id, turn_id=turn_id)
             from tools.approval import (
                 reset_current_session_key,
                 set_current_session_key,
             )
 
+            _log_prompt_stage(session, sid, "session-context-enter-start", run_id=turn_run_id, turn_id=turn_id)
             approval_token = set_current_session_key(session["session_key"])
             session_cwd = _session_cwd(session)
             session_tokens = _set_session_context(
@@ -782,12 +921,21 @@ def _run_prompt_submit(
                 terminal_cwd=session_cwd,
                 doxie_product_context=str((turn_metadata or {}).get("doxie_product_context") or ""),
             )
+            _log_prompt_stage(
+                session,
+                sid,
+                "session-context-enter-end",
+                run_id=turn_run_id,
+                turn_id=turn_id,
+                cwd=session_cwd,
+            )
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
             prompt = text
             clean_prompt = str((turn_metadata or {}).get("persist_user_message") or prompt or "")
 
             if isinstance(prompt, str) and "@" in prompt:
+                _log_prompt_stage(session, sid, "context-reference-preprocess-start", run_id=turn_run_id, turn_id=turn_id)
                 from agent.context_references import preprocess_context_references
                 from agent.model_metadata import get_model_context_length
 
@@ -819,18 +967,43 @@ def _run_prompt_submit(
                 prompt = ctx.message
                 if not str((turn_metadata or {}).get("persist_user_message") or "").strip():
                     clean_prompt = prompt
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "context-reference-preprocess-end",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    prompt_len=len(str(prompt or "")),
+                )
 
             try:
+                _log_prompt_stage(session, sid, "attachment-enrichment-start", run_id=turn_run_id, turn_id=turn_id)
                 from doxie_extension.prompt_attachments import enrich_prompt_with_document_attachments
 
                 prompt = enrich_prompt_with_document_attachments(
                     prompt,
                     (turn_metadata or {}).get("attachments"),
                 )
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "attachment-enrichment-end",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    prompt_len=len(str(prompt or "")),
+                )
             except Exception as exc:
                 print(
                     f"[tui_gateway] document attachment prompt enrichment failed: {exc}",
                     file=sys.stderr,
+                )
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "attachment-enrichment-error",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    error=str(exc),
                 )
 
             # Decide image routing per-turn based on active provider/model.
@@ -841,6 +1014,14 @@ def _run_prompt_submit(
             run_message: Any = prompt
             if images:
                 try:
+                    _log_prompt_stage(
+                        session,
+                        sid,
+                        "image-routing-decision-start",
+                        run_id=turn_run_id,
+                        turn_id=turn_id,
+                        image_count=len(images),
+                    )
                     from agent.image_routing import (
                         decide_image_input_mode,
                         build_native_content_parts,
@@ -864,15 +1045,32 @@ def _run_prompt_submit(
                         _cfg,
                         supports_vision_override=_supports_vision,
                     )
+                    _log_prompt_stage(
+                        session,
+                        sid,
+                        "image-routing-decision-end",
+                        run_id=turn_run_id,
+                        turn_id=turn_id,
+                        mode=_mode,
+                    )
                 except Exception as _img_exc:
                     print(
                         f"[tui_gateway] image_routing decision failed, defaulting to text: {_img_exc}",
                         file=sys.stderr,
                     )
                     _mode = "text"
+                    _log_prompt_stage(
+                        session,
+                        sid,
+                        "image-routing-decision-error",
+                        run_id=turn_run_id,
+                        turn_id=turn_id,
+                        error=str(_img_exc),
+                    )
 
                 if _mode == "native":
                     try:
+                        _log_prompt_stage(session, sid, "native-image-build-start", run_id=turn_run_id, turn_id=turn_id)
                         _parts, _skipped = build_native_content_parts(
                             prompt,
                             images,
@@ -886,15 +1084,54 @@ def _run_prompt_submit(
                             run_message = _parts
                         else:
                             run_message = _enrich_with_attached_images(prompt, images)
+                        _log_prompt_stage(
+                            session,
+                            sid,
+                            "native-image-build-end",
+                            run_id=turn_run_id,
+                            turn_id=turn_id,
+                            skipped_count=len(_skipped or []),
+                            part_count=len(_parts or []),
+                        )
                     except Exception as _img_exc:
                         print(
                             f"[tui_gateway] native attach failed, falling back to text: {_img_exc}",
                             file=sys.stderr,
                         )
                         run_message = _enrich_with_attached_images(prompt, images)
+                        _log_prompt_stage(
+                            session,
+                            sid,
+                            "native-image-build-error",
+                            run_id=turn_run_id,
+                            turn_id=turn_id,
+                            error=str(_img_exc),
+                        )
                 else:
+                    _log_prompt_stage(session, sid, "text-image-enrichment-start", run_id=turn_run_id, turn_id=turn_id)
                     run_message = _enrich_with_attached_images(prompt, images)
+                    _log_prompt_stage(session, sid, "text-image-enrichment-end", run_id=turn_run_id, turn_id=turn_id)
 
+            _log_prompt_stage(
+                session,
+                sid,
+                "before-agent-run",
+                run_id=turn_run_id,
+                turn_id=turn_id,
+                run_message_type=type(run_message).__name__,
+                elapsed_ms=int((time.time() - worker_started_at) * 1000),
+            )
+            emit_doxie_diagnostic(
+                "[doxie-prompt]",
+                {
+                    "stage": "agent-run-start",
+                    "sid": sid,
+                    "stored_session_id": session.get("session_key") or sid,
+                    "run_id": turn_run_id,
+                    "turn_id": turn_id,
+                    "runtime_scope_key": session.get("runtime_scope_key") or "",
+                },
+            )
             def _stream(delta):
                 if is_turn_interrupted():
                     return
@@ -916,6 +1153,7 @@ def _run_prompt_submit(
                 agent._hermes_active_run_id = turn_run_id
                 agent._hermes_active_turn_id = turn_id
                 agent._hermes_active_runtime_scope_key = str(session.get("runtime_scope_key") or "")
+                _log_prompt_stage(session, sid, "agent-run-call-start", run_id=turn_run_id, turn_id=turn_id)
                 result = agent.run_conversation(
                     run_message,
                     conversation_history=list(history),
@@ -923,13 +1161,59 @@ def _run_prompt_submit(
                     persist_user_message=clean_prompt,
                     turn_metadata=turn_metadata,
                 )
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "agent-run-call-end",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    result_type=type(result).__name__,
+                )
+                emit_doxie_diagnostic(
+                    "[doxie-prompt]",
+                    {
+                        "stage": "agent-run-returned",
+                        "sid": sid,
+                        "stored_session_id": session.get("session_key") or sid,
+                        "run_id": turn_run_id,
+                        "turn_id": turn_id,
+                        "result_type": type(result).__name__,
+                    },
+                )
             except TypeError as exc:
                 if "turn_metadata" not in str(exc) and "persist_user_message" not in str(exc):
                     raise
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "agent-run-compat-fallback-start",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    error=str(exc),
+                )
                 result = agent.run_conversation(
                     run_message,
                     conversation_history=list(history),
                     stream_callback=_stream,
+                )
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "agent-run-compat-fallback-end",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    result_type=type(result).__name__,
+                )
+                emit_doxie_diagnostic(
+                    "[doxie-prompt]",
+                    {
+                        "stage": "agent-run-returned-compat",
+                        "sid": sid,
+                        "stored_session_id": session.get("session_key") or sid,
+                        "run_id": turn_run_id,
+                        "turn_id": turn_id,
+                        "result_type": type(result).__name__,
+                    },
                 )
             finally:
                 if "previous_inject_tool_breaks" in locals():
@@ -974,6 +1258,7 @@ def _run_prompt_submit(
                         if current_version == history_version:
                             session["history"] = result["messages"]
                             session["history_version"] = history_version + 1
+                            post_turn_history = list(session["history"])
                         else:
                             # History mutated externally during the turn
                             # (undo/compress/retry/rollback now guard on
@@ -1005,11 +1290,7 @@ def _run_prompt_submit(
                 )
 
                 raw = result.get("final_response", "")
-                status = (
-                    "interrupted"
-                    if result.get("interrupted")
-                    else "error" if result.get("error") else "complete"
-                )
+                status = _prompt_terminal_status_from_result(result, raw)
                 # When the backend produced no visible response AND reported a
                 # real error (e.g. invalid model slug → provider 4xx), surface
                 # that error as the visible text instead of shipping an empty
@@ -1042,6 +1323,12 @@ def _run_prompt_submit(
                 payload["interrupt_detail"] = interrupt_detail
             if last_reasoning:
                 payload["reasoning"] = last_reasoning
+            if (
+                isinstance(result, dict)
+                and status == "complete"
+                and str(result.get("error") or "").strip()
+            ):
+                payload["nonfatal_error"] = str(result.get("error") or "").strip()
             if status_note:
                 payload["warning"] = status_note
             message_id = _latest_assistant_message_id_for_turn(
@@ -1053,7 +1340,20 @@ def _run_prompt_submit(
             rendered = render_message(raw, cols)
             if rendered:
                 payload["rendered"] = rendered
+            emit_doxie_diagnostic(
+                "[doxie-prompt]",
+                {
+                    "stage": "message-complete-emit",
+                    "sid": sid,
+                    "stored_session_id": session.get("session_key") or sid,
+                    "run_id": turn_run_id,
+                    "turn_id": turn_id,
+                    "status": status,
+                    "text_len": len(raw) if isinstance(raw, str) else 0,
+                },
+            )
             _emit("message.complete", sid, payload)
+            terminal_attempted = True
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge
@@ -1141,7 +1441,7 @@ def _run_prompt_submit(
                         session.get("session_key") or sid,
                         text,
                         raw,
-                        session.get("history", []),
+                        post_turn_history,
                     )
                 except Exception:
                     pass
@@ -1185,6 +1485,7 @@ def _run_prompt_submit(
                 f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True
             )
             _emit("error", sid, {"message": str(e)})
+            terminal_attempted = True
         finally:
             try:
                 if approval_token is not None:
@@ -1200,6 +1501,10 @@ def _run_prompt_submit(
                     session["active_turn_id"] = None
                     session["pending_turn"] = None
                     session["run_updated_at"] = time.time()
+            if not terminal_attempted:
+                terminalize_if_still_active("prompt worker exited before terminal event was emitted")
+            else:
+                terminalize_if_still_active("prompt worker terminal event did not close active run")
 
         # Chain a goal-continuation turn if the judge said so. We do
         # this AFTER the finally releases session["running"], so the
@@ -1275,6 +1580,7 @@ def _run_prompt_submit(
                     session["running"] = False
                     session["active_run_id"] = None
 
+    _log_prompt_stage(session, sid, "worker-dispatch", run_id=turn_run_id, turn_id=turn_id)
     threading.Thread(target=run, daemon=True).start()
 
 

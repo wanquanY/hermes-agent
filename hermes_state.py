@@ -29,6 +29,9 @@ from hermes_state_branch import SessionDBBranchMixin
 from hermes_state_runs import SessionDBRunMixin
 from hermes_state_team_capabilities import SessionDBTeamCapabilityMixin
 from hermes_state_team_missions import SessionDBTeamMissionMixin
+from hermes_team_mission_conversation_state import prune_empty_team_mission_conversations
+from hermes_team_mission_conversation_state import repair_placeholder_team_mission_conversation_titles
+from hermes_team_mission_conversation_state import repair_legacy_team_mission_conversation_sessions
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -646,6 +649,42 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
             self._conn.execute("PRAGMA foreign_keys=ON")
 
             self._init_schema()
+            try:
+                repaired = repair_legacy_team_mission_conversation_sessions(self)
+                if repaired:
+                    logger.info(
+                        "repaired %d legacy Team Mission conversation session(s)",
+                        repaired,
+                    )
+            except Exception as repair_exc:
+                logger.warning(
+                    "legacy Team Mission conversation session repair skipped: %s",
+                    repair_exc,
+                )
+            try:
+                retitled = repair_placeholder_team_mission_conversation_titles(self)
+                if retitled:
+                    logger.info(
+                        "retitled %d placeholder Team Mission conversation(s)",
+                        retitled,
+                    )
+            except Exception as retitle_exc:
+                logger.warning(
+                    "placeholder Team Mission conversation title repair skipped: %s",
+                    retitle_exc,
+                )
+            try:
+                pruned = prune_empty_team_mission_conversations(self)
+                if pruned:
+                    logger.info(
+                        "pruned %d empty Team Mission conversation shell(s)",
+                        pruned,
+                    )
+            except Exception as prune_exc:
+                logger.warning(
+                    "empty Team Mission conversation shell prune skipped: %s",
+                    prune_exc,
+                )
         except Exception as exc:
             # Capture the cause so /resume and friends can surface WHY the
             # session DB is unavailable instead of a bare "Session database

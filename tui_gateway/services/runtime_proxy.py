@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 _log = logging.getLogger(__name__)
@@ -74,10 +75,26 @@ _RUNTIME_SCOPED_CONTROL_METHODS = frozenset(
         "approval.respond",
         "clarify.respond",
         "cron.manage",
+        "events.subscribe",
+        "events.unsubscribe",
         "run.cancel",
+        "run.events",
+        "run.list",
+        "run.status",
         "secret.respond",
         "session.create",
+        "session.messages",
         "skills.reload",
+        "team_mission.conversation.ensure",
+        "team_mission.events",
+        "team_mission.graph",
+        "team_mission.graph.reduce",
+        "team_mission.message.submit",
+        "team_mission.node.history",
+        "team_mission.node.update",
+        "team_mission.plan.reject",
+        "team_mission.cancel",
+        "team_mission.schedule.ready",
         "toolsets.list",
         "sudo.respond",
         "tools.configure",
@@ -89,6 +106,12 @@ _DEFAULT_IDLE_TIMEOUT_S = 30 * 60
 _SIDECAR_TOKEN_ENV = "DOXIE_SIDECAR_TOKEN"
 _SIDECAR_PARENT_PID_ENV = "DOXIE_SIDECAR_PARENT_PID"
 _CRON_CONTROL_PLANE_READ_ACTIONS = frozenset({"", "list", "status", "runs"})
+_TEAM_LEADER_RUNTIME_METHODS = frozenset(
+    {
+        "team_mission.conversation.ensure",
+        "team_mission.message.submit",
+    }
+)
 
 
 class AsyncFrameTransport(Protocol):
@@ -125,6 +148,8 @@ class RuntimeWorker:
     last_exit_at: float = 0
     last_error: str = ""
     launch_fingerprint: str = ""
+    log_handle: Any | None = field(default=None, repr=False)
+    failure_reported: bool = False
 
     @property
     def scope_key(self) -> str:
@@ -156,6 +181,22 @@ class RuntimeWorker:
             "restartCount": self.restart_count,
             "lastError": self.last_error or None,
         }
+
+    def close_log_handle(self) -> None:
+        handle = self.log_handle
+        self.log_handle = None
+        if handle is None:
+            return
+        try:
+            handle.close()
+        except Exception:
+            pass
+
+    def mark_failure_reported(self) -> bool:
+        if self.failure_reported:
+            return False
+        self.failure_reported = True
+        return True
 
 
 def runtime_scope_from_params(params: dict[str, Any]) -> RuntimeScope:
@@ -205,6 +246,132 @@ def runtime_scope_from_params(params: dict[str, Any]) -> RuntimeScope:
     )
 
 
+def _team_leader_scope_key_from_params(params: dict[str, Any]) -> str:
+    runtime_context = params.get("runtime_context")
+    if not isinstance(runtime_context, dict):
+        runtime_context = params.get("runtimeContext")
+    if not isinstance(runtime_context, dict):
+        runtime_context = {}
+    explicit = str(
+        params.get("leader_runtime_scope_key")
+        or params.get("leaderRuntimeScopeKey")
+        or params.get("conversation_runtime_scope_key")
+        or params.get("conversationRuntimeScopeKey")
+        or params.get("team_leader_runtime_scope_key")
+        or params.get("teamLeaderRuntimeScopeKey")
+        or runtime_context.get("leader_runtime_scope_key")
+        or runtime_context.get("leaderRuntimeScopeKey")
+        or runtime_context.get("runtime_scope_key")
+        or runtime_context.get("runtimeScopeKey")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit
+    members = params.get("members")
+    if isinstance(members, list):
+        leader = next(
+            (
+                item for item in members
+                if isinstance(item, dict) and str(item.get("role") or "").strip() in {"lead", "leader"}
+            ),
+            None,
+        ) or next((item for item in members if isinstance(item, dict)), None)
+        metadata = leader.get("metadata") if isinstance(leader, dict) and isinstance(leader.get("metadata"), dict) else {}
+        member_explicit = str(
+            metadata.get("leader_runtime_scope_key")
+            or metadata.get("leaderRuntimeScopeKey")
+            or metadata.get("conversation_runtime_scope_key")
+            or metadata.get("conversationRuntimeScopeKey")
+            or leader.get("leader_runtime_scope_key")
+            or leader.get("leaderRuntimeScopeKey")
+            or ""
+        ).strip()
+        if member_explicit:
+            return member_explicit
+    subject = str(
+        params.get("conversation_id")
+        or params.get("conversationId")
+        or params.get("mission_id")
+        or params.get("missionId")
+        or ""
+    ).strip()
+    if subject:
+        return f"team:{subject}:leader-conversation"
+    return ""
+
+
+def _team_leader_profile_scope_from_params(params: dict[str, Any]) -> RuntimeScope:
+    members = params.get("members")
+    if not isinstance(members, list):
+        return RuntimeScope()
+    leader = next(
+        (
+            item for item in members
+            if isinstance(item, dict) and str(item.get("role") or "").strip() in {"lead", "leader"}
+        ),
+        None,
+    ) or next((item for item in members if isinstance(item, dict)), None)
+    if not isinstance(leader, dict):
+        return RuntimeScope()
+    profile = leader.get("doxie_profile")
+    if not isinstance(profile, dict):
+        profile = leader.get("doxieProfile")
+    if not isinstance(profile, dict):
+        profile = {}
+    scoped_params = {
+        "agent_profile_id": leader.get("profile_id") or leader.get("agent_profile_id") or profile.get("id"),
+        "agent_profile_version_id": (
+            leader.get("profile_version_id")
+            or leader.get("agent_profile_version_id")
+            or profile.get("agentProfileVersionId")
+            or profile.get("agent_profile_version_id")
+        ),
+        "runtime_scope_key": (
+            leader.get("runtime_scope_key")
+            or leader.get("runtimeScopeKey")
+            or profile.get("runtimeScopeKey")
+            or profile.get("runtime_scope_key")
+        ),
+        "doxie_profile": {
+            **profile,
+            "id": leader.get("profile_id") or leader.get("agent_profile_id") or profile.get("id"),
+            "hermesHomePath": (
+                leader.get("hermes_home_path")
+                or leader.get("hermesHomePath")
+                or profile.get("hermesHomePath")
+                or profile.get("hermes_home_path")
+            ),
+        },
+    }
+    return runtime_scope_from_params(scoped_params)
+
+
+def _team_leader_runtime_scope_from_params(params: dict[str, Any]) -> RuntimeScope:
+    leader_scope_key = _team_leader_scope_key_from_params(params)
+    profile_scope = runtime_scope_from_params(params)
+    if not profile_scope.agent_profile_id and not profile_scope.agent_profile_version_id and not profile_scope.hermes_home:
+        profile_scope = _team_leader_profile_scope_from_params(params)
+    if leader_scope_key:
+        return RuntimeScope(
+            agent_profile_id=profile_scope.agent_profile_id,
+            agent_profile_version_id=profile_scope.agent_profile_version_id,
+            runtime_scope_key=leader_scope_key,
+            hermes_home=profile_scope.hermes_home,
+        )
+    return profile_scope
+
+
+def runtime_scope_from_request(req: dict[str, Any]) -> RuntimeScope:
+    method = str((req or {}).get("method") or "").strip()
+    params = req.get("params") if isinstance(req.get("params"), dict) else {}
+    if method in _TEAM_LEADER_RUNTIME_METHODS:
+        leader_scope = _team_leader_runtime_scope_from_params(params)
+        if leader_scope.has_scope:
+            return leader_scope
+    scope = runtime_scope_from_params(params)
+    return scope
+
+
 def _truthy_param(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -234,7 +401,7 @@ def should_proxy_to_runtime(req: dict[str, Any]) -> bool:
     if not method:
         return False
     params = req.get("params") if isinstance(req.get("params"), dict) else {}
-    scope = runtime_scope_from_params(params)
+    scope = runtime_scope_from_request(req)
     if not scope.has_scope:
         return False
     current_scope = str(os.environ.get("DOXIE_HERMES_RUNTIME_SCOPE_KEY") or "").strip()
@@ -304,6 +471,132 @@ def _launch_fingerprint(scope: RuntimeScope, params: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def _scope_log_slug(scope_key: str) -> str:
+    raw = str(scope_key or "default").strip() or "default"
+    return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in raw)[:120]
+
+
+def _open_worker_log(scope: RuntimeScope):
+    logs_dir = Path(scope.hermes_home or os.getcwd()) / "logs"
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        path = logs_dir / f"runtime-worker-{_scope_log_slug(scope.runtime_scope_key)}.log"
+        handle = open(path, "ab", buffering=0)
+        header = (
+            f"\n--- runtime worker start pid=pending "
+            f"scope={scope.runtime_scope_key!r} at={time.time():.3f} ---\n"
+        )
+        handle.write(header.encode("utf-8", errors="replace"))
+        return handle
+    except Exception:
+        return subprocess.DEVNULL
+
+
+def _runtime_worker_failure_message(worker: RuntimeWorker, reason: str) -> str:
+    code = worker.process.poll()
+    exit_desc = f"exit_code={code}" if code is not None else "exit_code=unknown"
+    return (
+        "runtime worker for scoped Team conversation stopped before the run reached a terminal state "
+        f"({reason}; scope={worker.scope_key}; pid={worker.process.pid}; {exit_desc})"
+    )
+
+
+def _run_owned_by_worker(run: dict[str, Any], worker: RuntimeWorker) -> bool:
+    if str(run.get("runtime_scope_key") or "") == worker.scope_key:
+        return True
+    metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    try:
+        owner_pid = int(metadata.get("gateway_pid") or 0)
+    except (TypeError, ValueError):
+        owner_pid = 0
+    return bool(owner_pid and owner_pid == int(worker.process.pid or 0))
+
+
+def _worker_active_runs(worker: RuntimeWorker) -> list[dict[str, Any]]:
+    try:
+        from tui_gateway import server as tui_gateway_server
+        from tui_gateway.services import run_control
+    except Exception:
+        return []
+    db = None
+    try:
+        db = tui_gateway_server._get_db()
+    except Exception:
+        db = None
+    active_statuses = list(getattr(run_control, "ACTIVE_RUN_STATUSES", ()))
+    active_runs_by_id: dict[str, dict[str, Any]] = {}
+    for runtime_scope_key in (worker.scope_key, ""):
+        try:
+            runs = run_control.list_runs(
+                "",
+                db=db,
+                runtime_scope_key=runtime_scope_key,
+                statuses=active_statuses,
+                limit=1000,
+            )
+        except Exception:
+            runs = []
+        for run in runs:
+            if not isinstance(run, dict) or not _run_owned_by_worker(run, worker):
+                continue
+            run_id = str(run.get("run_id") or "").strip()
+            if run_id:
+                active_runs_by_id[run_id] = run
+    return list(active_runs_by_id.values())
+
+
+def _worker_has_active_runs(worker: RuntimeWorker) -> bool:
+    return bool(_worker_active_runs(worker))
+
+
+def _terminalize_worker_active_runs(worker: RuntimeWorker, *, reason: str, transport: AsyncFrameTransport | None = None) -> int:
+    if worker.running() or not worker.mark_failure_reported():
+        return 0
+    try:
+        from tui_gateway import server as tui_gateway_server
+        from tui_gateway.services import run_control
+    except Exception:
+        return 0
+    db = None
+    try:
+        db = tui_gateway_server._get_db()
+    except Exception:
+        db = None
+    active_runs = _worker_active_runs(worker)
+    message = _runtime_worker_failure_message(worker, reason)
+    failed = 0
+    for run in active_runs:
+        run_id = str(run.get("run_id") or "").strip()
+        stable = str(run.get("session_id") or run.get("stored_session_id") or "").strip()
+        if not run_id or not stable:
+            continue
+        try:
+            run_control.publish_run_terminal_event(
+                stored_session_id=stable,
+                run_id=run_id,
+                turn_id=str(run.get("turn_id") or ""),
+                runtime_scope_key=str(run.get("runtime_scope_key") or worker.scope_key),
+                runtime_session_id=str(run.get("runtime_session_id") or ""),
+                status="failed",
+                message=message,
+                db=db,
+                owner_transport=transport if hasattr(transport, "write") else None,
+            )
+            failed += 1
+        except Exception:
+            continue
+    if failed:
+        try:
+            _log.warning(
+                "runtime worker %s stopped; terminalized %s active run(s)",
+                worker.scope_key,
+                failed,
+            )
+        except Exception:
+            pass
+    return failed
+
+
 class RuntimeWorkerPool:
     def __init__(self) -> None:
         self._workers: dict[str, RuntimeWorker] = {}
@@ -315,9 +608,19 @@ class RuntimeWorkerPool:
         async with self._lock:
             await self._reclaim_idle_locked()
             existing = self._workers.get(scope.runtime_scope_key)
+            if existing is not None and existing.running() and not scope.hermes_home:
+                existing.mark_used()
+                return existing
             target_fingerprint = _launch_fingerprint(scope, params)
             if existing is not None and existing.running():
                 if existing.launch_fingerprint != target_fingerprint:
+                    if existing.bridge_count > 0 or _worker_has_active_runs(existing):
+                        _log.warning(
+                            "runtime worker %s launch environment changed while active; reusing existing worker",
+                            scope.runtime_scope_key,
+                        )
+                        existing.mark_used()
+                        return existing
                     _log.info(
                         "restarting runtime worker %s because its launch environment changed",
                         scope.runtime_scope_key,
@@ -436,6 +739,7 @@ class RuntimeWorkerPool:
             env["DOXIE_AGENT_PROFILE_VERSION_ID"] = scope.agent_profile_version_id
         env[_SIDECAR_TOKEN_ENV] = token
         env[_SIDECAR_PARENT_PID_ENV] = str(os.getpid())
+        log_handle = _open_worker_log(scope)
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -449,8 +753,8 @@ class RuntimeWorkerPool:
             cwd=os.getcwd(),
             env=env,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT if log_handle is not subprocess.DEVNULL else subprocess.DEVNULL,
         )
         now = time.time()
         return RuntimeWorker(
@@ -462,6 +766,7 @@ class RuntimeWorkerPool:
             created_at=now,
             last_started_at=now,
             last_used_at=now,
+            log_handle=log_handle if log_handle is not subprocess.DEVNULL else None,
         )
 
     async def _reclaim_idle_locked(self) -> dict[str, Any]:
@@ -474,8 +779,12 @@ class RuntimeWorkerPool:
             if not worker.running():
                 worker.last_exit_at = timestamp
                 self._workers.pop(scope_key, None)
+                _terminalize_worker_active_runs(worker, reason="runtime worker exited before idle reclaim")
                 continue
             if worker.bridge_count > 0:
+                continue
+            if _worker_has_active_runs(worker):
+                worker.mark_used()
                 continue
             if timestamp - worker.last_used_at >= idle_timeout:
                 stale.append(worker)
@@ -492,6 +801,8 @@ class RuntimeWorkerPool:
         process = worker.process
         worker.last_exit_at = time.time()
         if process.poll() is not None:
+            _terminalize_worker_active_runs(worker, reason="runtime worker stopped before runtime pool termination")
+            worker.close_log_handle()
             return
         try:
             process.terminate()
@@ -499,8 +810,12 @@ class RuntimeWorkerPool:
         except Exception:
             try:
                 process.kill()
+                await asyncio.to_thread(process.wait, 5)
             except Exception:
                 pass
+        finally:
+            _terminalize_worker_active_runs(worker, reason="runtime worker stopped by runtime pool")
+            worker.close_log_handle()
 
 
 class RuntimeProxyBridge:
@@ -587,6 +902,7 @@ class RuntimeProxyBridge:
         )
 
     async def _read_loop(self) -> None:
+        failure_reason = ""
         try:
             while not self._closed and self._ws is not None:
                 raw = await self._ws.recv()
@@ -597,12 +913,21 @@ class RuntimeProxyBridge:
                 if ((frame.get("params") or {}).get("type")) == "gateway.ready":
                     continue
                 self.worker.mark_used()
+                _persist_relayed_runtime_event(frame, owner_transport=self.transport)
                 if not await self.transport.write_async(frame):
+                    failure_reason = "owner transport closed while relaying runtime event"
                     break
         except Exception as exc:
+            failure_reason = f"runtime websocket closed: {exc}"
             if not self._closed:
                 _log.debug("runtime bridge %s read failed: %s", self.scope_key, exc)
         finally:
+            if not self.worker.running():
+                _terminalize_worker_active_runs(
+                    self.worker,
+                    reason=failure_reason or "runtime worker exited",
+                    transport=self.transport,
+                )
             await self.close(cancel_reader=False)
 
     async def close(self, *, cancel_reader: bool = True) -> None:
@@ -632,6 +957,58 @@ def runtime_proxy_pool() -> RuntimeWorkerPool:
     return _runtime_proxy_pool
 
 
+def _persist_relayed_runtime_event(frame: dict[str, Any], *, owner_transport: AsyncFrameTransport | None = None) -> None:
+    if str((frame or {}).get("method") or "") != "event":
+        return
+    params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
+    event_type = str(params.get("type") or "").strip()
+    if not event_type:
+        return
+    try:
+        from tui_gateway import server as tui_gateway_server
+        from tui_gateway.services import run_control
+
+        db = tui_gateway_server._get_db()
+        if db is None:
+            return
+        persisted = dict(params)
+        stable = str(
+            persisted.get("stored_session_id")
+            or persisted.get("storedSessionId")
+            or persisted.get("session_id")
+            or ""
+        ).strip()
+        try:
+            source_seq = int(persisted.get("seq") or 0)
+        except (TypeError, ValueError):
+            source_seq = 0
+        if source_seq > 0:
+            persisted["runtime_source_seq"] = source_seq
+            payload = persisted.get("payload") if isinstance(persisted.get("payload"), dict) else {}
+            persisted["payload"] = {
+                **payload,
+                "runtime_source_seq": source_seq,
+            }
+            has_source = getattr(db, "has_run_event_source", None)
+            if callable(has_source) and has_source(
+                stable,
+                run_id=str(persisted.get("run_id") or ""),
+                runtime_session_id=str(persisted.get("session_id") or ""),
+                event_type=event_type,
+                runtime_source_seq=source_seq,
+            ):
+                return
+        if stable:
+            persisted["seq"] = run_control.next_event_seq(stable, db=db)
+        run_control.record_event(
+            persisted,
+            owner_transport=owner_transport if hasattr(owner_transport, "write") else None,
+            db=db,
+        )
+    except Exception:
+        _log.debug("failed to persist relayed runtime event", exc_info=True)
+
+
 def ensure_runtime_ready_sync(params: dict[str, Any]) -> dict[str, Any]:
     scope = runtime_scope_from_params(params)
     worker = asyncio.run(runtime_proxy_pool().ensure_worker_ready(scope, params))
@@ -642,7 +1019,7 @@ async def proxy_to_runtime(req: dict[str, Any], transport: Any) -> bool:
     if not should_proxy_to_runtime(req):
         return False
     params = req.get("params") if isinstance(req.get("params"), dict) else {}
-    scope = runtime_scope_from_params(params)
+    scope = runtime_scope_from_request(req)
     pool = runtime_proxy_pool()
     worker = await pool.ensure_worker(scope, params)
     bridge = await transport.runtime_bridge(worker)

@@ -1349,6 +1349,33 @@ DoXie 不应该：
    - `TeamMissionReadyScheduler` 启动节点失败时会把节点标记为 `blocked` 并记录 `start_error`，不会让 scheduler 异常吞掉 ready graph 状态。
    - scheduler 统一使用 canonical node kind 判断 approval gate / verifier / synthesis。
 
+### 2026-06-13 当前落地快照
+
+本批 staged 代码继续补齐 Doxie 侧真实运行问题的可诊断性、终止一致性和 Team Mission Leader 会话归一化：
+
+1. Doxie runtime diagnostics：
+   - 新增 `agent/doxie_diagnostics.py`，使用 `os.write(2, ...)` 输出诊断，避免依赖 Python logging 锁。
+   - conversation loop、system prompt restore/build、pre-LLM hook、memory prefetch、API kwargs build、streaming API call、chat-completions client/create 等关键阶段会输出 `[doxie-turn-stage]` / `[doxie-stream-stage]`。
+   - TUI gateway agent build 会输出 `[doxie-agent-build-stage]`，便于定位 Doxie runtime 卡在 profile context、system prompt、client create 还是 provider request。
+2. Active run terminalization：
+   - gateway `_emit()` 在 terminal event 写入 run event 前释放对应 runtime session active run。
+   - sidecar parent watchdog 在父进程消失前调用 `_shutdown_sessions()`，尽力给 active run 写入 interrupted terminal event。
+   - `_finalize_session()` 会进入对应 profile context，terminalize active run，再提交 memory / end session，避免 Doxie 侧刷新后看到长期 running。
+3. Team Mission Leader conversation context：
+   - `_agent_context_options_for_session()` 为 `team_leader` runtime 禁用 context files、memory 和 soul identity，避免普通 profile 规则污染 Leader 路由判断。
+   - `team_mission.message.submit` / Leader run 创建路径写入稳定 Team Mission product context，工具读取上下文不再依赖前端临时 prompt 拼接。
+   - stable Leader conversation 的 `team_mission_leader` 工具面由 session/toolset scope 恢复，不因 runtime rebuild 丢失。
+4. Team Mission conversation normalization：
+   - `normalize_team_mission_conversation_session()` 会从 session metadata / Doxie product context 识别 Leader conversation，自动确保 `team_mission_conversations` 记录并把 session source 归一化为 `team_mission`。
+   - `team_mission_conversation_history_sql()` 只把有 active mission、历史消息或 active run 的 conversation 视为可路由历史，避免空 Leader 容器污染 session list。
+   - `is_team_mission_run_session()` 和 `team_mission_run_session_ids()` 用 run bindings 标记内部 mission node runtime sessions，session list 默认隐藏这些内部执行 session。
+5. Tool handoff：
+   - 新增 `agent/tool_handoff.py`，支持工具执行路径把 structured handoff 转为最终 assistant 响应。
+   - Team Mission Leader tools 可以把任务启动、状态查询等确定性结果以 handoff 形式返回，减少二次模型 follow-up 造成的延迟和卡 running 风险。
+6. Runtime proxy / pool 稳定性：
+   - runtime proxy 透传更多 Team Mission 控制方法，并保留 runtime scope / session binding。
+   - runtime pool 相关测试覆盖 Doxie session / runtime lifecycle，防止 worker 进程和 active run 残留。
+
 ## 17. 验收标准
 
 1. 用户发送 supervised mission 后，主会话立即出现 Leader 流式输出。

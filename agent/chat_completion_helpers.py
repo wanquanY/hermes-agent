@@ -59,10 +59,28 @@ from agent.tool_guardrails import (
     append_toolguard_guidance,
     toolguard_synthetic_result,
 )
+from agent.doxie_diagnostics import emit_doxie_diagnostic
 from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname
 
 logger = logging.getLogger(__name__)
+
+
+def _log_doxie_stream_stage(agent, stage: str, **fields: Any) -> None:
+    run_id = str(getattr(agent, "_hermes_active_run_id", "") or "")
+    turn_id = str(getattr(agent, "_hermes_active_turn_id", "") or "")
+    runtime_scope_key = str(getattr(agent, "_hermes_active_runtime_scope_key", "") or "")
+    if not run_id and not runtime_scope_key:
+        return
+    pairs = {
+        "stage": stage,
+        "session_id": str(getattr(agent, "session_id", "") or ""),
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "runtime_scope_key": runtime_scope_key,
+        **fields,
+    }
+    emit_doxie_diagnostic("[doxie-stream-stage]", pairs)
 
 
 def _ra():
@@ -1332,6 +1350,14 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     """
     if agent._interrupt_requested:
         raise InterruptedError("Agent interrupted before streaming API call")
+    _log_doxie_stream_stage(
+        agent,
+        "interruptible-stream-entry",
+        api_mode=agent.api_mode,
+        provider=agent.provider,
+        model=agent.model,
+        has_stream_consumers=agent._has_stream_consumers(),
+    )
 
     if agent.api_mode == "codex_responses":
         # Codex streams internally via _run_codex_stream. The main dispatch
@@ -1450,6 +1476,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     def _call_chat_completions():
         """Stream a chat completions response."""
         import httpx as _httpx
+        _log_doxie_stream_stage(agent, "chat-completions-thread-entry")
         # Per-provider / per-model request_timeout_seconds (from config.yaml)
         # wins over the HERMES_API_TIMEOUT env default if the user set it.
         _provider_timeout_cfg = get_provider_request_timeout(agent.provider, agent.model)
@@ -1488,12 +1515,21 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 pool=_conn_cap,
             ),
         }
+        _log_doxie_stream_stage(
+            agent,
+            "chat-completions-client-create-start",
+            timeout_read=_stream_read_timeout,
+            timeout_connect=_conn_cap,
+            message_count=len(stream_kwargs.get("messages") or []),
+            tool_count=len(stream_kwargs.get("tools") or []),
+        )
         request_client = _set_request_client(
             agent._create_request_openai_client(
                 reason="chat_completion_stream_request",
                 api_kwargs=stream_kwargs,
             )
         )
+        _log_doxie_stream_stage(agent, "chat-completions-client-create-end")
         # Reset stale-stream timer so the detector measures from this
         # attempt's start, not a previous attempt's last chunk.
         last_chunk_time["t"] = time.time()
@@ -1503,7 +1539,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # ``request_client_holder["diag"]`` for closure access.
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
+        _log_doxie_stream_stage(agent, "chat-completions-create-start")
         stream = request_client.chat.completions.create(**stream_kwargs)
+        _log_doxie_stream_stage(agent, "chat-completions-create-end")
 
         # Capture rate limit headers from the initial HTTP response.
         # The OpenAI SDK Stream object exposes the underlying httpx

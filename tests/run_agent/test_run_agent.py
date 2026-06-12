@@ -1849,6 +1849,37 @@ class TestExecuteToolCalls:
             or "interrupted" in messages[0]["content"].lower()
         )
 
+    def test_team_mission_handoff_skips_remaining_same_turn_tools(self, agent):
+        tc1 = _mock_tool_call(name="team_mission_start_task", arguments="{}", call_id="c1")
+        tc2 = _mock_tool_call(name="web_search", arguments="{}", call_id="c2")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
+        messages = []
+        handoff_result = json.dumps({
+            "success": True,
+            "mission_id": "mission-1",
+            "task_id": "task-1",
+            "submission_status": "accepted",
+            "task_status": "planning",
+            "message": "Planning started.",
+            "hermes_control": {
+                "kind": "team_mission_started",
+                "end_current_turn": True,
+                "await_final_deliverable": True,
+            },
+        })
+
+        with patch("run_agent.handle_function_call", return_value=handoff_result) as mock_hfc:
+            agent._execute_tool_calls(mock_msg, messages, "task-1")
+
+        assert mock_hfc.call_count == 1
+        assert len(messages) == 2
+        assert messages[0]["role"] == "tool"
+        assert messages[0]["tool_call_id"] == "c1"
+        assert messages[1]["role"] == "tool"
+        assert messages[1]["tool_call_id"] == "c2"
+        assert "Team Mission task was accepted" in messages[1]["content"]
+        assert agent._tool_handoff_exit["kind"] == "team_mission_started"
+
     def test_invalid_json_args_defaults_empty(self, agent):
         tc = _mock_tool_call(
             name="web_search", arguments="not valid json", call_id="c1"
@@ -2724,6 +2755,45 @@ class TestRunConversation:
         assert result["api_calls"] == 2
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
+
+    def test_team_mission_start_task_handoff_ends_turn_without_second_model_call(self, agent):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("team_mission_start_task")
+        tc = _mock_tool_call(
+            name="team_mission_start_task",
+            arguments='{"objective":"plan the work"}',
+            call_id="c1",
+        )
+        resp = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
+        agent.client.chat.completions.create.return_value = resp
+        handoff_result = json.dumps({
+            "success": True,
+            "mission_id": "mission-1",
+            "task_id": "task-1",
+            "submission_status": "accepted",
+            "task_status": "planning",
+            "message": "Planning started.",
+            "hermes_control": {
+                "kind": "team_mission_started",
+                "end_current_turn": True,
+                "await_final_deliverable": True,
+                "assistant_response": "Planning started.",
+            },
+        })
+
+        with (
+            patch("run_agent.handle_function_call", return_value=handoff_result) as mock_handle_function_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("start a team task")
+
+        assert result["final_response"] == "Planning started."
+        assert result["turn_exit_reason"] == "tool_handoff(team_mission_started)"
+        assert result["api_calls"] == 1
+        assert agent.client.chat.completions.create.call_count == 1
+        assert mock_handle_function_call.call_count == 1
 
     def test_request_scoped_api_hooks_fire_for_each_api_call(self, agent):
         self._setup_agent(agent)

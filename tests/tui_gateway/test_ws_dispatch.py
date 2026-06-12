@@ -3,11 +3,34 @@ import json
 import os
 import sys
 import types
+import time
 
 import pytest
 
 from tui_gateway import ws
+from tui_gateway.methods.prompt import _prompt_terminal_status_from_result
 from tui_gateway.services import runtime_proxy
+
+
+def test_prompt_terminal_status_keeps_usable_response_complete_with_nonfatal_error():
+    result = {
+        "final_response": "验证结果：不通过\n\n原因：时间格式不符合要求。",
+        "error": "subagent returned failed status",
+        "failed": True,
+    }
+
+    assert _prompt_terminal_status_from_result(result, result["final_response"]) == "complete"
+
+
+def test_prompt_terminal_status_reports_error_when_failed_without_usable_response():
+    assert _prompt_terminal_status_from_result(
+        {"error": "provider failed", "failed": True},
+        "",
+    ) == "error"
+    assert _prompt_terminal_status_from_result(
+        {"error": "provider failed", "failed": True},
+        "Error: provider failed",
+    ) == "error"
 
 
 def test_workspace_current_uses_control_plane_executor():
@@ -50,6 +73,91 @@ def test_events_unsubscribe_uses_control_plane_executor():
     assert executor is ws._ws_control_executor  # noqa: SLF001
 
 
+@pytest.mark.parametrize(
+    "method",
+    [
+        "events.subscribe",
+        "events.unsubscribe",
+        "run.events",
+        "run.list",
+        "run.status",
+        "session.messages",
+    ],
+)
+def test_profile_scoped_runtime_read_methods_are_proxied_to_runtime_worker(method):
+    assert runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": method,
+            "params": {
+                "stored_session_id": "stored-session-1",
+                "runtime_scope_key": "profile:agent-a:version:v1",
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "runtimeScopeKey": "profile:agent-a:version:v1",
+                    "agentProfileVersionId": "v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                },
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "team_mission.graph",
+        "team_mission.graph.reduce",
+        "team_mission.events",
+        "team_mission.node.history",
+        "team_mission.node.update",
+        "team_mission.plan.reject",
+        "team_mission.cancel",
+        "team_mission.schedule.ready",
+    ],
+)
+def test_team_mission_scoped_methods_are_proxied_to_runtime_worker(method):
+    assert runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": method,
+            "params": {
+                "mission_id": "mission-1",
+                "conversation_id": "conversation-1",
+                "runtime_scope_key": "team:conversation-1:leader-conversation",
+                "profile_runtime_scope_key": "profile:agent-a:version:v1",
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "runtimeScopeKey": "profile:agent-a:version:v1",
+                    "agentProfileVersionId": "v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                },
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "events.subscribe",
+        "run.events",
+        "run.status",
+        "session.messages",
+    ],
+)
+def test_unscoped_runtime_read_methods_stay_on_control_plane(method):
+    assert not runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": method,
+            "params": {
+                "stored_session_id": "stored-session-1",
+            },
+        }
+    )
+
+
 def test_prompt_submit_with_profile_scope_is_proxied_to_runtime_worker():
     assert runtime_proxy.should_proxy_to_runtime(
         {
@@ -64,6 +172,338 @@ def test_prompt_submit_with_profile_scope_is_proxied_to_runtime_worker():
             },
         }
     )
+
+
+def test_team_leader_conversation_submit_proxies_to_leader_runtime_from_members():
+    req = {
+        "id": "1",
+        "method": "team_mission.message.submit",
+        "params": {
+            "conversation_id": "conversation-1",
+            "conversation_session_id": "team-session-1",
+            "members": [
+                {
+                    "role": "lead",
+                    "profile_id": "agent-leader",
+                    "profile_version_id": "version-leader",
+                    "runtime_scope_key": "profile:agent-leader:version:version-leader",
+                    "hermes_home_path": "/tmp/hermes-agent-leader",
+                    "doxie_profile": {
+                        "id": "agent-leader",
+                        "agentProfileVersionId": "version-leader",
+                        "runtimeScopeKey": "profile:agent-leader:version:version-leader",
+                        "hermesHomePath": "/tmp/hermes-agent-leader",
+                    },
+                }
+            ],
+        },
+    }
+
+    assert runtime_proxy.should_proxy_to_runtime(req)
+    scope = runtime_proxy.runtime_scope_from_request(req)
+    assert scope.agent_profile_id == "agent-leader"
+    assert scope.agent_profile_version_id == "version-leader"
+    assert scope.runtime_scope_key == "team:conversation-1:leader-conversation"
+    assert scope.hermes_home == "/tmp/hermes-agent-leader"
+
+
+def test_team_leader_conversation_submit_uses_team_scope_with_leader_profile_resources():
+    req = {
+        "id": "1",
+        "method": "team_mission.message.submit",
+        "params": {
+            "conversation_id": "conversation-1",
+            "conversation_session_id": "team-session-1",
+            "runtimeScopeKey": "team:conversation-1:leader-conversation",
+            "profileRuntimeScopeKey": "profile:agent-leader:version:version-leader",
+            "agentProfileId": "agent-leader",
+            "agentProfileVersionId": "version-leader",
+            "doxie_profile": {
+                "id": "agent-leader",
+                "agentProfileVersionId": "version-leader",
+                "runtimeScopeKey": "profile:agent-leader:version:version-leader",
+                "hermesHomePath": "/tmp/hermes-agent-leader",
+            },
+            "members": [
+                {
+                    "role": "lead",
+                    "profile_id": "agent-leader",
+                    "profile_version_id": "version-leader",
+                    "runtime_scope_key": "profile:agent-leader:version:version-leader",
+                    "hermes_home_path": "/tmp/hermes-agent-leader",
+                    "doxie_profile": {
+                        "id": "agent-leader",
+                        "agentProfileVersionId": "version-leader",
+                        "runtimeScopeKey": "profile:agent-leader:version:version-leader",
+                        "hermesHomePath": "/tmp/hermes-agent-leader",
+                    },
+                }
+            ],
+        },
+    }
+
+    assert runtime_proxy.should_proxy_to_runtime(req)
+    scope = runtime_proxy.runtime_scope_from_request(req)
+    assert scope.agent_profile_id == "agent-leader"
+    assert scope.agent_profile_version_id == "version-leader"
+    assert scope.runtime_scope_key == "team:conversation-1:leader-conversation"
+    assert scope.hermes_home == "/tmp/hermes-agent-leader"
+
+
+def test_team_conversation_ensure_proxies_to_leader_runtime_from_members():
+    assert runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": "team_mission.conversation.ensure",
+            "params": {
+                "conversation_id": "conversation-1",
+                "conversation_session_id": "team-session-1",
+                "members": [
+                    {
+                        "role": "lead",
+                        "profile_id": "agent-leader",
+                        "profile_version_id": "version-leader",
+                        "runtime_scope_key": "profile:agent-leader:version:version-leader",
+                        "hermes_home_path": "/tmp/hermes-agent-leader",
+                    }
+                ],
+            },
+        }
+    )
+
+
+def test_team_mission_create_does_not_proxy_from_nested_members():
+    assert not runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": "team_mission.create",
+            "params": {
+                "members": [
+                    {
+                        "role": "lead",
+                        "profile_id": "agent-leader",
+                        "profile_version_id": "version-leader",
+                        "runtime_scope_key": "profile:agent-leader:version:version-leader",
+                        "hermes_home_path": "/tmp/hermes-agent-leader",
+                    }
+                ],
+            },
+        }
+    )
+
+
+def test_runtime_worker_exit_terminalizes_scope_active_runs(monkeypatch):
+    from tui_gateway import server
+    from tui_gateway.services import run_control
+
+    class ExitedProcess:
+        pid = 12345
+
+        def poll(self):
+            return 1
+
+    worker = runtime_proxy.RuntimeWorker(
+        scope=runtime_proxy.RuntimeScope(
+            runtime_scope_key="team:conversation-1:leader-conversation",
+            hermes_home="/tmp/hermes",
+        ),
+        process=ExitedProcess(),
+        port=1234,
+        token="token",
+        created_at=time.time(),
+        last_started_at=time.time(),
+        last_used_at=time.time(),
+    )
+    published = []
+
+    monkeypatch.setattr(server, "_get_db", lambda: "db")
+    monkeypatch.setattr(
+        run_control,
+        "list_runs",
+        lambda *args, **kwargs: [
+            {
+                "run_id": "run-1",
+                "session_id": "team-session-1",
+                "turn_id": "turn-1",
+                "runtime_scope_key": "team:conversation-1:leader-conversation",
+                "runtime_session_id": "runtime-1",
+                "status": "running",
+            }
+        ],
+    )
+
+    def publish_terminal(**kwargs):
+        published.append(kwargs)
+        return {"type": "message.complete"}
+
+    monkeypatch.setattr(run_control, "publish_run_terminal_event", publish_terminal)
+
+    failed = runtime_proxy._terminalize_worker_active_runs(  # noqa: SLF001
+        worker,
+        reason="runtime websocket closed",
+    )
+
+    assert failed == 1
+    assert published[0]["stored_session_id"] == "team-session-1"
+    assert published[0]["run_id"] == "run-1"
+    assert published[0]["status"] == "failed"
+    assert "scope=team:conversation-1:leader-conversation" in published[0]["message"]
+
+    assert runtime_proxy._terminalize_worker_active_runs(worker, reason="again") == 0  # noqa: SLF001
+
+
+def test_runtime_worker_exit_terminalizes_runs_owned_by_dead_pid_even_when_scope_mismatched(monkeypatch):
+    from tui_gateway import server
+    from tui_gateway.services import run_control
+
+    class ExitedProcess:
+        pid = 12345
+
+        def poll(self):
+            return 1
+
+    worker = runtime_proxy.RuntimeWorker(
+        scope=runtime_proxy.RuntimeScope(
+            runtime_scope_key="profile:agent-default",
+            hermes_home="/tmp/hermes",
+        ),
+        process=ExitedProcess(),
+        port=1234,
+        token="token",
+        created_at=time.time(),
+        last_started_at=time.time(),
+        last_used_at=time.time(),
+    )
+    published = []
+
+    monkeypatch.setattr(server, "_get_db", lambda: "db")
+
+    def list_runs(*args, **kwargs):
+        if kwargs.get("runtime_scope_key"):
+            return []
+        return [
+            {
+                "run_id": "run-1",
+                "session_id": "team-session-1",
+                "turn_id": "turn-1",
+                "runtime_scope_key": "team:conversation-1:leader-conversation",
+                "runtime_session_id": "runtime-1",
+                "status": "running",
+                "metadata": {"gateway_pid": 12345},
+            }
+        ]
+
+    monkeypatch.setattr(run_control, "list_runs", list_runs)
+    monkeypatch.setattr(run_control, "publish_run_terminal_event", lambda **kwargs: published.append(kwargs))
+
+    failed = runtime_proxy._terminalize_worker_active_runs(  # noqa: SLF001
+        worker,
+        reason="runtime websocket closed",
+    )
+
+    assert failed == 1
+    assert published[0]["runtime_scope_key"] == "team:conversation-1:leader-conversation"
+
+
+def test_relayed_runtime_terminal_event_updates_owner_team_mission_db(tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+    from tui_gateway import server
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="supervised_mission")
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-verifier",
+        kind="verifier",
+        title="Verifier",
+        status="running",
+        runtime_scope_key="profile:agent-7:version:v1",
+    )
+    db.upsert_run(
+        run_id="run-verifier",
+        session_id="team:mission-1:node:node-verifier",
+        runtime_scope_key="profile:agent-7:version:v1",
+        turn_id="turn-verifier",
+        runtime_session_id="runtime-verifier",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="node-verifier",
+        run_id="run-verifier",
+        session_id="team:mission-1:node:node-verifier",
+        runtime_session_id="runtime-verifier",
+        runtime_scope_key="profile:agent-7:version:v1",
+        role="verifier",
+    )
+    db.append_run_event(
+        "team:mission-1:node:node-verifier",
+        {
+            "type": "mission.node.started",
+            "session_id": "runtime-verifier",
+            "stored_session_id": "team:mission-1:node:node-verifier",
+            "run_id": "run-verifier",
+            "turn_id": "turn-verifier",
+            "runtime_scope_key": "profile:agent-7:version:v1",
+            "seq": 331,
+            "payload": {"node_id": "node-verifier"},
+        },
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    relayed_complete = {
+        "jsonrpc": "2.0",
+        "method": "event",
+        "params": {
+            "type": "message.complete",
+            "session_id": "runtime-verifier",
+            "stored_session_id": "team:mission-1:node:node-verifier",
+            "run_id": "run-verifier",
+            "turn_id": "turn-verifier",
+            "runtime_scope_key": "profile:agent-7:version:v1",
+            "seq": 331,
+            "payload": {
+                "status": "complete",
+                "text": "verification passed",
+            },
+        },
+    }
+
+    runtime_proxy._persist_relayed_runtime_event(relayed_complete)  # noqa: SLF001
+
+    node = db.get_team_mission_node("mission-1", "node-verifier")
+    run = db.get_run("run-verifier")
+    assert node["status"] == "completed"
+    assert node["metadata"]["last_run_terminal_status"] == "completed"
+    assert node["metadata"]["last_run_terminal_seq"] > 331
+    assert run["status"] == "completed"
+
+    runtime_proxy._persist_relayed_runtime_event(relayed_complete)  # noqa: SLF001
+    completed_events = [
+        event for event in db.list_team_mission_run_events("mission-1")
+        if event["type"] == "message.complete"
+        and (event.get("payload") or {}).get("status") == "complete"
+        and (event.get("payload") or {}).get("runtime_source_seq") == 331
+    ]
+    assert len(completed_events) == 1
+
+    run_control.publish_run_terminal_event(
+        stored_session_id="team:mission-1:node:node-verifier",
+        run_id="run-verifier",
+        turn_id="turn-verifier",
+        runtime_scope_key="profile:agent-7:version:v1",
+        runtime_session_id="runtime-verifier",
+        status="failed",
+        message="prompt worker terminal event did not close active run",
+        db=db,
+    )
+
+    node = db.get_team_mission_node("mission-1", "node-verifier")
+    run = db.get_run("run-verifier")
+    assert node["status"] == "completed"
+    assert node["metadata"]["last_run_terminal_status"] == "completed"
+    assert run["status"] == "completed"
 
 
 def test_control_plane_session_list_is_not_proxied_to_runtime_worker():
@@ -506,6 +946,187 @@ async def test_runtime_worker_pool_restarts_when_profile_launch_env_changes(monk
     assert first.process.terminated
     assert second.process.kwargs["env"]["DOXIE_BACKEND_BRIDGE_URL"] == "http://127.0.0.1:4567/api/doxie/invoke"
     assert second.process.kwargs["env"]["DOXIE_BACKEND_BRIDGE_TOKEN"] == "bridge-token"
+    assert pool.snapshot()["runningWorkerCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_worker_pool_reuses_active_bridge_when_launch_env_changes(monkeypatch):
+    class FakeProcess:
+        next_pid = 21150
+
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.pid = FakeProcess.next_pid
+            FakeProcess.next_pid += 1
+            self.terminated = False
+
+        def poll(self):
+            return 0 if self.terminated else None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, _timeout=None):
+            self.terminated = True
+            return 0
+
+    monkeypatch.setattr(runtime_proxy.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(runtime_proxy, "_reserve_loopback_port", lambda: 21150)
+
+    pool = runtime_proxy.RuntimeWorkerPool()
+    scope = runtime_proxy.RuntimeScope(
+        agent_profile_id="agent-a",
+        runtime_scope_key="team:conversation-a:leader-conversation",
+        hermes_home="/tmp/hermes-agent-a",
+    )
+    first = await pool.ensure_worker(
+        scope,
+        {
+            "runtime_scope_key": "team:conversation-a:leader-conversation",
+            "doxie_profile": {
+                "id": "agent-a",
+                "hermesHomePath": "/tmp/hermes-agent-a",
+                "env": {},
+            },
+        },
+    )
+    await pool.retain_bridge(first.scope_key)
+
+    second = await pool.ensure_worker(
+        scope,
+        {
+            "runtime_scope_key": "team:conversation-a:leader-conversation",
+            "doxie_profile": {
+                "id": "agent-a",
+                "hermesHomePath": "/tmp/hermes-agent-a",
+                "env": {
+                    "DOXIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/doxie/invoke",
+                },
+            },
+        },
+    )
+
+    assert second is first
+    assert first.running()
+    assert not first.process.terminated
+    assert pool.snapshot()["runningWorkerCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_worker_pool_reuses_active_run_when_launch_env_changes(monkeypatch):
+    class FakeProcess:
+        next_pid = 21170
+
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.pid = FakeProcess.next_pid
+            FakeProcess.next_pid += 1
+            self.terminated = False
+
+        def poll(self):
+            return 0 if self.terminated else None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, _timeout=None):
+            self.terminated = True
+            return 0
+
+    monkeypatch.setattr(runtime_proxy.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(runtime_proxy, "_reserve_loopback_port", lambda: 21170)
+    monkeypatch.setattr(runtime_proxy, "_worker_has_active_runs", lambda _worker: True)
+
+    pool = runtime_proxy.RuntimeWorkerPool()
+    scope = runtime_proxy.RuntimeScope(
+        agent_profile_id="agent-a",
+        runtime_scope_key="team:conversation-a:leader-conversation",
+        hermes_home="/tmp/hermes-agent-a",
+    )
+    first = await pool.ensure_worker(
+        scope,
+        {
+            "runtime_scope_key": "team:conversation-a:leader-conversation",
+            "doxie_profile": {
+                "id": "agent-a",
+                "hermesHomePath": "/tmp/hermes-agent-a",
+                "env": {},
+            },
+        },
+    )
+
+    second = await pool.ensure_worker(
+        scope,
+        {
+            "runtime_scope_key": "team:conversation-a:leader-conversation",
+            "doxie_profile": {
+                "id": "agent-a",
+                "hermesHomePath": "/tmp/hermes-agent-a",
+                "env": {
+                    "DOXIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
+                },
+            },
+        },
+    )
+
+    assert second is first
+    assert first.running()
+    assert not first.process.terminated
+    assert pool.snapshot()["runningWorkerCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_worker_pool_reuses_existing_worker_when_scoped_read_lacks_launch_home(monkeypatch):
+    class FakeProcess:
+        next_pid = 21200
+
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.pid = FakeProcess.next_pid
+            FakeProcess.next_pid += 1
+            self.terminated = False
+            self.killed = False
+
+        def poll(self):
+            return 0 if self.terminated or self.killed else None
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, _timeout=None):
+            self.terminated = True
+            return 0
+
+    monkeypatch.setattr(runtime_proxy.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(runtime_proxy, "_reserve_loopback_port", lambda: 21200)
+
+    pool = runtime_proxy.RuntimeWorkerPool()
+    launch_scope = runtime_proxy.RuntimeScope(
+        agent_profile_id="agent-a",
+        runtime_scope_key="profile:agent-a",
+        hermes_home="/tmp/hermes-agent-a",
+    )
+    first = await pool.ensure_worker(
+        launch_scope,
+        {"doxie_profile": {"id": "agent-a", "hermesHomePath": "/tmp/hermes-agent-a"}},
+    )
+    read_scope = runtime_proxy.RuntimeScope(
+        agent_profile_id="agent-a",
+        runtime_scope_key="profile:agent-a",
+        hermes_home="",
+    )
+
+    second = await pool.ensure_worker(read_scope, {"runtime_scope_key": "profile:agent-a"})
+
+    assert second is first
+    assert first.running()
+    assert not first.process.terminated
     assert pool.snapshot()["runningWorkerCount"] == 1
 
 

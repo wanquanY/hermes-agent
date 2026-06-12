@@ -147,11 +147,33 @@ def _(rid, params: dict) -> dict:
         )
         conflict = reservation.get("conflict") if isinstance(reservation, dict) else None
         if isinstance(conflict, dict) and conflict:
+            metadata = conflict.get("metadata") if isinstance(conflict.get("metadata"), dict) else {}
+            logger.warning(
+                "[doxie-run-submit] session busy stored_session_id=%s requested_run_id=%s active_run_id=%s active_status=%s runtime_scope_key=%s runtime_session_id=%s gateway_pid=%s gateway_instance_id=%s",
+                target,
+                requested_run_id,
+                conflict.get("run_id") or "",
+                conflict.get("status") or "",
+                conflict.get("runtime_scope_key") or "",
+                conflict.get("runtime_session_id") or "",
+                metadata.get("gateway_pid") or "",
+                metadata.get("gateway_instance_id") or "",
+            )
             response = _err(rid, 4009, "session busy")
             response["error"]["data"] = {
                 "stored_session_id": target,
                 "active_run_id": conflict.get("run_id") or "",
                 "active_turn_id": conflict.get("turn_id") or "",
+                "active_status": conflict.get("status") or "",
+                "runtime_scope_key": conflict.get("runtime_scope_key") or "",
+                "runtime_session_id": conflict.get("runtime_session_id") or "",
+                "run_updated_at": conflict.get("updated_at") or 0,
+                "run_started_at": conflict.get("started_at") or 0,
+                "metadata": metadata,
+                "requested_run_id": requested_run_id,
+                "requested_turn_id": requested_turn_id,
+                "current_gateway_pid": os.getpid(),
+                "current_gateway_instance_id": _GATEWAY_INSTANCE_ID,
             }
             return response
         existing_run = reservation.get("run") if isinstance(reservation, dict) else None
@@ -262,11 +284,33 @@ def _(rid, params: dict) -> dict:
     )
     conflict = reservation.get("conflict") if isinstance(reservation, dict) else None
     if isinstance(conflict, dict) and conflict:
+        metadata = conflict.get("metadata") if isinstance(conflict.get("metadata"), dict) else {}
+        logger.warning(
+            "[doxie-run-reserve] session busy stored_session_id=%s requested_run_id=%s active_run_id=%s active_status=%s runtime_scope_key=%s runtime_session_id=%s gateway_pid=%s gateway_instance_id=%s",
+            target,
+            requested_run_id,
+            conflict.get("run_id") or "",
+            conflict.get("status") or "",
+            conflict.get("runtime_scope_key") or "",
+            conflict.get("runtime_session_id") or "",
+            metadata.get("gateway_pid") or "",
+            metadata.get("gateway_instance_id") or "",
+        )
         response = _err(rid, 4009, "session busy")
         response["error"]["data"] = {
             "stored_session_id": target,
             "active_run_id": conflict.get("run_id") or "",
             "active_turn_id": conflict.get("turn_id") or "",
+            "active_status": conflict.get("status") or "",
+            "runtime_scope_key": conflict.get("runtime_scope_key") or "",
+            "runtime_session_id": conflict.get("runtime_session_id") or "",
+            "run_updated_at": conflict.get("updated_at") or 0,
+            "run_started_at": conflict.get("started_at") or 0,
+            "metadata": metadata,
+            "requested_run_id": requested_run_id,
+            "requested_turn_id": requested_turn_id,
+            "current_gateway_pid": os.getpid(),
+            "current_gateway_instance_id": _GATEWAY_INSTANCE_ID,
         }
         return response
     run = reservation.get("run") if isinstance(reservation, dict) else None
@@ -324,9 +368,23 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     run_id = str(params.get("run_id") or params.get("runId") or "").strip()
     if run_id:
-        state = run_control.get_run(run_id, db=_get_db())
+        db = _get_db()
+        state = run_control.get_run(run_id, db=db)
         if state is None:
             return _err(rid, 4040, "run not found")
+        if str(state.get("status") or "") in run_control.ACTIVE_RUN_STATUSES:
+            stable_session_id = str(
+                state.get("stored_session_id")
+                or state.get("session_id")
+                or ""
+            ).strip()
+            if stable_session_id:
+                run_control.session_status(
+                    stable_session_id,
+                    db=db,
+                    current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+                )
+                state = run_control.get_run(run_id, db=db) or state
         return _ok(rid, {"run": state})
 
     stable_session_id = str(
@@ -337,7 +395,14 @@ def _(rid, params: dict) -> dict:
     ).strip()
     if not stable_session_id:
         return _err(rid, 4006, "run_id or stored_session_id required")
-    return _ok(rid, run_control.session_status(stable_session_id, db=_get_db()))
+    return _ok(
+        rid,
+        run_control.session_status(
+            stable_session_id,
+            db=_get_db(),
+            current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+        ),
+    )
 
 
 @method("run.list")
@@ -465,14 +530,22 @@ def _(rid, params: dict) -> dict:
     runtime_scope_key = str(
         params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
     ).strip()
+    run_id = str(params.get("run_id") or params.get("runId") or "").strip()
+    db = _get_db()
+    run_control.session_status(
+        stable_session_id,
+        db=db,
+        current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+    )
     _, events = run_control.subscribe_session_with_id(
         stored_session_id=stable_session_id,
         transport=None,
         after_seq=after_seq,
         active_only=bool(params.get("active_only") or params.get("activeOnly")),
         runtime_scope_key=runtime_scope_key,
+        run_id=run_id,
         limit=_bounded_limit(params.get("limit"), default=2000, maximum=5000),
-        db=_get_db(),
+        db=db,
     )
     return _ok(
         rid,

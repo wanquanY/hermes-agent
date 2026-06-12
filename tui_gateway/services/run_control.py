@@ -9,11 +9,14 @@ own a session at the moment.
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import threading
 import time
 import uuid
 from collections import defaultdict, deque
-import logging
+from collections.abc import Callable
 from typing import Any
 
 from tui_gateway.transport import Transport
@@ -75,6 +78,97 @@ def _db_method(db: Any, name: str):
         return None
     method = getattr(db, name, None)
     return method if callable(method) else None
+
+
+def _db_label(db: Any = None) -> str:
+    value = getattr(db, "db_path", "") if db is not None else ""
+    return str(value or "")
+
+
+def _json_for_log(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return repr(value)
+
+
+def _diagnostic_warning(label: str, **fields: Any) -> None:
+    logger.warning("[doxie-run-control] %s %s", label, _json_for_log(fields))
+
+
+def _run_summary(run: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(run, dict):
+        return {}
+    metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    return {
+        "run_id": str(run.get("run_id") or ""),
+        "session_id": str(run.get("session_id") or run.get("stored_session_id") or ""),
+        "turn_id": str(run.get("turn_id") or ""),
+        "runtime_scope_key": str(run.get("runtime_scope_key") or ""),
+        "runtime_session_id": str(run.get("runtime_session_id") or ""),
+        "status": str(run.get("status") or ""),
+        "updated_at": run.get("updated_at"),
+        "gateway_pid": metadata.get("gateway_pid"),
+        "gateway_instance_id": metadata.get("gateway_instance_id"),
+        "metadata": metadata,
+    }
+
+
+def _gateway_instance_id_from_metadata(metadata: dict[str, Any] | None = None) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get("gateway_instance_id") or "").strip()
+
+
+def _live_runtime_session_ids_snapshot() -> set[str]:
+    with _lock:
+        return {
+            str(run.get("session_id") or "").strip()
+            for run in _run_state_by_id.values()
+            if str(run.get("status") or "") in ACTIVE_RUN_STATUSES
+            and str(run.get("session_id") or "").strip()
+        }
+
+
+def _recover_orphaned_active_runs(
+    db: Any = None,
+    *,
+    current_gateway_instance_id: str = "",
+    stale_after_seconds: float = 300.0,
+) -> int:
+    method = _db_method(db, "fail_orphaned_active_runs")
+    if method is None:
+        return 0
+    try:
+        failed = int(
+            method(
+                live_runtime_session_ids=_live_runtime_session_ids_snapshot(),
+                current_pid=os.getpid(),
+                current_gateway_instance_id=str(current_gateway_instance_id or "").strip(),
+                stale_after_seconds=stale_after_seconds,
+                owner_dead_grace_seconds=2.0,
+                reason="gateway process restarted before run reached terminal state",
+            )
+            or 0
+        )
+        if failed:
+            _diagnostic_warning(
+                "orphaned-active-runs-recovered",
+                db=_db_label(db),
+                failed=failed,
+                current_pid=os.getpid(),
+                current_gateway_instance_id=str(current_gateway_instance_id or "").strip(),
+            )
+        return failed
+    except Exception as exc:
+        _diagnostic_warning(
+            "orphaned-active-run-recovery-error",
+            db=_db_label(db),
+            error=str(exc),
+            current_pid=os.getpid(),
+            current_gateway_instance_id=str(current_gateway_instance_id or "").strip(),
+        )
+        return 0
 
 
 def register_team_mission_ready_scheduler(callback: Any) -> None:
@@ -302,6 +396,7 @@ def _filter_events_for_subscription(
     active_only: bool,
     active_run_ids: set[str],
     runtime_scope_key: str = "",
+    run_id: str = "",
 ) -> list[dict[str, Any]]:
     scope = str(runtime_scope_key or "").strip()
     if scope:
@@ -313,6 +408,13 @@ def _filter_events_for_subscription(
                 or str(event.get("stored_session_id") or "")
             ).strip()
             == scope
+        ]
+    normalized_run_id = str(run_id or "").strip()
+    if normalized_run_id:
+        events = [
+            event
+            for event in events
+            if _event_run_id(event) == normalized_run_id
         ]
     if not active_only:
         return events
@@ -423,6 +525,7 @@ def _poll_subscription_events() -> None:
                     active_only=active_only,
                     active_run_ids=active_run_ids,
                     runtime_scope_key=runtime_scope_key,
+                    run_id=str(subscription.get("run_id") or ""),
                 )
             if not events:
                 continue
@@ -547,6 +650,10 @@ def create_run_if_session_idle(
         return {"run": None, "conflict": None}
 
     if method := _db_method(db, "create_run_if_session_idle"):
+        _recover_orphaned_active_runs(
+            db,
+            current_gateway_instance_id=_gateway_instance_id_from_metadata(metadata),
+        )
         try:
             result = method(
                 run_id=normalized_run_id,
@@ -572,11 +679,30 @@ def create_run_if_session_idle(
                     state.update(run)
                 return {"run": run, "conflict": None, "created": created}
             if isinstance(conflict, dict) and conflict:
+                _diagnostic_warning(
+                    "run-reservation-conflict",
+                    source="db",
+                    db=_db_label(db),
+                    requested={
+                        "run_id": normalized_run_id,
+                        "session_id": stable,
+                        "turn_id": turn_id,
+                        "runtime_scope_key": runtime_scope_key or stable,
+                        "runtime_session_id": runtime_session_id,
+                        "gateway_instance_id": _gateway_instance_id_from_metadata(metadata),
+                        "gateway_pid": os.getpid(),
+                    },
+                    conflict=_run_summary(conflict),
+                )
                 return {"run": None, "conflict": conflict, "created": False}
         except Exception:
             pass
 
-    persisted_status = session_status(stable, db=db)
+    persisted_status = session_status(
+        stable,
+        db=db,
+        current_gateway_instance_id=_gateway_instance_id_from_metadata(metadata),
+    )
     if persisted_status.get("running"):
         active_run_id = str(persisted_status.get("active_run_id") or "").strip()
         if active_run_id and active_run_id != normalized_run_id:
@@ -603,6 +729,21 @@ def create_run_if_session_idle(
                 active_run_id != normalized_run_id
                 and str(active.get("status") or "") in ACTIVE_RUN_STATUSES
             ):
+                _diagnostic_warning(
+                    "run-reservation-conflict",
+                    source="memory",
+                    db=_db_label(db),
+                    requested={
+                        "run_id": normalized_run_id,
+                        "session_id": stable,
+                        "turn_id": turn_id,
+                        "runtime_scope_key": runtime_scope_key or stable,
+                        "runtime_session_id": runtime_session_id,
+                        "gateway_instance_id": _gateway_instance_id_from_metadata(metadata),
+                        "gateway_pid": os.getpid(),
+                    },
+                    conflict=_run_summary(dict(active)),
+                )
                 return {"run": None, "conflict": dict(active), "created": False}
         state = _ensure_run(
             stable_session_id=stable,
@@ -654,6 +795,8 @@ def record_event(
     turn_id = _event_turn_id(frame)
     event_type = str(frame.get("type") or "").strip()
     runtime_session_id = str(frame.get("session_id") or "").strip()
+    owner_metadata = frame.get("owner_metadata")
+    owner_metadata = owner_metadata if isinstance(owner_metadata, dict) else {}
     now = time.time()
     frame["timestamp"] = now
     terminal_event = _terminal_status(event_type, payload)
@@ -686,6 +829,12 @@ def record_event(
                     runtime_session_id=runtime_session_id,
                 )
                 state["last_seq"] = int(frame.get("seq") or state.get("last_seq") or 0)
+                if owner_metadata:
+                    metadata = state.get("metadata")
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    metadata.update(owner_metadata)
+                    state["metadata"] = metadata
                 if terminal_event:
                     state["status"] = terminal_event
                     if terminal_event == "failed":
@@ -713,6 +862,19 @@ def record_event(
     if stable and (method := _db_method(db, "append_run_event")):
         try:
             saved = method(stable, frame)
+            if terminal_event:
+                _diagnostic_warning(
+                    "terminal-event-persisted",
+                    db=_db_label(db),
+                    event_type=event_type,
+                    terminal_status=terminal_event,
+                    session_id=stable,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    runtime_scope_key=str(frame.get("runtime_scope_key") or ""),
+                    runtime_session_id=runtime_session_id,
+                    seq=int(frame.get("seq") or 0),
+                )
             reducer = _db_method(db, "reduce_team_mission_run_event")
             if reducer is not None and run_id:
                 reduced_node = reducer(run_id=run_id, event=saved if isinstance(saved, dict) else frame)
@@ -753,8 +915,34 @@ def record_event(
                                     _write_event(transport, mirrored)
                         except Exception:
                             logger.debug("failed to mirror Team Mission event", exc_info=True)
-        except Exception:
+        except Exception as exc:
+            _diagnostic_warning(
+                "run-event-persist-failed",
+                db=_db_label(db),
+                event_type=event_type,
+                terminal_status=terminal_event,
+                session_id=stable,
+                run_id=run_id,
+                turn_id=turn_id,
+                runtime_scope_key=str(frame.get("runtime_scope_key") or ""),
+                runtime_session_id=runtime_session_id,
+                seq=int(frame.get("seq") or 0),
+                error=str(exc),
+            )
             logger.warning("failed to persist run event", exc_info=True)
+    elif terminal_event:
+        _diagnostic_warning(
+            "terminal-event-not-persisted-no-db-method",
+            db=_db_label(db),
+            event_type=event_type,
+            terminal_status=terminal_event,
+            session_id=stable,
+            run_id=run_id,
+            turn_id=turn_id,
+            runtime_scope_key=str(frame.get("runtime_scope_key") or ""),
+            runtime_session_id=runtime_session_id,
+            seq=int(frame.get("seq") or 0),
+        )
     if terminal_event and scheduler_mission_id:
         _dispatch_team_mission_ready_scheduler(
             mission_id=scheduler_mission_id,
@@ -769,6 +957,7 @@ def publish_recorded_event(
     params: dict[str, Any],
     owner_transport: Transport | None = None,
     db: Any = None,
+    before_deliver: Callable[[], None] | None = None,
 ) -> list[Transport]:
     """Persist an event and deliver it to live event subscribers.
 
@@ -779,6 +968,8 @@ def publish_recorded_event(
     immediately.
     """
     subscribers = record_event(params, owner_transport=owner_transport, db=db)
+    if before_deliver is not None:
+        before_deliver()
     delivered: list[Transport] = []
     for transport in subscribers:
         if _write_event(transport, params):
@@ -822,8 +1013,24 @@ def publish_run_terminal_event(
         "turn_id": str(turn_id or "").strip(),
         "runtime_scope_key": str(runtime_scope_key or stable).strip(),
         "seq": next_event_seq(stable, db=db),
+        "owner_metadata": {
+            "gateway_pid": os.getpid(),
+        },
         "payload": payload,
     }
+    _diagnostic_warning(
+        "publish-terminal-event",
+        db=_db_label(db),
+        status=terminal_status,
+        payload_status=payload_status,
+        session_id=stable,
+        run_id=normalized_run_id,
+        turn_id=str(turn_id or "").strip(),
+        runtime_scope_key=str(runtime_scope_key or stable).strip(),
+        runtime_session_id=str(runtime_session_id or stable).strip(),
+        seq=int(frame.get("seq") or 0),
+        message=str(message or ""),
+    )
     publish_recorded_event(frame, owner_transport=owner_transport, db=db)
     return frame
 
@@ -835,6 +1042,7 @@ def subscribe_session(
     after_seq: int = 0,
     active_only: bool = False,
     runtime_scope_key: str = "",
+    run_id: str = "",
     limit: int = _MAX_EVENTS_PER_SESSION,
     db: Any = None,
 ) -> list[dict[str, Any]]:
@@ -844,6 +1052,7 @@ def subscribe_session(
         after_seq=after_seq,
         active_only=active_only,
         runtime_scope_key=runtime_scope_key,
+        run_id=run_id,
         limit=limit,
         db=db,
     )
@@ -857,6 +1066,7 @@ def subscribe_session_with_id(
     after_seq: int = 0,
     active_only: bool = False,
     runtime_scope_key: str = "",
+    run_id: str = "",
     limit: int = _MAX_EVENTS_PER_SESSION,
     db: Any = None,
     subscription_id: str = "",
@@ -876,6 +1086,7 @@ def subscribe_session_with_id(
                 "transport": transport,
                 "active_only": bool(active_only),
                 "runtime_scope_key": scope,
+                "run_id": str(run_id or "").strip(),
                 "active_run_ids": set(active_run_ids),
                 "last_seq": max(0, int(after_seq or 0)),
                 "delivered_stream_texts": {},
@@ -895,6 +1106,7 @@ def subscribe_session_with_id(
                 after_seq=after_seq,
                 active_only=False,
                 runtime_scope_key=scope,
+                run_id=str(run_id or "").strip(),
                 limit=limit,
             )
         except Exception:
@@ -904,12 +1116,14 @@ def subscribe_session_with_id(
         active_only=active_only,
         active_run_ids=active_run_ids,
         runtime_scope_key=scope,
+        run_id=run_id,
     )
     memory_events = _filter_events_for_subscription(
         memory_events,
         active_only=active_only,
         active_run_ids=active_run_ids,
         runtime_scope_key=scope,
+        run_id=run_id,
     )
     if after_seq > 0:
         memory_events = [event for event in memory_events if int(event.get("seq") or 0) > after_seq]
@@ -1120,7 +1334,16 @@ def list_runs(
     )[:max(1, min(int(limit or 200), 1000))]
 
 
-def session_status(stored_session_id: str, db: Any = None) -> dict[str, Any]:
+def session_status(
+    stored_session_id: str,
+    db: Any = None,
+    *,
+    current_gateway_instance_id: str = "",
+) -> dict[str, Any]:
+    _recover_orphaned_active_runs(
+        db,
+        current_gateway_instance_id=current_gateway_instance_id,
+    )
     persisted_status = None
     if method := _db_method(db, "get_session_run_status"):
         try:

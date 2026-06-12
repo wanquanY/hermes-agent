@@ -831,6 +831,131 @@ def test_run_control_replays_events_and_tracks_status(capture):
     assert done["result"]["run"]["status"] == "completed"
 
 
+def test_terminal_event_releases_live_session_before_client_delivery(capture, monkeypatch):
+    server, _buf = capture
+    entered_write = threading.Event()
+    release_write = threading.Event()
+    observed_events = []
+    write_released = []
+
+    def _blocking_write_json(obj):
+        observed_events.append(obj)
+        params = obj.get("params") or {}
+        if obj.get("method") == "event" and params.get("type") == "message.complete":
+            entered_write.set()
+            write_released.append(release_write.wait(timeout=2))
+        return True
+
+    agent = MagicMock(model="gpt-test", provider="test-provider")
+    agent.context_compressor = None
+    server._sessions["runtime-terminal"] = {
+        "agent": agent,
+        "session_key": "stored-terminal",
+        "running": True,
+        "active_run_id": "run-terminal",
+        "active_turn_id": "turn-terminal",
+        "run_started_at": 11,
+        "run_updated_at": 22,
+        "history": [],
+        "history_lock": threading.Lock(),
+    }
+    monkeypatch.setattr(server, "write_json", _blocking_write_json)
+
+    emitter = threading.Thread(
+        target=server._emit,
+        args=(
+            "message.complete",
+            "runtime-terminal",
+            {
+                "run_id": "run-terminal",
+                "turn_id": "turn-terminal",
+                "status": "complete",
+            },
+        ),
+    )
+    emitter.start()
+
+    assert entered_write.wait(timeout=2)
+    try:
+        status = server.handle_request(
+            {
+                "id": "terminal-status",
+                "method": "session.status",
+                "params": {"stored_session_id": "stored-terminal"},
+            }
+        )
+    finally:
+        release_write.set()
+    emitter.join(timeout=2)
+
+    assert not emitter.is_alive()
+    assert observed_events
+    assert write_released == [True]
+    assert "error" not in status
+    assert status["result"]["running"] is False
+    assert status["result"]["active_run_id"] == ""
+    assert status["result"]["active_turn_id"] == ""
+
+
+def test_terminal_event_releases_live_session_before_subscription_delivery(capture):
+    server, _buf = capture
+    from tui_gateway.services import run_control
+
+    observed_statuses = []
+
+    class _StatusCheckingTransport:
+        def write(self, obj):
+            params = obj.get("params") or {}
+            if obj.get("method") == "event" and params.get("type") == "message.complete":
+                observed_statuses.append(
+                    server.handle_request(
+                        {
+                            "id": "subscriber-status",
+                            "method": "session.status",
+                            "params": {"stored_session_id": "stored-subscriber"},
+                        }
+                    )
+                )
+            return True
+
+    agent = MagicMock(model="gpt-test", provider="test-provider")
+    agent.context_compressor = None
+    server._sessions["runtime-subscriber"] = {
+        "agent": agent,
+        "session_key": "stored-subscriber",
+        "running": True,
+        "active_run_id": "run-subscriber",
+        "active_turn_id": "turn-subscriber",
+        "run_started_at": 11,
+        "run_updated_at": 22,
+        "history": [],
+        "history_lock": threading.Lock(),
+    }
+    subscription_id, _replay = run_control.subscribe_session_with_id(
+        stored_session_id="stored-subscriber",
+        transport=_StatusCheckingTransport(),
+    )
+
+    try:
+        server._emit(
+            "message.complete",
+            "runtime-subscriber",
+            {
+                "run_id": "run-subscriber",
+                "turn_id": "turn-subscriber",
+                "status": "complete",
+            },
+        )
+    finally:
+        run_control.unsubscribe_session(subscription_id=subscription_id)
+
+    assert len(observed_statuses) == 1
+    assert "error" not in observed_statuses[0]
+    assert observed_statuses[0]["result"]["running"] is False
+    assert observed_statuses[0]["result"]["active_run_id"] == ""
+    assert observed_statuses[0]["result"]["active_turn_id"] == ""
+
+
 def test_run_control_control_events_do_not_mark_session_busy(capture):
     server, _buf = capture
     agent = MagicMock(model="gpt-test", provider="test-provider")
@@ -991,11 +1116,12 @@ def test_run_events_replays_without_creating_subscription(server, monkeypatch):
     from tui_gateway.services import run_control
 
     class _RunDB:
-        def list_run_events(self, session_id, *, after_seq=0, active_only=False, runtime_scope_key="", limit=2000):
+        def list_run_events(self, session_id, *, after_seq=0, active_only=False, runtime_scope_key="", run_id="", limit=2000):
             assert session_id == "stored-run-events"
             assert after_seq == 1
             assert active_only is False
             assert runtime_scope_key == "profile:agent-a"
+            assert run_id == "run-a"
             assert limit == 321
             return [
                 {
@@ -1018,6 +1144,7 @@ def test_run_events_replays_without_creating_subscription(server, monkeypatch):
                 "stored_session_id": "stored-run-events",
                 "after_seq": 1,
                 "runtime_scope_key": "profile:agent-a",
+                "run_id": "run-a",
                 "limit": 321,
             },
         }

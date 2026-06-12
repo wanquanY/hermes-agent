@@ -113,6 +113,39 @@ def test_team_mission_leader_node_toolsets_are_phase_independent():
     ) == ["team_mission_leader"]
 
 
+def test_team_mission_worker_toolsets_follow_current_member_profile(monkeypatch):
+    import importlib
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    monkeypatch.setattr(team_mission, "_load_enabled_toolsets", lambda: ["hermes-cli"], raising=False)
+    params = {
+        "members": [
+            {
+                "member_id": "qa-member",
+                "profile_id": "profile-qa",
+                "profile_version_id": "version-current",
+                "runtime_scope_key": "profile:profile-qa:version:version-current",
+                "default_toolsets": ["file", "terminal", "skills"],
+            }
+        ]
+    }
+    node = {
+        "kind": "worker",
+        "assignee_profile_id": "profile-qa",
+        "assignee_profile_version_id": "version-old",
+        "metadata": {"role": "member"},
+    }
+    profile_params = team_mission._node_profile_params(params, {"metadata": {"members": []}}, node)
+
+    assert profile_params["agent_profile_version_id"] == "version-current"
+    assert team_mission._start_toolsets(
+        params,
+        {"mode": "supervised_mission"},
+        node,
+        profile_params=profile_params,
+    ) == ["hermes-cli"]
+
+
 def test_team_profile_get_resolves_conversation_source_packet_without_active_mission(monkeypatch, tmp_path: Path):
     import importlib
 
@@ -327,6 +360,7 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(mo
     assert db.get_messages("team-session-1") == []
     assert db.get_team_mission_graph("mission-1") == {}
 
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "profile:profile-leader")
     submit_response = server._methods["team_mission.message.submit"](
         2,
         {
@@ -377,6 +411,25 @@ def test_team_mission_node_create_requires_existing_mission(monkeypatch, tmp_pat
     assert response["error"]["code"] == 4040
     assert response["error"]["message"] == "team mission not found"
     assert db.get_team_mission_node("missing-mission", "node-1") == {}
+
+
+def test_team_conversation_resolve_returns_empty_when_conversation_is_missing(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+
+    response = server._methods["team_mission.conversation.resolve"](
+        1,
+        {"identifier": "missing-conversation"},
+    )
+
+    assert "error" not in response
+    assert response["result"] == {"conversation": {}, "mission": {}, "graph": {}}
 
 
 def test_team_mission_create_records_user_task_in_stable_team_session(monkeypatch, tmp_path: Path):
@@ -476,6 +529,7 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
         }
 
     monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "profile:profile-leader")
 
     response = server._methods["team_mission.message.submit"](
         1,
@@ -503,6 +557,282 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
     assert submitted["doxie_product_context"]["team_mission"]["tool_policy"]["disabled_toolsets"] == ["delegation"]
     assert submitted["doxie_product_context"]["team_mission"]["tool_policy"]["toolset_scope"] == "exact"
     assert len(db.get_team_mission_graph("mission-1")["nodes"]) == 1
+
+
+def test_team_mission_message_submit_forwards_leader_profile_context(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    leader_member = {
+        "member_id": "leader",
+        "profile_id": "profile-leader",
+        "profile_version_id": "version-leader",
+        "role": "leader",
+        "runtime_scope_key": "profile:profile-leader:version:version-leader",
+        "doxie_profile": {
+            "id": "profile-leader",
+            "agentProfileVersionId": "version-leader",
+            "runtimeScopeKey": "profile:profile-leader:version:version-leader",
+            "hermesHomePath": str(tmp_path / "leader-home"),
+        },
+    }
+    db.initialize_team_mission_from_strategy(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="监督执行",
+        objective="初始任务",
+        mode="supervised_mission",
+        leader_session_id="team-session-1",
+        metadata={"conversation_session_id": "team-session-1"},
+        members=[leader_member],
+    )
+    submitted = {}
+
+    def fake_run_submit(rid, params):
+        submitted.update(params)
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "status": "streaming",
+                "run_id": params["run_id"],
+                "turn_id": params["turn_id"],
+                "session_id": "runtime-leader-conversation",
+                "stored_session_id": params["stored_session_id"],
+                "runtime_scope_key": params["runtime_scope_key"],
+            },
+        }
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "profile:profile-leader:version:version-leader")
+
+    server._methods["team_mission.message.submit"](
+        1,
+        {
+            "mission_id": "mission-1",
+            "text": "我叫什么名字？",
+            "members": [leader_member],
+            "leader_runtime_scope_key": "team:mission-1:leader-conversation",
+        },
+    )
+
+    assert submitted["agent_profile_id"] == "profile-leader"
+    assert submitted["agent_profile_version_id"] == "version-leader"
+    assert submitted["runtime_scope_key"] == "team:mission-1:leader-conversation"
+    assert submitted["doxie_profile"]["hermesHomePath"] == str(tmp_path / "leader-home")
+    assert submitted["doxie_profile"]["agentProfileVersionId"] == "version-leader"
+    assert submitted["doxie_profile"]["runtimeScopeKey"] == "profile:profile-leader:version:version-leader"
+
+
+def test_team_mission_message_submit_keeps_team_scope_out_of_profile_owner_check(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    submitted = {}
+
+    def fake_run_submit(rid, params):
+        submitted.update(params)
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "status": "streaming",
+                "run_id": params["run_id"],
+                "turn_id": params["turn_id"],
+                "session_id": "runtime-leader-conversation",
+                "stored_session_id": params["stored_session_id"],
+                "runtime_scope_key": params["runtime_scope_key"],
+            },
+        }
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "profile:agent-default")
+
+    response = server._methods["team_mission.message.submit"](
+        1,
+        {
+            "conversation_id": "conversation-1",
+            "conversation_session_id": "team-session-1",
+            "text": "团队会话继续聊",
+            "agentProfileId": "agent-default",
+            "runtimeScopeKey": "profile:agent-default",
+            "runtime_scope_key": "team:conversation-1:leader-conversation",
+            "leader_runtime_scope_key": "team:conversation-1:leader-conversation",
+        },
+    )
+
+    assert "error" not in response
+    assert submitted["agent_profile_id"] == "agent-default"
+    assert submitted["runtimeScopeKey"] == "profile:agent-default"
+    assert submitted["runtime_scope_key"] == "team:conversation-1:leader-conversation"
+
+
+def test_team_mission_conversation_ensure_keeps_team_scope_out_of_profile_owner_check(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "profile:agent-default")
+
+    response = server._methods["team_mission.conversation.ensure"](
+        1,
+        {
+            "conversation_id": "conversation-1",
+            "stable_team_session_id": "team-session-1",
+            "team_id": "team-1",
+            "title": "团队会话",
+            "agentProfileId": "agent-default",
+            "runtimeScopeKey": "profile:agent-default",
+            "runtime_scope_key": "team:conversation-1:leader-conversation",
+            "leader_runtime_scope_key": "team:conversation-1:leader-conversation",
+        },
+    )
+
+    assert "error" not in response
+    assert response["result"]["conversation_id"] == "conversation-1"
+    assert response["result"]["conversation_session_id"] == "team-session-1"
+
+
+def test_team_mission_conversation_ensure_uses_conversation_scope_for_bound_mission(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    db.initialize_team_mission_from_strategy(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="功能测试",
+        objective="验证历史团队任务会话",
+        mode="supervised_mission",
+        leader_session_id="team-session-conversation-1",
+        conversation_id="conversation-1",
+        metadata={"conversation_id": "conversation-1", "conversation_session_id": "team-session-conversation-1"},
+        members=[{
+            "member_id": "leader",
+            "profile_id": "profile-leader",
+            "profile_version_id": "version-leader",
+            "runtime_scope_key": "profile:profile-leader:version:version-leader",
+            "role": "leader",
+        }],
+    )
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "team:conversation-1:leader-conversation")
+
+    response = server._methods["team_mission.conversation.ensure"](
+        1,
+        {
+            "mission_id": "mission-1",
+            "conversation_id": "conversation-1",
+            "conversation_session_id": "team-session-conversation-1",
+            "runtime_scope_key": "team:conversation-1:leader-conversation",
+            "profile_runtime_scope_key": "profile:profile-leader:version:version-leader",
+            "members": [{
+                "member_id": "leader",
+                "profile_id": "profile-leader",
+                "profile_version_id": "version-leader",
+                "runtime_scope_key": "profile:profile-leader:version:version-leader",
+                "role": "leader",
+            }],
+        },
+    )
+
+    assert "error" not in response
+    assert response["result"]["conversation_id"] == "conversation-1"
+    assert response["result"]["conversation_session_id"] == "team-session-conversation-1"
+
+
+def test_team_mission_message_submit_rejects_wrong_owner_runtime_scope(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    db.initialize_team_mission_from_strategy(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="监督执行",
+        objective="初始任务",
+        mode="supervised_mission",
+        leader_session_id="team-session-1",
+        metadata={"conversation_session_id": "team-session-1"},
+        members=[{"member_id": "leader", "profile_id": "profile-leader", "role": "leader"}],
+    )
+    submitted = {}
+
+    def fake_run_submit(rid, params):
+        submitted.update(params)
+        return {"jsonrpc": "2.0", "id": rid, "result": {"status": "streaming"}}
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "profile:other")
+
+    response = server._methods["team_mission.message.submit"](
+        1,
+        {
+            "mission_id": "mission-1",
+            "text": "这条不能写到错误 profile",
+            "members": [{"member_id": "leader", "profile_id": "profile-leader", "role": "leader"}],
+        },
+    )
+
+    assert response["error"]["code"] == 4094
+    assert "team:mission-1:leader-conversation" in response["error"]["message"]
+    assert submitted == {}
+
+
+def test_team_mission_message_submit_rejects_profile_scope_as_team_execution_scope(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "team:conversation-1:leader-conversation")
+    submitted = {}
+
+    def fake_run_submit(rid, params):
+        submitted.update(params)
+        return {"jsonrpc": "2.0", "id": rid, "result": {"status": "streaming"}}
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+
+    response = server._methods["team_mission.message.submit"](
+        1,
+        {
+            "conversation_id": "conversation-1",
+            "conversation_session_id": "team-session-1",
+            "text": "团队会话继续聊",
+            "agentProfileId": "agent-default",
+            "runtimeScopeKey": "profile:agent-default",
+            "profileRuntimeScopeKey": "profile:agent-default",
+        },
+    )
+
+    assert response["error"]["code"] == 4094
+    assert "must use the team conversation runtime scope as runtimeScopeKey" in response["error"]["message"]
+    assert submitted == {}
 
 
 def test_team_mission_message_submit_merges_requested_leader_conversation_toolsets(monkeypatch, tmp_path: Path):
@@ -542,6 +872,7 @@ def test_team_mission_message_submit_merges_requested_leader_conversation_toolse
         }
 
     monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "profile:profile-leader")
 
     response = server._methods["team_mission.message.submit"](
         1,
@@ -564,6 +895,7 @@ def test_team_mission_message_submit_merges_requested_leader_conversation_toolse
     ]
     assert submitted["toolset_scope"] == "exact"
     assert "delegation" in submitted["disabled_toolsets"]
+    assert submitted["agent_context_mode"] == "team_leader"
 
 
 def test_team_mission_member_node_start_keeps_delegation_available(monkeypatch, tmp_path: Path):
@@ -630,7 +962,7 @@ def test_team_mission_member_node_start_keeps_delegation_available(monkeypatch, 
     assert response["result"]["node"]["node_id"] == "node-builder"
     assert submitted["agent_profile_id"] == "profile-builder"
     assert "delegation" not in submitted.get("disabled_toolsets", [])
-    assert "toolset_scope" not in submitted
+    assert submitted["toolset_scope"] == "exact"
     assert "tool_policy" not in submitted["doxie_product_context"]["team_mission"]
 
 
@@ -691,6 +1023,7 @@ def test_team_mission_message_submit_does_not_inject_other_conversation_memory(m
         }
 
     monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "profile:profile-leader")
 
     response = server._methods["team_mission.message.submit"](
         1,
@@ -806,7 +1139,8 @@ def test_team_mission_conversation_rename_gateway_updates_canonical_state(monkey
 
     assert response["result"]["conversation_id"] == "conversation-1"
     assert response["result"]["conversation"]["title"] == "新团队任务"
-    assert db.get_session("team-session-1")["title"] == "新团队任务"
+    assert db.get_session("team-session-1")["source"] == "team_mission"
+    assert db.get_session("team-session-1")["title"] is None
     assert db.get_team_mission_graph("mission-1")["mission"]["title"] == "旧团队任务"
 
 
@@ -964,6 +1298,14 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
 
     assert result["success"] is True
     assert result["intent"] == "start_team_task"
+    assert result["submission_status"] == "accepted"
+    assert result["task_status"] == "planning"
+    assert result["completion_status"] == "pending"
+    assert result["final_result_available"] is False
+    assert result["await_final_deliverable"] is True
+    assert result["hermes_control"]["kind"] == "team_mission_started"
+    assert result["hermes_control"]["end_current_turn"] is True
+    assert result["hermes_control"]["await_final_deliverable"] is True
     assert result["mission_id"] != "mission-1"
     assert result["conversation_id"] == "mission-1"
     assert result["node"]["node_id"] == f"team-mission:{result['mission_id']}:root"
@@ -1863,6 +2205,82 @@ def test_team_mission_node_start_reuses_run_submit_and_binds_worker_run(monkeypa
     events = db.list_team_mission_run_events("mission-1")
     assert events[-1]["type"] == "mission.node.started"
     assert events[-1]["payload"]["binding"]["node_id"] == "node-worker"
+
+
+def test_team_mission_node_start_forwards_assignee_profile_context(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    worker_member = {
+        "member_id": "worker-a",
+        "profile_id": "profile-worker",
+        "profile_version_id": "version-worker",
+        "role": "builder",
+        "runtime_scope_key": "profile:profile-worker:version:version-worker",
+        "doxie_profile": {
+            "id": "profile-worker",
+            "agentProfileVersionId": "version-worker",
+            "runtimeScopeKey": "profile:profile-worker:version:version-worker",
+            "hermesHomePath": str(tmp_path / "worker-home"),
+        },
+    }
+    db.initialize_team_mission_from_strategy(
+        mission_id="mission-1",
+        title="自主执行",
+        objective="自动执行节点",
+        mode="autonomous_mission",
+        members=[worker_member],
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-worker",
+        kind="worker",
+        title="执行节点",
+        objective="完成交付",
+        status="ready",
+        assignee_profile_id="profile-worker",
+        assignee_profile_version_id="version-worker",
+        output_contract={"format": "deliverable"},
+    )
+    submitted = {}
+
+    def fake_run_submit(rid, params):
+        submitted.update(params)
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "status": "running",
+                "run_id": params["run_id"],
+                "turn_id": params["turn_id"],
+                "session_id": "runtime-worker",
+                "stored_session_id": params["stored_session_id"],
+                "runtime_scope_key": params["runtime_scope_key"],
+            },
+        }
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+
+    server._methods["team_mission.node.start"](
+        1,
+        {
+            "mission_id": "mission-1",
+            "node_id": "node-worker",
+            "run_id": "run-worker",
+            "turn_id": "turn-worker",
+        },
+    )
+
+    assert submitted["agent_profile_id"] == "profile-worker"
+    assert submitted["agent_profile_version_id"] == "version-worker"
+    assert submitted["runtime_scope_key"] == "profile:profile-worker:version:version-worker"
+    assert submitted["doxie_profile"]["hermesHomePath"] == str(tmp_path / "worker-home")
+    assert submitted["doxie_profile"]["agentProfileVersionId"] == "version-worker"
 
 
 def test_team_mission_bound_worker_run_event_updates_node_status(tmp_path: Path):

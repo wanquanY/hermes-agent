@@ -414,6 +414,7 @@ def init_agent(
     agent._executing_tools = False
     agent._tool_guardrails = ToolCallGuardrailController()
     agent._tool_guardrail_halt_decision: ToolGuardrailDecision | None = None
+    agent._tool_handoff_exit: dict | None = None
 
     # Interrupt mechanism for breaking out of tool loops
     agent._interrupt_requested = False

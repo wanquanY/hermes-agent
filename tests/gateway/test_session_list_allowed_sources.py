@@ -9,7 +9,8 @@ History:
   but exist in .hermes/sessions."
 - The handler now deny-lists only internal/noisy sources such as ``tool``
   (sub-agent runs) and ``cron`` (scheduler execution contexts), and surfaces
-  every human-facing source to the picker.
+  every human-facing source to the picker. Team mission conversations are
+  surfaced through ``session.list`` with Hermes-owned route metadata.
 - The handler now exposes backend pagination metadata so clients can keep
   loading older sessions without a fixed fetch cap.
 """
@@ -48,6 +49,7 @@ def test_session_list_surfaces_all_user_facing_sources(monkeypatch):
         {"id": "tui-1", "source": "tui", "started_at": 9},
         {"id": "tool-1", "source": "tool", "started_at": 8},
         {"id": "cron-1", "source": "cron", "started_at": 8},
+        {"id": "team-1", "source": "team_mission", "started_at": 8},
         {"id": "tg-1", "source": "telegram", "started_at": 7},
         {"id": "acp-1", "source": "acp", "started_at": 6},
         {"id": "cli-1", "source": "cli", "started_at": 5},
@@ -72,6 +74,7 @@ def test_session_list_surfaces_all_user_facing_sources(monkeypatch):
     # Internal execution contexts stay hidden.
     assert "tool-1" not in ids
     assert "cron-1" not in ids
+    assert "team-1" not in ids
 
 
 def test_session_list_default_limit_stays_legacy_compatible(monkeypatch):
@@ -83,6 +86,130 @@ def test_session_list_default_limit_stays_legacy_compatible(monkeypatch):
     assert db.calls[0].get("limit") == 201, db.calls[0]
     assert db.calls[0].get("order_by_last_active") is True, db.calls[0]
     assert db.calls[0].get("exclude_sources") == ["tool", "cron"], db.calls[0]
+
+
+def test_session_list_surfaces_team_conversation_route_metadata(tmp_path, monkeypatch):
+    """Team conversations belong in the unified Hermes session list."""
+    profile_home = tmp_path / "profile-home"
+    seed_db = SessionDB(profile_home / "state.db")
+    try:
+        seed_db.upsert_team_mission_conversation(
+            conversation_id="conversation-1",
+            team_id="team-1",
+            stable_session_id="team-session-1",
+            title="团队会话标题",
+            objective="团队任务预览",
+            workspace_id="workspace-1",
+            workspace_path="/tmp/workspace",
+            active_mission_id="mission-1",
+            created_at=100,
+            updated_at=200,
+        )
+        seed_db.create_session("team-session-1", source="team_mission", transient=False)
+        seed_db.append_message("team-session-1", role="user", content="hello team")
+    finally:
+        seed_db.close()
+
+    monkeypatch.setattr(server, "_db_by_home", {})
+    monkeypatch.setattr(server, "_db_error_by_home", {})
+    try:
+        resp = server.handle_request({
+            "id": "1",
+            "method": "session.list",
+            "params": {
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "agentProfileVersionId": "version-1",
+                    "runtimeScopeKey": "profile:agent-a:version:version-1",
+                    "hermesHomePath": str(profile_home),
+                },
+            },
+        })
+        assert "error" not in resp
+        [item] = resp["result"]["sessions"]
+        assert item["id"] == "team-session-1"
+        assert item["source"] == "team_mission"
+        assert item["session_kind"] == "team_mission"
+        assert item["conversation_id"] == "conversation-1"
+        assert item["team_id"] == "team-1"
+        assert item["active_mission_id"] == "mission-1"
+        assert item["title"] == "团队会话标题"
+        assert item["preview"] == "团队任务预览"
+        assert item["workspace"]["path"] == "/tmp/workspace"
+    finally:
+        for db in list(server._db_by_home.values()):
+            db.close()
+
+
+def test_session_list_hides_team_mission_node_run_sessions(tmp_path, monkeypatch):
+    """Team node/member runtime sessions are mission internals, not sidebar conversations."""
+    profile_home = tmp_path / "profile-home"
+    seed_db = SessionDB(profile_home / "state.db")
+    try:
+        seed_db.upsert_team_mission_conversation(
+            conversation_id="conversation-1",
+            team_id="team-1",
+            stable_session_id="team-session-1",
+            title="团队会话",
+            active_mission_id="mission-1",
+            created_at=100,
+            updated_at=200,
+        )
+        seed_db.create_session("team-session-1", source="team_mission", transient=False)
+        seed_db.append_message("team-session-1", role="user", content="hello team")
+        seed_db.upsert_team_mission(
+            mission_id="mission-1",
+            conversation_id="conversation-1",
+            team_id="team-1",
+            title="团队会话",
+            mode="supervised_mission",
+            status="running",
+            leader_session_id="team-session-1",
+        )
+        seed_db.upsert_team_mission_node(
+            mission_id="mission-1",
+            node_id="node-worker",
+            kind="worker",
+            title="成员节点",
+            status="running",
+            runtime_scope_key="team:mission-1:node:node-worker",
+        )
+        seed_db.create_session("team:mission-1:node:worker", source="team_mission", transient=False)
+        seed_db.append_message("team:mission-1:node:worker", role="assistant", content="worker output")
+        seed_db.create_session("member-session-leaked-as-tui", source="tui", transient=False)
+        seed_db.append_message("member-session-leaked-as-tui", role="assistant", content="member output")
+        seed_db.bind_team_mission_run(
+            mission_id="mission-1",
+            node_id="node-worker",
+            run_id="run-worker",
+            session_id="member-session-leaked-as-tui",
+            runtime_session_id="runtime-worker",
+            runtime_scope_key="team:mission-1:node:node-worker",
+        )
+    finally:
+        seed_db.close()
+
+    monkeypatch.setattr(server, "_db_by_home", {})
+    monkeypatch.setattr(server, "_db_error_by_home", {})
+    try:
+        resp = server.handle_request({
+            "id": "1",
+            "method": "session.list",
+            "params": {
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "agentProfileVersionId": "version-1",
+                    "runtimeScopeKey": "profile:agent-a:version:version-1",
+                    "hermesHomePath": str(profile_home),
+                },
+            },
+        })
+        assert "error" not in resp
+        ids = [item["id"] for item in resp["result"]["sessions"]]
+        assert ids == ["team-session-1"]
+    finally:
+        for db in list(server._db_by_home.values()):
+            db.close()
 
 
 def test_session_list_returns_last_message_activity_as_updated_at(monkeypatch):
@@ -251,6 +378,8 @@ def test_team_conversation_list_reads_requested_doxie_profile_home(tmp_path, mon
             workspace_path="/tmp/workspace",
             updated_at=200,
         )
+        seed_db.create_session("team-session-1", source="team_mission", transient=False)
+        seed_db.append_message("team-session-1", role="user", content="hello from profile team conversation")
     finally:
         seed_db.close()
 

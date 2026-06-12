@@ -24,9 +24,12 @@ Pure helpers that read the agent's state.  AIAgent keeps thin forwarders.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sys
 from typing import Any, Dict, List, Optional
 
+from agent.doxie_diagnostics import emit_doxie_diagnostic
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
@@ -39,22 +42,39 @@ from agent.prompt_builder import (
     SKILLS_GUIDANCE,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
+    build_context_files_prompt as _build_context_files_prompt,
+    build_environment_hints as _build_environment_hints,
+    build_nous_subscription_prompt as _build_nous_subscription_prompt,
+    build_skills_system_prompt as _build_skills_system_prompt,
+    load_soul_md as _load_soul_md,
 )
 
+logger = logging.getLogger(__name__)
 
-def _ra():
-    """Lazy reference to the ``run_agent`` module.
 
-    Helpers like ``load_soul_md``, ``build_environment_hints``,
-    ``build_context_files_prompt``, ``build_nous_subscription_prompt``,
-    ``build_skills_system_prompt`` and ``get_toolset_for_tool`` are
-    imported into ``run_agent``'s namespace.  Many tests
-    ``patch("run_agent.load_soul_md", ...)``; if we imported them
-    directly here those patches would not reach us.  Looking them up
-    through ``run_agent`` on every call preserves the patch contract.
-    """
-    import run_agent
-    return run_agent
+def _log_doxie_system_prompt_stage(agent: Any, stage: str, **fields: Any) -> None:
+    run_id = str(getattr(agent, "_hermes_active_run_id", "") or "")
+    turn_id = str(getattr(agent, "_hermes_active_turn_id", "") or "")
+    runtime_scope_key = str(getattr(agent, "_hermes_active_runtime_scope_key", "") or "")
+    if not run_id and not runtime_scope_key:
+        return
+    pairs = {
+        "stage": stage,
+        "session_id": str(getattr(agent, "session_id", "") or ""),
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "runtime_scope_key": runtime_scope_key,
+        **fields,
+    }
+    emit_doxie_diagnostic("[doxie-system-prompt-stage]", pairs)
+
+
+def _patched_run_agent_attr(name: str, fallback: Any) -> Any:
+    """Return a run_agent monkeypatch only when run_agent is already loaded."""
+    run_agent_module = sys.modules.get("run_agent")
+    if run_agent_module is None:
+        return fallback
+    return getattr(run_agent_module, name, fallback)
 
 
 def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) -> Dict[str, str]:
@@ -75,10 +95,24 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     session — that's the only way to keep upstream prompt caches
     warm across turns.
     """
-    # Local import to avoid pulling model_tools at module load.  Tests
-    # patch ``run_agent.get_toolset_for_tool`` and similar helpers, so
-    # we resolve through ``_ra()`` to honor those patches.
-    _r = _ra()
+    _log_doxie_system_prompt_stage(agent, "parts-start")
+    load_soul_md = _patched_run_agent_attr("load_soul_md", _load_soul_md)
+    build_nous_subscription_prompt = _patched_run_agent_attr(
+        "build_nous_subscription_prompt",
+        _build_nous_subscription_prompt,
+    )
+    build_skills_system_prompt = _patched_run_agent_attr(
+        "build_skills_system_prompt",
+        _build_skills_system_prompt,
+    )
+    build_environment_hints = _patched_run_agent_attr(
+        "build_environment_hints",
+        _build_environment_hints,
+    )
+    build_context_files_prompt = _patched_run_agent_attr(
+        "build_context_files_prompt",
+        _build_context_files_prompt,
+    )
 
     # ── Stable tier ────────────────────────────────────────────────
     stable_parts: List[str] = []
@@ -88,7 +122,14 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # cwd project instructions disabled.
     _soul_loaded = False
     if agent.load_soul_identity or not agent.skip_context_files:
-        _soul_content = _r.load_soul_md()
+        _log_doxie_system_prompt_stage(agent, "load-soul-start")
+        _soul_content = load_soul_md()
+        _log_doxie_system_prompt_stage(
+            agent,
+            "load-soul-end",
+            has_soul=bool(_soul_content),
+            soul_chars=len(_soul_content or ""),
+        )
         if _soul_content:
             stable_parts.append(_soul_content)
             _soul_loaded = True
@@ -127,7 +168,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         from agent.prompt_builder import COMPUTER_USE_GUIDANCE
         stable_parts.append(COMPUTER_USE_GUIDANCE)
 
-    nous_subscription_prompt = _r.build_nous_subscription_prompt(agent.valid_tool_names)
+    nous_subscription_prompt = build_nous_subscription_prompt(agent.valid_tool_names)
     if nous_subscription_prompt:
         stable_parts.append(nous_subscription_prompt)
     # Tool-use enforcement: tells the model to actually call tools instead
@@ -168,16 +209,30 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
 
     has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
     if has_skills_tools:
+        _log_doxie_system_prompt_stage(
+            agent,
+            "skills-prompt-start",
+            tool_count=len(agent.valid_tool_names or []),
+        )
+        get_toolset_for_tool = _patched_run_agent_attr("get_toolset_for_tool", None)
         avail_toolsets = {
             toolset
             for toolset in (
-                _r.get_toolset_for_tool(tool_name) for tool_name in agent.valid_tool_names
+                get_toolset_for_tool(tool_name)
+                for tool_name in agent.valid_tool_names
+                if callable(get_toolset_for_tool)
             )
             if toolset
         }
-        skills_prompt = _r.build_skills_system_prompt(
+        skills_prompt = build_skills_system_prompt(
             available_tools=agent.valid_tool_names,
             available_toolsets=avail_toolsets,
+        )
+        _log_doxie_system_prompt_stage(
+            agent,
+            "skills-prompt-end",
+            toolset_count=len(avail_toolsets),
+            prompt_chars=len(skills_prompt or ""),
         )
     else:
         skills_prompt = ""
@@ -201,7 +256,12 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # Environment hints (WSL, Termux, etc.) — tell the agent about the
     # execution environment so it can translate paths and adapt behavior.
     # Stable for the lifetime of the process.
-    _env_hints = _r.build_environment_hints()
+    _env_hints = build_environment_hints()
+    _log_doxie_system_prompt_stage(
+        agent,
+        "environment-hints-built",
+        hints_chars=len(_env_hints or ""),
+    )
     if _env_hints:
         stable_parts.append(_env_hints)
 
@@ -244,8 +304,19 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             or os.getenv("TERMINAL_CWD")
             or None
         )
-        context_files_prompt = _r.build_context_files_prompt(
+        _log_doxie_system_prompt_stage(
+            agent,
+            "context-files-start",
+            cwd=_context_cwd or "",
+            skip_soul=_soul_loaded,
+        )
+        context_files_prompt = build_context_files_prompt(
             cwd=_context_cwd, skip_soul=_soul_loaded)
+        _log_doxie_system_prompt_stage(
+            agent,
+            "context-files-end",
+            prompt_chars=len(context_files_prompt or ""),
+        )
         if context_files_prompt:
             context_parts.append(context_files_prompt)
 
@@ -253,6 +324,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     volatile_parts: List[str] = []
 
     if agent._memory_store:
+        _log_doxie_system_prompt_stage(agent, "memory-store-start")
         if agent._memory_enabled:
             mem_block = agent._memory_store.format_for_system_prompt("memory")
             if mem_block:
@@ -262,14 +334,22 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             user_block = agent._memory_store.format_for_system_prompt("user")
             if user_block:
                 volatile_parts.append(user_block)
+        _log_doxie_system_prompt_stage(agent, "memory-store-end")
 
     # External memory provider system prompt block (additive to built-in)
     if agent._memory_manager:
         try:
+            _log_doxie_system_prompt_stage(agent, "external-memory-system-prompt-start")
             _ext_mem_block = agent._memory_manager.build_system_prompt()
             if _ext_mem_block:
                 volatile_parts.append(_ext_mem_block)
+            _log_doxie_system_prompt_stage(
+                agent,
+                "external-memory-system-prompt-end",
+                prompt_chars=len(_ext_mem_block or ""),
+            )
         except Exception:
+            _log_doxie_system_prompt_stage(agent, "external-memory-system-prompt-error")
             pass
 
     from hermes_time import now as _hermes_now
@@ -289,6 +369,13 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         timestamp_line += f"\nProvider: {agent.provider}"
     volatile_parts.append(timestamp_line)
 
+    _log_doxie_system_prompt_stage(
+        agent,
+        "parts-end",
+        stable_parts=len(stable_parts),
+        context_parts=len(context_parts),
+        volatile_parts=len(volatile_parts),
+    )
     return {
         "stable":   "\n\n".join(p.strip() for p in stable_parts   if p and p.strip()),
         "context":  "\n\n".join(p.strip() for p in context_parts  if p and p.strip()),
@@ -311,8 +398,11 @@ def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str
     mid-session, which is the only way to keep upstream prompt caches
     warm across turns.
     """
+    _log_doxie_system_prompt_stage(agent, "build-start")
     parts = build_system_prompt_parts(agent, system_message=system_message)
-    return "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
+    prompt = "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
+    _log_doxie_system_prompt_stage(agent, "build-end", prompt_chars=len(prompt))
+    return prompt
 
 
 def invalidate_system_prompt(agent: Any) -> None:

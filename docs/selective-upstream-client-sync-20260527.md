@@ -100,6 +100,22 @@ codex/selective-upstream-client-sync-20260527
 
 Tag 计划：`prodv0.9.3`。该节点仍不是上游 full merge；它是 Doxie Team Mission runtime 的本地生产化补齐。
 
+## 现状更新（2026-06-13，Doxie runtime diagnostics / terminalization）
+
+本地工作区当前 staged 代码继续修复 Doxie 作为 Hermes agent engine 时的运行态问题：卡 running 不可诊断、sidecar 退出后 active run 残留、Team Mission Leader 会话被普通 profile context 污染、内部 node runtime session 泄露到会话列表。
+
+当前节点包括：
+
+- Doxie diagnostics：新增 `agent/doxie_diagnostics.py`，conversation loop、system prompt、memory prefetch、API kwargs、streaming request、chat-completions client/create、gateway agent build 等关键阶段输出无锁 stderr 诊断。
+- terminalization：gateway terminal event 写入前释放 active run；sidecar parent watchdog 退出前清理 sessions；gateway shutdown/finalize 会把仍 active 的 run 写入 interrupted terminal event。
+- Team Mission Leader context：`team_leader` runtime 禁用 context files、memory 和 soul identity，避免普通 profile 规则进入 Leader 路由判断；Team Mission product context 从 gateway/session metadata 进入工具和 runtime。
+- Team Mission conversation normalization：Leader conversation session 会自动归一化为 `team_mission` source 并确保 `team_mission_conversations`；只有有 mission、历史消息或 active run 的 conversation 会出现在可路由历史中。
+- 内部 session 过滤：通过 `team_mission_run_bindings` 识别 mission node runtime sessions，session list 默认隐藏这些内部执行会话。
+- Tool handoff：新增 `agent/tool_handoff.py`，Team Mission Leader 工具可把确定性结构化结果转为最终 assistant 响应，减少不必要模型 follow-up。
+- Runtime proxy / pool：补齐 Team Mission 控制方法透传和 runtime lifecycle 测试，减少 runtime worker 与 active run 残留。
+
+这些改动仍是 Doxie 本地 contract 的生产化，不是吸收上游 Desktop / Dashboard UI。Hermes 继续作为 Team Mission graph/history/stream 和 active run 状态的唯一事实源。
+
 ## 逐项核对结果（2026-05-27）
 
 本节记录按本文 P0/P1 清单逐项核对当前工作区后的真实状态。后续再同步上游时，优先看这里，而不是只看提交是否 cherry-pick 成功。

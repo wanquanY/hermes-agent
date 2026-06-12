@@ -69,6 +69,15 @@ def start_parent_watchdog() -> threading.Thread | None:
         while True:
             time.sleep(_PARENT_WATCHDOG_INTERVAL_SECONDS)
             if not parent_process_still_owns_sidecar(parent_pid):
+                try:
+                    from tui_gateway import server as tui_gateway_server
+
+                    tui_gateway_server._shutdown_sessions()
+                except Exception as exc:
+                    print(
+                        f"[doxie-sidecar] shutdown session cleanup failed before parent-exit: {exc}",
+                        flush=True,
+                    )
                 os._exit(0)
 
     thread = threading.Thread(

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import logging
+import os
+import threading
+import time
+
 from doxie_extension import DoxieHermesExtension, load_extension
 from doxie_extension.gateway_methods import doxie_gateway_method_overrides
 from doxie_extension.manifest import gateway_capabilities as extension_gateway_capabilities
@@ -421,6 +426,10 @@ def test_session_db_persists_run_registry_and_event_log(tmp_path):
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "runtime_scope_key": "profile:agent-default",
+                "owner_metadata": {
+                    "gateway_pid": 4321,
+                    "gateway_instance_id": "runtime-owner",
+                },
                 "seq": 1,
                 "payload": {"text": "hello"},
             },
@@ -436,6 +445,8 @@ def test_session_db_persists_run_registry_and_event_log(tmp_path):
         run = db.get_run("run-1")
         assert run["last_seq"] == 1
         assert run["metadata"]["source"] == "test"
+        assert run["metadata"]["gateway_pid"] == 4321
+        assert run["metadata"]["gateway_instance_id"] == "runtime-owner"
 
         rows = db._conn.execute("SELECT transient FROM sessions WHERE id = ?", ("session-1",)).fetchone()
         assert rows["transient"] == 1
@@ -506,6 +517,384 @@ def test_session_db_keeps_terminal_run_closed_after_late_delta(tmp_path):
         )
         assert second["created"] is True
         assert second["conflict"] is None
+    finally:
+        db.close()
+
+
+def test_run_control_session_status_recovers_dead_gateway_active_run(tmp_path, caplog):
+    from hermes_state import SessionDB
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("team-session-recovered", "tui")
+        stale_time = time.time() - 301
+        db.upsert_run(
+            run_id="stale-run",
+            session_id="team-session-recovered",
+            runtime_scope_key="team:conversation:leader",
+            runtime_session_id="runtime-stale",
+            status="running",
+            started_at=stale_time,
+            updated_at=stale_time,
+            metadata={
+                "gateway_pid": os.getpid(),
+                "gateway_instance_id": "previous-gateway",
+            },
+        )
+
+        with caplog.at_level(logging.WARNING, logger="hermes_state_runs"):
+            status = run_control.session_status(
+                "team-session-recovered",
+                db=db,
+                current_gateway_instance_id="current-gateway",
+            )
+
+        assert status["running"] is False
+        assert "[doxie-run-recovery] active-run-scan" in caplog.text
+        stale = db.get_run("stale-run")
+        assert stale["status"] == "failed"
+        assert stale["error"] == "gateway process restarted before run reached terminal state"
+        assert db.list_run_events("team-session-recovered")[-1]["type"] == "message.complete"
+    finally:
+        db.close()
+
+
+def test_run_control_session_status_does_not_warn_for_live_owner_run(tmp_path, caplog):
+    from hermes_state import SessionDB
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("team-session-live", "tui")
+        db.upsert_run(
+            run_id="live-run",
+            session_id="team-session-live",
+            runtime_scope_key="team:conversation:leader",
+            runtime_session_id="runtime-live",
+            status="running",
+            metadata={
+                "gateway_pid": os.getpid(),
+                "gateway_instance_id": "current-gateway",
+            },
+        )
+
+        with caplog.at_level(logging.WARNING, logger="hermes_state_runs"):
+            status = run_control.session_status(
+                "team-session-live",
+                db=db,
+                current_gateway_instance_id="current-gateway",
+            )
+
+        assert status["running"] is True
+        assert db.get_run("live-run")["status"] == "running"
+        assert "[doxie-run-recovery] active-run-scan" not in caplog.text
+    finally:
+        db.close()
+
+
+def test_run_control_session_status_does_not_fail_fresh_dead_owner_run(tmp_path, caplog):
+    from hermes_state import SessionDB
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("team-session-fresh", "tui")
+        db.upsert_run(
+            run_id="fresh-run",
+            session_id="team-session-fresh",
+            runtime_scope_key="profile:agent-default:version:v1",
+            runtime_session_id="runtime-fresh",
+            status="running",
+            metadata={
+                "gateway_pid": 999_999_998,
+                "gateway_instance_id": "previous-gateway",
+            },
+        )
+
+        with caplog.at_level(logging.WARNING, logger="hermes_state_runs"):
+            status = run_control.session_status(
+                "team-session-fresh",
+                db=db,
+                current_gateway_instance_id="current-gateway",
+            )
+
+        assert status["running"] is True
+        assert db.get_run("fresh-run")["status"] == "running"
+        assert "owner-pid-dead-fresh" in caplog.text or "[doxie-run-recovery] active-run-scan" not in caplog.text
+    finally:
+        db.close()
+
+
+def test_run_control_session_status_recovers_recent_dead_owner_run(tmp_path, caplog):
+    from hermes_state import SessionDB
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("team-session-recent", "tui")
+        recent_time = time.time() - 30
+        db.upsert_run(
+            run_id="recent-run",
+            session_id="team-session-recent",
+            runtime_scope_key="team:conversation:leader",
+            runtime_session_id="runtime-recent",
+            status="running",
+            started_at=recent_time,
+            updated_at=recent_time,
+            metadata={
+                "gateway_pid": 999_999_998,
+                "gateway_instance_id": "previous-gateway",
+            },
+        )
+
+        with caplog.at_level(logging.WARNING, logger="hermes_state_runs"):
+            status = run_control.session_status(
+                "team-session-recent",
+                db=db,
+                current_gateway_instance_id="current-gateway",
+            )
+
+        assert status["running"] is False
+        assert db.get_run("recent-run")["status"] == "failed"
+        assert "owner-pid-dead" in caplog.text
+    finally:
+        db.close()
+
+
+def test_dead_owner_metadata_wins_over_stale_live_runtime_session_snapshot(tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("team-session-stale-live", "tui")
+        recent_time = time.time() - 30
+        db.upsert_run(
+            run_id="dead-owner-run",
+            session_id="team-session-stale-live",
+            runtime_scope_key="team:conversation:leader",
+            runtime_session_id="runtime-stale-live",
+            status="running",
+            started_at=recent_time,
+            updated_at=recent_time,
+            metadata={
+                "gateway_pid": 999_999_998,
+                "gateway_instance_id": "dead-worker",
+            },
+        )
+
+        failed = db.fail_orphaned_active_runs(
+            live_runtime_session_ids={"runtime-stale-live"},
+            current_pid=os.getpid(),
+            current_gateway_instance_id="current-gateway",
+            stale_after_seconds=300,
+            owner_dead_grace_seconds=2,
+        )
+
+        assert failed == 1
+        recovered = db.get_run("dead-owner-run")
+        assert recovered["status"] == "failed"
+        assert recovered["error"] == "runtime owner is no longer available"
+    finally:
+        db.close()
+
+
+def test_run_control_reservation_recovers_dead_gateway_active_run(tmp_path):
+    from hermes_state import SessionDB
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("team-session-submit", "tui")
+        stale_time = time.time() - 301
+        db.upsert_run(
+            run_id="stale-run",
+            session_id="team-session-submit",
+            runtime_scope_key="team:conversation:leader",
+            runtime_session_id="runtime-stale",
+            status="running",
+            started_at=stale_time,
+            updated_at=stale_time,
+            metadata={
+                "gateway_pid": os.getpid(),
+                "gateway_instance_id": "previous-gateway",
+            },
+        )
+
+        reservation = run_control.create_run_if_session_idle(
+            stored_session_id="team-session-submit",
+            run_id="next-run",
+            turn_id="next-turn",
+            runtime_scope_key="team:conversation:leader",
+            runtime_session_id="runtime-current",
+            metadata={
+                "gateway_pid": os.getpid(),
+                "gateway_instance_id": "current-gateway",
+            },
+            db=db,
+        )
+
+        assert reservation["created"] is True
+        assert reservation["conflict"] is None
+        assert reservation["run"]["run_id"] == "next-run"
+        assert db.get_run("stale-run")["status"] == "failed"
+    finally:
+        db.close()
+
+
+def test_run_submit_recovers_dead_gateway_active_run_before_busy_check(tmp_path, monkeypatch):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    run_methods = importlib.import_module("tui_gateway.methods.run")
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("team-session-submit", "tui")
+        stale_time = time.time() - 301
+        db.upsert_run(
+            run_id="stale-run",
+            session_id="team-session-submit",
+            runtime_scope_key="team:conversation:leader",
+            runtime_session_id="runtime-stale",
+            status="running",
+            started_at=stale_time,
+            updated_at=stale_time,
+            metadata={
+                "gateway_pid": os.getpid(),
+                "gateway_instance_id": "previous-gateway",
+            },
+        )
+        monkeypatch.setattr(run_methods, "_get_db", lambda: db)
+        monkeypatch.setattr(
+            run_methods,
+            "_runtime_for_run_target",
+            lambda _rid, _params: (
+                "runtime-current",
+                {"session_key": "team-session-submit"},
+                None,
+            ),
+        )
+
+        def fake_prompt_submit(rid, params):
+            return {
+                "jsonrpc": "2.0",
+                "id": rid,
+                "result": {
+                    "status": "running",
+                    "run_id": params["run_id"],
+                    "turn_id": params["turn_id"],
+                    "stored_session_id": params["stored_session_id"],
+                },
+            }
+
+        monkeypatch.setitem(server._methods, "prompt.submit", fake_prompt_submit)
+
+        response = server._methods["run.submit"](
+            1,
+            {
+                "stored_session_id": "team-session-submit",
+                "client_run_id": "next-run",
+                "turn_id": "next-turn",
+                "runtime_scope_key": "team:conversation:leader",
+                "text": "你好",
+                "persist_user_message": "你好",
+            },
+        )
+
+        assert "error" not in response
+        assert response["result"]["run_id"] == "next-run"
+        assert db.get_run("stale-run")["status"] == "failed"
+        assert db.get_run("next-run")["status"] == "running"
+    finally:
+        db.close()
+
+
+def test_gateway_shutdown_terminalizes_active_run(tmp_path, monkeypatch):
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("team-session-shutdown", "tui")
+        db.upsert_run(
+            run_id="active-run",
+            session_id="team-session-shutdown",
+            runtime_scope_key="team:conversation:leader",
+            runtime_session_id="runtime-live",
+            turn_id="turn-1",
+            status="running",
+            metadata={
+                "gateway_pid": os.getpid(),
+                "gateway_instance_id": "current-gateway",
+            },
+        )
+        monkeypatch.setattr(server, "_get_db", lambda: db)
+
+        session = {
+            "session_key": "team-session-shutdown",
+            "history": [],
+            "history_lock": threading.Lock(),
+            "running": True,
+            "active_run_id": "active-run",
+            "active_turn_id": "turn-1",
+            "active_runtime_scope_key": "team:conversation:leader",
+        }
+
+        server._finalize_session(
+            session,
+            end_reason="test_shutdown",
+            runtime_sid="runtime-live",
+        )
+
+        run = db.get_run("active-run")
+        assert run["status"] == "interrupted"
+        assert run["error"] == ""
+        assert db.list_run_events("team-session-shutdown")[-1]["type"] == "message.complete"
+        assert db.list_run_events("team-session-shutdown")[-1]["payload"]["status"] == "interrupted"
+    finally:
+        db.close()
+
+
+def test_team_conversation_resolve_recovers_dead_gateway_active_run(tmp_path, monkeypatch):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.upsert_team_mission_conversation(
+            conversation_id="conversation-1",
+            stable_session_id="team-session-resolve",
+            team_id="team-1",
+            title="团队会话",
+        )
+        stale_time = time.time() - 301
+        db.upsert_run(
+            run_id="stale-run",
+            session_id="team-session-resolve",
+            runtime_scope_key="team:conversation:leader",
+            runtime_session_id="runtime-stale",
+            status="running",
+            started_at=stale_time,
+            updated_at=stale_time,
+            metadata={
+                "gateway_pid": os.getpid(),
+                "gateway_instance_id": "previous-gateway",
+            },
+        )
+        monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+
+        response = server._methods["team_mission.conversation.resolve"](
+            1,
+            {"identifier": "conversation-1"},
+        )
+
+        assert response["result"]["conversation"]["stable_session_id"] == "team-session-resolve"
+        assert db.get_run("stale-run")["status"] == "failed"
     finally:
         db.close()
 
@@ -637,6 +1026,10 @@ def test_session_db_replays_run_events_by_runtime_scope(tmp_path):
             runtime_scope_key="profile:agent-a:version:v2",
         )
         assert [item["run_id"] for item in v2_events] == ["run-v2"]
+        assert [
+            item["payload"]["text"]
+            for item in db.list_run_events("session-1", run_id="run-v2")
+        ] == ["v2"]
 
         assert db.list_run_events(
             "session-1",

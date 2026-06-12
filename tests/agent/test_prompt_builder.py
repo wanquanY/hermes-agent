@@ -19,6 +19,7 @@ from agent.prompt_builder import (
     build_nous_subscription_prompt,
     build_context_files_prompt,
     build_environment_hints,
+    load_soul_md,
     CONTEXT_FILE_MAX_CHARS,
     DEFAULT_AGENT_IDENTITY,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
@@ -491,15 +492,15 @@ class TestBuildNousSubscriptionPrompt:
 
 
 class TestBuildContextFilesPrompt:
-    def test_empty_dir_loads_seeded_global_soul(self, tmp_path):
+    def test_empty_dir_does_not_seed_global_soul(self, tmp_path):
         from unittest.mock import patch
 
         fake_home = tmp_path / "fake_home"
         fake_home.mkdir()
         with patch("pathlib.Path.home", return_value=fake_home):
             result = build_context_files_prompt(cwd=str(tmp_path))
-        assert "Project Context" in result
-        assert "Hermes Agent" in result
+        assert result == ""
+        assert not (fake_home / ".hermes" / "SOUL.md").exists()
 
     def test_loads_agents_md(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text("Use Ruff for linting.")
@@ -539,6 +540,18 @@ class TestBuildContextFilesPrompt:
         (hermes_home / "SOUL.md").write_text("\n\n", encoding="utf-8")
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert result == ""
+
+    def test_load_soul_md_is_pure_read(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "missing_home"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        def fail_if_initialized():
+            raise AssertionError("load_soul_md must not initialize HERMES_HOME")
+
+        monkeypatch.setattr("hermes_cli.config.ensure_hermes_home", fail_if_initialized)
+
+        assert load_soul_md() is None
+        assert not hermes_home.exists()
 
     def test_blocks_injection_in_agents_md(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text(
@@ -1192,6 +1205,4 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
-
 
