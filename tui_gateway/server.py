@@ -2809,6 +2809,43 @@ def _resolve_notification_event_session(evt: dict) -> tuple[str, dict] | None:
     return None
 
 
+def _notification_event_dedup_key(evt: dict) -> tuple:
+    """Return the UI-emission identity for a process notification event.
+
+    Completion events are terminal notifications for a background process, so
+    they remain one-shot per process session. Watch-match events are not
+    terminal: a single background process can legitimately match the same or
+    different patterns many times, so include event-specific content to avoid
+    suppressing later distinct matches from the same process.
+    """
+    evt_type = evt.get("type", "completion")
+    evt_sid = evt.get("session_id", "")
+    if evt_type == "watch_match":
+        return (
+            evt_sid,
+            evt_type,
+            evt.get("command", ""),
+            evt.get("pattern", ""),
+            evt.get("output", ""),
+            evt.get("suppressed", 0),
+            evt.get("message_id", ""),
+        )
+    if evt_type.startswith("watch_overflow_") or evt_type == "watch_disabled":
+        return (
+            evt_sid,
+            evt_type,
+            evt.get("command", ""),
+            evt.get("message", ""),
+            evt.get("suppressed", 0),
+        )
+    if evt_type == "async_delegation":
+        # Async-delegation completions have no process session_id; without
+        # this the fallthrough keys every one as ("", "async_delegation")
+        # and the second completion's status update is suppressed forever.
+        return (evt.get("delegation_id", ""), evt_type)
+    return (evt_sid, evt_type)
+
+
 def _notification_poller_loop(
     stop_event: threading.Event,
     sid: str,
