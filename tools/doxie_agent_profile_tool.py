@@ -896,14 +896,6 @@ def get_agent_profile(**kwargs) -> str:
     return _backend_tool_result("doxie_agent_profile_resolve", kwargs)
 
 
-def list_agent_profile_versions(**kwargs) -> str:
-    return _backend_tool_result("doxie_agent_profile_version_list", kwargs)
-
-
-def get_agent_profile_version(**kwargs) -> str:
-    return _backend_tool_result("doxie_agent_profile_version_get", kwargs)
-
-
 def create_agent_profile_revision_draft(**kwargs) -> str:
     try:
         draft = _backend_call("doxie_agent_profile_draft_create_revision", _contextual_payload(kwargs))
@@ -1226,25 +1218,12 @@ for _name, _description, _handler, _properties in [
         {"agentProfileId": {"type": "string"}, "slug": {"type": "string"}},
     ),
     (
-        "list_agent_profile_versions",
-        "List immutable published versions for a Doxie agent profile.",
-        list_agent_profile_versions,
-        {"agentProfileId": {"type": "string"}},
-    ),
-    (
-        "get_agent_profile_version",
-        "Get an immutable published Doxie agent profile version.",
-        get_agent_profile_version,
-        {"agentProfileId": {"type": "string"}, "versionId": {"type": "string"}},
-    ),
-    (
         "create_agent_profile_revision_draft",
-        "Create an editable revision draft from an existing published Doxie agent profile/version.",
+        "Create an editable revision draft from the latest published Doxie agent profile.",
         create_agent_profile_revision_draft,
         {
             "agentProfileId": {"type": "string"},
             "targetAgentProfileId": {"type": "string"},
-            "versionId": {"type": "string"},
         },
     ),
     (

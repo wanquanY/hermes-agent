@@ -10,6 +10,18 @@ from tui_gateway.services.persistence.gateway_store import get_gateway_state_sto
 from tui_gateway.services.workspaces.domain import Workspace
 
 
+def _text(value: Any = "") -> str:
+    return str(value or "").strip()
+
+
+def _first_text(*values: Any) -> str:
+    for value in values:
+        normalized = _text(value)
+        if normalized:
+            return normalized
+    return ""
+
+
 def normalize_session_cwd(value: Any = None) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -45,18 +57,37 @@ def _workspace_name_for_path(path: str) -> str:
 def workspace_from_params(params: dict, cwd: str) -> dict:
     raw = params.get("workspace")
     workspace = raw if isinstance(raw, dict) else {}
-    workspace_path = normalize_session_cwd(workspace.get("path") or cwd)
+    workspace_path = normalize_session_cwd(_first_text(
+        workspace.get("path"),
+        workspace.get("workspace_path"),
+        workspace.get("workspacePath"),
+        cwd,
+    ))
     if not is_path_inside(cwd, workspace_path):
         raise ValueError(
             f"cwd must be inside workspace path: cwd={cwd} workspace={workspace_path}"
         )
 
-    explicit_id = workspace.get("id") or workspace.get("workspace_id")
+    explicit_id = _first_text(
+        workspace.get("id"),
+        workspace.get("workspace_id"),
+        workspace.get("workspaceId"),
+    )
     model = Workspace(
         id=str(explicit_id or _workspace_id_for_path(workspace_path)),
-        name=str(workspace.get("name") or _workspace_name_for_path(workspace_path)),
+        name=_first_text(
+            workspace.get("name"),
+            workspace.get("workspace_name"),
+            workspace.get("workspaceName"),
+            _workspace_name_for_path(workspace_path),
+        ),
         path=workspace_path,
-        kind=str(workspace.get("kind") or "local"),
+        kind=_first_text(
+            workspace.get("kind"),
+            workspace.get("workspace_kind"),
+            workspace.get("workspaceKind"),
+            "local",
+        ),
     )
     payload = model.to_payload()
     # Hermes stores this only as a runtime/session cache for artifact lookup and
@@ -72,6 +103,7 @@ def bind_session_workspace(
     session_id: str,
     cwd: str,
     workspace: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     store = get_gateway_state_store()
     persisted = store.upsert_workspace(workspace)
@@ -79,17 +111,12 @@ def bind_session_workspace(
         session_id=session_id,
         workspace_id=persisted["id"],
         cwd=cwd,
+        metadata=metadata,
     )
     return persisted
 
 
-def workspace_for_session(session_id: str) -> dict[str, Any] | None:
-    store = get_gateway_state_store(create_if_missing=False)
-    if store is None:
-        return None
-    row = store.get_session_workspace(session_id)
-    if not row:
-        return None
+def _workspace_payload_from_row(row: dict[str, Any]) -> dict[str, Any]:
     authority = "hermes_runtime_cache" if str(row["id"]).startswith("local:") else "doxie"
     return {
         "id": row["id"],
@@ -100,9 +127,76 @@ def workspace_for_session(session_id: str) -> dict[str, Any] | None:
         "session_id": row["session_id"],
         "authority": authority,
         "runtime_cache": True,
+        "metadata": row.get("metadata") if isinstance(row.get("metadata"), dict) else {},
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
+
+
+def workspace_for_session(session_id: str) -> dict[str, Any] | None:
+    store = get_gateway_state_store(create_if_missing=False)
+    if store is None:
+        return None
+    row = store.get_session_workspace(session_id)
+    if not row:
+        return None
+    return _workspace_payload_from_row(row)
+
+
+def session_workspace_binding(session_id: str) -> dict[str, Any] | None:
+    workspace = workspace_for_session(session_id)
+    if not workspace:
+        return None
+    metadata = workspace.get("metadata") if isinstance(workspace.get("metadata"), dict) else {}
+    return {
+        "session_id": workspace["session_id"],
+        "workspace_id": workspace["id"],
+        "workspace_path": workspace["path"],
+        "cwd": workspace.get("cwd") or workspace["path"],
+        "workspace": workspace,
+        "metadata": metadata,
+        **metadata,
+    }
+
+
+def list_session_workspace_bindings(limit: int = 200) -> list[dict[str, Any]]:
+    store = get_gateway_state_store(create_if_missing=False)
+    if store is None:
+        return []
+    bindings = []
+    for row in store.list_session_workspaces(limit=limit):
+        workspace = _workspace_payload_from_row(row)
+        metadata = workspace.get("metadata") if isinstance(workspace.get("metadata"), dict) else {}
+        bindings.append({
+            "session_id": workspace["session_id"],
+            "workspace_id": workspace["id"],
+            "workspace_path": workspace["path"],
+            "cwd": workspace.get("cwd") or workspace["path"],
+            "workspace": workspace,
+            "metadata": metadata,
+            **metadata,
+        })
+    return bindings
+
+
+def delete_session_workspace_bindings(session_ids: list[str]) -> list[dict[str, Any]]:
+    store = get_gateway_state_store(create_if_missing=False)
+    if store is None:
+        return []
+    removed = []
+    for row in store.delete_session_workspaces(session_ids):
+        workspace = _workspace_payload_from_row(row)
+        metadata = workspace.get("metadata") if isinstance(workspace.get("metadata"), dict) else {}
+        removed.append({
+            "session_id": workspace["session_id"],
+            "workspace_id": workspace["id"],
+            "workspace_path": workspace["path"],
+            "cwd": workspace.get("cwd") or workspace["path"],
+            "workspace": workspace,
+            "metadata": metadata,
+            **metadata,
+        })
+    return removed
 
 
 def list_workspaces(limit: int = 200) -> list[dict[str, Any]]:

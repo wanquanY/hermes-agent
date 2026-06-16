@@ -374,8 +374,6 @@ def compress_context(
 
     if agent._session_db:
         try:
-            # Propagate title to the new session with auto-numbering
-            old_title = agent._session_db.get_session_title(agent.session_id)
             # Trigger memory extraction on the old session before it rotates.
             agent.commit_memory_session(messages)
             agent._session_db.end_session(agent.session_id, "compression")
@@ -396,13 +394,6 @@ def compress_context(
                 parent_session_id=old_session_id,
             )
             agent._session_db_created = True
-            # Auto-number the title for the continuation session
-            if old_title:
-                try:
-                    new_title = agent._session_db.get_next_title_in_lineage(old_title)
-                    agent._session_db.set_session_title(agent.session_id, new_title)
-                except (ValueError, Exception) as e:
-                    logger.debug("Could not propagate title on compression: %s", e)
             agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
             # Reset flush cursor — new session starts with no messages written
             agent._last_flushed_db_idx = 0

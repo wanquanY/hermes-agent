@@ -7,29 +7,166 @@ import uuid
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
+from hermes_team_leader_runtime_context import resolve_team_leader_runtime_params, resolve_team_runtime_members
+from hermes_team_mission_artifact_refs import artifact_refs_from_payload
+from hermes_team_mission_conversation_state import is_placeholder_team_mission_conversation_title as _is_placeholder_team_mission_conversation_title
 from hermes_team_mission_conversation_utils import append_user_task_message as _append_team_user_task_message
 from hermes_team_mission_conversation_utils import conversation_session_id as _team_conversation_session_id
 from hermes_team_mission_modes import strategy_for_mode
+from hermes_team_mission_profile_tools import team_mission_control_db as _team_mission_control_db
 from tui_gateway.methods._shared import bind_server_globals
+from tui_gateway.methods.team_registry import _team_for_projection as _registry_team_for_projection
+from tui_gateway.services.artifacts import delete_session_artifacts
 from tui_gateway.services import run_control
 from tui_gateway.services.profile_context import enter_profile_context as _enter_profile_context_for_team
 from tui_gateway.services.profile_context import leave_profile_context as _leave_profile_context_for_team
 from tui_gateway.services.profile_context import profile_context_for_params as _profile_context_for_params
+from tui_gateway.services.prompt_attachments import submitted_attachments as _submitted_attachments
+from tui_gateway.services.team_mission_conversation_recovery import recover_conversation_active_run
 from tui_gateway.services.team_mission_leader_runs import ensure_team_leader_message_run_state
+from tui_gateway.services.team_mission_workspace import (
+    bind_team_mission_session_workspace,
+    resolve_team_mission_workspace_context,
+    workspace_id_from_params as _team_workspace_id_from_params,
+    workspace_path_from_params as _team_workspace_path_from_params,
+    workspace_payload_from_params as _team_workspace_payload_from_params,
+)
 from tui_gateway.services.team_mission_scheduler import TeamMissionReadyScheduler
+from tui_gateway.services.workspace import delete_session_workspace_bindings
 
 _server = bind_server_globals(globals())
 
+
+def _get_db():
+    return _team_mission_control_db()
+
+
+def _get_runtime_db():
+    try:
+        return _server._get_db()
+    except Exception:
+        return None
+
+
+def _team_detail_projection_for_conversation(db, conversation: dict | None = None, mission: dict | None = None) -> dict:
+    conversation = conversation if isinstance(conversation, dict) else {}
+    mission = mission if isinstance(mission, dict) else {}
+    team_id = str(
+        conversation.get("team_id")
+        or conversation.get("teamId")
+        or mission.get("team_id")
+        or mission.get("teamId")
+        or ""
+    ).strip()
+    if not team_id:
+        return {}
+    if not hasattr(db, "get_agent_team_with_members") and not hasattr(db, "get_agent_team"):
+        return {}
+    team = db.get_agent_team_with_members(team_id) if hasattr(db, "get_agent_team_with_members") else db.get_agent_team(team_id)
+    if not isinstance(team, dict) or not team:
+        return {}
+    members = team.get("members") if isinstance(team.get("members"), list) else []
+    if not members and hasattr(db, "list_agent_team_members"):
+        members = db.list_agent_team_members(team_id)
+    return _registry_team_for_projection(
+        team,
+        members=members if isinstance(members, list) else [],
+        projection="detail",
+        include_members=True,
+    )
+
+
+def _attach_team_detail_projection(db, result: dict) -> dict:
+    if not isinstance(result, dict) or not result:
+        return result
+    conversation = result.get("conversation") if isinstance(result.get("conversation"), dict) else {}
+    mission = result.get("mission") if isinstance(result.get("mission"), dict) else {}
+    team = _team_detail_projection_for_conversation(db, conversation, mission)
+    if not team:
+        return result
+    graph = result.get("graph") if isinstance(result.get("graph"), dict) else {}
+    return {
+        **result,
+        "team": team,
+        "graph": {
+            **graph,
+            "team": team,
+        } if graph else graph,
+    }
+
+
+def _conversation_title_from_submit(db, params: dict, text: str) -> str:
+    message_title = str(
+        params.get("persist_user_message")
+        or params.get("persistUserMessage")
+        or params.get("draft_text")
+        or params.get("draftText")
+        or text
+        or ""
+    ).strip()
+    message_title = " ".join(message_title.split())
+    if not message_title:
+        return ""
+    try:
+        return db.sanitize_title(message_title[:100].rstrip()) or ""
+    except Exception:
+        return ""
+
+
+def _ensure_team_mission_runtime_session_shell(stable_session_id: str) -> str:
+    stable_session_id = str(stable_session_id or "").strip()
+    if not stable_session_id or not os.getenv("DOXIE_HERMES_CONTROL_HOME"):
+        return ""
+    runtime_db = _get_runtime_db()
+    if runtime_db is None:
+        return "team mission runtime state db unavailable"
+    try:
+        if not runtime_db.get_session(stable_session_id):
+            runtime_db.create_session(stable_session_id, source="team_mission", transient=False)
+    except Exception:
+        return "team mission runtime session shell unavailable"
+    return ""
+
+
 _TEAM_LEADER_TOOLSET_SCOPE = "exact"
 _TEAM_LEADER_CONVERSATION_TOOLSETS = (
-    "team_mission_leader",
+    "team_mission_conversation_leader",
     "clarify",
+    "vision",
     "file",
     "terminal",
     "todo",
 )
 _TEAM_LEADER_DISABLED_TOOLSETS = ("delegation",)
 _TEAM_LEADER_BLOCKED_TOOLS = ("delegate_task",)
+_TEAM_LEADER_DIRECT_REPLY_REASONING_CONFIG = {"enabled": False}
+_TEAM_LEADER_DIRECT_REPLY_MARKERS = (
+    "不要启动团队任务",
+    "不要发起团队任务",
+    "不要创建团队任务",
+    "不要启动任务",
+    "不要发起任务",
+    "不要创建任务",
+    "不需要团队任务",
+    "无需团队任务",
+    "别启动团队任务",
+    "别发起团队任务",
+    "自己完成",
+    "你自己完成",
+    "你来完成",
+    "leader自己完成",
+    "leader 直接完成",
+    "do not start a team mission",
+    "don't start a team mission",
+    "do not start team mission",
+    "don't start team mission",
+    "do not launch a team mission",
+    "don't launch a team mission",
+    "do not start a team task",
+    "don't start a team task",
+    "answer directly",
+    "reply directly",
+)
 
 
 def _mission_id_from_params(params: dict) -> str:
@@ -38,6 +175,31 @@ def _mission_id_from_params(params: dict) -> str:
         or params.get("missionId")
         or ""
     ).strip()
+
+
+def _graph_mission_ids(graph: dict) -> set[str]:
+    graph = graph if isinstance(graph, dict) else {}
+    mission_ids: set[str] = set()
+    mission = graph.get("mission")
+    if isinstance(mission, dict):
+        mission_id = str(
+            mission.get("mission_id")
+            or mission.get("missionId")
+            or ""
+        ).strip()
+        if mission_id:
+            mission_ids.add(mission_id)
+    for frame in graph.get("task_frames") or graph.get("taskFrames") or []:
+        if not isinstance(frame, dict):
+            continue
+        mission_id = str(
+            frame.get("missionId")
+            or frame.get("mission_id")
+            or ""
+        ).strip()
+        if mission_id:
+            mission_ids.add(mission_id)
+    return mission_ids
 
 
 def _bounded_limit(value, default: int = 2000, maximum: int = 10000) -> int:
@@ -77,32 +239,15 @@ def _edge_payload_from_params(params: dict) -> dict:
 
 
 def _workspace_payload(params: dict) -> dict:
-    workspace = params.get("workspace")
-    return workspace if isinstance(workspace, dict) else {}
+    return _team_workspace_payload_from_params(params)
 
 
 def _workspace_id_from_params(params: dict) -> str:
-    workspace = _workspace_payload(params)
-    return str(
-        params.get("workspace_id")
-        or params.get("workspaceId")
-        or workspace.get("workspace_id")
-        or workspace.get("workspaceId")
-        or workspace.get("id")
-        or ""
-    ).strip()
+    return _team_workspace_id_from_params(params)
 
 
 def _workspace_path_from_params(params: dict) -> str:
-    workspace = _workspace_payload(params)
-    return str(
-        params.get("workspace_path")
-        or params.get("workspacePath")
-        or workspace.get("workspace_path")
-        or workspace.get("workspacePath")
-        or workspace.get("path")
-        or ""
-    ).strip()
+    return _team_workspace_path_from_params(params)
 
 
 def _team_capability_payload(params: dict) -> dict:
@@ -118,18 +263,6 @@ def _team_capability_payload(params: dict) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-def _team_capability_source_packet(params: dict) -> dict:
-    payload = _team_capability_payload(params)
-    source_packet = (
-        payload.get("source_packet")
-        or payload.get("sourcePacket")
-        or params.get("team_capability_source_packet")
-        or params.get("teamCapabilitySourcePacket")
-        or {}
-    )
-    return source_packet if isinstance(source_packet, dict) else {}
-
-
 def _team_capability_snapshot_id(params: dict) -> str:
     payload = _team_capability_payload(params)
     return str(
@@ -141,28 +274,6 @@ def _team_capability_snapshot_id(params: dict) -> str:
         or params.get("teamCapabilitySnapshotId")
         or ""
     ).strip()
-
-
-def _team_capability_source_digest(params: dict) -> str:
-    payload = _team_capability_payload(params)
-    return str(
-        payload.get("source_digest")
-        or payload.get("sourceDigest")
-        or params.get("team_capability_source_digest")
-        or params.get("teamCapabilitySourceDigest")
-        or ""
-    ).strip()
-
-
-def _team_capability_force_refresh(params: dict) -> bool:
-    payload = _team_capability_payload(params)
-    return _truthy(
-        payload.get("force_refresh")
-        or payload.get("forceRefresh")
-        or payload.get("refresh")
-        or params.get("team_capability_force_refresh")
-        or params.get("teamCapabilityForceRefresh")
-    )
 
 
 def _snapshot_binding_metadata(snapshot: dict) -> dict:
@@ -233,25 +344,33 @@ def _resolve_team_capability_snapshot_for_params(db, params: dict, *, team_id: s
     snapshot_id = _team_capability_snapshot_id(params)
     if snapshot_id:
         return db.get_team_capability_snapshot(snapshot_id)
-    return _resolve_team_capability_snapshot_from_source_packet(db, params, team_id=team_id)
-
-
-def _resolve_team_capability_snapshot_from_source_packet(db, params: dict, *, team_id: str = "") -> dict:
-    source_packet = _team_capability_source_packet(params)
-    if not source_packet:
+    resolved_team_id = str(team_id or params.get("team_id") or params.get("teamId") or "").strip()
+    if not resolved_team_id:
         return {}
+    return _resolve_team_capability_snapshot_from_registry(db, params, team_id=resolved_team_id)
+
+
+def _resolve_team_capability_snapshot_from_registry(
+    db,
+    params: dict,
+    *,
+    team_id: str = "",
+    force_refresh: bool = False,
+) -> dict:
+    resolved_team_id = str(team_id or params.get("team_id") or params.get("teamId") or "").strip()
+    if not resolved_team_id:
+        return {}
+    registry_payload = _team_capability_registry_payload(db, params, team_id=resolved_team_id)
     return db.resolve_team_capability_snapshot(
-        team_id=team_id or str(params.get("team_id") or params.get("teamId") or ""),
-        source_packet=source_packet,
-        source_digest_value=_team_capability_source_digest(params),
-        force_refresh=_team_capability_force_refresh(params),
+        team_id=resolved_team_id,
+        source_packet=registry_payload,
+        force_refresh=force_refresh,
     )
 
 
 def _team_id_for_profile(params: dict, *, mission: dict | None = None, conversation: dict | None = None) -> str:
     mission = mission if isinstance(mission, dict) else {}
     conversation = conversation if isinstance(conversation, dict) else {}
-    source_packet = _team_capability_source_packet(params)
     return str(
         params.get("team_id")
         or params.get("teamId")
@@ -259,10 +378,136 @@ def _team_id_for_profile(params: dict, *, mission: dict | None = None, conversat
         or mission.get("teamId")
         or conversation.get("team_id")
         or conversation.get("teamId")
-        or source_packet.get("teamId")
-        or source_packet.get("team_id")
         or ""
     ).strip()
+
+
+def _archived_team_write_error(db, team_id: str) -> str:
+    resolved_team_id = str(team_id or "").strip()
+    if not resolved_team_id or not hasattr(db, "get_agent_team"):
+        return ""
+    try:
+        team = db.get_agent_team(resolved_team_id)
+    except Exception:
+        return ""
+    if isinstance(team, dict) and str(team.get("status") or "").strip().lower() == "archived":
+        return f"team archived: {resolved_team_id}"
+    return ""
+
+
+def _text_list(value) -> list[str]:
+    if isinstance(value, str):
+        raw_items = value.replace("\n", ",").split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = []
+    result = []
+    seen = set()
+    for item in raw_items:
+        normalized = str(item or "").strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def _profile_id_from_team_member(member: dict) -> str:
+    return str(
+        member.get("agent_profile_id")
+        or member.get("agentProfileId")
+        or member.get("profile_id")
+        or member.get("profileId")
+        or ""
+    ).strip()
+
+
+def _profile_for_team_member(db, member: dict) -> dict:
+    profile_id = _profile_id_from_team_member(member)
+    if not profile_id or not hasattr(db, "get_agent_profile"):
+        return {}
+    profile = db.get_agent_profile(profile_id)
+    return profile if isinstance(profile, dict) else {}
+
+
+def _team_capability_registry_payload(db, params: dict, *, team_id: str = "") -> dict:
+    resolved_team_id = str(team_id or params.get("team_id") or params.get("teamId") or "").strip()
+    if not resolved_team_id:
+        raise ValueError("team_id required")
+    if not hasattr(db, "get_agent_team"):
+        raise ValueError("team registry unavailable")
+    team = db.get_agent_team(resolved_team_id)
+    if not isinstance(team, dict) or not team:
+        raise ValueError(f"team not found: {resolved_team_id}")
+    runtime_members = resolve_team_runtime_members({"team_id": resolved_team_id}, db=db)
+    members = []
+    for member in runtime_members:
+        if not isinstance(member, dict):
+            continue
+        profile = _profile_for_team_member(db, member)
+        doxie_profile = member.get("doxie_profile") if isinstance(member.get("doxie_profile"), dict) else {}
+        members.append({
+            "memberId": str(member.get("member_id") or member.get("memberId") or member.get("id") or "").strip(),
+            "agentProfileId": _profile_id_from_team_member(member),
+            "agentProfileVersionId": str(
+                member.get("agent_profile_version_id")
+                or member.get("agentProfileVersionId")
+                or profile.get("agent_profile_version_id")
+                or profile.get("agentProfileVersionId")
+                or profile.get("current_version_id")
+                or profile.get("currentVersionId")
+                or ""
+            ).strip(),
+            "displayName": str(
+                profile.get("name")
+                or doxie_profile.get("name")
+                or member.get("display_name")
+                or member.get("displayName")
+                or ""
+            ).strip(),
+            "avatar": str(profile.get("avatar") or doxie_profile.get("avatar") or "").strip(),
+            "role": str(member.get("role") or "member").strip(),
+            "capabilityTags": _text_list(member.get("capability_tags") or member.get("capabilityTags")),
+            "autoAssignable": member.get("auto_assignable", member.get("autoAssignable", True)) is not False,
+            "maxConcurrentNodes": max(1, int(member.get("max_concurrent_nodes") or member.get("maxConcurrentNodes") or 1)),
+            "permissionMode": str(member.get("permission_mode") or member.get("permissionMode") or "").strip(),
+            "profile": {
+                "description": str(profile.get("description") or "").strip(),
+                "category": str(profile.get("category") or "").strip(),
+                "tags": _text_list(profile.get("tags")),
+                "defaultToolsets": _text_list(
+                    profile.get("defaultToolsets")
+                    or profile.get("default_toolsets")
+                    or member.get("defaultToolsets")
+                    or member.get("default_toolsets")
+                ),
+                "recommendedSkills": _text_list(
+                    profile.get("recommendedSkills")
+                    or profile.get("recommended_skills")
+                    or member.get("recommendedSkills")
+                    or member.get("recommended_skills")
+                ),
+            },
+        })
+    return {
+        "teamId": resolved_team_id,
+        "teamRevision": str(team.get("updated_at") or team.get("updatedAt") or ""),
+        "team": {
+            "name": str(team.get("name") or "").strip(),
+            "description": str(team.get("description") or "").strip(),
+            "defaultMode": str(team.get("default_mode") or team.get("defaultMode") or "").strip(),
+            "policy": team.get("policy") if isinstance(team.get("policy"), dict) else {},
+        },
+        "members": members,
+    }
+
+
+def _team_runtime_members_from_registry(db, params: dict, *, mission: dict | None = None, team_id: str = "") -> list[dict]:
+    seed = dict(params or {})
+    if team_id:
+        seed["team_id"] = team_id
+        seed["teamId"] = team_id
+    return resolve_team_runtime_members(seed, mission=mission, db=db)
 
 
 def _bind_team_capability_snapshot_for_mission(db, *, mission_id: str, conversation_id: str, snapshot: dict) -> dict:
@@ -416,11 +661,16 @@ def _node_phase(node: dict) -> str:
 
 def _task_id_from_metadata(metadata: dict) -> str:
     metadata = metadata if isinstance(metadata, dict) else {}
+    active_task = metadata.get("active_task") if isinstance(metadata.get("active_task"), dict) else {}
     return str(
         metadata.get("task_id")
         or metadata.get("taskId")
+        or metadata.get("active_task_id")
+        or metadata.get("activeTaskId")
         or metadata.get("submitted_task_id")
         or metadata.get("submittedTaskId")
+        or active_task.get("task_id")
+        or active_task.get("taskId")
         or ""
     ).strip()
 
@@ -504,7 +754,7 @@ def _strategy_start_text(params: dict, mission: dict, node: dict) -> str:
             mission_id=str(mission.get("mission_id") or ""),
             title=title,
             objective=objective,
-            members=params.get("members") or (mission.get("metadata") or {}).get("members") or (),
+            members=(mission.get("metadata") or {}).get("members") or (),
         )
     return str(explicit_text or node.get("objective") or node.get("title") or "").strip()
 
@@ -530,8 +780,8 @@ def _member_default_toolsets(member: dict) -> list[str]:
     )
 
 
-def _member_for_node(params: dict, mission: dict, node: dict) -> dict:
-    for member in _leader_members_from_params(params, mission if isinstance(mission, dict) else {}):
+def _member_for_node(params: dict, mission: dict, node: dict, *, db=None) -> dict:
+    for member in _leader_members_from_params(params, mission if isinstance(mission, dict) else {}, db=db):
         if _member_matches_node_profile(member, node):
             return member
     return {}
@@ -553,17 +803,16 @@ def _profile_current_toolsets(profile_params: dict) -> list[str]:
         _leave_profile_context_for_team(token)
 
 
-def _start_toolsets(params: dict, mission: dict, node: dict, *, profile_params: dict | None = None) -> list[str]:
+def _start_toolsets(params: dict, mission: dict, node: dict, *, profile_params: dict | None = None, db=None) -> list[str]:
     if _is_team_leader_control_node(node):
-        toolsets = ["team_mission_leader"]
         if _node_phase(node) in {"planning", "change_request"}:
-            toolsets.append("team_mission_planning")
-        return toolsets
+            return ["team_mission_planning"]
+        return ["team_mission_read"]
     toolsets = _normalize_toolsets(params.get("enabled_toolsets") or params.get("enabledToolsets"))
     if not toolsets:
         toolsets = _profile_current_toolsets(profile_params or {})
     if not toolsets:
-        toolsets = _member_default_toolsets(_member_for_node(params, mission, node))
+        toolsets = _member_default_toolsets(_member_for_node(params, mission, node, db=db))
     if _should_use_strategy_start_text(params, mission, node) and _node_phase(node) in {"planning", "change_request"}:
         if "team_mission_planning" not in toolsets:
             toolsets.append("team_mission_planning")
@@ -724,29 +973,141 @@ def _root_leader_node(graph: dict) -> dict:
     return {}
 
 
-def _leader_members_from_params(params: dict, mission: dict) -> list[dict]:
-    members = params.get("members")
-    if not isinstance(members, list):
-        metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
-        members = metadata.get("members") if isinstance(metadata.get("members"), list) else []
-    return [dict(item) for item in members if isinstance(item, dict)]
+def _leader_members_from_params(params: dict, mission: dict, *, db=None, strict: bool = False) -> list[dict]:
+    metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+    members = metadata.get("members") if isinstance(metadata.get("members"), list) else []
+    resolved = [dict(item) for item in members if isinstance(item, dict)]
+    if resolved:
+        return resolved
+    try:
+        return resolve_team_runtime_members(params, mission=mission if isinstance(mission, dict) else {}, db=db)
+    except ValueError:
+        if strict:
+            raise
+    return []
 
 
 def _recover_conversation_active_run(db, conversation: dict | None) -> None:
+    recover_conversation_active_run(
+        db=db,
+        conversation=conversation,
+        current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+    )
+
+
+_TEAM_MISSION_ACTIVE_STATUSES = {
+    "planning",
+    "running",
+    "partially_blocked",
+    "blocked",
+    "verifying",
+    "waiting_approval",
+}
+_TEAM_MISSION_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "canceled"}
+_TEAM_MISSION_ACTIVE_NODE_STATUSES = {"starting", "running", "waiting_approval"}
+
+
+def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
     if not isinstance(conversation, dict):
-        return
+        return {}
     stable_session_id = str(
         conversation.get("stable_session_id")
         or conversation.get("stableSessionId")
         or ""
     ).strip()
-    if not stable_session_id:
-        return
-    run_control.session_status(
+    conversation_id = str(
+        conversation.get("conversation_id")
+        or conversation.get("conversationId")
+        or ""
+    ).strip()
+    mission_id = str(
+        conversation.get("active_mission_id")
+        or conversation.get("activeMissionId")
+        or conversation.get("mission_id")
+        or conversation.get("missionId")
+        or ""
+    ).strip()
+    runtime_summary = {}
+    summary_fn = getattr(db, "get_team_mission_conversation_runtime_summary", None)
+    if callable(summary_fn) and conversation_id:
+        runtime_summary = summary_fn(conversation_id) or {}
+    if isinstance(runtime_summary, dict):
+        mission_id = str(runtime_summary.get("active_mission_id") or mission_id or "").strip()
+    graph = db.get_team_mission_graph(mission_id) if mission_id and not runtime_summary else {}
+    mission = (
+        runtime_summary.get("mission") if isinstance(runtime_summary, dict) else {}
+    ) or (graph.get("mission") if isinstance(graph, dict) else {})
+    mission = mission if isinstance(mission, dict) else {}
+    mission_status = str(mission.get("status") or conversation.get("status") or "").strip()
+    if isinstance(runtime_summary, dict) and runtime_summary.get("mission_status"):
+        mission_status = str(runtime_summary.get("mission_status") or "").strip()
+    nodes = [node for node in (graph.get("nodes") if isinstance(graph, dict) else []) or [] if isinstance(node, dict)]
+    active_nodes = [
+        node for node in nodes
+        if str(node.get("status") or "").strip() in _TEAM_MISSION_ACTIVE_NODE_STATUSES
+    ]
+    active_node_count = int(runtime_summary.get("active_node_count") or 0) if isinstance(runtime_summary, dict) else len(active_nodes)
+    pending_approvals = [
+        item for item in (
+            runtime_summary.get("pending_approvals")
+            if isinstance(runtime_summary, dict)
+            else []
+        ) or []
+        if isinstance(item, dict)
+    ]
+    approval_waiting = bool(pending_approvals) or any(
+        str(node.get("kind") or "").strip() == "approval_gate"
+        and str(node.get("status") or "").strip() == "waiting_approval"
+        for node in nodes
+    )
+    run_state = run_control.session_status(
         stable_session_id,
         db=db,
         current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+    ) if stable_session_id else {}
+    leader_running = bool(run_state.get("running"))
+    mission_running = bool(active_node_count) or mission_status in _TEAM_MISSION_ACTIVE_STATUSES
+    terminal = mission_status in _TEAM_MISSION_TERMINAL_STATUSES
+    running = bool(leader_running or (mission_running and not terminal))
+    waiting_approval = approval_waiting or mission_status == "waiting_approval"
+    projected_state = "waiting_approval" if waiting_approval else "running" if running else (
+        "completed" if mission_status == "completed"
+        else "failed" if mission_status == "failed"
+        else "cancelled" if mission_status in {"cancelled", "canceled"}
+        else "idle"
     )
+    projection = {
+        "running": running,
+        "run_state": projected_state,
+        "activity_state": projected_state,
+        "waiting_approval": waiting_approval,
+        "pending_approval_count": len(pending_approvals) if pending_approvals else (1 if waiting_approval else 0),
+        "pending_approvals": pending_approvals,
+        "mission_status": mission_status,
+        "status": mission_status or str(conversation.get("status") or "").strip(),
+        "active_mission_id": mission_id,
+        "activeMissionId": mission_id,
+        "active_run_id": str(run_state.get("active_run_id") or "") if running else "",
+        "active_turn_id": str(run_state.get("active_turn_id") or "") if running else "",
+        "active_runtime_session_id": str(run_state.get("active_runtime_session_id") or "") if running else "",
+        "runtime_scope_key": str(run_state.get("runtime_scope_key") or "") if running else "",
+        "run_started_at": run_state.get("run_started_at") or 0 if running else 0,
+        "run_updated_at": run_state.get("run_updated_at") or 0,
+        "active_node_count": active_node_count,
+    }
+    if isinstance(runtime_summary, dict):
+        projection.update({
+            "task_frames": list(runtime_summary.get("task_frames") or []),
+            "task_frame_count": int(runtime_summary.get("task_frame_count") or 0),
+            "active_task_frame": runtime_summary.get("active_task_frame") if isinstance(runtime_summary.get("active_task_frame"), dict) else {},
+            "run_session_ids": list(runtime_summary.get("run_session_ids") or []),
+            "last_message": runtime_summary.get("last_message") if isinstance(runtime_summary.get("last_message"), dict) else {},
+            "last_message_preview": str(runtime_summary.get("last_message_preview") or ""),
+            "last_message_at": runtime_summary.get("last_message_at") or 0,
+            "final_deliverables": list(runtime_summary.get("final_deliverables") or []),
+            "artifact_refs": list(runtime_summary.get("artifact_refs") or []),
+        })
+    return projection
 
 
 def _profile_params_from_payload(payload: dict) -> dict:
@@ -814,17 +1175,33 @@ def _profile_params_from_member(member: dict) -> dict:
         else {}
     )
     payload = {
-        "agent_profile_id": str(member.get("profile_id") or member.get("agent_profile_id") or profile.get("id") or "").strip(),
+        "agent_profile_id": str(
+            member.get("profile_id")
+            or member.get("profileId")
+            or member.get("agent_profile_id")
+            or member.get("agentProfileId")
+            or profile.get("id")
+            or profile.get("agentProfileId")
+            or profile.get("agent_profile_id")
+            or ""
+        ).strip(),
         "agent_profile_version_id": str(
             member.get("profile_version_id")
+            or member.get("profileVersionId")
             or member.get("agent_profile_version_id")
+            or member.get("agentProfileVersionId")
+            or member.get("version_id")
+            or member.get("versionId")
             or profile.get("agentProfileVersionId")
             or profile.get("agent_profile_version_id")
+            or profile.get("versionId")
+            or profile.get("version_id")
             or ""
         ).strip(),
         "agent_profile_draft_id": str(
             member.get("profile_draft_id")
             or member.get("agent_profile_draft_id")
+            or member.get("agentProfileDraftId")
             or profile.get("agentProfileDraftId")
             or profile.get("agent_profile_draft_id")
             or ""
@@ -865,7 +1242,16 @@ def _member_matches_node_profile(member: dict, node: dict) -> bool:
         if isinstance(member.get("doxieProfile"), dict)
         else {}
     )
-    member_profile_id = str(member.get("profile_id") or member.get("agent_profile_id") or profile.get("id") or "").strip()
+    member_profile_id = str(
+        member.get("profile_id")
+        or member.get("profileId")
+        or member.get("agent_profile_id")
+        or member.get("agentProfileId")
+        or profile.get("id")
+        or profile.get("agentProfileId")
+        or profile.get("agent_profile_id")
+        or ""
+    ).strip()
     node_profile_id = str(node.get("assignee_profile_id") or "").strip()
     if node_profile_id and member_profile_id == node_profile_id:
         return True
@@ -873,11 +1259,21 @@ def _member_matches_node_profile(member: dict, node: dict) -> bool:
     return _node_role(node) == "leader" and role in {"lead", "leader"}
 
 
-def _node_profile_params(params: dict, mission: dict, node: dict) -> dict:
+def _node_profile_params(params: dict, mission: dict, node: dict, *, db=None) -> dict:
     explicit = _profile_params_from_payload(params)
     if explicit:
         return explicit
-    members = _leader_members_from_params(params, mission if isinstance(mission, dict) else {})
+    has_team_identity = bool(
+        str(params.get("team_id") or params.get("teamId") or "").strip()
+        or (isinstance(mission, dict) and str(mission.get("team_id") or mission.get("teamId") or "").strip())
+    )
+    has_node_assignee = bool(str(node.get("assignee_profile_id") or node.get("assigneeProfileId") or "").strip())
+    members = _leader_members_from_params(
+        params,
+        mission if isinstance(mission, dict) else {},
+        db=db,
+        strict=has_team_identity and has_node_assignee,
+    )
     for member in members:
         if _member_matches_node_profile(member, node):
             profile_params = _profile_params_from_member(member)
@@ -903,7 +1299,8 @@ def _leader_profile_params(params: dict, graph: dict) -> dict:
         or str(mission.get("conversation_id") or "").strip()
         or mission_id
     )
-    members = params.get("members") if isinstance(params.get("members"), list) else []
+    metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+    members = metadata.get("members") if isinstance(metadata.get("members"), list) else []
     leader = next(
         (
             item for item in members
@@ -921,6 +1318,23 @@ def _leader_profile_params(params: dict, graph: dict) -> dict:
         "agent_profile_version_id": str(root.get("assignee_profile_version_id") or "").strip(),
         "runtime_scope_key": str(root.get("runtime_scope_key") or f"team:{scope_subject}:leader-conversation").strip(),
     }
+
+
+def _resolve_team_leader_runtime_params_for_request(params: dict, graph: dict, db) -> tuple[dict, dict]:
+    try:
+        resolution = resolve_team_leader_runtime_params(params, db=db)
+        return resolution.params, resolution.leader_runtime_context
+    except ValueError:
+        profile_params = _leader_profile_params(params, graph if isinstance(graph, dict) else {})
+        if any(str(profile_params.get(key) or "").strip() for key in (
+            "agent_profile_id",
+            "agent_profile_version_id",
+            "agent_profile_draft_id",
+            "runtime_scope_key",
+            "hermesHomePath",
+        )):
+            return params, {}
+        raise
 
 
 def _profile_runtime_owned(profile_params: dict) -> bool:
@@ -1050,18 +1464,71 @@ def _team_memory_for_leader_message(db, params: dict, mission: dict, *, objectiv
         return {"disabled": True, "reason": f"memory_build_failed: {exc}"}, ""
 
 
+def _record_leader_input_attachment_artifacts(
+    db,
+    *,
+    mission: dict,
+    conversation_session_id: str,
+    run_id: str,
+    attachments: list[dict],
+) -> list[dict]:
+    artifact_refs = artifact_refs_from_payload({"attachments": attachments}, event_type="team_mission.message.submit")
+    if not artifact_refs:
+        return []
+    mission_id = str((mission or {}).get("mission_id") or "").strip()
+    if not mission_id:
+        return []
+    metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+    task_id = _task_id_from_metadata(metadata) or mission_id
+    titles = [
+        str(ref.get("title") or ref.get("path") or ref.get("uri") or ref.get("id") or "").strip()
+        for ref in artifact_refs
+    ]
+    content = "User submitted attachments: " + ", ".join(title for title in titles if title)
+    try:
+        item = db.upsert_team_mission_memory_item(
+            memory_id=f"team-input-artifacts:{mission_id}:{task_id}:{run_id}",
+            team_id=str((mission or {}).get("team_id") or mission_id),
+            mission_id=mission_id,
+            conversation_session_id=str(conversation_session_id or ""),
+            task_id=task_id,
+            scope="mission_task",
+            kind="artifact",
+            content=content,
+            structured_payload={
+                "source": "team_mission.message.submit",
+                "attachments": attachments,
+            },
+            source_node_ids=[],
+            source_run_ids=[str(run_id or "")],
+            artifact_refs=artifact_refs,
+            workspace_refs=[{
+                "workspace_id": str((mission or {}).get("workspace_id") or ""),
+                "workspace_path": str((mission or {}).get("workspace_path") or ""),
+            }] if ((mission or {}).get("workspace_id") or (mission or {}).get("workspace_path")) else [],
+            confidence=0.98,
+            visibility="team",
+            status="committed",
+        )
+    except Exception:
+        return []
+    return [item] if isinstance(item, dict) and item else []
+
+
 def _leader_router_prompt(*, user_text: str, graph: dict, memory_text: str = "") -> str:
     context_json = json.dumps(_compact_graph_context(graph), ensure_ascii=False, indent=2)
     parts = [
-        "You are the Team Leader for a Hermes Team Mission conversation.",
+        "You are the Team Leader for a DoXie team conversation.",
+        "Keep the same persona, identity, tone, and memory as the underlying DoXie profile. Team mode only adds team context and team coordination tools.",
+        "Never expose internal runtime, framework, or implementation names to the user. The product name shown to users is DoXie.",
         "",
         "Route this user message before acting:",
         "- Answer directly for greetings, status questions, explanations, follow-up questions, clarifications, or requests about prior/current work.",
-        "- Use clarify, file, terminal, or todo tools when they help you understand the user's request, inspect the workspace, validate local context, or organize the plan before deciding whether to start a Team Mission.",
+        "- Use clarify, file, terminal, or todo tools when they help you understand the user's request, inspect the workspace, validate local context, or organize the plan before deciding whether to start a team task.",
         "- Use team_mission_status when you need fresh mission graph or memory context to answer.",
         "- Call team_mission_start_task only when the user is asking to start a new substantive executable team task that benefits from planning, multi-agent work, workspace changes, research, verification, or a deliverable.",
-        "- Do not call team_mission_start_task for greetings, lightweight Q&A, status checks, or discussion that can be answered by the Leader.",
-        "- Do not call delegate_task or ordinary subagents. In Team Mission, the Leader is the control plane: communicate with the user, plan the Mission Graph, and coordinate member nodes.",
+        "- Do not call team_mission_start_task for greetings, lightweight Q&A, status checks, or discussion that can be answered directly.",
+        "- Do not call delegate_task or ordinary subagents. In DoXie team mode, the Leader coordinates the user conversation, task graph, and member nodes.",
         "- If you start a task, keep your visible reply brief and tell the user that planning has started.",
         "- After team_mission_start_task succeeds, stop the current turn. Do not continue with research, file work, terminal commands, or deliverable execution.",
         "- Reply in the user's language.",
@@ -1069,13 +1536,45 @@ def _leader_router_prompt(*, user_text: str, graph: dict, memory_text: str = "")
         "Current team conversation context. The active mission may be empty until a team task is started:",
         context_json,
         "",
-        "A Team Mission is created only when you call team_mission_start_task. "
+        "A team task is created only when you call team_mission_start_task. "
         "For a new task, derive the mission title and objective from the current User message, not from the conversation title.",
     ]
     if memory_text:
         parts.extend(["", memory_text])
     parts.extend(["", "User message:", user_text])
     return "\n".join(parts).strip()
+
+
+def _leader_direct_reply_prompt(*, user_text: str, graph: dict, memory_text: str = "") -> str:
+    parts = [
+        "You are the Team Leader in a DoXie team conversation.",
+        "Keep the same persona, identity, tone, and memory as the underlying DoXie profile. Team mode only adds team context and team coordination tools.",
+        "Never expose internal runtime, framework, or implementation names to the user. The product name shown to users is DoXie.",
+        "The user explicitly asked you not to start or launch a team task for this turn.",
+        "Answer directly in the user's language. Do not call tools, do not create tasks, and do not mention internal routing.",
+    ]
+    context = _compact_graph_context(graph)
+    active_mission = context.get("mission") if isinstance(context, dict) else {}
+    if isinstance(active_mission, dict) and active_mission:
+        parts.extend(
+            [
+                "",
+                "Current team conversation context for reference only:",
+                json.dumps(context, ensure_ascii=False, indent=2),
+            ]
+        )
+    if memory_text:
+        parts.extend(["", memory_text])
+    parts.extend(["", "User message:", user_text])
+    return "\n".join(parts).strip()
+
+
+def _leader_message_requests_direct_reply(user_text: str) -> bool:
+    normalized = " ".join(str(user_text or "").strip().lower().split())
+    if not normalized:
+        return False
+    compact = normalized.replace(" ", "")
+    return any(marker in normalized or marker.replace(" ", "") in compact for marker in _TEAM_LEADER_DIRECT_REPLY_MARKERS)
 
 
 def _leader_message_toolsets(params: dict) -> list[str]:
@@ -1149,27 +1648,17 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5008)
-    source_packet = _team_capability_source_packet(params) or (
-        params.get("source_packet") if isinstance(params.get("source_packet"), dict) else {}
-    ) or (
-        params.get("sourcePacket") if isinstance(params.get("sourcePacket"), dict) else {}
-    )
     snapshot_id = _team_capability_snapshot_id(params) or str(params.get("snapshot_id") or params.get("snapshotId") or "").strip()
-    if snapshot_id and not source_packet:
+    if snapshot_id:
         snapshot = db.get_team_capability_snapshot(snapshot_id)
         if not snapshot:
             return _err(rid, 4040, "team capability snapshot not found")
         return _ok(rid, {"snapshot": snapshot})
     team_id = str(params.get("team_id") or params.get("teamId") or "").strip()
-    if not source_packet:
-        return _err(rid, 4006, "source_packet required")
+    if not team_id:
+        return _err(rid, 4006, "team_id or snapshot_id required")
     try:
-        snapshot = db.resolve_team_capability_snapshot(
-            team_id=team_id,
-            source_packet=source_packet,
-            source_digest_value=_team_capability_source_digest(params) or str(params.get("source_digest") or params.get("sourceDigest") or ""),
-            force_refresh=False,
-        )
+        snapshot = _resolve_team_capability_snapshot_from_registry(db, params, team_id=team_id)
     except ValueError as exc:
         return _err(rid, 4006, str(exc))
     except Exception as exc:
@@ -1182,20 +1671,11 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5008)
-    source_packet = _team_capability_source_packet(params) or (
-        params.get("source_packet") if isinstance(params.get("source_packet"), dict) else {}
-    ) or (
-        params.get("sourcePacket") if isinstance(params.get("sourcePacket"), dict) else {}
-    )
-    if not source_packet:
-        return _err(rid, 4006, "source_packet required")
+    team_id = str(params.get("team_id") or params.get("teamId") or "").strip()
+    if not team_id:
+        return _err(rid, 4006, "team_id required")
     try:
-        snapshot = db.resolve_team_capability_snapshot(
-            team_id=str(params.get("team_id") or params.get("teamId") or ""),
-            source_packet=source_packet,
-            source_digest_value=_team_capability_source_digest(params) or str(params.get("source_digest") or params.get("sourceDigest") or ""),
-            force_refresh=True,
-        )
+        snapshot = _resolve_team_capability_snapshot_from_registry(db, params, team_id=team_id, force_refresh=True)
     except ValueError as exc:
         return _err(rid, 4006, str(exc))
     except Exception as exc:
@@ -1218,7 +1698,7 @@ def _(rid, params: dict) -> dict:
             team_id=str(params.get("team_id") or params.get("teamId") or ""),
         )
         if not snapshot:
-            return _err(rid, 4006, "snapshot_id or source_packet required")
+            return _err(rid, 4006, "snapshot_id or team_id required")
         binding = _bind_team_capability_snapshot_for_mission(
             db,
             mission_id=mission_id,
@@ -1266,13 +1746,13 @@ def _(rid, params: dict) -> dict:
                 if snapshot:
                     source = "mission_binding"
         if not snapshot:
-            snapshot = _resolve_team_capability_snapshot_from_source_packet(db, params, team_id=team_id)
-            if snapshot:
-                source = "source_packet"
-        if not snapshot and team_id:
-            snapshot = db.get_latest_team_capability_snapshot(team_id)
+            snapshot = db.get_latest_team_capability_snapshot(team_id) if team_id else {}
             if snapshot:
                 source = "latest_team_snapshot"
+        if not snapshot and team_id:
+            snapshot = _resolve_team_capability_snapshot_from_registry(db, params, team_id=team_id)
+            if snapshot:
+                source = "team_registry"
     except Exception as exc:
         return _err(rid, 5008, f"team profile unavailable: {exc}")
     if not snapshot:
@@ -1287,11 +1767,11 @@ def _(rid, params: dict) -> dict:
         return _db_unavailable_error(rid, code=5008)
     mission_id = _mission_id_from_params(params)
     mode = str(params.get("mode") or "supervised_mission").strip()
-    members = params.get("members")
-    if members is None:
-        members = []
-    if not isinstance(members, list):
-        return _err(rid, 4004, "members must be a list")
+    team_id = str(params.get("team_id") or params.get("teamId") or "").strip()
+    archived_team_error = _archived_team_write_error(db, team_id)
+    if archived_team_error:
+        return _err(rid, 4023, archived_team_error)
+    members = []
     graph_payload = (
         params.get("graph_payload")
         or params.get("graphPayload")
@@ -1317,16 +1797,34 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4006, "conversation_id required")
         conversation_session_id = _conversation_session_id_from_params(params, metadata) or conversation_id
         try:
+            workspace_context = resolve_team_mission_workspace_context(
+                params,
+                session_id=conversation_session_id,
+                require=True,
+            )
+        except ValueError as exc:
+            return _err(rid, 4004, str(exc))
+        try:
             conversation = db.ensure_team_mission_conversation(
                 conversation_id=conversation_id,
                 stable_session_id=conversation_session_id,
-                team_id=str(params.get("team_id") or params.get("teamId") or ""),
+                team_id=team_id,
                 title=str(params.get("title") or ""),
                 objective=str(params.get("conversation_objective") or params.get("conversationObjective") or ""),
-                workspace_id=_workspace_id_from_params(params),
-                workspace_path=_workspace_path_from_params(params),
+                workspace_id=workspace_context["workspace_id"],
+                workspace_path=workspace_context["workspace_path"],
                 created_by_user_id=str(params.get("created_by_user_id") or params.get("createdByUserId") or ""),
                 metadata=metadata,
+            )
+            bind_team_mission_session_workspace(
+                session_id=conversation_session_id,
+                context=workspace_context,
+                metadata={
+                    "source": "team_mission.create",
+                    "conversation_id": conversation_id,
+                    "team_id": team_id,
+                    "conversation_only": True,
+                },
             )
         except ValueError as exc:
             return _err(rid, 4004, str(exc))
@@ -1347,12 +1845,21 @@ def _(rid, params: dict) -> dict:
         })
     if not mission_id:
         return _err(rid, 4006, "mission_id required")
+    if team_id:
+        try:
+            members = _team_runtime_members_from_registry(db, params, team_id=team_id)
+        except ValueError as exc:
+            return _err(rid, 4006, str(exc))
+        except Exception as exc:
+            return _err(rid, 5008, f"team members unavailable: {exc}")
+    else:
+        return _err(rid, 4006, "team_id required")
     capability_snapshot = {}
     try:
         capability_snapshot = _resolve_team_capability_snapshot_for_params(
             db,
             params,
-            team_id=str(params.get("team_id") or params.get("teamId") or ""),
+            team_id=team_id,
         )
     except ValueError as exc:
         return _err(rid, 4006, str(exc))
@@ -1361,20 +1868,39 @@ def _(rid, params: dict) -> dict:
     if capability_snapshot:
         metadata["team_capability_snapshot"] = _snapshot_binding_metadata(capability_snapshot)
         members = _members_with_capability_snapshot(members, capability_snapshot)
+    conversation_session_id = leader_session_id or _conversation_session_id_from_params(params, metadata) or conversation_id
+    try:
+        workspace_context = resolve_team_mission_workspace_context(
+            params,
+            session_id=conversation_session_id,
+            require=True,
+        )
+    except ValueError as exc:
+        return _err(rid, 4004, str(exc))
     try:
         graph = db.initialize_team_mission_from_strategy(
             mission_id=mission_id,
             conversation_id=conversation_id,
-            team_id=str(params.get("team_id") or params.get("teamId") or ""),
+            team_id=team_id,
             title=str(params.get("title") or ""),
             objective=str(params.get("objective") or params.get("prompt") or ""),
-            workspace_id=_workspace_id_from_params(params),
-            workspace_path=_workspace_path_from_params(params),
+            workspace_id=workspace_context["workspace_id"],
+            workspace_path=workspace_context["workspace_path"],
             mode=mode,
             members=members,
             graph_payload=graph_payload,
             leader_session_id=leader_session_id,
             metadata=metadata,
+        )
+        bind_team_mission_session_workspace(
+            session_id=conversation_session_id,
+            context=workspace_context,
+            metadata={
+                "source": "team_mission.create",
+                "conversation_id": conversation_id,
+                "mission_id": mission_id,
+                "team_id": team_id,
+            },
         )
     except ValueError as exc:
         return _err(rid, 4004, str(exc))
@@ -1481,6 +2007,28 @@ def _(rid, params: dict) -> dict:
         conversation_id = conversation_session_id
     if not conversation_id:
         return _err(rid, 4006, "conversation_id required")
+    params = {
+        **params,
+        "conversation_id": conversation_id,
+        "conversationId": conversation_id,
+        **({"conversation_session_id": conversation_session_id, "conversationSessionId": conversation_session_id} if conversation_session_id else {}),
+        **({"mission_id": mission_id, "missionId": mission_id} if mission_id else {}),
+    }
+    before = db.get_team_mission_conversation(conversation_id)
+    archived_team_error = _archived_team_write_error(
+        db,
+        _team_id_for_profile(params, mission=mission if isinstance(mission, dict) else {}, conversation=before),
+    )
+    if archived_team_error:
+        return _err(rid, 4023, archived_team_error)
+    try:
+        params, leader_runtime_context = _resolve_team_leader_runtime_params_for_request(
+            params,
+            graph if isinstance(graph, dict) else {},
+            db,
+        )
+    except ValueError as exc:
+        return _err(rid, 4094, str(exc))
     profile_params = _leader_profile_params(params, graph if isinstance(graph, dict) else {})
     runtime_scope_key = _leader_conversation_runtime_scope_key(
         params,
@@ -1494,7 +2042,13 @@ def _(rid, params: dict) -> dict:
     if owner_error:
         return _err(rid, 4094, owner_error)
     try:
-        before = db.get_team_mission_conversation(conversation_id)
+        workspace_context = resolve_team_mission_workspace_context(
+            params,
+            mission=mission if isinstance(mission, dict) else {},
+            conversation=before if isinstance(before, dict) else {},
+            session_id=conversation_session_id,
+            require=True,
+        )
         bound_mission_id = mission_id if isinstance(mission, dict) and mission else ""
         conversation = db.ensure_team_mission_conversation(
             conversation_id=conversation_id,
@@ -1502,14 +2056,26 @@ def _(rid, params: dict) -> dict:
             mission=mission if isinstance(mission, dict) else {},
             mission_id=bound_mission_id,
             team_id=str(params.get("team_id") or params.get("teamId") or ""),
-            title=str(params.get("title") or ""),
+            title="",
             objective=str(params.get("objective") or params.get("prompt") or ""),
-            workspace_id=_workspace_id_from_params(params),
-            workspace_path=_workspace_path_from_params(params),
+            workspace_id=workspace_context["workspace_id"],
+            workspace_path=workspace_context["workspace_path"],
             created_by_user_id=str(params.get("created_by_user_id") or params.get("createdByUserId") or ""),
             metadata=metadata,
         )
+        bind_team_mission_session_workspace(
+            session_id=conversation_session_id,
+            context=workspace_context,
+            metadata={
+                "source": "team_mission.conversation.ensure",
+                "conversation_id": conversation_id,
+                **({"mission_id": mission_id} if mission_id else {}),
+                "team_id": str(params.get("team_id") or params.get("teamId") or ""),
+            },
+        )
         created = not bool(before)
+    except ValueError as exc:
+        return _err(rid, 4004, str(exc))
     except Exception as exc:
         return _err(rid, 5008, f"team mission conversation unavailable: {exc}")
     conversation_session_id = str(
@@ -1527,6 +2093,8 @@ def _(rid, params: dict) -> dict:
             "created": created,
             "conversation": conversation,
             "session": db.get_session(conversation_session_id) or {},
+            "leader_runtime_context": leader_runtime_context,
+            "leaderRuntimeContext": leader_runtime_context,
             "graph": graph if isinstance(graph, dict) else {},
         },
     )
@@ -1551,11 +2119,21 @@ def _(rid, params: dict) -> dict:
     result = db.resolve_team_mission_conversation(identifier)
     if not result:
         return _ok(rid, {"conversation": {}, "mission": {}, "graph": {}})
-    _recover_conversation_active_run(
-        db,
-        result.get("conversation") if isinstance(result, dict) else None,
-    )
-    return _ok(rid, result)
+    conversation = result.get("conversation") if isinstance(result, dict) else None
+    _recover_conversation_active_run(db, conversation)
+    if isinstance(conversation, dict):
+        refreshed_identifier = str(
+            conversation.get("conversation_id")
+            or conversation.get("stable_session_id")
+            or identifier
+        ).strip()
+        refreshed = db.resolve_team_mission_conversation(refreshed_identifier) if refreshed_identifier else {}
+        if isinstance(refreshed, dict) and refreshed:
+            result = refreshed
+            conversation = result.get("conversation") if isinstance(result.get("conversation"), dict) else conversation
+    if isinstance(conversation, dict):
+        conversation.update(_conversation_runtime_projection(db, conversation))
+    return _ok(rid, _attach_team_detail_projection(db, result))
 
 
 @method("team_mission.conversation.list")
@@ -1571,6 +2149,7 @@ def _(rid, params: dict) -> dict:
     )
     for conversation in conversations if isinstance(conversations, list) else []:
         _recover_conversation_active_run(db, conversation)
+        conversation.update(_conversation_runtime_projection(db, conversation))
     return _ok(rid, {"conversations": conversations})
 
 
@@ -1635,8 +2214,50 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4023, "cannot delete a conversation with an active leader run")
     try:
         result = db.delete_team_mission_conversation(identifier)
+        deleted_session_ids = list((result or {}).get("deleted_session_ids") or [])
+        artifact_cleanup = {
+            "deleted_artifact_links": 0,
+            "deleted_artifacts": 0,
+            "deleted_artifact_ids": [],
+            "physical_files_deleted": 0,
+        }
+        workspace_bindings = []
+        workspace_binding_cleanup_error = ""
+        if deleted_session_ids:
+            try:
+                artifact_cleanup = delete_session_artifacts(deleted_session_ids)
+            except Exception as exc:
+                artifact_cleanup = {
+                    **artifact_cleanup,
+                    "error": str(exc),
+                }
+            try:
+                workspace_bindings = delete_session_workspace_bindings(deleted_session_ids)
+            except Exception as exc:
+                workspace_bindings = []
+                workspace_binding_cleanup_error = str(exc)
+        remove_session_files = getattr(db, "_remove_session_files", None)
+        if callable(remove_session_files):
+            sessions_dir = Path(get_hermes_home()) / "sessions"
+            for session_id in dict.fromkeys(str(item or "").strip() for item in deleted_session_ids):
+                if not session_id:
+                    continue
+                try:
+                    remove_session_files(sessions_dir, session_id)
+                except Exception:
+                    pass
+        if isinstance(result, dict):
+            result["deleted_session_ids"] = deleted_session_ids
+            result["artifact_cleanup"] = artifact_cleanup
+            result["deleted_artifact_links"] = int(artifact_cleanup.get("deleted_artifact_links") or 0)
+            result["deleted_artifacts"] = int(artifact_cleanup.get("deleted_artifacts") or 0)
+            result["physical_files_deleted"] = int(artifact_cleanup.get("physical_files_deleted") or 0)
+            result["deleted_workspace_bindings"] = workspace_bindings
+            result["deleted_workspace_binding_count"] = len(workspace_bindings)
+            if workspace_binding_cleanup_error:
+                result["workspace_binding_cleanup_error"] = workspace_binding_cleanup_error
         if stable_session_id:
-            db.delete_session(stable_session_id, sessions_dir=Path(get_hermes_home()) / "sessions")
+            result.setdefault("stable_session_id", stable_session_id)
     except Exception as exc:
         return _err(rid, 5008, f"team mission conversation delete failed: {exc}")
     if not result:
@@ -1692,6 +2313,28 @@ def _(rid, params: dict) -> dict:
     )
     if not conversation_session_id:
         return _err(rid, 4006, "conversation_session_id required")
+    params = {
+        **params,
+        "conversation_id": conversation_id,
+        "conversationId": conversation_id,
+        "conversation_session_id": conversation_session_id,
+        "conversationSessionId": conversation_session_id,
+        **({"mission_id": mission_id, "missionId": mission_id} if mission_id else {}),
+    }
+    archived_team_error = _archived_team_write_error(
+        db,
+        _team_id_for_profile(params, mission=mission if isinstance(mission, dict) else {}, conversation=conversation),
+    )
+    if archived_team_error:
+        return _err(rid, 4023, archived_team_error)
+    try:
+        params, leader_runtime_context = _resolve_team_leader_runtime_params_for_request(
+            params,
+            graph if isinstance(graph, dict) else {},
+            db,
+        )
+    except ValueError as exc:
+        return _err(rid, 4094, str(exc))
     profile_params = _leader_profile_params(params, graph if isinstance(graph, dict) else {})
     runtime_scope_key = _leader_conversation_runtime_scope_key(
         params,
@@ -1705,18 +2348,39 @@ def _(rid, params: dict) -> dict:
     if owner_error:
         return _err(rid, 4094, owner_error)
     try:
+        workspace_context = resolve_team_mission_workspace_context(
+            params,
+            mission=mission if isinstance(mission, dict) else {},
+            conversation=conversation if isinstance(conversation, dict) else {},
+            session_id=conversation_session_id,
+            require=True,
+        )
+        conversation_title = _conversation_title_from_submit(db, params, text)
         conversation = db.ensure_team_mission_conversation(
             conversation_id=conversation_id,
             stable_session_id=conversation_session_id,
             mission=mission if isinstance(mission, dict) and mission else {},
             mission_id=mission_id if isinstance(mission, dict) and mission else "",
             team_id=str(params.get("team_id") or params.get("teamId") or (mission or {}).get("team_id") or ""),
-            title=str(params.get("title") or (mission or {}).get("title") or text),
+            title=conversation_title,
             objective=str(params.get("objective") or params.get("prompt") or (mission or {}).get("objective") or text),
-            workspace_id=_workspace_id_from_params(params) or str((mission or {}).get("workspace_id") or ""),
-            workspace_path=_workspace_path_from_params(params) or str((mission or {}).get("workspace_path") or ""),
+            workspace_id=workspace_context["workspace_id"],
+            workspace_path=workspace_context["workspace_path"],
             created_by_user_id=str(params.get("created_by_user_id") or params.get("createdByUserId") or (mission or {}).get("created_by_user_id") or ""),
+            metadata={"display_title_source": "first_user_message"} if conversation_title else None,
         )
+        bind_team_mission_session_workspace(
+            session_id=conversation_session_id,
+            context=workspace_context,
+            metadata={
+                "source": "team_mission.message.submit",
+                "conversation_id": conversation_id,
+                **({"mission_id": mission_id} if mission_id else {}),
+                "team_id": str(params.get("team_id") or params.get("teamId") or (mission or {}).get("team_id") or ""),
+            },
+        )
+    except ValueError as exc:
+        return _err(rid, 4004, str(exc))
     except Exception as exc:
         return _err(rid, 5008, f"team conversation session unavailable: {exc}")
     if not graph:
@@ -1734,6 +2398,9 @@ def _(rid, params: dict) -> dict:
     )
     run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
     turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
+    draft_text = str(params.get("draft_text") or params.get("draftText") or text)
+    submitted_attachments = _submitted_attachments(params)
+    direct_reply = _leader_message_requests_direct_reply(text)
     team_context = {
         "kind": "leader_conversation",
         "conversation_id": conversation_id,
@@ -1741,18 +2408,12 @@ def _(rid, params: dict) -> dict:
         "team_id": str(params.get("team_id") or params.get("teamId") or (mission or {}).get("team_id") or (conversation or {}).get("team_id") or ""),
         "mode": (mission or {}).get("mode") or str(params.get("mode") or ""),
         "status": (mission or {}).get("status") or "",
-        "workspace_id": _workspace_id_from_params(params) or str((mission or {}).get("workspace_id") or (conversation or {}).get("workspace_id") or ""),
-        "workspace_path": _workspace_path_from_params(params) or str((mission or {}).get("workspace_path") or (conversation or {}).get("workspace_path") or ""),
+        "workspace_id": workspace_context["workspace_id"],
+        "workspace_path": workspace_context["workspace_path"],
         "memory": memory_context,
         "members": _leader_members_from_params(params, mission if isinstance(mission, dict) else {}),
         "tool_policy": _team_leader_tool_policy(surface="leader_conversation"),
     }
-    team_capability_payload = _team_capability_payload(params)
-    if team_capability_payload:
-        team_context["team_capability"] = team_capability_payload
-    source_packet = _team_capability_source_packet(params)
-    if source_packet:
-        team_context["team_capability_source_packet"] = source_packet
     snapshot_id = _team_capability_snapshot_id(params)
     if snapshot_id:
         team_context["team_capability_snapshot_id"] = snapshot_id
@@ -1768,10 +2429,17 @@ def _(rid, params: dict) -> dict:
         "turn_id": turn_id,
         "runtime_scope_key": runtime_scope_key,
         "agent_context_mode": "team_leader",
-        "text": _leader_router_prompt(user_text=text, graph=graph, memory_text=memory_text),
-        "persist_user_message": text,
-        "draft_text": str(params.get("draft_text") or params.get("draftText") or text),
-        "enabled_toolsets": _leader_message_toolsets(params),
+        "cwd": workspace_context["cwd"],
+        "workspace": workspace_context["workspace"],
+        "text": (
+            _leader_direct_reply_prompt(user_text=text, graph=graph, memory_text=memory_text)
+            if direct_reply
+            else _leader_router_prompt(user_text=text, graph=graph, memory_text=memory_text)
+        ),
+        "persist_user_message": draft_text,
+        "draft_text": draft_text,
+        "attachments": submitted_attachments,
+        "enabled_toolsets": [] if direct_reply else _leader_message_toolsets(params),
         "disabled_toolsets": _leader_disabled_toolsets(params),
         "toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE,
         "doxie_product_context": {
@@ -1779,10 +2447,23 @@ def _(rid, params: dict) -> dict:
             "team_mission": team_context,
         },
     }
+    if direct_reply:
+        submit_params["reasoning_config"] = dict(_TEAM_LEADER_DIRECT_REPLY_REASONING_CONFIG)
+    runtime_session_error = _ensure_team_mission_runtime_session_shell(conversation_session_id)
+    if runtime_session_error:
+        return _err(rid, 5008, runtime_session_error)
     response = _methods["run.submit"](rid, submit_params)
     if isinstance(response, dict) and response.get("error"):
         return response
     result = response.get("result") if isinstance(response, dict) else {}
+    if isinstance(mission, dict) and mission and submitted_attachments:
+        _record_leader_input_attachment_artifacts(
+            db,
+            mission=mission,
+            conversation_session_id=conversation_session_id,
+            run_id=run_id,
+            attachments=submitted_attachments,
+        )
     ensure_team_leader_message_run_state(db, run_id=run_id, session_id=conversation_session_id, runtime_scope_key=runtime_scope_key, result=result)
     return _ok(
         rid,
@@ -1792,6 +2473,8 @@ def _(rid, params: dict) -> dict:
             "conversation_session_id": conversation_session_id,
             "conversation": conversation,
             "leader_turn": result or {},
+            "leader_runtime_context": leader_runtime_context,
+            "leaderRuntimeContext": leader_runtime_context,
             "graph": db.get_team_mission_graph(mission_id) if mission_id else graph,
         },
     )
@@ -1803,6 +2486,28 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _db_unavailable_error(rid, code=5008)
     mission_id = _mission_id_from_params(params)
+    conversation_id = _conversation_id_from_params(params)
+    if conversation_id:
+        graph = db.get_team_mission_conversation_graph(conversation_id)
+        if not graph:
+            return _err(rid, 4040, "team mission conversation not found")
+        mission_ids = _graph_mission_ids(graph)
+        if mission_id and mission_id not in mission_ids:
+            return _err(rid, 4040, "team mission not found in conversation")
+        graph_mission = graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
+        graph_mission_id = str(
+            graph_mission.get("mission_id")
+            or graph_mission.get("missionId")
+            or ""
+        ).strip()
+        result = {
+            "mission_id": graph_mission_id or mission_id,
+            "conversation_id": conversation_id,
+            "graph": graph,
+        }
+        if mission_id and mission_id != result["mission_id"]:
+            result["requested_mission_id"] = mission_id
+        return _ok(rid, result)
     if not mission_id:
         return _err(rid, 4006, "mission_id required")
     graph = db.get_team_mission_graph(mission_id)
@@ -2106,6 +2811,114 @@ def _(rid, params: dict) -> dict:
     )
 
 
+@method("team_mission.plan.approve")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    mission_id = _mission_id_from_params(params)
+    if not mission_id:
+        return _err(rid, 4006, "mission_id required")
+    graph = db.get_team_mission_graph(mission_id)
+    mission = graph.get("mission") if isinstance(graph, dict) else None
+    if not isinstance(mission, dict):
+        return _err(rid, 4040, "team mission not found")
+    task_id = str(params.get("task_id") or params.get("taskId") or "").strip()
+    approval_nodes: list[dict] = []
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        if str(node.get("kind") or "").strip() != "approval_gate":
+            continue
+        metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        node_task_id = str(
+            node.get("task_id")
+            or node.get("taskId")
+            or metadata.get("task_id")
+            or metadata.get("taskId")
+            or ""
+        ).strip()
+        if task_id and node_task_id and node_task_id != task_id:
+            continue
+        approval_nodes.append(node)
+    waiting_nodes = [
+        node
+        for node in approval_nodes
+        if str(node.get("status") or "").strip() == "waiting_approval"
+    ]
+    if not waiting_nodes:
+        mission_status = str(mission.get("status") or "").strip()
+        completed_nodes = [
+            node
+            for node in approval_nodes
+            if str(node.get("status") or "").strip() in {"completed", "verified"}
+        ]
+        if completed_nodes and mission_status != "waiting_approval":
+            return _ok(
+                rid,
+                {
+                    "mission_id": mission_id,
+                    "already_approved": True,
+                    "node": sorted(
+                        completed_nodes,
+                        key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0),
+                    )[-1],
+                    "scheduled": {},
+                    "graph": graph,
+                },
+            )
+        return _err(rid, 4040, "team mission approval gate not found")
+    approval_node = sorted(
+        waiting_nodes,
+        key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0),
+    )[-1]
+    node_id = str(approval_node.get("node_id") or approval_node.get("id") or "").strip()
+    if not node_id:
+        return _err(rid, 4040, "team mission approval gate not found")
+    metadata = dict(approval_node.get("metadata") or {})
+    metadata.update({
+        "approved_by": str(params.get("approved_by") or params.get("approvedBy") or "user").strip() or "user",
+    })
+    approved_node = db.upsert_team_mission_node(
+        mission_id=mission_id,
+        node_id=node_id,
+        kind=str(approval_node.get("kind") or "approval_gate"),
+        title=str(approval_node.get("title") or "审批任务图"),
+        objective=str(approval_node.get("objective") or ""),
+        status="completed",
+        assignee_profile_id=str(approval_node.get("assignee_profile_id") or ""),
+        assignee_profile_version_id=str(approval_node.get("assignee_profile_version_id") or ""),
+        runtime_scope_key=str(approval_node.get("runtime_scope_key") or ""),
+        output_contract=dict(approval_node.get("output_contract") or {}),
+        metadata=metadata,
+        position_x=float(approval_node.get("position_x") or 0),
+        position_y=float(approval_node.get("position_y") or 0),
+    )
+    run_id = _run_id_from_params(params)
+    if run_id:
+        db.append_team_mission_run_event(
+            mission_id=mission_id,
+            run_id=run_id,
+            event={"type": "mission.plan.approved", "payload": {"node": approved_node}},
+        )
+    schedule_result = _schedule_ready_nodes(
+        db=db,
+        rid=rid,
+        params={"mission_id": mission_id, "task_id": task_id, "limit": params.get("limit")},
+        trigger="team_mission.plan.approve",
+    )
+    return _ok(
+        rid,
+        {
+            "mission_id": mission_id,
+            "node": approved_node,
+            "scheduled": schedule_result,
+            "graph": (schedule_result.get("graph") if isinstance(schedule_result, dict) else None)
+            or db.get_team_mission_graph(mission_id),
+        },
+    )
+
+
 @method("team_mission.plan.reject")
 def _(rid, params: dict) -> dict:
     db = _get_db()
@@ -2313,7 +3126,10 @@ def _(rid, params: dict) -> dict:
         or metadata.get("stored_session_id")
         or _default_node_session_id(mission_id, node_id)
     ).strip()
-    profile_params = _node_profile_params(params, mission if isinstance(mission, dict) else {}, node)
+    try:
+        profile_params = _node_profile_params(params, mission if isinstance(mission, dict) else {}, node, db=db)
+    except ValueError as exc:
+        return _err(rid, 4094, str(exc))
     runtime_scope_key = str(
         params.get("runtime_scope_key")
         or params.get("runtimeScopeKey")
@@ -2325,6 +3141,29 @@ def _(rid, params: dict) -> dict:
     turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
     if not db.get_session(stored_session_id):
         db.create_session(stored_session_id, source="team_mission", transient=False)
+    try:
+        workspace_context = resolve_team_mission_workspace_context(
+            params,
+            mission=mission if isinstance(mission, dict) else {},
+            session_id=stored_session_id,
+            require=True,
+        )
+    except ValueError as exc:
+        return _err(rid, 4004, str(exc))
+    bind_team_mission_session_workspace(
+        session_id=stored_session_id,
+        context=workspace_context,
+        metadata={
+            "source": "team_mission.node.start",
+            "conversation_id": conversation_id,
+            "mission_id": mission_id,
+            "node_id": node_id,
+            "team_id": str((mission or {}).get("team_id") or ""),
+        },
+    )
+    runtime_session_error = _ensure_team_mission_runtime_session_shell(stored_session_id)
+    if runtime_session_error:
+        return _err(rid, 5008, runtime_session_error)
     text = _strategy_start_text(params, mission if isinstance(mission, dict) else {}, node)
     memory_context, memory_text = _team_memory_for_node(
         db,
@@ -2340,6 +3179,7 @@ def _(rid, params: dict) -> dict:
         mission if isinstance(mission, dict) else {},
         node,
         profile_params=profile_params,
+        db=db,
     )
     leader_control_node = _is_team_leader_control_node(node)
     agent_profile_id = str(
@@ -2356,6 +3196,35 @@ def _(rid, params: dict) -> dict:
         or node.get("assignee_profile_version_id")
         or ""
     ).strip()
+    task_id = str(
+        metadata.get("task_id")
+        or metadata.get("taskId")
+        or metadata.get("submitted_task_id")
+        or metadata.get("submittedTaskId")
+        or ""
+    ).strip()
+    mission_metadata = mission.get("metadata") if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict) else {}
+    active_task = dict(mission_metadata.get("active_task") or {}) if isinstance(mission_metadata.get("active_task"), dict) else {}
+    if not active_task and _is_root_planning_node(node):
+        active_task = {
+            "task_id": task_id,
+            "title": str(node.get("title") or mission.get("title") or "").strip(),
+            "objective": str(node.get("objective") or mission.get("objective") or "").strip(),
+            "root_node_id": node_id,
+        }
+    binding_metadata = {"turn_id": turn_id, "source": "team_mission.node.start"}
+    if task_id:
+        binding_metadata["task_id"] = task_id
+    db.bind_team_mission_run(
+        mission_id=mission_id,
+        node_id=node_id,
+        run_id=run_id,
+        session_id=stored_session_id,
+        runtime_session_id="",
+        runtime_scope_key=runtime_scope_key,
+        role=_node_role(node),
+        metadata={**binding_metadata, "prebound": True},
+    )
     submit_params = {
         **params,
         **profile_params,
@@ -2367,6 +3236,8 @@ def _(rid, params: dict) -> dict:
         "runtime_scope_key": runtime_scope_key,
         "agent_profile_id": agent_profile_id,
         "agent_profile_version_id": agent_profile_version_id,
+        "cwd": workspace_context["cwd"],
+        "workspace": workspace_context["workspace"],
         "text": text,
         "enabled_toolsets": enabled_toolsets,
         **({"disabled_toolsets": _leader_disabled_toolsets(params)} if leader_control_node else {}),
@@ -2374,14 +3245,20 @@ def _(rid, params: dict) -> dict:
         "doxie_product_context": {
             **(params.get("doxie_product_context") if isinstance(params.get("doxie_product_context"), dict) else {}),
             "team_mission": {
+                "kind": "leader_planning_node" if leader_control_node else "mission_node",
+                "surface": "mission_node",
                 "mission_id": mission_id,
                 "conversation_id": conversation_id,
                 "conversation_session_id": conversation_session_id,
+                "parent_conversation_session_id": conversation_session_id,
+                "workspace_id": workspace_context["workspace_id"],
+                "workspace_path": workspace_context["workspace_path"],
                 "node_id": node_id,
                 "node_title": node.get("title") or "",
                 "node_kind": node.get("kind") or "",
                 "node_role": _node_role(node),
                 "node_phase": _node_phase(node),
+                "active_task": active_task,
                 "output_contract": node.get("output_contract") or {},
                 "memory": memory_context,
                 "delegate_inherits_parent_tools": not leader_control_node,
@@ -2416,16 +3293,7 @@ def _(rid, params: dict) -> dict:
     result_run_id = str((result or {}).get("run_id") or run_id).strip()
     result_turn_id = str((result or {}).get("turn_id") or turn_id).strip()
     result_scope = str((result or {}).get("runtime_scope_key") or runtime_scope_key).strip()
-    task_id = str(
-        metadata.get("task_id")
-        or metadata.get("taskId")
-        or metadata.get("submitted_task_id")
-        or metadata.get("submittedTaskId")
-        or ""
-    ).strip()
-    binding_metadata = {"turn_id": result_turn_id, "source": "team_mission.node.start"}
-    if task_id:
-        binding_metadata["task_id"] = task_id
+    binding_metadata["turn_id"] = result_turn_id
     binding = db.bind_team_mission_run(
         mission_id=mission_id,
         node_id=node_id,

@@ -35,6 +35,7 @@ from tui_gateway.services.runtime_proxy import (
     RuntimeProxyBridge,
     RuntimeWorker,
     proxy_to_runtime,
+    runtime_scope_from_request,
 )
 
 _log = logging.getLogger(__name__)
@@ -46,9 +47,20 @@ _WS_WRITE_TIMEOUT_S = 10.0
 _WS_CONTROL_METHODS = frozenset(
     {
         "events.compact",
+        "conversation.activity.list",
+        "conversation.render_snapshot",
         "events.prune",
         "events.subscribe",
         "events.unsubscribe",
+        "profile.archive",
+        "profile.draft.discard",
+        "profile.draft.get",
+        "profile.draft.list",
+        "profile.draft.upsert",
+        "profile.get",
+        "profile.growth.summary",
+        "profile.list",
+        "profile.upsert",
         "run.cancel",
         "run.events",
         "run.fail",
@@ -64,9 +76,14 @@ _WS_CONTROL_METHODS = frozenset(
         "team_mission.conversation.ensure",
         "team_mission.conversation.list",
         "team_mission.conversation.rename",
+        "team_mission.conversation.render",
         "team_mission.conversation.resolve",
         "team_mission.node.history",
         "workspace.current",
+        "workspace.session.bind",
+        "workspace.session.current",
+        "workspace.session.delete",
+        "workspace.session.list",
         "workspace.list",
     }
 )
@@ -76,10 +93,25 @@ _ws_control_executor = concurrent.futures.ThreadPoolExecutor(
 )
 
 def _executor_for_request(req: dict) -> concurrent.futures.Executor | None:
-    method = str((req or {}).get("method") or "")
+    method = str(req.get("method") or "") if isinstance(req, dict) else ""
     if method in _WS_CONTROL_METHODS:
         return _ws_control_executor
     return None
+
+
+def _request_id(req: Any) -> Any:
+    return req.get("id") if isinstance(req, dict) else None
+
+
+def _request_method(req: Any) -> str:
+    return str(req.get("method") or "") if isinstance(req, dict) else ""
+
+
+def _runtime_scope_key(req: Any) -> str:
+    try:
+        return runtime_scope_from_request(req).runtime_scope_key
+    except Exception:
+        return ""
 
 # Keep starlette optional at import time; handle_ws uses the real class when
 # it's available and falls back to a generic Exception sentinel otherwise.
@@ -197,7 +229,11 @@ class WSTransport:
     async def runtime_bridge(self, worker: RuntimeWorker) -> RuntimeProxyBridge:
         scope_key = worker.scope_key
         bridge = self._runtime_bridges.get(scope_key)
-        if bridge is None or bridge.closed:
+        if bridge is not None and (bridge.closed or bridge.worker is not worker or not bridge.worker.running()):
+            await bridge.close()
+            self._runtime_bridges.pop(scope_key, None)
+            bridge = None
+        if bridge is None:
             from tui_gateway.services.runtime_proxy import runtime_proxy_pool
 
             bridge = RuntimeProxyBridge(
@@ -261,11 +297,27 @@ async def handle_ws(ws: Any) -> None:
                 if await proxy_to_runtime(req, transport):
                     continue
             except Exception as exc:
+                rid = _request_id(req)
+                method = _request_method(req)
+                scope_key = _runtime_scope_key(req)
+                _log.exception(
+                    "runtime proxy failed for method=%s id=%s scope=%s",
+                    method,
+                    rid,
+                    scope_key,
+                )
                 ok = await transport.write_async(
                     {
                         "jsonrpc": "2.0",
-                        "error": {"code": 5020, "message": f"runtime proxy failed: {exc}"},
-                        "id": req.get("id"),
+                        "error": {
+                            "code": 5020,
+                            "message": f"runtime proxy failed: {exc}",
+                            "data": {
+                                "method": method,
+                                "runtime_scope_key": scope_key,
+                            },
+                        },
+                        "id": rid,
                     }
                 )
                 if not ok:

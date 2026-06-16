@@ -66,21 +66,63 @@ class TeamMissionMember:
     def from_raw(cls, raw: Mapping[str, Any] | "TeamMissionMember") -> "TeamMissionMember":
         if isinstance(raw, TeamMissionMember):
             return raw
+        doxie_profile = dict(raw.get("doxie_profile") or raw.get("doxieProfile") or {})
         member_id = str(
             raw.get("member_id")
+            or raw.get("memberId")
             or raw.get("id")
             or raw.get("profile_id")
             or raw.get("profileId")
+            or raw.get("agent_profile_id")
+            or raw.get("agentProfileId")
+            or doxie_profile.get("memberId")
+            or doxie_profile.get("member_id")
             or ""
         ).strip()
-        profile_id = str(raw.get("profile_id") or raw.get("profileId") or member_id).strip()
+        profile_id = str(
+            raw.get("profile_id")
+            or raw.get("profileId")
+            or raw.get("agent_profile_id")
+            or raw.get("agentProfileId")
+            or doxie_profile.get("id")
+            or doxie_profile.get("agentProfileId")
+            or doxie_profile.get("agent_profile_id")
+            or member_id
+        ).strip()
         return cls(
             member_id=member_id,
             profile_id=profile_id,
-            profile_version_id=str(raw.get("profile_version_id") or raw.get("profileVersionId") or ""),
-            runtime_scope_key=str(raw.get("runtime_scope_key") or raw.get("runtimeScopeKey") or ""),
-            hermes_home_path=str(raw.get("hermes_home_path") or raw.get("hermesHomePath") or ""),
-            doxie_profile=dict(raw.get("doxie_profile") or raw.get("doxieProfile") or {}),
+            profile_version_id=str(
+                raw.get("profile_version_id")
+                or raw.get("profileVersionId")
+                or raw.get("agent_profile_version_id")
+                or raw.get("agentProfileVersionId")
+                or raw.get("version_id")
+                or raw.get("versionId")
+                or raw.get("current_version_id")
+                or raw.get("currentVersionId")
+                or doxie_profile.get("agentProfileVersionId")
+                or doxie_profile.get("agent_profile_version_id")
+                or doxie_profile.get("versionId")
+                or doxie_profile.get("version_id")
+                or ""
+            ),
+            runtime_scope_key=str(
+                raw.get("runtime_scope_key")
+                or raw.get("runtimeScopeKey")
+                or doxie_profile.get("runtimeScopeKey")
+                or doxie_profile.get("runtime_scope_key")
+                or ""
+            ),
+            hermes_home_path=str(
+                raw.get("hermes_home_path")
+                or raw.get("hermesHomePath")
+                or doxie_profile.get("hermesHomePath")
+                or doxie_profile.get("hermes_home_path")
+                or doxie_profile.get("hermes_home")
+                or ""
+            ),
+            doxie_profile=doxie_profile,
             display_name=str(raw.get("display_name") or raw.get("displayName") or raw.get("name") or member_id),
             role=str(raw.get("role") or "worker"),
             status=str(raw.get("status") or "active"),
@@ -380,7 +422,9 @@ class DiscussionStrategy(TeamMissionModeStrategy):
     ) -> str:
         del mission_id, title, members
         return "\n".join([
-            "You are the Hermes Team Mission discussion leader.",
+            "You are the DoXie team discussion leader.",
+            "Keep the same persona, identity, tone, and memory as the underlying DoXie profile. Team mode only adds team context and team coordination tools.",
+            "Never expose internal runtime, framework, or implementation names to the user. The product name shown to users is DoXie.",
             "Coordinate the discussion nodes and synthesize the result. Do not treat this as a single-agent direct answer unless no participants exist.",
             "",
             f"Mission objective: {str(objective or '').strip()}",
@@ -439,7 +483,9 @@ class SupervisedMissionStrategy(TeamMissionModeStrategy):
         del members
         profile_hint = _team_profile_prompt_hint()
         return "\n".join([
-            "You are the Hermes Team Mission Leader Planner for supervised execution.",
+            "You are the DoXie team Leader Planner for supervised execution.",
+            "Keep the same persona, identity, tone, and memory as the underlying DoXie profile. Team mode only adds team context and team coordination tools.",
+            "Never expose internal runtime, framework, or implementation names to the user. The product name shown to users is DoXie.",
             "Your current phase is planning only. Do not execute the user task directly and do not provide the final answer.",
             "Stream your understanding and decomposition for the user while you build the mission graph.",
             "The current task title/objective below are authoritative. Ignore older draft mission text, greetings, and memory if they conflict.",
@@ -574,7 +620,9 @@ class AutonomousMissionStrategy(TeamMissionModeStrategy):
         del members
         profile_hint = _team_profile_prompt_hint()
         return "\n".join([
-            "You are the Hermes Team Mission Leader Planner for autonomous execution.",
+            "You are the DoXie team Leader Planner for autonomous execution.",
+            "Keep the same persona, identity, tone, and memory as the underlying DoXie profile. Team mode only adds team context and team coordination tools.",
+            "Never expose internal runtime, framework, or implementation names to the user. The product name shown to users is DoXie.",
             "Your first phase is planning. Do not execute worker tasks inside the root planning node.",
             "Build the mission graph before execution is released.",
             "The current task title/objective below are authoritative. Ignore older draft mission text, greetings, and memory if they conflict.",
@@ -589,7 +637,7 @@ class AutonomousMissionStrategy(TeamMissionModeStrategy):
             "2. Use team_mission_node_create to create worker/verifier/synthesis nodes.",
             "3. Use team_mission_edge_create to connect dependencies.",
             "4. Mark high-risk nodes with metadata.risk_level='high' or 'critical'.",
-            "5. When the graph is planned, call team_mission_plan_complete so Hermes can release low-risk ready nodes.",
+            "5. When the graph is planned, call team_mission_plan_complete so DoXie can release low-risk ready nodes.",
         ]).strip()
 
     def allow_automatic_graph_mutation(self, *, phase: str = "") -> bool:
@@ -723,7 +771,7 @@ def _team_profile_prompt_hint() -> str:
         "2. Select worker assignee_member_id only from team_mission_team_profile.snapshot.member_profiles[].member_id.",
         "3. Never use run_id, session_id, node_id, profile_id, or profile_version_id as assignee_member_id.",
         "4. For verifier, synthesis, approval, and orchestration nodes, omit assignee fields unless the profile tool result identifies the Leader member_id.",
-        "5. Use canonical node kinds only: worker, verifier, synthesis. Root and approval_gate are reserved for Hermes runtime.",
+        "5. Use canonical node kinds only: worker, verifier, synthesis. Root and approval_gate are reserved for the DoXie team runtime.",
         "6. Put specialties such as research, coding, testing, quality, or verification in metadata.work_type or output_contract; do not use them as kind.",
     ])
 

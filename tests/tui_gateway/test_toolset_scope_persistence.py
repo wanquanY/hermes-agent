@@ -75,6 +75,48 @@ def test_gateway_state_store_round_trips_session_toolset_overrides(tmp_path):
     assert isinstance(payload["updated_at"], float)
 
 
+def test_gateway_state_store_round_trips_session_workspace_bindings(tmp_path):
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    store = GatewayStateStore(tmp_path / "gateway-state.db")
+
+    persisted_workspace = store.upsert_workspace({
+        "id": "workspace-1",
+        "name": "Workspace One",
+        "path": str(workspace_path),
+        "kind": "local",
+    })
+    persisted_binding = store.bind_session_workspace(
+        session_id="stored-session-1",
+        workspace_id=persisted_workspace["id"],
+        cwd=str(workspace_path),
+        metadata={
+            "agentProfileId": "agent-profile-1",
+            "agentProfileVersionId": "version-current",
+            "title": "Session title",
+        },
+    )
+
+    assert persisted_binding["session_id"] == "stored-session-1"
+    assert persisted_binding["id"] == "workspace-1"
+    assert persisted_binding["metadata"]["agentProfileId"] == "agent-profile-1"
+
+    loaded = store.get_session_workspace("stored-session-1")
+    assert loaded["session_id"] == "stored-session-1"
+    assert loaded["id"] == "workspace-1"
+    assert loaded["path"] == str(workspace_path)
+    assert loaded["metadata"]["agentProfileVersionId"] == "version-current"
+    assert isinstance(loaded["binding_created_at"], float)
+    assert isinstance(loaded["binding_updated_at"], float)
+
+    listed = store.list_session_workspaces()
+    assert [binding["session_id"] for binding in listed] == ["stored-session-1"]
+
+    removed = store.delete_session_workspaces(["stored-session-1"])
+    assert removed[0]["metadata"]["title"] == "Session title"
+    assert store.get_session_workspace("stored-session-1") is None
+
+
 def test_resolve_session_toolsets_uses_persisted_overrides(monkeypatch):
     monkeypatch.setattr(
         toolset_scope,

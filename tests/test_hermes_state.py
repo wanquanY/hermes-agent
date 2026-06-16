@@ -243,6 +243,195 @@ def test_append_run_event_coalesces_adjacent_main_message_deltas(db):
     assert events[2]["payload"]["text"] == "。"
 
 
+def test_append_run_event_skips_delta_coalesce_when_target_seq_is_occupied(db):
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "runtime_scope_key": "team:mission-1:leader",
+            "seq": 1,
+            "payload": {"mode": "append", "text": "你", "delta": "你", "offset": 0},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "tool.start",
+            "session_id": "runtime-2",
+            "stored_session_id": "stored-1",
+            "run_id": "run-2",
+            "turn_id": "turn-2",
+            "runtime_scope_key": "team:mission-1:node:worker",
+            "seq": 2,
+            "payload": {"name": "team_mission_node_start"},
+        },
+    )
+
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "runtime_scope_key": "team:mission-1:leader",
+            "seq": 2,
+            "payload": {"mode": "append", "text": "好", "delta": "好", "offset": 1},
+        },
+    )
+
+    events = db.list_run_events("stored-1")
+
+    assert [event["seq"] for event in events] == [1, 2]
+    assert [event["type"] for event in events] == ["message.delta", "tool.start"]
+
+
+def test_append_run_event_coalesces_message_deltas_across_tool_events(db):
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 1,
+            "payload": {"mode": "append", "text": "A", "delta": "A", "offset": 0},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "tool.progress",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 2,
+            "payload": {"tool_name": "terminal", "text": "running"},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 3,
+            "payload": {"mode": "append", "text": "B", "delta": "B", "offset": 1},
+        },
+    )
+
+    events = db.list_run_events_filtered("stored-1", limit=10)
+    message_events = [event for event in events if event["type"] == "message.delta"]
+
+    assert [event["type"] for event in events] == ["tool.progress", "message.delta"]
+    assert message_events[0]["seq"] == 3
+    assert message_events[0]["payload"] == {"mode": "append", "text": "AB", "delta": "AB", "offset": 0}
+
+
+def test_append_run_event_does_not_coalesce_message_delta_when_offset_restarts(db):
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 1,
+            "payload": {"mode": "append", "text": "你", "delta": "你", "offset": 0},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 2,
+            "payload": {"mode": "append", "text": "好", "delta": "好", "offset": 1},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 3,
+            "payload": {"mode": "append", "text": "重新开始", "delta": "重新开始", "offset": 0},
+        },
+    )
+
+    events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
+
+    assert [event["seq"] for event in events] == [2, 3]
+    assert events[0]["payload"] == {"mode": "append", "text": "你好", "delta": "你好", "offset": 0}
+    assert events[1]["payload"] == {
+        "mode": "append",
+        "text": "重新开始",
+        "delta": "重新开始",
+        "offset": 0,
+    }
+
+
+def test_append_run_event_coalesces_cumulative_message_delta_without_duplication(db):
+    prefix = "## ✅ 团队任务执行结果整合\n\n本"
+    full = (
+        "## ✅ 团队任务执行结果整合\n\n"
+        "本次团队任务目标：**创建一个测试文件。**\n\n"
+        "---\n\n"
+        "## 一、执行结果\n\n"
+        "```text\n"
+        "创建测试文件 → 验证测试文件\n"
+        "```"
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 1,
+            "payload": {"mode": "append", "text": prefix, "delta": prefix},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 2,
+            "payload": {"mode": "append", "text": full, "delta": full},
+        },
+    )
+
+    events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
+
+    assert [event["seq"] for event in events] == [2]
+    assert events[0]["payload"]["text"] == full
+    assert events[0]["payload"]["delta"] == full
+    assert "本## ✅" not in events[0]["payload"]["text"]
+    assert "\n\n---\n\n## 一、执行结果" in events[0]["payload"]["text"]
+
+
 def test_append_run_event_coalesces_adjacent_reasoning_deltas_by_source(db):
     db.append_run_event(
         "stored-1",
@@ -320,6 +509,127 @@ def test_append_run_event_prunes_on_terminal_event(db, monkeypatch):
     )
 
     assert calls == [{"session_id": "stored-1"}]
+
+
+def test_append_run_event_compacts_on_terminal_event(db, monkeypatch):
+    calls = []
+    original_compact = db.compact_run_events
+
+    def compact_spy(**kwargs):
+        calls.append(kwargs)
+        return original_compact(**kwargs)
+
+    monkeypatch.setattr(db, "compact_run_events", compact_spy)
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 1,
+            "payload": {"mode": "append", "text": "A", "delta": "A", "offset": 0},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.complete",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 2,
+            "payload": {"status": "completed", "text": "A"},
+        },
+    )
+
+    assert calls == [{"session_id": "stored-1"}]
+
+
+def test_append_run_event_deduplicates_repeated_terminal_for_run(db):
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 1,
+            "payload": {"text": "running"},
+        },
+    )
+    first = db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.complete",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 2,
+            "payload": {"status": "complete", "text": "done"},
+        },
+    )
+    duplicate = db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.complete",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 3,
+            "payload": {"status": "complete", "text": "done again"},
+        },
+    )
+
+    events = db.list_run_events("stored-1")
+    run = db.get_run("run-1")
+
+    assert first["seq"] == 2
+    assert duplicate["_persistence_disposition"] == "duplicate_terminal"
+    assert duplicate["seq"] == 2
+    assert [event["type"] for event in events] == ["message.delta", "message.complete"]
+    assert events[-1]["payload"]["text"] == "done"
+    assert run["status"] == "completed"
+    assert run["last_seq"] == 2
+
+
+def test_append_run_event_allows_higher_priority_terminal_upgrade(db):
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.complete",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 1,
+            "payload": {"status": "failed", "message": "worker closed"},
+        },
+    )
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.complete",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 2,
+            "payload": {"status": "complete", "text": "final answer"},
+        },
+    )
+
+    events = db.list_run_events("stored-1")
+    run = db.get_run("run-1")
+
+    assert [event["payload"]["status"] for event in events] == ["failed", "complete"]
+    assert run["status"] == "completed"
+    assert run["last_seq"] == 2
 
 
 def test_compact_run_events_coalesces_existing_stream_rows(db):
@@ -432,8 +742,94 @@ def test_compact_run_events_coalesces_existing_stream_rows(db):
     events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
 
     assert result["deleted_events"] == 1
-    assert [event["seq"] for event in events] == [1, 4, 7]
+    assert [event["seq"] for event in events] == [4, 7]
+    assert events[0]["payload"] == {"mode": "append", "text": "ABC", "delta": "ABC", "offset": 0}
     assert events[-1]["payload"] == {"mode": "append", "text": "DE", "delta": "DE", "offset": 3}
+
+
+def test_compact_run_events_does_not_coalesce_restarted_message_append_offsets(db):
+    for seq, payload in (
+        (1, '{"mode":"append","text":"A","delta":"A","offset":0}'),
+        (2, '{"mode":"append","text":"B","delta":"B","offset":1}'),
+        (3, '{"mode":"append","text":"RESET","delta":"RESET","offset":0}'),
+    ):
+        db._conn.execute(
+            """
+            INSERT INTO run_events (
+                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                event_type, seq, timestamp, payload_json, event_json, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "stored-1",
+                "run-1",
+                "turn-1",
+                "runtime-1",
+                "stored-1",
+                "message.delta",
+                seq,
+                float(seq),
+                payload,
+                (
+                    '{"type":"message.delta","session_id":"runtime-1",'
+                    '"stored_session_id":"stored-1","run_id":"run-1",'
+                    '"turn_id":"turn-1","runtime_scope_key":"stored-1",'
+                    f'"seq":{seq},"timestamp":{float(seq)},"payload":{payload}}}'
+                ),
+                "",
+            ),
+        )
+
+    result = db.compact_run_events(session_id="stored-1")
+    events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
+
+    assert result["deleted_events"] == 1
+    assert [event["seq"] for event in events] == [2, 3]
+    assert events[0]["payload"] == {"mode": "append", "text": "AB", "delta": "AB", "offset": 0}
+    assert events[1]["payload"] == {"mode": "append", "text": "RESET", "delta": "RESET", "offset": 0}
+
+
+def test_compact_run_events_deduplicates_existing_terminal_rows(db):
+    db.upsert_run(
+        run_id="run-1",
+        session_id="stored-1",
+        runtime_scope_key="profile:agent-default",
+        turn_id="turn-1",
+        runtime_session_id="runtime-1",
+        status="completed",
+    )
+    for seq, text in ((11, "first complete"), (12, "latest complete")):
+        db._conn.execute(
+            """
+            INSERT INTO run_events (
+                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                event_type, seq, timestamp, payload_json, event_json, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "stored-1",
+                "run-1",
+                "turn-1",
+                "runtime-1",
+                "profile:agent-default",
+                "message.complete",
+                seq,
+                float(seq),
+                f'{{"status":"complete","text":"{text}"}}',
+                f'{{"type":"message.complete","session_id":"runtime-1","stored_session_id":"stored-1","run_id":"run-1","turn_id":"turn-1","runtime_scope_key":"profile:agent-default","seq":{seq},"payload":{{"status":"complete","text":"{text}"}}}}',
+                "completed",
+            ),
+        )
+
+    result = db.compact_run_events(session_id="stored-1")
+    events = db.list_run_events("stored-1")
+    run = db.get_run("run-1")
+
+    assert result["deduplicated_terminal_groups"] == 1
+    assert result["deleted_events"] == 1
+    assert [event["seq"] for event in events] == [11]
+    assert events[0]["payload"]["text"] == "latest complete"
+    assert run["last_seq"] == 11
 
 
 # =========================================================================
@@ -950,6 +1346,55 @@ class TestMessageStorage:
         assert len(msgs) == 2
         assert msgs[0]["content"] == content
         assert msgs[1]["content"] == "I see a screenshot."
+
+    def test_display_title_uses_first_user_message_without_auto_title_overwrite(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="同样的首条消息")
+        db.append_message("s1", role="assistant", content="ok")
+        db.create_session(session_id="s2", source="cli")
+        db.append_message("s2", role="user", content="同样的首条消息")
+
+        first = db.get_session("s1")
+        second = db.get_session("s2")
+        assert first["display_title"] == "同样的首条消息"
+        assert second["display_title"] == "同样的首条消息"
+        assert first["display_title_source"] == "first_user_message"
+        assert second["display_title_source"] == "first_user_message"
+
+        assert db.set_session_title("s1", "LLM 自动摘要标题", title_source="auto") is False
+        auto_titled = db.get_session("s1")
+        assert auto_titled["title"] is None
+        assert auto_titled["display_title"] == "同样的首条消息"
+        assert auto_titled["display_title_source"] == "first_user_message"
+
+        assert db.set_session_title("s1", "用户手动重命名")
+        renamed = db.get_session("s1")
+        assert renamed["title"] == "用户手动重命名"
+        assert renamed["display_title"] == "用户手动重命名"
+        assert renamed["display_title_source"] == "user"
+
+        db.replace_messages("s1", [{"role": "user", "content": "新的首条消息"}])
+        rewritten = db.get_session("s1")
+        assert rewritten["display_title"] == "用户手动重命名"
+        assert rewritten["display_title_source"] == "user"
+
+        db.create_session(session_id="s3", source="cli")
+        db.append_message(
+            "s3",
+            role="user",
+            content=[
+                {"type": "text", "text": "多模态首条标题"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+            ],
+        )
+        multimodal = db.get_session("s3")
+        assert multimodal["display_title"] == "多模态首条标题"
+        assert multimodal["display_title_source"] == "first_user_message"
+
+        rows = {row["id"]: row for row in db.list_sessions_rich(limit=10, include_children=True)}
+        assert rows["s1"]["display_title"] == "用户手动重命名"
+        assert rows["s2"]["display_title"] == "同样的首条消息"
+        assert rows["s3"]["display_title"] == "多模态首条标题"
 
     def test_get_messages_as_conversation(self, db):
         db.create_session(session_id="s1", source="cli")
@@ -1899,6 +2344,61 @@ class TestDeleteAndExport:
         assert db.get_session("s1") is None
         assert db.message_count(session_id="s1") == 0
 
+    def test_delete_branch_source_session_cleans_lineage_references(self, db):
+        db.create_session("source", "tui")
+        db.append_message("source", role="user", content="branch from this")
+        assistant_id = db.append_message("source", role="assistant", content="answer")
+        db.branch_session(
+            source_session_id="source",
+            new_session_id="branch-1",
+            branch_point={"message_id": str(assistant_id)},
+            idempotency_key="branch-key-1",
+        )
+
+        assert db.delete_session("source") is True
+
+        branch = db.get_session("branch-1")
+        branch_info = db.get_session_branch_info("branch-1")
+        branch_requests = db._conn.execute(
+            "SELECT COUNT(*) FROM session_branch_requests"
+        ).fetchone()[0]
+        fk_errors = db._conn.execute("PRAGMA foreign_key_check").fetchall()
+
+        assert db.get_session("source") is None
+        assert branch is not None
+        assert branch_info is not None
+        assert branch_info["parent_session_id"] == ""
+        assert branch_requests == 0
+        assert fk_errors == []
+
+    def test_delete_branch_result_session_cleans_lineage_and_idempotency(self, db):
+        db.create_session("source", "tui")
+        db.append_message("source", role="user", content="branch from this")
+        assistant_id = db.append_message("source", role="assistant", content="answer")
+        db.branch_session(
+            source_session_id="source",
+            new_session_id="branch-1",
+            branch_point={"message_id": str(assistant_id)},
+            idempotency_key="branch-key-1",
+        )
+
+        assert db.delete_session("branch-1") is True
+
+        lineage_rows = db._conn.execute(
+            "SELECT COUNT(*) FROM session_lineage WHERE session_id = ?",
+            ("branch-1",),
+        ).fetchone()[0]
+        branch_requests = db._conn.execute(
+            "SELECT COUNT(*) FROM session_branch_requests"
+        ).fetchone()[0]
+        fk_errors = db._conn.execute("PRAGMA foreign_key_check").fetchall()
+
+        assert db.get_session("source") is not None
+        assert db.get_session("branch-1") is None
+        assert lineage_rows == 0
+        assert branch_requests == 0
+        assert fk_errors == []
+
     def test_delete_nonexistent(self, db):
         assert db.delete_session("nope") is False
 
@@ -2081,6 +2581,61 @@ class TestDeleteSessionOrphansChildren:
         grandchild = db.get_session("grandchild")
         assert grandchild is not None
         assert grandchild["parent_session_id"] == "child"
+
+
+def test_repair_orphaned_foreign_key_rows_removes_non_authoritative_dangling_rows(db):
+    db._conn.execute("PRAGMA foreign_keys=OFF")
+    db._conn.execute(
+        """
+        INSERT INTO session_lineage (
+            session_id, parent_session_id, root_session_id,
+            branch_origin, branch_mode, branch_depth, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "missing-branch",
+            "missing-parent",
+            "missing-root",
+            "user_message_action",
+            "materialized_prefix",
+            1,
+            time.time(),
+        ),
+    )
+    db._conn.execute(
+        """
+        INSERT INTO session_branch_requests (
+            idempotency_key, source_session_id, branch_fingerprint,
+            result_session_id, created_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        ("branch-key-orphan", "missing-source", "fingerprint", "missing-result", time.time()),
+    )
+    db._conn.execute(
+        """
+        INSERT INTO team_capability_snapshot_bindings (
+            binding_id, mission_id, conversation_id, snapshot_id,
+            snapshot_version, source_digest, pinned_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "team-capability-binding:missing",
+            "missing-mission",
+            "missing-conversation",
+            "missing-snapshot",
+            1,
+            "digest",
+            time.time(),
+        ),
+    )
+    db._conn.execute("PRAGMA foreign_keys=ON")
+
+    assert db._conn.execute("PRAGMA foreign_key_check").fetchall()
+
+    repaired = db.repair_orphaned_foreign_key_rows()
+
+    assert repaired == 3
+    assert db._conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 # =========================================================================
@@ -3004,6 +3559,26 @@ class TestListSessionsRich:
         # No messages, so last_active falls back to started_at
         assert sessions[0]["last_active"] == sessions[0]["started_at"]
 
+    def test_list_sessions_rich_reads_summary_not_transcript_rows(self, db):
+        db.create_session("s1", "cli")
+        db.append_message("s1", "user", "first summary")
+        db.create_session("s2", "cli")
+        db.append_message("s2", "user", "second summary")
+
+        statements = []
+        with db._lock:
+            db._conn.set_trace_callback(statements.append)
+        try:
+            sessions = db.list_sessions_rich(limit=2, order_by_last_active=True)
+        finally:
+            with db._lock:
+                db._conn.set_trace_callback(None)
+
+        assert [session["id"] for session in sessions] == ["s2", "s1"]
+        traced_sql = "\n".join(statements).lower()
+        assert "from messages" not in traced_sql
+        assert "join messages" not in traced_sql
+
     def test_order_by_last_active_surfaces_recently_touched_older_session_first(self, db):
         t0 = 1709500000.0
         db.create_session("old", "cli")
@@ -3029,6 +3604,14 @@ class TestListSessionsRich:
             db._conn.execute(
                 "UPDATE messages SET timestamp=? WHERE session_id=? AND role=? AND content=?",
                 (t0 + 20, "old", "assistant", "old touched later"),
+            )
+            db._conn.execute(
+                "UPDATE sessions SET last_active=? WHERE id=?",
+                (t0 + 20, "old"),
+            )
+            db._conn.execute(
+                "UPDATE sessions SET last_active=? WHERE id=?",
+                (t0 + 11, "new"),
             )
             db._conn.commit()
 
@@ -3056,6 +3639,10 @@ class TestListSessionsRich:
                 db._conn.execute(
                     "UPDATE messages SET timestamp=? WHERE session_id=? AND content=?",
                     (message_ts, session_id, session_id),
+                )
+                db._conn.execute(
+                    "UPDATE sessions SET last_active=? WHERE id=?",
+                    (message_ts, session_id),
                 )
                 db._conn.commit()
 
@@ -3112,6 +3699,12 @@ class TestListSessionsRich:
                 (t0 + 100, "compression", "root1"),
             )
         db.append_message("root1", "user", "old ask")
+        with db._lock:
+            db._conn.execute(
+                "UPDATE sessions SET last_active=? WHERE id=?",
+                (t0, "root1"),
+            )
+            db._conn.commit()
 
         # Continuation tip created after root ended; last activity much later.
         db.create_session("tip1", "cli", parent_session_id="root1")
@@ -3136,12 +3729,20 @@ class TestListSessionsRich:
                     "UPDATE messages SET timestamp=? WHERE session_id=? AND content=?",
                     (t0 + 500 + i, sid, f"msg {i}"),
                 )
+                db._conn.execute(
+                    "UPDATE sessions SET last_active=? WHERE id=?",
+                    (t0 + 500 + i, sid),
+                )
 
         # Tip activity timestamp is the latest thing in the DB.
         with db._lock:
             db._conn.execute(
                 "UPDATE messages SET timestamp=? WHERE session_id=? AND content=?",
                 (t0 + 10_000, "tip1", "latest message"),
+            )
+            db._conn.execute(
+                "UPDATE sessions SET last_active=? WHERE id=?",
+                (t0 + 10_000, "tip1"),
             )
             db._conn.commit()
 
@@ -3644,6 +4245,52 @@ class TestAutoMaintenance:
         assert result["vacuumed"] is False
         # But last-run is still recorded so we don't retry immediately.
         assert db.get_meta("last_auto_prune") is not None
+
+    def test_auto_run_event_compaction_reclaims_stream_chunks_without_session_prune(self, db):
+        for seq, payload in (
+            (1, '{"mode":"append","text":"A","delta":"A","offset":0}'),
+            (2, '{"mode":"append","text":"B","delta":"B","offset":1}'),
+        ):
+            db._conn.execute(
+                """
+                INSERT INTO run_events (
+                    session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                    event_type, seq, timestamp, payload_json, event_json, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "stored-1",
+                    "run-1",
+                    "turn-1",
+                    "runtime-1",
+                    "stored-1",
+                    "message.delta",
+                    seq,
+                    float(seq),
+                    payload,
+                    (
+                        '{"type":"message.delta","session_id":"runtime-1",'
+                        '"stored_session_id":"stored-1","run_id":"run-1",'
+                        '"turn_id":"turn-1","runtime_scope_key":"stored-1",'
+                        f'"seq":{seq},"timestamp":{float(seq)},"payload":{payload}}}'
+                    ),
+                    "",
+                ),
+            )
+        db._conn.commit()
+
+        result = db.maybe_auto_compact_run_events(vacuum=False)
+        second = db.maybe_auto_compact_run_events(vacuum=False)
+        events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
+
+        assert result["skipped"] is False
+        assert result["deleted_events"] == 1
+        assert result["compacted_segments"] == 1
+        assert result["vacuumed"] is False
+        assert db.get_meta("last_auto_run_event_compaction_v1") is not None
+        assert second["skipped"] is True
+        assert [event["seq"] for event in events] == [2]
+        assert events[0]["payload"] == {"mode": "append", "text": "AB", "delta": "AB", "offset": 0}
 
     def test_vacuum_disabled_via_flag(self, db):
         self._make_old_ended(db, "old", days_old=100)

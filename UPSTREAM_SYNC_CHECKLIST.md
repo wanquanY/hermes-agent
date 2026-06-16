@@ -4,6 +4,16 @@
 
 重点不是罗列所有功能，而是把最容易在同步后回归的边界固定下来：先看症状，再查对应模块，最后跑最小验证包。
 
+## 文档管理
+
+同步文档按职责拆分，避免把历史审计、架构设计和发布快照继续堆到一个文件里：
+
+- `UPSTREAM_SYNC_CHECKLIST.md`：只放同步后的快速分诊、红线和最小验证包。
+- `docs/upstream-sync/README.zh-CN.md`：同步文档入口和更新规则。
+- `docs/upstream-sync/doxie-runtime-snapshot-YYYYMMDD.md`：每次大批量本地 staged 代码的 Doxie runtime 快照。
+- `docs/selective-upstream-client-sync-20260527.md`：P0/P1 选择性吸收历史审计。
+- `docs/team-mission-runtime-architecture.zh-CN.md`：Team Mission 原生运行时长期架构。
+
 ## 本次同步暴露的问题
 
 当前分支的暂存改动显示，这次同步后的问题集中在几个边界：
@@ -357,7 +367,7 @@ Doxie profile-scoped 请求不能长期跑在 control plane 进程里。control 
 - `doxie_extension` manifest 和 method overrides 中的 `runtime.ensure`。
 - `tui_gateway/services/runtime_proxy.py` 的 `RuntimeWorkerPool`、`RuntimeProxyBridge`、`should_proxy_to_runtime(...)`。
 - `tui_gateway/ws.py` 在普通 dispatch 前先调用 `proxy_to_runtime(...)`。
-- worker 启动环境中的 `HERMES_HOME`、`DOXIE_HERMES_RUNTIME_SCOPE_KEY`、`DOXIE_AGENT_PROFILE_ID`、`DOXIE_AGENT_PROFILE_VERSION_ID`。
+- worker 启动环境中的 `HERMES_HOME`、`DOXIE_HERMES_RUNTIME_SCOPE_KEY`、`DOXIE_AGENT_PROFILE_ID`。
 - WebSocket bridge 读取 worker 的 response/event 后原样写回客户端，并在客户端 WS 关闭时释放 bridge。
 - `bridge_count > 0` 时 idle reclaim 不能杀 worker；idle timeout 到期且无活动 bridge 时才回收。
 - control-plane 方法默认不代理，但 `approval.pending.list`、`approval.policy.get`、`approval.policy.set`、`approval.respond`、`cron.manage`、`skills.reload`、`tools.configure`、`run.cancel`、`session.create(control_plane_only)`、clarify/sudo/secret respond 等 scoped 控制动作要按规则处理。

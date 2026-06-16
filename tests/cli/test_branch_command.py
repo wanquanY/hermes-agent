@@ -116,8 +116,8 @@ class TestBranchCommandCLI:
         title = session_db.get_session_title(cli_instance.session_id)
         assert title == "refactor approach"
 
-    def test_branch_auto_title_lineage(self, cli_instance, session_db):
-        """Without a name, branch should auto-generate a title from the parent's title."""
+    def test_branch_default_title_lineage(self, cli_instance, session_db):
+        """Without a name, branch should derive a title from the parent's title."""
         from cli import HermesCLI
 
         HermesCLI._handle_branch_command(cli_instance, "/branch")
@@ -161,7 +161,7 @@ class TestBranchCommandCLI:
         assert agent._last_flushed_db_idx == 4  # len(conversation_history)
 
     def test_branch_sets_resumed_flag(self, cli_instance, session_db):
-        """Branch should set _resumed=True to prevent auto-title generation."""
+        """Branch should set _resumed=True after switching sessions."""
         from cli import HermesCLI
 
         HermesCLI._handle_branch_command(cli_instance, "/branch")

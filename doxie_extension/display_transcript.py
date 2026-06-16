@@ -119,9 +119,14 @@ def sanitize_session_list_item(session: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize session list title/preview for Doxie history surfaces."""
 
     item = dict(session)
+    display_title = sanitize_display_text(item.get("display_title") or item.get("displayTitle"))
     title = sanitize_display_text(item.get("title"))
     preview = sanitize_display_text(item.get("preview"))
-    if title:
+    if display_title:
+        item["title"] = display_title
+        item["display_title"] = display_title
+        item["displayTitle"] = display_title
+    elif title:
         item["title"] = title
     elif preview:
         item["title"] = preview

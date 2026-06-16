@@ -11,8 +11,12 @@ from doxie_extension import load_extension
 METHOD_MODULES = (
     "session",
     "session_branch",
+    "conversation_activity",
+    "conversation_render_snapshot",
     "prompt",
     "run",
+    "team_registry",
+    "profile_registry",
     "team_mission",
     "team_mission_history",
     "config",

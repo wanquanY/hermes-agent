@@ -35,6 +35,51 @@ MEMBERS = [
 ]
 
 
+DOXIE_MEMBERS = [
+    {
+        "memberId": "member-leader",
+        "agentProfileId": "profile-leader",
+        "agentProfileVersionId": "version-leader",
+        "displayName": "Leader",
+        "role": "lead",
+        "doxieProfile": {
+            "id": "profile-leader",
+            "agentProfileVersionId": "version-leader",
+            "runtimeScopeKey": "profile:profile-leader:version:version-leader",
+            "hermesHomePath": "/tmp/profile-leader-runtime",
+        },
+    },
+    {
+        "memberId": "member-worker",
+        "agentProfileId": "profile-worker",
+        "agentProfileVersionId": "version-worker",
+        "displayName": "Worker",
+        "role": "worker",
+        "doxieProfile": {
+            "id": "profile-worker",
+            "agentProfileVersionId": "version-worker",
+            "runtimeScopeKey": "profile:profile-worker:version:version-worker",
+            "hermesHomePath": "/tmp/profile-worker-runtime",
+        },
+    },
+]
+
+
+def test_supervised_strategy_preserves_doxie_member_profile_identity():
+    strategy = strategy_for_mode(MODE_SUPERVISED_MISSION)
+
+    patch = strategy.initialize_graph(
+        mission_id="mission-doxie",
+        title="执行任务",
+        objective="规划后审批再执行",
+        members=DOXIE_MEMBERS,
+    )
+
+    root = patch.nodes[0]
+    assert root.assignee_profile_id == "profile-leader"
+    assert root.assignee_profile_version_id == "version-leader"
+
+
 def test_discussion_strategy_creates_parallel_contribution_nodes():
     strategy = strategy_for_mode(MODE_DISCUSSION)
 
@@ -104,6 +149,9 @@ def test_supervised_strategy_waits_for_whole_graph_approval_after_planning():
     assert "team_mission_node_create" in leader_text
     assert "team_mission_team_profile" in leader_text
     assert "team_mission_plan_complete" in leader_text
+    assert "Hermes" not in leader_text
+    assert "DoXie team Leader Planner" in leader_text
+    assert "Keep the same persona, identity, tone, and memory as the underlying DoXie profile" in leader_text
     assert "worker-a" not in leader_text
     assert "profile-worker-a" not in leader_text
     assert "Worker A" not in leader_text
@@ -216,3 +264,24 @@ def test_session_db_initializes_team_mission_through_mode_strategy(tmp_path: Pat
     assert graph["mission"]["metadata"]["requires_whole_graph_approval"] is True
     assert [node["kind"] for node in graph["nodes"]] == ["root"]
     assert graph["nodes"][0]["runtime_scope_key"] == "team:mission-1:leader"
+
+
+def test_session_db_stores_doxie_member_runtime_profiles_for_team_mission(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+
+    graph = db.initialize_team_mission_from_strategy(
+        mission_id="mission-doxie",
+        team_id="team-1",
+        title="监督执行",
+        objective="规划审批后执行",
+        mode=MODE_SUPERVISED_MISSION,
+        members=DOXIE_MEMBERS,
+    )
+
+    members = graph["mission"]["metadata"]["members"]
+    assert members[0]["member_id"] == "member-leader"
+    assert members[0]["profile_id"] == "profile-leader"
+    assert members[0]["profile_version_id"] == "version-leader"
+    assert members[0]["hermes_home_path"] == "/tmp/profile-leader-runtime"
+    assert graph["nodes"][0]["assignee_profile_id"] == "profile-leader"
+    assert graph["nodes"][0]["metadata"]["assignee_member_id"] == "member-leader"

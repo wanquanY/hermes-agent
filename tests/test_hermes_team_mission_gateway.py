@@ -16,39 +16,70 @@ class _MemoryTransport:
         pass
 
 
-def _capability_source_packet() -> dict:
-    return {
-        "teamId": "team-1",
-        "team": {
-            "name": "研发验收组",
-            "description": "面向工程实现和质量验收的团队。",
-            "defaultMode": "supervised_mission",
-        },
-        "members": [
-            {
-                "memberId": "leader",
-                "agentProfileId": "profile-leader",
-                "displayName": "多多",
-                "role": "leader",
-                "profile": {
-                    "description": "负责需求沟通、规划和验收协调。",
-                    "tags": ["planning", "quality"],
-                },
-            },
-            {
-                "memberId": "builder",
-                "agentProfileId": "profile-builder",
-                "displayName": "推进工程师",
-                "role": "engineer",
-                "capabilityTags": ["code", "automation"],
-                "profile": {
-                    "description": "负责代码实现、文件编辑和测试自动化。",
-                    "tags": ["engineering"],
-                    "defaultToolsets": ["terminal", "file"],
-                },
-            },
-        ],
-    }
+def _workspace_payload(tmp_path: Path, workspace_id: str = "workspace-1") -> dict:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    return {"workspace_id": workspace_id, "workspace_path": str(workspace)}
+
+
+def _workspace_kwargs(tmp_path: Path, workspace_id: str = "workspace-1") -> dict:
+    workspace = _workspace_payload(tmp_path, workspace_id=workspace_id)
+    return {"workspace_id": workspace["workspace_id"], "workspace_path": workspace["workspace_path"]}
+
+
+def _seed_registry_team(db, tmp_path: Path) -> None:
+    db.upsert_agent_profile(
+        profile_id="profile-leader",
+        slug="leader",
+        name="Leader",
+        description="Plans and verifies team work.",
+        category="product",
+        tags=["planning", "quality"],
+        hermes_profile_name="leader",
+        hermes_home_path=str(tmp_path / "leader" / "version-leader"),
+        default_toolsets=["file", "terminal"],
+        recommended_skills=["planning"],
+        current_version_id="version-leader",
+        current_version_number=1,
+    )
+    db.upsert_agent_profile(
+        profile_id="profile-builder",
+        slug="builder",
+        name="Builder",
+        description="Builds the implementation.",
+        category="engineering",
+        tags=["engineering"],
+        hermes_profile_name="builder",
+        hermes_home_path=str(tmp_path / "builder" / "version-builder"),
+        default_toolsets=["file", "terminal"],
+        recommended_skills=["implementation"],
+        current_version_id="version-builder",
+        current_version_number=1,
+    )
+    db.upsert_agent_team(
+        team_id="team-1",
+        name="Registry Team",
+        description="Team from Hermes registry.",
+        lead_agent_profile_id="profile-leader",
+        default_mode="supervised_mission",
+        policy={"planApproval": "always"},
+    )
+    db.upsert_agent_team_member(
+        member_id="member-leader",
+        team_id="team-1",
+        agent_profile_id="profile-leader",
+        agent_profile_version_id="version-leader",
+        role="lead",
+        capability_tags=["planning"],
+    )
+    db.upsert_agent_team_member(
+        member_id="member-builder",
+        team_id="team-1",
+        agent_profile_id="profile-builder",
+        agent_profile_version_id="version-builder",
+        role="builder",
+        capability_tags=["engineering"],
+    )
 
 
 def test_team_capability_gateway_get_refresh_and_bind(monkeypatch, tmp_path: Path):
@@ -59,15 +90,16 @@ def test_team_capability_gateway_get_refresh_and_bind(monkeypatch, tmp_path: Pat
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
 
     get_response = server._methods["team_capability.snapshot.get"](
         1,
-        {"source_packet": _capability_source_packet()},
+        {"team_id": "team-1"},
     )
     refresh_response = server._methods["team_capability.snapshot.refresh"](
         2,
-        {"source_packet": _capability_source_packet()},
+        {"team_id": "team-1"},
     )
     db.upsert_team_mission(
         mission_id="mission-1",
@@ -96,7 +128,55 @@ def test_team_capability_gateway_get_refresh_and_bind(monkeypatch, tmp_path: Pat
     assert profile_response["result"]["snapshot"]["snapshot_id"] == refresh_response["result"]["snapshot"]["snapshot_id"]
 
 
-def test_team_mission_leader_node_toolsets_are_phase_independent():
+def test_team_capability_gateway_builds_snapshot_from_registry_team_id(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    monkeypatch.setitem(server._methods, "run.submit", lambda rid, params: {
+        "jsonrpc": "2.0",
+        "id": rid,
+        "result": {
+            "status": "running",
+            "run_id": params["run_id"],
+            "turn_id": params["turn_id"],
+            "session_id": "runtime-leader",
+            "stored_session_id": params["stored_session_id"],
+            "runtime_scope_key": params["runtime_scope_key"],
+        },
+    })
+
+    get_response = server._methods["team_capability.snapshot.get"](1, {"team_id": "team-1"})
+    refresh_response = server._methods["team_capability.snapshot.refresh"](2, {"team_id": "team-1"})
+    create_response = server._methods["team_mission.create"](
+        3,
+        {
+            "mission_id": "mission-registry",
+            "team_id": "team-1",
+            "title": "Registry-owned task",
+            "objective": "Verify registry-owned team mission creation.",
+            "workspace": {"workspace_id": "workspace-1", "workspace_path": str(tmp_path)},
+            "mode": "supervised_mission",
+        },
+    )
+
+    snapshot = get_response["result"]["snapshot"]
+    assert snapshot["team_id"] == "team-1"
+    assert [item["member_id"] for item in snapshot["member_profiles"]] == ["member-leader", "member-builder"]
+    assert refresh_response["result"]["snapshot"]["team_id"] == "team-1"
+    graph = create_response["result"]["graph"]
+    root = next(node for node in graph["nodes"] if node["kind"] == "root")
+    assert root["assignee_profile_id"] == "profile-leader"
+    assert root["assignee_profile_version_id"] == "version-leader"
+    assert graph["mission"]["metadata"]["team_capability_snapshot"]["snapshot_id"].startswith("team-capability:team-1:")
+
+
+def test_team_mission_leader_node_toolsets_are_surface_scoped():
     import importlib
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
@@ -105,12 +185,12 @@ def test_team_mission_leader_node_toolsets_are_phase_independent():
         {},
         {"mode": "supervised_mission"},
         {"kind": "root", "metadata": {"role": "leader", "phase": "planning"}},
-    ) == ["team_mission_leader", "team_mission_planning"]
+    ) == ["team_mission_planning"]
     assert team_mission._start_toolsets(
         {},
         {"mode": "supervised_mission"},
         {"kind": "root", "metadata": {"role": "leader", "phase": "verifying"}},
-    ) == ["team_mission_leader"]
+    ) == ["team_mission_read"]
 
 
 def test_team_mission_worker_toolsets_follow_current_member_profile(monkeypatch):
@@ -118,16 +198,19 @@ def test_team_mission_worker_toolsets_follow_current_member_profile(monkeypatch)
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     monkeypatch.setattr(team_mission, "_load_enabled_toolsets", lambda: ["hermes-cli"], raising=False)
-    params = {
-        "members": [
-            {
-                "member_id": "qa-member",
-                "profile_id": "profile-qa",
-                "profile_version_id": "version-current",
-                "runtime_scope_key": "profile:profile-qa:version:version-current",
-                "default_toolsets": ["file", "terminal", "skills"],
-            }
-        ]
+    params = {}
+    mission = {
+        "metadata": {
+            "members": [
+                {
+                    "member_id": "qa-member",
+                    "profile_id": "profile-qa",
+                    "profile_version_id": "version-current",
+                    "runtime_scope_key": "profile:profile-qa:version:version-current",
+                    "default_toolsets": ["file", "terminal", "skills"],
+                }
+            ]
+        }
     }
     node = {
         "kind": "worker",
@@ -135,7 +218,7 @@ def test_team_mission_worker_toolsets_follow_current_member_profile(monkeypatch)
         "assignee_profile_version_id": "version-old",
         "metadata": {"role": "member"},
     }
-    profile_params = team_mission._node_profile_params(params, {"metadata": {"members": []}}, node)
+    profile_params = team_mission._node_profile_params(params, mission, node)
 
     assert profile_params["agent_profile_version_id"] == "version-current"
     assert team_mission._start_toolsets(
@@ -146,7 +229,44 @@ def test_team_mission_worker_toolsets_follow_current_member_profile(monkeypatch)
     ) == ["hermes-cli"]
 
 
-def test_team_profile_get_resolves_conversation_source_packet_without_active_mission(monkeypatch, tmp_path: Path):
+def test_team_mission_node_profile_params_accept_doxie_member_fields():
+    import importlib
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    params = {}
+    mission = {
+        "metadata": {
+            "members": [
+                {
+                    "memberId": "member-leader",
+                    "agentProfileId": "profile-leader",
+                    "agentProfileVersionId": "version-leader",
+                    "role": "lead",
+                    "doxieProfile": {
+                        "id": "profile-leader",
+                        "agentProfileVersionId": "version-leader",
+                        "runtimeScopeKey": "profile:profile-leader:version:version-leader",
+                        "hermesHomePath": "/tmp/profile-leader-runtime",
+                    },
+                }
+            ]
+        }
+    }
+    node = {
+        "kind": "root",
+        "assignee_profile_id": "profile-leader",
+        "metadata": {"role": "leader"},
+    }
+
+    profile_params = team_mission._node_profile_params(params, mission, node)
+
+    assert profile_params["agent_profile_id"] == "profile-leader"
+    assert profile_params["agent_profile_version_id"] == "version-leader"
+    assert profile_params["runtime_scope_key"] == "profile:profile-leader:version:version-leader"
+    assert profile_params["doxie_profile"]["hermesHomePath"] == "/tmp/profile-leader-runtime"
+
+
+def test_team_profile_get_resolves_conversation_registry_without_active_mission(monkeypatch, tmp_path: Path):
     import importlib
 
     from hermes_state import SessionDB
@@ -154,6 +274,7 @@ def test_team_profile_get_resolves_conversation_source_packet_without_active_mis
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
@@ -167,19 +288,18 @@ def test_team_profile_get_resolves_conversation_source_packet_without_active_mis
         {
             "conversation_id": "conversation-1",
             "team_id": "team-1",
-            "team_capability": {"source_packet": _capability_source_packet()},
         },
     )
 
     result = response["result"]
     assert result["mission_id"] == ""
     assert result["team_id"] == "team-1"
-    assert result["source"] == "source_packet"
+    assert result["source"] == "team_registry"
     assert result["snapshot"]["team_id"] == "team-1"
-    assert [member["display_name"] for member in result["snapshot"]["member_profiles"]] == ["多多", "推进工程师"]
+    assert [member["display_name"] for member in result["snapshot"]["member_profiles"]] == ["Leader", "Builder"]
 
 
-def test_leader_team_profile_tool_forwards_conversation_capability_packet(monkeypatch, tmp_path: Path):
+def test_leader_team_profile_tool_resolves_conversation_registry(monkeypatch, tmp_path: Path):
     import importlib
 
     from hermes_state import SessionDB
@@ -188,6 +308,7 @@ def test_leader_team_profile_tool_forwards_conversation_capability_packet(monkey
     leader_tools = importlib.import_module("tools.team_mission_leader_tools")
     profile_tools = importlib.import_module("tools.team_mission_profile_tools")
     db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
@@ -204,8 +325,6 @@ def test_leader_team_profile_tool_forwards_conversation_capability_packet(monkey
                 "conversation_id": "conversation-1",
                 "conversation_session_id": "team-session-1",
                 "team_id": "team-1",
-                "members": [{"member_id": "leader", "profile_id": "profile-leader", "role": "leader"}],
-                "team_capability": {"source_packet": _capability_source_packet()},
             }
         },
     )
@@ -215,7 +334,7 @@ def test_leader_team_profile_tool_forwards_conversation_capability_packet(monkey
     assert payload["success"] is True
     assert payload["mission_id"] == ""
     assert payload["snapshot"]["team_id"] == "team-1"
-    assert [member["display_name"] for member in payload["snapshot"]["member_profiles"]] == ["多多", "推进工程师"]
+    assert [member["display_name"] for member in payload["snapshot"]["member_profiles"]] == ["Leader", "Builder"]
     assert "evidence_refs" not in payload["snapshot"]
     assert all("evidence_refs" not in member for member in payload["snapshot"]["member_profiles"])
 
@@ -228,6 +347,7 @@ def test_team_mission_gateway_methods_create_graph_and_replay_events(monkeypatch
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     submitted = {}
 
@@ -262,14 +382,7 @@ def test_team_mission_gateway_methods_create_graph_and_replay_events(monkeypatch
             "title": "监督执行",
             "objective": "规划审批后执行",
             "mode": "supervised_mission",
-            "members": [
-                {
-                    "member_id": "leader",
-                    "profile_id": "profile-leader",
-                    "role": "leader",
-                },
-            ],
-            "team_capability": {"source_packet": _capability_source_packet()},
+            "workspace": _workspace_payload(tmp_path),
         },
     )
 
@@ -283,7 +396,7 @@ def test_team_mission_gateway_methods_create_graph_and_replay_events(monkeypatch
     assert submitted["text"] != "规划审批后执行"
     assert "team_mission_node_create" in submitted["text"]
     assert "team_mission_plan_complete" in submitted["text"]
-    assert submitted["enabled_toolsets"] == ["team_mission_leader", "team_mission_planning"]
+    assert submitted["enabled_toolsets"] == ["team_mission_planning"]
     assert "delegation" in submitted["disabled_toolsets"]
     assert submitted["toolset_scope"] == "exact"
     assert submitted["doxie_product_context"]["team_mission"]["node_role"] == "leader"
@@ -306,10 +419,123 @@ def test_team_mission_gateway_methods_create_graph_and_replay_events(monkeypatch
 
     events_response = server._methods["team_mission.events"](3, {"mission_id": "mission-1"})
     events = events_response["result"]["events"]
-    message_events = [event for event in events if event["type"] == "message.delta"]
+    message_events = [
+        event
+        for event in events
+        if (
+            event["type"] == "team_mission.runtime.event"
+            and event["payload"]["source_event_type"] == "message.delta"
+        )
+    ]
     assert events_response["result"]["last_event_seq"] >= message_events[-1]["seq"]
     assert message_events[-1]["payload"]["mission_id"] == "mission-1"
-    assert message_events[-1]["payload"]["delta"] == "规划中"
+    assert message_events[-1]["payload"]["source_event"]["payload"]["delta"] == "规划中"
+
+
+def test_team_mission_graph_returns_conversation_graph_when_conversation_id_is_present(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        title="连续任务",
+        active_mission_id="mission-2",
+    )
+    for mission_id, title, created_at in (
+        ("mission-1", "第一轮", 1.0),
+        ("mission-2", "第二轮", 2.0),
+    ):
+        db.upsert_team_mission(
+            mission_id=mission_id,
+            conversation_id="conversation-1",
+            team_id="team-1",
+            title=title,
+            objective=title,
+            mode="supervised_mission",
+            leader_session_id="team-session-1",
+            created_at=created_at,
+            updated_at=created_at,
+            metadata={"task_id": f"task-{mission_id}"},
+        )
+        db.upsert_team_mission_node(
+            mission_id=mission_id,
+            node_id="root",
+            kind="root",
+            title=f"{title}根节点",
+            status="completed",
+            metadata={"task_id": f"task-{mission_id}"},
+        )
+
+    response = server._methods["team_mission.graph"](
+        1,
+        {"mission_id": "mission-2", "conversation_id": "conversation-1"},
+    )
+
+    result = response["result"]
+    graph = result["graph"]
+    assert result["mission_id"] == "mission-2"
+    assert result["conversation_id"] == "conversation-1"
+    assert graph["mission"]["mission_id"] == "mission-2"
+    assert [frame["missionId"] for frame in graph["task_frames"]] == [
+        "mission-1",
+        "mission-2",
+    ]
+    assert [node["node_id"] for node in graph["nodes"]] == ["mission-1:root", "mission-2:root"]
+
+
+def test_team_mission_graph_rejects_mission_from_another_conversation(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        active_mission_id="mission-1",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="第一轮",
+        objective="第一轮",
+        leader_session_id="team-session-1",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-other",
+        conversation_id="conversation-other",
+        team_id="team-1",
+        title="其他会话",
+        objective="其他会话",
+        leader_session_id="team-session-other",
+    )
+
+    response = server._methods["team_mission.graph"](
+        1,
+        {"mission_id": "mission-other", "conversation_id": "conversation-1"},
+    )
+
+    assert response["error"]["code"] == 4040
+    assert response["error"]["message"] == "team mission not found in conversation"
 
 
 def test_team_mission_create_conversation_only_does_not_create_or_start_graph(monkeypatch, tmp_path: Path):
@@ -320,6 +546,7 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(mo
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     submitted = []
 
@@ -338,12 +565,8 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(mo
             "objective": "你好啊",
             "mode": "supervised_mission",
             "conversation_only": True,
-            "workspace": {
-                "workspace_id": "workspace-1",
-                "workspace_path": "/tmp/workspace",
-            },
+            "workspace": _workspace_payload(tmp_path),
             "metadata": {"stableTeamSessionId": "team-session-1"},
-            "members": [{"member_id": "leader", "role": "leader"}],
         },
     )
 
@@ -366,8 +589,8 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(mo
         {
             "conversation_id": "mission-1",
             "conversation_session_id": "team-session-1",
+            "team_id": "team-1",
             "text": "你好啊",
-            "members": [{"member_id": "leader", "profile_id": "profile-leader", "role": "leader"}],
         },
     )
 
@@ -387,6 +610,133 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(mo
     assert resolve_response["result"]["mission"] == {}
 
 
+def test_team_mission_message_submit_derives_conversation_title_from_first_user_message(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    workspace = _workspace_payload(tmp_path)
+    db.ensure_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        title="Team Mission",
+        objective="占位会话",
+        workspace_id=workspace["workspace_id"],
+        workspace_path=workspace["workspace_path"],
+    )
+    submitted = {}
+
+    def fake_run_submit(rid, params):
+        submitted.update(params)
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "status": "streaming",
+                "run_id": params["run_id"],
+                "turn_id": params["turn_id"],
+                "session_id": "runtime-leader-conversation",
+                "stored_session_id": params["stored_session_id"],
+                "runtime_scope_key": params["runtime_scope_key"],
+            },
+        }
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+
+    response = server._methods["team_mission.message.submit"](
+        1,
+        {
+            "conversation_id": "conversation-1",
+            "conversation_session_id": "team-session-1",
+            "team_id": "team-1",
+            "title": "DoXie 不应该拥有这个标题",
+            "text": "内部增强后的提示",
+            "draft_text": "你是谁？ 我是谁？",
+            "runtime_scope_key": "team:conversation-1:leader-conversation",
+            "workspace": workspace,
+        },
+    )
+
+    assert "error" not in response
+    conversation = db.get_team_mission_conversation("conversation-1")
+    assert conversation["title"] == "你是谁？ 我是谁？"
+    assert conversation["display_title_source"] == "first_user_message"
+    assert submitted["persist_user_message"] == "你是谁？ 我是谁？"
+
+
+def test_team_conversation_detail_returns_registry_team_members(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
+    db.upsert_agent_profile(
+        profile_id="profile-reviewer",
+        slug="reviewer",
+        name="Reviewer",
+        description="Reviews team work.",
+        category="quality",
+        tags=["review"],
+        hermes_profile_name="reviewer",
+        hermes_home_path=str(tmp_path / "reviewer" / "version-reviewer"),
+        default_toolsets=["file"],
+        recommended_skills=["review"],
+        current_version_id="version-reviewer",
+        current_version_number=1,
+    )
+    db.upsert_agent_team_member(
+        member_id="member-reviewer",
+        team_id="team-1",
+        agent_profile_id="profile-reviewer",
+        agent_profile_version_id="version-reviewer",
+        role="reviewer",
+        capability_tags=["review"],
+    )
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    workspace = _workspace_payload(tmp_path)
+    db.ensure_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        title="团队会话",
+        objective="协作",
+        workspace_id=workspace["workspace_id"],
+        workspace_path=workspace["workspace_path"],
+    )
+    db.create_session("team-session-1", source="team_mission", transient=False)
+    db.append_message("team-session-1", "user", "请开始团队协作")
+
+    resolve_response = server._methods["team_mission.conversation.resolve"](
+        1,
+        {"identifier": "conversation-1"},
+    )
+    render_response = server._methods["team_mission.conversation.render"](
+        2,
+        {"identifier": "conversation-1"},
+    )
+
+    assert "error" not in resolve_response
+    resolved_team = resolve_response["result"]["team"]
+    assert resolved_team["projection"] == "detail"
+    assert [member["member_id"] for member in resolved_team["members"]] == [
+        "member-leader",
+        "member-builder",
+        "member-reviewer",
+    ]
+    assert len(resolved_team["display_members"]) == 2
+    assert resolve_response["result"]["graph"]["team"]["members"] == resolved_team["members"]
+    assert "error" not in render_response
+    assert render_response["result"]["team"]["members"] == resolved_team["members"]
+
+
 def test_team_mission_node_create_requires_existing_mission(monkeypatch, tmp_path: Path):
     import importlib
 
@@ -395,6 +745,7 @@ def test_team_mission_node_create_requires_existing_mission(monkeypatch, tmp_pat
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
 
     response = server._methods["team_mission.node.create"](
@@ -440,6 +791,7 @@ def test_team_mission_create_records_user_task_in_stable_team_session(monkeypatc
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
 
     def fake_run_submit(rid, params):
@@ -472,17 +824,13 @@ def test_team_mission_create_records_user_task_in_stable_team_session(monkeypatc
             "title": "监督执行",
             "objective": "继续做第二个任务",
             "mode": "supervised_mission",
-            "workspace": {
-                "workspace_id": "workspace-1",
-                "workspace_path": "/tmp/workspace",
-            },
+            "workspace": _workspace_payload(tmp_path),
             "metadata": {"stableTeamSessionId": "team-session-1"},
-            "members": [{"member_id": "leader", "role": "leader"}],
         },
     )
 
     assert response["result"]["graph"]["mission"]["workspace_id"] == "workspace-1"
-    assert response["result"]["graph"]["mission"]["workspace_path"] == "/tmp/workspace"
+    assert response["result"]["graph"]["mission"]["workspace_path"] == _workspace_payload(tmp_path)["workspace_path"]
     assert response["result"]["graph"]["mission"]["metadata"]["conversation_session_id"] == "team-session-1"
 
     messages = db.get_messages("team-session-1")
@@ -500,15 +848,17 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.initialize_team_mission_from_strategy(
         mission_id="mission-1",
         team_id="team-1",
         title="监督执行",
         objective="初始任务",
+        **_workspace_kwargs(tmp_path),
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"conversation_session_id": "team-session-1"},
+        metadata={"conversation_session_id": "team-session-1", "active_task_id": "task-1"},
         members=[{"member_id": "leader", "profile_id": "profile-leader", "role": "leader"}],
     )
     submitted = {}
@@ -537,6 +887,16 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
             "mission_id": "mission-1",
             "text": "你好，上一轮进度怎么样？",
             "members": [{"member_id": "leader", "profile_id": "profile-leader", "role": "leader"}],
+            "attachments": [
+                {
+                    "id": "upload-1",
+                    "name": "requirements.pdf",
+                    "mimeType": "application/pdf",
+                    "size": 1200,
+                    "path": "/tmp/requirements.pdf",
+                    "kind": "file",
+                }
+            ],
         },
     )
 
@@ -544,8 +904,9 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
     assert submitted["stored_session_id"] == "team-session-1"
     assert submitted["persist_user_message"] == "你好，上一轮进度怎么样？"
     assert submitted["enabled_toolsets"] == [
-        "team_mission_leader",
+        "team_mission_conversation_leader",
         "clarify",
+        "vision",
         "file",
         "terminal",
         "todo",
@@ -556,7 +917,138 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
     assert submitted["doxie_product_context"]["team_mission"]["kind"] == "leader_conversation"
     assert submitted["doxie_product_context"]["team_mission"]["tool_policy"]["disabled_toolsets"] == ["delegation"]
     assert submitted["doxie_product_context"]["team_mission"]["tool_policy"]["toolset_scope"] == "exact"
+    assert submitted["attachments"][0]["path"] == "/tmp/requirements.pdf"
+    conversation = db.get_team_mission_conversation("mission-1")
+    assert conversation["title"] == "你好，上一轮进度怎么样？"
+    assert conversation["display_title_source"] == "first_user_message"
+    memory_items = db.list_team_mission_memory_items(
+        mission_id="mission-1",
+        conversation_session_id="team-session-1",
+        kinds=["artifact"],
+        statuses=["committed"],
+    )
+    assert len(memory_items) == 1
+    assert memory_items[0]["task_id"] == "task-1"
+    assert memory_items[0]["source_run_ids"] == [submitted["run_id"]]
+    assert memory_items[0]["artifact_refs"][0]["path"] == "/tmp/requirements.pdf"
+    assert memory_items[0]["artifact_refs"][0]["kind"] == "file"
     assert len(db.get_team_mission_graph("mission-1")["nodes"]) == 1
+
+
+def test_team_mission_message_submit_direct_reply_disables_tools_and_reasoning(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    submitted = {}
+
+    def fake_run_submit(rid, params):
+        submitted.update(params)
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "status": "streaming",
+                "run_id": params["run_id"],
+                "turn_id": params["turn_id"],
+                "session_id": "runtime-leader-conversation",
+                "stored_session_id": params["stored_session_id"],
+                "runtime_scope_key": params["runtime_scope_key"],
+            },
+        }
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "team:conversation-1:leader-conversation")
+
+    response = server._methods["team_mission.message.submit"](
+        1,
+        {
+            "conversation_id": "conversation-1",
+            "conversation_session_id": "team-session-conversation-1",
+            "text": "我测试功能，你写一篇不少于800字的科幻作文，不要启动团队任务，你自己完成",
+            "runtime_scope_key": "team:conversation-1:leader-conversation",
+            "workspace": _workspace_payload(tmp_path),
+        },
+    )
+
+    assert response["result"]["conversation_session_id"] == "team-session-conversation-1"
+    assert submitted["enabled_toolsets"] == []
+    assert submitted["toolset_scope"] == "exact"
+    assert submitted["reasoning_config"] == {"enabled": False}
+    assert "team_mission_start_task" not in submitted["text"]
+    assert "Answer directly" in submitted["text"]
+    assert submitted["persist_user_message"] == "我测试功能，你写一篇不少于800字的科幻作文，不要启动团队任务，你自己完成"
+    assert db.get_team_mission_graph("mission-1") == {}
+
+
+def test_team_mission_message_submit_registers_worker_runtime_session_shell(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    control_home = tmp_path / "control"
+    profile_home = tmp_path / "profile"
+    control_home.mkdir()
+    profile_home.mkdir()
+    control_db = SessionDB(control_home / "state.db")
+    runtime_db = SessionDB(profile_home / "state.db")
+    monkeypatch.setenv("DOXIE_HERMES_CONTROL_HOME", str(control_home))
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "team:conversation-1:leader-conversation")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: control_db)
+    monkeypatch.setattr(server, "_get_db", lambda: runtime_db)
+
+    control_db.ensure_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        title="团队会话",
+        objective="继续沟通",
+    )
+    assert control_db.get_session("team-session-1") is not None
+    assert runtime_db.get_session("team-session-1") is None
+
+    submitted = {}
+
+    def fake_run_submit(rid, params):
+        assert runtime_db.get_session("team-session-1") is not None
+        submitted.update(params)
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "status": "streaming",
+                "run_id": params["run_id"],
+                "turn_id": params["turn_id"],
+                "session_id": "runtime-leader-conversation",
+                "stored_session_id": params["stored_session_id"],
+                "runtime_scope_key": params["runtime_scope_key"],
+            },
+        }
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+
+    response = server._methods["team_mission.message.submit"](
+        1,
+        {
+            "conversation_id": "conversation-1",
+            "conversation_session_id": "team-session-1",
+            "team_id": "team-1",
+            "text": "哈哈哈",
+            "runtime_scope_key": "team:conversation-1:leader-conversation",
+            "workspace": _workspace_payload(tmp_path),
+        },
+    )
+
+    assert "error" not in response
+    assert response["result"]["conversation_session_id"] == "team-session-1"
+    assert submitted["stored_session_id"] == "team-session-1"
+    assert runtime_db.get_session("team-session-1")["source"] == "team_mission"
 
 
 def test_team_mission_message_submit_forwards_leader_profile_context(monkeypatch, tmp_path: Path):
@@ -586,6 +1078,7 @@ def test_team_mission_message_submit_forwards_leader_profile_context(monkeypatch
         team_id="team-1",
         title="监督执行",
         objective="初始任务",
+        **_workspace_kwargs(tmp_path),
         mode="supervised_mission",
         leader_session_id="team-session-1",
         metadata={"conversation_session_id": "team-session-1"},
@@ -668,6 +1161,7 @@ def test_team_mission_message_submit_keeps_team_scope_out_of_profile_owner_check
             "runtimeScopeKey": "profile:agent-default",
             "runtime_scope_key": "team:conversation-1:leader-conversation",
             "leader_runtime_scope_key": "team:conversation-1:leader-conversation",
+            "workspace": _workspace_payload(tmp_path),
         },
     )
 
@@ -699,6 +1193,7 @@ def test_team_mission_conversation_ensure_keeps_team_scope_out_of_profile_owner_
             "runtimeScopeKey": "profile:agent-default",
             "runtime_scope_key": "team:conversation-1:leader-conversation",
             "leader_runtime_scope_key": "team:conversation-1:leader-conversation",
+            "workspace": _workspace_payload(tmp_path),
         },
     )
 
@@ -715,12 +1210,14 @@ def test_team_mission_conversation_ensure_uses_conversation_scope_for_bound_miss
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.initialize_team_mission_from_strategy(
         mission_id="mission-1",
         team_id="team-1",
         title="功能测试",
         objective="验证历史团队任务会话",
+        **_workspace_kwargs(tmp_path),
         mode="supervised_mission",
         leader_session_id="team-session-conversation-1",
         conversation_id="conversation-1",
@@ -772,6 +1269,7 @@ def test_team_mission_message_submit_rejects_wrong_owner_runtime_scope(monkeypat
         team_id="team-1",
         title="监督执行",
         objective="初始任务",
+        **_workspace_kwargs(tmp_path),
         mode="supervised_mission",
         leader_session_id="team-session-1",
         metadata={"conversation_session_id": "team-session-1"},
@@ -827,6 +1325,7 @@ def test_team_mission_message_submit_rejects_profile_scope_as_team_execution_sco
             "agentProfileId": "agent-default",
             "runtimeScopeKey": "profile:agent-default",
             "profileRuntimeScopeKey": "profile:agent-default",
+            "workspace": _workspace_payload(tmp_path),
         },
     )
 
@@ -849,6 +1348,7 @@ def test_team_mission_message_submit_merges_requested_leader_conversation_toolse
         team_id="team-1",
         title="监督执行",
         objective="初始任务",
+        **_workspace_kwargs(tmp_path),
         mode="supervised_mission",
         leader_session_id="team-session-1",
         metadata={"conversation_session_id": "team-session-1"},
@@ -886,8 +1386,9 @@ def test_team_mission_message_submit_merges_requested_leader_conversation_toolse
 
     assert response["result"]["conversation_session_id"] == "team-session-1"
     assert submitted["enabled_toolsets"] == [
-        "team_mission_leader",
+        "team_mission_conversation_leader",
         "clarify",
+        "vision",
         "file",
         "terminal",
         "todo",
@@ -896,6 +1397,10 @@ def test_team_mission_message_submit_merges_requested_leader_conversation_toolse
     assert submitted["toolset_scope"] == "exact"
     assert "delegation" in submitted["disabled_toolsets"]
     assert submitted["agent_context_mode"] == "team_leader"
+    assert "Hermes" not in submitted["text"]
+    assert "DoXie team conversation" in submitted["text"]
+    assert "Keep the same persona, identity, tone, and memory as the underlying DoXie profile" in submitted["text"]
+    assert "Never expose internal runtime" in submitted["text"]
 
 
 def test_team_mission_member_node_start_keeps_delegation_available(monkeypatch, tmp_path: Path):
@@ -912,6 +1417,7 @@ def test_team_mission_member_node_start_keeps_delegation_available(monkeypatch, 
         team_id="team-1",
         title="监督执行",
         objective="初始任务",
+        **_workspace_kwargs(tmp_path),
         mode="supervised_mission",
         leader_session_id="team-session-1",
         metadata={"conversation_session_id": "team-session-1"},
@@ -1000,6 +1506,7 @@ def test_team_mission_message_submit_does_not_inject_other_conversation_memory(m
         team_id="team-1",
         title="Fresh conversation",
         objective="你好",
+        **_workspace_kwargs(tmp_path),
         mode="supervised_mission",
         leader_session_id="team-session-new",
         metadata={"conversation_session_id": "team-session-new"},
@@ -1051,17 +1558,20 @@ def test_team_mission_conversation_ensure_creates_missing_stable_session(monkeyp
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.initialize_team_mission_from_strategy(
         mission_id="mission-1",
         team_id="team-1",
         title="监督执行",
         objective="初始任务",
+        **_workspace_kwargs(tmp_path),
         mode="supervised_mission",
         leader_session_id="team-session-legacy",
         metadata={"conversation_session_id": "team-session-legacy"},
         members=[{"member_id": "leader", "role": "leader"}],
     )
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "team:mission-1:leader-conversation")
 
     assert db.get_session("team-session-legacy")["source"] == "team_mission"
 
@@ -1100,6 +1610,7 @@ def test_team_mission_conversation_ensure_can_repair_session_without_graph(monke
         {
             "mission_id": "mission-missing-in-hermes",
             "conversation_session_id": "team-session-from-doxie",
+            "workspace": _workspace_payload(tmp_path),
         },
     )
 
@@ -1107,6 +1618,73 @@ def test_team_mission_conversation_ensure_can_repair_session_without_graph(monke
     assert response["result"]["conversation_session_id"] == "team-session-from-doxie"
     assert response["result"]["created"] is True
     assert db.get_session("team-session-from-doxie")["source"] == "team_mission"
+
+
+def test_archived_team_history_is_readable_but_team_writes_are_rejected(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    _seed_registry_team(db, tmp_path)
+    workspace = _workspace_payload(tmp_path)
+    db.ensure_team_mission_conversation(
+        conversation_id="conversation-archived-team",
+        stable_session_id="team-session-archived",
+        team_id="team-1",
+        title="历史团队会话",
+        objective="历史内容",
+        workspace_id=workspace["workspace_id"],
+        workspace_path=workspace["workspace_path"],
+    )
+    db.create_session("team-session-archived", source="team_mission", transient=False)
+    db.append_message("team-session-archived", "user", "历史消息仍可查看")
+    db.archive_agent_team("team-1")
+
+    resolve_response = server._methods["team_mission.conversation.resolve"](
+        1,
+        {"conversation_id": "conversation-archived-team"},
+    )
+    assert "error" not in resolve_response
+    assert resolve_response["result"]["conversation"]["conversation_id"] == "conversation-archived-team"
+    assert resolve_response["result"]["messages"][0]["content"] == "历史消息仍可查看"
+
+    ensure_response = server._methods["team_mission.conversation.ensure"](
+        2,
+        {
+            "conversation_id": "conversation-archived-team",
+            "conversation_session_id": "team-session-archived",
+            "team_id": "team-1",
+            "workspace": workspace,
+        },
+    )
+    create_response = server._methods["team_mission.create"](
+        3,
+        {
+            "mission_id": "mission-archived-team",
+            "team_id": "team-1",
+            "title": "不应创建",
+            "objective": "不应创建",
+            "workspace": workspace,
+        },
+    )
+    submit_response = server._methods["team_mission.message.submit"](
+        4,
+        {
+            "conversation_id": "conversation-archived-team",
+            "conversation_session_id": "team-session-archived",
+            "team_id": "team-1",
+            "text": "不能继续对话",
+            "workspace": workspace,
+        },
+    )
+
+    for response in (ensure_response, create_response, submit_response):
+        assert response["error"]["code"] == 4023
+        assert response["error"]["message"] == "team archived: team-1"
 
 
 def test_team_mission_conversation_rename_gateway_updates_canonical_state(monkeypatch, tmp_path: Path):
@@ -1184,11 +1762,16 @@ def test_team_mission_conversation_delete_gateway_removes_canonical_conversation
 
     from hermes_state import SessionDB
     from tui_gateway import server
+    from tui_gateway.services.artifacts import list_artifacts, record_artifacts_from_tool_complete
+    from tui_gateway.services.persistence import gateway_store
+    from tui_gateway.services.workspaces import bind_session_workspace, session_workspace_binding
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     monkeypatch.setattr(team_mission, "get_hermes_home", lambda: str(tmp_path / "hermes-home"))
+    monkeypatch.setattr(gateway_store, "get_hermes_home", lambda: tmp_path / "hermes-home")
+    gateway_store._DEFAULT_STORES.clear()
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -1205,6 +1788,8 @@ def test_team_mission_conversation_delete_gateway_removes_canonical_conversation
         title="Worker",
         status="completed",
     )
+    db.create_session("worker-session-1", source="team_mission", transient=False)
+    db.create_session("runtime-worker-1", source="team_mission", transient=False)
     db.bind_team_mission_run(
         mission_id="mission-1",
         node_id="node-worker",
@@ -1213,6 +1798,30 @@ def test_team_mission_conversation_delete_gateway_removes_canonical_conversation
         runtime_session_id="runtime-worker-1",
         runtime_scope_key="team:mission-1:node-worker",
         role="worker",
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "worker-output.md"
+    artifact.write_text("# worker output\n", encoding="utf-8")
+    workspace_payload = {
+        "id": "workspace-test",
+        "name": "workspace",
+        "path": str(workspace),
+        "kind": "local",
+    }
+    bind_session_workspace(
+        session_id="team-session-1",
+        cwd=str(workspace),
+        workspace=workspace_payload,
+    )
+    record_artifacts_from_tool_complete(
+        session_id="worker-session-1",
+        tool_call_id="tool-worker",
+        name="write_file",
+        args={"path": "worker-output.md"},
+        result=json.dumps({"bytes_written": artifact.stat().st_size}),
+        cwd=str(workspace),
+        workspace=workspace_payload,
     )
 
     response = server._methods["team_mission.conversation.delete"](
@@ -1224,8 +1833,24 @@ def test_team_mission_conversation_delete_gateway_removes_canonical_conversation
     assert response["result"]["conversation_id"] == "conversation-1"
     assert response["result"]["stable_session_id"] == "team-session-1"
     assert response["result"]["run_session_ids"] == ["worker-session-1", "runtime-worker-1"]
+    assert response["result"]["deleted_session_ids"] == [
+        "team-session-1",
+        "worker-session-1",
+        "runtime-worker-1",
+    ]
+    assert response["result"]["deleted_artifact_links"] == 1
+    assert response["result"]["deleted_artifacts"] == 1
+    assert response["result"]["physical_files_deleted"] == 0
+    assert response["result"]["deleted_workspace_binding_count"] == 2
     assert db.resolve_team_mission_conversation("conversation-1") == {}
     assert db.get_session("team-session-1") is None
+    assert db.get_session("worker-session-1") is None
+    assert db.get_session("runtime-worker-1") is None
+    assert list_artifacts(session_id="worker-session-1") == []
+    assert list_artifacts(workspace_id="workspace-test") == []
+    assert session_workspace_binding("team-session-1") is None
+    assert session_workspace_binding("worker-session-1") is None
+    assert artifact.exists()
 
 
 def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, tmp_path: Path):
@@ -1240,17 +1865,19 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     graph = server._methods["team_mission.create"](
         1,
         {
             "mission_id": "mission-1",
+            "team_id": "team-1",
             "title": "监督执行",
             "objective": "初始任务",
             "mode": "supervised_mission",
             "conversation_only": True,
+            "workspace": _workspace_payload(tmp_path),
             "metadata": {"stableTeamSessionId": "team-session-1"},
-            "members": [{"member_id": "leader", "profile_id": "profile-leader", "role": "leader"}],
         },
     )["result"]["graph"]
     submitted = {}
@@ -1271,30 +1898,38 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
         }
 
     monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
-    monkeypatch.setenv(
-        "HERMES_DOXIE_PRODUCT_CONTEXT",
-        json.dumps({
+    from gateway import session_context
+
+    context_tokens = session_context.set_session_vars(
+        doxie_product_context=json.dumps({
                 "team_mission": {
                     "kind": "leader_conversation",
                     "conversation_id": "mission-1",
                     "conversation_session_id": "team-session-1",
-                    "members": [{"member_id": "leader", "profile_id": "profile-leader", "role": "leader"}],
+                    "team_id": "team-1",
+                    "workspace_id": "workspace-1",
+                    "workspace_path": str(tmp_path / "workspace"),
                 }
         }),
     )
-    agent = SimpleNamespace(_session_db=db, _hermes_active_run_id="run-leader-conversation")
+    try:
+        agent = SimpleNamespace(_session_db=db, _hermes_active_run_id="run-leader-conversation")
 
-    result = json.loads(
-        registry.dispatch(
-            "team_mission_start_task",
-            {
-                "task_id": "task-2",
-                "title": "第二个任务",
-                "objective": "规划并执行第二个任务",
-            },
-            parent_agent=agent,
+        result = json.loads(
+            registry.dispatch(
+                "team_mission_start_task",
+                {
+                    "task_id": "task-2",
+                    "title": "第二个任务",
+                    "objective": "规划并执行第二个任务",
+                },
+                parent_agent=agent,
+            )
         )
-    )
+    finally:
+        session_context.clear_session_vars(context_tokens)
+        for var in session_context._VAR_MAP.values():
+            var.set(session_context._UNSET)
 
     assert result["success"] is True
     assert result["intent"] == "start_team_task"
@@ -1311,7 +1946,7 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
     assert result["node"]["node_id"] == f"team-mission:{result['mission_id']}:root"
     assert submitted["record_user_task_message"] is False
     assert submitted["agent_profile_id"] == "profile-leader"
-    assert submitted["enabled_toolsets"] == ["team_mission_leader", "team_mission_planning"]
+    assert submitted["enabled_toolsets"] == ["team_mission_planning"]
     assert "delegation" in submitted["disabled_toolsets"]
     assert submitted["toolset_scope"] == "exact"
     assert submitted["doxie_product_context"]["team_mission"]["node_phase"] == "planning"
@@ -1337,7 +1972,7 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
             parent_agent=planning_agent,
         )
     )
-    assert created_worker["success"] is True
+    assert created_worker.get("success") is True, created_worker
     assert created_worker["node"]["metadata"]["task_id"] == "task-2"
     assert created_worker["node"]["metadata"]["task_title"] == "第二个任务"
     assert created_worker["node"]["metadata"]["task_objective"] == "规划并执行第二个任务"
@@ -1373,6 +2008,89 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
     assert {node["status"] for node in rejected_task_nodes} == {"cancelled"}
 
 
+def test_team_mission_plan_approve_uses_requested_mission_native_graph(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    try:
+        db.upsert_team_mission_conversation(
+            conversation_id="conversation-1",
+            stable_session_id="team-session-1",
+            team_id="team-1",
+            active_mission_id="mission-current",
+            title="团队会话",
+        )
+        db.upsert_team_mission(
+            mission_id="mission-old",
+            conversation_id="conversation-1",
+            team_id="team-1",
+            title="旧任务",
+            objective="旧任务",
+            mode="supervised_mission",
+            status="waiting_approval",
+            metadata={"conversation_id": "conversation-1"},
+        )
+        db.upsert_team_mission_node(
+            mission_id="mission-old",
+            node_id="team-mission:mission-old:approval-plan",
+            kind="approval_gate",
+            title="旧审批",
+            status="waiting_approval",
+            metadata={"task_id": "task-old"},
+        )
+        db.upsert_team_mission(
+            mission_id="mission-current",
+            conversation_id="conversation-1",
+            team_id="team-1",
+            title="当前任务",
+            objective="当前任务",
+            mode="supervised_mission",
+            status="waiting_approval",
+            metadata={"conversation_id": "conversation-1"},
+        )
+        db.upsert_team_mission_node(
+            mission_id="mission-current",
+            node_id="team-mission:mission-current:approval-plan",
+            kind="approval_gate",
+            title="当前审批",
+            status="waiting_approval",
+            metadata={"task_id": "task-current"},
+        )
+
+        response = server._methods["team_mission.plan.approve"](
+            1,
+            {
+                "mission_id": "mission-current",
+                "conversation_id": "conversation-1",
+                "approved_by": "user",
+            },
+        )
+
+        assert "error" not in response
+        assert response["result"]["node"]["node_id"] == "team-mission:mission-current:approval-plan"
+        assert response["result"]["node"]["status"] == "completed"
+        assert response["result"]["node"]["metadata"]["approved_by"] == "user"
+        assert db.get_team_mission_node(
+            "mission-current",
+            "team-mission:mission-current:approval-plan",
+        )["status"] == "completed"
+        old_node = db.get_team_mission_node("mission-old", "team-mission:mission-old:approval-plan")
+        assert old_node["status"] == "waiting_approval"
+        assert "approved_by" not in (old_node.get("metadata") or {})
+        assert {
+            node["node_id"]
+            for node in response["result"]["graph"]["nodes"]
+        } == {"team-mission:mission-current:approval-plan"}
+    finally:
+        db.close()
+
+
 def test_team_mission_direct_root_task_activation_replaces_draft_objective(monkeypatch, tmp_path: Path):
     import importlib
 
@@ -1381,6 +2099,7 @@ def test_team_mission_direct_root_task_activation_replaces_draft_objective(monke
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     server._methods["team_mission.create"](
         1,
@@ -1391,8 +2110,8 @@ def test_team_mission_direct_root_task_activation_replaces_draft_objective(monke
             "title": "你好",
             "mode": "supervised_mission",
             "conversation_only": True,
+            "workspace": _workspace_payload(tmp_path),
             "metadata": {"stableTeamSessionId": "team-session-1"},
-            "members": [{"member_id": "leader", "profile_id": "profile-leader", "role": "leader"}],
         },
     )
     submitted = {}
@@ -1423,9 +2142,9 @@ def test_team_mission_direct_root_task_activation_replaces_draft_objective(monke
             "title": "创建文件扫描工具",
             "objective": "在当前工作目录下创建 filescan.py 并完成验证",
             "mode": "supervised_mission",
+            "workspace": _workspace_payload(tmp_path),
             "task_id": "task-filescan",
             "record_user_task_message": False,
-            "members": [{"member_id": "leader", "profile_id": "profile-leader", "role": "leader"}],
         },
     )
 
@@ -1486,10 +2205,17 @@ def test_team_mission_runtime_output_stays_inside_node_session(tmp_path: Path):
     node_events = db.list_run_events("node-session-1")
     assert "message.complete" in [event["type"] for event in node_events]
     team_events = db.list_team_mission_run_events("mission-1")
-    message_complete_events = [event for event in team_events if event["type"] == "message.complete"]
+    message_complete_events = [
+        event
+        for event in team_events
+        if (
+            event["type"] == "team_mission.runtime.event"
+            and event["payload"]["source_event_type"] == "message.complete"
+        )
+    ]
     assert len(message_complete_events) == 1
     assert message_complete_events[0]["run_id"] == "run-leader"
-    assert message_complete_events[0]["payload"]["text"] == "Leader 已完成任务图规划"
+    assert message_complete_events[0]["payload"]["source_event"]["payload"]["text"] == "Leader 已完成任务图规划"
 
 
 def test_team_mission_synthesis_output_is_mirrored_as_conversation_deliverable(tmp_path: Path):
@@ -1553,21 +2279,53 @@ def test_team_mission_synthesis_output_is_mirrored_as_conversation_deliverable(t
     )
     run_control.record_event(
         {
-            "type": "message.complete",
+            "type": "message.start",
             "session_id": "runtime-synthesis",
             "stored_session_id": "synthesis-session-1",
             "run_id": "run-synthesis",
             "turn_id": "turn-synthesis",
             "runtime_scope_key": "team:mission-1:synthesis",
             "seq": 1,
+            "payload": {},
+        },
+        db=db,
+    )
+    run_control.record_event(
+        {
+            "type": "message.delta",
+            "session_id": "runtime-synthesis",
+            "stored_session_id": "synthesis-session-1",
+            "run_id": "run-synthesis",
+            "turn_id": "turn-synthesis",
+            "runtime_scope_key": "team:mission-1:synthesis",
+            "seq": 2,
+            "payload": {"delta": "最终汇总", "text": "最终汇总"},
+        },
+        db=db,
+    )
+    mirrored_events = db.list_run_events("team-session-1")
+    assert [event["type"] for event in mirrored_events] == ["message.start", "message.delta"]
+    assert mirrored_events[1]["payload"]["team_mission_final_deliverable"] is True
+    assert mirrored_events[1]["payload"]["team_mission_conversation_mirror"] is True
+    assert db.get_messages("team-session-1") == []
+
+    run_control.record_event(
+        {
+            "type": "message.complete",
+            "session_id": "runtime-synthesis",
+            "stored_session_id": "synthesis-session-1",
+            "run_id": "run-synthesis",
+            "turn_id": "turn-synthesis",
+            "runtime_scope_key": "team:mission-1:synthesis",
+            "seq": 3,
             "payload": {"text": "最终汇总交付内容", "status": "complete"},
         },
         db=db,
     )
 
     mirrored_events = db.list_run_events("team-session-1")
-    assert [event["type"] for event in mirrored_events] == ["message.complete"]
-    mirrored = mirrored_events[0]
+    assert [event["type"] for event in mirrored_events] == ["message.start", "message.delta", "message.complete"]
+    mirrored = mirrored_events[2]
     assert mirrored["run_id"] == "team-mission:mission-1:conversation:run-synthesis"
     assert mirrored["stored_session_id"] == "team-session-1"
     assert mirrored["payload"]["text"] == "最终汇总交付内容"
@@ -1581,7 +2339,291 @@ def test_team_mission_synthesis_output_is_mirrored_as_conversation_deliverable(t
     assert messages[0]["role"] == "assistant"
     assert messages[0]["content"] == "最终汇总交付内容"
     assert messages[0]["metadata"]["team_mission"]["kind"] == "final_deliverable"
+    assert db.get_team_mission_node("mission-1", "team-mission:mission-1:synthesis")["status"] == "completed"
+    resolved = db.resolve_team_mission_conversation("mission-1")
+    assert resolved["messages"][0]["text"] == "最终汇总交付内容"
+    assert resolved["graph"]["last_message"]["text"] == "最终汇总交付内容"
     assert messages[0]["metadata"]["team_mission"]["source_run_id"] == "run-synthesis"
+
+
+def test_team_mission_synthesis_mirror_streams_to_conversation_subscriber(tmp_path: Path):
+    from hermes_state import SessionDB
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="监督执行",
+        objective="规划审批后执行",
+        mode="supervised_mission",
+        metadata={"stableTeamSessionId": "team-session-1"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="team-mission:mission-1:synthesis",
+        kind="synthesizer",
+        title="汇总交付",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="team-mission:mission-1:synthesis",
+        run_id="run-synthesis",
+        session_id="synthesis-session-1",
+        runtime_session_id="runtime-synthesis",
+        runtime_scope_key="team:mission-1:synthesis",
+        role="member",
+    )
+
+    transport = _MemoryTransport()
+    subscription_id, _ = run_control.subscribe_session_with_id(
+        stored_session_id="team-session-1",
+        transport=transport,
+        active_only=False,
+        db=db,
+    )
+    try:
+        run_control.record_event(
+            {
+                "type": "message.start",
+                "session_id": "runtime-synthesis",
+                "stored_session_id": "synthesis-session-1",
+                "run_id": "run-synthesis",
+                "turn_id": "turn-synthesis",
+                "runtime_scope_key": "team:mission-1:synthesis",
+                "seq": 1,
+                "payload": {},
+            },
+            db=db,
+        )
+        run_control.record_event(
+            {
+                "type": "message.delta",
+                "session_id": "runtime-synthesis",
+                "stored_session_id": "synthesis-session-1",
+                "run_id": "run-synthesis",
+                "turn_id": "turn-synthesis",
+                "runtime_scope_key": "team:mission-1:synthesis",
+                "seq": 2,
+                "payload": {"delta": "实时最终交付", "text": "实时最终交付"},
+            },
+            db=db,
+        )
+    finally:
+        run_control.unsubscribe_session(subscription_id=subscription_id)
+
+    streamed = [
+        frame.get("params") or {}
+        for frame in transport.frames
+        if frame.get("method") == "event"
+    ]
+    assert [event["type"] for event in streamed] == ["message.start", "message.delta"]
+    assert all(event["stored_session_id"] == "team-session-1" for event in streamed)
+    assert all(int(event.get("seq") or 0) > 0 for event in streamed)
+    assert streamed[1]["payload"]["delta"] == "实时最终交付"
+    assert streamed[1]["payload"]["team_mission_final_deliverable"] is True
+    assert streamed[1]["payload"]["team_mission_conversation_mirror"] is True
+
+
+def test_team_mission_tools_use_control_plane_db_inside_profile_worker(monkeypatch, tmp_path: Path):
+    from hermes_state import SessionDB
+    from hermes_team_mission_profile_tools import gateway_call
+    from tui_gateway.methods import team_mission
+    from tools import team_mission_leader_tools, team_mission_planning_tools
+    from tui_gateway import server
+
+    control_home = tmp_path / "control-home"
+    profile_home = tmp_path / "profile-home"
+    control_home.mkdir()
+    profile_home.mkdir()
+    profile_db = SessionDB(profile_home / "state.db")
+    parent_agent = SimpleNamespace(_session_db=profile_db)
+    monkeypatch.setenv("DOXIE_HERMES_CONTROL_HOME", str(control_home))
+
+    assert Path(team_mission_leader_tools._get_db(parent_agent).db_path) == control_home / "state.db"
+    assert Path(team_mission_planning_tools._get_db(parent_agent).db_path) == control_home / "state.db"
+
+    def read_current_db_path(rid, _params):
+        db = team_mission._get_db()
+        return {"jsonrpc": "2.0", "id": rid, "result": {"db_path": str(db.db_path)}}
+
+    monkeypatch.setitem(server._methods, "test.team_mission.db_path", read_current_db_path)
+    response = gateway_call("test.team_mission.db_path", {})
+    assert response["result"]["db_path"] == str(control_home / "state.db")
+
+
+def test_team_mission_node_start_prebinds_run_before_fast_synthesis_events(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+    from tui_gateway.services import run_control
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        title="团队会话",
+        active_mission_id="mission-1",
+    )
+    db.create_session("team-session-1", source="team_mission", transient=False)
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="监督执行",
+        objective="规划审批后执行",
+        **_workspace_kwargs(tmp_path),
+        mode="supervised_mission",
+        status="running",
+        metadata={"stableTeamSessionId": "team-session-1"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-synthesis-delivery",
+        kind="synthesis",
+        title="汇总交付",
+        status="ready",
+        runtime_scope_key="team:mission-1:synthesis",
+    )
+    transport = _MemoryTransport()
+    subscription_id, _ = run_control.subscribe_session_with_id(
+        stored_session_id="team-session-1",
+        transport=transport,
+        active_only=False,
+        db=db,
+    )
+
+    def fake_run_submit(rid, params):
+        for seq, event_type, payload in (
+            (1, "message.start", {}),
+            (2, "message.delta", {"delta": "实时", "text": "实时"}),
+            (3, "message.complete", {"text": "实时最终交付", "status": "complete"}),
+        ):
+            run_control.record_event(
+                {
+                    "type": event_type,
+                    "session_id": "runtime-synthesis",
+                    "stored_session_id": params["stored_session_id"],
+                    "run_id": params["run_id"],
+                    "turn_id": params["turn_id"],
+                    "runtime_scope_key": params["runtime_scope_key"],
+                    "seq": seq,
+                    "payload": payload,
+                },
+                db=db,
+            )
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "status": "running",
+                "run_id": params["run_id"],
+                "turn_id": params["turn_id"],
+                "session_id": "runtime-synthesis",
+                "stored_session_id": params["stored_session_id"],
+                "runtime_scope_key": params["runtime_scope_key"],
+            },
+        }
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+    try:
+        started = server._methods["team_mission.node.start"](
+            1,
+            {
+                "mission_id": "mission-1",
+                "node_id": "node-synthesis-delivery",
+                "run_id": "run-synthesis",
+                "turn_id": "turn-synthesis",
+                "stored_session_id": "synthesis-session-1",
+            },
+        )
+    finally:
+        run_control.unsubscribe_session(subscription_id=subscription_id)
+
+    assert "error" not in started
+    streamed = [
+        frame.get("params") or {}
+        for frame in transport.frames
+        if frame.get("method") == "event"
+    ]
+    assert [event["type"] for event in streamed] == ["message.start", "message.delta", "message.complete"]
+    assert all(event["stored_session_id"] == "team-session-1" for event in streamed)
+    assert streamed[2]["payload"]["text"] == "实时最终交付"
+    assert streamed[2]["payload"]["team_mission_final_deliverable"] is True
+    assert streamed[2]["payload"]["team_mission_conversation_mirror"] is True
+    messages = db.get_messages("team-session-1")
+    assert len(messages) == 1
+    assert messages[0]["content"] == "实时最终交付"
+
+
+def test_team_mission_synthesis_failed_complete_with_text_still_mirrors_deliverable(tmp_path: Path):
+    from hermes_state import SessionDB
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="监督执行",
+        objective="规划审批后执行",
+        mode="supervised_mission",
+        metadata={"stableTeamSessionId": "team-session-1"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="team-mission:mission-1:synthesis",
+        kind="synthesizer",
+        title="汇总交付",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="team-mission:mission-1:synthesis",
+        run_id="run-synthesis",
+        session_id="synthesis-session-1",
+        runtime_session_id="runtime-synthesis",
+        runtime_scope_key="team:mission-1:synthesis",
+        role="member",
+    )
+
+    run_control.record_event(
+        {
+            "type": "message.complete",
+            "session_id": "runtime-synthesis",
+            "stored_session_id": "synthesis-session-1",
+            "run_id": "run-synthesis",
+            "turn_id": "turn-synthesis",
+            "runtime_scope_key": "team:mission-1:synthesis",
+            "seq": 1,
+            "payload": {
+                "text": "最终汇总交付内容",
+                "status": "failed",
+                "message": "nonfatal tool cleanup failed",
+            },
+        },
+        db=db,
+    )
+
+    mirrored_events = db.list_run_events("team-session-1")
+    assert [event["type"] for event in mirrored_events] == ["message.complete"]
+    mirrored = mirrored_events[0]
+    assert mirrored["payload"]["status"] == "complete"
+    assert mirrored["payload"]["text"] == "最终汇总交付内容"
+    assert mirrored["payload"]["team_mission_final_deliverable"] is True
+    assert mirrored["payload"]["team_mission_terminal_status_recovered"] == "failed"
+    assert mirrored["payload"]["nonfatal_error"] == "nonfatal tool cleanup failed"
+    messages = db.get_messages("team-session-1")
+    assert len(messages) == 1
+    assert messages[0]["role"] == "assistant"
+    assert messages[0]["content"] == "最终汇总交付内容"
+    assert messages[0]["metadata"]["team_mission"]["kind"] == "final_deliverable"
+    assert db.get_team_mission_node("mission-1", "team-mission:mission-1:synthesis")["status"] == "completed"
+    resolved = db.resolve_team_mission_conversation("mission-1")
+    assert resolved["messages"][0]["text"] == "最终汇总交付内容"
+    assert resolved["graph"]["last_message"]["text"] == "最终汇总交付内容"
 
 
 def test_team_mission_cancel_marks_graph_and_cancels_active_runs(monkeypatch, tmp_path: Path):
@@ -1726,6 +2768,365 @@ def test_gateway_emit_publishes_terminal_event_to_session_subscribers(monkeypatc
     )
 
 
+def test_event_bus_delivers_explicit_subscription_on_owner_transport(tmp_path: Path):
+    from hermes_state import SessionDB
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    transport = _MemoryTransport()
+    subscription_id, _ = run_control.subscribe_session_with_id(
+        stored_session_id="team-session-owner-live",
+        transport=transport,
+        active_only=False,
+        db=db,
+    )
+    try:
+        delivered = run_control.publish_recorded_event(
+            {
+                "type": "message.delta",
+                "session_id": "runtime-owner-live",
+                "stored_session_id": "team-session-owner-live",
+                "run_id": "run-owner-live",
+                "turn_id": "turn-owner-live",
+                "runtime_scope_key": "team:conversation-owner:leader-conversation",
+                "seq": 1,
+                "payload": {"mode": "append", "delta": "实时", "text": "实时"},
+            },
+            owner_transport=transport,
+            db=db,
+        )
+    finally:
+        run_control.unsubscribe_session(subscription_id=subscription_id)
+        db.close()
+
+    assert any(item is transport for item in delivered)
+    streamed = [
+        frame.get("params") or {}
+        for frame in transport.frames
+        if frame.get("method") == "event"
+    ]
+    assert [event["type"] for event in streamed] == ["message.delta"]
+    assert streamed[0]["stored_session_id"] == "team-session-owner-live"
+    assert streamed[0]["payload"]["delta"] == "实时"
+
+
+def test_runtime_proxy_relay_uses_persisted_event_bus_for_owner_subscription(monkeypatch, tmp_path: Path):
+    from hermes_state import SessionDB
+    from tui_gateway import server
+    from tui_gateway.services import run_control, runtime_proxy
+
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    transport = _MemoryTransport()
+    subscription_id, _ = run_control.subscribe_session_with_id(
+        stored_session_id="team-session-relay-live",
+        transport=transport,
+        active_only=False,
+        db=db,
+    )
+    try:
+        delivered = runtime_proxy._persist_relayed_runtime_event(
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "message.delta",
+                    "session_id": "runtime-relay-live",
+                    "stored_session_id": "team-session-relay-live",
+                    "run_id": "run-relay-live",
+                    "turn_id": "turn-relay-live",
+                    "runtime_scope_key": "team:conversation-relay:leader-conversation",
+                    "seq": 77,
+                    "payload": {"mode": "append", "delta": "同步", "text": "同步"},
+                },
+            },
+            owner_transport=transport,
+        )
+    finally:
+        run_control.unsubscribe_session(subscription_id=subscription_id)
+        db.close()
+
+    assert any(item is transport for item in delivered)
+    streamed = [
+        frame.get("params") or {}
+        for frame in transport.frames
+        if frame.get("method") == "event"
+    ]
+    assert [event["type"] for event in streamed] == ["message.delta"]
+    assert streamed[0]["stored_session_id"] == "team-session-relay-live"
+    assert streamed[0]["seq"] == 1
+    assert streamed[0]["payload"]["runtime_source_seq"] == 77
+    assert streamed[0]["payload"]["delta"] == "同步"
+
+
+def test_runtime_proxy_drops_already_relayed_runtime_event(monkeypatch, tmp_path: Path):
+    from hermes_state import SessionDB
+    from tui_gateway import server
+    from tui_gateway.services import runtime_proxy
+
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    frame = {
+        "jsonrpc": "2.0",
+        "method": "event",
+        "params": {
+            "type": "message.delta",
+            "session_id": "runtime-relay-loop",
+            "stored_session_id": "team-session-relay-loop",
+            "run_id": "run-relay-loop",
+            "turn_id": "turn-relay-loop",
+            "runtime_scope_key": "team:conversation-relay:leader-conversation",
+            "seq": 110,
+            "runtime_source_seq": 103,
+            "payload": {
+                "mode": "append",
+                "delta": "重复",
+                "text": "重复",
+                "runtime_source_seq": 103,
+            },
+        },
+    }
+
+    result = runtime_proxy._record_relayed_runtime_event(frame)
+
+    assert result.delivered_transports == []
+    assert result.allow_direct_relay is False
+    assert db.list_run_events("team-session-relay-loop") == []
+    db.close()
+
+
+def test_runtime_proxy_disables_direct_relay_for_duplicate_source_seq(monkeypatch, tmp_path: Path):
+    from hermes_state import SessionDB
+    from tui_gateway import server
+    from tui_gateway.services import runtime_proxy
+
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    frame = {
+        "jsonrpc": "2.0",
+        "method": "event",
+        "params": {
+            "type": "message.delta",
+            "session_id": "runtime-source-once",
+            "stored_session_id": "team-session-source-once",
+            "run_id": "run-source-once",
+            "turn_id": "turn-source-once",
+            "runtime_scope_key": "team:conversation-source:leader-conversation",
+            "seq": 77,
+            "payload": {"mode": "append", "delta": "一次", "text": "一次"},
+        },
+    }
+
+    first = runtime_proxy._record_relayed_runtime_event(frame)
+    second = runtime_proxy._record_relayed_runtime_event(frame)
+
+    assert first.allow_direct_relay is True
+    assert second.delivered_transports == []
+    assert second.allow_direct_relay is False
+    events = db.list_run_events("team-session-source-once")
+    assert len(events) == 1
+    assert events[0]["payload"]["runtime_source_seq"] == 77
+    db.close()
+
+
+def test_gateway_emit_stream_subscription_does_not_poll_coalesced_duplicate(monkeypatch, tmp_path: Path):
+    from hermes_state import SessionDB
+    from tui_gateway import server
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    stable_session_id = "team-session-stream"
+    runtime_session_id = "runtime-stream"
+    owner_transport = _MemoryTransport()
+    subscription_id, _ = run_control.subscribe_session_with_id(
+        stored_session_id=stable_session_id,
+        transport=owner_transport,
+        active_only=False,
+        db=db,
+    )
+    previous_session = None
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    with server._sessions_lock:
+        previous_session = server._sessions.get(runtime_session_id)
+        server._sessions[runtime_session_id] = {
+            "session_key": stable_session_id,
+            "active_run_id": "run-stream",
+            "active_turn_id": "turn-stream",
+            "active_runtime_scope_key": "team:mission-stream:leader-conversation",
+            "transport": owner_transport,
+        }
+    token = server.bind_transport(owner_transport)
+    try:
+        server._emit(
+            "message.delta",
+            runtime_session_id,
+            {
+                "run_id": "run-stream",
+                "turn_id": "turn-stream",
+                "runtime_scope_key": "team:mission-stream:leader-conversation",
+                "mode": "append",
+                "delta": "你",
+                "text": "你",
+            },
+        )
+        server._emit(
+            "message.delta",
+            runtime_session_id,
+            {
+                "run_id": "run-stream",
+                "turn_id": "turn-stream",
+                "runtime_scope_key": "team:mission-stream:leader-conversation",
+                "mode": "append",
+                "delta": "好",
+                "text": "好",
+            },
+        )
+        time.sleep(0.7)
+    finally:
+        server.reset_transport(token)
+        run_control.unsubscribe_session(subscription_id=subscription_id)
+        with server._sessions_lock:
+            if previous_session is None:
+                server._sessions.pop(runtime_session_id, None)
+            else:
+                server._sessions[runtime_session_id] = previous_session
+
+    delta_payloads = [
+        (frame.get("params") or {}).get("payload") or {}
+        for frame in owner_transport.frames
+        if (frame.get("params") or {}).get("type") == "message.delta"
+    ]
+    assert [payload.get("delta") for payload in delta_payloads] == ["你", "好"]
+    persisted_deltas = [
+        event
+        for event in db.list_run_events(stable_session_id)
+        if event.get("type") == "message.delta"
+    ]
+    assert len(persisted_deltas) == 1
+    assert (persisted_deltas[0].get("payload") or {}).get("delta") == "你好"
+
+
+def test_run_control_subscription_poll_skips_stream_already_delivered_directly(tmp_path: Path):
+    from hermes_state import SessionDB
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    transport = _MemoryTransport()
+    stable_session_id = "stored-direct-stream"
+    run_id = "run-direct-stream"
+    turn_id = "turn-direct-stream"
+    runtime_scope_key = "profile:agent-default"
+    subscription_id, _ = run_control.subscribe_session_with_id(
+        stored_session_id=stable_session_id,
+        transport=transport,
+        active_only=False,
+        runtime_scope_key=runtime_scope_key,
+        db=db,
+    )
+    direct_event = {
+        "type": "message.delta",
+        "session_id": "runtime-direct-stream",
+        "stored_session_id": stable_session_id,
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "runtime_scope_key": runtime_scope_key,
+        "seq": 1,
+        "payload": {"mode": "append", "text": "你", "delta": "你", "offset": 0},
+    }
+    try:
+        run_control.remember_transport_delivery(transport, direct_event)
+        db.append_run_event(
+            stable_session_id,
+            {
+                **direct_event,
+                "seq": 2,
+                "payload": {"mode": "append", "text": "你好", "delta": "你好", "offset": 0},
+            },
+        )
+        time.sleep(0.7)
+    finally:
+        run_control.unsubscribe_session(subscription_id=subscription_id)
+        db.close()
+
+    delta_payloads = [
+        (frame.get("params") or {}).get("payload") or {}
+        for frame in transport.frames
+        if (frame.get("params") or {}).get("type") == "message.delta"
+    ]
+    assert delta_payloads == []
+
+
+def test_run_control_subscription_poll_sends_only_suffix_for_coalesced_stream_row(tmp_path: Path):
+    from hermes_state import SessionDB
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    transport = _MemoryTransport()
+    stable_session_id = "stored-coalesced-stream"
+    run_id = "run-coalesced-stream"
+    turn_id = "turn-coalesced-stream"
+    runtime_scope_key = "profile:agent-default"
+    subscription_id, _ = run_control.subscribe_session_with_id(
+        stored_session_id=stable_session_id,
+        transport=transport,
+        active_only=False,
+        runtime_scope_key=runtime_scope_key,
+        db=db,
+    )
+
+    def delta_payloads() -> list[dict]:
+        return [
+            (frame.get("params") or {}).get("payload") or {}
+            for frame in transport.frames
+            if (frame.get("params") or {}).get("type") == "message.delta"
+        ]
+
+    def wait_for_delta_count(expected: int) -> None:
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            if len(delta_payloads()) >= expected:
+                return
+            time.sleep(0.05)
+
+    try:
+        db.append_run_event(
+            stable_session_id,
+            {
+                "type": "message.delta",
+                "session_id": "runtime-coalesced-stream",
+                "stored_session_id": stable_session_id,
+                "run_id": run_id,
+                "turn_id": turn_id,
+                "runtime_scope_key": runtime_scope_key,
+                "seq": 1,
+                "payload": {"mode": "append", "text": "你", "delta": "你", "offset": 0},
+            },
+        )
+        wait_for_delta_count(1)
+        db.append_run_event(
+            stable_session_id,
+            {
+                "type": "message.delta",
+                "session_id": "runtime-coalesced-stream",
+                "stored_session_id": stable_session_id,
+                "run_id": run_id,
+                "turn_id": turn_id,
+                "runtime_scope_key": runtime_scope_key,
+                "seq": 2,
+                "payload": {"mode": "append", "text": "好", "delta": "好", "offset": 1},
+            },
+        )
+        wait_for_delta_count(2)
+    finally:
+        run_control.unsubscribe_session(subscription_id=subscription_id)
+        db.close()
+
+    payloads = delta_payloads()
+    assert [payload.get("delta") for payload in payloads] == ["你", "好"]
+    assert [payload.get("text") for payload in payloads] == ["你", "好"]
+    assert payloads[-1].get("offset") == 1
+
+
 def test_active_only_subscription_keeps_seen_live_run_for_terminal_polling(tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway.services import run_control
@@ -1859,13 +3260,16 @@ def test_team_mission_gateway_rejects_invalid_manual_graph(monkeypatch, tmp_path
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
 
     response = server._methods["team_mission.create"](
         1,
         {
             "mission_id": "mission-1",
+            "team_id": "team-1",
             "mode": "manual_graph",
+            "workspace": _workspace_payload(tmp_path),
             "graph_payload": {
                 "nodes": [{"id": "node-a", "title": "A"}],
                 "edges": [{"source": "node-a", "target": "missing"}],
@@ -1926,7 +3330,9 @@ def test_team_mission_subscribe_replays_and_streams_mission_events(monkeypatch, 
 
     subscription_id = subscribed["result"]["subscription_id"]
     assert subscription_id
-    assert subscribed["result"]["events"][0]["payload"]["delta"] == "先前事件"
+    assert subscribed["result"]["events"][0]["type"] == "team_mission.runtime.event"
+    assert subscribed["result"]["events"][0]["payload"]["source_event_type"] == "message.delta"
+    assert subscribed["result"]["events"][0]["payload"]["source_event"]["payload"]["delta"] == "先前事件"
 
     db.append_team_mission_run_event(
         mission_id="mission-1",
@@ -1937,16 +3343,115 @@ def test_team_mission_subscribe_replays_and_streams_mission_events(monkeypatch, 
     deadline = time.time() + 2
     while time.time() < deadline:
         if any(
-            ((frame.get("params") or {}).get("payload") or {}).get("delta") == "实时事件"
+            (((frame.get("params") or {}).get("payload") or {}).get("source_event") or {}).get("payload", {}).get("delta") == "实时事件"
             for frame in transport.frames
         ):
             break
         time.sleep(0.05)
 
     assert any(
-        ((frame.get("params") or {}).get("payload") or {}).get("delta") == "实时事件"
+        (((frame.get("params") or {}).get("payload") or {}).get("source_event") or {}).get("payload", {}).get("delta") == "实时事件"
         for frame in transport.frames
     )
+
+    removed = run_control.unsubscribe_session(subscription_id=subscription_id)
+    assert removed == 1
+
+
+def test_team_mission_subscribe_streams_conversation_status_projection(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+    from tui_gateway.services import run_control
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="Mission",
+        objective="Create launch plan",
+        workspace_id="workspace-1",
+        workspace_path=_workspace_payload(tmp_path)["workspace_path"],
+        mode="autonomous_mission",
+        leader_session_id="team-session-1",
+        metadata={"task_id": "task-1", "stableTeamSessionId": "team-session-1"},
+    )
+    mission = db.get_team_mission_graph("mission-1")["mission"]
+    db.ensure_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        mission=mission,
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        objective="Create launch plan",
+        workspace_id="workspace-1",
+        workspace_path=_workspace_payload(tmp_path)["workspace_path"],
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-worker",
+        kind="worker",
+        title="Worker",
+        status="running",
+        metadata={"task_id": "task-1"},
+    )
+    db.upsert_run(
+        run_id="run-worker",
+        session_id="session-worker",
+        runtime_scope_key="team:mission-1:node:node-worker",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="node-worker",
+        run_id="run-worker",
+        session_id="session-worker",
+        runtime_scope_key="team:mission-1:node:node-worker",
+        role="worker",
+    )
+
+    transport = _MemoryTransport()
+    token = server.bind_transport(transport)
+    try:
+        subscribed = server._methods["team_mission.subscribe"](
+            1,
+            {"mission_id": "mission-1"},
+        )
+    finally:
+        server.reset_transport(token)
+
+    subscription_id = subscribed["result"]["subscription_id"]
+    assert subscription_id
+
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-worker",
+        event={"type": "message.complete", "seq": 1, "payload": {"status": "complete"}},
+    )
+
+    deadline = time.time() + 2
+    status_payload = {}
+    while time.time() < deadline:
+        for frame in transport.frames:
+            params = frame.get("params") or {}
+            if params.get("type") == "team_mission.conversation.status":
+                status_payload = params.get("payload") or {}
+                break
+        if status_payload:
+            break
+        time.sleep(0.05)
+
+    conversation = status_payload.get("conversation") or {}
+    assert status_payload["conversation_id"] == "conversation-1"
+    assert status_payload["stable_session_id"] == "team-session-1"
+    assert status_payload["source_event_type"] == "message.complete"
+    assert conversation["mission_status"] == "ready"
+    assert conversation["running"] is False
 
     removed = run_control.unsubscribe_session(subscription_id=subscription_id)
     assert removed == 1
@@ -1985,7 +3490,7 @@ def test_team_mission_node_history_reads_runtime_from_hermes_store(monkeypatch, 
         session_id="session-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
         runtime_session_id="runtime-worker",
-        status="completed",
+        status="running",
     )
     db.bind_team_mission_run(
         mission_id="mission-1",
@@ -2036,6 +3541,202 @@ def test_team_mission_node_history_reads_runtime_from_hermes_store(monkeypatch, 
     assert result["run_events"][0]["seq"] == 7
     assert result["run_events"][0]["payload"]["mission_id"] == "mission-1"
     assert result["run_events"][0]["payload"]["node_id"] == "node-worker"
+
+
+def test_team_mission_node_history_filters_stream_chunks(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission_history = importlib.import_module("tui_gateway.methods.team_mission_history")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    monkeypatch.setattr(team_mission_history, "_get_db", lambda: db)
+
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="Mission",
+        objective="Build",
+        mode="supervised_mission",
+        status="running",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-worker",
+        kind="worker",
+        title="Worker",
+        status="running",
+        runtime_scope_key="team:mission-1:node:node-worker",
+    )
+    db.create_session("session-worker", source="team_mission")
+    db.upsert_run(
+        run_id="run-worker",
+        session_id="session-worker",
+        runtime_scope_key="team:mission-1:node:node-worker",
+        runtime_session_id="runtime-worker",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="node-worker",
+        run_id="run-worker",
+        session_id="session-worker",
+        runtime_session_id="runtime-worker",
+        runtime_scope_key="team:mission-1:node:node-worker",
+        role="worker",
+    )
+    for seq, event_type, payload in (
+        (1, "message.delta", {"mode": "append", "text": "raw", "delta": "raw", "offset": 0}),
+        (2, "thinking.delta", {"text": "thinking"}),
+        (3, "tool.complete", {"tool_name": "terminal", "status": "completed"}),
+        (4, "message.complete", {"status": "completed", "text": "final"}),
+    ):
+        db.append_run_event(
+            "session-worker",
+            {
+                "type": event_type,
+                "session_id": "runtime-worker",
+                "stored_session_id": "session-worker",
+                "run_id": "run-worker",
+                "turn_id": "turn-worker",
+                "runtime_scope_key": "team:mission-1:node:node-worker",
+                "seq": seq,
+                "payload": payload,
+            },
+        )
+
+    response = server._methods["team_mission.node.history"](
+        1,
+        {
+            "mission_id": "mission-1",
+            "node_id": "node-worker",
+            "include_run_events": True,
+            "run_events_limit": 20,
+            "exclude_run_event_types": ["message.delta", "thinking.delta"],
+        },
+    )
+
+    assert "error" not in response
+    assert [event["type"] for event in response["result"]["run_events"]] == [
+        "tool.complete",
+        "message.complete",
+    ]
+
+
+def test_team_mission_node_history_resolves_active_conversation_mission(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission_history = importlib.import_module("tui_gateway.methods.team_mission_history")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    monkeypatch.setattr(team_mission_history, "_get_db", lambda: db)
+
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        title="Team",
+        active_mission_id="mission-active",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-active",
+        conversation_id="conversation-1",
+        title="Mission",
+        objective="Build",
+        mode="supervised_mission",
+        status="running",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-active",
+        node_id="node-worker",
+        kind="worker",
+        title="Worker",
+        status="running",
+        runtime_scope_key="team:mission-active:node:node-worker",
+    )
+    db.create_session("session-worker", source="team_mission")
+    db.upsert_run(
+        run_id="run-worker",
+        session_id="session-worker",
+        runtime_scope_key="team:mission-active:node:node-worker",
+        status="completed",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-active",
+        node_id="node-worker",
+        run_id="run-worker",
+        session_id="session-worker",
+        runtime_scope_key="team:mission-active:node:node-worker",
+        role="worker",
+    )
+    db.append_message(
+        "session-worker",
+        role="assistant",
+        content="active mission output",
+        platform_message_id="msg-worker",
+        metadata={"run_id": "run-worker"},
+    )
+
+    response = server._methods["team_mission.node.history"](
+        1,
+        {
+            "mission_id": "mission-stale",
+            "conversation_id": "conversation-1",
+            "conversation_session_id": "team-session-1",
+            "node_id": "node-worker",
+            "session_id": "session-worker",
+        },
+    )
+
+    assert "error" not in response
+    result = response["result"]
+    assert result["mission_id"] == "mission-active"
+    assert result["source"]["session_id"] == "session-worker"
+    assert result["messages"][0]["text"] == "active mission output"
+
+
+def test_team_mission_node_history_keeps_transcript_readable_when_graph_is_missing(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission_history = importlib.import_module("tui_gateway.methods.team_mission_history")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission_history, "_get_db", lambda: db)
+
+    db.create_session("session-worker", source="team_mission")
+    db.append_message(
+        "session-worker",
+        role="assistant",
+        content="preserved failed node output",
+        platform_message_id="msg-worker",
+        metadata={"run_id": "run-worker"},
+    )
+
+    response = server._methods["team_mission.node.history"](
+        1,
+        {
+            "mission_id": "mission-missing",
+            "node_id": "node-worker",
+            "session_id": "session-worker",
+            "include_run_events": True,
+            "run_events_limit": 20,
+        },
+    )
+
+    assert "error" not in response
+    result = response["result"]
+    assert result["mission_id"] == "mission-missing"
+    assert result["source"]["session_id"] == "session-worker"
+    assert result["source"]["node_id"] == "node-worker"
+    assert result["messages"][0]["text"] == "preserved failed node output"
 
 
 def test_team_mission_planner_methods_mutate_graph_and_emit_events(monkeypatch, tmp_path: Path):
@@ -2126,8 +3827,20 @@ def test_team_mission_planner_methods_mutate_graph_and_emit_events(monkeypatch, 
         if edge["metadata"].get("approval_gate")
     }
 
-    events = [event["type"] for event in db.list_team_mission_run_events("mission-1")]
-    assert events == [
+    events = db.list_team_mission_run_events("mission-1")
+    source_events = [
+        event["payload"]["source_event_type"]
+        for event in events
+        if event["type"] == "team_mission.runtime.event"
+    ]
+    assert source_events == [
+        "mission.node.created",
+        "mission.edge.created",
+        "mission.node.updated",
+        "mission.approval.requested",
+        "mission.strategy.actions",
+    ]
+    assert [event["payload"]["source_event_type"] for event in events if event["type"] == "team_mission.conversation.status"] == [
         "mission.node.created",
         "mission.edge.created",
         "mission.node.updated",
@@ -2149,6 +3862,7 @@ def test_team_mission_node_start_reuses_run_submit_and_binds_worker_run(monkeypa
         mission_id="mission-1",
         title="自主执行",
         objective="自动执行节点",
+        **_workspace_kwargs(tmp_path),
         mode="autonomous_mission",
     )
     db.upsert_team_mission_node(
@@ -2203,8 +3917,84 @@ def test_team_mission_node_start_reuses_run_submit_and_binds_worker_run(monkeypa
     assert graph["run_bindings"][0]["run_id"] == "run-worker"
     assert graph["run_bindings"][0]["runtime_session_id"] == "runtime-worker"
     events = db.list_team_mission_run_events("mission-1")
-    assert events[-1]["type"] == "mission.node.started"
-    assert events[-1]["payload"]["binding"]["node_id"] == "node-worker"
+    source_events = [event for event in events if event["type"] == "team_mission.runtime.event"]
+    assert source_events[-1]["payload"]["source_event_type"] == "mission.node.started"
+    assert source_events[-1]["payload"]["source_event"]["payload"]["binding"]["node_id"] == "node-worker"
+    assert events[-1]["type"] == "team_mission.conversation.status"
+    assert events[-1]["payload"]["source_event_type"] == "mission.node.started"
+
+
+def test_team_mission_node_start_registers_worker_runtime_session_shell(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    control_home = tmp_path / "control"
+    profile_home = tmp_path / "profile"
+    control_home.mkdir()
+    profile_home.mkdir()
+    control_db = SessionDB(control_home / "state.db")
+    runtime_db = SessionDB(profile_home / "state.db")
+    monkeypatch.setenv("DOXIE_HERMES_CONTROL_HOME", str(control_home))
+    monkeypatch.setattr(team_mission, "_get_db", lambda: control_db)
+    monkeypatch.setattr(server, "_get_db", lambda: runtime_db)
+    control_db.initialize_team_mission_from_strategy(
+        mission_id="mission-1",
+        title="启动节点",
+        objective="执行节点任务",
+        **_workspace_kwargs(tmp_path),
+        mode="autonomous_mission",
+    )
+    control_db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-worker",
+        kind="worker",
+        title="执行节点",
+        objective="完成交付",
+        status="ready",
+        runtime_scope_key="profile:worker-a",
+    )
+    expected_session_id = "team:mission-1:node:node-worker"
+    assert control_db.get_session(expected_session_id) is None
+    assert runtime_db.get_session(expected_session_id) is None
+
+    submitted = {}
+
+    def fake_run_submit(rid, params):
+        assert runtime_db.get_session(expected_session_id) is not None
+        submitted.update(params)
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "status": "running",
+                "run_id": params["run_id"],
+                "turn_id": params["turn_id"],
+                "session_id": "runtime-worker",
+                "stored_session_id": params["stored_session_id"],
+                "runtime_scope_key": params["runtime_scope_key"],
+            },
+        }
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+
+    started = server._methods["team_mission.node.start"](
+        1,
+        {
+            "mission_id": "mission-1",
+            "node_id": "node-worker",
+            "run_id": "run-worker",
+            "turn_id": "turn-worker",
+        },
+    )
+
+    assert "error" not in started
+    assert started["result"]["stored_session_id"] == expected_session_id
+    assert submitted["stored_session_id"] == expected_session_id
+    assert control_db.get_session(expected_session_id)["source"] == "team_mission"
+    assert runtime_db.get_session(expected_session_id)["source"] == "team_mission"
 
 
 def test_team_mission_node_start_forwards_assignee_profile_context(monkeypatch, tmp_path: Path):
@@ -2233,6 +4023,7 @@ def test_team_mission_node_start_forwards_assignee_profile_context(monkeypatch, 
         mission_id="mission-1",
         title="自主执行",
         objective="自动执行节点",
+        **_workspace_kwargs(tmp_path),
         mode="autonomous_mission",
         members=[worker_member],
     )
@@ -2329,8 +4120,13 @@ def test_team_mission_bound_worker_run_event_updates_node_status(tmp_path: Path)
     assert node["status"] == "completed"
     assert node["metadata"]["last_run_terminal_event"] == "message.complete"
     events = db.list_team_mission_run_events("mission-1")
-    assert any(event["type"] == "message.complete" for event in events)
-    assert events[-1]["type"] == "mission.memory.compiled"
+    assert any(
+        event["type"] == "team_mission.runtime.event"
+        and event["payload"]["source_event_type"] == "message.complete"
+        for event in events
+    )
+    assert events[-1]["type"] == "team_mission.runtime.event"
+    assert events[-1]["payload"]["source_event_type"] == "mission.memory.compiled"
 
 
 def test_team_mission_schedule_ready_starts_only_dependency_ready_nodes(monkeypatch, tmp_path: Path):
@@ -2342,7 +4138,13 @@ def test_team_mission_schedule_ready_starts_only_dependency_ready_nodes(monkeypa
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
-    db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission", status="running")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="Mission",
+        **_workspace_kwargs(tmp_path),
+        mode="autonomous_mission",
+        status="running",
+    )
     db.upsert_team_mission_node(
         mission_id="mission-1",
         node_id="node-a",
@@ -2410,7 +4212,13 @@ def test_team_mission_schedule_ready_marks_claimed_node_blocked_when_start_fails
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
-    db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission", status="running")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="Mission",
+        **_workspace_kwargs(tmp_path),
+        mode="autonomous_mission",
+        status="running",
+    )
     db.upsert_team_mission_node(
         mission_id="mission-1",
         node_id="node-a",
@@ -2444,7 +4252,13 @@ def test_team_mission_schedule_ready_skips_autonomous_high_risk_nodes(monkeypatc
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
-    db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission", status="running")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="Mission",
+        **_workspace_kwargs(tmp_path),
+        mode="autonomous_mission",
+        status="running",
+    )
     db.upsert_team_mission_node(
         mission_id="mission-1",
         node_id="node-low",
@@ -2650,7 +4464,13 @@ def test_team_mission_schedule_ready_starts_auto_created_verifier(monkeypatch, t
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
-    db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission", status="running")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="Mission",
+        **_workspace_kwargs(tmp_path),
+        mode="autonomous_mission",
+        status="running",
+    )
     db.upsert_team_mission_node(
         mission_id="mission-1",
         node_id="node-a",
@@ -2690,7 +4510,13 @@ def test_team_mission_terminal_event_auto_starts_unblocked_child_node(monkeypatc
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
-    db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission", status="running")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="Mission",
+        **_workspace_kwargs(tmp_path),
+        mode="autonomous_mission",
+        status="running",
+    )
     db.upsert_team_mission_node(
         mission_id="mission-1",
         node_id="node-a",
@@ -2782,6 +4608,7 @@ def test_team_mission_node_start_injects_leader_memory_pack(monkeypatch, tmp_pat
         team_id="team-1",
         title="Old mission",
         objective="Research market",
+        **_workspace_kwargs(tmp_path),
         mode="autonomous_mission",
         metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-old"},
     )
@@ -2802,6 +4629,7 @@ def test_team_mission_node_start_injects_leader_memory_pack(monkeypatch, tmp_pat
         team_id="team-1",
         title="New mission",
         objective="Continue Japan launch planning",
+        **_workspace_kwargs(tmp_path),
         mode="supervised_mission",
         members=[{"member_id": "leader", "role": "leader"}],
         metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-new"},
@@ -2901,7 +4729,13 @@ def test_team_mission_terminal_event_auto_starts_verifier_finalizer(monkeypatch,
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
-    db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission", status="running")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="Mission",
+        **_workspace_kwargs(tmp_path),
+        mode="autonomous_mission",
+        status="running",
+    )
     db.upsert_team_mission_node(
         mission_id="mission-1",
         node_id="node-a",

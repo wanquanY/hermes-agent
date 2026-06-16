@@ -7,6 +7,7 @@ from doxie_extension.prompt_attachments import (
     enrich_prompt_with_document_attachments,
     format_document_attachment_context,
 )
+from tui_gateway.services.prompt_attachments import submitted_image_paths
 from tools.registry import registry
 
 
@@ -114,3 +115,27 @@ def test_document_attachment_prompt_enrichment_ignores_images():
     assert prompt.endswith("总结附件")
     assert "paper.pdf" in prompt
     assert "photo.png" not in prompt
+
+
+def test_doxie_local_image_attachment_routes_to_vision_input(tmp_path):
+    image = tmp_path / "photo.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    paths = submitted_image_paths({
+        "attachments": [
+            {
+                "name": "photo.png",
+                "path": str(image),
+                "mimeType": "image/png",
+                "kind": "image",
+            },
+            {
+                "name": "paper.pdf",
+                "path": str(tmp_path / "paper.pdf"),
+                "mimeType": "application/pdf",
+                "kind": "file",
+            },
+        ],
+    })
+
+    assert paths == [str(image)]

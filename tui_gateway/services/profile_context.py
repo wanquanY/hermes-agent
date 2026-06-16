@@ -61,8 +61,6 @@ def profile_context_for_params(params: dict | None = None) -> dict | None:
     if not runtime_scope_key:
         if draft_id:
             runtime_scope_key = f"draft:{draft_id}"
-        elif profile_id and version_id:
-            runtime_scope_key = f"profile:{profile_id}:version:{version_id}"
         elif profile_id:
             runtime_scope_key = f"profile:{profile_id}"
     return {

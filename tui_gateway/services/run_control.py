@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
 import threading
 import time
 import uuid
@@ -19,6 +20,8 @@ from collections import defaultdict, deque
 from collections.abc import Callable
 from typing import Any
 
+from hermes_runtime_event_payloads import primary_deliverable_text
+from agent.doxie_diagnostics import emit_doxie_diagnostic
 from tui_gateway.transport import Transport
 
 try:
@@ -36,6 +39,7 @@ except Exception:  # pragma: no cover - keeps gateway importable in mocked tests
 
 _MAX_EVENTS_PER_SESSION = 2000
 _POLL_INTERVAL_SECONDS = 0.25
+_TEAM_MISSION_RUNTIME_EVENT_TYPE = "team_mission.runtime.event"
 _RUN_OPENING_EVENT_TYPES = {
     "message.start",
     "message.delta",
@@ -56,6 +60,36 @@ _RUN_OPENING_EVENT_TYPES = {
 }
 
 logger = logging.getLogger(__name__)
+
+_STREAM_TRACE_EVENT_TYPES = {
+    "message.start",
+    "message.delta",
+    "message.complete",
+    "reasoning.delta",
+    "thinking.delta",
+}
+
+
+def _transport_debug_id(transport: Any) -> str:
+    if transport is None:
+        return ""
+    return f"{transport.__class__.__name__}:{id(transport):x}"
+
+
+def _stream_trace_summary(event: dict[str, Any]) -> dict[str, Any]:
+    text = _stream_text_delta(event)
+    digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    return {
+        "payload_mode": str(payload.get("mode") or ""),
+        "payload_len": len(text),
+        "payload_sha1": digest,
+        "payload_preview": text[:80].replace("\n", "\\n"),
+    }
+
+
+def _trace_stream_route(stage: str, **fields: Any) -> None:
+    emit_doxie_diagnostic("[doxie-stream-route]", {"stage": stage, **fields})
 
 _lock = threading.RLock()
 _events_by_session: dict[str, deque[dict[str, Any]]] = defaultdict(
@@ -272,9 +306,92 @@ def _stream_identity(event: dict[str, Any]) -> tuple[Any, ...]:
         str(payload.get("output_index") or "").strip(),
         str(payload.get("tool_call_id") or "").strip(),
         str(payload.get("subagent_id") or "").strip(),
-        str(payload.get("mission_id") or "").strip(),
-        str(payload.get("node_id") or "").strip(),
     )
+
+
+def _team_mission_runtime_source_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    if str(event.get("type") or "").strip() != _TEAM_MISSION_RUNTIME_EVENT_TYPE:
+        return None
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    for key in ("source_event", "sourceEvent", "runtime_event", "runtimeEvent"):
+        source_event = payload.get(key)
+        if isinstance(source_event, dict):
+            return source_event
+    return None
+
+
+def _with_team_mission_runtime_source_event(
+    event: dict[str, Any],
+    source_event: dict[str, Any],
+) -> dict[str, Any]:
+    patched = dict(event)
+    payload = dict(patched.get("payload") if isinstance(patched.get("payload"), dict) else {})
+    source_payload = dict(source_event.get("payload") if isinstance(source_event.get("payload"), dict) else {})
+    source_type = str(source_event.get("type") or "").strip()
+    payload.update(
+        {
+            "event_type": source_type,
+            "eventType": source_type,
+            "source_event_type": source_type,
+            "sourceEventType": source_type,
+            "source_event": source_event,
+            "sourceEvent": source_event,
+            "runtime_event": source_event,
+            "runtimeEvent": source_event,
+            "source_payload": source_payload,
+            "sourcePayload": source_payload,
+        }
+    )
+    patched["payload"] = payload
+    return patched
+
+
+def _terminal_delivery_identity(event: dict[str, Any]) -> tuple[Any, ...] | None:
+    event_type = str(event.get("type") or "").strip()
+    if event_type not in {"message.complete", "error", "session.interrupted", "session.recalled"}:
+        return None
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    source_seq = (
+        event.get("source_seq")
+        or event.get("sourceSeq")
+        or payload.get("source_seq")
+        or payload.get("sourceSeq")
+        or event.get("seq")
+        or payload.get("seq")
+    )
+    try:
+        normalized_seq = int(source_seq or 0)
+    except (TypeError, ValueError):
+        normalized_seq = 0
+    return (
+        event_type,
+        _event_run_id(event),
+        _event_turn_id(event),
+        _event_runtime_scope_key(event),
+        normalized_seq,
+    )
+
+
+def _remember_direct_terminal_delivery(subscription: dict[str, Any], event: dict[str, Any]) -> None:
+    identity = _terminal_delivery_identity(event)
+    if not identity:
+        return
+    identities = subscription.get("direct_terminal_identities")
+    if not isinstance(identities, set):
+        identities = set(identities or ())
+        subscription["direct_terminal_identities"] = identities
+    identities.add(identity)
+    if len(identities) > 2000:
+        for value in list(identities)[: len(identities) - 2000]:
+            identities.discard(value)
+
+
+def _was_terminal_delivered_directly(subscription: dict[str, Any], event: dict[str, Any]) -> bool:
+    identity = _terminal_delivery_identity(event)
+    if not identity:
+        return False
+    identities = subscription.get("direct_terminal_identities")
+    return isinstance(identities, set) and identity in identities
 
 
 def _prime_subscription_stream_state(subscription: dict[str, Any], events: list[dict[str, Any]]) -> None:
@@ -283,12 +400,52 @@ def _prime_subscription_stream_state(subscription: dict[str, Any], events: list[
         streams = {}
         subscription["delivered_stream_texts"] = streams
     for event in events:
-        if not isinstance(event, dict) or not _is_coalesced_stream_delta(event):
+        if not isinstance(event, dict):
             continue
-        streams[_stream_identity(event)] = _stream_text_delta(event)
+        stream_event = _team_mission_runtime_source_event(event) or event
+        if not _is_coalesced_stream_delta(stream_event):
+            continue
+        streams[_stream_identity(stream_event)] = _stream_text_delta(stream_event)
 
 
-def _delta_event_for_subscription(subscription: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+def _merge_delivered_stream_text(previous: str, delivered: str) -> str:
+    if not previous:
+        return delivered
+    if delivered.startswith(previous):
+        return delivered
+    if previous.endswith(delivered):
+        return previous
+    overlap = _suffix_prefix_overlap(previous, delivered)
+    return previous + delivered[overlap:]
+
+
+def _stream_suffix_after_previous(previous: str, delivered: str) -> str:
+    if not previous:
+        return delivered
+    if delivered.startswith(previous):
+        return delivered[len(previous):]
+    if previous.endswith(delivered):
+        return ""
+    overlap = _suffix_prefix_overlap(previous, delivered)
+    if overlap > 0:
+        return delivered[overlap:]
+    return delivered
+
+
+def _delta_event_for_subscription(
+    subscription: dict[str, Any],
+    event: dict[str, Any],
+) -> dict[str, Any] | None:
+    if _was_terminal_delivered_directly(subscription, event):
+        return None
+    source_event = _team_mission_runtime_source_event(event)
+    if source_event is not None and _is_coalesced_stream_delta(source_event):
+        source_event_for_transport = _delta_event_for_subscription(subscription, source_event)
+        if source_event_for_transport is None:
+            return None
+        if source_event_for_transport is source_event:
+            return event
+        return _with_team_mission_runtime_source_event(event, source_event_for_transport)
     if not _is_coalesced_stream_delta(event):
         return event
     streams = subscription.get("delivered_stream_texts")
@@ -298,21 +455,121 @@ def _delta_event_for_subscription(subscription: dict[str, Any], event: dict[str,
     identity = _stream_identity(event)
     text = _stream_text_delta(event)
     previous = str(streams.get(identity) or "")
-    streams[identity] = text
-    if previous and text.startswith(previous):
-        suffix = text[len(previous):]
-        if suffix:
-            patched = dict(event)
-            payload = dict(patched.get("payload") if isinstance(patched.get("payload"), dict) else {})
-            for key in ("delta", "text", "output"):
-                if key in payload:
-                    payload[key] = suffix
-            if str(patched.get("type") or "") == "message.delta":
-                payload["mode"] = "append"
-                payload["offset"] = len(previous)
-            patched["payload"] = payload
-            return patched
+    direct_identities = subscription.get("direct_stream_identities")
+    if not isinstance(direct_identities, set):
+        direct_identities = set(direct_identities or ())
+        subscription["direct_stream_identities"] = direct_identities
+    if previous and identity in direct_identities:
+        streams[identity] = _merge_delivered_stream_text(previous, text)
+        return None
+    streams[identity] = _merge_delivered_stream_text(previous, text)
+    if previous:
+        suffix = _stream_suffix_after_previous(previous, text)
+        if not suffix:
+            return None
+        if suffix == text:
+            return event
+        patched = dict(event)
+        payload = dict(patched.get("payload") if isinstance(patched.get("payload"), dict) else {})
+        for key in ("delta", "text", "output"):
+            if key in payload:
+                payload[key] = suffix
+        if str(patched.get("type") or "") == "message.delta":
+            payload["mode"] = "append"
+            payload["offset"] = len(previous)
+        patched["payload"] = payload
+        return patched
     return event
+
+
+def _suffix_prefix_overlap(left: str, right: str) -> int:
+    limit = min(len(left), len(right))
+    for size in range(limit, 0, -1):
+        if left.endswith(right[:size]):
+            return size
+    return 0
+
+
+def _remember_subscription_stream_delivery(
+    subscription: dict[str, Any],
+    event: dict[str, Any],
+    *,
+    direct: bool = False,
+) -> None:
+    stream_event = _team_mission_runtime_source_event(event) or event
+    if not _is_coalesced_stream_delta(stream_event):
+        return
+    streams = subscription.get("delivered_stream_texts")
+    if not isinstance(streams, dict):
+        streams = {}
+        subscription["delivered_stream_texts"] = streams
+    identity = _stream_identity(stream_event)
+    if direct:
+        direct_identities = subscription.get("direct_stream_identities")
+        if not isinstance(direct_identities, set):
+            direct_identities = set(direct_identities or ())
+            subscription["direct_stream_identities"] = direct_identities
+        direct_identities.add(identity)
+    delivered = _stream_text_delta(stream_event)
+    if not delivered:
+        return
+    previous = str(streams.get(identity) or "")
+    streams[identity] = _merge_delivered_stream_text(previous, delivered)
+
+
+def _remember_subscription_delivery(
+    subscription: dict[str, Any],
+    event: dict[str, Any],
+    *,
+    direct: bool = False,
+) -> None:
+    try:
+        seq = int(event.get("seq") or 0)
+    except (TypeError, ValueError):
+        seq = 0
+    if seq > 0:
+        subscription["last_seq"] = max(int(subscription.get("last_seq") or 0), seq)
+    _remember_subscription_run(subscription, event)
+    _remember_subscription_stream_delivery(subscription, event, direct=direct)
+    if direct:
+        _remember_direct_terminal_delivery(subscription, event)
+
+
+def remember_transport_delivery(transport: Transport | None, event: dict[str, Any]) -> None:
+    if transport is None or not isinstance(event, dict):
+        return
+    stable = _stable_session_id(event)
+    event_run_id = _event_run_id(event)
+    with _lock:
+        for subscription_id in list(_subscription_ids_by_transport.get(transport, set())):
+            subscription = _subscriptions_by_id.get(subscription_id)
+            if not isinstance(subscription, dict):
+                continue
+            if subscription.get("transport") is not transport:
+                continue
+            kind = str(subscription.get("kind") or "session")
+            if kind == "session":
+                if stable and str(subscription.get("stored_session_id") or "").strip() != stable:
+                    continue
+                if not _event_matches_subscription(subscription, event):
+                    continue
+            elif kind == "team_mission":
+                payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                event_mission_id = str(event.get("mission_id") or payload.get("mission_id") or "").strip()
+                if not event_mission_id and event_run_id:
+                    binding_getter = _db_method(subscription.get("db"), "get_team_mission_run_binding")
+                    if binding_getter is not None:
+                        try:
+                            binding = binding_getter(event_run_id)
+                        except Exception:
+                            binding = {}
+                        if isinstance(binding, dict):
+                            event_mission_id = str(binding.get("mission_id") or "").strip()
+                if str(subscription.get("mission_id") or "").strip() != event_mission_id:
+                    continue
+                _remember_subscription_run(subscription, event)
+                continue
+            _remember_subscription_delivery(subscription, event, direct=True)
 
 
 def _terminal_status(event_type: str, payload: dict[str, Any]) -> str | None:
@@ -328,6 +585,41 @@ def _terminal_status(event_type: str, payload: dict[str, Any]) -> str | None:
     if status in {"error", "failed"}:
         return "failed"
     return "completed"
+
+
+def _normalize_team_mission_deliverable_terminal_event(
+    frame: dict[str, Any],
+    *,
+    run_id: str,
+    db: Any = None,
+) -> dict[str, Any]:
+    if str(frame.get("type") or "").strip() != "message.complete":
+        return frame
+    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    status = str(payload.get("status") or "").strip().lower()
+    if status not in {"failed", "error"}:
+        return frame
+    deliverable_text = primary_deliverable_text(payload)
+    if not deliverable_text or not run_id:
+        return frame
+    binding_getter = _db_method(db, "get_team_mission_run_binding")
+    if binding_getter is None:
+        return frame
+    try:
+        binding = binding_getter(run_id)
+    except Exception:
+        binding = None
+    if not isinstance(binding, dict) or not binding:
+        return frame
+    normalized_payload = dict(payload)
+    original_status = str(normalized_payload.get("status") or "").strip()
+    original_error = str(normalized_payload.get("message") or normalized_payload.get("error") or "").strip()
+    normalized_payload["text"] = deliverable_text
+    normalized_payload["status"] = "complete"
+    normalized_payload["team_mission_terminal_status_recovered"] = original_status
+    if original_error:
+        normalized_payload["nonfatal_error"] = original_error
+    return {**frame, "payload": normalized_payload}
 
 
 def _event_opens_active_run(event_type: str) -> bool:
@@ -535,6 +827,43 @@ def _poll_subscription_events() -> None:
                 if seq <= delivered_seq:
                     continue
                 event_for_transport = _delta_event_for_subscription(subscription, event)
+                if event_for_transport is None:
+                    event_type = str(event.get("type") or "")
+                    if event_type in _STREAM_TRACE_EVENT_TYPES:
+                        _trace_stream_route(
+                            "subscription-poll-skip-direct-stream",
+                            event_type=event_type,
+                            subscription_id=str(subscription.get("id") or ""),
+                            subscription_kind=subscription_kind,
+                            stored_session_id=stable,
+                            mission_id=mission_id,
+                            run_id=_event_run_id(event),
+                            turn_id=_event_turn_id(event),
+                            runtime_scope_key=_event_runtime_scope_key(event),
+                            seq=seq,
+                            previous_delivered_seq=delivered_seq,
+                            transport=_transport_debug_id(transport),
+                            **_stream_trace_summary(event),
+                        )
+                    delivered_seq = seq
+                    continue
+                event_type = str(event_for_transport.get("type") or "")
+                if event_type in _STREAM_TRACE_EVENT_TYPES:
+                    _trace_stream_route(
+                        "subscription-poll-delivery",
+                        event_type=event_type,
+                        subscription_id=str(subscription.get("id") or ""),
+                        subscription_kind=subscription_kind,
+                        stored_session_id=stable,
+                        mission_id=mission_id,
+                        run_id=_event_run_id(event_for_transport),
+                        turn_id=_event_turn_id(event_for_transport),
+                        runtime_scope_key=_event_runtime_scope_key(event_for_transport),
+                        seq=seq,
+                        previous_delivered_seq=delivered_seq,
+                        transport=_transport_debug_id(transport),
+                        **_stream_trace_summary(event_for_transport),
+                    )
                 if not _write_event(transport, event_for_transport):
                     break
                 delivered_seq = seq
@@ -785,6 +1114,7 @@ def next_event_seq(stored_session_id: str, fallback_seq: int = 0, db: Any = None
 def record_event(
     params: dict[str, Any],
     owner_transport: Transport | None = None,
+    skip_owner_transport: bool = False,
     db: Any = None,
 ) -> list[Transport]:
     """Persist an event frame and return live subscriber transports to notify."""
@@ -793,6 +1123,8 @@ def record_event(
     stable = _stable_session_id(frame)
     run_id = _event_run_id(frame)
     turn_id = _event_turn_id(frame)
+    frame = _normalize_team_mission_deliverable_terminal_event(frame, run_id=run_id, db=db)
+    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     event_type = str(frame.get("type") or "").strip()
     runtime_session_id = str(frame.get("session_id") or "").strip()
     owner_metadata = frame.get("owner_metadata")
@@ -856,12 +1188,33 @@ def record_event(
                     _remember_subscription_run(subscription, frame)
                     subscribers.add(transport)
             subscribers.update(_subscribers_by_session.get(stable, set()))
-        if owner_transport is not None:
+        if skip_owner_transport and owner_transport is not None:
             subscribers.discard(owner_transport)
         result = list(subscribers)
+        if event_type in _STREAM_TRACE_EVENT_TYPES:
+            _trace_stream_route(
+                "run-control-record",
+                event_type=event_type,
+                session_id=runtime_session_id,
+                stored_session_id=stable,
+                run_id=run_id,
+                turn_id=turn_id,
+                runtime_scope_key=str(frame.get("runtime_scope_key") or ""),
+                seq=int(frame.get("seq") or 0),
+                owner_transport=_transport_debug_id(owner_transport),
+                subscriber_delivery_count=len(result),
+                **_stream_trace_summary(frame),
+            )
     if stable and (method := _db_method(db, "append_run_event")):
         try:
             saved = method(stable, frame)
+            if isinstance(saved, dict) and saved.get("_persistence_disposition") == "duplicate_terminal":
+                with _lock:
+                    try:
+                        _events_by_session[stable].remove(frame)
+                    except (KeyError, ValueError):
+                        pass
+                return []
             if terminal_event:
                 _diagnostic_warning(
                     "terminal-event-persisted",
@@ -877,44 +1230,56 @@ def record_event(
                 )
             reducer = _db_method(db, "reduce_team_mission_run_event")
             if reducer is not None and run_id:
-                reduced_node = reducer(run_id=run_id, event=saved if isinstance(saved, dict) else frame)
+                event_for_reduce = saved if isinstance(saved, dict) else frame
+                event_for_mirror = frame if event_type == "message.delta" else event_for_reduce
+                reduced_node = reducer(run_id=run_id, event=event_for_reduce)
+                scheduler_mission_id = ""
+                binding: dict[str, Any] = {}
                 if isinstance(reduced_node, dict):
                     scheduler_mission_id = str(reduced_node.get("mission_id") or "").strip()
-                    if scheduler_mission_id:
-                        try:
-                            from hermes_team_mission_conversation_utils import mirror_event_to_conversation
+                if not scheduler_mission_id:
+                    binding_getter = _db_method(db, "get_team_mission_run_binding")
+                    if binding_getter is not None:
+                        candidate_binding = binding_getter(run_id)
+                        binding = dict(candidate_binding) if isinstance(candidate_binding, dict) else {}
+                        scheduler_mission_id = str(binding.get("mission_id") or "").strip()
+                if scheduler_mission_id:
+                    try:
+                        from hermes_team_mission_conversation_utils import mirror_event_to_conversation
 
-                            mirrored = mirror_event_to_conversation(
-                                db,
-                                mission_id=scheduler_mission_id,
-                                event=saved if isinstance(saved, dict) else frame,
-                                source="runtime_event",
-                            )
-                            if mirrored:
-                                mirror_stable = _stable_session_id(mirrored)
-                                mirror_subscribers = set()
-                                with _lock:
-                                    if mirror_stable:
-                                        _events_by_session[mirror_stable].append(mirrored)
-                                        _last_seq_by_session[mirror_stable] = max(
-                                            int(_last_seq_by_session.get(mirror_stable) or 0),
-                                            int(mirrored.get("seq") or 0),
-                                        )
-                                        for subscription_id in list(_subscription_ids_by_session.get(mirror_stable, set())):
-                                            subscription = _subscriptions_by_id.get(subscription_id)
-                                            transport = subscription.get("transport") if isinstance(subscription, dict) else None
-                                            if (
-                                                transport is not None
-                                                and isinstance(subscription, dict)
-                                                and _event_matches_subscription(subscription, mirrored)
-                                            ):
-                                                _remember_subscription_run(subscription, mirrored)
-                                                mirror_subscribers.add(transport)
-                                        mirror_subscribers.update(_subscribers_by_session.get(mirror_stable, set()))
-                                for transport in mirror_subscribers:
-                                    _write_event(transport, mirrored)
-                        except Exception:
-                            logger.debug("failed to mirror Team Mission event", exc_info=True)
+                        mirrored = mirror_event_to_conversation(
+                            db,
+                            mission_id=scheduler_mission_id,
+                            binding=binding or None,
+                            event=event_for_mirror,
+                            source="runtime_event",
+                        )
+                        if mirrored:
+                            mirror_stable = _stable_session_id(mirrored)
+                            mirror_subscribers = set()
+                            with _lock:
+                                if mirror_stable:
+                                    _events_by_session[mirror_stable].append(mirrored)
+                                    _last_seq_by_session[mirror_stable] = max(
+                                        int(_last_seq_by_session.get(mirror_stable) or 0),
+                                        int(mirrored.get("seq") or 0),
+                                    )
+                                    for subscription_id in list(_subscription_ids_by_session.get(mirror_stable, set())):
+                                        subscription = _subscriptions_by_id.get(subscription_id)
+                                        transport = subscription.get("transport") if isinstance(subscription, dict) else None
+                                        if (
+                                            transport is not None
+                                            and isinstance(subscription, dict)
+                                            and _event_matches_subscription(subscription, mirrored)
+                                        ):
+                                            _remember_subscription_run(subscription, mirrored)
+                                            mirror_subscribers.add(transport)
+                                    mirror_subscribers.update(_subscribers_by_session.get(mirror_stable, set()))
+                            for transport in mirror_subscribers:
+                                if _write_event(transport, mirrored):
+                                    remember_transport_delivery(transport, mirrored)
+                    except Exception:
+                        logger.debug("failed to mirror Team Mission event", exc_info=True)
         except Exception as exc:
             _diagnostic_warning(
                 "run-event-persist-failed",
@@ -956,6 +1321,7 @@ def record_event(
 def publish_recorded_event(
     params: dict[str, Any],
     owner_transport: Transport | None = None,
+    skip_owner_transport: bool = False,
     db: Any = None,
     before_deliver: Callable[[], None] | None = None,
 ) -> list[Transport]:
@@ -966,13 +1332,23 @@ def publish_recorded_event(
     terminal events, and interrupt events need the stronger contract that every
     matching ``events.subscribe`` transport receives the same persisted frame
     immediately.
+
+    ``skip_owner_transport`` is reserved for callers that also have a direct
+    delivery path for the exact same event frame. Passing ``owner_transport``
+    alone is diagnostic context; it must not suppress an explicit subscription.
     """
-    subscribers = record_event(params, owner_transport=owner_transport, db=db)
+    subscribers = record_event(
+        params,
+        owner_transport=owner_transport,
+        skip_owner_transport=skip_owner_transport,
+        db=db,
+    )
     if before_deliver is not None:
         before_deliver()
     delivered: list[Transport] = []
     for transport in subscribers:
         if _write_event(transport, params):
+            remember_transport_delivery(transport, params)
             delivered.append(transport)
     return delivered
 
@@ -1090,6 +1466,7 @@ def subscribe_session_with_id(
                 "active_run_ids": set(active_run_ids),
                 "last_seq": max(0, int(after_seq or 0)),
                 "delivered_stream_texts": {},
+                "direct_stream_identities": set(),
                 "db": db,
                 "created_at": time.time(),
             }
@@ -1173,6 +1550,7 @@ def subscribe_team_mission_with_id(
                 "active_run_ids": set(),
                 "last_seq": max(0, int(after_seq or 0)),
                 "delivered_stream_texts": {},
+                "direct_stream_identities": set(),
                 "db": db,
                 "created_at": time.time(),
             }

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 
@@ -119,22 +121,6 @@ def compact_team_profile_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]
     }
 
 
-def team_capability_payload(context: Mapping[str, Any]) -> dict[str, Any]:
-    payload = context.get("team_capability") if isinstance(context.get("team_capability"), Mapping) else {}
-    source_packet = (
-        context.get("team_capability_source_packet")
-        if isinstance(context.get("team_capability_source_packet"), Mapping)
-        else {}
-    )
-    snapshot_id = text(context.get("team_capability_snapshot_id") or context.get("teamCapabilitySnapshotId"))
-    result = dict(payload)
-    if source_packet:
-        result.setdefault("source_packet", dict(source_packet))
-    if snapshot_id:
-        result.setdefault("snapshot_id", snapshot_id)
-    return result
-
-
 def gateway_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
     try:
         from tui_gateway import server
@@ -145,6 +131,64 @@ def gateway_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
         return fn(None, params)
     except Exception as exc:
         return {"error": {"message": str(exc)}}
+
+
+def team_mission_control_home() -> str:
+    return text(os.getenv("DOXIE_HERMES_CONTROL_HOME") or os.getenv("HERMES_HOME"))
+
+
+def enter_team_mission_control_home() -> Any:
+    control_home = team_mission_control_home()
+    if not control_home:
+        return None
+    try:
+        from hermes_constants import set_hermes_home_override
+
+        return set_hermes_home_override(control_home)
+    except Exception:
+        return None
+
+
+def leave_team_mission_control_home(token: Any) -> None:
+    if token is None:
+        return
+    try:
+        from hermes_constants import reset_hermes_home_override
+
+        reset_hermes_home_override(token)
+    except Exception:
+        return
+
+
+def team_mission_control_db(parent_agent: Any = None) -> Any:
+    explicit_control_home = text(os.getenv("DOXIE_HERMES_CONTROL_HOME"))
+    if explicit_control_home:
+        try:
+            from hermes_state import SessionDB
+
+            return SessionDB(db_path=Path(explicit_control_home).expanduser().resolve() / "state.db")
+        except Exception:
+            pass
+    db = getattr(parent_agent, "_session_db", None) if parent_agent is not None else None
+    if db is not None:
+        return db
+    try:
+        from tui_gateway import server
+
+        return server._get_db()
+    except Exception:
+        pass
+    control_home = text(os.getenv("HERMES_HOME"))
+    if control_home:
+        try:
+            from hermes_state import SessionDB
+
+            return SessionDB(db_path=Path(control_home).expanduser().resolve() / "state.db")
+        except Exception:
+            pass
+    from hermes_state import SessionDB
+
+    return SessionDB()
 
 
 def unwrap_response(response: dict[str, Any]) -> tuple[dict[str, Any], str]:

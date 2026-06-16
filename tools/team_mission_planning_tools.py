@@ -16,6 +16,7 @@ from hermes_team_mission_assignees import normalized_member_dicts
 from hermes_team_mission_modes import strategy_for_mode
 from hermes_team_mission_node_kinds import metadata_with_normalized_node_kind
 from hermes_team_mission_node_kinds import normalize_team_mission_node_kind
+from hermes_team_mission_profile_tools import team_mission_control_db as _team_mission_control_db
 from tools.registry import registry, tool_error, tool_result
 
 
@@ -43,13 +44,8 @@ def _number(value: Any, default: float = 0) -> float:
 
 
 def _get_db(parent_agent=None):
-    db = getattr(parent_agent, "_session_db", None) if parent_agent is not None else None
-    if db is not None:
-        return db
     try:
-        from tui_gateway import server
-
-        return server._get_db()
+        return _team_mission_control_db(parent_agent)
     except Exception:
         return SessionDB()
 

@@ -2,6 +2,7 @@ import atexit
 import concurrent.futures
 import contextvars
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -71,6 +72,88 @@ from doxie_extension import load_extension
 
 logger = logging.getLogger(__name__)
 
+
+_DOXIE_STREAM_TRACE_EVENTS = {
+    "message.start",
+    "message.delta",
+    "message.complete",
+    "reasoning.delta",
+    "thinking.delta",
+}
+
+
+def _stream_trace_text(payload: dict | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("delta", "text", "snapshot", "output", "message"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def _stream_trace_payload_summary(payload: dict | None) -> dict[str, Any]:
+    text = _stream_trace_text(payload)
+    digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return {
+        "payload_mode": str((payload or {}).get("mode") or ""),
+        "payload_len": len(text),
+        "payload_sha1": digest,
+        "payload_preview": text[:80].replace("\n", "\\n"),
+    }
+
+
+def _transport_debug_id(transport: Any) -> str:
+    if transport is None:
+        return ""
+    return f"{transport.__class__.__name__}:{id(transport):x}"
+
+
+def _trace_stream_route(stage: str, **fields: Any) -> None:
+    emit_doxie_diagnostic("[doxie-stream-route]", {"stage": stage, **fields})
+
+
+def _diagnostic_param_summary(params: dict | None) -> dict[str, Any]:
+    if not isinstance(params, dict):
+        return {"param_type": type(params).__name__}
+    keys = sorted(str(key) for key in params.keys())
+    summary: dict[str, Any] = {"param_keys": keys[:40], "param_key_count": len(keys)}
+    for key in (
+        "identifier",
+        "mission_id",
+        "missionId",
+        "conversation_id",
+        "conversationId",
+        "conversation_session_id",
+        "conversationSessionId",
+        "stable_team_session_id",
+        "stableTeamSessionId",
+        "node_id",
+        "nodeId",
+        "session_id",
+        "sessionId",
+        "stored_session_id",
+        "storedSessionId",
+        "runtime_scope_key",
+        "runtimeScopeKey",
+        "profile_runtime_scope_key",
+        "profileRuntimeScopeKey",
+        "agent_profile_id",
+        "agentProfileId",
+        "agent_profile_version_id",
+        "agentProfileVersionId",
+        "include_run_events",
+        "includeRunEvents",
+        "limit",
+        "run_events_limit",
+        "runEventsLimit",
+    ):
+        value = params.get(key)
+        if value is None or isinstance(value, (dict, list)):
+            continue
+        summary[key] = str(value)[:240]
+    return summary
+
 _hermes_home = get_hermes_home()
 load_hermes_dotenv(
     hermes_home=_hermes_home, project_env=Path(__file__).parent.parent / ".env"
@@ -111,9 +194,15 @@ _DETAIL_MODES = frozenset({"hidden", "collapsed", "expanded"})
 _READ_ONLY_DB_METHODS = frozenset(
     {
         "artifacts.list",
+        "conversation.activity.list",
         "delegation.status",
         "events.subscribe",
         "insights.get",
+        "profile.draft.get",
+        "profile.draft.list",
+        "profile.get",
+        "profile.growth.summary",
+        "profile.list",
         "rollback.diff",
         "rollback.list",
         "run.events",
@@ -128,9 +217,12 @@ _READ_ONLY_DB_METHODS = frozenset(
         "session.status",
         "session.usage",
         "team_mission.conversation.list",
+        "team_mission.conversation.render",
         "team_mission.conversation.resolve",
         "spawn_tree.list",
         "workspace.current",
+        "workspace.session.current",
+        "workspace.session.list",
         "workspace.list",
     }
 )
@@ -156,17 +248,14 @@ def _agent_context_options_for_session(session: dict | None) -> dict:
     """Resolve semantic context loading policy for a gateway runtime session."""
 
     mode = _agent_context_mode_from_params(session)
-    if mode == "team_leader":
-        return {
-            "skip_context_files": True,
-            "skip_memory": True,
-            "load_soul_identity": False,
-        }
     ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
-    return {
+    options = {
         "skip_context_files": ignore_rules,
         "skip_memory": ignore_rules,
     }
+    if mode == "team_leader":
+        options["load_soul_identity"] = True
+    return options
 
 
 def _log_agent_build_stage(sid: str, session: dict | None, stage: str, **fields: Any) -> None:
@@ -460,6 +549,7 @@ def _emit(event: str, sid: str, payload: dict | None = None):
     run_id = ""
     turn_id = ""
     runtime_scope_key = ""
+    direct_transport = None
     try:
         from tui_gateway.services import run_control
 
@@ -484,6 +574,9 @@ def _emit(event: str, sid: str, payload: dict | None = None):
             params["runtime_scope_key"] = runtime_scope_key
         if sid:
             params["runtime_session_id"] = sid
+        session_transport = session.get("transport")
+        context_transport = current_transport()
+        direct_transport = session_transport or context_transport or _stdio_transport
         if stable_session_id and run_id:
             frame = {
                 "type": event,
@@ -502,14 +595,31 @@ def _emit(event: str, sid: str, payload: dict | None = None):
             frame["seq"] = run_control.next_event_seq(stable_session_id, db=_get_db())
             params["seq"] = frame["seq"]
             terminal_event = _is_terminal_run_event(event)
-            run_control.publish_recorded_event(
+            recorded_deliveries = run_control.publish_recorded_event(
                 frame,
                 db=_get_db(),
-                owner_transport=current_transport(),
+                owner_transport=direct_transport,
+                skip_owner_transport=True,
                 before_deliver=(lambda: _release_terminal_session_run(sid, run_id))
                 if terminal_event
                 else None,
             )
+            if event in _DOXIE_STREAM_TRACE_EVENTS:
+                _trace_stream_route(
+                    "record-publish",
+                    event_type=event,
+                    session_id=sid,
+                    stored_session_id=stable_session_id,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    runtime_scope_key=runtime_scope_key,
+                    seq=frame["seq"],
+                    session_transport=_transport_debug_id(session_transport),
+                    context_transport=_transport_debug_id(context_transport),
+                    owner_transport=_transport_debug_id(direct_transport),
+                    subscriber_delivery_count=len(recorded_deliveries or []),
+                    **_stream_trace_payload_summary(event_payload),
+                )
     except Exception:
         logger.warning(
             "[doxie-gateway] emit record failed event=%s session_id=%s stored_session_id=%s run_id=%s turn_id=%s runtime_scope_key=%s",
@@ -523,7 +633,28 @@ def _emit(event: str, sid: str, payload: dict | None = None):
         )
     if payload is not None:
         params["payload"] = payload
-    write_json({"jsonrpc": "2.0", "method": "event", "params": params})
+    direct_delivered = write_json({"jsonrpc": "2.0", "method": "event", "params": params})
+    if event in _DOXIE_STREAM_TRACE_EVENTS:
+        _trace_stream_route(
+            "direct-write",
+            event_type=event,
+            session_id=sid,
+            stored_session_id=stable_session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+            runtime_scope_key=runtime_scope_key,
+            seq=params.get("seq") or 0,
+            direct_transport=_transport_debug_id(direct_transport),
+            delivered=bool(direct_delivered),
+            **_stream_trace_payload_summary(event_payload),
+        )
+    if direct_delivered:
+        try:
+            from tui_gateway.services import run_control
+
+            run_control.remember_transport_delivery(direct_transport, params)
+        except Exception:
+            logger.debug("failed to remember direct event delivery", exc_info=True)
 
 
 def _is_terminal_run_event(event: str) -> bool:
@@ -658,18 +789,31 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
         if isinstance(normalized, dict):
             return normalized
 
-        _rid, method, _params = normalized
+        rid, method, params = normalized
+
+        def run_handler() -> dict | None:
+            try:
+                return handle_request(req)
+            except Exception as exc:
+                diagnostic = {
+                    "method": method,
+                    "request_id": rid,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    **_diagnostic_param_summary(params),
+                }
+                emit_doxie_diagnostic("[tui-gateway-handler-error]", diagnostic)
+                logger.exception("[tui-gateway] handler error method=%s diagnostic=%s", method, diagnostic)
+                return _err(rid, -32000, f"handler error: {exc}")
+
         if method not in _LONG_HANDLERS:
-            return handle_request(req)
+            return run_handler()
 
         # Snapshot the context so the pool worker sees the bound transport.
         ctx = contextvars.copy_context()
 
         def run():
-            try:
-                resp = handle_request(req)
-            except Exception as exc:
-                resp = _err(req.get("id"), -32000, f"handler error: {exc}")
+            resp = run_handler()
             if resp is not None:
                 t.write(resp)
 
@@ -1659,7 +1803,7 @@ def _tool_result_text(result: object) -> str:
     return _redact_tui_verbose_text(raw)
 
 
-def _agent_cbs(sid: str) -> dict:
+def _tool_event_bridge() -> GatewayToolEventBridge:
     return GatewayToolEventBridge(
         sessions=_sessions,
         emit=_emit,
@@ -1669,7 +1813,19 @@ def _agent_cbs(sid: str) -> dict:
         tool_args_text=_tool_args_text,
         tool_result_text=_tool_result_text,
         thinking_event="thinking.delta",
-    ).agent_callbacks(
+    )
+
+
+def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict) -> None:
+    _tool_event_bridge().on_tool_start(sid, tool_call_id, name, args)
+
+
+def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result: str) -> None:
+    _tool_event_bridge().on_tool_complete(sid, tool_call_id, name, args, result)
+
+
+def _agent_cbs(sid: str) -> dict:
+    return _tool_event_bridge().agent_callbacks(
         sid,
         block=_block,
         status_update=_status_update,

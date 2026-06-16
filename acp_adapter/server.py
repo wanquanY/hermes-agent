@@ -1513,27 +1513,6 @@ class HermesACPAgent(acp.Agent):
             self.session_manager.save_session(session_id)
 
         final_response = result.get("final_response", "")
-        if final_response:
-            try:
-                from agent.title_generator import maybe_auto_title
-
-                def _notify_title_update(_title: str) -> None:
-                    if conn:
-                        loop.call_soon_threadsafe(
-                            asyncio.create_task,
-                            self._send_session_info_update(session_id),
-                        )
-
-                maybe_auto_title(
-                    self.session_manager._get_db(),
-                    session_id,
-                    user_text,
-                    final_response,
-                    state.history,
-                    title_callback=_notify_title_update,
-                )
-            except Exception:
-                logger.debug("Failed to auto-title ACP session %s", session_id, exc_info=True)
         if final_response and conn and not streamed_message:
             update = acp.update_agent_message_text(final_response)
             await conn.session_update(session_id, update)

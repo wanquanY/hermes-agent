@@ -263,7 +263,7 @@ class TestPendingTitleValueError:
             # pending_title should be cleared on ValueError, not left wedged
             assert session.get("pending_title") is None, (
                 "ValueError from set_session_title must clear pending_title "
-                "so auto-title can take over"
+                "so the failed explicit title does not retry forever"
             )
         finally:
             server._sessions.pop("sid", None)

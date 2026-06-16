@@ -213,6 +213,36 @@ def _is_empty_stored_conversation(row: dict) -> bool:
     )
 
 
+def _is_team_mission_internal_session_row(
+    db,
+    row: dict,
+    team_run_session_ids: set[str] | None = None,
+) -> bool:
+    session_ids = {
+        str(row.get("id") or "").strip(),
+        str(row.get("stored_session_id") or row.get("storedSessionId") or "").strip(),
+        str(row.get("session_id") or row.get("sessionId") or "").strip(),
+    }
+    session_ids.discard("")
+    for session_id in session_ids:
+        if session_id.startswith("team:") and ":node:" in session_id:
+            return True
+        if team_run_session_ids is not None and session_id in team_run_session_ids:
+            return True
+    runtime_scope_key = str(
+        row.get("runtime_scope_key")
+        or row.get("runtimeScopeKey")
+        or ""
+    ).strip()
+    if runtime_scope_key.startswith("team:") and ":node:" in runtime_scope_key:
+        return True
+    if team_run_session_ids is None:
+        is_run_session = getattr(db, "is_team_mission_run_session", None)
+        if callable(is_run_session) and any(is_run_session(session_id) for session_id in session_ids):
+            return True
+    return False
+
+
 def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str] | None = None) -> dict | None:
     """Overlay Hermes team-conversation identity onto its backing session row."""
 
@@ -239,6 +269,8 @@ def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str
             "mission_id": str(conversation.get("active_mission_id") or "").strip(),
             "status": str(conversation.get("status") or "").strip(),
             "title": str(conversation.get("title") or row.get("title") or "").strip(),
+            "display_title": str(conversation.get("display_title") or conversation.get("title") or row.get("display_title") or row.get("preview") or "").strip(),
+            "display_title_source": str(conversation.get("display_title_source") or "first_user_message").strip(),
             "preview": str(conversation.get("objective") or row.get("preview") or "").strip(),
             "workspace": {
                 "id": str(conversation.get("workspace_id") or "").strip(),
@@ -249,13 +281,7 @@ def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str
             "updated_at": updated_at,
         }
 
-    if team_run_session_ids is not None and session_id in team_run_session_ids:
-        return None
-    if team_run_session_ids is None:
-        is_run_session = getattr(db, "is_team_mission_run_session", None)
-        if callable(is_run_session) and is_run_session(session_id):
-            return None
-    if session_id.startswith("team:") and ":node:" in session_id:
+    if _is_team_mission_internal_session_row(db, row, team_run_session_ids):
         return None
     if (row.get("source") or "").strip().lower() == "team_mission":
         return None
@@ -418,10 +444,6 @@ def _request_session_interrupt_side_effects_async(
                 f"sid={sid} run_id={interrupted_run_id or '-'} turn_id={interrupted_turn_id or '-'}",
             )
             _request_agent_interrupt_async(sid, session.get("agent"))
-            # Scope pending prompt release to THIS session. A global
-            # _clear_pending() would collaterally cancel clarify/sudo/secret
-            # prompts on unrelated sessions sharing the same gateway process.
-            _clear_pending(sid)
             try:
                 from tools.approval import resolve_gateway_approval
 
@@ -742,16 +764,7 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
-        return _ok(
-            rid,
-            {
-                "sessions": [],
-                "pageInfo": {
-                    "nextCursor": "",
-                    "hasMore": False,
-                },
-            },
-        )
+        return _db_unavailable_error(rid, code=5006)
     try:
         # Resume picker should surface human conversation sessions from every
         # user-facing surface — CLI, TUI, all gateway platforms (including new
@@ -806,6 +819,10 @@ def _(rid, params: dict) -> dict:
                 sanitize_session_list_item({
                     "id": s["id"],
                     "title": s.get("title") or "",
+                    "display_title": s.get("display_title") or "",
+                    "displayTitle": s.get("display_title") or "",
+                    "display_title_source": s.get("display_title_source") or "",
+                    "displayTitleSource": s.get("display_title_source") or "",
                     "preview": s.get("preview") or "",
                     "started_at": s.get("started_at") or 0,
                     "updated_at": s.get("updated_at") or s.get("last_active") or s.get("started_at") or 0,
@@ -878,6 +895,7 @@ def _(rid, params: dict) -> dict:
                 {
                     "session_id": row.get("id"),
                     "title": row.get("title") or "",
+                    "display_title": row.get("display_title") or "",
                     "started_at": row.get("started_at") or 0,
                     "source": row.get("source") or "",
                 },
@@ -1983,6 +2001,12 @@ def _(rid, params: dict) -> dict:
     _interrupt_trace(
         f"[hermes] [tui_gateway] session.interrupt sid={sid} run_id={interrupted_run_id or '-'} turn_id={interrupted_turn_id or '-'} seq={interrupt_seq}",
     )
+    # Release pending prompts for this session before returning. Pending
+    # clarify/sudo/secret prompts are part of the interrupted interaction even
+    # when the session has no active run metadata, and resolving them
+    # synchronously avoids leaving worker threads blocked behind an interrupt
+    # response that already reported success.
+    _clear_pending(sid)
     _request_session_interrupt_side_effects_async(
         sid=sid,
         session=session,

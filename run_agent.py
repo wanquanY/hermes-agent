@@ -3046,7 +3046,7 @@ class AIAgent:
                 if ctx_scrubber is not None:
                     think_tail = ctx_scrubber.feed(think_tail)
                 if think_tail:
-                    callbacks = [cb for cb in (self.stream_delta_callback, self._stream_callback) if cb is not None]
+                    callbacks = self._stream_delta_callbacks()
                     for cb in callbacks:
                         try:
                             cb(think_tail)
@@ -3060,7 +3060,7 @@ class AIAgent:
         if scrubber is not None:
             tail = scrubber.flush()
             if tail:
-                callbacks = [cb for cb in (self.stream_delta_callback, self._stream_callback) if cb is not None]
+                callbacks = self._stream_delta_callbacks()
                 for cb in callbacks:
                     try:
                         cb(tail)
@@ -3068,6 +3068,7 @@ class AIAgent:
                         pass
                 self._record_streamed_assistant_text(tail)
         self._current_streamed_assistant_text = ""
+        self._current_streamed_reasoning_text = ""
 
     def _record_streamed_assistant_text(self, text: str) -> None:
         """Accumulate visible assistant text emitted through stream callbacks."""
@@ -3075,6 +3076,49 @@ class AIAgent:
             self._current_streamed_assistant_text = (
                 getattr(self, "_current_streamed_assistant_text", "") + text
             )
+
+    def _stream_delta_callbacks(self) -> List[callable]:
+        """Return distinct text stream callbacks in display/TTS delivery order."""
+        callbacks: List[callable] = []
+        seen: set[int] = set()
+        for cb in (self.stream_delta_callback, self._stream_callback):
+            if cb is None:
+                continue
+            identity = id(cb)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            callbacks.append(cb)
+        return callbacks
+
+    @staticmethod
+    def _stream_suffix_prefix_overlap(left: str, right: str) -> int:
+        limit = min(len(left), len(right))
+        for size in range(limit, 0, -1):
+            if left.endswith(right[:size]):
+                return size
+        return 0
+
+    def _normalize_reasoning_delta(self, text: str) -> str:
+        incoming = str(text or "")
+        if not incoming:
+            return ""
+        current = str(getattr(self, "_current_streamed_reasoning_text", "") or "")
+        if not current:
+            self._current_streamed_reasoning_text = incoming
+            return incoming
+        if incoming == current or current.startswith(incoming):
+            return ""
+        if incoming.startswith(current):
+            delta = incoming[len(current):]
+            self._current_streamed_reasoning_text = incoming
+            return delta
+        overlap = self._stream_suffix_prefix_overlap(current, incoming)
+        delta = incoming[overlap:] if overlap > 0 else incoming
+        if not delta:
+            return ""
+        self._current_streamed_reasoning_text = current + delta
+        return delta
 
     @staticmethod
     def _normalize_interim_visible_text(text: str) -> str:
@@ -3157,7 +3201,7 @@ class AIAgent:
                 text = text.lstrip("\n")
         if not text:
             return
-        callbacks = [cb for cb in (self.stream_delta_callback, self._stream_callback) if cb is not None]
+        callbacks = self._stream_delta_callbacks()
         delivered = False
         for cb in callbacks:
             try:
@@ -3170,6 +3214,9 @@ class AIAgent:
 
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire reasoning callback if registered."""
+        text = self._normalize_reasoning_delta(text)
+        if not text:
+            return
         cb = self.reasoning_callback
         if cb is not None:
             try:

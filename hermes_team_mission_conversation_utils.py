@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
+from hermes_runtime_event_payloads import primary_deliverable_text
+from hermes_team_mission_artifact_refs import artifact_refs_from_event
+from hermes_team_mission_artifact_refs import dedupe_artifact_refs
 from hermes_team_mission_node_kinds import is_team_mission_synthesis_node_kind
 from hermes_team_mission_node_kinds import normalize_team_mission_node_kind
 
@@ -12,7 +16,8 @@ _CONTROL_MIRROR_EVENT_TYPES = {
     "mission.strategy.actions",
 }
 
-_FINAL_DELIVERABLE_MESSAGE_EVENT_TYPES = {"message.complete"}
+_FINAL_DELIVERABLE_STREAM_EVENT_TYPES = {"message.start", "message.delta", "message.complete"}
+_FINAL_DELIVERABLE_PERSISTED_MESSAGE_EVENT_TYPES = {"message.complete"}
 _NON_DELIVERABLE_MESSAGE_STATUSES = {
     "cancelled",
     "canceled",
@@ -74,6 +79,7 @@ def _append_message_once(
     role: str,
     content: str,
     metadata: dict[str, Any],
+    replace_existing_content: bool = False,
 ) -> bool:
     if not session_id or not content:
         return False
@@ -100,6 +106,13 @@ def _append_message_once(
                     source_run_id=source_run_id,
                 )
             ):
+                if replace_existing_content and str(message.get("content") or "") != content:
+                    return _replace_message_content(
+                        db,
+                        session_id=session_id,
+                        message_id=message.get("id"),
+                        content=content,
+                    )
                 return False
     except Exception:
         pass
@@ -108,6 +121,48 @@ def _append_message_once(
         return True
     except Exception:
         return False
+
+
+def _replace_message_content(
+    db: Any,
+    *,
+    session_id: str,
+    message_id: Any,
+    content: str,
+) -> bool:
+    try:
+        numeric_message_id = int(message_id)
+    except (TypeError, ValueError):
+        return False
+    try:
+        stored_content = db._encode_content(content) if hasattr(db, "_encode_content") else content
+
+        def _do(conn: Any) -> bool:
+            cursor = conn.execute(
+                "UPDATE messages SET content = ? WHERE id = ? AND session_id = ?",
+                (stored_content, numeric_message_id, session_id),
+            )
+            return bool(cursor.rowcount)
+
+        if hasattr(db, "_execute_write"):
+            return bool(db._execute_write(_do))
+    except Exception:
+        return False
+    return False
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_loads(value: Any) -> Any:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def append_user_task_message(
@@ -141,6 +196,132 @@ def append_user_task_message(
 def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     return dict(payload)
+
+
+def _payload_stream_text(payload: dict[str, Any]) -> str:
+    return text(
+        payload.get("delta")
+        or payload.get("text")
+        or payload.get("snapshot")
+    )
+
+
+def _suffix_prefix_overlap(left: str, right: str) -> int:
+    if not left or not right:
+        return 0
+    max_len = min(len(left), len(right))
+    for size in range(max_len, 0, -1):
+        if left[-size:] == right[:size]:
+            return size
+    return 0
+
+
+def _merge_stream_text(previous: str, incoming: str) -> str:
+    previous = previous or ""
+    incoming = incoming or ""
+    if not incoming:
+        return previous
+    if not previous:
+        return incoming
+    if incoming == previous or incoming in previous:
+        return previous
+    if incoming.startswith(previous):
+        return incoming
+    return previous + incoming[_suffix_prefix_overlap(previous, incoming):]
+
+
+def _stream_text_from_events(events: list[dict[str, Any]]) -> str:
+    content = ""
+    for event in events or []:
+        if not isinstance(event, dict) or text(event.get("type")) != "message.delta":
+            continue
+        payload = _event_payload(event)
+        chunk = _payload_stream_text(payload)
+        if not chunk:
+            continue
+        mode = text(payload.get("mode")).lower()
+        if mode == "snapshot" or payload.get("snapshot") is not None:
+            content = chunk
+        else:
+            content = _merge_stream_text(content, chunk)
+    return text(content)
+
+
+def _normalized_conversation_delta_payload(
+    db: Any,
+    *,
+    target_session_id: str,
+    conversation_run_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    incoming = _payload_stream_text(payload)
+    if not incoming:
+        return None
+    normalized = dict(payload)
+    mode = text(normalized.get("mode")).lower()
+    if mode == "snapshot" or normalized.get("snapshot") is not None:
+        normalized["mode"] = "snapshot"
+        normalized["snapshot"] = incoming
+        normalized["text"] = incoming
+        normalized.pop("delta", None)
+        normalized.pop("output", None)
+        return normalized
+
+    previous = _final_deliverable_text_from_history(
+        db,
+        target_session_id=target_session_id,
+        conversation_run_id=conversation_run_id,
+        source_session_id="",
+        source_run_id="",
+    )
+    if previous and incoming == previous:
+        return None
+    suffix = incoming
+    if previous and incoming.startswith(previous):
+        suffix = incoming[len(previous):]
+    elif previous:
+        overlap = _suffix_prefix_overlap(previous, incoming)
+        if overlap > 0:
+            suffix = incoming[overlap:]
+    if not suffix:
+        return None
+    normalized["mode"] = "append"
+    normalized["text"] = suffix
+    normalized["delta"] = suffix
+    if "output" in normalized:
+        normalized["output"] = suffix
+    normalized["offset"] = len(previous)
+    normalized.pop("snapshot", None)
+    return normalized
+
+
+def _final_deliverable_text_from_history(
+    db: Any,
+    *,
+    target_session_id: str,
+    conversation_run_id: str,
+    source_session_id: str,
+    source_run_id: str,
+    prefer_source: bool = False,
+) -> str:
+    target_candidate = (target_session_id, conversation_run_id)
+    source_candidate = (source_session_id, source_run_id)
+    candidates = (
+        (source_candidate, target_candidate)
+        if prefer_source
+        else (target_candidate, source_candidate)
+    )
+    for session_id, run_id in candidates:
+        if not text(session_id) or not text(run_id):
+            continue
+        try:
+            events = db.list_run_events(text(session_id), run_id=text(run_id), limit=5000)
+        except Exception:
+            events = []
+        content = _stream_text_from_events(events)
+        if content:
+            return content
+    return ""
 
 
 def _node_by_id(graph: dict[str, Any], node_id: str) -> dict[str, Any]:
@@ -181,6 +362,49 @@ def _task_id_from_metadata(*values: dict[str, Any]) -> str:
     return ""
 
 
+def _conversation_id_from_mission(mission: dict[str, Any]) -> str:
+    metadata = mapping(mission.get("metadata"))
+    return text(
+        mission.get("conversation_id")
+        or metadata.get("conversation_id")
+        or metadata.get("conversationId")
+        or metadata.get("team_conversation_id")
+        or metadata.get("teamConversationId")
+    )
+
+
+def _event_identity_payload(
+    *,
+    mission: dict[str, Any],
+    mission_id: str,
+    target_session_id: str,
+    node: dict[str, Any],
+    binding: dict[str, Any],
+) -> dict[str, Any]:
+    node_id = text(node.get("node_id") or binding.get("node_id"))
+    task_id = _task_id_from_metadata(
+        node.get("metadata") if isinstance(node, dict) else {},
+        binding.get("metadata") if isinstance(binding, dict) else {},
+        mission.get("metadata") if isinstance(mission, dict) else {},
+    ) or mission_id
+    task_frame_id = f"mission-frame:{mission_id}" if mission_id else ""
+    conversation_id = _conversation_id_from_mission(mission)
+    return {
+        "mission_id": mission_id,
+        "missionId": mission_id,
+        "conversation_id": conversation_id,
+        "conversationId": conversation_id,
+        "stable_session_id": target_session_id,
+        "stableSessionId": target_session_id,
+        "node_id": node_id,
+        "nodeId": node_id,
+        "task_id": task_id,
+        "taskId": task_id,
+        "task_frame_id": task_frame_id,
+        "taskFrameId": task_frame_id,
+    }
+
+
 def _append_final_deliverable_message(
     db: Any,
     *,
@@ -196,11 +420,30 @@ def _append_final_deliverable_message(
     node: dict[str, Any],
     binding: dict[str, Any],
     content: str,
+    artifact_refs: list[dict[str, Any]] | None = None,
 ) -> bool:
     task_id = _task_id_from_metadata(
         node.get("metadata") if isinstance(node, dict) else {},
         binding.get("metadata") if isinstance(binding, dict) else {},
     )
+    task_frame_id = f"mission-frame:{mission_id}" if text(mission_id) else ""
+    artifacts = dedupe_artifact_refs(artifact_refs or [])
+    team_ref = {
+        "kind": "final_deliverable",
+        "mission_id": mission_id,
+        "node_id": node_id,
+        "node_kind": text(node.get("kind")),
+        "task_id": task_id,
+        "task_frame_id": task_frame_id,
+        "conversation_session_id": target_session_id,
+        "stable_session_id": target_session_id,
+        "source_run_id": source_run_id,
+        "source_session_id": source_session_id,
+        "source_seq": source_seq,
+    }
+    if artifacts:
+        team_ref["artifact_refs"] = artifacts
+        team_ref["artifactRefs"] = artifacts
     return _append_message_once(
         db,
         session_id=target_session_id,
@@ -210,19 +453,169 @@ def _append_final_deliverable_message(
             **({"run_id": text(conversation_run_id)} if text(conversation_run_id) else {}),
             **({"turn_id": text(turn_id)} if text(turn_id) else {}),
             **({"client_message_id": text(client_message_id)} if text(client_message_id) else {}),
-            "team_mission": {
-                "kind": "final_deliverable",
-                "mission_id": mission_id,
-                "node_id": node_id,
-                "node_kind": text(node.get("kind")),
-                "task_id": task_id,
-                "conversation_session_id": target_session_id,
-                "source_run_id": source_run_id,
-                "source_session_id": source_session_id,
-                "source_seq": source_seq,
-            }
+            "team_mission": team_ref,
         },
+        replace_existing_content=True,
     )
+
+
+def _repair_final_deliverable_mirror_events(
+    db: Any,
+    *,
+    target_session_id: str,
+    conversation_run_id: str,
+    mission_id: str,
+    node_id: str,
+    source_run_id: str,
+    content: str,
+) -> int:
+    canonical = text(content)
+    if not target_session_id or not conversation_run_id or not canonical:
+        return 0
+
+    def _payload_matches(payload: dict[str, Any]) -> bool:
+        if not payload.get("team_mission_conversation_mirror"):
+            return False
+        if not payload.get("team_mission_final_deliverable"):
+            return False
+        if mission_id and text(payload.get("mission_id")) != mission_id:
+            return False
+        if source_run_id and text(payload.get("source_run_id")) != source_run_id:
+            return False
+        if node_id and text(payload.get("node_id")) != node_id:
+            return False
+        return True
+
+    def _do(conn: Any) -> int:
+        rows = conn.execute(
+            """
+            SELECT id, event_type, payload_json, event_json
+            FROM run_events
+            WHERE session_id = ?
+              AND run_id = ?
+              AND event_type IN ('message.delta', 'message.complete')
+            ORDER BY seq ASC, id ASC
+            """,
+            (target_session_id, conversation_run_id),
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            payload = _json_loads(row["payload_json"])
+            if not _payload_matches(payload):
+                continue
+            event_type = text(row["event_type"])
+            next_payload = dict(payload)
+            if event_type == "message.delta":
+                next_payload["mode"] = "snapshot"
+                next_payload["text"] = canonical
+                next_payload["snapshot"] = canonical
+                next_payload.pop("delta", None)
+                next_payload.pop("output", None)
+            elif event_type == "message.complete":
+                next_payload["text"] = canonical
+            else:
+                continue
+            if next_payload == payload:
+                continue
+            event = _json_loads(row["event_json"])
+            if event:
+                event["payload"] = next_payload
+            conn.execute(
+                """
+                UPDATE run_events
+                SET payload_json = ?, event_json = ?
+                WHERE id = ?
+                """,
+                (
+                    _json_dumps(next_payload),
+                    _json_dumps(event) if event else row["event_json"],
+                    row["id"],
+                ),
+            )
+            updated += 1
+        return updated
+
+    try:
+        if hasattr(db, "_execute_write"):
+            return int(db._execute_write(_do) or 0)
+    except Exception:
+        return 0
+    return 0
+
+
+def recover_final_deliverable_messages(db: Any, conversation: dict[str, Any] | None) -> int:
+    if not isinstance(conversation, dict):
+        return 0
+    target_session_id = text(
+        conversation.get("stable_session_id")
+        or conversation.get("stableSessionId")
+    )
+    if not target_session_id:
+        return 0
+    try:
+        events = db.list_run_events(target_session_id, limit=5000)
+    except Exception:
+        return 0
+    recovered = 0
+    for event in events or []:
+        if not isinstance(event, dict) or text(event.get("type")) != "message.complete":
+            continue
+        payload = _event_payload(event)
+        if not payload.get("team_mission_conversation_mirror"):
+            continue
+        if not payload.get("team_mission_final_deliverable"):
+            continue
+        mission_id = text(payload.get("mission_id"))
+        source_run_id = text(payload.get("source_run_id"))
+        source_session_id = text(payload.get("source_session_id"))
+        if not mission_id or not source_run_id:
+            continue
+        conversation_run_id = text(event.get("run_id") or payload.get("run_id")) or _mirror_run_id(mission_id, source_run_id)
+        final_deliverable_text = _final_deliverable_text_from_history(
+            db,
+            target_session_id=target_session_id,
+            conversation_run_id=conversation_run_id,
+            source_session_id=source_session_id,
+            source_run_id=source_run_id,
+            prefer_source=True,
+        ) or primary_deliverable_text(payload)
+        if not final_deliverable_text:
+            continue
+        graph = db.get_team_mission_graph(mission_id)
+        graph = graph if isinstance(graph, dict) else {}
+        node_id = text(payload.get("node_id"))
+        node = _node_by_id(graph, node_id)
+        try:
+            binding = db.get_team_mission_run_binding(source_run_id)
+        except Exception:
+            binding = {}
+        _repair_final_deliverable_mirror_events(
+            db,
+            target_session_id=target_session_id,
+            conversation_run_id=conversation_run_id,
+            mission_id=mission_id,
+            node_id=node_id,
+            source_run_id=source_run_id,
+            content=final_deliverable_text,
+        )
+        if _append_final_deliverable_message(
+            db,
+            mission_id=mission_id,
+            target_session_id=target_session_id,
+            conversation_run_id=conversation_run_id,
+            source_run_id=source_run_id,
+            source_session_id=source_session_id,
+            source_seq=text(payload.get("source_seq")),
+            turn_id=text(event.get("turn_id") or payload.get("turn_id")),
+            client_message_id=text(event.get("client_message_id") or payload.get("client_message_id")),
+            node_id=node_id,
+            node=node,
+            binding=dict(binding or {}),
+            content=final_deliverable_text,
+            artifact_refs=artifact_refs_from_event(event),
+        ):
+            recovered += 1
+    return recovered
 
 
 def _is_final_deliverable_message(
@@ -232,11 +625,16 @@ def _is_final_deliverable_message(
     node: dict[str, Any],
     binding: dict[str, Any],
 ) -> bool:
-    if event_type not in _FINAL_DELIVERABLE_MESSAGE_EVENT_TYPES:
+    if event_type not in _FINAL_DELIVERABLE_STREAM_EVENT_TYPES:
         return False
-    if not text(payload.get("text")):
+    if event_type == "message.delta" and not _payload_stream_text(payload):
         return False
-    if text(payload.get("status")).lower() in _NON_DELIVERABLE_MESSAGE_STATUSES:
+    if event_type == "message.complete":
+        return _is_final_deliverable_node(node, binding)
+    payload_status = text(payload.get("status")).lower()
+    if payload_status in _NON_DELIVERABLE_MESSAGE_STATUSES:
+        if event_type == "message.complete" and payload_status in {"failed", "error"}:
+            return _is_final_deliverable_node(node, binding)
         return False
     return _is_final_deliverable_node(node, binding)
 
@@ -309,7 +707,7 @@ def mirror_event_to_conversation(
 ) -> dict[str, Any]:
     frame = dict(event or {})
     event_type = text(frame.get("type"))
-    if event_type not in _CONTROL_MIRROR_EVENT_TYPES and event_type not in _FINAL_DELIVERABLE_MESSAGE_EVENT_TYPES:
+    if event_type not in _CONTROL_MIRROR_EVENT_TYPES and event_type not in _FINAL_DELIVERABLE_STREAM_EVENT_TYPES:
         return {}
     payload = _event_payload(frame)
     if payload.get("team_mission_conversation_mirror"):
@@ -345,6 +743,13 @@ def mirror_event_to_conversation(
         return {}
     source_seq = text(frame.get("source_seq") or frame.get("seq"))
     mirror_run_id = _mirror_run_id(mission_id, source_run_id)
+    identity_payload = _event_identity_payload(
+        mission=mission,
+        mission_id=mission_id,
+        target_session_id=target_session_id,
+        node=node,
+        binding=binding,
+    )
     turn_id = text(frame.get("turn_id") or payload.get("turn_id"))
     client_message_id = text(
         frame.get("client_message_id")
@@ -361,8 +766,47 @@ def mirror_event_to_conversation(
         source_run_id=source_run_id,
         source_seq=source_seq,
     )
+    should_persist_final_message = (
+        is_final_deliverable
+        and event_type in _FINAL_DELIVERABLE_PERSISTED_MESSAGE_EVENT_TYPES
+    )
+    final_deliverable_text = ""
+    if is_final_deliverable and event_type == "message.complete":
+        final_deliverable_text = primary_deliverable_text(payload) or _final_deliverable_text_from_history(
+            db,
+            target_session_id=target_session_id,
+            conversation_run_id=mirror_run_id,
+            source_session_id=source_session_id,
+            source_run_id=source_run_id,
+            prefer_source=True,
+        )
+    elif is_final_deliverable:
+        final_deliverable_text = primary_deliverable_text(payload)
+    if final_deliverable_text:
+        payload["text"] = final_deliverable_text
+    if is_final_deliverable and event_type == "message.delta":
+        normalized_delta_payload = _normalized_conversation_delta_payload(
+            db,
+            target_session_id=target_session_id,
+            conversation_run_id=mirror_run_id,
+            payload=payload,
+        )
+        if normalized_delta_payload is None:
+            return {}
+        payload = normalized_delta_payload
+    if (
+        is_final_deliverable
+        and event_type == "message.complete"
+        and text(payload.get("status")).lower() in {"failed", "error"}
+    ):
+        original_status = text(payload.get("status"))
+        original_error = text(payload.get("message") or payload.get("error"))
+        payload["status"] = "complete"
+        payload["team_mission_terminal_status_recovered"] = original_status
+        if original_error:
+            payload["nonfatal_error"] = original_error
     if already_mirrored:
-        if is_final_deliverable:
+        if should_persist_final_message:
             _append_final_deliverable_message(
                 db,
                 mission_id=mission_id,
@@ -376,7 +820,8 @@ def mirror_event_to_conversation(
                 node_id=node_id,
                 node=node,
                 binding=binding,
-                content=text(payload.get("text")),
+                content=final_deliverable_text,
+                artifact_refs=artifact_refs_from_event(frame),
             )
         return {}
     payload.update(
@@ -385,8 +830,8 @@ def mirror_event_to_conversation(
             "source_run_id": source_run_id,
             "source_seq": source_seq,
             "source_session_id": source_session_id,
-            "mission_id": mission_id,
-            "node_id": node_id,
+            "source_runtime_scope_key": text(frame.get("runtime_scope_key") or binding.get("runtime_scope_key")),
+            **identity_payload,
             "node_kind": text(node.get("kind")),
             "team_mission_final_deliverable": is_final_deliverable,
             "team_mission_conversation_mirror": True,
@@ -399,6 +844,8 @@ def mirror_event_to_conversation(
         "run_id": mirror_run_id,
         "runtime_scope_key": f"team_mission:{mission_id}",
         "payload": payload,
+        **{key: value for key, value in identity_payload.items() if "_" in key and text(value)},
+        "source_seq": source_seq,
         "seq": 0,
         "timestamp": float(frame.get("timestamp") or time.time()),
     }
@@ -407,7 +854,7 @@ def mirror_event_to_conversation(
             db.create_session(target_session_id, source="team_mission", transient=False)
     except Exception:
         pass
-    if is_final_deliverable:
+    if should_persist_final_message:
         _append_final_deliverable_message(
             db,
             mission_id=mission_id,
@@ -421,7 +868,14 @@ def mirror_event_to_conversation(
             node_id=node_id,
             node=node,
             binding=binding,
-            content=text(payload.get("text")),
+            content=final_deliverable_text,
+            artifact_refs=artifact_refs_from_event(mirror),
         )
     saved = db.append_run_event(target_session_id, mirror)
+    if event_type == "message.delta" and isinstance(saved, dict):
+        return {
+            **mirror,
+            "seq": saved.get("seq") or mirror.get("seq") or 0,
+            "timestamp": saved.get("timestamp") or mirror.get("timestamp") or time.time(),
+        }
     return saved if isinstance(saved, dict) else {}

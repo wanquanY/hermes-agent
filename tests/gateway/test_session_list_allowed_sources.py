@@ -453,6 +453,333 @@ def test_team_conversation_list_is_control_plane_read_for_profile_scope():
     }) is False
 
 
+def test_team_conversation_list_projects_active_mission_runtime_state(tmp_path, monkeypatch):
+    profile_home = tmp_path / "profile-home"
+    seed_db = SessionDB(profile_home / "state.db")
+    try:
+        seed_db.upsert_team_mission_conversation(
+            conversation_id="conversation-running",
+            team_id="team-1",
+            stable_session_id="team-session-running",
+            title="运行中团队会话",
+            active_mission_id="mission-running",
+            created_at=100,
+            updated_at=200,
+        )
+        seed_db.create_session("team-session-running", source="team_mission", transient=False)
+        seed_db.upsert_team_mission(
+            mission_id="mission-running",
+            conversation_id="conversation-running",
+            team_id="team-1",
+            title="运行中任务",
+            mode="supervised_mission",
+            status="running",
+            leader_session_id="team-session-running",
+        )
+        seed_db.upsert_team_mission_node(
+            mission_id="mission-running",
+            node_id="node-running",
+            kind="worker",
+            title="运行中节点",
+            status="running",
+            runtime_scope_key="team:mission-running:node:node-running",
+        )
+        seed_db.bind_team_mission_run(
+            mission_id="mission-running",
+            node_id="node-running",
+            run_id="run-worker",
+            session_id="worker-session-1",
+            runtime_session_id="runtime-worker-1",
+            runtime_scope_key="team:mission-running:node:node-running",
+            role="worker",
+        )
+    finally:
+        seed_db.close()
+
+    monkeypatch.setattr(server, "_db_by_home", {})
+    monkeypatch.setattr(server, "_db_error_by_home", {})
+    try:
+        resp = server.handle_request({
+            "id": "1",
+            "method": "team_mission.conversation.list",
+            "params": {
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "agentProfileVersionId": "version-1",
+                    "runtimeScopeKey": "profile:agent-a:version:version-1",
+                    "hermesHomePath": str(profile_home),
+                },
+            },
+        })
+        assert "error" not in resp
+        [conversation] = resp["result"]["conversations"]
+        assert conversation["conversation_id"] == "conversation-running"
+        assert conversation["running"] is True
+        assert conversation["run_state"] == "running"
+        assert conversation["mission_status"] == "running"
+        assert conversation["active_node_count"] == 1
+        assert conversation["task_frame_count"] == 1
+        assert conversation["task_frames"][0]["missionId"] == "mission-running"
+        assert conversation["run_session_ids"] == ["worker-session-1", "runtime-worker-1"]
+    finally:
+        for db in list(server._db_by_home.values()):
+            db.close()
+
+
+def test_team_conversation_list_projects_final_deliverable_and_artifacts(tmp_path, monkeypatch):
+    profile_home = tmp_path / "profile-home"
+    seed_db = SessionDB(profile_home / "state.db")
+    try:
+        seed_db.upsert_team_mission_conversation(
+            conversation_id="conversation-completed",
+            team_id="team-1",
+            stable_session_id="team-session-completed",
+            title="已完成团队会话",
+            active_mission_id="mission-completed",
+            created_at=100,
+            updated_at=200,
+        )
+        seed_db.create_session("team-session-completed", source="team_mission", transient=False)
+        seed_db.upsert_team_mission(
+            mission_id="mission-completed",
+            conversation_id="conversation-completed",
+            team_id="team-1",
+            title="交付任务",
+            mode="supervised_mission",
+            status="completed",
+            leader_session_id="team-session-completed",
+            metadata={"task_id": "task-completed"},
+        )
+        seed_db.upsert_team_mission_node(
+            mission_id="mission-completed",
+            node_id="synthesis",
+            kind="synthesizer",
+            title="汇总",
+            status="completed",
+            metadata={"task_id": "task-completed"},
+        )
+        message_id = seed_db.append_message(
+            "team-session-completed",
+            "assistant",
+            "最终汇总",
+            metadata={
+                "team_mission": {
+                    "kind": "final_deliverable",
+                    "mission_id": "mission-completed",
+                    "node_id": "synthesis",
+                    "task_id": "task-completed",
+                    "source_run_id": "run-synthesis",
+                    "source_session_id": "worker-session-completed",
+                }
+            },
+        )
+        seed_db.upsert_team_mission_memory_item(
+            memory_id="memory-artifact-completed",
+            team_id="team-1",
+            mission_id="mission-completed",
+            conversation_session_id="team-session-completed",
+            task_id="task-completed",
+            content="交付文件",
+            artifact_refs=[{"path": "/tmp/final.txt", "title": "final.txt"}],
+        )
+    finally:
+        seed_db.close()
+
+    monkeypatch.setattr(server, "_db_by_home", {})
+    monkeypatch.setattr(server, "_db_error_by_home", {})
+    try:
+        resp = server.handle_request({
+            "id": "1",
+            "method": "team_mission.conversation.list",
+            "params": {
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "agentProfileVersionId": "version-1",
+                    "runtimeScopeKey": "profile:agent-a:version:version-1",
+                    "hermesHomePath": str(profile_home),
+                },
+            },
+        })
+        assert "error" not in resp
+        [conversation] = resp["result"]["conversations"]
+        assert conversation["conversation_id"] == "conversation-completed"
+        assert conversation["run_state"] == "completed"
+        assert conversation["final_deliverables"][0]["messageId"] == str(message_id)
+        assert conversation["artifact_refs"] == [{"path": "/tmp/final.txt", "title": "final.txt"}]
+        assert conversation["task_frames"][0]["finalDeliverable"]["content"] == "最终汇总"
+        assert conversation["task_frames"][0]["artifactRefs"] == conversation["artifact_refs"]
+    finally:
+        for db in list(server._db_by_home.values()):
+            db.close()
+
+
+def test_team_conversation_list_prioritizes_approval_gate_state(tmp_path, monkeypatch):
+    profile_home = tmp_path / "profile-home"
+    seed_db = SessionDB(profile_home / "state.db")
+    try:
+        seed_db.upsert_team_mission_conversation(
+            conversation_id="conversation-approval",
+            team_id="team-1",
+            stable_session_id="team-session-approval",
+            title="待审批团队会话",
+            active_mission_id="mission-approval",
+            created_at=100,
+            updated_at=200,
+        )
+        seed_db.create_session("team-session-approval", source="team_mission", transient=False)
+        seed_db.upsert_team_mission(
+            mission_id="mission-approval",
+            conversation_id="conversation-approval",
+            team_id="team-1",
+            title="待审批任务",
+            mode="supervised_mission",
+            status="running",
+            leader_session_id="team-session-approval",
+        )
+        seed_db.upsert_team_mission_node(
+            mission_id="mission-approval",
+            node_id="approval-plan",
+            kind="approval_gate",
+            title="审批任务图",
+            status="waiting_approval",
+        )
+    finally:
+        seed_db.close()
+
+    monkeypatch.setattr(server, "_db_by_home", {})
+    monkeypatch.setattr(server, "_db_error_by_home", {})
+    try:
+        resp = server.handle_request({
+            "id": "1",
+            "method": "team_mission.conversation.list",
+            "params": {
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "agentProfileVersionId": "version-1",
+                    "runtimeScopeKey": "profile:agent-a:version:version-1",
+                    "hermesHomePath": str(profile_home),
+                },
+            },
+        })
+        assert "error" not in resp
+        [conversation] = resp["result"]["conversations"]
+        assert conversation["conversation_id"] == "conversation-approval"
+        assert conversation["running"] is True
+        assert conversation["run_state"] == "waiting_approval"
+        assert conversation["waiting_approval"] is True
+        assert conversation["pending_approval_count"] == 1
+        assert conversation["pending_approvals"][0]["nodeId"] == "mission-approval:approval-plan"
+    finally:
+        for db in list(server._db_by_home.values()):
+            db.close()
+
+
+def test_conversation_activity_list_projects_run_and_approval_state(monkeypatch):
+    class _ActivityDB(_StubDB):
+        def get_team_mission_conversation_by_session(self, session_id):
+            if session_id != "team-session-approval":
+                return {}
+            return {
+                "conversation_id": "conversation-approval",
+                "stable_session_id": "team-session-approval",
+                "team_id": "team-1",
+                "active_mission_id": "mission-approval",
+                "status": "waiting_approval",
+                "title": "Team",
+            }
+
+        def team_mission_run_session_ids(self, _session_ids):
+            return set()
+
+        def get_team_mission_graph(self, mission_id):
+            if mission_id != "mission-approval":
+                return {}
+            return {
+                "mission": {
+                    "mission_id": "mission-approval",
+                    "status": "waiting_approval",
+                }
+            }
+
+    db = _ActivityDB([
+        {
+            "id": "ordinary-running",
+            "source": "tui",
+            "title": "Ordinary",
+            "started_at": 1,
+            "message_count": 1,
+        },
+        {
+            "id": "team-session-approval",
+            "source": "team_mission",
+            "session_kind": "team_mission",
+            "conversation_id": "conversation-approval",
+            "team_id": "team-1",
+            "active_mission_id": "mission-approval",
+            "status": "active",
+            "title": "Team",
+            "started_at": 2,
+            "message_count": 1,
+        },
+    ])
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    server._sessions["runtime-ordinary"] = {
+        "session_key": "ordinary-running",
+        "running": True,
+        "active_run_id": "run-ordinary",
+        "active_turn_id": "turn-ordinary",
+        "run_started_at": 10,
+        "run_updated_at": 20,
+    }
+    original_approval = server._methods.get("approval.pending.list")
+
+    def fake_pending_approvals(rid, params):
+        session_id = params.get("stored_session_id")
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "approvals": [{"id": "approval-1"}] if session_id == "ordinary-running" else [],
+            },
+        }
+
+    server._methods["approval.pending.list"] = fake_pending_approvals
+    try:
+        resp = server.handle_request({
+            "id": "1",
+            "method": "conversation.activity.list",
+            "params": {"limit": 10},
+        })
+    finally:
+        server._sessions.clear()
+        if original_approval is not None:
+            server._methods["approval.pending.list"] = original_approval
+
+    assert "error" not in resp
+    activities = {item["stable_session_id"]: item for item in resp["result"]["activities"]}
+    assert activities["ordinary-running"]["run_state"] == "waiting_approval"
+    assert activities["ordinary-running"]["pending_approval_count"] == 1
+    assert activities["ordinary-running"]["active_run_id"] == "run-ordinary"
+    assert activities["team-session-approval"]["kind"] == "team_mission"
+    assert activities["team-session-approval"]["run_state"] == "waiting_approval"
+    assert activities["team-session-approval"]["mission_id"] == "mission-approval"
+
+
+def test_conversation_activity_list_is_control_plane_read_for_profile_scope():
+    assert runtime_proxy.should_proxy_to_runtime({
+        "id": "1",
+        "method": "conversation.activity.list",
+        "params": {
+            "agentProfileId": "agent-a",
+            "runtimeScopeKey": "profile:agent-a",
+            "doxie_profile": {
+                "id": "agent-a",
+                "hermesHomePath": "/tmp/hermes-agent-a",
+            },
+        },
+    }) is False
+
+
 def test_session_messages_returns_paged_transcript(monkeypatch):
     class _MessagesDB:
         def get_session(self, session_id):

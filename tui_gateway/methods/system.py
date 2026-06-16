@@ -47,8 +47,6 @@ def _profile_runtime_scope_from_params(params: dict) -> dict:
         runtime_scope_key = explicit_scope
     elif draft_id:
         runtime_scope_key = f"draft:{draft_id}"
-    elif agent_profile_id and agent_profile_version_id:
-        runtime_scope_key = f"profile:{agent_profile_id}:version:{agent_profile_version_id}"
     elif agent_profile_id:
         runtime_scope_key = f"profile:{agent_profile_id}"
     else:
@@ -133,6 +131,30 @@ def _(rid, params: dict) -> dict:
             **({"error": error} if error else {}),
         },
     )
+
+
+@method("storage.stats")
+def _(rid, params: dict) -> dict:
+    """Return read-only Hermes storage diagnostics."""
+    try:
+        from tui_gateway.services.storage_stats import collect_storage_stats
+
+        include_file_sizes = params.get("include_registered_file_sizes")
+        if include_file_sizes is None:
+            include_file_sizes = params.get("includeRegisteredFileSizes")
+        if include_file_sizes is None:
+            include_file_sizes = "true"
+        result = collect_storage_stats(
+            include_registered_file_sizes=str(include_file_sizes).strip().lower() not in {"0", "false", "no"},
+            registered_file_limit=int(
+                params.get("registered_file_limit")
+                or params.get("registeredFileLimit")
+                or 10_000
+            ),
+        )
+        return _ok(rid, result)
+    except Exception as exc:
+        return _err(rid, 5021, f"storage stats failed: {exc}")
 
 
 @method("process.stop")
@@ -236,7 +258,6 @@ _TUI_HIDDEN: frozenset[str] = frozenset(
     {
         "sethome",
         "set-home",
-        "update",
         "commands",
         "approve",
         "deny",
@@ -246,7 +267,11 @@ _TUI_HIDDEN: frozenset[str] = frozenset(
 _TUI_EXTRA: list[tuple[str, str, str]] = [
     ("/compact", "Toggle compact display mode", "TUI"),
     ("/logs", "Show recent gateway log lines", "TUI"),
-    ("/mouse", "Toggle mouse/wheel tracking [on|off|toggle]", "TUI"),
+    (
+        "/mouse",
+        "Set mouse tracking preset [on|off|toggle|wheel|buttons|all]",
+        "TUI",
+    ),
 ]
 
 # Commands that queue messages onto _pending_input in the CLI.

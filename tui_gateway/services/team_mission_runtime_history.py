@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from agent.doxie_diagnostics import emit_doxie_diagnostic
+
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
@@ -14,6 +16,25 @@ def _bounded_int(value: Any, *, default: int, minimum: int = 0, maximum: int = 5
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(parsed, maximum))
+
+
+def _text_set(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = [value]
+    return {_text(item) for item in items if _text(item)}
+
+
+def _param_text_set(params: dict[str, Any], *keys: str) -> set[str]:
+    values: set[str] = set()
+    for key in keys:
+        values.update(_text_set(params.get(key)))
+    return values
 
 
 def _json_loads(value: Any, fallback: Any) -> Any:
@@ -35,6 +56,10 @@ def _row_value(row: Any, key: str, fallback: Any = "") -> Any:
         return row[key]
     except Exception:
         return fallback
+
+
+def _trace_history(stage: str, **fields: Any) -> None:
+    emit_doxie_diagnostic("[team-mission-node-history]", {"stage": stage, **fields})
 
 
 def _binding_matches(binding: dict[str, Any], *, node_id: str, session_id: str) -> bool:
@@ -61,6 +86,50 @@ def _select_binding(graph: dict[str, Any], *, node_id: str, session_id: str) -> 
         key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0),
         reverse=True,
     )[0]
+
+
+def _conversation_from_params(db: Any, params: dict[str, Any]) -> dict[str, Any]:
+    conversation_id = _text(
+        params.get("conversation_id")
+        or params.get("conversationId")
+    )
+    conversation_session_id = _text(
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
+        or params.get("stable_team_session_id")
+        or params.get("stableTeamSessionId")
+    )
+    if conversation_id and hasattr(db, "get_team_mission_conversation"):
+        conversation = db.get_team_mission_conversation(conversation_id)
+        if conversation:
+            return conversation
+    if conversation_session_id and hasattr(db, "get_team_mission_conversation_by_session"):
+        conversation = db.get_team_mission_conversation_by_session(conversation_session_id)
+        if conversation:
+            return conversation
+    if conversation_id and hasattr(db, "resolve_team_mission_conversation"):
+        resolved = db.resolve_team_mission_conversation(conversation_id)
+        conversation = resolved.get("conversation") if isinstance(resolved, dict) else {}
+        if isinstance(conversation, dict) and conversation:
+            return conversation
+    return {}
+
+
+def _resolve_graph(db: Any, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    requested_mission_id = _text(params.get("mission_id") or params.get("missionId"))
+    if requested_mission_id:
+        graph = db.get_team_mission_graph(requested_mission_id)
+        if graph:
+            return requested_mission_id, graph
+
+    conversation = _conversation_from_params(db, params)
+    active_mission_id = _text(conversation.get("active_mission_id") or conversation.get("activeMissionId"))
+    if active_mission_id:
+        graph = db.get_team_mission_graph(active_mission_id)
+        if graph:
+            return active_mission_id, graph
+
+    return requested_mission_id, {}
 
 
 def _message_from_row(db: Any, row: Any) -> dict[str, Any]:
@@ -150,30 +219,55 @@ def _event_from_row(row: Any, session_id: str) -> dict[str, Any]:
     }
 
 
-def _fetch_recent_run_events(db: Any, session_id: str, *, limit: int) -> list[dict[str, Any]]:
+def _fetch_recent_run_events(
+    db: Any,
+    session_id: str,
+    *,
+    run_id: str = "",
+    limit: int,
+    include_control_events: bool = False,
+    event_types: set[str] | None = None,
+    exclude_event_types: set[str] | None = None,
+) -> list[dict[str, Any]]:
     if not session_id or not hasattr(db, "_conn"):
         return []
     bounded_limit = _bounded_int(limit, default=0, minimum=0, maximum=5000)
     if bounded_limit <= 0:
         return []
+    normalized_run_id = _text(run_id)
+    include_types = sorted(event_types or set())
+    exclude_types = sorted(exclude_event_types or set())
+    clauses = [
+        "session_id = ?",
+        "(? = '' OR run_id = ?)",
+        "(? = 1 OR event_type NOT LIKE 'mission.%')",
+    ]
+    params: list[Any] = [session_id, normalized_run_id, normalized_run_id, 1 if include_control_events else 0]
+    if include_types:
+        clauses.append(f"event_type IN ({','.join('?' for _ in include_types)})")
+        params.extend(include_types)
+    if exclude_types:
+        clauses.append(f"event_type NOT IN ({','.join('?' for _ in exclude_types)})")
+        params.extend(exclude_types)
+    params.append(bounded_limit)
+    where_clause = "\n                  AND ".join(clauses)
     with db._lock:
         rows = db._conn.execute(
-            """
+            f"""
             SELECT * FROM (
                 SELECT *
                 FROM run_events
-                WHERE session_id = ?
+                WHERE {where_clause}
                 ORDER BY seq DESC
                 LIMIT ?
             ) ORDER BY seq ASC
             """,
-            (session_id, bounded_limit),
+            tuple(params),
         ).fetchall()
     return [_event_from_row(row, session_id) for row in rows]
 
 
 def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> dict[str, Any]:
-    mission_id = _text(params.get("mission_id") or params.get("missionId"))
     node_id = _text(params.get("node_id") or params.get("nodeId"))
     requested_session_id = _text(
         params.get("session_id")
@@ -181,17 +275,78 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
         or params.get("stored_session_id")
         or params.get("storedSessionId")
     )
-    if not mission_id:
-        return {"error": "mission_id required", "code": 4006}
     if not node_id and not requested_session_id:
         return {"error": "node_id or session_id required", "code": 4006}
 
-    graph = db.get_team_mission_graph(mission_id)
-    if not graph:
+    conversation_id = _text(params.get("conversation_id") or params.get("conversationId"))
+    conversation_session_id = _text(
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
+        or params.get("stable_team_session_id")
+        or params.get("stableTeamSessionId")
+    )
+    include_run_events = bool(params.get("include_run_events") or params.get("includeRunEvents"))
+    run_event_types = _param_text_set(
+        params,
+        "run_event_types",
+        "runEventTypes",
+        "include_run_event_types",
+        "includeRunEventTypes",
+    )
+    exclude_run_event_types = _param_text_set(
+        params,
+        "exclude_run_event_types",
+        "excludeRunEventTypes",
+    )
+    requested_limit = _bounded_int(params.get("limit"), default=50, minimum=1, maximum=500)
+    requested_run_events_limit = _bounded_int(
+        params.get("run_events_limit") or params.get("runEventsLimit"),
+        default=0 if not include_run_events else 200,
+        minimum=0,
+        maximum=5000,
+    )
+    _trace_history(
+        "request",
+        mission_id=_text(params.get("mission_id") or params.get("missionId")),
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        node_id=node_id,
+        requested_session_id=requested_session_id,
+        include_run_events=include_run_events,
+        limit=requested_limit,
+        run_events_limit=requested_run_events_limit,
+        run_event_types=sorted(run_event_types),
+        exclude_run_event_types=sorted(exclude_run_event_types),
+    )
+
+    mission_id, graph = _resolve_graph(db, params)
+    if not graph and not requested_session_id:
+        _trace_history(
+            "mission-not-found",
+            mission_id=mission_id,
+            node_id=node_id,
+            requested_session_id=requested_session_id,
+        )
         return {"error": "team mission not found", "code": 4040}
-    binding = _select_binding(graph, node_id=node_id, session_id=requested_session_id)
+    binding = _select_binding(graph, node_id=node_id, session_id=requested_session_id) if graph else {}
     session_id = _text(binding.get("session_id")) or requested_session_id
+    _trace_history(
+        "resolved",
+        mission_id=mission_id,
+        graph_found=bool(graph),
+        graph_node_count=len(graph.get("nodes") or []) if isinstance(graph, dict) else 0,
+        graph_binding_count=len(graph.get("run_bindings") or []) if isinstance(graph, dict) else 0,
+        binding_found=bool(binding),
+        node_id=node_id,
+        resolved_node_id=_text(binding.get("node_id")) or node_id,
+        requested_session_id=requested_session_id,
+        resolved_session_id=session_id,
+        run_id=_text(binding.get("run_id")),
+        runtime_session_id=_text(binding.get("runtime_session_id")),
+        runtime_scope_key=_text(binding.get("runtime_scope_key")),
+    )
     if not session_id:
+        _trace_history("no-session", mission_id=mission_id, node_id=node_id)
         return {
             "mission_id": mission_id,
             "node_id": node_id,
@@ -204,20 +359,33 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
     messages, total_count = _fetch_recent_messages(
         db,
         session_id,
-        limit=_bounded_int(params.get("limit"), default=50, minimum=1, maximum=500),
+        limit=requested_limit,
     )
-    include_run_events = bool(params.get("include_run_events") or params.get("includeRunEvents"))
+    include_control_events = bool(params.get("include_control_events") or params.get("includeControlEvents"))
+    run_id = _text(binding.get("run_id") or params.get("run_id") or params.get("runId"))
     run_events = _fetch_recent_run_events(
         db,
         session_id,
-        limit=_bounded_int(
-            params.get("run_events_limit") or params.get("runEventsLimit"),
-            default=0 if not include_run_events else 200,
-            minimum=0,
-            maximum=5000,
-        ),
+        run_id=run_id,
+        limit=requested_run_events_limit,
+        include_control_events=include_control_events,
+        event_types=run_event_types,
+        exclude_event_types=exclude_run_event_types,
     ) if include_run_events else []
     resolved_node_id = _text(binding.get("node_id")) or node_id
+    _trace_history(
+        "result",
+        mission_id=mission_id,
+        node_id=resolved_node_id,
+        session_id=session_id,
+        run_id=run_id,
+        message_count=len(messages),
+        total_count=total_count,
+        run_event_count=len(run_events),
+        include_control_events=include_control_events,
+        run_event_types=sorted(run_event_types),
+        exclude_run_event_types=sorted(exclude_run_event_types),
+    )
     return {
         "mission_id": mission_id,
         "node_id": resolved_node_id,

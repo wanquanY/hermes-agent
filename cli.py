@@ -6612,7 +6612,7 @@ class HermesCLI:
         self.session_id = new_session_id
         self.session_start = now
         self._pending_title = None
-        self._resumed = True  # Prevents auto-title generation
+        self._resumed = True
 
         # Sync the agent
         if self.agent:
@@ -11488,9 +11488,9 @@ class HermesCLI:
 
             # If auto-compression fired mid-turn, the agent created a new
             # continuation session and mutated self.agent.session_id. Sync
-            # the CLI's session_id so /status, /resume, title generation,
-            # and the exit summary all target the live child session rather
-            # than the ended parent. Mirrors the gateway's post-run sync
+            # the CLI's session_id so /status, /resume, and the exit summary
+            # all target the live child session rather than the ended parent.
+            # Mirrors the gateway's post-run sync
             # (gateway/run.py around line 9983).
             if (
                 self.agent
@@ -11503,35 +11503,6 @@ class HermesCLI:
 
             # Get the final response
             response = result.get("final_response", "") if result else ""
-
-            # Auto-generate session title after first exchange (non-blocking)
-            if response and result and not result.get("failed") and not result.get("partial"):
-                try:
-                    from agent.title_generator import maybe_auto_title
-                    # Route title-generation failures through the agent's
-                    # user-visible warning channel so a depleted auxiliary
-                    # provider doesn't silently leave sessions untitled
-                    # (issue #15775).
-                    _title_failure_cb = getattr(
-                        self.agent, "_emit_auxiliary_failure", None
-                    ) if self.agent else None
-                    maybe_auto_title(
-                        self._session_db,
-                        self.session_id,
-                        message,
-                        response,
-                        self.conversation_history,
-                        failure_callback=_title_failure_cb,
-                        main_runtime={
-                            "model": self.model,
-                            "provider": self.provider,
-                            "base_url": self.base_url,
-                            "api_key": self.api_key,
-                            "api_mode": self.api_mode,
-                        },
-                    )
-                except Exception:
-                    pass
 
             # Handle failed or partial results (e.g., non-retryable errors, rate limits,
             # truncated output, invalid tool calls). Both "failed" and "partial" with

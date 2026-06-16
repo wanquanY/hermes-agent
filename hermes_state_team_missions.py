@@ -10,10 +10,20 @@ from hermes_team_mission_memory_utils import MEMORY_COMMITTED_STATUS as _MEMORY_
 from hermes_team_mission_memory_utils import stable_id as _stable_id
 from hermes_team_mission_memory_utils import text as _text
 from hermes_team_mission_conversation_utils import mirror_event_to_conversation as _mirror_team_mission_event
+from hermes_runtime_event_payloads import primary_deliverable_text
 from hermes_team_mission_conversation_state import delete_team_mission_conversation as _delete_team_mission_conversation
+from hermes_team_mission_conversation_state import is_placeholder_team_mission_conversation_title as _is_placeholder_team_mission_conversation_title
+from hermes_team_mission_conversation_state import is_replaceable_team_mission_conversation_title as _is_replaceable_team_mission_conversation_title
 from hermes_team_mission_conversation_state import is_routeable_team_mission_conversation as _conversation_routeable
+from hermes_team_mission_conversation_state import team_mission_conversation_message_page as _conversation_message_page
 from hermes_team_mission_conversation_state import rename_team_mission_conversation as _rename_team_mission_conversation
 from hermes_team_mission_conversation_state import team_mission_conversation_history_sql as _conversation_history_sql
+from hermes_team_mission_conversation_projection import dedupe_artifact_refs as _dedupe_artifact_refs
+from hermes_team_mission_conversation_projection import final_deliverable_for_frame as _final_deliverable_for_frame
+from hermes_team_mission_conversation_projection import final_deliverable_from_message as _final_deliverable_from_message
+from hermes_team_mission_conversation_projection import final_deliverable_with_artifact_refs as _final_deliverable_with_artifact_refs
+from hermes_team_mission_conversation_projection import message_summary_from_message as _message_summary_from_message
+from hermes_team_mission_conversation_projection import message_with_deliverable_artifact_refs as _message_with_deliverable_artifact_refs
 import hermes_team_mission_memory_state as _memory_state
 import hermes_team_mission_graph_state as _graph_state
 from hermes_team_mission_assignees import assignee_public_fields as _assignee_public_fields
@@ -86,6 +96,31 @@ _TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "i
 _EXECUTION_MODES_REQUIRE_FINALIZERS = {"supervised_mission", "autonomous_mission", "manual_graph"}
 _NON_WORK_NODE_KINDS = TEAM_MISSION_CONTROL_NODE_KINDS
 _TEAM_MISSION_EVENT_SEQ_FACTOR = 1_000_000_000
+_TEAM_MISSION_RUNTIME_EVENT_TYPE = "team_mission.runtime.event"
+_TEAM_MISSION_CONVERSATION_STATUS_EVENT_TYPE = "team_mission.conversation.status"
+_TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES = {
+    "message.start",
+    "message.complete",
+    "error",
+    "session.interrupted",
+    "session.recalled",
+    "mission.strategy.actions",
+    "mission.approval.requested",
+    "mission.plan.rejected",
+    "mission.node.created",
+    "mission.node.updated",
+    "mission.node.started",
+    "mission.node.run.bound",
+    "mission.edge.created",
+}
+_RUNNING_MISSION_STATUSES = {
+    "planning",
+    "waiting_approval",
+    "running",
+    "partially_blocked",
+    "blocked",
+    "verifying",
+}
 
 
 def _event_seq(event: Dict[str, Any] | None) -> int:
@@ -98,6 +133,11 @@ def _event_seq(event: Dict[str, Any] | None) -> int:
         if value > 0:
             return value
     return 0
+
+
+def _should_emit_conversation_status_projection(event: Dict[str, Any] | None) -> bool:
+    event_type = _text((event or {}).get("type"))
+    return event_type in _TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES
 
 
 def _payload_text_value(payload: Dict[str, Any] | None) -> str:
@@ -121,7 +161,7 @@ def _event_has_deliverable_text(event_type: str, payload: Dict[str, Any] | None)
         return False
     payload = payload if isinstance(payload, dict) else {}
     if event_type == "message.complete" and _text(payload.get("status")).lower() in {"error", "failed"}:
-        return False
+        return bool(primary_deliverable_text(payload))
     return bool(_payload_text_value(payload))
 
 
@@ -219,6 +259,143 @@ def _task_id_from_node_and_binding(node: Dict[str, Any] | None, binding: Dict[st
     return _task_id_from_metadata(node_metadata) or _task_id_from_metadata(binding_metadata)
 
 
+def _conversation_graph_node_id(mission_id: str, node_id: str) -> str:
+    return f"{_text(mission_id)}:{_text(node_id)}"
+
+
+def _task_id_from_mission(mission: Dict[str, Any] | None) -> str:
+    if not isinstance(mission, dict):
+        return ""
+    metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+    return _task_id_from_metadata(metadata) or _text(mission.get("mission_id"))
+
+
+def _team_mission_runtime_event_identity(
+    *,
+    mission: Dict[str, Any] | None,
+    node: Dict[str, Any] | None,
+    binding: Dict[str, Any] | None,
+) -> Dict[str, str]:
+    mission = mission if isinstance(mission, dict) else {}
+    node = node if isinstance(node, dict) else {}
+    binding = binding if isinstance(binding, dict) else {}
+    mission_id = _text(mission.get("mission_id") or binding.get("mission_id") or node.get("mission_id"))
+    mission_metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+    node_id = _text(node.get("node_id") or binding.get("node_id"))
+    task_id = (
+        _task_id_from_node_and_binding(node, binding)
+        or _task_id_from_mission(mission)
+        or mission_id
+    )
+    conversation_id = _conversation_id_from_metadata(
+        mission_metadata,
+        _text(mission.get("conversation_id")),
+    )
+    stable_session_id = _stable_session_id_from_metadata(
+        mission_metadata,
+        _text(mission.get("leader_session_id") or mission.get("team_id") or mission_id),
+    )
+    return {
+        "mission_id": mission_id,
+        "missionId": mission_id,
+        "conversation_id": conversation_id,
+        "conversationId": conversation_id,
+        "stable_session_id": stable_session_id,
+        "stableSessionId": stable_session_id,
+        "node_id": node_id,
+        "nodeId": node_id,
+        "task_id": task_id,
+        "taskId": task_id,
+        "task_frame_id": f"mission-frame:{mission_id}" if mission_id else "",
+        "taskFrameId": f"mission-frame:{mission_id}" if mission_id else "",
+    }
+
+
+def _runtime_event_with_team_mission_identity(
+    event: Dict[str, Any],
+    identity: Dict[str, str],
+    *,
+    source_seq: int = 0,
+    mission_event_seq: int = 0,
+) -> Dict[str, Any]:
+    frame = dict(event or {})
+    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    payload = dict(payload)
+    for key, value in identity.items():
+        if _text(value) and not _text(payload.get(key)):
+            payload[key] = value
+    if source_seq > 0:
+        frame["source_seq"] = source_seq
+        payload["source_seq"] = source_seq
+        payload["sourceSeq"] = source_seq
+    if mission_event_seq > 0:
+        frame["team_mission_event_seq"] = mission_event_seq
+        payload["team_mission_event_seq"] = mission_event_seq
+        payload["teamMissionEventSeq"] = mission_event_seq
+    for key in ("mission_id", "conversation_id", "stable_session_id", "node_id", "task_id", "task_frame_id"):
+        value = _text(identity.get(key))
+        if value and not _text(frame.get(key)):
+            frame[key] = value
+    frame["payload"] = payload
+    return frame
+
+
+def _team_mission_runtime_projection_event(
+    source_event: Dict[str, Any],
+    identity: Dict[str, str],
+    *,
+    source_seq: int = 0,
+    mission_event_seq: int = 0,
+) -> Dict[str, Any]:
+    source_event = dict(source_event or {})
+    source_type = _text(source_event.get("type"))
+    source_payload = source_event.get("payload") if isinstance(source_event.get("payload"), dict) else {}
+    timestamp = float(source_event.get("timestamp") or time.time())
+    payload: Dict[str, Any] = {
+        "event_type": source_type,
+        "eventType": source_type,
+        "source_event_type": source_type,
+        "sourceEventType": source_type,
+        "source_event": source_event,
+        "sourceEvent": source_event,
+        "runtime_event": source_event,
+        "runtimeEvent": source_event,
+        "source_payload": dict(source_payload),
+        "sourcePayload": dict(source_payload),
+    }
+    for key, value in identity.items():
+        if _text(value):
+            payload[key] = value
+    if source_seq > 0:
+        payload["source_seq"] = source_seq
+        payload["sourceSeq"] = source_seq
+    if mission_event_seq > 0:
+        payload["seq"] = mission_event_seq
+        payload["team_mission_event_seq"] = mission_event_seq
+        payload["teamMissionEventSeq"] = mission_event_seq
+    for key in ("run_id", "runId", "turn_id", "turnId"):
+        value = source_event.get(key)
+        if _text(value):
+            payload[key] = value
+    projection: Dict[str, Any] = {
+        "type": _TEAM_MISSION_RUNTIME_EVENT_TYPE,
+        "seq": mission_event_seq,
+        "source_seq": source_seq,
+        "team_mission_event_seq": mission_event_seq,
+        "timestamp": timestamp,
+        "payload": payload,
+    }
+    for key in ("mission_id", "conversation_id", "stable_session_id", "node_id", "task_id", "task_frame_id"):
+        value = _text(identity.get(key))
+        if value:
+            projection[key] = value
+    for key in ("run_id", "turn_id"):
+        value = _text(source_event.get(key))
+        if value:
+            projection[key] = value
+    return projection
+
+
 def _node_matches_task(node: Dict[str, Any] | None, task_id: str) -> bool:
     normalized = _text(task_id)
     if not normalized:
@@ -314,12 +491,20 @@ class SessionDBTeamMissionMixin:
         if row is None:
             return None
         metadata = _json_loads(_row_value(row, "metadata_json", ""), {})
+        display_title_source = _text(
+            (metadata if isinstance(metadata, dict) else {}).get("display_title_source")
+            or (metadata if isinstance(metadata, dict) else {}).get("displayTitleSource")
+            or "conversation_title"
+        )
         updated_at = _row_value(row, "activity_updated_at", _row_value(row, "updated_at", 0))
+        message_count = int(_row_value(row, "message_count", 0) or 0)
         return {
             "conversation_id": str(_row_value(row, "conversation_id", "") or ""),
             "team_id": str(_row_value(row, "team_id", "") or ""),
             "stable_session_id": str(_row_value(row, "stable_session_id", "") or ""),
             "title": str(_row_value(row, "title", "") or ""),
+            "display_title": str(_row_value(row, "title", "") or ""),
+            "display_title_source": display_title_source,
             "objective": str(_row_value(row, "objective", "") or ""),
             "workspace_id": str(_row_value(row, "workspace_id", "") or ""),
             "workspace_path": str(_row_value(row, "workspace_path", "") or ""),
@@ -329,6 +514,7 @@ class SessionDBTeamMissionMixin:
             "metadata": metadata if isinstance(metadata, dict) else {},
             "created_at": float(_row_value(row, "created_at", 0) or 0),
             "updated_at": float(updated_at or 0),
+            "message_count": message_count,
         }
 
     def _team_mission_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
@@ -478,6 +664,18 @@ class SessionDBTeamMissionMixin:
             "invalidated_at": row["invalidated_at"],
         }
 
+    def _team_mission_message_from_row(self, row: sqlite3.Row | None) -> Dict[str, Any]:
+        if row is None:
+            return {}
+        message = dict(row)
+        if "content" in message:
+            message["content"] = self._decode_content(message["content"])
+        if message.get("metadata_json"):
+            metadata = _json_loads(message.get("metadata_json"), None)
+            if isinstance(metadata, dict):
+                message["metadata"] = metadata
+        return message
+
     def _team_mission_memory_edge_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
         if row is None:
             return None
@@ -522,15 +720,38 @@ class SessionDBTeamMissionMixin:
                 "SELECT metadata_json, title, created_at, updated_at FROM team_mission_conversations WHERE conversation_id = ?",
                 (conversation_id,),
             ).fetchone()
-            merged_metadata = _json_loads(_row_value(existing, "metadata_json", ""), {})
+            existing_metadata = _json_loads(_row_value(existing, "metadata_json", ""), {})
+            merged_metadata = dict(existing_metadata)
             if isinstance(metadata, dict):
                 merged_metadata.update(metadata)
             merged_metadata["conversation_id"] = conversation_id
             merged_metadata["stable_session_id"] = stable_session_id
             existing_title = _text(_row_value(existing, "title", ""))
             requested_title = _text(title)
+            existing_display_title_source = _text(
+                existing_metadata.get("display_title_source")
+                or existing_metadata.get("displayTitleSource")
+            )
+            requested_display_title_source = _text(
+                merged_metadata.get("display_title_source")
+                or merged_metadata.get("displayTitleSource")
+            )
+            existing_title_is_replaceable = _is_replaceable_team_mission_conversation_title(
+                existing_title,
+                existing_display_title_source,
+            )
+            should_write_requested_title = bool(
+                requested_title
+                and (replace_title or not existing_title or existing_title_is_replaceable)
+            )
+            if (
+                should_write_requested_title
+                and not _is_placeholder_team_mission_conversation_title(requested_title)
+                and not requested_display_title_source
+            ):
+                merged_metadata["display_title_source"] = "first_user_message"
             insert_title = requested_title or existing_title or "Team Mission"
-            update_title = requested_title if (replace_title or not existing_title) else ""
+            update_title = requested_title if should_write_requested_title else ""
             existing_updated = float(_row_value(existing, "updated_at", requested_updated) or requested_updated)
             update_updated = requested_updated if (updated_at is not None or touch or existing is None) else existing_updated
             conn.execute(
@@ -711,19 +932,16 @@ class SessionDBTeamMissionMixin:
                 )
         if not conversation:
             return {}
-        mission_id = _text(conversation.get("active_mission_id"))
-        if not mission_id:
-            with self._lock:
-                row = self._conn.execute(
-                    "SELECT mission_id FROM team_missions WHERE conversation_id = ? ORDER BY updated_at DESC LIMIT 1",
-                    (_text(conversation.get("conversation_id")),),
-                ).fetchone()
-                mission_id = _text(_row_value(row, "mission_id", ""))
-        graph = self.get_team_mission_graph(mission_id) if mission_id else {}
+        graph = self.get_team_mission_conversation_graph(_text(conversation.get("conversation_id")))
+        messages = list((graph or {}).get("recent_messages") or [])
+        page_info = (graph or {}).get("message_page_info") or {}
         return {
             "conversation": conversation,
             "mission": (graph.get("mission") if isinstance(graph, dict) else {}) or {},
             "graph": graph if isinstance(graph, dict) else {},
+            "messages": messages,
+            "pageInfo": page_info,
+            "page_info": page_info,
         }
 
     def list_team_mission_conversations(
@@ -751,18 +969,19 @@ class SessionDBTeamMissionMixin:
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                SELECT *,
+                SELECT team_mission_conversations.*,
+                    COALESCE(session_summary.message_count, 0) AS message_count,
                     MAX(
                         COALESCE(
-                            (SELECT MAX(m.timestamp)
-                             FROM messages m
-                             WHERE m.session_id = team_mission_conversations.stable_session_id
-                               AND m.active = 1),
+                            session_summary.last_active,
+                            session_summary.started_at,
                             0
                         ),
                         COALESCE(created_at, 0)
                     ) AS activity_updated_at
                 FROM team_mission_conversations
+                LEFT JOIN sessions session_summary
+                  ON session_summary.id = team_mission_conversations.stable_session_id
                 {where_sql}
                 ORDER BY activity_updated_at DESC, created_at DESC, conversation_id ASC
                 LIMIT ?
@@ -775,6 +994,532 @@ class SessionDBTeamMissionMixin:
                 for row in rows
             ) if conversation is not None
         ]
+
+    def _team_mission_conversation_deliverable_projection(
+        self,
+        conversation: Dict[str, Any],
+        missions: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        mission_ids = [
+            _text(mission.get("mission_id"))
+            for mission in missions
+            if _text(mission.get("mission_id"))
+        ]
+        mission_id_set = set(mission_ids)
+        stable_session_id = _text(
+            conversation.get("stable_session_id")
+            or conversation.get("stableSessionId")
+        )
+
+        last_message: Dict[str, Any] = {}
+        final_deliverables: List[Dict[str, Any]] = []
+        if stable_session_id:
+            with self._lock:
+                last_message_row = self._conn.execute(
+                    """
+                    SELECT *
+                    FROM messages
+                    WHERE session_id = ?
+                      AND active = 1
+                      AND role IN ('user', 'assistant')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (stable_session_id,),
+                ).fetchone()
+                final_rows = self._conn.execute(
+                    """
+                    SELECT *
+                    FROM messages
+                    WHERE session_id = ?
+                      AND active = 1
+                      AND role = 'assistant'
+                      AND metadata_json LIKE ?
+                    ORDER BY id ASC
+                    """,
+                    (stable_session_id, "%final_deliverable%"),
+                ).fetchall()
+            last_message = _message_summary_from_message(self._team_mission_message_from_row(last_message_row))
+            for row in final_rows:
+                message = self._team_mission_message_from_row(row)
+                deliverable = _final_deliverable_from_message(message)
+                if not deliverable:
+                    continue
+                mission_id = _text(deliverable.get("mission_id"))
+                if mission_id not in mission_id_set:
+                    continue
+                final_deliverables.append(deliverable)
+
+        if not mission_ids:
+            return {
+                "last_message": last_message,
+                "last_message_preview": _text(last_message.get("preview")),
+                "last_message_at": last_message.get("timestamp") or 0,
+                "final_deliverables": [],
+                "final_deliverables_by_mission": {},
+                "final_deliverables_by_task": {},
+                "artifact_refs": [],
+                "artifact_refs_by_mission": {},
+                "artifact_refs_by_task": {},
+            }
+
+        placeholders = ",".join("?" for _ in mission_ids)
+        memory_params: List[Any] = [*mission_ids, _MEMORY_COMMITTED_STATUS]
+        memory_clauses = [
+            f"mission_id IN ({placeholders})",
+            "status = ?",
+        ]
+        if stable_session_id:
+            memory_clauses.append("conversation_session_id = ?")
+            memory_params.append(stable_session_id)
+        with self._lock:
+            memory_rows = self._conn.execute(
+                f"""
+                SELECT *
+                FROM team_mission_memory_items
+                WHERE {' AND '.join(memory_clauses)}
+                ORDER BY created_at ASC, updated_at ASC, id ASC
+                """,
+                tuple(memory_params),
+            ).fetchall()
+        artifact_refs_by_mission: Dict[str, List[Dict[str, Any]]] = {}
+        artifact_refs_by_task: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+        all_artifact_refs: List[Dict[str, Any]] = []
+        for row in memory_rows:
+            item = self._team_mission_memory_item_from_row(row)
+            if not item:
+                continue
+            refs = _dedupe_artifact_refs(list(item.get("artifact_refs") or []))
+            if not refs:
+                continue
+            mission_id = _text(item.get("mission_id"))
+            task_id = _text(item.get("task_id"))
+            artifact_refs_by_mission[mission_id] = _dedupe_artifact_refs([
+                *artifact_refs_by_mission.get(mission_id, []),
+                *refs,
+            ])
+            if task_id:
+                artifact_refs_by_task[(mission_id, task_id)] = _dedupe_artifact_refs([
+                    *artifact_refs_by_task.get((mission_id, task_id), []),
+                    *refs,
+                ])
+            all_artifact_refs.extend(refs)
+
+        final_deliverables = [
+            _final_deliverable_with_artifact_refs(
+                deliverable,
+                artifact_refs_by_mission,
+                artifact_refs_by_task,
+            )
+            for deliverable in final_deliverables
+        ]
+        final_deliverables_by_mission: Dict[str, List[Dict[str, Any]]] = {}
+        final_deliverables_by_task: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+        for deliverable in final_deliverables:
+            mission_id = _text(deliverable.get("mission_id"))
+            task_id = _text(deliverable.get("task_id"))
+            final_deliverables_by_mission.setdefault(mission_id, []).append(deliverable)
+            if task_id:
+                final_deliverables_by_task.setdefault((mission_id, task_id), []).append(deliverable)
+        last_message = _message_with_deliverable_artifact_refs(last_message, final_deliverables)
+
+        return {
+            "last_message": last_message,
+            "last_message_preview": _text(last_message.get("preview")),
+            "last_message_at": last_message.get("timestamp") or 0,
+            "final_deliverables": final_deliverables,
+            "final_deliverables_by_mission": final_deliverables_by_mission,
+            "final_deliverables_by_task": final_deliverables_by_task,
+            "artifact_refs": _dedupe_artifact_refs(all_artifact_refs),
+            "artifact_refs_by_mission": artifact_refs_by_mission,
+            "artifact_refs_by_task": artifact_refs_by_task,
+        }
+
+    def get_team_mission_conversation_runtime_summary(self, conversation_id: str) -> Dict[str, Any]:
+        """Return the lightweight Team Mission facts needed by conversation lists.
+
+        The full conversation graph is still available through
+        ``resolve_team_mission_conversation``. List views need a stable
+        projection of task frames, active nodes, approval gates, and runtime
+        session ids without loading run event history or node detail payloads.
+        """
+        conversation_id = _text(conversation_id)
+        if not conversation_id:
+            return {}
+        with self._lock:
+            conversation = self._team_mission_conversation_from_row(self._conn.execute(
+                "SELECT * FROM team_mission_conversations WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone())
+            if conversation is None:
+                return {}
+            missions = [
+                mission for mission in (
+                    self._team_mission_from_row(row)
+                    for row in self._conn.execute(
+                        """
+                        SELECT *
+                        FROM team_missions
+                        WHERE conversation_id = ?
+                        ORDER BY created_at ASC, updated_at ASC, mission_id ASC
+                        """,
+                        (conversation_id,),
+                    ).fetchall()
+                ) if mission is not None
+            ]
+            mission_ids = [_text(mission.get("mission_id")) for mission in missions if _text(mission.get("mission_id"))]
+            placeholders = ",".join("?" for _ in mission_ids)
+            node_rows = self._conn.execute(
+                f"""
+                SELECT *
+                FROM team_mission_nodes
+                WHERE mission_id IN ({placeholders})
+                ORDER BY created_at ASC, node_id ASC
+                """,
+                tuple(mission_ids),
+            ).fetchall() if mission_ids else []
+            binding_rows = self._conn.execute(
+                f"""
+                SELECT *
+                FROM team_mission_run_bindings
+                WHERE mission_id IN ({placeholders})
+                ORDER BY created_at ASC, run_id ASC
+                """,
+                tuple(mission_ids),
+            ).fetchall() if mission_ids else []
+
+        if not missions:
+            deliverable_projection = self._team_mission_conversation_deliverable_projection(conversation, [])
+            return {
+                "conversation": conversation,
+                "mission": {},
+                "active_mission_id": _text(conversation.get("active_mission_id")),
+                "mission_status": "",
+                "task_frames": [],
+                "task_frame_count": 0,
+                "active_task_frame": {},
+                "pending_approvals": [],
+                "pending_approval_count": 0,
+                "active_node_count": 0,
+                "run_bindings": [],
+                "run_session_ids": [],
+                "last_message": deliverable_projection.get("last_message") or {},
+                "last_message_preview": deliverable_projection.get("last_message_preview") or "",
+                "last_message_at": deliverable_projection.get("last_message_at") or 0,
+                "final_deliverables": [],
+                "artifact_refs": [],
+            }
+
+        nodes_by_mission: Dict[str, List[Dict[str, Any]]] = {mission_id: [] for mission_id in mission_ids}
+        for row in node_rows:
+            node = self._team_mission_node_from_row(row)
+            if not node:
+                continue
+            nodes_by_mission.setdefault(_text(node.get("mission_id")), []).append(node)
+
+        bindings: List[Dict[str, Any]] = []
+        run_session_ids: List[str] = []
+        seen_run_session_ids: set[str] = set()
+        for row in binding_rows:
+            binding = self._team_mission_run_binding_from_row(row)
+            if not binding:
+                continue
+            bindings.append(binding)
+            for key in ("session_id", "runtime_session_id"):
+                value = _text(binding.get(key))
+                if value and value not in seen_run_session_ids:
+                    seen_run_session_ids.add(value)
+                    run_session_ids.append(value)
+
+        active_mission_id = _text(conversation.get("active_mission_id"))
+        latest_mission = missions[-1]
+        active_mission = next(
+            (mission for mission in missions if _text(mission.get("mission_id")) == active_mission_id),
+            latest_mission,
+        )
+        active_mission_id = _text(active_mission.get("mission_id")) or active_mission_id
+        deliverable_projection = self._team_mission_conversation_deliverable_projection(conversation, missions)
+        deliverables_by_mission = deliverable_projection.get("final_deliverables_by_mission") or {}
+        deliverables_by_task = deliverable_projection.get("final_deliverables_by_task") or {}
+        artifact_refs_by_mission = deliverable_projection.get("artifact_refs_by_mission") or {}
+        artifact_refs_by_task = deliverable_projection.get("artifact_refs_by_task") or {}
+
+        task_frames: List[Dict[str, Any]] = []
+        pending_approvals: List[Dict[str, Any]] = []
+        active_node_count = 0
+        for mission in missions:
+            mission_id = _text(mission.get("mission_id"))
+            mission_nodes = nodes_by_mission.get(mission_id) or []
+            node_ids: List[str] = []
+            root_node_id = ""
+            for node in mission_nodes:
+                original_node_id = _text(node.get("node_id"))
+                if not original_node_id:
+                    continue
+                namespaced_node_id = _conversation_graph_node_id(mission_id, original_node_id)
+                node_ids.append(namespaced_node_id)
+                node_kind = _normalize_node_kind(_text(node.get("kind")))
+                node_status = _text(node.get("status")).lower()
+                if not root_node_id and node_kind == "root":
+                    root_node_id = namespaced_node_id
+                if node_status in _ACTIVE_NODE_STATUSES:
+                    active_node_count += 1
+                if node_kind == "approval_gate" and node_status == "waiting_approval":
+                    pending_approvals.append({
+                        "mission_id": mission_id,
+                        "missionId": mission_id,
+                        "task_frame_id": f"mission-frame:{mission_id}",
+                        "taskFrameId": f"mission-frame:{mission_id}",
+                        "node_id": namespaced_node_id,
+                        "nodeId": namespaced_node_id,
+                        "hermes_node_id": original_node_id,
+                        "hermesNodeId": original_node_id,
+                        "title": _text(node.get("title")) or "审批任务图",
+                        "status": node_status,
+                    })
+            task_id = _task_id_from_mission(mission)
+            frame_artifact_refs = _dedupe_artifact_refs([
+                *list(artifact_refs_by_mission.get(mission_id, [])),
+                *list(artifact_refs_by_task.get((mission_id, task_id), [])),
+            ])
+            final_deliverable = _final_deliverable_for_frame(
+                deliverables_by_mission,
+                deliverables_by_task,
+                mission_id,
+                task_id,
+                frame_artifact_refs,
+            )
+            frame = {
+                "id": f"mission-frame:{mission_id}",
+                "runId": _text(mission.get("leader_session_id")),
+                "missionId": mission_id,
+                "mission_id": mission_id,
+                "taskId": task_id,
+                "task_id": task_id,
+                "title": _text(mission.get("title")) or _text(conversation.get("title")) or "团队任务",
+                "objective": _text(mission.get("objective")) or _text(mission.get("title")) or "团队任务",
+                "status": _text(mission.get("status")) or "planning",
+                "source": "hermes_conversation",
+                "rootNodeId": root_node_id or (node_ids[0] if node_ids else ""),
+                "root_node_id": root_node_id or (node_ids[0] if node_ids else ""),
+                "nodeIds": node_ids,
+                "node_ids": node_ids,
+                "createdAt": mission.get("created_at") or 0,
+                "created_at": mission.get("created_at") or 0,
+                "updatedAt": mission.get("updated_at") or 0,
+                "updated_at": mission.get("updated_at") or 0,
+                "completedAt": mission.get("completed_at"),
+                "completed_at": mission.get("completed_at"),
+                "artifactRefs": frame_artifact_refs,
+                "artifact_refs": frame_artifact_refs,
+            }
+            if final_deliverable:
+                frame.update({
+                    "finalDeliverable": final_deliverable,
+                    "final_deliverable": final_deliverable,
+                    "deliverableMessageId": final_deliverable.get("messageId") or "",
+                    "deliverable_message_id": final_deliverable.get("message_id") or "",
+                })
+            task_frames.append(frame)
+
+        active_task_frame = next(
+            (frame for frame in task_frames if _text(frame.get("missionId")) == active_mission_id),
+            task_frames[-1] if task_frames else {},
+        )
+        mission_status = _text(active_mission.get("status")) or _text(conversation.get("status"))
+        return {
+            "conversation": conversation,
+            "mission": active_mission,
+            "active_mission_id": active_mission_id,
+            "mission_status": mission_status,
+            "task_frames": task_frames,
+            "task_frame_count": len(task_frames),
+            "active_task_frame": active_task_frame,
+            "pending_approvals": pending_approvals,
+            "pending_approval_count": len(pending_approvals),
+            "active_node_count": active_node_count,
+            "run_bindings": bindings,
+            "run_session_ids": run_session_ids,
+            "last_message": deliverable_projection.get("last_message") or {},
+            "last_message_preview": deliverable_projection.get("last_message_preview") or "",
+            "last_message_at": deliverable_projection.get("last_message_at") or 0,
+            "final_deliverables": list(deliverable_projection.get("final_deliverables") or []),
+            "artifact_refs": list(deliverable_projection.get("artifact_refs") or []),
+        }
+
+    def _team_mission_conversation_active_run(self, stable_session_id: str) -> Dict[str, Any]:
+        stable_session_id = _text(stable_session_id)
+        if not stable_session_id:
+            return {}
+        placeholders = ",".join("?" for _ in _ACTIVE_RUN_STATUSES)
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT *
+                FROM runs
+                WHERE session_id = ?
+                  AND status IN ({placeholders})
+                ORDER BY updated_at DESC, started_at DESC, run_id ASC
+                LIMIT 1
+                """,
+                (stable_session_id, *sorted(_ACTIVE_RUN_STATUSES)),
+            ).fetchone()
+        try:
+            return self._run_from_row(row) or {}
+        except Exception:
+            return {}
+
+    def _team_mission_conversation_message_count(self, stable_session_id: str) -> int:
+        stable_session_id = _text(stable_session_id)
+        if not stable_session_id:
+            return 0
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(message_count, 0) AS message_count FROM sessions WHERE id = ?",
+                (stable_session_id,),
+            ).fetchone()
+        try:
+            return int(_row_value(row, "message_count", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def get_team_mission_conversation_status_projection(self, conversation_id: str) -> Dict[str, Any]:
+        """Return the canonical Team Mission conversation status event payload.
+
+        This is the event-stream counterpart to ``team_mission.conversation.list``:
+        it projects only sidebar/index facts and keeps raw runtime trace in
+        ``run_events``.
+        """
+        conversation_id = _text(conversation_id)
+        if not conversation_id:
+            return {}
+        summary = self.get_team_mission_conversation_runtime_summary(conversation_id)
+        if not isinstance(summary, dict) or not summary:
+            return {}
+        conversation = summary.get("conversation") if isinstance(summary.get("conversation"), dict) else {}
+        conversation = dict(conversation or self.get_team_mission_conversation(conversation_id) or {})
+        if not conversation:
+            return {}
+        stable_session_id = _text(conversation.get("stable_session_id") or conversation.get("stableSessionId"))
+        active_run = self._team_mission_conversation_active_run(stable_session_id)
+        pending_approvals = [
+            item for item in summary.get("pending_approvals") or []
+            if isinstance(item, dict)
+        ]
+        mission_status = _text(summary.get("mission_status") or conversation.get("status"))
+        active_node_count = int(summary.get("active_node_count") or 0)
+        terminal = mission_status in _TERMINAL_MISSION_STATUSES
+        running = bool(active_run) or (
+            not terminal
+            and (active_node_count > 0 or mission_status in _RUNNING_MISSION_STATUSES)
+        )
+        waiting_approval = bool(pending_approvals) or mission_status == "waiting_approval"
+        projected_state = "waiting_approval" if waiting_approval else "running" if running else (
+            "completed" if mission_status == "completed"
+            else "failed" if mission_status == "failed"
+            else "cancelled" if mission_status in {"cancelled", "canceled", "interrupted"}
+            else "idle"
+        )
+        run_updated_at = active_run.get("updated_at") or 0
+        last_message_at = summary.get("last_message_at") or 0
+        updated_at = max(
+            float(conversation.get("updated_at") or 0),
+            float(last_message_at or 0),
+            float(run_updated_at or 0),
+        )
+        projection = {
+            **conversation,
+            "conversation_id": conversation_id,
+            "stable_session_id": stable_session_id,
+            "team_id": _text(conversation.get("team_id")),
+            "active_mission_id": _text(summary.get("active_mission_id") or conversation.get("active_mission_id")),
+            "activeMissionId": _text(summary.get("active_mission_id") or conversation.get("active_mission_id")),
+            "mission_status": mission_status,
+            "status": mission_status or _text(conversation.get("status")),
+            "running": running,
+            "run_state": projected_state,
+            "activity_state": projected_state,
+            "waiting_approval": waiting_approval,
+            "pending_approval_count": len(pending_approvals),
+            "pending_approvals": pending_approvals,
+            "active_run_id": _text(active_run.get("run_id")) if running and active_run else "",
+            "active_turn_id": _text(active_run.get("turn_id")) if running and active_run else "",
+            "active_runtime_session_id": _text(active_run.get("runtime_session_id")) if running and active_run else "",
+            "runtime_scope_key": _text(active_run.get("runtime_scope_key")) if running and active_run else "",
+            "run_started_at": active_run.get("started_at") or 0 if running and active_run else 0,
+            "run_updated_at": run_updated_at,
+            "active_node_count": active_node_count,
+            "task_frames": list(summary.get("task_frames") or []),
+            "task_frame_count": int(summary.get("task_frame_count") or 0),
+            "active_task_frame": summary.get("active_task_frame") if isinstance(summary.get("active_task_frame"), dict) else {},
+            "run_session_ids": list(summary.get("run_session_ids") or []),
+            "last_message": summary.get("last_message") if isinstance(summary.get("last_message"), dict) else {},
+            "last_message_preview": _text(summary.get("last_message_preview")),
+            "last_message_at": last_message_at,
+            "final_deliverables": list(summary.get("final_deliverables") or []),
+            "artifact_refs": list(summary.get("artifact_refs") or []),
+            "message_count": int(conversation.get("message_count") or 0) or self._team_mission_conversation_message_count(stable_session_id),
+            "updated_at": updated_at,
+        }
+        return projection
+
+    def _team_mission_conversation_status_event(
+        self,
+        *,
+        mission_id: str,
+        source_event: Dict[str, Any],
+        source_seq: int,
+        projection_seq: int,
+    ) -> Dict[str, Any]:
+        mission_id = _text(mission_id)
+        if not mission_id:
+            return {}
+        with self._lock:
+            mission = self._team_mission_from_row(self._conn.execute(
+                "SELECT * FROM team_missions WHERE mission_id = ?",
+                (mission_id,),
+            ).fetchone())
+        conversation_id = _text((mission or {}).get("conversation_id"))
+        if not conversation_id:
+            return {}
+        projection = self.get_team_mission_conversation_status_projection(conversation_id)
+        if not projection:
+            return {}
+        stable_session_id = _text(projection.get("stable_session_id"))
+        source_type = _text(source_event.get("type"))
+        timestamp = float(source_event.get("timestamp") or time.time())
+        payload = {
+            "conversation_id": conversation_id,
+            "conversationId": conversation_id,
+            "stable_session_id": stable_session_id,
+            "stableSessionId": stable_session_id,
+            "mission_id": mission_id,
+            "missionId": mission_id,
+            "active_mission_id": _text(projection.get("active_mission_id")) or mission_id,
+            "activeMissionId": _text(projection.get("active_mission_id")) or mission_id,
+            "source_event_type": source_type,
+            "sourceEventType": source_type,
+            "source_seq": source_seq,
+            "sourceSeq": source_seq,
+            "team_mission_event_seq": projection_seq,
+            "teamMissionEventSeq": projection_seq,
+            "projection": projection,
+            "conversation": projection,
+        }
+        return {
+            "type": _TEAM_MISSION_CONVERSATION_STATUS_EVENT_TYPE,
+            "seq": projection_seq,
+            "source_seq": source_seq,
+            "team_mission_event_seq": projection_seq,
+            "timestamp": timestamp,
+            "mission_id": mission_id,
+            "missionId": mission_id,
+            "conversation_id": conversation_id,
+            "conversationId": conversation_id,
+            "stable_session_id": stable_session_id,
+            "stableSessionId": stable_session_id,
+            "payload": payload,
+        }
 
     def rename_team_mission_conversation(self, identifier: str, title: str) -> Dict[str, Any]:
         return _rename_team_mission_conversation(self, identifier, title)
@@ -998,8 +1743,8 @@ class SessionDBTeamMissionMixin:
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
             existing = conn.execute(
-                "SELECT * FROM team_mission_nodes WHERE node_id = ?",
-                (node_id,),
+                "SELECT * FROM team_mission_nodes WHERE mission_id = ? AND node_id = ?",
+                (mission_id, node_id),
             ).fetchone()
             merged_metadata = _json_loads(_row_value(existing, "metadata_json", ""), {})
             if isinstance(metadata, dict):
@@ -1046,8 +1791,7 @@ class SessionDBTeamMissionMixin:
                     created_at, updated_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(node_id) DO UPDATE SET
-                    mission_id = excluded.mission_id,
+                ON CONFLICT(mission_id, node_id) DO UPDATE SET
                     kind = excluded.kind,
                     title = excluded.title,
                     objective = excluded.objective,
@@ -1080,8 +1824,8 @@ class SessionDBTeamMissionMixin:
                 ),
             )
             return self._team_mission_node_from_row(conn.execute(
-                "SELECT * FROM team_mission_nodes WHERE node_id = ?",
-                (node_id,),
+                "SELECT * FROM team_mission_nodes WHERE mission_id = ? AND node_id = ?",
+                (mission_id, node_id),
             ).fetchone()) or {}
 
         return self._execute_write(_do)
@@ -1795,29 +2539,43 @@ class SessionDBTeamMissionMixin:
                 "SELECT * FROM team_mission_run_bindings WHERE mission_id = ? AND run_id = ?",
                 (mission_id, run_id),
             ).fetchone()
+            mission_row = self._conn.execute(
+                "SELECT * FROM team_missions WHERE mission_id = ?",
+                (mission_id,),
+            ).fetchone()
+            node_row = self._conn.execute(
+                "SELECT * FROM team_mission_nodes WHERE mission_id = ? AND node_id = ?",
+                (mission_id, _row_value(binding, "node_id", "") if binding is not None else ""),
+            ).fetchone() if binding is not None else None
         if binding is None:
             return {}
+        mission = self._team_mission_from_row(mission_row) or {"mission_id": mission_id}
+        node = self._team_mission_node_from_row(node_row) or {}
+        binding_value = self._team_mission_run_binding_from_row(binding) or {}
+        identity = _team_mission_runtime_event_identity(
+            mission=mission,
+            node=node,
+            binding=binding_value,
+        )
         frame = dict(event or {})
         payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
-        mission_payload = {
-            **payload,
-            "mission_id": mission_id,
-            "node_id": str(binding["node_id"] or ""),
-        }
         frame.update({
             "run_id": run_id,
             "session_id": str(frame.get("session_id") or binding["runtime_session_id"] or ""),
             "stored_session_id": str(binding["session_id"] or ""),
             "runtime_scope_key": str(frame.get("runtime_scope_key") or binding["runtime_scope_key"] or binding["session_id"] or ""),
-            "payload": mission_payload,
+            "payload": payload,
         })
+        frame = _runtime_event_with_team_mission_identity(frame, identity)
         saved = self.append_run_event(str(binding["session_id"] or ""), frame)
+        if isinstance(saved, dict) and saved.get("_persistence_disposition") == "duplicate_terminal":
+            return saved
         self.reduce_team_mission_run_event(run_id=run_id, event=saved or frame)
         try:
             _mirror_team_mission_event(
                 self,
                 mission_id=mission_id,
-                binding=self._team_mission_run_binding_from_row(binding) or {},
+                binding=binding_value,
                 event=saved or frame,
                 source="team_mission_run_event",
             )
@@ -1877,6 +2635,190 @@ class SessionDBTeamMissionMixin:
             "nodes": nodes,
             "edges": edges,
             "run_bindings": run_bindings,
+        }
+
+    def get_team_mission_conversation_graph(self, conversation_id: str) -> Dict[str, Any]:
+        conversation_id = _text(conversation_id)
+        if not conversation_id:
+            return {}
+        with self._lock:
+            conversation = self._team_mission_conversation_from_row(self._conn.execute(
+                "SELECT * FROM team_mission_conversations WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone())
+            if conversation is None:
+                return {}
+            missions = [
+                mission for mission in (
+                    self._team_mission_from_row(row)
+                    for row in self._conn.execute(
+                        """
+                        SELECT *
+                        FROM team_missions
+                        WHERE conversation_id = ?
+                        ORDER BY created_at ASC, updated_at ASC, mission_id ASC
+                        """,
+                        (conversation_id,),
+                    ).fetchall()
+                ) if mission is not None
+            ]
+        message_page = _conversation_message_page(self, conversation, limit=100)
+        if not missions:
+            deliverable_projection = self._team_mission_conversation_deliverable_projection(conversation, [])
+            return {
+                "mission": {},
+                "conversation": conversation,
+                "nodes": [],
+                "edges": [],
+                "run_bindings": [],
+                "task_frames": [],
+                "runs": [],
+                "last_message": deliverable_projection.get("last_message") or {},
+                "last_message_preview": deliverable_projection.get("last_message_preview") or "",
+                "last_message_at": deliverable_projection.get("last_message_at") or 0,
+                "final_deliverables": [],
+                "artifact_refs": [],
+                "recent_messages": list(message_page.get("messages") or []),
+                "recentMessages": list(message_page.get("messages") or []),
+                "message_page_info": message_page.get("pageInfo") or {},
+                "messagePageInfo": message_page.get("pageInfo") or {},
+            }
+
+        active_mission_id = _text(conversation.get("active_mission_id"))
+        latest_mission = missions[-1]
+        active_mission = next(
+            (mission for mission in missions if _text(mission.get("mission_id")) == active_mission_id),
+            latest_mission,
+        )
+        deliverable_projection = self._team_mission_conversation_deliverable_projection(conversation, missions)
+        deliverables_by_mission = deliverable_projection.get("final_deliverables_by_mission") or {}
+        deliverables_by_task = deliverable_projection.get("final_deliverables_by_task") or {}
+        artifact_refs_by_mission = deliverable_projection.get("artifact_refs_by_mission") or {}
+        artifact_refs_by_task = deliverable_projection.get("artifact_refs_by_task") or {}
+        aggregate_nodes: List[Dict[str, Any]] = []
+        aggregate_edges: List[Dict[str, Any]] = []
+        aggregate_bindings: List[Dict[str, Any]] = []
+        task_frames: List[Dict[str, Any]] = []
+        runs: List[Dict[str, Any]] = []
+
+        for mission in missions:
+            mission_id = _text(mission.get("mission_id"))
+            single_graph = self.get_team_mission_graph(mission_id)
+            nodes = list(single_graph.get("nodes") or [])
+            edges = list(single_graph.get("edges") or [])
+            bindings = list(single_graph.get("run_bindings") or [])
+            node_ids: List[str] = []
+            root_node_id = ""
+            for node in nodes:
+                original_node_id = _text(node.get("node_id"))
+                if not original_node_id:
+                    continue
+                namespaced_node_id = _conversation_graph_node_id(mission_id, original_node_id)
+                metadata = dict(node.get("metadata") or {})
+                metadata.setdefault("hermes_mission_id", mission_id)
+                metadata.setdefault("hermes_node_id", original_node_id)
+                metadata.setdefault("task_id", _task_id_from_mission(mission))
+                projected_node = {
+                    **node,
+                    "node_id": namespaced_node_id,
+                    "metadata": metadata,
+                }
+                aggregate_nodes.append(projected_node)
+                node_ids.append(namespaced_node_id)
+                if not root_node_id and _normalize_node_kind(_text(node.get("kind"))) == "root":
+                    root_node_id = namespaced_node_id
+            for edge in edges:
+                from_node_id = _text(edge.get("from_node_id"))
+                to_node_id = _text(edge.get("to_node_id"))
+                if not from_node_id or not to_node_id:
+                    continue
+                metadata = dict(edge.get("metadata") or {})
+                metadata.setdefault("hermes_mission_id", mission_id)
+                aggregate_edges.append({
+                    **edge,
+                    "from_node_id": _conversation_graph_node_id(mission_id, from_node_id),
+                    "to_node_id": _conversation_graph_node_id(mission_id, to_node_id),
+                    "metadata": metadata,
+                })
+            for binding in bindings:
+                original_node_id = _text(binding.get("node_id"))
+                metadata = dict(binding.get("metadata") or {})
+                metadata.setdefault("hermes_mission_id", mission_id)
+                metadata.setdefault("hermes_node_id", original_node_id)
+                aggregate_bindings.append({
+                    **binding,
+                    "node_id": _conversation_graph_node_id(mission_id, original_node_id) if original_node_id else "",
+                    "metadata": metadata,
+                })
+            task_id = _task_id_from_mission(mission)
+            frame_id = f"mission-frame:{mission_id}"
+            frame_artifact_refs = _dedupe_artifact_refs([
+                *list(artifact_refs_by_mission.get(mission_id, [])),
+                *list(artifact_refs_by_task.get((mission_id, task_id), [])),
+            ])
+            final_deliverable = _final_deliverable_for_frame(
+                deliverables_by_mission,
+                deliverables_by_task,
+                mission_id,
+                task_id,
+                frame_artifact_refs,
+            )
+            frame = {
+                "id": frame_id,
+                "runId": _text(mission.get("leader_session_id")),
+                "missionId": mission_id,
+                "mission_id": mission_id,
+                "taskId": task_id,
+                "task_id": task_id,
+                "title": _text(mission.get("title")) or _text(conversation.get("title")) or "团队任务",
+                "objective": _text(mission.get("objective")) or _text(mission.get("title")) or "团队任务",
+                "status": _text(mission.get("status")) or "planning",
+                "source": "hermes_conversation",
+                "rootNodeId": root_node_id or (node_ids[0] if node_ids else ""),
+                "root_node_id": root_node_id or (node_ids[0] if node_ids else ""),
+                "nodeIds": node_ids,
+                "node_ids": node_ids,
+                "createdAt": mission.get("created_at") or 0,
+                "created_at": mission.get("created_at") or 0,
+                "updatedAt": mission.get("updated_at") or 0,
+                "updated_at": mission.get("updated_at") or 0,
+                "completedAt": mission.get("completed_at"),
+                "completed_at": mission.get("completed_at"),
+                "artifactRefs": frame_artifact_refs,
+                "artifact_refs": frame_artifact_refs,
+            }
+            if final_deliverable:
+                frame.update({
+                    "finalDeliverable": final_deliverable,
+                    "final_deliverable": final_deliverable,
+                    "deliverableMessageId": final_deliverable.get("messageId") or "",
+                    "deliverable_message_id": final_deliverable.get("message_id") or "",
+                })
+            task_frames.append(frame)
+            runs.append({
+                "id": frame_id,
+                "conversationId": conversation_id,
+                "conversation_id": conversation_id,
+                **frame,
+            })
+
+        return {
+            "mission": active_mission,
+            "conversation": conversation,
+            "nodes": aggregate_nodes,
+            "edges": aggregate_edges,
+            "run_bindings": aggregate_bindings,
+            "task_frames": task_frames,
+            "runs": runs,
+            "last_message": deliverable_projection.get("last_message") or {},
+            "last_message_preview": deliverable_projection.get("last_message_preview") or "",
+            "last_message_at": deliverable_projection.get("last_message_at") or 0,
+            "final_deliverables": list(deliverable_projection.get("final_deliverables") or []),
+            "artifact_refs": list(deliverable_projection.get("artifact_refs") or []),
+            "recent_messages": list(message_page.get("messages") or []),
+            "recentMessages": list(message_page.get("messages") or []),
+            "message_page_info": message_page.get("pageInfo") or {},
+            "messagePageInfo": message_page.get("pageInfo") or {},
         }
 
     def _team_mission_memory_context(self, mission: Dict[str, Any]) -> Dict[str, Any]:
@@ -2094,6 +3036,11 @@ class SessionDBTeamMissionMixin:
         mission_id = str(mission_id or "").strip()
         if not mission_id:
             return []
+        after_seq = int(after_seq or 0)
+        projection_source_placeholders = ",".join(
+            "?" for _ in _TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES
+        )
+        projection_source_event_types = tuple(sorted(_TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES))
         with self._lock:
             rows = self._conn.execute(
                 f"""
@@ -2101,20 +3048,53 @@ class SessionDBTeamMissionMixin:
                     e.id * {_TEAM_MISSION_EVENT_SEQ_FACTOR}
                     + COALESCE(e.seq, 0)
                 ) AS mission_event_seq,
-                e.event_json
-                FROM run_events e
-                INNER JOIN team_mission_run_bindings b
-                    ON b.run_id = e.run_id
-                   AND b.session_id = e.session_id
-                WHERE b.mission_id = ?
-                  AND (
-                    e.id * {_TEAM_MISSION_EVENT_SEQ_FACTOR}
-                    + COALESCE(e.seq, 0)
-                  ) > ?
-                ORDER BY mission_event_seq ASC
-                LIMIT ?
-                """,
-                (mission_id, int(after_seq or 0), max(1, min(int(limit or 2000), 10000))),
+                e.event_json,
+                b.node_id AS binding_node_id,
+                b.session_id AS binding_session_id,
+                b.runtime_session_id AS binding_runtime_session_id,
+                b.runtime_scope_key AS binding_runtime_scope_key,
+                b.role AS binding_role,
+                b.metadata_json AS binding_metadata_json,
+                m.mission_id AS mission_id,
+                m.conversation_id AS mission_conversation_id,
+                m.team_id AS mission_team_id,
+                m.leader_session_id AS mission_leader_session_id,
+                m.metadata_json AS mission_metadata_json,
+                n.kind AS node_kind,
+                n.metadata_json AS node_metadata_json
+	                FROM run_events e
+	                INNER JOIN team_mission_run_bindings b
+	                    ON b.run_id = e.run_id
+	                   AND b.session_id = e.session_id
+                INNER JOIN team_missions m
+                    ON m.mission_id = b.mission_id
+                LEFT JOIN team_mission_nodes n
+                    ON n.mission_id = b.mission_id
+                   AND n.node_id = b.node_id
+	                WHERE b.mission_id = ?
+	                  AND (
+	                    (
+	                      e.id * {_TEAM_MISSION_EVENT_SEQ_FACTOR}
+	                      + COALESCE(e.seq, 0)
+	                    ) > ?
+	                    OR (
+	                      (
+	                        e.id * {_TEAM_MISSION_EVENT_SEQ_FACTOR}
+	                        + COALESCE(e.seq, 0)
+	                      ) + 1 > ?
+	                      AND e.event_type IN ({projection_source_placeholders})
+	                    )
+	                  )
+	                ORDER BY mission_event_seq ASC
+	                LIMIT ?
+	                """,
+                (
+                    mission_id,
+                    after_seq,
+                    after_seq,
+                    *projection_source_event_types,
+                    max(1, min(int(limit or 2000), 10000)),
+                ),
             ).fetchall()
         events: List[Dict[str, Any]] = []
         for row in rows:
@@ -2122,8 +3102,61 @@ class SessionDBTeamMissionMixin:
             if isinstance(event, dict):
                 source_seq = int(event.get("seq") or 0)
                 mission_seq = int(row["mission_event_seq"] or 0)
-                event["source_seq"] = source_seq
-                event["team_mission_event_seq"] = mission_seq
-                event["seq"] = mission_seq
-                events.append(event)
+                mission_metadata = _json_loads(_row_value(row, "mission_metadata_json", ""), {})
+                binding_metadata = _json_loads(_row_value(row, "binding_metadata_json", ""), {})
+                node_metadata = _json_loads(_row_value(row, "node_metadata_json", ""), {})
+                mission = {
+                    "mission_id": _text(_row_value(row, "mission_id", "")),
+                    "conversation_id": _text(_row_value(row, "mission_conversation_id", "")),
+                    "team_id": _text(_row_value(row, "mission_team_id", "")),
+                    "leader_session_id": _text(_row_value(row, "mission_leader_session_id", "")),
+                    "metadata": mission_metadata if isinstance(mission_metadata, dict) else {},
+                }
+                binding = {
+                    "mission_id": _text(_row_value(row, "mission_id", "")),
+                    "node_id": _text(_row_value(row, "binding_node_id", "")),
+                    "run_id": _text(event.get("run_id")),
+                    "session_id": _text(_row_value(row, "binding_session_id", "")),
+                    "runtime_session_id": _text(_row_value(row, "binding_runtime_session_id", "")),
+                    "runtime_scope_key": _text(_row_value(row, "binding_runtime_scope_key", "")),
+                    "role": _text(_row_value(row, "binding_role", "")),
+                    "metadata": binding_metadata if isinstance(binding_metadata, dict) else {},
+                }
+                node = {
+                    "mission_id": _text(_row_value(row, "mission_id", "")),
+                    "node_id": _text(_row_value(row, "binding_node_id", "")),
+                    "kind": _text(_row_value(row, "node_kind", "")),
+                    "metadata": node_metadata if isinstance(node_metadata, dict) else {},
+                }
+                identity = _team_mission_runtime_event_identity(
+                    mission=mission,
+                    node=node,
+                    binding=binding,
+                )
+                source_event = _runtime_event_with_team_mission_identity(
+                    event,
+                    identity,
+                    source_seq=source_seq,
+                    mission_event_seq=mission_seq,
+                )
+                projected_event = _team_mission_runtime_projection_event(
+                    source_event,
+                    identity,
+                    source_seq=source_seq,
+                    mission_event_seq=mission_seq,
+                )
+                if mission_seq > after_seq:
+                    events.append(projected_event)
+                if (
+                    _should_emit_conversation_status_projection(source_event)
+                    and mission_seq + 1 > after_seq
+                ):
+                    projection_event = self._team_mission_conversation_status_event(
+                        mission_id=_text(_row_value(row, "mission_id", "")),
+                        source_event=source_event,
+                        source_seq=mission_seq,
+                        projection_seq=mission_seq + 1,
+                    )
+                    if projection_event:
+                        events.append(projection_event)
         return events

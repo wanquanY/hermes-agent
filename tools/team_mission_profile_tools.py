@@ -11,13 +11,12 @@ from hermes_team_mission_assignees import normalized_member_dicts
 from hermes_team_mission_profile_tools import compact_team_profile_snapshot
 from hermes_team_mission_profile_tools import gateway_call
 from hermes_team_mission_profile_tools import metadata as _metadata
-from hermes_team_mission_profile_tools import team_capability_payload
 from hermes_team_mission_profile_tools import text as _text
 from hermes_team_mission_profile_tools import unwrap_response
 from tools.registry import registry, tool_error, tool_result
 
 
-_TOOLSET = "team_mission_leader"
+_TOOLSET = "team_mission_read"
 _LEADER_ROLES = {"leader", "root"}
 _LEADER_NODE_KINDS = {"root"}
 
@@ -143,9 +142,6 @@ def _leader_profile_params(team_context: dict[str, Any], mission_id: str) -> dic
     snapshot_id = _text(team_context.get("team_capability_snapshot_id") or team_context.get("teamCapabilitySnapshotId"))
     if snapshot_id:
         params["snapshot_id"] = snapshot_id
-    capability = team_capability_payload(team_context)
-    if capability:
-        params["team_capability"] = capability
     return params
 
 

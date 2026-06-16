@@ -3,14 +3,14 @@ import json
 from tui_gateway.services.tool_events import GatewayToolEventBridge
 
 
-def _bridge(events):
+def _bridge(events, *, tool_progress_enabled=True):
     sessions = {"sid": {"session_key": "stored", "tool_started_at": {}}}
     return GatewayToolEventBridge(
         sessions=sessions,
         emit=lambda event_type, sid, payload=None: events.append(
             {"type": event_type, "session_id": sid, "payload": payload or {}}
         ),
-        tool_progress_enabled=lambda _sid: True,
+        tool_progress_enabled=lambda _sid: tool_progress_enabled,
         session_cwd=lambda _session: "/tmp",
     )
 
@@ -96,3 +96,42 @@ def test_agent_profile_test_uses_dedicated_stream_events():
     assert events[4]["payload"]["tool_preview"] == "read draft memory"
     assert events[5]["payload"]["text"] == "thinking"
     assert events[7]["payload"]["result"]["doxie_event"] == "agent_profile_test_completed"
+
+
+def test_team_mission_start_task_emits_structured_complete_when_tool_progress_disabled():
+    events = []
+    bridge = _bridge(events, tool_progress_enabled=False)
+
+    bridge.on_tool_complete(
+        "sid",
+        "tool-1",
+        "team_mission_start_task",
+        {"objective": "create a tiny test task"},
+        json.dumps(
+            {
+                "success": True,
+                "mission_id": "mission-1",
+                "conversation_id": "conversation-1",
+                "task_id": "task-1",
+                "submission_status": "accepted",
+                "task_status": "planning",
+                "node": {"node_id": "node-1"},
+                "run": {"run_id": "run-node-1"},
+                "graph_summary": {"node_count": 1},
+                "await_final_deliverable": True,
+                "hermes_control": {
+                    "kind": "team_mission_started",
+                    "end_current_turn": True,
+                    "await_final_deliverable": True,
+                },
+            }
+        ),
+    )
+
+    assert [event["type"] for event in events] == ["tool.complete"]
+    result = events[0]["payload"]["result"]
+    assert result["doxie_event"] == "team_mission_started"
+    assert result["mission_id"] == "mission-1"
+    assert result["conversation_id"] == "conversation-1"
+    assert result["node"] == {"node_id": "node-1"}
+    assert result["run"] == {"run_id": "run-node-1"}

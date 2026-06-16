@@ -1,9 +1,13 @@
 """Tests for composite toolset expansion in delegate_task intersection."""
 
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
 
-from tools.delegate_tool import _expand_parent_toolsets
+from tools.delegate_tool import DELEGATE_BLOCKED_TOOLS
+from tools.delegate_tool_access import (
+    _expand_parent_toolsets,
+    resolve_child_tool_access,
+)
 
 
 class TestExpandParentToolsets(unittest.TestCase):
@@ -40,6 +44,24 @@ class TestExpandParentToolsets(unittest.TestCase):
         toolsets = ["web"]
         child_toolsets = [t for t in toolsets if t in expanded]
         self.assertEqual(child_toolsets, ["web"])
+
+    def test_child_access_allows_subset_from_composite_parent(self):
+        """delegate_task access resolution allows a concrete subset of a composite parent."""
+        parent = SimpleNamespace(
+            enabled_toolsets=["hermes-cli"],
+            valid_tool_names={"web_search", "web_extract", "terminal", "process"},
+        )
+
+        child_toolsets, child_tool_names = resolve_child_tool_access(
+            parent,
+            ["web"],
+            role="leaf",
+            blocked_tools=DELEGATE_BLOCKED_TOOLS,
+            default_toolsets=["terminal", "file", "web"],
+        )
+
+        self.assertEqual(child_toolsets, ["web"])
+        self.assertEqual(child_tool_names, ["web_extract", "web_search"])
 
 
 if __name__ == "__main__":

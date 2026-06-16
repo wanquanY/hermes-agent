@@ -65,6 +65,25 @@ def test_workspace_from_params_preserves_doxie_metadata(tmp_path):
     assert workspace["kind"] == "local"
 
 
+def test_workspace_from_params_accepts_doxie_workspace_aliases(tmp_path):
+    workspace = workspace_from_params(
+        {
+            "workspace": {
+                "workspace_id": "workspace-local",
+                "workspace_name": "Project",
+                "workspace_path": str(tmp_path),
+                "workspace_kind": "local",
+            }
+        },
+        str(tmp_path),
+    )
+
+    assert workspace["id"] == "workspace-local"
+    assert workspace["name"] == "Project"
+    assert workspace["path"] == str(tmp_path)
+    assert workspace["kind"] == "local"
+
+
 def test_workspace_from_params_rejects_cwd_outside_workspace(tmp_path):
     workspace_root = tmp_path / "workspace"
     outside = tmp_path / "outside"

@@ -98,3 +98,39 @@ def test_ws_receive_loop_does_not_wait_for_previous_response_flush(monkeypatch):
         assert second_seen.is_set()
     finally:
         first_release.set()
+
+
+def test_ws_handler_exception_returns_request_error_and_keeps_connection(monkeypatch):
+    release_after = threading.Event()
+    fake_ws = DispatchFakeWebSocket(
+        [
+            {"jsonrpc": "2.0", "id": "failure", "method": "test.inline.failure", "params": {}},
+            {"jsonrpc": "2.0", "id": "success", "method": "test.inline.success", "params": {}},
+        ],
+        release_after,
+    )
+
+    def failing_handler(_rid, _params):
+        raise RuntimeError("boom")
+
+    def success_handler(_rid, _params):
+        release_after.set()
+        return {"jsonrpc": "2.0", "id": "success", "result": {"ok": True}}
+
+    monkeypatch.setitem(server._methods, "test.inline.failure", failing_handler)
+    monkeypatch.setitem(server._methods, "test.inline.success", success_handler)
+
+    async def run() -> None:
+        await asyncio.wait_for(handle_ws(fake_ws), timeout=2)
+
+    asyncio.run(run())
+
+    responses = [frame for frame in fake_ws.sent if frame.get("id")]
+    assert responses == [
+        {
+            "jsonrpc": "2.0",
+            "id": "failure",
+            "error": {"code": -32000, "message": "handler error: boom"},
+        },
+        {"jsonrpc": "2.0", "id": "success", "result": {"ok": True}},
+    ]

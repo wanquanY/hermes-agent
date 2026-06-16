@@ -18,12 +18,12 @@ from __future__ import annotations
 import concurrent.futures
 import contextvars
 import copy
+import hashlib
 import json
 import logging
 import os
 import random
 import re
-import sys
 import threading
 import time
 import uuid
@@ -81,6 +81,16 @@ def _log_doxie_stream_stage(agent, stage: str, **fields: Any) -> None:
         **fields,
     }
     emit_doxie_diagnostic("[doxie-stream-stage]", pairs)
+
+
+def _text_probe(value: Any) -> dict[str, Any]:
+    text = str(value or "")
+    digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return {
+        "len": len(text),
+        "sha1": digest,
+        "preview": text[:80].replace("\n", "\\n"),
+    }
 
 
 def _ra():
@@ -1569,9 +1579,34 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         role = "assistant"
         reasoning_parts: list = []
         usage_obj = None
+        previous_content_chunk = ""
+        previous_reasoning_chunk = ""
+        stream_probe_run_id = str(getattr(agent, "_hermes_active_run_id", "") or "")
+        stream_probe_scope = str(getattr(agent, "_hermes_active_runtime_scope_key", "") or "")
+        stream_probe_enabled = bool(stream_probe_run_id or stream_probe_scope.startswith("team:"))
+        stream_probe_counts = {
+            "chunks": 0,
+            "reasoning": 0,
+            "content": 0,
+            "tool": 0,
+            "empty_choices": 0,
+        }
+        if stream_probe_enabled:
+            _log_doxie_stream_stage(
+                agent,
+                "chat-stream-start",
+                scope=stream_probe_scope,
+                model=getattr(agent, "model", ""),
+                provider=getattr(agent, "provider", ""),
+                api_mode=getattr(agent, "api_mode", ""),
+                reasoning_config=getattr(agent, "reasoning_config", None),
+                tool_count=len(getattr(agent, "tools", []) or []),
+            )
         for chunk in stream:
             last_chunk_time["t"] = time.time()
             agent._touch_activity("receiving stream response")
+            if stream_probe_enabled:
+                stream_probe_counts["chunks"] += 1
 
             # Update per-attempt diagnostic counters.  Best-effort —
             # failures are swallowed so the streaming hot path is never
@@ -1595,6 +1630,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 break
 
             if not chunk.choices:
+                if stream_probe_enabled:
+                    stream_probe_counts["empty_choices"] += 1
                 if hasattr(chunk, "model") and chunk.model:
                     model_name = chunk.model
                 # Usage comes in the final chunk with empty choices
@@ -1609,12 +1646,52 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             # Accumulate reasoning content
             reasoning_text = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
             if reasoning_text:
+                if stream_probe_enabled:
+                    stream_probe_counts["reasoning"] += 1
+                    reasoning_probe = _text_probe(reasoning_text)
+                    if stream_probe_counts["reasoning"] <= 3 or stream_probe_counts["reasoning"] % 20 == 0:
+                        _log_doxie_stream_stage(
+                            agent,
+                            "reasoning-chunk",
+                            chunk_index=stream_probe_counts["chunks"],
+                            reasoning_count=stream_probe_counts["reasoning"],
+                            reasoning_len=reasoning_probe["len"],
+                            reasoning_sha1=reasoning_probe["sha1"],
+                            reasoning_preview=reasoning_probe["preview"],
+                            accumulated_reasoning_before_len=sum(len(str(part or "")) for part in reasoning_parts),
+                            same_as_previous=str(reasoning_text or "") == previous_reasoning_chunk,
+                            extends_previous=(
+                                bool(previous_reasoning_chunk)
+                                and str(reasoning_text or "").startswith(previous_reasoning_chunk)
+                            ),
+                        )
+                    previous_reasoning_chunk = str(reasoning_text or "")
                 reasoning_parts.append(reasoning_text)
                 _fire_first_delta()
                 agent._fire_reasoning_delta(reasoning_text)
 
             # Accumulate text content — fire callback only when no tool calls
             if delta and delta.content:
+                if stream_probe_enabled:
+                    stream_probe_counts["content"] += 1
+                    content_probe = _text_probe(delta.content)
+                    _log_doxie_stream_stage(
+                        agent,
+                        "content-chunk",
+                        chunk_index=stream_probe_counts["chunks"],
+                        content_count=stream_probe_counts["content"],
+                        content_len=content_probe["len"],
+                        content_sha1=content_probe["sha1"],
+                        content_preview=content_probe["preview"],
+                        accumulated_content_before_len=sum(len(str(part or "")) for part in content_parts),
+                        same_as_previous=str(delta.content or "") == previous_content_chunk,
+                        extends_previous=(
+                            bool(previous_content_chunk)
+                            and str(delta.content or "").startswith(previous_content_chunk)
+                        ),
+                        tool_calls_active=bool(tool_calls_acc),
+                    )
+                    previous_content_chunk = str(delta.content or "")
                 content_parts.append(delta.content)
                 if not tool_calls_acc:
                     _fire_first_delta()
@@ -1640,6 +1717,15 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
 
             # Accumulate tool call deltas — notify display on first name
             if delta and delta.tool_calls:
+                if stream_probe_enabled:
+                    stream_probe_counts["tool"] += 1
+                    _log_doxie_stream_stage(
+                        agent,
+                        "tool-call-chunk",
+                        chunk_index=stream_probe_counts["chunks"],
+                        tool_chunk_count=stream_probe_counts["tool"],
+                        tool_delta_count=len(delta.tool_calls or []),
+                    )
                 for tc_delta in delta.tool_calls:
                     raw_idx = tc_delta.index if tc_delta.index is not None else 0
                     delta_id = tc_delta.id or ""
@@ -1706,6 +1792,13 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
 
             if chunk.choices[0].finish_reason:
                 finish_reason = chunk.choices[0].finish_reason
+                if stream_probe_enabled:
+                    _log_doxie_stream_stage(
+                        agent,
+                        "finish-reason",
+                        finish_reason=finish_reason,
+                        counts=dict(stream_probe_counts),
+                    )
 
             # Usage in the final chunk
             if hasattr(chunk, "usage") and chunk.usage:
@@ -1713,6 +1806,16 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
 
         # Build mock response matching non-streaming shape
         full_content = "".join(content_parts) or None
+        if stream_probe_enabled:
+            _log_doxie_stream_stage(
+                agent,
+                "chat-stream-end",
+                finish_reason=finish_reason,
+                full_content_len=len(full_content or ""),
+                reasoning_len=sum(len(str(part or "")) for part in reasoning_parts),
+                tool_call_count=len(tool_calls_acc),
+                counts=dict(stream_probe_counts),
+            )
         mock_tool_calls = None
         has_truncated_tool_args = False
         if tool_calls_acc:

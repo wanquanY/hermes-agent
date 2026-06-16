@@ -73,6 +73,22 @@ def test_events_unsubscribe_uses_control_plane_executor():
     assert executor is ws._ws_control_executor  # noqa: SLF001
 
 
+def test_profile_growth_summary_uses_control_plane_executor():
+    executor = ws._executor_for_request(  # noqa: SLF001
+        {"id": "1", "method": "profile.growth.summary", "params": {"agentProfileId": "agent-a"}}
+    )
+
+    assert executor is ws._ws_control_executor  # noqa: SLF001
+
+
+def test_conversation_render_snapshot_uses_control_plane_executor():
+    executor = ws._executor_for_request(  # noqa: SLF001
+        {"id": "1", "method": "conversation.render_snapshot", "params": {"session_id": "stored-1"}}
+    )
+
+    assert executor is ws._ws_control_executor  # noqa: SLF001
+
+
 @pytest.mark.parametrize(
     "method",
     [
@@ -81,7 +97,6 @@ def test_events_unsubscribe_uses_control_plane_executor():
         "run.events",
         "run.list",
         "run.status",
-        "session.messages",
     ],
 )
 def test_profile_scoped_runtime_read_methods_are_proxied_to_runtime_worker(method):
@@ -106,11 +121,8 @@ def test_profile_scoped_runtime_read_methods_are_proxied_to_runtime_worker(metho
 @pytest.mark.parametrize(
     "method",
     [
-        "team_mission.graph",
-        "team_mission.graph.reduce",
-        "team_mission.events",
-        "team_mission.node.history",
         "team_mission.node.update",
+        "team_mission.plan.approve",
         "team_mission.plan.reject",
         "team_mission.cancel",
         "team_mission.schedule.ready",
@@ -132,6 +144,31 @@ def test_team_mission_scoped_methods_are_proxied_to_runtime_worker(method):
                     "agentProfileVersionId": "v1",
                     "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
                 },
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "conversation.render_snapshot",
+        "team_mission.graph",
+        "team_mission.graph.reduce",
+        "team_mission.events",
+    ],
+)
+def test_team_mission_persisted_state_methods_stay_on_control_plane(method):
+    assert not runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": method,
+            "params": {
+                "mission_id": "mission-1",
+                "conversation_id": "conversation-1",
+                "runtime_scope_key": "team:conversation-1:leader-conversation",
+                "agent_profile_id": "agent-a",
+                "agent_profile_version_id": "v1",
             },
         }
     )
@@ -174,90 +211,25 @@ def test_prompt_submit_with_profile_scope_is_proxied_to_runtime_worker():
     )
 
 
-def test_team_leader_conversation_submit_proxies_to_leader_runtime_from_members():
-    req = {
-        "id": "1",
-        "method": "team_mission.message.submit",
-        "params": {
-            "conversation_id": "conversation-1",
-            "conversation_session_id": "team-session-1",
-            "members": [
-                {
-                    "role": "lead",
-                    "profile_id": "agent-leader",
-                    "profile_version_id": "version-leader",
-                    "runtime_scope_key": "profile:agent-leader:version:version-leader",
-                    "hermes_home_path": "/tmp/hermes-agent-leader",
-                    "doxie_profile": {
-                        "id": "agent-leader",
-                        "agentProfileVersionId": "version-leader",
-                        "runtimeScopeKey": "profile:agent-leader:version:version-leader",
-                        "hermesHomePath": "/tmp/hermes-agent-leader",
-                    },
-                }
-            ],
-        },
-    }
-
-    assert runtime_proxy.should_proxy_to_runtime(req)
-    scope = runtime_proxy.runtime_scope_from_request(req)
-    assert scope.agent_profile_id == "agent-leader"
-    assert scope.agent_profile_version_id == "version-leader"
-    assert scope.runtime_scope_key == "team:conversation-1:leader-conversation"
-    assert scope.hermes_home == "/tmp/hermes-agent-leader"
-
-
-def test_team_leader_conversation_submit_uses_team_scope_with_leader_profile_resources():
-    req = {
-        "id": "1",
-        "method": "team_mission.message.submit",
-        "params": {
-            "conversation_id": "conversation-1",
-            "conversation_session_id": "team-session-1",
-            "runtimeScopeKey": "team:conversation-1:leader-conversation",
-            "profileRuntimeScopeKey": "profile:agent-leader:version:version-leader",
-            "agentProfileId": "agent-leader",
-            "agentProfileVersionId": "version-leader",
-            "doxie_profile": {
-                "id": "agent-leader",
-                "agentProfileVersionId": "version-leader",
-                "runtimeScopeKey": "profile:agent-leader:version:version-leader",
-                "hermesHomePath": "/tmp/hermes-agent-leader",
-            },
-            "members": [
-                {
-                    "role": "lead",
-                    "profile_id": "agent-leader",
-                    "profile_version_id": "version-leader",
-                    "runtime_scope_key": "profile:agent-leader:version:version-leader",
-                    "hermes_home_path": "/tmp/hermes-agent-leader",
-                    "doxie_profile": {
-                        "id": "agent-leader",
-                        "agentProfileVersionId": "version-leader",
-                        "runtimeScopeKey": "profile:agent-leader:version:version-leader",
-                        "hermesHomePath": "/tmp/hermes-agent-leader",
-                    },
-                }
-            ],
-        },
-    }
-
-    assert runtime_proxy.should_proxy_to_runtime(req)
-    scope = runtime_proxy.runtime_scope_from_request(req)
-    assert scope.agent_profile_id == "agent-leader"
-    assert scope.agent_profile_version_id == "version-leader"
-    assert scope.runtime_scope_key == "team:conversation-1:leader-conversation"
-    assert scope.hermes_home == "/tmp/hermes-agent-leader"
-
-
-def test_team_conversation_ensure_proxies_to_leader_runtime_from_members():
-    assert runtime_proxy.should_proxy_to_runtime(
+@pytest.mark.parametrize("method", ["team_mission.message.submit", "team_mission.conversation.ensure"])
+def test_team_leader_runtime_methods_do_not_proxy_from_profile_or_member_payload(method):
+    assert not runtime_proxy.should_proxy_to_runtime(
         {
             "id": "1",
-            "method": "team_mission.conversation.ensure",
+            "method": method,
             "params": {
                 "conversation_id": "conversation-1",
                 "conversation_session_id": "team-session-1",
+                "runtimeScopeKey": "team:conversation-1:leader-conversation",
+                "profileRuntimeScopeKey": "profile:agent-leader:version:version-leader",
+                "agentProfileId": "agent-leader",
+                "agentProfileVersionId": "version-leader",
+                "doxie_profile": {
+                    "id": "agent-leader",
+                    "agentProfileVersionId": "version-leader",
+                    "runtimeScopeKey": "profile:agent-leader:version:version-leader",
+                    "hermesHomePath": "/tmp/hermes-agent-leader",
+                },
                 "members": [
                     {
                         "role": "lead",
@@ -482,9 +454,14 @@ def test_relayed_runtime_terminal_event_updates_owner_team_mission_db(tmp_path, 
     runtime_proxy._persist_relayed_runtime_event(relayed_complete)  # noqa: SLF001
     completed_events = [
         event for event in db.list_team_mission_run_events("mission-1")
-        if event["type"] == "message.complete"
-        and (event.get("payload") or {}).get("status") == "complete"
-        and (event.get("payload") or {}).get("runtime_source_seq") == 331
+        if event["type"] == "team_mission.runtime.event"
+        and (event.get("payload") or {}).get("event_type") == "message.complete"
+        and (((event.get("payload") or {}).get("source_event") or {}).get("payload") or {}).get("status")
+        == "complete"
+        and (((event.get("payload") or {}).get("source_event") or {}).get("payload") or {}).get(
+            "runtime_source_seq"
+        )
+        == 331
     ]
     assert len(completed_events) == 1
 
@@ -504,6 +481,52 @@ def test_relayed_runtime_terminal_event_updates_owner_team_mission_db(tmp_path, 
     assert node["status"] == "completed"
     assert node["metadata"]["last_run_terminal_status"] == "completed"
     assert run["status"] == "completed"
+
+
+def test_run_control_does_not_deliver_duplicate_terminal_events(tmp_path):
+    from hermes_state import SessionDB
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    delivered = []
+
+    class CapturingTransport:
+        def write(self, obj):
+            delivered.append(obj)
+            return True
+
+    subscription_id, _replay = run_control.subscribe_session_with_id(
+        stored_session_id="stored-terminal-dedupe",
+        transport=CapturingTransport(),
+        db=db,
+    )
+    try:
+        for seq in (1, 2):
+            run_control.publish_recorded_event(
+                {
+                    "type": "message.complete",
+                    "session_id": "runtime-terminal-dedupe",
+                    "stored_session_id": "stored-terminal-dedupe",
+                    "run_id": "run-terminal-dedupe",
+                    "turn_id": "turn-terminal-dedupe",
+                    "runtime_scope_key": "profile:agent-default",
+                    "seq": seq,
+                    "payload": {"status": "complete", "text": f"done {seq}"},
+                },
+                db=db,
+            )
+    finally:
+        run_control.unsubscribe_session(subscription_id=subscription_id)
+        db.close()
+
+    delivered_events = [
+        item.get("params") or {}
+        for item in delivered
+        if item.get("method") == "event"
+    ]
+
+    assert [event["type"] for event in delivered_events] == ["message.complete"]
+    assert delivered_events[0]["payload"]["text"] == "done 1"
 
 
 def test_control_plane_session_list_is_not_proxied_to_runtime_worker():
@@ -541,6 +564,47 @@ def test_control_plane_session_title_is_not_proxied_to_runtime_worker():
     )
 
 
+def test_control_plane_session_messages_are_not_proxied_to_runtime_worker():
+    assert not runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": "session.messages",
+            "params": {
+                "stored_session_id": "stored-session-1",
+                "runtime_scope_key": "team:conversation-1:leader-conversation",
+                "profile_runtime_scope_key": "profile:agent-a:version:v1",
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "runtimeScopeKey": "profile:agent-a:version:v1",
+                    "agentProfileVersionId": "v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                },
+            },
+        }
+    )
+
+
+def test_control_plane_team_mission_node_history_is_not_proxied_to_runtime_worker():
+    assert not runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": "team_mission.node.history",
+            "params": {
+                "mission_id": "mission-1",
+                "node_id": "node-worker",
+                "runtime_scope_key": "team:conversation-1:leader-conversation",
+                "profile_runtime_scope_key": "profile:agent-a:version:v1",
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "runtimeScopeKey": "profile:agent-a:version:v1",
+                    "agentProfileVersionId": "v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                },
+            },
+        }
+    )
+
+
 def test_profile_scoped_cron_manage_is_proxied_to_runtime_worker():
     assert runtime_proxy.should_proxy_to_runtime(
         {
@@ -566,6 +630,27 @@ def test_profile_scoped_cron_control_plane_reads_are_not_proxied_to_runtime_work
             "method": "cron.manage",
             "params": {
                 "action": action,
+                "controlPlaneOnly": True,
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "runtimeScopeKey": "profile:agent-a:version:v1",
+                    "agentProfileVersionId": "v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                },
+            },
+        }
+    )
+
+
+def test_profile_growth_summary_stays_on_control_plane_with_profile_scope():
+    assert not runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": "profile.growth.summary",
+            "params": {
+                "agentProfileId": "agent-a",
+                "agentProfileVersionId": "v1",
+                "runtime_scope_key": "profile:agent-a:version:v1",
                 "controlPlaneOnly": True,
                 "doxie_profile": {
                     "id": "agent-a",
@@ -821,6 +906,119 @@ async def test_runtime_proxy_keeps_bridge_open_for_streaming_events(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_runtime_proxy_rejects_non_object_ready_frame_without_attribute_error(monkeypatch):
+    class FakeRuntimeSocket:
+        def __init__(self):
+            self.closed = False
+
+        async def recv(self):
+            return "null"
+
+        async def close(self):
+            self.closed = True
+
+    class FakeProcess:
+        pid = 12346
+
+        def poll(self):
+            return None
+
+    class FakePool:
+        async def retain_bridge(self, _scope_key):
+            raise AssertionError("bridge must not be retained before a valid ready frame")
+
+        async def release_bridge(self, _scope_key):
+            raise AssertionError("bridge was never retained")
+
+    runtime_socket = FakeRuntimeSocket()
+
+    async def fake_connect(_uri):
+        return runtime_socket
+
+    monkeypatch.setitem(sys.modules, "websockets", types.SimpleNamespace(connect=fake_connect))
+    monkeypatch.setattr(runtime_proxy, "_RUNTIME_CONNECT_ATTEMPTS", 1)
+    monkeypatch.setattr(runtime_proxy, "_RUNTIME_CONNECT_DELAY_S", 0)
+
+    worker = runtime_proxy.RuntimeWorker(
+        scope=runtime_proxy.RuntimeScope(
+            agent_profile_id="agent-a",
+            runtime_scope_key="profile:agent-a",
+            hermes_home="/tmp/hermes-agent-a",
+        ),
+        process=FakeProcess(),
+        port=19451,
+        token="token",
+        created_at=1,
+        last_started_at=1,
+        last_used_at=1,
+    )
+    bridge = runtime_proxy.RuntimeProxyBridge(
+        worker=worker,
+        transport=object(),
+        pool=FakePool(),
+    )
+
+    with pytest.raises(RuntimeError, match="ready frame must be a JSON object, got NoneType"):
+        await bridge.send({"id": "1", "method": "run.status", "params": {}})
+    assert runtime_socket.closed
+    assert bridge.closed
+
+
+@pytest.mark.asyncio
+async def test_ws_transport_replaces_cached_runtime_bridge_when_worker_changes():
+    class FakeClientSocket:
+        async def send_text(self, _raw):
+            return None
+
+    class FakeProcess:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def poll(self):
+            return None
+
+    scope = runtime_proxy.RuntimeScope(
+        agent_profile_id="agent-a",
+        runtime_scope_key="team:conversation-1:leader-conversation",
+        hermes_home="/tmp/hermes-agent-a",
+    )
+    first_worker = runtime_proxy.RuntimeWorker(
+        scope=scope,
+        process=FakeProcess(21001),
+        port=21001,
+        token="first",
+        created_at=1,
+        last_started_at=1,
+        last_used_at=1,
+    )
+    second_worker = runtime_proxy.RuntimeWorker(
+        scope=scope,
+        process=FakeProcess(21002),
+        port=21002,
+        token="second",
+        created_at=2,
+        last_started_at=2,
+        last_used_at=2,
+    )
+
+    transport = ws.WSTransport(FakeClientSocket(), asyncio.get_running_loop())
+    first_bridge = await transport.runtime_bridge(first_worker)
+    second_bridge = await transport.runtime_bridge(second_worker)
+
+    assert second_bridge is not first_bridge
+    assert first_bridge.closed
+    assert second_bridge.worker is second_worker
+    assert transport._runtime_bridges[scope.runtime_scope_key] is second_bridge  # noqa: SLF001
+
+
+def test_runtime_proxy_ignores_non_object_requests():
+    assert not runtime_proxy.should_proxy_to_runtime(None)
+    assert not runtime_proxy.should_proxy_to_runtime([])
+    assert not runtime_proxy.should_proxy_to_runtime(["not", "a", "request"])
+    assert runtime_proxy.runtime_scope_from_request(["not", "a", "request"]) == runtime_proxy.RuntimeScope()
+
+
+@pytest.mark.asyncio
 async def test_runtime_worker_pool_reuses_and_reclaims_idle_workers(monkeypatch):
     class FakeProcess:
         next_pid = 20000
@@ -950,7 +1148,7 @@ async def test_runtime_worker_pool_restarts_when_profile_launch_env_changes(monk
 
 
 @pytest.mark.asyncio
-async def test_runtime_worker_pool_reuses_active_bridge_when_launch_env_changes(monkeypatch):
+async def test_runtime_worker_pool_detaches_active_bridge_when_launch_env_changes(monkeypatch):
     class FakeProcess:
         next_pid = 21150
 
@@ -1007,14 +1205,16 @@ async def test_runtime_worker_pool_reuses_active_bridge_when_launch_env_changes(
         },
     )
 
-    assert second is first
+    assert second is not first
     assert first.running()
     assert not first.process.terminated
+    assert second.running()
+    assert second.process.kwargs["env"]["DOXIE_BACKEND_BRIDGE_URL"] == "http://127.0.0.1:4567/api/doxie/invoke"
     assert pool.snapshot()["runningWorkerCount"] == 1
 
 
 @pytest.mark.asyncio
-async def test_runtime_worker_pool_reuses_active_run_when_launch_env_changes(monkeypatch):
+async def test_runtime_worker_pool_detaches_active_run_when_launch_env_changes(monkeypatch):
     class FakeProcess:
         next_pid = 21170
 
@@ -1071,9 +1271,11 @@ async def test_runtime_worker_pool_reuses_active_run_when_launch_env_changes(mon
         },
     )
 
-    assert second is first
+    assert second is not first
     assert first.running()
     assert not first.process.terminated
+    assert second.running()
+    assert second.process.kwargs["env"]["DOXIE_BACKEND_BRIDGE_TOKEN"] == "bridge-token"
     assert pool.snapshot()["runningWorkerCount"] == 1
 
 

@@ -144,24 +144,37 @@ TOOLSETS = {
         "includes": []
     },
 
+    "team_mission_read": {
+        "description": "Internal DoXie team task read-only context tools",
+        "tools": [
+            "team_mission_status",
+            "team_mission_team_profile",
+        ],
+        "includes": []
+    },
+
     "team_mission_planning": {
-        "description": "Internal Hermes Team Mission graph planning tools for Leader planning runs",
+        "description": "Internal DoXie team task graph planning tools for Leader planning runs",
         "tools": [
             "team_mission_node_create",
             "team_mission_edge_create",
             "team_mission_plan_complete",
         ],
-        "includes": []
+        "includes": ["team_mission_read"]
+    },
+
+    "team_mission_conversation_leader": {
+        "description": "DoXie team Leader conversation tools that may start new team tasks",
+        "tools": [
+            "team_mission_start_task",
+        ],
+        "includes": ["team_mission_read"]
     },
 
     "team_mission_leader": {
-        "description": "Hermes Team Mission Leader baseline tools for conversation and bound Leader node runs",
-        "tools": [
-            "team_mission_status",
-            "team_mission_team_profile",
-            "team_mission_start_task",
-        ],
-        "includes": []
+        "description": "Compatibility alias for DoXie team Leader conversation tools",
+        "tools": [],
+        "includes": ["team_mission_conversation_leader"]
     },
 
     "video_gen": {
@@ -587,7 +600,7 @@ TOOLSETS = {
     }
 }
 
-INTERNAL_TOOLSETS = {"doxie", "team_mission_planning"}
+INTERNAL_TOOLSETS = {"doxie", "team_mission_read", "team_mission_planning"}
 
 
 def is_internal_toolset(name: str) -> bool:

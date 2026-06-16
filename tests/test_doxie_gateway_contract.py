@@ -18,7 +18,7 @@ def test_doxie_gateway_capabilities_reports_complete_gateway_abi():
     manifest = gateway_capabilities()
 
     assert manifest["ok"] is True
-    assert manifest["protocolVersion"] == "2026-06-10"
+    assert manifest["protocolVersion"] == "2026-06-15"
     for method in REQUIRED_METHODS:
         assert method in manifest["methods"]
     assert "message.delta" in manifest["events"]
@@ -53,10 +53,11 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     importlib.import_module("tui_gateway.methods.run")
     response = server._methods["gateway.capabilities"](1, {})
 
-    assert response["result"]["protocolVersion"] == "2026-06-10"
+    assert response["result"]["protocolVersion"] == "2026-06-15"
     assert "run.submit" in response["result"]["methods"]
     assert "run.events" in response["result"]["methods"]
     assert "events.unsubscribe" in response["result"]["methods"]
+    assert "conversation.render_snapshot" in response["result"]["methods"]
     assert "team_mission.create" in response["result"]["methods"]
     assert "team_mission.graph" in response["result"]["methods"]
     assert "team_mission.graph.reduce" in response["result"]["methods"]
@@ -68,6 +69,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.team_profile.get" in response["result"]["methods"]
     assert "team_mission.conversation.ensure" in response["result"]["methods"]
     assert "team_mission.conversation.resolve" in response["result"]["methods"]
+    assert "team_mission.conversation.render" in response["result"]["methods"]
     assert "team_mission.conversation.list" in response["result"]["methods"]
     assert "team_mission.conversation.rename" in response["result"]["methods"]
     assert "team_mission.conversation.delete" in response["result"]["methods"]
@@ -80,6 +82,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.node.history" in response["result"]["methods"]
     assert "team_mission.node.start" in response["result"]["methods"]
     assert "team_mission.plan.complete" in response["result"]["methods"]
+    assert "team_mission.plan.approve" in response["result"]["methods"]
     assert "team_mission.schedule.ready" in response["result"]["methods"]
     assert "team_mission.memory.compile" in response["result"]["methods"]
     assert "team_mission.memory.pack" in response["result"]["methods"]
@@ -96,13 +99,16 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "model.options" in response["result"]["methods"]
     assert "toolsets.list" in response["result"]["methods"]
     assert "profile.prepare_runtime" in response["result"]["methods"]
+    assert "profile.growth.summary" in response["result"]["methods"]
     assert "runtime.ensure" in response["result"]["methods"]
     assert "runtime.status" in response["result"]["methods"]
+    assert "storage.stats" in response["result"]["methods"]
     assert "approval.respond" in response["result"]["methods"]
     assert "sudo.respond" in response["result"]["methods"]
     assert "secret.respond" in response["result"]["methods"]
     assert "clarify.respond" in response["result"]["methods"]
     assert "run.events" in server._methods
+    assert "conversation.render_snapshot" in server._methods
     assert "session.message_metadata.merge" in server._methods
     assert "events.unsubscribe" in server._methods
     assert "team_mission.create" in server._methods
@@ -116,6 +122,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.team_profile.get" in server._methods
     assert "team_mission.conversation.ensure" in server._methods
     assert "team_mission.conversation.resolve" in server._methods
+    assert "team_mission.conversation.render" in server._methods
     assert "team_mission.conversation.list" in server._methods
     assert "team_mission.conversation.rename" in server._methods
     assert "team_mission.conversation.delete" in server._methods
@@ -128,6 +135,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.node.history" in server._methods
     assert "team_mission.node.start" in server._methods
     assert "team_mission.plan.complete" in server._methods
+    assert "team_mission.plan.approve" in server._methods
     assert "team_mission.schedule.ready" in server._methods
     assert "team_mission.memory.compile" in server._methods
     assert "team_mission.memory.pack" in server._methods
@@ -142,10 +150,14 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert server._methods["session.status"].__module__ == "tui_gateway.methods.session"
     assert server._methods["session.branch"].__module__ == "tui_gateway.methods.session_branch"
     assert server._methods["prompt.submit"].__module__ == "tui_gateway.methods.prompt"
+    assert server._methods["conversation.render_snapshot"].__module__ == "tui_gateway.methods.conversation_render_snapshot"
+    assert server._methods["team_mission.conversation.render"].__module__ == "tui_gateway.methods.conversation_render_snapshot"
+    assert server._methods["team_mission.plan.approve"].__module__ == "tui_gateway.methods.team_mission"
     assert "model.set" in server._methods
     assert "model.options" in server._methods
     assert "toolsets.list" in server._methods
     assert "profile.prepare_runtime" in server._methods
+    assert "profile.growth.summary" in server._methods
     assert "runtime.ensure" in server._methods
     assert "runtime.status" in server._methods
     assert "approval.respond" in server._methods
@@ -173,6 +185,7 @@ def test_extracted_gateway_methods_own_registered_handlers():
     assert server._methods["team_mission.team_profile.get"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.conversation.ensure"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.conversation.resolve"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.conversation.render"].__module__ == "tui_gateway.methods.conversation_render_snapshot"
     assert server._methods["team_mission.conversation.list"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.conversation.rename"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.conversation.delete"].__module__ == "tui_gateway.methods.team_mission"
@@ -185,6 +198,7 @@ def test_extracted_gateway_methods_own_registered_handlers():
     assert server._methods["team_mission.node.history"].__module__ == "tui_gateway.methods.team_mission_history"
     assert server._methods["team_mission.node.start"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.plan.complete"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.plan.approve"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.schedule.ready"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.memory.compile"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.memory.pack"].__module__ == "tui_gateway.methods.team_mission"
@@ -197,6 +211,7 @@ def test_extracted_gateway_methods_own_registered_handlers():
     assert server._methods["session.branch"].__module__ == "tui_gateway.methods.session_branch"
     assert server._methods["config.show"].__module__ == "tui_gateway.methods.integrations"
     assert server._methods["skills.reload"].__module__ == "tui_gateway.methods.integrations"
+    assert server._methods["profile.growth.summary"].__module__ == "tui_gateway.methods.profile_registry"
     assert {
         getattr(handler, "__module__", "")
         for name, handler in server._methods.items()
@@ -243,6 +258,431 @@ def test_session_message_metadata_merge_json_rpc_persists_transcript_metadata(tm
         assert messages[0]["metadata"]["agentProfileDrafts"] == [
             {"draftId": "draft-1", "name": "产品经理分身"},
         ]
+    finally:
+        db.close()
+
+
+def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_path, monkeypatch):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session(session_id="stored-ordinary-1", source="tui")
+        db.append_message(
+            "stored-ordinary-1",
+            role="assistant",
+            content="我会读取文件。",
+            metadata={"run_id": "run-1", "turn_id": "turn-1"},
+        )
+        db.append_run_event(
+            "stored-ordinary-1",
+            {
+                "type": "tool.complete",
+                "session_id": "runtime-1",
+                "stored_session_id": "stored-ordinary-1",
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "payload": {
+                    "tool_id": "tool-read-1",
+                    "name": "read_file",
+                    "arguments": {"path": "README.md"},
+                    "result_text": "ok",
+                },
+            },
+        )
+        monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
+        monkeypatch.setattr(session_methods, "_get_db", lambda: db)
+
+        response = server._methods["conversation.render_snapshot"](
+            1,
+            {"session_id": "stored-ordinary-1", "limit": 50},
+        )
+
+        assert response["result"]["kind"] == "ordinary"
+        assert response["result"]["renderReady"] is True
+        assert response["result"]["stored_session_id"] == "stored-ordinary-1"
+        assert response["result"]["messages"][0]["text"] == "我会读取文件。"
+        assert response["result"]["runEvents"][0]["type"] == "tool.complete"
+        assert response["result"]["runEvents"][0]["payload"]["tool_id"] == "tool-read-1"
+        assert response["result"]["projection"]["source"] == "conversation.render_snapshot"
+    finally:
+        db.close()
+
+
+def test_conversation_render_snapshot_returns_completed_team_projection_without_historical_runtime_events(tmp_path, monkeypatch):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session(session_id="team-session-1", source="team_mission")
+        db.append_message(
+            "team-session-1",
+            role="assistant",
+            content="团队任务完成。",
+            metadata={"run_id": "team-run-1", "turn_id": "team-turn-1"},
+        )
+        db.append_run_event(
+            "team-session-1",
+            {
+                "type": "tool.complete",
+                "session_id": "runtime-team-1",
+                "stored_session_id": "team-session-1",
+                "run_id": "team-run-1",
+                "turn_id": "team-turn-1",
+                "runtime_scope_key": "team:conversation-1:leader",
+                "payload": {
+                    "tool_id": "team-tool-1",
+                    "name": "team_mission_start_task",
+                    "result_text": "accepted",
+                },
+            },
+        )
+        db.upsert_team_mission_conversation(
+            conversation_id="conversation-1",
+            stable_session_id="team-session-1",
+            team_id="team-1",
+            title="团队会话",
+        )
+        monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
+        monkeypatch.setattr(session_methods, "_get_db", lambda: db)
+        monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+
+        response = server._methods["conversation.render_snapshot"](
+            1,
+            {
+                "kind": "team_mission",
+                "conversation_id": "conversation-1",
+                "runtime_scope_key": "team:conversation-1:leader",
+            },
+        )
+
+        assert response["result"]["kind"] == "team_mission"
+        assert response["result"]["renderReady"] is True
+        assert response["result"]["conversation"]["conversation_id"] == "conversation-1"
+        assert response["result"]["stored_session_id"] == "team-session-1"
+        assert response["result"]["graph"]["recent_messages"][0]["text"] == "团队任务完成。"
+        assert response["result"]["messages"][0]["text"] == "团队任务完成。"
+        assert response["result"]["runEvents"] == []
+    finally:
+        db.close()
+
+
+def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkeypatch):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session(session_id="team-session-1", source="team_mission")
+        db.append_message(
+            "team-session-1",
+            role="assistant",
+            content="团队房间首屏消息。",
+            metadata={"run_id": "team-run-1", "turn_id": "team-turn-1"},
+        )
+        db.upsert_team_mission_conversation(
+            conversation_id="conversation-1",
+            stable_session_id="team-session-1",
+            team_id="team-1",
+            title="团队会话",
+            active_mission_id="mission-1",
+        )
+        db.upsert_team_mission(
+            mission_id="mission-1",
+            conversation_id="conversation-1",
+            team_id="team-1",
+            title="团队任务",
+            objective="测试",
+            status="completed",
+            metadata={"stableTeamSessionId": "team-session-1"},
+        )
+        monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
+        monkeypatch.setattr(session_methods, "_get_db", lambda: db)
+        monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+
+        response = server._methods["team_mission.conversation.render"](
+            1,
+            {
+                "conversation_id": "conversation-1",
+                "limit": 100,
+                "includeRunEvents": True,
+            },
+        )
+
+        assert response["result"]["kind"] == "team_mission"
+        assert response["result"]["renderReady"] is True
+        assert response["result"]["projection"]["source"] == "team_mission.conversation.render"
+        assert response["result"]["stable_session_id"] == "team-session-1"
+        assert response["result"]["conversation"]["conversation_id"] == "conversation-1"
+        assert response["result"]["mission"]["mission_id"] == "mission-1"
+        assert response["result"]["messages"][0]["text"] == "团队房间首屏消息。"
+        assert response["result"]["runEvents"] == []
+    finally:
+        db.close()
+
+
+def test_conversation_render_snapshot_returns_active_team_runtime_events(tmp_path, monkeypatch):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session(session_id="team-session-1", source="team_mission")
+        db.append_message(
+            "team-session-1",
+            role="assistant",
+            content="团队任务进行中。",
+            metadata={"run_id": "completed-run-1", "turn_id": "completed-turn-1"},
+        )
+        db.upsert_run(
+            run_id="active-team-run-1",
+            session_id="team-session-1",
+            runtime_scope_key="team:conversation-1:leader",
+            turn_id="active-team-turn-1",
+            runtime_session_id="runtime-team-active",
+            status="running",
+        )
+        db.append_run_event(
+            "team-session-1",
+            {
+                "type": "message.delta",
+                "session_id": "runtime-team-old",
+                "stored_session_id": "team-session-1",
+                "run_id": "completed-run-1",
+                "turn_id": "completed-turn-1",
+                "runtime_scope_key": "team:conversation-1:leader",
+                "payload": {"text": "old"},
+            },
+        )
+        db.append_run_event(
+            "team-session-1",
+            {
+                "type": "message.delta",
+                "session_id": "runtime-team-active",
+                "stored_session_id": "team-session-1",
+                "run_id": "active-team-run-1",
+                "turn_id": "active-team-turn-1",
+                "runtime_scope_key": "team:conversation-1:leader",
+                "payload": {"text": "active"},
+            },
+        )
+        db.upsert_team_mission_conversation(
+            conversation_id="conversation-1",
+            stable_session_id="team-session-1",
+            team_id="team-1",
+            title="团队会话",
+        )
+        monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
+        monkeypatch.setattr(session_methods, "_get_db", lambda: db)
+        monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+
+        response = server._methods["conversation.render_snapshot"](
+            1,
+            {
+                "kind": "team_mission",
+                "conversation_id": "conversation-1",
+                "runtime_scope_key": "team:conversation-1:leader",
+            },
+        )
+
+        assert response["result"]["kind"] == "team_mission"
+        assert response["result"]["conversation"]["running"] is True
+        assert response["result"]["conversation"]["active_run_id"] == "active-team-run-1"
+        assert [event["run_id"] for event in response["result"]["runEvents"]] == ["active-team-run-1"]
+        assert response["result"]["runEvents"][0]["payload"]["text"] == "active"
+    finally:
+        db.close()
+
+
+def test_conversation_render_snapshot_normalizes_duplicate_team_assistant_run_ids(tmp_path, monkeypatch):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session(session_id="team-session-1", source="team_mission")
+        shared_run_id = "team-mission:mission-1:conversation:run-synthesis"
+        db.append_message(
+            "team-session-1",
+            role="assistant",
+            content="第一轮汇总。",
+            metadata={
+                "run_id": shared_run_id,
+                "team_mission": {
+                    "mission_id": "mission-1",
+                    "source_run_id": "run-synthesis",
+                    "source_seq": "101",
+                },
+            },
+        )
+        db.append_message(
+            "team-session-1",
+            role="user",
+            content="继续。",
+        )
+        db.append_message(
+            "team-session-1",
+            role="assistant",
+            content="第二轮汇总。",
+            metadata={
+                "run_id": shared_run_id,
+                "team_mission": {
+                    "mission_id": "mission-1",
+                    "source_run_id": "run-synthesis",
+                    "source_seq": "202",
+                },
+            },
+        )
+        db.upsert_team_mission_conversation(
+            conversation_id="conversation-1",
+            stable_session_id="team-session-1",
+            team_id="team-1",
+            title="团队会话",
+            active_mission_id="mission-1",
+        )
+        db.upsert_team_mission(
+            mission_id="mission-1",
+            conversation_id="conversation-1",
+            team_id="team-1",
+            title="团队任务",
+            objective="测试",
+            status="completed",
+            metadata={"stableTeamSessionId": "team-session-1"},
+        )
+        monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
+        monkeypatch.setattr(session_methods, "_get_db", lambda: db)
+        monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+
+        response = server._methods["conversation.render_snapshot"](
+            1,
+            {
+                "kind": "team_mission",
+                "conversation_id": "conversation-1",
+            },
+        )
+
+        messages = response["result"]["messages"]
+        assistant_run_ids = [
+            message["metadata"]["run_id"]
+            for message in messages
+            if message["role"] == "assistant"
+        ]
+        assert len(assistant_run_ids) == 2
+        assert len(set(assistant_run_ids)) == 2
+        assert all(run_id.startswith(f"{shared_run_id}:render:") for run_id in assistant_run_ids)
+        assert messages[0]["metadata"]["original_run_id"] == shared_run_id
+        assert messages[0]["metadata"]["team_mission"]["sourceRunId"] == "run-synthesis"
+        assert messages[2]["metadata"]["team_mission"]["sourceSeq"] == "202"
+        assert response["result"]["runEvents"] == []
+    finally:
+        db.close()
+
+
+def test_conversation_render_snapshot_normalizes_same_turn_team_assistant_tool_messages(tmp_path, monkeypatch):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session(session_id="team-session-1", source="team_mission")
+        shared_run_id = "team-leader-run-1"
+        shared_turn_id = "team-leader-turn-1"
+        db.append_message(
+            "team-session-1",
+            role="user",
+            content="创建团队任务。",
+            metadata={"run_id": shared_run_id, "turn_id": shared_turn_id},
+        )
+        db.append_message(
+            "team-session-1",
+            role="assistant",
+            content="好的，开始创建。",
+            metadata={"run_id": shared_run_id, "turn_id": shared_turn_id},
+        )
+        db.append_message(
+            "team-session-1",
+            role="tool",
+            content='{"success": true}',
+            metadata={"run_id": shared_run_id, "turn_id": shared_turn_id},
+        )
+        db.append_message(
+            "team-session-1",
+            role="assistant",
+            content="团队任务已接受。",
+            metadata={"run_id": shared_run_id, "turn_id": shared_turn_id},
+        )
+        db.upsert_team_mission_conversation(
+            conversation_id="conversation-1",
+            stable_session_id="team-session-1",
+            team_id="team-1",
+            title="团队会话",
+            active_mission_id="mission-1",
+        )
+        db.upsert_team_mission(
+            mission_id="mission-1",
+            conversation_id="conversation-1",
+            team_id="team-1",
+            title="团队任务",
+            objective="测试",
+            status="completed",
+            metadata={"stableTeamSessionId": "team-session-1"},
+        )
+        monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
+        monkeypatch.setattr(session_methods, "_get_db", lambda: db)
+        monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+
+        response = server._methods["conversation.render_snapshot"](
+            1,
+            {
+                "kind": "team_mission",
+                "conversation_id": "conversation-1",
+            },
+        )
+
+        messages = response["result"]["messages"]
+        assistant_run_ids = [
+            message["metadata"]["run_id"]
+            for message in messages
+            if message["role"] == "assistant"
+        ]
+        assert len(assistant_run_ids) == 2
+        assert len(set(assistant_run_ids)) == 2
+        assert assistant_run_ids[0] == f"{shared_run_id}:render:{shared_turn_id}"
+        assert assistant_run_ids[1].startswith(f"{shared_run_id}:render:{shared_turn_id}:index-")
+        assert [message["role"] for message in messages] == ["user", "assistant", "tool", "assistant"]
+        assert messages[1]["metadata"]["original_run_id"] == shared_run_id
+        assert messages[3]["metadata"]["original_run_id"] == shared_run_id
     finally:
         db.close()
 
@@ -315,7 +755,7 @@ def test_profile_prepare_runtime_returns_canonical_runtime_scope():
     assert response["result"]["status"] == "prepared"
     assert response["result"]["agent_profile_id"] == "agent-a"
     assert response["result"]["agent_profile_version_id"] == "version-1"
-    assert response["result"]["runtime_scope_key"] == "profile:agent-a:version:version-1"
+    assert response["result"]["runtime_scope_key"] == "profile:agent-a"
     assert response["result"]["transient"] is False
 
 
@@ -344,7 +784,7 @@ def test_runtime_ensure_starts_scoped_runtime_worker(monkeypatch):
     def fake_ensure(params):
         calls.append(params)
         return {
-            "scopeKey": "profile:agent-a:version:version-1",
+            "scopeKey": "profile:agent-a",
             "running": True,
             "healthy": True,
             "pid": 1234,
@@ -367,7 +807,7 @@ def test_runtime_ensure_starts_scoped_runtime_worker(monkeypatch):
 
     assert response["result"]["ready"] is True
     assert response["result"]["status"] == "ready"
-    assert response["result"]["runtime_scope_key"] == "profile:agent-a:version:version-1"
+    assert response["result"]["runtime_scope_key"] == "profile:agent-a"
     assert response["result"]["worker"]["running"] is True
     assert calls[0]["doxie_profile"]["hermesHomePath"] == "/tmp/hermes-agent-a"
 

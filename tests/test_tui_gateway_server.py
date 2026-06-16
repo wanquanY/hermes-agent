@@ -364,6 +364,21 @@ def test_dispatch_rejects_non_object_params():
     }
 
 
+def test_dispatch_converts_inline_handler_exception_to_json_rpc_error(monkeypatch):
+    def failing_handler(_rid, _params):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(server._methods, "test.inline.failure", failing_handler)
+
+    resp = server.dispatch({"id": "inline-failure", "method": "test.inline.failure", "params": {}})
+
+    assert resp == {
+        "jsonrpc": "2.0",
+        "id": "inline-failure",
+        "error": {"code": -32000, "message": "handler error: boom"},
+    }
+
+
 def test_voice_toggle_returns_configured_record_key(monkeypatch):
     monkeypatch.setattr(
         server,
@@ -883,7 +898,7 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
     monkeypatch.setattr(
         server,
         "_session_info",
-        lambda agent: {"model": "test", "tools": {}, "skills": {}},
+        lambda agent, _session=None: {"model": "test", "tools": {}, "skills": {}},
     )
     monkeypatch.setattr(
         server, "_init_session", lambda sid, key, agent, history, cols=80: None
@@ -1390,7 +1405,7 @@ def test_session_title_get_retries_persist_for_pending_title(monkeypatch):
 def test_session_title_get_retries_pending_even_when_db_has_title(monkeypatch):
     class _FakeDB:
         def __init__(self):
-            self.title = "auto title"
+            self.title = "stored title"
 
         def get_session_title(self, _key):
             return self.title
@@ -1597,7 +1612,15 @@ def test_session_create_drops_pending_title_on_valueerror(monkeypatch):
 
     try:
         server.handle_request(
-            {"id": "1", "method": "prompt.submit", "params": {"session_id": "sid", "text": "hello"}}
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "_run_registry_reserved": True,
+                    "session_id": "sid",
+                    "text": "hello",
+                },
+            }
         )
         assert session["pending_title"] is None
     finally:
@@ -1646,7 +1669,7 @@ def test_config_set_fast_updates_live_agent_and_config(monkeypatch):
     monkeypatch.setattr(
         server, "_write_config_key", lambda path, value: writes.append((path, value))
     )
-    monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "x"})
+    monkeypatch.setattr(server, "_session_info", lambda _agent, _session=None: {"model": "x"})
     monkeypatch.setattr(server, "_emit", lambda *args: emits.append(args))
     monkeypatch.setattr(
         "hermes_cli.models.resolve_fast_mode_overrides",
@@ -2421,7 +2444,9 @@ def test_config_set_personality_preserves_history_and_returns_info(monkeypatch):
         lambda cfg=None: {"helpful": "You are helpful."},
     )
     monkeypatch.setattr(
-        server, "_session_info", lambda agent: {"model": getattr(agent, "model", "?")}
+        server,
+        "_session_info",
+        lambda agent, _session=None: {"model": getattr(agent, "model", "?")},
     )
     monkeypatch.setattr(server, "_emit", lambda *args: emits.append(args))
     monkeypatch.setattr(server, "_write_config_key", lambda path, value: None)
@@ -2458,7 +2483,7 @@ def test_session_compress_uses_compress_helper(monkeypatch):
         "_compress_session_history",
         lambda session, focus_topic=None, **_kw: (2, {"total": 42}),
     )
-    monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "x"})
+    monkeypatch.setattr(server, "_session_info", lambda _agent, _session=None: {"model": "x"})
 
     with patch("tui_gateway.server._emit") as emit:
         resp = server.handle_request(
@@ -2490,7 +2515,7 @@ def test_session_compress_syncs_session_key_after_rotation(monkeypatch):
         "_compress_session_history",
         lambda session, focus_topic=None, **_kw: (2, {"total": 42}),
     )
-    monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "x"})
+    monkeypatch.setattr(server, "_session_info", lambda _agent, _session=None: {"model": "x"})
     restart_calls = []
     monkeypatch.setattr(
         server, "_restart_slash_worker", lambda s: restart_calls.append(s)
@@ -2545,7 +2570,11 @@ def test_prompt_submit_sets_approval_session_key(monkeypatch):
         {
             "id": "1",
             "method": "prompt.submit",
-            "params": {"session_id": "sid", "text": "ping"},
+            "params": {
+                "_run_registry_reserved": True,
+                "session_id": "sid",
+                "text": "ping",
+            },
         }
     )
 
@@ -2602,7 +2631,11 @@ def test_prompt_submit_expands_context_refs(monkeypatch):
         {
             "id": "1",
             "method": "prompt.submit",
-            "params": {"session_id": "sid", "text": "@diff"},
+            "params": {
+                "_run_registry_reserved": True,
+                "session_id": "sid",
+                "text": "@diff",
+            },
         }
     )
 
@@ -3198,7 +3231,11 @@ def test_prompt_submit_history_version_mismatch_surfaces_warning(monkeypatch):
             {
                 "id": "1",
                 "method": "prompt.submit",
-                "params": {"session_id": "sid", "text": "hi"},
+                "params": {
+                    "_run_registry_reserved": True,
+                    "session_id": "sid",
+                    "text": "hi",
+                },
             }
         )
         assert resp.get("result"), f"got error: {resp.get('error')}"
@@ -3255,7 +3292,11 @@ def test_prompt_submit_history_version_match_persists_normally(monkeypatch):
             {
                 "id": "1",
                 "method": "prompt.submit",
-                "params": {"session_id": "sid", "text": "hi"},
+                "params": {
+                    "_run_registry_reserved": True,
+                    "session_id": "sid",
+                    "text": "hi",
+                },
             }
         )
         assert resp.get("result")
@@ -3610,7 +3651,7 @@ def test_mirror_slash_compress_does_not_prelock_history(monkeypatch):
 
     monkeypatch.setattr(server, "_compress_session_history", _fake_compress)
     monkeypatch.setattr(server, "_sync_session_key_after_compress", _fake_sync)
-    monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "x"})
+    monkeypatch.setattr(server, "_session_info", lambda _agent, _session=None: {"model": "x"})
     monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
 
     session = _session(running=False)
@@ -3669,7 +3710,7 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     release_build = threading.Event()
     build_entered = threading.Event()
 
-    def _slow_make_agent(sid, key, session_id=None):
+    def _slow_make_agent(sid, key, session_id=None, **_kwargs):
         build_started.set()
         build_entered.set()
         release_build.wait(timeout=3.0)
@@ -3683,7 +3724,7 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
         "_get_db",
         lambda: types.SimpleNamespace(create_session=lambda *a, **kw: None),
     )
-    monkeypatch.setattr(server, "_session_info", lambda _a: {"model": "x"})
+    monkeypatch.setattr(server, "_session_info", lambda _a, _session=None: {"model": "x"})
     monkeypatch.setattr(server, "_probe_credentials", lambda _a: None)
     monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
@@ -3777,14 +3818,14 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
             self.base_url = ""
             self.api_key = ""
 
-    monkeypatch.setattr(server, "_make_agent", lambda sid, key: _FakeAgent())
+    monkeypatch.setattr(server, "_make_agent", lambda sid, key, **_kwargs: _FakeAgent())
     monkeypatch.setattr(server, "_SlashWorker", _FakeWorker)
     monkeypatch.setattr(
         server,
         "_get_db",
         lambda: types.SimpleNamespace(create_session=lambda *a, **kw: None),
     )
-    monkeypatch.setattr(server, "_session_info", lambda _a: {"model": "x"})
+    monkeypatch.setattr(server, "_session_info", lambda _a, _session=None: {"model": "x"})
     monkeypatch.setattr(server, "_probe_credentials", lambda _a: None)
     monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
@@ -3832,16 +3873,18 @@ def test_get_db_degrades_cleanly_when_sessiondb_init_fails(monkeypatch):
     fake_mod = types.ModuleType("hermes_state")
 
     class _BrokenSessionDB:
-        def __init__(self):
+        def __init__(self, *args, **kwargs):
             raise RuntimeError("locking protocol")
 
     fake_mod.SessionDB = _BrokenSessionDB
     monkeypatch.setitem(sys.modules, "hermes_state", fake_mod)
     monkeypatch.setattr(server, "_db", None)
     monkeypatch.setattr(server, "_db_error", None)
+    monkeypatch.setattr(server, "_db_error_by_home", {})
 
     assert server._get_db() is None
-    assert server._db_error == "locking protocol"
+    unavailable = server._db_unavailable_error("1", code=5000)
+    assert unavailable["error"]["message"] == "state.db unavailable: locking protocol"
 
 
 def test_session_create_continues_when_state_db_is_unavailable(monkeypatch):
@@ -3861,10 +3904,10 @@ def test_session_create_continues_when_state_db_is_unavailable(monkeypatch):
 
     emits = []
 
-    monkeypatch.setattr(server, "_make_agent", lambda sid, key: _FakeAgent())
+    monkeypatch.setattr(server, "_make_agent", lambda sid, key, **_kwargs: _FakeAgent())
     monkeypatch.setattr(server, "_SlashWorker", _FakeWorker)
     monkeypatch.setattr(server, "_get_db", lambda: None)
-    monkeypatch.setattr(server, "_session_info", lambda _a: {"model": "x"})
+    monkeypatch.setattr(server, "_session_info", lambda _a, _session=None: {"model": "x"})
     monkeypatch.setattr(server, "_probe_credentials", lambda _a: None)
     monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: emits.append(a))
@@ -4194,6 +4237,44 @@ def test_session_delete_propagates_db_exception(monkeypatch):
     assert "disk full" in resp["error"]["message"]
 
 
+def test_session_delete_removes_branched_session_fk_graph(monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("source", "tui")
+    db.append_message("source", role="user", content="branch from this")
+    assistant_id = db.append_message("source", role="assistant", content="answer")
+    db.branch_session(
+        source_session_id="source",
+        new_session_id="branch-1",
+        branch_point={"message_id": str(assistant_id)},
+        idempotency_key="branch-key-1",
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_sessions", {})
+
+    try:
+        resp = server.handle_request(
+            {"id": "1", "method": "session.delete", "params": {"session_id": "source"}}
+        )
+
+        branch_info = db.get_session_branch_info("branch-1")
+        branch_requests = db._conn.execute(
+            "SELECT COUNT(*) FROM session_branch_requests"
+        ).fetchone()[0]
+
+        assert "result" in resp, resp
+        assert resp["result"] == {"deleted": "source"}
+        assert db.get_session("source") is None
+        assert db.get_session("branch-1") is not None
+        assert branch_info is not None
+        assert branch_info["parent_session_id"] == ""
+        assert branch_requests == 0
+        assert db._conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        db.close()
+
+
 def test_session_delete_success_returns_deleted_id(monkeypatch):
     """Happy path — DB delete succeeds, response carries the deleted id
     and the on-disk sessions dir is forwarded so transcript files get
@@ -4300,7 +4381,7 @@ def test_model_options_propagates_list_exception(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# prompt.submit — auto-title
+# prompt.submit — first-user-message titles, no auto-title
 # ---------------------------------------------------------------------------
 
 
@@ -4336,7 +4417,7 @@ def test_prompt_submit_emits_explicit_append_and_snapshot_message_delta(monkeypa
             }
 
     emitted = []
-    server._sessions["sid"] = _session(agent=_Agent())
+    server._sessions["sid"] = _session(agent=_Agent(), transient=True)
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
@@ -4348,7 +4429,13 @@ def test_prompt_submit_emits_explicit_append_and_snapshot_message_delta(monkeypa
             {
                 "id": "1",
                 "method": "prompt.submit",
-                "params": {"session_id": "sid", "text": "你好"},
+                "params": {
+                    "_run_registry_reserved": True,
+                    "session_id": "sid",
+                    "text": "你好",
+                    "run_id": "run-stream-contract",
+                    "turn_id": "turn-stream-contract",
+                },
             }
         )
     finally:
@@ -4363,8 +4450,106 @@ def test_prompt_submit_emits_explicit_append_and_snapshot_message_delta(monkeypa
     assert deltas[2]["delta"] == " 继续说。"
 
 
-def test_prompt_submit_auto_titles_session_on_complete(monkeypatch):
-    """maybe_auto_title is called after a successful (complete) prompt."""
+def test_prompt_submit_reconciles_diverged_stream_with_final_snapshot(monkeypatch):
+    """A bad live stream must be corrected by the final persisted answer."""
+
+    class _Agent:
+        session_id = "session-key"
+
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None, **_kwargs):
+            stream_callback("收到信号信号！！有什么有什么")
+            return {
+                "final_response": "收到信号！有什么我可以帮你的吗？",
+                "messages": [
+                    {"role": "user", "content": "嘟嘟嘟"},
+                    {"role": "assistant", "content": "收到信号！有什么我可以帮你的吗？"},
+                ],
+            }
+
+    emitted = []
+    server._sessions["sid"] = _session(agent=_Agent(), transient=True)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    try:
+        server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "_run_registry_reserved": True,
+                    "session_id": "sid",
+                    "text": "嘟嘟嘟",
+                    "run_id": "run-final-snapshot",
+                    "turn_id": "turn-final-snapshot",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    deltas = [args[2] for args in emitted if args[0] == "message.delta"]
+    assert [payload["mode"] for payload in deltas] == ["append", "snapshot"]
+    assert deltas[0]["delta"] == "收到信号信号！！有什么有什么"
+    assert deltas[1]["snapshot"] == "收到信号！有什么我可以帮你的吗？"
+    assert deltas[1]["source"] == "final_response_reconciliation"
+    assert deltas[1]["final_text_mismatch"] is True
+
+    complete_events = [args[2] for args in emitted if args[0] == "message.complete"]
+    assert complete_events[-1]["final_text_mismatch"] is True
+    assert complete_events[-1]["text_available"] is True
+    assert complete_events[-1]["text_length"] == len("收到信号！有什么我可以帮你的吗？")
+
+
+def test_emit_does_not_echo_direct_stream_event_to_same_run_subscription(monkeypatch):
+    """A session owner transport must not receive its own run-event replay."""
+
+    from tui_gateway.services import run_control
+
+    class _Transport:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, obj):
+            self.frames.append(obj)
+            return True
+
+    transport = _Transport()
+    server._sessions["sid"] = _session(
+        transport=transport,
+        active_run_id="run-stream-echo",
+        active_turn_id="turn-stream-echo",
+        active_runtime_scope_key="profile:agent-default",
+    )
+    subscription_id, _ = run_control.subscribe_session_with_id(
+        stored_session_id="session-key",
+        transport=transport,
+        active_only=True,
+        runtime_scope_key="profile:agent-default",
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    try:
+        server._emit("message.delta", "sid", {"delta": "hello"})
+    finally:
+        run_control.unsubscribe_session(subscription_id=subscription_id)
+        server._sessions.pop("sid", None)
+
+    events = [
+        frame.get("params") or {}
+        for frame in transport.frames
+        if frame.get("method") == "event"
+    ]
+    assert len(events) == 1
+    assert events[0]["type"] == "message.delta"
+    assert events[0]["payload"]["delta"] == "hello"
+
+
+def test_prompt_submit_does_not_auto_title_session_on_complete(monkeypatch):
+    """prompt.submit must not call the removed auto-title worker."""
 
     class _Agent:
         def run_conversation(
@@ -4390,19 +4575,19 @@ def test_prompt_submit_auto_titles_session_on_complete(monkeypatch):
             {
                 "id": "1",
                 "method": "prompt.submit",
-                "params": {"session_id": "sid", "text": "Tell me about Rome"},
+                "params": {
+                    "_run_registry_reserved": True,
+                    "session_id": "sid",
+                    "text": "Tell me about Rome",
+                },
             }
         )
 
-    mock_title.assert_called_once()
-    args = mock_title.call_args.args
-    assert args[1] == "session-key"
-    assert args[2] == "Tell me about Rome"
-    assert args[3] == "Rome was founded in 753 BC."
+    mock_title.assert_not_called()
 
 
 def test_prompt_submit_skips_auto_title_when_interrupted(monkeypatch):
-    """maybe_auto_title must NOT be called when the agent was interrupted."""
+    """Auto-title stays disabled when the agent is interrupted."""
 
     class _Agent:
         def run_conversation(
@@ -4426,7 +4611,11 @@ def test_prompt_submit_skips_auto_title_when_interrupted(monkeypatch):
             {
                 "id": "1",
                 "method": "prompt.submit",
-                "params": {"session_id": "sid", "text": "Tell me about Rome"},
+                "params": {
+                    "_run_registry_reserved": True,
+                    "session_id": "sid",
+                    "text": "Tell me about Rome",
+                },
             }
         )
 
@@ -4446,7 +4635,8 @@ def test_prompt_submit_does_not_surface_interrupt_diagnostic_as_text(monkeypatch
                 "messages": [],
             }
 
-    server._sessions["sid"] = _session(agent=_Agent())
+    server._sessions.pop("sid", None)
+    monkeypatch.setitem(server._sessions, "sid", _session(agent=_Agent(), transient=True))
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     emitted: list[tuple[str, str, dict]] = []
     monkeypatch.setattr(
@@ -4462,7 +4652,13 @@ def test_prompt_submit_does_not_surface_interrupt_diagnostic_as_text(monkeypatch
         {
             "id": "1",
             "method": "prompt.submit",
-            "params": {"session_id": "sid", "text": "Tell me about Rome"},
+            "params": {
+                "_run_registry_reserved": True,
+                "session_id": "sid",
+                "text": "Tell me about Rome",
+                "run_id": "run-interrupted-contract",
+                "turn_id": "turn-interrupted-contract",
+            },
         }
     )
 
@@ -4470,7 +4666,8 @@ def test_prompt_submit_does_not_surface_interrupt_diagnostic_as_text(monkeypatch
     assert complete_events, "expected message.complete to be emitted"
     payload = complete_events[-1][2]
     assert payload.get("status") == "interrupted"
-    assert payload.get("text") == ""
+    assert "text" not in payload
+    assert payload.get("text_available") is False
     assert payload.get("interrupt_detail", "").startswith("Operation interrupted:")
 
 
@@ -4563,8 +4760,10 @@ def test_prompt_submit_persists_interrupted_partial_after_tool_flush(monkeypatch
                 "client_message_id": "",
                 "attachments": [],
                 "draft_text": "use a tool first",
+                "persist_user_message": "",
                 "model": "",
                 "model_descriptor": {},
+                "reasoning_config": None,
                 "doxie_product_context": "",
             },
         },
@@ -4598,7 +4797,7 @@ def test_prompt_submit_persists_interrupted_partial_after_tool_flush(monkeypatch
 
 
 def test_prompt_submit_skips_auto_title_when_response_empty(monkeypatch):
-    """maybe_auto_title must NOT be called when the agent returns an empty reply."""
+    """Auto-title stays disabled when the agent returns an empty reply."""
 
     class _Agent:
         def run_conversation(
@@ -4621,7 +4820,11 @@ def test_prompt_submit_skips_auto_title_when_response_empty(monkeypatch):
             {
                 "id": "1",
                 "method": "prompt.submit",
-                "params": {"session_id": "sid", "text": "Tell me about Rome"},
+                "params": {
+                    "_run_registry_reserved": True,
+                    "session_id": "sid",
+                    "text": "Tell me about Rome",
+                },
             }
         )
 
@@ -4646,7 +4849,8 @@ def test_prompt_submit_surfaces_backend_error_as_visible_text(monkeypatch):
                 "error": "HTTP 400: invalid model id 'kimi-k2.6'",
             }
 
-    server._sessions["sid"] = _session(agent=_Agent())
+    server._sessions.pop("sid", None)
+    monkeypatch.setitem(server._sessions, "sid", _session(agent=_Agent(), transient=True))
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
 
     emitted: list[tuple[str, str, dict]] = []
@@ -4663,16 +4867,30 @@ def test_prompt_submit_surfaces_backend_error_as_visible_text(monkeypatch):
         {
             "id": "1",
             "method": "prompt.submit",
-            "params": {"session_id": "sid", "text": "hello"},
+            "params": {
+                "_run_registry_reserved": True,
+                "session_id": "sid",
+                "text": "hello",
+                "run_id": "run-error-contract",
+                "turn_id": "turn-error-contract",
+            },
         }
     )
+
+    delta_events = [e for e in emitted if e[0] == "message.delta"]
+    assert delta_events, "expected backend error to be emitted as visible delta"
+    delta_payload = delta_events[-1][2]
+    assert delta_payload.get("mode") == "append"
+    assert delta_payload.get("delta", "").startswith("Error:")
+    assert "kimi-k2.6" in delta_payload.get("delta", "")
 
     complete_events = [e for e in emitted if e[0] == "message.complete"]
     assert complete_events, "expected message.complete to be emitted"
     payload = complete_events[-1][2]
     assert payload.get("status") == "error"
-    assert payload.get("text", "").startswith("Error:")
-    assert "kimi-k2.6" in payload.get("text", "")
+    assert "text" not in payload
+    assert payload.get("text_available") is True
+    assert payload.get("text_length") == len(delta_payload["delta"])
 
 
 def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
@@ -4691,7 +4909,8 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
                 "completed": True,
             }
 
-    server._sessions["sid"] = _session(agent=_Agent())
+    server._sessions.pop("sid", None)
+    monkeypatch.setitem(server._sessions, "sid", _session(agent=_Agent(), transient=True))
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
 
     emitted: list[tuple[str, str, dict]] = []
@@ -4708,7 +4927,13 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
         {
             "id": "1",
             "method": "prompt.submit",
-            "params": {"session_id": "sid", "text": "hello"},
+            "params": {
+                "_run_registry_reserved": True,
+                "session_id": "sid",
+                "text": "hello",
+                "run_id": "run-empty-contract",
+                "turn_id": "turn-empty-contract",
+            },
         }
     )
 
@@ -4717,9 +4942,10 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
     payload = complete_events[-1][2]
     # Status stays "complete" because no error flag was set
     assert payload.get("status") == "complete"
-    # Text stays empty — we did NOT fabricate an "Error:" string
-    text = payload.get("text", "")
-    assert text in {"", None}, f"expected empty text, got {text!r}"
+    # Text stays empty and complete carries only terminal metadata.
+    assert "text" not in payload
+    assert payload.get("text_available") is False
+    assert payload.get("text_length") == 0
 
 
 # ── session.most_recent ──────────────────────────────────────────────
@@ -4961,6 +5187,10 @@ def test_browser_manage_connect_default_local_reports_launch_hint(monkeypatch):
             patch(
                 "hermes_cli.browser_connect.get_chrome_debug_candidates",
                 return_value=[],
+            ),
+            patch(
+                "hermes_cli.browser_connect.manual_chrome_debug_command",
+                return_value=None,
             ),
         ):
             resp = server.handle_request(

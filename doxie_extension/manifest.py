@@ -6,8 +6,8 @@ import importlib.util
 import inspect
 from typing import Any
 
-CONTRACT_VERSION = "2026-06-10"
-EXTENSION_VERSION = "2026-06-10"
+CONTRACT_VERSION = "2026-06-15"
+EXTENSION_VERSION = "2026-06-15"
 
 REQUIRED_METHODS = [
     "gateway.capabilities",
@@ -18,6 +18,8 @@ REQUIRED_METHODS = [
     "session.branch",
     "session.status",
     "session.usage",
+    "conversation.activity.list",
+    "conversation.render_snapshot",
     "session.delete",
     "session.title",
     "prompt.submit",
@@ -29,6 +31,23 @@ REQUIRED_METHODS = [
     "events.subscribe",
     "events.unsubscribe",
     "team_mission.create",
+    "team_registry.team.upsert",
+    "team_registry.team.get",
+    "team_registry.team.list",
+    "team_registry.team.archive",
+    "team_registry.member.upsert",
+    "team_registry.member.get",
+    "team_registry.member.list",
+    "team_registry.member.delete",
+    "profile.upsert",
+    "profile.get",
+    "profile.growth.summary",
+    "profile.list",
+    "profile.archive",
+    "profile.draft.upsert",
+    "profile.draft.get",
+    "profile.draft.list",
+    "profile.draft.discard",
     "team_mission.graph",
     "team_mission.graph.reduce",
     "team_mission.events",
@@ -39,6 +58,7 @@ REQUIRED_METHODS = [
     "team_mission.team_profile.get",
     "team_mission.conversation.ensure",
     "team_mission.conversation.resolve",
+    "team_mission.conversation.render",
     "team_mission.conversation.list",
     "team_mission.conversation.rename",
     "team_mission.conversation.delete",
@@ -51,6 +71,7 @@ REQUIRED_METHODS = [
     "team_mission.node.history",
     "team_mission.node.start",
     "team_mission.plan.complete",
+    "team_mission.plan.approve",
     "team_mission.schedule.ready",
     "team_mission.memory.compile",
     "team_mission.memory.pack",
@@ -74,7 +95,12 @@ REQUIRED_METHODS = [
     "profile.prepare_runtime",
     "runtime.ensure",
     "runtime.status",
+    "storage.stats",
     "workspace.current",
+    "workspace.session.current",
+    "workspace.session.bind",
+    "workspace.session.list",
+    "workspace.session.delete",
     "workspace.list",
     "artifacts.list",
 ]
@@ -108,7 +134,9 @@ REQUIRED_STATE_FEATURES = [
     "state:transient_session",
     "state:run_registry",
     "state:run_event_log",
+    "state:agent_profile_registry",
     "state:team_mission_graph",
+    "state:team_registry",
     "state:team_mission_conversation",
     "state:team_mission_memory",
     "state:team_capability_snapshot",
@@ -132,6 +160,8 @@ METHOD_MODULES = {
     "session.branch": "tui_gateway.methods.session_branch",
     "session.status": "tui_gateway.methods.session",
     "session.usage": "tui_gateway.methods.session",
+    "conversation.activity.list": "tui_gateway.methods.conversation_activity",
+    "conversation.render_snapshot": "tui_gateway.methods.conversation_render_snapshot",
     "session.delete": "tui_gateway.methods.session",
     "session.title": "tui_gateway.methods.session",
     "run.reserve": "tui_gateway.methods.run",
@@ -142,6 +172,23 @@ METHOD_MODULES = {
     "events.subscribe": "tui_gateway.methods.run",
     "events.unsubscribe": "tui_gateway.methods.run",
     "team_mission.create": "tui_gateway.methods.team_mission",
+    "team_registry.team.upsert": "tui_gateway.methods.team_registry",
+    "team_registry.team.get": "tui_gateway.methods.team_registry",
+    "team_registry.team.list": "tui_gateway.methods.team_registry",
+    "team_registry.team.archive": "tui_gateway.methods.team_registry",
+    "team_registry.member.upsert": "tui_gateway.methods.team_registry",
+    "team_registry.member.get": "tui_gateway.methods.team_registry",
+    "team_registry.member.list": "tui_gateway.methods.team_registry",
+    "team_registry.member.delete": "tui_gateway.methods.team_registry",
+    "profile.upsert": "tui_gateway.methods.profile_registry",
+    "profile.get": "tui_gateway.methods.profile_registry",
+    "profile.growth.summary": "tui_gateway.methods.profile_registry",
+    "profile.list": "tui_gateway.methods.profile_registry",
+    "profile.archive": "tui_gateway.methods.profile_registry",
+    "profile.draft.upsert": "tui_gateway.methods.profile_registry",
+    "profile.draft.get": "tui_gateway.methods.profile_registry",
+    "profile.draft.list": "tui_gateway.methods.profile_registry",
+    "profile.draft.discard": "tui_gateway.methods.profile_registry",
     "team_mission.graph": "tui_gateway.methods.team_mission",
     "team_mission.graph.reduce": "tui_gateway.methods.team_mission",
     "team_mission.events": "tui_gateway.methods.team_mission",
@@ -152,6 +199,7 @@ METHOD_MODULES = {
     "team_mission.team_profile.get": "tui_gateway.methods.team_mission",
     "team_mission.conversation.ensure": "tui_gateway.methods.team_mission",
     "team_mission.conversation.resolve": "tui_gateway.methods.team_mission",
+    "team_mission.conversation.render": "tui_gateway.methods.conversation_render_snapshot",
     "team_mission.conversation.list": "tui_gateway.methods.team_mission",
     "team_mission.conversation.rename": "tui_gateway.methods.team_mission",
     "team_mission.conversation.delete": "tui_gateway.methods.team_mission",
@@ -164,6 +212,7 @@ METHOD_MODULES = {
     "team_mission.node.history": "tui_gateway.methods.team_mission_history",
     "team_mission.node.start": "tui_gateway.methods.team_mission",
     "team_mission.plan.complete": "tui_gateway.methods.team_mission",
+    "team_mission.plan.approve": "tui_gateway.methods.team_mission",
     "team_mission.schedule.ready": "tui_gateway.methods.team_mission",
     "team_mission.memory.compile": "tui_gateway.methods.team_mission",
     "team_mission.memory.pack": "tui_gateway.methods.team_mission",
@@ -187,7 +236,12 @@ METHOD_MODULES = {
     "profile.prepare_runtime": "tui_gateway.methods.system",
     "runtime.ensure": "tui_gateway.methods.system",
     "runtime.status": "tui_gateway.methods.system",
+    "storage.stats": "tui_gateway.methods.system",
     "workspace.current": "tui_gateway.methods.workspace_artifacts",
+    "workspace.session.current": "tui_gateway.methods.workspace_artifacts",
+    "workspace.session.bind": "tui_gateway.methods.workspace_artifacts",
+    "workspace.session.list": "tui_gateway.methods.workspace_artifacts",
+    "workspace.session.delete": "tui_gateway.methods.workspace_artifacts",
     "workspace.list": "tui_gateway.methods.workspace_artifacts",
     "artifacts.list": "tui_gateway.methods.workspace_artifacts",
     "prompt.submit": "tui_gateway.methods.prompt",
@@ -237,6 +291,26 @@ def _state_features_present() -> set[str]:
         present.add("state:message_reasoning")
     if _session_db_method("search_messages") and _session_db_method("search_sessions"):
         present.add("state:session_search")
+    if all(
+        _session_db_method(name)
+        for name in (
+            "upsert_agent_team",
+            "get_agent_team_with_members",
+            "upsert_agent_team_member",
+            "delete_agent_team_member",
+        )
+    ) and _session_db_schema_contains("agent_teams", "agent_team_members"):
+        present.add("state:team_registry")
+    if all(
+        _session_db_method(name)
+        for name in (
+            "upsert_agent_profile",
+            "get_agent_profile",
+            "upsert_agent_profile_draft",
+            "discard_agent_profile_draft",
+        )
+    ) and _session_db_schema_contains("agent_profiles", "agent_profile_drafts"):
+        present.add("state:agent_profile_registry")
     if all(
         _session_db_method(name)
         for name in (

@@ -22,6 +22,7 @@ DOXIE_STRUCTURED_RESULT_TOOLS = {
     "doxie_automation_task_list",
     "doxie_automation_task_update",
     "doxie_automation_task_remove",
+    "team_mission_start_task",
 }
 
 
@@ -103,6 +104,28 @@ def _doxie_structured_tool_result(name: str, result: str) -> dict | None:
         if event_name != "automation_job_removed":
             return None
         return data if isinstance(data.get("job"), dict) else None
+    if name == "team_mission_start_task":
+        control = data.get("hermes_control")
+        if not isinstance(control, dict):
+            return None
+        if control.get("kind") != "team_mission_started":
+            return None
+        mission_id = str(data.get("mission_id") or "").strip()
+        conversation_id = str(data.get("conversation_id") or "").strip()
+        if not mission_id or not conversation_id:
+            return None
+        return {
+            "doxie_event": "team_mission_started",
+            "mission_id": mission_id,
+            "conversation_id": conversation_id,
+            "task_id": str(data.get("task_id") or "").strip(),
+            "node": data.get("node") if isinstance(data.get("node"), dict) else {},
+            "run": data.get("run") if isinstance(data.get("run"), dict) else {},
+            "graph_summary": data.get("graph_summary") if isinstance(data.get("graph_summary"), dict) else {},
+            "submission_status": str(data.get("submission_status") or "").strip(),
+            "task_status": str(data.get("task_status") or control.get("mission_status") or "").strip(),
+            "await_final_deliverable": bool(data.get("await_final_deliverable") or control.get("await_final_deliverable")),
+        }
     if event_name not in {
         "agent_profile_draft_requested",
         "agent_profile_design_draft_requested",

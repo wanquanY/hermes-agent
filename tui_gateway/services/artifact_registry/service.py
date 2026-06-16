@@ -160,3 +160,41 @@ def list_artifacts(
         workspace_id=workspace_id,
         limit=limit,
     )
+
+
+def delete_session_artifacts(session_ids: list[str]) -> dict[str, Any]:
+    store = get_gateway_state_store(create_if_missing=False)
+    if store is None:
+        return {
+            "skipped": True,
+            "deleted_artifact_links": 0,
+            "deleted_artifacts": 0,
+            "deleted_artifact_ids": [],
+            "physical_files_deleted": 0,
+        }
+    return store.delete_session_artifacts(session_ids)
+
+
+def prune_artifacts(
+    *,
+    session_id: str = "",
+    workspace_id: str = "",
+    retention_days: int = 30,
+    max_artifacts_per_session: int = 500,
+    max_artifacts_per_workspace: int = 2000,
+) -> dict[str, Any]:
+    store = get_gateway_state_store(create_if_missing=False)
+    if store is None:
+        return {
+            "skipped": True,
+            "deleted_artifact_links": 0,
+            "deleted_artifacts": 0,
+            "physical_files_deleted": 0,
+        }
+    return store.prune_artifacts(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        retention_days=retention_days,
+        max_artifacts_per_session=max_artifacts_per_session,
+        max_artifacts_per_workspace=max_artifacts_per_workspace,
+    )

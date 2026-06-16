@@ -7,6 +7,8 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional
 
+from hermes_runtime_event_payloads import primary_deliverable_text
+
 logger = logging.getLogger(__name__)
 
 ACTIVE_RUN_STATUSES = {
@@ -36,6 +38,23 @@ COALESCIBLE_STREAM_EVENT_TYPES = {
     "subagent.thinking",
     "agent_profile_test.output_delta",
     "agent_profile_test.thinking",
+}
+STREAM_COMPACTION_BOUNDARY_EVENT_TYPES = {
+    "message.start",
+    "message.complete",
+    "error",
+    "session.interrupted",
+}
+SUBAGENT_STREAM_COMPACTION_BOUNDARY_EVENT_TYPES = {
+    "subagent.start",
+    "subagent.tool",
+    "subagent.complete",
+    "subagent.error",
+}
+SUBAGENT_COALESCIBLE_STREAM_EVENT_TYPES = {
+    "subagent.output_delta",
+    "subagent.reasoning_delta",
+    "subagent.thinking",
 }
 RUNTIME_LIFECYCLE_EVENT_PREFIXES = (
     "message.",
@@ -186,6 +205,33 @@ def _event_text_delta(event: Dict[str, Any]) -> str:
     return str(payload.get("text") or payload.get("delta") or payload.get("output") or "")
 
 
+def _suffix_prefix_overlap(left: str, right: str) -> int:
+    if not left or not right:
+        return 0
+    max_len = min(len(left), len(right))
+    for size in range(max_len, 0, -1):
+        if left.endswith(right[:size]):
+            return size
+    return 0
+
+
+def _merge_stream_text(previous_text: str, incoming_text: str) -> str:
+    previous = str(previous_text or "")
+    incoming = str(incoming_text or "")
+    if not incoming:
+        return previous
+    if not previous:
+        return incoming
+    if incoming == previous or incoming in previous:
+        return previous
+    if incoming.startswith(previous):
+        return incoming
+    overlap = _suffix_prefix_overlap(previous, incoming)
+    if overlap > 0:
+        return previous + incoming[overlap:]
+    return previous + incoming
+
+
 def _event_stream_mode(event: Dict[str, Any]) -> str:
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     return str(payload.get("mode") or "").strip().lower()
@@ -217,11 +263,98 @@ def _event_stream_identity(event: Dict[str, Any]) -> tuple[Any, ...]:
     return tuple(identity)
 
 
+def _stream_compaction_boundary_event_types(event_type: str) -> set[str]:
+    event_type = str(event_type or "").strip()
+    boundaries = set(STREAM_COMPACTION_BOUNDARY_EVENT_TYPES)
+    if event_type in SUBAGENT_COALESCIBLE_STREAM_EVENT_TYPES:
+        boundaries.update(SUBAGENT_STREAM_COMPACTION_BOUNDARY_EVENT_TYPES)
+    return boundaries
+
+
+def _boundary_stream_types(event_type: str) -> set[str] | None:
+    event_type = str(event_type or "").strip()
+    if event_type in STREAM_COMPACTION_BOUNDARY_EVENT_TYPES:
+        return None
+    if event_type in SUBAGENT_STREAM_COMPACTION_BOUNDARY_EVENT_TYPES:
+        return set(SUBAGENT_COALESCIBLE_STREAM_EVENT_TYPES)
+    return set()
+
+
+def _payload_int(payload: Dict[str, Any], key: str) -> int | None:
+    if key not in payload:
+        return None
+    try:
+        return int(payload.get(key))
+    except (TypeError, ValueError):
+        return None
+
+
+def _stream_events_can_coalesce(previous_event: Dict[str, Any], event: Dict[str, Any]) -> bool:
+    if not (
+        _event_is_coalescible_stream_delta(previous_event)
+        and _event_is_coalescible_stream_delta(event)
+        and _event_stream_identity(previous_event) == _event_stream_identity(event)
+    ):
+        return False
+    if str(event.get("type") or "") != "message.delta":
+        return True
+    previous_payload = (
+        previous_event.get("payload")
+        if isinstance(previous_event.get("payload"), dict)
+        else {}
+    )
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    previous_offset = _payload_int(previous_payload, "offset")
+    next_offset = _payload_int(payload, "offset")
+    if previous_offset is None or next_offset is None:
+        return True
+    return next_offset == previous_offset + len(_event_text_delta(previous_event))
+
+
+def _stream_events_require_contiguous_rows(
+    previous_event: Dict[str, Any],
+    event: Dict[str, Any],
+) -> bool:
+    if str(previous_event.get("type") or "") != "message.delta":
+        return False
+    if str(event.get("type") or "") != "message.delta":
+        return False
+    previous_payload = (
+        previous_event.get("payload")
+        if isinstance(previous_event.get("payload"), dict)
+        else {}
+    )
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    return _payload_int(previous_payload, "offset") is None or _payload_int(payload, "offset") is None
+
+
 def _merge_stream_payload(previous_event: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
     previous_payload = previous_event.get("payload") if isinstance(previous_event.get("payload"), dict) else {}
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     merged_payload = dict(previous_payload)
-    merged_text = f"{_event_text_delta(previous_event)}{_event_text_delta(event)}"
+    previous_text = _event_text_delta(previous_event)
+    incoming_text = _event_text_delta(event)
+    previous_offset = _payload_int(previous_payload, "offset")
+    next_offset = _payload_int(payload, "offset")
+    incoming_is_cumulative = bool(
+        previous_text
+        and incoming_text
+        and (
+            incoming_text == previous_text
+            or incoming_text in previous_text
+            or incoming_text.startswith(previous_text)
+        )
+    )
+    if (
+        str(event.get("type") or "") == "message.delta"
+        and previous_offset is not None
+        and next_offset is not None
+        and next_offset > previous_offset
+        and not incoming_is_cumulative
+    ):
+        merged_text = previous_text[:next_offset] + incoming_text
+    else:
+        merged_text = _merge_stream_text(previous_text, incoming_text)
     for key in ("text", "delta", "output"):
         if key in previous_payload or key in payload:
             merged_payload[key] = merged_text
@@ -580,6 +713,27 @@ class SessionDBRunMixin:
         payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
         run_id = _event_run_id(frame)
         turn_id = _event_turn_id(frame)
+        if (
+            event_type == "message.complete"
+            and str(payload.get("status") or "").strip().lower() in {"failed", "error"}
+            and primary_deliverable_text(payload)
+            and hasattr(self, "get_team_mission_run_binding")
+        ):
+            try:
+                team_mission_binding = self.get_team_mission_run_binding(run_id)  # type: ignore[attr-defined]
+            except Exception:
+                team_mission_binding = None
+            if isinstance(team_mission_binding, dict) and team_mission_binding:
+                normalized_payload = dict(payload)
+                original_status = str(normalized_payload.get("status") or "").strip()
+                original_error = str(normalized_payload.get("message") or normalized_payload.get("error") or "").strip()
+                normalized_payload["text"] = primary_deliverable_text(payload)
+                normalized_payload["status"] = "complete"
+                normalized_payload["team_mission_terminal_status_recovered"] = original_status
+                if original_error:
+                    normalized_payload["nonfatal_error"] = original_error
+                frame["payload"] = normalized_payload
+                payload = normalized_payload
         runtime_session_id = str(frame.get("session_id") or "").strip()
         runtime_scope_key = _event_runtime_scope_key(frame, stable)
         frame["runtime_scope_key"] = runtime_scope_key
@@ -597,65 +751,181 @@ class SessionDBRunMixin:
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
             inserted_event = frame
             coalesced = False
+            existing = None
+            existing_status = ""
+            if run_id:
+                existing = conn.execute(
+                    "SELECT * FROM runs WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                existing_status = str(_row_value(existing, "status", "") or "")
+                if existing_status in TERMINAL_RUN_STATUSES and terminal_status in TERMINAL_RUN_STATUSES:
+                    preferred_status = _prefer_terminal_run_status(existing_status, terminal_status)
+                    if preferred_status == existing_status:
+                        canonical = conn.execute(
+                            """
+                            SELECT event_json
+                            FROM run_events
+                            WHERE session_id = ?
+                              AND run_id = ?
+                              AND status = ?
+                            ORDER BY seq DESC, id DESC
+                            LIMIT 1
+                            """,
+                            (stable, run_id, existing_status),
+                        ).fetchone()
+                        canonical_event = _json_loads(_row_value(canonical, "event_json", ""), {})
+                        if isinstance(canonical_event, dict) and canonical_event:
+                            canonical_event["_persistence_disposition"] = "duplicate_terminal"
+                            return canonical_event
+                        canonical_payload = dict(payload)
+                        canonical_payload["status"] = "complete" if existing_status == "completed" else existing_status
+                        duplicate_event = {
+                            **frame,
+                            "payload": canonical_payload,
+                            "status": existing_status,
+                            "seq": int(_row_value(existing, "last_seq", seq) or seq),
+                        }
+                        duplicate_event["_persistence_disposition"] = "duplicate_terminal"
+                        return duplicate_event
             if _event_is_coalescible_stream_delta(frame):
-                previous = conn.execute(
-                    """
-                    SELECT id, event_json
+                boundary_event_types = _stream_compaction_boundary_event_types(event_type)
+                boundary_placeholders = ",".join("?" for _ in boundary_event_types)
+                boundary = conn.execute(
+                    f"""
+                    SELECT COALESCE(MAX(seq), 0) AS boundary_seq
                     FROM run_events
                     WHERE session_id = ?
-                    ORDER BY seq DESC
-                    LIMIT 1
+                      AND (? = '' OR run_id = ?)
+                      AND (? = '' OR turn_id = ?)
+                      AND event_type IN ({boundary_placeholders})
                     """,
-                    (stable,),
+                    (
+                        stable,
+                        run_id,
+                        run_id,
+                        turn_id,
+                        turn_id,
+                        *sorted(boundary_event_types),
+                    ),
                 ).fetchone()
-                previous_event = _json_loads(_row_value(previous, "event_json", ""), {})
-                if (
-                    isinstance(previous_event, dict)
-                    and _event_is_coalescible_stream_delta(previous_event)
-                    and _event_stream_identity(previous_event) == _event_stream_identity(frame)
-                ):
-                    merged_payload = _merge_stream_payload(previous_event, frame)
-                    merged_event = {
-                        **previous_event,
-                        "session_id": runtime_session_id or previous_event.get("session_id") or "",
-                        "stored_session_id": stable,
-                        "run_id": run_id or previous_event.get("run_id") or "",
-                        "turn_id": turn_id or previous_event.get("turn_id") or "",
-                        "runtime_session_id": runtime_session_id or previous_event.get("runtime_session_id") or "",
-                        "runtime_scope_key": runtime_scope_key,
-                        "seq": seq,
-                        "timestamp": timestamp,
-                        "payload": merged_payload,
-                    }
-                    conn.execute(
+                boundary_seq = int(_row_value(boundary, "boundary_seq", 0) or 0)
+                candidates = conn.execute(
+                    """
+                    SELECT id, seq, event_json
+                    FROM run_events
+                    WHERE session_id = ?
+                      AND event_type = ?
+                      AND (? = '' OR run_id = ?)
+                      AND (? = '' OR turn_id = ?)
+                      AND COALESCE(runtime_scope_key, '') = ?
+                      AND seq > ?
+                    ORDER BY seq DESC
+                    LIMIT 128
+                    """,
+                    (
+                        stable,
+                        event_type,
+                        run_id,
+                        run_id,
+                        turn_id,
+                        turn_id,
+                        runtime_scope_key,
+                        boundary_seq,
+                    ),
+                ).fetchall()
+                previous = None
+                previous_event: Dict[str, Any] = {}
+                for candidate in candidates:
+                    candidate_event = _json_loads(_row_value(candidate, "event_json", ""), {})
+                    if (
+                        isinstance(candidate_event, dict)
+                        and _stream_events_can_coalesce(candidate_event, frame)
+                    ):
+                        if _stream_events_require_contiguous_rows(candidate_event, frame):
+                            interleaving = conn.execute(
+                                """
+                                SELECT 1
+                                FROM run_events
+                                WHERE session_id = ?
+                                  AND (? = '' OR run_id = ?)
+                                  AND (? = '' OR turn_id = ?)
+                                  AND COALESCE(runtime_scope_key, '') = ?
+                                  AND seq > ?
+                                  AND seq < ?
+                                LIMIT 1
+                                """,
+                                (
+                                    stable,
+                                    run_id,
+                                    run_id,
+                                    turn_id,
+                                    turn_id,
+                                    runtime_scope_key,
+                                    int(_row_value(candidate, "seq", 0) or 0),
+                                    seq,
+                                ),
+                            ).fetchone()
+                            if interleaving is not None:
+                                continue
+                        previous = candidate
+                        previous_event = candidate_event
+                        break
+                if previous is not None:
+                    target_seq = conn.execute(
                         """
-                        UPDATE run_events
-                        SET run_id = ?,
-                            turn_id = ?,
-                            runtime_session_id = ?,
-                            runtime_scope_key = ?,
-                            seq = ?,
-                            timestamp = ?,
-                            payload_json = ?,
-                            event_json = ?,
-                            status = ?
-                        WHERE id = ?
+                        SELECT id
+                        FROM run_events
+                        WHERE session_id = ?
+                          AND seq = ?
+                          AND id != ?
+                        LIMIT 1
                         """,
-                        (
-                            run_id,
-                            turn_id,
-                            runtime_session_id,
-                            runtime_scope_key,
-                            seq,
-                            timestamp,
-                            _json_dumps(merged_payload),
-                            _json_dumps(merged_event),
-                            terminal_status or "",
-                            previous["id"],
-                        ),
-                    )
-                    inserted_event = merged_event
-                    coalesced = True
+                        (stable, seq, previous["id"]),
+                    ).fetchone()
+                    if target_seq is None:
+                        merged_payload = _merge_stream_payload(previous_event, frame)
+                        merged_event = {
+                            **previous_event,
+                            "session_id": runtime_session_id or previous_event.get("session_id") or "",
+                            "stored_session_id": stable,
+                            "run_id": run_id or previous_event.get("run_id") or "",
+                            "turn_id": turn_id or previous_event.get("turn_id") or "",
+                            "runtime_session_id": runtime_session_id or previous_event.get("runtime_session_id") or "",
+                            "runtime_scope_key": runtime_scope_key,
+                            "seq": seq,
+                            "timestamp": timestamp,
+                            "payload": merged_payload,
+                        }
+                        conn.execute(
+                            """
+                            UPDATE run_events
+                            SET run_id = ?,
+                                turn_id = ?,
+                                runtime_session_id = ?,
+                                runtime_scope_key = ?,
+                                seq = ?,
+                                timestamp = ?,
+                                payload_json = ?,
+                                event_json = ?,
+                                status = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                run_id,
+                                turn_id,
+                                runtime_session_id,
+                                runtime_scope_key,
+                                seq,
+                                timestamp,
+                                _json_dumps(merged_payload),
+                                _json_dumps(merged_event),
+                                terminal_status or "",
+                                previous["id"],
+                            ),
+                        )
+                        inserted_event = merged_event
+                        coalesced = True
             if not coalesced:
                 conn.execute(
                     """
@@ -680,10 +950,6 @@ class SessionDBRunMixin:
                     ),
                 )
             if run_id:
-                existing = conn.execute(
-                    "SELECT * FROM runs WHERE run_id = ?",
-                    (run_id,),
-                ).fetchone()
                 should_track_run = bool(
                     existing is not None
                     or terminal_status
@@ -691,7 +957,6 @@ class SessionDBRunMixin:
                 )
                 if not should_track_run:
                     return inserted_event
-                existing_status = str(_row_value(existing, "status", "") or "")
                 next_status = terminal_status or existing_status or "running"
                 if existing_status in TERMINAL_RUN_STATUSES and terminal_status is None:
                     next_status = existing_status
@@ -806,6 +1071,11 @@ class SessionDBRunMixin:
             or terminal_status in TERMINAL_RUN_STATUSES
         )
         if should_prune:
+            if terminal_status in TERMINAL_RUN_STATUSES:
+                try:
+                    self.compact_run_events(session_id=stable)
+                except Exception as exc:
+                    logger.debug("run event compaction skipped for %s: %s", stable, exc)
             try:
                 self.prune_run_events(session_id=stable)
             except Exception as exc:
@@ -1362,15 +1632,16 @@ class SessionDBRunMixin:
         session_id: str = "",
         vacuum: bool = False,
     ) -> Dict[str, Any]:
-        """Coalesce already-persisted stream deltas without changing boundaries.
+        """Coalesce already-persisted stream deltas without preserving chunk rows.
 
         ``run_events`` is an operational replay log, not the canonical message
         store.  Token-sized stream rows are useful live but wasteful on disk.
-        This maintenance pass keeps the final sequence point for each
-        contiguous stream segment and removes only redundant preceding delta
-        rows.  Tool/progress/snapshot/terminal boundaries stay intact.  Set
-        ``vacuum`` only during explicit maintenance windows when the caller
-        also wants SQLite to release freed pages back to the filesystem.
+        This maintenance pass keeps the final sequence point for each logical
+        stream segment and removes redundant preceding delta rows even when
+        tool/progress events were interleaved during the live run.  Terminal
+        and message-start events remain hard boundaries.  Set ``vacuum`` only
+        during explicit maintenance windows when the caller also wants SQLite
+        to release freed pages back to the filesystem.
         """
         stable_filter = str(session_id or "").strip()
 
@@ -1395,13 +1666,112 @@ class SessionDBRunMixin:
 
             compacted_segments = 0
             deleted_events = 0
+            deduplicated_terminal_groups = 0
             updated_events = 0
-            pending: list[tuple[sqlite3.Row, Dict[str, Any]]] = []
+            pending_by_key: dict[tuple[Any, ...], list[tuple[sqlite3.Row, Dict[str, Any]]]] = {}
+            interrupted_pending_keys: set[tuple[Any, ...]] = set()
+            affected_run_ids: set[str] = set()
+
+            def compact_terminal_duplicates() -> None:
+                nonlocal deduplicated_terminal_groups, deleted_events, updated_events
+                terminal_types = ("message.complete", "error", "session.interrupted")
+                terminal_statuses = tuple(sorted(TERMINAL_RUN_STATUSES))
+                terminal_type_literals = ",".join("?" for _ in terminal_types)
+                terminal_status_literals = ",".join("?" for _ in terminal_statuses)
+                group_params: list[Any] = [*terminal_types, *terminal_statuses]
+                group_session_clause = ""
+                if stable_filter:
+                    group_session_clause = "AND e.session_id = ?"
+                    group_params.append(stable_filter)
+                groups = conn.execute(
+                    f"""
+                    SELECT e.session_id,
+                           COALESCE(e.run_id, '') AS run_id,
+                           COALESCE(e.turn_id, '') AS turn_id,
+                           e.event_type,
+                           COALESCE(e.status, '') AS status,
+                           COUNT(*) AS event_count
+                    FROM run_events e
+                    LEFT JOIN runs r ON r.run_id = e.run_id
+                    WHERE e.event_type IN ({terminal_type_literals})
+                      AND COALESCE(e.status, '') IN ({terminal_status_literals})
+                      AND COALESCE(r.status, '') NOT IN ({active_statuses})
+                      {group_session_clause}
+                    GROUP BY e.session_id,
+                             COALESCE(e.run_id, ''),
+                             COALESCE(e.turn_id, ''),
+                             e.event_type,
+                             COALESCE(e.status, '')
+                    HAVING COUNT(*) > 1
+                    """,
+                    tuple(group_params),
+                ).fetchall()
+                for group in groups:
+                    rows_for_group = conn.execute(
+                        """
+                        SELECT *
+                        FROM run_events
+                        WHERE session_id = ?
+                          AND COALESCE(run_id, '') = ?
+                          AND COALESCE(turn_id, '') = ?
+                          AND event_type = ?
+                          AND COALESCE(status, '') = ?
+                        ORDER BY seq ASC, id ASC
+                        """,
+                        (
+                            group["session_id"],
+                            group["run_id"],
+                            group["turn_id"],
+                            group["event_type"],
+                            group["status"],
+                        ),
+                    ).fetchall()
+                    if len(rows_for_group) <= 1:
+                        continue
+                    keep_row = rows_for_group[-1]
+                    canonical_seq = int(rows_for_group[0]["seq"] or keep_row["seq"] or 0)
+                    keep_event = _json_loads(keep_row["event_json"], {})
+                    if not isinstance(keep_event, dict):
+                        keep_event = {}
+                    keep_event = {**keep_event, "seq": canonical_seq}
+                    keep_payload = keep_event.get("payload") if isinstance(keep_event.get("payload"), dict) else {}
+                    delete_ids = [int(row["id"]) for row in rows_for_group if int(row["id"]) != int(keep_row["id"])]
+                    for start in range(0, len(delete_ids), 500):
+                        chunk = delete_ids[start:start + 500]
+                        placeholders = ",".join("?" for _ in chunk)
+                        conn.execute(f"DELETE FROM run_events WHERE id IN ({placeholders})", tuple(chunk))
+                    conn.execute(
+                        """
+                        UPDATE run_events
+                        SET seq = ?,
+                            payload_json = ?,
+                            event_json = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            canonical_seq,
+                            _json_dumps(keep_payload),
+                            _json_dumps(keep_event),
+                            int(keep_row["id"]),
+                        ),
+                    )
+                    normalized_run_id = str(group["run_id"] or "").strip()
+                    if normalized_run_id:
+                        affected_run_ids.add(normalized_run_id)
+                    deduplicated_terminal_groups += 1
+                    deleted_events += len(delete_ids)
+                    updated_events += 1
 
             def flush_pending() -> None:
-                nonlocal compacted_segments, deleted_events, updated_events, pending
+                nonlocal compacted_segments, deleted_events, updated_events
+                for key in list(pending_by_key.keys()):
+                    flush_pending_key(key)
+
+            def flush_pending_key(key: tuple[Any, ...]) -> None:
+                nonlocal compacted_segments, deleted_events, updated_events
+                interrupted_pending_keys.discard(key)
+                pending = pending_by_key.pop(key, [])
                 if len(pending) <= 1:
-                    pending = []
                     return
                 merged_event = pending[0][1]
                 for _, event in pending[1:]:
@@ -1453,25 +1823,86 @@ class SessionDBRunMixin:
                 compacted_segments += 1
                 deleted_events += len(delete_ids)
                 updated_events += 1
-                pending = []
+                normalized_run_id = _event_run_id(merged_event)
+                if normalized_run_id:
+                    affected_run_ids.add(normalized_run_id)
 
+            compact_terminal_duplicates()
             for row in rows:
                 event = _json_loads(row["event_json"], {})
                 if not isinstance(event, dict) or not _event_is_coalescible_stream_delta(event):
-                    flush_pending()
+                    event_dict = event if isinstance(event, dict) else {}
+                    event_type = str(_row_value(row, "event_type", "") or event_dict.get("type") or "")
+                    boundary_stream_types = _boundary_stream_types(event_type)
+                    if boundary_stream_types is None:
+                        flush_pending()
+                    elif boundary_stream_types:
+                        for key in list(pending_by_key.keys()):
+                            if len(key) > 1 and key[1] in boundary_stream_types:
+                                flush_pending_key(key)
+                    else:
+                        row_session_id = str(_row_value(row, "session_id", "") or "")
+                        row_run_id = str(_row_value(row, "run_id", "") or _event_run_id(event_dict) or "")
+                        row_turn_id = str(_row_value(row, "turn_id", "") or _event_turn_id(event_dict) or "")
+                        row_scope_key = str(
+                            _row_value(row, "runtime_scope_key", "")
+                            or _event_runtime_scope_key(event_dict)
+                            or ""
+                        )
+                        for key in list(pending_by_key.keys()):
+                            if len(key) <= 4 or key[1] != "message.delta":
+                                continue
+                            pending_session_id = str(key[0] or "")
+                            pending_run_id = str(key[2] or "")
+                            pending_turn_id = str(key[3] or "")
+                            pending_scope_key = str(key[4] or "")
+                            if pending_session_id != row_session_id:
+                                continue
+                            if pending_scope_key != row_scope_key:
+                                continue
+                            if pending_run_id and pending_run_id != row_run_id:
+                                continue
+                            if pending_turn_id and pending_turn_id != row_turn_id:
+                                continue
+                            interrupted_pending_keys.add(key)
                     continue
-                if (
+                key = (str(row["session_id"] or ""), *_event_stream_identity(event))
+                pending = pending_by_key.get(key, [])
+                can_append_to_pending = (
                     pending
                     and str(row["session_id"] or "") == str(pending[-1][0]["session_id"] or "")
-                    and _event_stream_identity(event) == _event_stream_identity(pending[-1][1])
+                    and _stream_events_can_coalesce(pending[-1][1], event)
+                )
+                if (
+                    can_append_to_pending
+                    and key in interrupted_pending_keys
+                    and _stream_events_require_contiguous_rows(pending[-1][1], event)
                 ):
+                    can_append_to_pending = False
+                if can_append_to_pending:
                     pending.append((row, event))
+                    pending_by_key[key] = pending
+                    interrupted_pending_keys.discard(key)
                     continue
-                flush_pending()
-                pending = [(row, event)]
+                flush_pending_key(key)
+                pending_by_key[key] = [(row, event)]
             flush_pending()
+            for run_id in affected_run_ids:
+                conn.execute(
+                    """
+                    UPDATE runs
+                    SET last_seq = (
+                        SELECT COALESCE(MAX(seq), 0)
+                        FROM run_events
+                        WHERE run_id = ?
+                    )
+                    WHERE run_id = ?
+                    """,
+                    (run_id, run_id),
+                )
             return {
                 "compacted_segments": compacted_segments,
+                "deduplicated_terminal_groups": deduplicated_terminal_groups,
                 "deleted_events": deleted_events,
                 "updated_events": updated_events,
                 "vacuumed": False,

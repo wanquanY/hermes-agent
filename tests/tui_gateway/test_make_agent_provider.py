@@ -286,7 +286,7 @@ def test_make_agent_honors_tui_launch_env_flags():
         assert kwargs["skip_memory"] is True
 
 
-def test_make_agent_team_leader_context_disables_profile_identity_loading():
+def test_make_agent_team_leader_context_inherits_profile_identity_loading():
     fake_runtime = {
         "provider": "openrouter",
         "base_url": "https://api.synthetic.new/v1",
@@ -317,9 +317,9 @@ def test_make_agent_team_leader_context_disables_profile_identity_loading():
         )
 
         kwargs = mock_agent.call_args.kwargs
-        assert kwargs["skip_context_files"] is True
-        assert kwargs["skip_memory"] is True
-        assert kwargs["load_soul_identity"] is False
+        assert kwargs["skip_context_files"] is False
+        assert kwargs["skip_memory"] is False
+        assert kwargs["load_soul_identity"] is True
 
 
 def test_probe_config_health_flags_null_sections():

@@ -5,6 +5,8 @@ import json
 import re
 from typing import Any
 
+from hermes_team_mission_artifact_refs import artifact_refs_from_event
+
 
 def text(value: Any) -> str:
     return str(value or "").strip()
@@ -99,31 +101,7 @@ def event_text(event: dict[str, Any]) -> str:
 
 
 def event_artifacts(event: dict[str, Any]) -> list[dict[str, Any]]:
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    candidates: list[Any] = []
-    for key in ("artifacts", "artifact_refs", "artifactRefs"):
-        if key in payload:
-            candidates.extend(json_list(payload.get(key)))
-    result: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for raw in candidates:
-        if isinstance(raw, dict):
-            uri = text(raw.get("uri") or raw.get("path") or raw.get("url") or raw.get("id"))
-            if not uri or uri in seen:
-                continue
-            seen.add(uri)
-            result.append({
-                "uri": uri,
-                "title": text(raw.get("title") or raw.get("name") or raw.get("display_name") or uri),
-                "kind": text(raw.get("kind") or raw.get("type") or "artifact"),
-                "mime_type": text(raw.get("mime_type") or raw.get("mimeType")),
-            })
-        else:
-            uri = text(raw)
-            if uri and uri not in seen:
-                seen.add(uri)
-                result.append({"uri": uri, "title": uri, "kind": "artifact", "mime_type": ""})
-    return result
+    return artifact_refs_from_event(event)
 
 
 def tokenize(value: str) -> set[str]:

@@ -316,6 +316,46 @@ class TestStreamingCallbacks:
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_same_stream_callback_is_not_delivered_twice(self, mock_close, mock_create):
+        """Doxie gateway may bind the same callable through both stream paths."""
+        from run_agent import AIAgent
+
+        chunks = [
+            _make_stream_chunk(content="收到"),
+            _make_stream_chunk(content="信号"),
+            _make_stream_chunk(content="！"),
+            _make_stream_chunk(finish_reason="stop"),
+        ]
+
+        deltas = []
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+
+        def stream_callback(text):
+            deltas.append(text)
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=stream_callback,
+        )
+        agent._stream_callback = stream_callback
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert deltas == ["收到", "信号", "！"]
+        assert response.choices[0].message.content == "收到信号！"
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
     def test_on_first_delta_fires_once(self, mock_close, mock_create):
         """on_first_delta callback fires exactly once."""
         from run_agent import AIAgent
@@ -713,6 +753,21 @@ class TestReasoningStreaming:
         assert text_deltas == ["The answer is 42"]
         assert response.choices[0].message.reasoning_content == "Let me think about this"
         assert response.choices[0].message.content == "The answer is 42"
+
+    def test_reasoning_callback_normalizes_cumulative_snapshots(self):
+        """Reasoning callbacks expose append-only deltas even when providers resend snapshots."""
+        from run_agent import AIAgent
+
+        agent = object.__new__(AIAgent)
+        reasoning_deltas = []
+        agent.reasoning_callback = lambda text: reasoning_deltas.append(text)
+        agent._current_streamed_reasoning_text = ""
+
+        agent._fire_reasoning_delta("Let me think")
+        agent._fire_reasoning_delta("Let me think about this")
+        agent._fire_reasoning_delta(" about this carefully")
+
+        assert reasoning_deltas == ["Let me think", " about this", " carefully"]
 
 
 # ── Test: _has_stream_consumers ──────────────────────────────────────────

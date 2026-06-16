@@ -45,6 +45,7 @@ def get_session_db_for_home(
             return SessionStoreResult(None, default_db, default_error)
         try:
             db = session_db_factory()
+            _run_startup_run_event_maintenance(db, logger)
             return SessionStoreResult(db, db, None)
         except Exception as exc:
             error = str(exc)
@@ -63,6 +64,7 @@ def get_session_db_for_home(
 
     try:
         db = session_db_factory(db_path=active_home / "state.db")
+        _run_startup_run_event_maintenance(db, logger)
         db_by_home[home_key] = db
         db_error_by_home.pop(home_key, None)
         return SessionStoreResult(db, default_db, default_error)
@@ -88,3 +90,19 @@ def db_unavailable_detail(
         or default_error
         or "state.db unavailable"
     )
+
+
+def _run_startup_run_event_maintenance(db: Any, logger: logging.Logger) -> None:
+    method = getattr(db, "maybe_auto_compact_run_events", None)
+    if not callable(method):
+        return
+    try:
+        result = method()
+        deleted_events = int(result.get("deleted_events") or 0) if isinstance(result, dict) else 0
+        if isinstance(result, dict) and not result.get("skipped") and deleted_events > 0:
+            logger.info(
+                "TUI session store run-event maintenance compacted %s event row(s)",
+                deleted_events,
+            )
+    except Exception as exc:
+        logger.debug("TUI session store run-event maintenance skipped: %s", exc)

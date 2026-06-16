@@ -579,6 +579,7 @@ def init_agent(
     # commentary when the provider later returns it as a completed interim
     # assistant message.
     agent._current_streamed_assistant_text = ""
+    agent._current_streamed_reasoning_text = ""
 
     # Optional current-turn user-message override used when the API-facing
     # user message intentionally differs from the persisted transcript

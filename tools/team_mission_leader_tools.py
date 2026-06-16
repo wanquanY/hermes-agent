@@ -1,9 +1,9 @@
 """Hermes Team Mission Leader tools.
 
 These tools are exposed to Team Mission Leaders. Conversation turns can route a
-user message into a new mission task; bound Leader node runs can inspect mission
-state and team capability context while phase-specific mutation remains owned by
-the separate ``team_mission_planning`` toolset.
+user message into a new mission task. Bound Leader node runs can inspect mission
+state through the read-only toolset while phase-specific mutation remains owned
+by the separate ``team_mission_planning`` toolset.
 """
 
 from __future__ import annotations
@@ -14,15 +14,19 @@ from collections.abc import Mapping
 from typing import Any
 
 from hermes_state import SessionDB
+from hermes_team_mission_modes import MODE_AUTONOMOUS_MISSION
+from hermes_team_mission_modes import MODE_SUPERVISED_MISSION
 from hermes_team_mission_profile_tools import gateway_call as _gateway_call
-from hermes_team_mission_profile_tools import team_capability_payload as _team_capability_payload
+from hermes_team_mission_profile_tools import team_mission_control_db as _team_mission_control_db
 from hermes_team_mission_profile_tools import unwrap_response as _unwrap_response
 from tools.registry import registry, tool_error, tool_result
 from tools.team_mission_profile_tools import _handle_team_profile  # compatibility export
 from tools.team_mission_profile_tools import _leader_run_context
 
 
-_TOOLSET = "team_mission_leader"
+_READ_TOOLSET = "team_mission_read"
+_CONVERSATION_TOOLSET = "team_mission_conversation_leader"
+_TEAM_TASK_PLANNING_MODES = {MODE_SUPERVISED_MISSION, MODE_AUTONOMOUS_MISSION}
 _START_TASK_HANDOFF_MESSAGE = (
     "Team mission accepted; planning has started. This is the task-start "
     "state, not the final result. The final deliverable will be written "
@@ -35,13 +39,8 @@ def _text(value: Any) -> str:
 
 
 def _get_db(parent_agent=None):
-    db = getattr(parent_agent, "_session_db", None) if parent_agent is not None else None
-    if db is not None:
-        return db
     try:
-        from tui_gateway import server
-
-        return server._get_db()
+        return _team_mission_control_db(parent_agent)
     except Exception:
         return SessionDB()
 
@@ -163,6 +162,28 @@ def _leader_member(team_context: dict[str, Any]) -> dict[str, Any]:
     ) or next((dict(item) for item in members if isinstance(item, Mapping)), {})
 
 
+def _task_execution_mode(args: Mapping[str, Any], team_context: Mapping[str, Any]) -> str:
+    explicit_mode = _text(
+        args.get("execution_mode")
+        or args.get("executionMode")
+        or args.get("mission_mode")
+        or args.get("missionMode")
+        or args.get("mode")
+    )
+    if explicit_mode in _TEAM_TASK_PLANNING_MODES:
+        return explicit_mode
+    context_mode = _text(
+        team_context.get("task_execution_mode")
+        or team_context.get("taskExecutionMode")
+        or team_context.get("mission_mode")
+        or team_context.get("missionMode")
+        or team_context.get("mode")
+    )
+    if context_mode in _TEAM_TASK_PLANNING_MODES:
+        return context_mode
+    return MODE_SUPERVISED_MISSION
+
+
 def _handle_status(args: dict[str, Any], parent_agent=None, **_kwargs) -> str:
     args = args if isinstance(args, dict) else {}
     ctx = _team_context()
@@ -220,7 +241,54 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
     if not conversation_id or not conversation_session_id:
         return tool_error("Team Mission conversation context is not available for this Leader turn.")
     active_run_id = _active_run_id(parent_agent)
+    existing_mission_id, existing_graph = _active_mission_graph(db, {
+        **team_context,
+        "conversation_id": conversation_id,
+        "conversation_session_id": conversation_session_id,
+    })
+    existing_mission = existing_graph.get("mission") if isinstance(existing_graph, dict) and isinstance(existing_graph.get("mission"), Mapping) else {}
+    existing_metadata = existing_mission.get("metadata") if isinstance(existing_mission.get("metadata"), Mapping) else {}
+    existing_task = existing_metadata.get("active_task") if isinstance(existing_metadata.get("active_task"), Mapping) else {}
+    existing_started_run_id = _text(existing_metadata.get("started_from_leader_conversation_run_id"))
+    existing_task_id = _text(
+        existing_metadata.get("active_task_id")
+        or existing_metadata.get("task_id")
+        or existing_task.get("task_id")
+        or existing_task.get("taskId")
+    )
+    if existing_mission_id and (
+        (active_run_id and existing_started_run_id == active_run_id)
+        or (task_id and existing_task_id == task_id)
+    ):
+        node = _root_leader_node(existing_graph)
+        mission_status = _text(existing_mission.get("status")) or "planning"
+        return tool_result(
+            success=True,
+            intent="start_team_task",
+            submission_status="accepted",
+            task_status=mission_status,
+            completion_status="pending",
+            final_result_available=False,
+            await_final_deliverable=True,
+            mission_id=existing_mission_id,
+            conversation_id=conversation_id,
+            task_id=existing_task_id or task_id,
+            node=node or {},
+            run={},
+            graph_summary=_graph_summary(existing_graph),
+            message=_START_TASK_HANDOFF_MESSAGE,
+            idempotent=True,
+            hermes_control={
+                "kind": "team_mission_started",
+                "end_current_turn": True,
+                "await_final_deliverable": True,
+                "mission_status": mission_status,
+                "assistant_response": _START_TASK_HANDOFF_MESSAGE,
+            },
+        )
     members = list(team_context.get("members") or []) if isinstance(team_context.get("members"), list) else []
+    conversation_mode = _text(team_context.get("mode"))
+    task_execution_mode = _task_execution_mode(args if isinstance(args, Mapping) else {}, team_context)
     metadata = {
         "conversation_id": conversation_id,
         "stableTeamSessionId": conversation_session_id,
@@ -228,6 +296,8 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
         "task_id": task_id,
         "task_title": title,
         "task_objective": objective,
+        "conversation_mode": conversation_mode,
+        "task_execution_mode": task_execution_mode,
     }
     create_response = _gateway_call(
         "team_mission.create",
@@ -238,13 +308,12 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
             "team_id": _text(team_context.get("team_id") or team_context.get("teamId")),
             "title": title,
             "objective": objective,
-            "mode": _text(args.get("mode") or team_context.get("mode")) or "supervised_mission",
+            "mode": task_execution_mode,
             "workspace": {
                 "workspace_id": _text(team_context.get("workspace_id") or team_context.get("workspaceId")),
                 "workspace_path": _text(team_context.get("workspace_path") or team_context.get("workspacePath")),
             },
             "members": members,
-            "team_capability": _team_capability_payload(team_context),
             "task_id": task_id,
             "record_user_task_message": False,
             "metadata": metadata,
@@ -285,7 +354,7 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
 
 registry.register(
     name="team_mission_status",
-    toolset=_TOOLSET,
+    toolset=_READ_TOOLSET,
     schema={
         "name": "team_mission_status",
         "description": "Read the current Hermes Team Mission graph and memory summary for a Team Mission Leader.",
@@ -301,7 +370,7 @@ registry.register(
 
 registry.register(
     name="team_mission_start_task",
-    toolset=_TOOLSET,
+    toolset=_CONVERSATION_TOOLSET,
     schema={
         "name": "team_mission_start_task",
         "description": (
@@ -316,6 +385,11 @@ registry.register(
                 "objective": {"type": "string", "description": "Self-contained objective for the new team task."},
                 "task_id": {"type": "string", "description": "Optional stable task id."},
                 "node_id": {"type": "string", "description": "Optional stable root planning node id."},
+                "execution_mode": {
+                    "type": "string",
+                    "enum": ["supervised_mission", "autonomous_mission"],
+                    "description": "Optional planning execution mode for the task. Omit for supervised planning.",
+                },
             },
             "required": ["objective"],
         },

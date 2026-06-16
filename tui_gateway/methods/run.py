@@ -63,12 +63,7 @@ def _runtime_scope_key_from_params(params: dict, session: dict | None = None) ->
             return scope_key
         profile_id = str(profile.get("id") or "").strip()
         if profile_id:
-            version_id = str(
-                profile.get("agent_profile_version_id")
-                or profile.get("agentProfileVersionId")
-                or ""
-            ).strip()
-            return f"profile:{profile_id}:version:{version_id}" if version_id else f"profile:{profile_id}"
+            return f"profile:{profile_id}"
         hermes_home = str(profile.get("hermes_home") or "").strip()
         if hermes_home:
             digest = hashlib.sha1(hermes_home.encode("utf-8")).hexdigest()[:12]

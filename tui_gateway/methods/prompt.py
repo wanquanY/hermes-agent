@@ -1,14 +1,18 @@
 # ruff: noqa: F401,F403,F405,F821,ARG001
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from typing import Any
 
 from agent.doxie_diagnostics import emit_doxie_diagnostic
+from hermes_runtime_event_payloads import terminal_text_metadata
 from hermes_team_mission_conversation_state import normalize_team_mission_conversation_session
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
+from tui_gateway.services.prompt_attachments import submitted_attachments as _normalize_submitted_attachments
+from tui_gateway.services.prompt_attachments import submitted_image_paths as _normalize_submitted_image_paths
 from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
 from tui_gateway.services.toolset_scope import ensure_session_turn_toolsets
 from tui_gateway.services.voice import voice_tts_enabled
@@ -40,6 +44,26 @@ def _log_prompt_stage(session: dict, sid: str, stage: str, **fields: Any) -> Non
         **fields,
     }
     emit_doxie_diagnostic("[doxie-prompt-stage]", pairs)
+
+
+def _text_probe(value: Any) -> dict[str, Any]:
+    text = str(value or "")
+    digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return {
+        "len": len(text),
+        "sha1": digest,
+        "preview": text[:80].replace("\n", "\\n"),
+    }
+
+
+def _payload_text(payload: dict | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("delta", "text", "snapshot", "output", "message"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
 
 
 def _apply_doxie_product_runtime_policy(agent: Any, raw_context: Any) -> None:
@@ -556,6 +580,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 "persist_user_message": persist_user_message,
                 "model": requested_model,
                 "model_descriptor": model_descriptor,
+                "reasoning_config": _turn_reasoning_config(params),
                 "doxie_product_context": doxie_product_context,
             }
         finally:
@@ -578,74 +603,26 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
 
 
 def _submitted_attachments(params: dict) -> list[dict]:
-    raw_attachments = params.get("attachments")
-    if not isinstance(raw_attachments, list):
-        return []
-    attachments: list[dict] = []
-    for raw in raw_attachments:
-        if not isinstance(raw, dict):
-            continue
-        name = str(raw.get("name") or raw.get("fileName") or raw.get("file_name") or "").strip()
-        item = {
-            "id": str(raw.get("id") or raw.get("fileId") or raw.get("file_id") or "").strip(),
-            "name": name,
-            "fileName": name,
-            "mimeType": str(raw.get("mimeType") or raw.get("mime_type") or "").strip(),
-            "size": raw.get("size") or raw.get("sizeBytes") or raw.get("size_bytes") or 0,
-            "path": str(raw.get("path") or raw.get("localPath") or raw.get("local_path") or "").strip(),
-            "fileUrl": str(raw.get("fileUrl") or raw.get("file_url") or raw.get("remoteUrl") or raw.get("remote_url") or "").strip(),
-            "previewUrl": str(raw.get("previewUrl") or raw.get("preview_url") or raw.get("url") or "").strip(),
-            "kind": str(raw.get("kind") or "").strip(),
-        }
-        attachments.append({
-            k: v for k, v in item.items()
-            if v is not None and not (isinstance(v, str) and v == "")
-        })
-    return attachments
+    return _normalize_submitted_attachments(params)
 
 
 def _submitted_image_paths(params: dict) -> list[str]:
-    raw_attachments = params.get("attachments")
-    if not isinstance(raw_attachments, list):
-        return []
-    image_paths: list[str] = []
-    image_extensions = {
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".gif",
-        ".webp",
-        ".bmp",
-        ".tif",
-        ".tiff",
-        ".heic",
-        ".heif",
-    }
-    for raw in raw_attachments:
-        if not isinstance(raw, dict):
-            continue
-        raw_path = str(raw.get("path") or "").strip()
-        if not raw_path:
-            continue
-        mime_type = str(raw.get("mimeType") or raw.get("mime_type") or "").lower()
-        kind = str(raw.get("kind") or "").lower()
-        path = Path(raw_path).expanduser()
-        is_image = (
-            kind == "image"
-            or mime_type.startswith("image/")
-            or path.suffix.lower() in image_extensions
-        )
-        if not is_image:
-            continue
-        if not path.is_file():
-            print(
-                f"[tui_gateway] prompt.submit skipped missing image attachment: {path}",
-                file=sys.stderr,
-                flush=True,
-            )
-            continue
-        image_paths.append(str(path))
-    return image_paths
+    return _normalize_submitted_image_paths(params)
+
+
+def _turn_reasoning_config(params: dict) -> dict | None:
+    raw = params.get("reasoning_config")
+    if raw is None:
+        raw = params.get("reasoningConfig")
+    if not isinstance(raw, dict):
+        return None
+    config = dict(raw)
+    if config.get("enabled") is False:
+        return {"enabled": False}
+    effort = str(config.get("effort") or "").strip()
+    if effort:
+        return {"effort": effort}
+    return config or None
 
 
 def _turn_identity(metadata: dict | None) -> dict:
@@ -1132,27 +1109,58 @@ def _run_prompt_submit(
                     "runtime_scope_key": session.get("runtime_scope_key") or "",
                 },
             )
+            stream_delta_emitted = False
+
             def _stream(delta):
+                nonlocal stream_delta_emitted
                 if is_turn_interrupted():
                     return
+                input_probe = _text_probe(delta)
                 payload = delta_normalizer.feed(delta)
+                output_probe = _text_probe(_payload_text(payload))
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "stream-callback-normalized",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    input_len=input_probe["len"],
+                    input_sha1=input_probe["sha1"],
+                    input_preview=input_probe["preview"],
+                    emitted=payload is not None,
+                    output_mode=str((payload or {}).get("mode") or ""),
+                    output_offset=(payload or {}).get("offset"),
+                    output_len=output_probe["len"],
+                    output_sha1=output_probe["sha1"],
+                    output_preview=output_probe["preview"],
+                    accumulated_text_len=len(str(delta_normalizer.text or "")),
+                )
                 if payload is None:
                     return
                 render_delta = payload.get("delta") or payload.get("snapshot") or payload.get("text") or ""
                 if streamer and (r := streamer.feed(render_delta)) is not None:
                     payload["rendered"] = r
                 _emit("message.delta", sid, payload)
+                stream_delta_emitted = True
 
             active_context_missing = object()
             previous_active_run_id = getattr(agent, "_hermes_active_run_id", active_context_missing)
             previous_active_turn_id = getattr(agent, "_hermes_active_turn_id", active_context_missing)
             previous_active_runtime_scope_key = getattr(agent, "_hermes_active_runtime_scope_key", active_context_missing)
+            previous_reasoning_config = getattr(agent, "reasoning_config", active_context_missing)
+            turn_reasoning_config = (
+                (turn_metadata or {}).get("reasoning_config")
+                if isinstance((turn_metadata or {}).get("reasoning_config"), dict)
+                else None
+            )
             try:
                 previous_inject_tool_breaks = getattr(agent, "_stream_inject_tool_breaks", True)
                 agent._stream_inject_tool_breaks = False
                 agent._hermes_active_run_id = turn_run_id
                 agent._hermes_active_turn_id = turn_id
                 agent._hermes_active_runtime_scope_key = str(session.get("runtime_scope_key") or "")
+                if turn_reasoning_config is not None:
+                    agent.reasoning_config = dict(turn_reasoning_config)
                 _log_prompt_stage(session, sid, "agent-run-call-start", run_id=turn_run_id, turn_id=turn_id)
                 result = agent.run_conversation(
                     run_message,
@@ -1239,6 +1247,13 @@ def _run_prompt_submit(
                         pass
                 else:
                     agent._hermes_active_runtime_scope_key = previous_active_runtime_scope_key
+                if previous_reasoning_config is active_context_missing:
+                    try:
+                        delattr(agent, "reasoning_config")
+                    except AttributeError:
+                        pass
+                else:
+                    agent.reasoning_config = previous_reasoning_config
 
             if is_turn_interrupted():
                 result_messages = (
@@ -1318,11 +1333,73 @@ def _run_prompt_submit(
             ):
                 interrupt_detail = raw.strip()
                 raw = ""
-            payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+            raw_text = str(raw or "")
+            final_delta_mismatch = False
+            if raw_text:
+                current_stream_text = str(delta_normalizer.text or "")
+                should_emit_final_delta = not current_stream_text or (
+                    raw_text.startswith(current_stream_text)
+                    and len(raw_text) > len(current_stream_text)
+                )
+                raw_probe = _text_probe(raw_text)
+                stream_probe = _text_probe(current_stream_text)
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "final-response-reconciliation",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    raw_len=raw_probe["len"],
+                    raw_sha1=raw_probe["sha1"],
+                    raw_preview=raw_probe["preview"],
+                    streamed_len=stream_probe["len"],
+                    streamed_sha1=stream_probe["sha1"],
+                    streamed_preview=stream_probe["preview"],
+                    should_emit_final_delta=should_emit_final_delta,
+                    raw_startswith_stream=current_stream_text
+                    and raw_text.startswith(current_stream_text),
+                    stream_startswith_raw=current_stream_text.startswith(raw_text),
+                )
+                if should_emit_final_delta:
+                    final_delta_payload = delta_normalizer.feed(raw_text)
+                    if final_delta_payload is not None:
+                        render_delta = (
+                            final_delta_payload.get("delta")
+                            or final_delta_payload.get("text")
+                            or ""
+                        )
+                        if streamer and (r := streamer.feed(render_delta)) is not None:
+                            final_delta_payload["rendered"] = r
+                        final_delta_payload["source"] = "final_response_reconciliation"
+                        _emit("message.delta", sid, final_delta_payload)
+                        stream_delta_emitted = True
+                elif current_stream_text and raw_text != current_stream_text:
+                    final_delta_mismatch = True
+                    final_delta_payload = {
+                        "mode": "snapshot",
+                        "text": raw_text,
+                        "snapshot": raw_text,
+                        "offset": 0,
+                        "source": "final_response_reconciliation",
+                        "final_text_mismatch": True,
+                    }
+                    if streamer and (r := streamer.feed(raw_text)) is not None:
+                        final_delta_payload["rendered"] = r
+                    _emit("message.delta", sid, final_delta_payload)
+                    stream_delta_emitted = True
+
+            payload = {
+                "usage": _get_usage(agent),
+                "status": status,
+                "streamed": stream_delta_emitted,
+                **terminal_text_metadata(raw_text, prefix="text"),
+            }
             if interrupt_detail:
                 payload["interrupt_detail"] = interrupt_detail
+            if final_delta_mismatch:
+                payload["final_text_mismatch"] = True
             if last_reasoning:
-                payload["reasoning"] = last_reasoning
+                payload.update(terminal_text_metadata(last_reasoning, prefix="reasoning"))
             if (
                 isinstance(result, dict)
                 and status == "complete"
@@ -1337,9 +1414,6 @@ def _run_prompt_submit(
             )
             if message_id:
                 payload["message_id"] = message_id
-            rendered = render_message(raw, cols)
-            if rendered:
-                payload["rendered"] = rendered
             emit_doxie_diagnostic(
                 "[doxie-prompt]",
                 {
@@ -1424,27 +1498,6 @@ def _run_prompt_submit(
                         except Exception:
                             # Transient DB failure — keep pending_title for retry.
                             pass
-
-            if (
-                status == "complete"
-                and isinstance(raw, str)
-                and raw.strip()
-                and isinstance(text, str)
-                and text.strip()
-                and not session.get("transient")
-            ):
-                try:
-                    from agent.title_generator import maybe_auto_title
-
-                    maybe_auto_title(
-                        _get_db(),
-                        session.get("session_key") or sid,
-                        text,
-                        raw,
-                        post_turn_history,
-                    )
-                except Exception:
-                    pass
 
             # CLI parity: when voice-mode TTS is on, speak the agent reply
             # (cli.py:_voice_speak_response).  Only the final text — tool

@@ -1,5 +1,7 @@
 # 选择性吸收上游更新清单 - 客户端接入
 
+> 文档管理说明：本文保留为 2026-05-27 起 P0/P1 选择性吸收的历史审计，不再继续承载每个 Doxie runtime 发布节点的长篇流水账。后续同步入口见 `docs/upstream-sync/README.zh-CN.md`；当前本地运行时快照见 `docs/upstream-sync/doxie-runtime-snapshot-20260616.md`。
+
 ## 目标
 
 本分支用于评估并选择性吸收 `upstream/main` 在 `1264fab15..4feb181eb` 范围内，对当前客户端接入真正有价值的更新。

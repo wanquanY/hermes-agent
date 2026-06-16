@@ -25,10 +25,12 @@ from pathlib import Path
 
 from agent.memory_manager import sanitize_context
 from hermes_constants import get_hermes_home
+from hermes_state_agent_profiles import SessionDBAgentProfileMixin
 from hermes_state_branch import SessionDBBranchMixin
 from hermes_state_runs import SessionDBRunMixin
 from hermes_state_team_capabilities import SessionDBTeamCapabilityMixin
 from hermes_state_team_missions import SessionDBTeamMissionMixin
+from hermes_state_team_registry import SessionDBTeamRegistryMixin
 from hermes_team_mission_conversation_state import prune_empty_team_mission_conversations
 from hermes_team_mission_conversation_state import repair_placeholder_team_mission_conversation_titles
 from hermes_team_mission_conversation_state import repair_legacy_team_mission_conversation_sessions
@@ -40,7 +42,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 20
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -207,6 +209,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     end_reason TEXT,
     message_count INTEGER DEFAULT 0,
     tool_call_count INTEGER DEFAULT 0,
+    preview TEXT DEFAULT '',
+    last_active REAL,
     input_tokens INTEGER DEFAULT 0,
     output_tokens INTEGER DEFAULT 0,
     cache_read_tokens INTEGER DEFAULT 0,
@@ -221,6 +225,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     cost_source TEXT,
     pricing_version TEXT,
     title TEXT,
+    display_title TEXT DEFAULT '',
+    display_title_source TEXT DEFAULT '',
     api_call_count INTEGER DEFAULT 0,
     handoff_state TEXT,
     handoff_platform TEXT,
@@ -327,6 +333,101 @@ CREATE TABLE IF NOT EXISTS run_event_archives (
     metadata_json TEXT
 );
 
+CREATE TABLE IF NOT EXISTS agent_teams (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    avatar_json TEXT,
+    description TEXT,
+    lead_agent_profile_id TEXT,
+    default_mode TEXT NOT NULL,
+    policy_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_team_members (
+    id TEXT PRIMARY KEY,
+    team_id TEXT NOT NULL REFERENCES agent_teams(id) ON DELETE CASCADE,
+    agent_profile_id TEXT NOT NULL,
+    agent_profile_version_id TEXT,
+    role TEXT NOT NULL,
+    capability_tags_json TEXT NOT NULL,
+    auto_assignable INTEGER NOT NULL,
+    max_concurrent_nodes INTEGER NOT NULL,
+    permission_mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(team_id, agent_profile_id)
+);
+
+CREATE TABLE IF NOT EXISTS agent_profiles (
+    id TEXT PRIMARY KEY,
+    slug TEXT NOT NULL,
+    name TEXT NOT NULL,
+    avatar TEXT,
+    description TEXT,
+    category TEXT,
+    tags_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    is_system_default INTEGER NOT NULL,
+    hermes_profile_name TEXT,
+    hermes_home_path TEXT NOT NULL,
+    default_model TEXT,
+    default_provider TEXT,
+    default_permission_mode TEXT,
+    default_toolsets_json TEXT NOT NULL,
+    recommended_skills_json TEXT NOT NULL DEFAULT '[]',
+    platform_base_toolsets_initialized INTEGER NOT NULL,
+    current_version_id TEXT,
+    current_version_number INTEGER NOT NULL,
+    source_kind TEXT,
+    public_profile_id TEXT,
+    public_version_id TEXT,
+    public_content_hash TEXT,
+    metadata_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    last_used_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS agent_profile_drafts (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    draft_kind TEXT NOT NULL,
+    base_agent_profile_id TEXT,
+    base_version_id TEXT,
+    target_agent_profile_id TEXT,
+    source_session_id TEXT,
+    source_agent_profile_id TEXT,
+    source_run_id TEXT,
+    source_turn_id TEXT,
+    source_client_message_id TEXT,
+    workspace_id TEXT,
+    name TEXT NOT NULL,
+    avatar TEXT,
+    description TEXT,
+    category TEXT,
+    tags_json TEXT NOT NULL,
+    architecture_template_id TEXT,
+    recommended_toolsets_json TEXT NOT NULL,
+    recommended_skills_json TEXT NOT NULL,
+    skill_creation_plans_json TEXT NOT NULL,
+    missing_capabilities_json TEXT NOT NULL,
+    default_model TEXT,
+    default_provider TEXT,
+    default_permission_mode TEXT,
+    files_json TEXT NOT NULL,
+    runtime_prepared_at REAL,
+    published_agent_profile_id TEXT,
+    published_version_id TEXT,
+    metadata_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    published_at REAL
+);
+
 CREATE TABLE IF NOT EXISTS team_mission_conversations (
     conversation_id TEXT PRIMARY KEY,
     team_id TEXT,
@@ -361,7 +462,7 @@ CREATE TABLE IF NOT EXISTS team_missions (
 );
 
 CREATE TABLE IF NOT EXISTS team_mission_nodes (
-    node_id TEXT PRIMARY KEY,
+    node_id TEXT NOT NULL,
     mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -375,7 +476,8 @@ CREATE TABLE IF NOT EXISTS team_mission_nodes (
     position_x REAL NOT NULL DEFAULT 0,
     position_y REAL NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (mission_id, node_id)
 );
 
 CREATE TABLE IF NOT EXISTS team_mission_edges (
@@ -487,6 +589,8 @@ CREATE INDEX IF NOT EXISTS idx_sessions_parent
     ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started
     ON sessions(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_effective_last_active
+    ON sessions(COALESCE(last_active, started_at) DESC, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session
     ON messages(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_session_active
@@ -509,6 +613,16 @@ CREATE INDEX IF NOT EXISTS idx_run_events_run
     ON run_events(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_run_event_archives_session
     ON run_event_archives(session_id, archived_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_teams_status_updated
+    ON agent_teams(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_team_members_team_id
+    ON agent_team_members(team_id, role, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_agent_profiles_status_updated
+    ON agent_profiles(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_profile_drafts_status_updated
+    ON agent_profile_drafts(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_profile_drafts_source
+    ON agent_profile_drafts(source_session_id, source_agent_profile_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_conversations_team
     ON team_mission_conversations(team_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_conversations_workspace
@@ -601,7 +715,7 @@ END;
 """
 
 
-class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBRunMixin, SessionDBBranchMixin):
+class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBRunMixin, SessionDBBranchMixin):
     """
     SQLite-backed session storage with FTS5 search.
 
@@ -684,6 +798,18 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                 logger.warning(
                     "empty Team Mission conversation shell prune skipped: %s",
                     prune_exc,
+                )
+            try:
+                repaired_fk_rows = self.repair_orphaned_foreign_key_rows()
+                if repaired_fk_rows:
+                    logger.info(
+                        "repaired %d orphaned state foreign-key row(s)",
+                        repaired_fk_rows,
+                    )
+            except Exception as repair_fk_exc:
+                logger.warning(
+                    "orphaned state foreign-key repair skipped: %s",
+                    repair_fk_exc,
                 )
         except Exception as exc:
             # Capture the cause so /resume and friends can surface WHY the
@@ -884,6 +1010,229 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                             "reconcile %s.%s: %s", table_name, col_name, exc,
                         )
 
+    def _reconcile_team_mission_node_primary_key(self, cursor: sqlite3.Cursor) -> None:
+        """Ensure Team Mission nodes are keyed by mission and node.
+
+        A Team Mission conversation can contain multiple missions, and planners
+        may reuse local node ids such as ``root`` or ``worker`` in each mission.
+        The durable identity is therefore ``(mission_id, node_id)``.  Older
+        databases used a global ``node_id`` primary key, which made later
+        missions overwrite earlier graph nodes.
+        """
+        try:
+            rows = cursor.execute('PRAGMA table_info("team_mission_nodes")').fetchall()
+        except sqlite3.OperationalError:
+            return
+        pk_columns = [
+            (row["name"] if isinstance(row, sqlite3.Row) else row[1])
+            for row in sorted(
+                rows,
+                key=lambda item: item["pk"] if isinstance(item, sqlite3.Row) else item[5],
+            )
+            if (row["pk"] if isinstance(row, sqlite3.Row) else row[5])
+        ]
+        if pk_columns == ["mission_id", "node_id"]:
+            return
+
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("DROP INDEX IF EXISTS idx_team_mission_nodes_mission")
+        cursor.execute("ALTER TABLE team_mission_nodes RENAME TO team_mission_nodes_legacy_pk")
+        cursor.execute(
+            """
+            CREATE TABLE team_mission_nodes (
+                node_id TEXT NOT NULL,
+                mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                objective TEXT,
+                status TEXT NOT NULL,
+                assignee_profile_id TEXT,
+                assignee_profile_version_id TEXT,
+                runtime_scope_key TEXT,
+                output_contract_json TEXT,
+                metadata_json TEXT,
+                position_x REAL NOT NULL DEFAULT 0,
+                position_y REAL NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (mission_id, node_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO team_mission_nodes (
+                node_id, mission_id, kind, title, objective, status,
+                assignee_profile_id, assignee_profile_version_id, runtime_scope_key,
+                output_contract_json, metadata_json, position_x, position_y,
+                created_at, updated_at
+            )
+            SELECT
+                node_id, mission_id, kind, title, objective, status,
+                assignee_profile_id, assignee_profile_version_id, runtime_scope_key,
+                output_contract_json, metadata_json, position_x, position_y,
+                created_at, updated_at
+            FROM team_mission_nodes_legacy_pk
+            ORDER BY updated_at ASC, created_at ASC
+            """
+        )
+        cursor.execute("DROP TABLE team_mission_nodes_legacy_pk")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_team_mission_nodes_mission "
+            "ON team_mission_nodes(mission_id, created_at ASC)"
+        )
+        cursor.execute("PRAGMA foreign_keys=ON")
+
+    def _backfill_session_list_summaries(self, cursor: sqlite3.Cursor) -> None:
+        """Populate denormalized list fields from active message rows.
+
+        This is a one-time compatibility path for databases created before
+        ``sessions.preview`` and ``sessions.last_active`` existed. New writes
+        keep these fields current, so list endpoints do not need to aggregate
+        over the messages table on every sidebar refresh.
+        """
+        cursor.execute(
+            """
+            UPDATE sessions
+            SET
+                message_count = (
+                    SELECT COUNT(1)
+                    FROM messages m
+                    WHERE m.session_id = sessions.id
+                      AND m.active = 1
+                ),
+                preview = COALESCE((
+                    SELECT CASE
+                        WHEN LENGTH(raw.preview_raw) > 60 THEN SUBSTR(raw.preview_raw, 1, 60) || '...'
+                        ELSE raw.preview_raw
+                    END
+                    FROM (
+                        SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63) AS preview_raw
+                        FROM messages m
+                        WHERE m.session_id = sessions.id
+                          AND m.active = 1
+                          AND m.role = 'user'
+                          AND m.content IS NOT NULL
+                        ORDER BY m.timestamp, m.id
+                        LIMIT 1
+                    ) raw
+                ), ''),
+                last_active = (
+                    SELECT MAX(m.timestamp)
+                    FROM messages m
+                    WHERE m.session_id = sessions.id
+                      AND m.active = 1
+                )
+            """
+        )
+        rows = cursor.execute(
+            """
+            SELECT
+                s.id,
+                s.display_title_source,
+                m.content AS first_user_content
+            FROM sessions s
+            LEFT JOIN messages m
+              ON m.id = (
+                  SELECT m2.id
+                  FROM messages m2
+                  WHERE m2.session_id = s.id
+                    AND m2.active = 1
+                    AND m2.role = 'user'
+                    AND m2.content IS NOT NULL
+                  ORDER BY m2.timestamp, m2.id
+                  LIMIT 1
+              )
+            """
+        ).fetchall()
+        for row in rows:
+            if str(row["display_title_source"] or "") == "user":
+                continue
+            display_title = self._message_display_title_text(row["first_user_content"])
+            cursor.execute(
+                """
+                UPDATE sessions
+                SET display_title = ?,
+                    display_title_source = CASE
+                        WHEN ? != '' THEN 'first_user_message'
+                        ELSE ''
+                    END
+                WHERE id = ?
+                """,
+                (display_title, display_title, row["id"]),
+            )
+
+    def _migrate_agent_profile_versions_to_latest_profiles(self, cursor: sqlite3.Cursor) -> None:
+        """Fold the removed profile version table into latest profile rows."""
+
+        tables = cursor.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'agent_profile_versions'
+            """
+        ).fetchall()
+        if not tables:
+            return
+        rows = cursor.execute(
+            """
+            SELECT *
+            FROM agent_profile_versions
+            ORDER BY agent_profile_id ASC, version_number DESC, published_at DESC, id ASC
+            """
+        ).fetchall()
+        seen_profile_ids: set[str] = set()
+        for version in rows:
+            profile_id = str(version["agent_profile_id"] or "").strip()
+            if not profile_id or profile_id in seen_profile_ids:
+                continue
+            seen_profile_ids.add(profile_id)
+            profile = cursor.execute(
+                "SELECT * FROM agent_profiles WHERE id = ?",
+                (profile_id,),
+            ).fetchone()
+            if profile is None:
+                continue
+            cursor.execute(
+                """
+                UPDATE agent_profiles
+                SET
+                    name = COALESCE(NULLIF(?, ''), name),
+                    avatar = COALESCE(NULLIF(?, ''), avatar),
+                    description = COALESCE(NULLIF(?, ''), description),
+                    category = COALESCE(NULLIF(?, ''), category),
+                    tags_json = COALESCE(NULLIF(?, ''), tags_json),
+                    default_model = COALESCE(NULLIF(?, ''), default_model),
+                    default_provider = COALESCE(NULLIF(?, ''), default_provider),
+                    default_permission_mode = COALESCE(NULLIF(?, ''), default_permission_mode),
+                    default_toolsets_json = COALESCE(NULLIF(?, ''), default_toolsets_json),
+                    recommended_skills_json = COALESCE(NULLIF(?, ''), recommended_skills_json),
+                    current_version_id = COALESCE(NULLIF(?, ''), current_version_id),
+                    current_version_number = CASE WHEN ? > 0 THEN ? ELSE current_version_number END,
+                    updated_at = CASE WHEN ? > updated_at THEN ? ELSE updated_at END
+                WHERE id = ?
+                """,
+                (
+                    version["name"] or "",
+                    version["avatar"] or "",
+                    version["description"] or "",
+                    version["category"] or "",
+                    version["tags_json"] or "",
+                    version["default_model"] or "",
+                    version["default_provider"] or "",
+                    version["default_permission_mode"] or "",
+                    version["default_toolsets_json"] or "",
+                    version["recommended_skills_json"] or "",
+                    version["id"] or "",
+                    int(version["version_number"] or 0),
+                    int(version["version_number"] or 0),
+                    float(version["published_at"] or 0),
+                    float(version["published_at"] or 0),
+                    profile_id,
+                ),
+            )
+        cursor.execute("DROP TABLE IF EXISTS agent_profile_versions")
+
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -907,6 +1256,7 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
         # migration was skipped (e.g. due to version renumbering), the
         # column gets created here.
         self._reconcile_columns(cursor)
+        self._reconcile_team_mission_node_primary_key(cursor)
 
         # Indexes that reference reconciler-added columns must be created
         # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL
@@ -932,6 +1282,7 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
         cursor.execute("SELECT version FROM schema_version LIMIT 1")
         row = cursor.fetchone()
         if row is None:
+            self._backfill_session_list_summaries(cursor)
             cursor.execute(
                 "INSERT INTO schema_version (version) VALUES (?)",
                 (SCHEMA_VERSION,),
@@ -1008,6 +1359,10 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                     cursor.execute("UPDATE messages SET active = 1 WHERE active IS NULL")
                 except sqlite3.OperationalError:
                     pass
+            if current_version < 18:
+                self._backfill_session_list_summaries(cursor)
+            if current_version < 20:
+                self._migrate_agent_profile_versions_to_latest_profiles(cursor)
             if current_version < SCHEMA_VERSION:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
@@ -1103,6 +1458,67 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                 (session_id,),
             )
         self._execute_write(_do)
+
+    def repair_orphaned_foreign_key_rows(self) -> int:
+        """Repair non-authoritative index/cache rows left dangling by old builds.
+
+        The canonical owners are ``sessions``, ``team_missions`` and
+        ``team_capability_snapshots``.  Lineage/idempotency/snapshot binding
+        rows only index those owners, so deleting or orphaning invalid rows is
+        the only valid recovery.  This keeps ``PRAGMA foreign_key_check`` clean
+        without inventing placeholder parent records.
+        """
+
+        def affected(cursor: sqlite3.Cursor) -> int:
+            return max(0, int(cursor.rowcount or 0))
+
+        def _do(conn):
+            repaired = 0
+            repaired += affected(conn.execute(
+                """
+                DELETE FROM session_lineage
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM sessions s WHERE s.id = session_lineage.session_id
+                )
+                """
+            ))
+            repaired += affected(conn.execute(
+                """
+                UPDATE session_lineage
+                SET parent_session_id = NULL
+                WHERE parent_session_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sessions s WHERE s.id = session_lineage.parent_session_id
+                  )
+                """
+            ))
+            repaired += affected(conn.execute(
+                """
+                DELETE FROM session_branch_requests
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM sessions s WHERE s.id = session_branch_requests.source_session_id
+                )
+                   OR NOT EXISTS (
+                    SELECT 1 FROM sessions s WHERE s.id = session_branch_requests.result_session_id
+                )
+                """
+            ))
+            repaired += affected(conn.execute(
+                """
+                DELETE FROM team_capability_snapshot_bindings
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM team_missions m
+                    WHERE m.mission_id = team_capability_snapshot_bindings.mission_id
+                )
+                   OR NOT EXISTS (
+                    SELECT 1 FROM team_capability_snapshots s
+                    WHERE s.snapshot_id = team_capability_snapshot_bindings.snapshot_id
+                )
+                """
+            ))
+            return repaired
+
+        return self._execute_write(_do)
 
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
         """Store the full assembled system prompt snapshot."""
@@ -1375,14 +1791,23 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
 
         return cleaned
 
-    def set_session_title(self, session_id: str, title: str) -> bool:
+    def set_session_title(self, session_id: str, title: str, *, title_source: str = "user") -> bool:
         """Set or update a session's title.
 
         Returns True if session was found and title was set.
         Raises ValueError if title is already in use by another session,
         or if the title fails validation (too long, invalid characters).
         Empty/whitespace-only strings are normalized to None (clearing the title).
+
+        ``title`` remains the legacy unique Hermes title used by CLI resume and
+        platform integrations. ``display_title`` is the non-unique product title
+        Doxie shows in history. Auto-generated summary titles are no longer a
+        valid write source; ``title_source="auto"`` is ignored so canonical
+        titles cannot regress behind first-user-message display titles.
         """
+        normalized_source = str(title_source or "user").strip().lower() or "user"
+        if normalized_source == "auto":
+            return False
         title = self.sanitize_title(title)
         def _do(conn):
             if title:
@@ -1397,8 +1822,14 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                         f"Title '{title}' is already in use by session {conflict['id']}"
                     )
             cursor = conn.execute(
-                "UPDATE sessions SET title = ? WHERE id = ?",
-                (title, session_id),
+                """
+                UPDATE sessions
+                SET title = ?,
+                    display_title = COALESCE(?, ''),
+                    display_title_source = ?
+                WHERE id = ?
+                """,
+                (title, title or "", normalized_source, session_id),
             )
             return cursor.rowcount
         rowcount = self._execute_write(_do)
@@ -1540,7 +1971,8 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
         message_count, preview (first 60 chars of first user message),
         last_active (timestamp of last message).
 
-        Uses a single query with correlated subqueries instead of N+2 queries.
+        Reads denormalized list fields maintained on the ``sessions`` row;
+        transcript bodies are loaded only by detail/history APIs.
 
         By default, child sessions (subagent runs, compression continuations)
         are excluded.  Pass ``include_children=True`` to include them.
@@ -1622,7 +2054,7 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
             outer_params = list(params)
             cursor_id = _cursor_id()
             if cursor_id:
-                effective_last_active_expr = "COALESCE(cm.effective_last_active, s.started_at)"
+                effective_last_active_expr = "COALESCE(cm.effective_last_active, COALESCE(s.last_active, s.started_at))"
                 cursor_effective_last_active = _cursor_number("effective_last_active")
                 cursor_started_at = _cursor_number("started_at")
                 outer_where_clauses.append(
@@ -1656,9 +2088,9 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
             )
             # Compute effective_last_active by walking each surfaced session's
             # compression-continuation chain forward in SQL and taking the MAX
-            # timestamp across the chain. This lets us ORDER BY + LIMIT at SQL
-            # level instead of fetching every row and sorting in Python, while
-            # still surfacing old compression roots whose live tip is fresh.
+            # denormalized session activity timestamp across the chain. This
+            # keeps ORDER BY + LIMIT in SQL without aggregating transcript rows,
+            # while still surfacing old compression roots whose live tip is fresh.
             #
             # The CTE seeds from rows the outer WHERE admits (roots + branch
             # children), then recursively joins forward through
@@ -1679,26 +2111,15 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                 chain_max AS (
                     SELECT
                         root_id,
-                        MAX(COALESCE(
-                            (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = cur_id AND m.active = 1),
-                            (SELECT started_at FROM sessions ss WHERE ss.id = cur_id)
-                        )) AS effective_last_active
-                    FROM chain
+                        MAX(COALESCE(ss.last_active, ss.started_at)) AS effective_last_active
+                    FROM chain c
+                    JOIN sessions ss ON ss.id = c.cur_id
                     GROUP BY root_id
                 )
                 SELECT s.*,
-                    COALESCE(
-                        (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
-                         FROM messages m
-                         WHERE m.session_id = s.id AND m.active = 1 AND m.role = 'user' AND m.content IS NOT NULL
-                         ORDER BY m.timestamp, m.id LIMIT 1),
-                        ''
-                    ) AS _preview_raw,
-                    COALESCE(
-                        (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id AND m2.active = 1),
-                        s.started_at
-                    ) AS last_active,
-                    COALESCE(cm.effective_last_active, s.started_at) AS _effective_last_active
+                    COALESCE(s.preview, '') AS _preview_summary,
+                    COALESCE(s.last_active, s.started_at) AS _last_active_summary,
+                    COALESCE(cm.effective_last_active, COALESCE(s.last_active, s.started_at)) AS _effective_last_active
                 FROM sessions s
                 LEFT JOIN chain_max cm ON cm.root_id = s.id
                 {outer_where_sql}
@@ -1727,17 +2148,8 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
             )
             query = f"""
                 SELECT s.*,
-                    COALESCE(
-                        (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
-                         FROM messages m
-                         WHERE m.session_id = s.id AND m.active = 1 AND m.role = 'user' AND m.content IS NOT NULL
-                         ORDER BY m.timestamp, m.id LIMIT 1),
-                        ''
-                    ) AS _preview_raw,
-                    COALESCE(
-                        (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id AND m2.active = 1),
-                        s.started_at
-                    ) AS last_active
+                    COALESCE(s.preview, '') AS _preview_summary,
+                    COALESCE(s.last_active, s.started_at) AS _last_active_summary
                 FROM sessions s
                 {outer_where_sql}
                 ORDER BY s.started_at DESC, s.id DESC
@@ -1750,13 +2162,10 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
         sessions = []
         for row in rows:
             s = dict(row)
-            # Build the preview from the raw substring
-            raw = s.pop("_preview_raw", "").strip()
-            if raw:
-                text = raw[:60]
-                s["preview"] = text + ("..." if len(raw) > 60 else "")
-            else:
-                s["preview"] = ""
+            s["preview"] = str(s.pop("_preview_summary", s.get("preview") or "") or "")
+            last_active = s.pop("_last_active_summary", None)
+            if last_active is not None:
+                s["last_active"] = last_active
             effective_last_active = s.pop("_effective_last_active", None)
             if effective_last_active is None:
                 effective_last_active = s.get("last_active") or s.get("started_at") or 0
@@ -1792,8 +2201,9 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                 merged = dict(s)
                 for key in (
                     "id", "ended_at", "end_reason", "message_count",
-                    "tool_call_count", "title", "last_active", "preview",
-                    "model", "system_prompt",
+                    "tool_call_count", "title", "display_title",
+                    "display_title_source", "last_active", "preview", "model",
+                    "system_prompt",
                 ):
                     if key in tip_row:
                         merged[key] = tip_row[key]
@@ -1810,17 +2220,8 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
         """
         query = """
             SELECT s.*,
-                COALESCE(
-                    (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
-                     FROM messages m
-                     WHERE m.session_id = s.id AND m.active = 1 AND m.role = 'user' AND m.content IS NOT NULL
-                     ORDER BY m.timestamp, m.id LIMIT 1),
-                    ''
-                ) AS _preview_raw,
-                COALESCE(
-                    (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id AND m2.active = 1),
-                    s.started_at
-                ) AS last_active
+                COALESCE(s.preview, '') AS _preview_summary,
+                COALESCE(s.last_active, s.started_at) AS _last_active_summary
             FROM sessions s
             WHERE s.id = ?
         """
@@ -1830,12 +2231,8 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
         if not row:
             return None
         s = dict(row)
-        raw = s.pop("_preview_raw", "").strip()
-        if raw:
-            text = raw[:60]
-            s["preview"] = text + ("..." if len(raw) > 60 else "")
-        else:
-            s["preview"] = ""
+        s["preview"] = str(s.pop("_preview_summary", s.get("preview") or "") or "")
+        s["last_active"] = s.pop("_last_active_summary", s.get("last_active") or s.get("started_at") or 0)
         return s
 
     # =========================================================================
@@ -1883,6 +2280,101 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                 )
                 return content
         return content
+
+    @classmethod
+    def _message_preview_text(cls, content: Any, limit: int = 60) -> str:
+        """Return the compact user-facing preview stored on ``sessions``."""
+        decoded = cls._decode_content(content)
+        if isinstance(decoded, list):
+            parts: list[str] = []
+            for item in decoded:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text") or item.get("content") or ""))
+                else:
+                    parts.append(str(item or ""))
+            preview = " ".join(part for part in parts if part).strip()
+            if not preview and decoded:
+                preview = "[multimodal content]"
+        elif isinstance(decoded, dict):
+            preview = str(decoded.get("text") or decoded.get("content") or "").strip()
+        else:
+            preview = str(decoded or "").strip()
+        preview = " ".join(preview.split())
+        if len(preview) > limit:
+            return preview[:limit] + "..."
+        return preview
+
+    @classmethod
+    def _message_display_title_text(cls, content: Any, limit: int = 100) -> str:
+        """Return a deterministic product title derived from the first user message."""
+        decoded = cls._decode_content(content)
+        if isinstance(decoded, list):
+            parts: list[str] = []
+            for item in decoded:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text") or item.get("content") or ""))
+                else:
+                    parts.append(str(item or ""))
+            title = " ".join(part for part in parts if part).strip()
+            if not title and decoded:
+                title = "[multimodal content]"
+        elif isinstance(decoded, dict):
+            title = str(decoded.get("text") or decoded.get("content") or "").strip()
+        else:
+            title = str(decoded or "").strip()
+        title = " ".join(title.split())
+        if len(title) > limit:
+            return title[:limit].rstrip()
+        return title
+
+    def _rebuild_session_list_summary(self, conn: sqlite3.Connection, session_id: str) -> None:
+        """Recompute list summary fields after active-message set changes."""
+        row = conn.execute(
+            """
+            SELECT content
+            FROM messages
+            WHERE session_id = ?
+              AND active = 1
+              AND role = 'user'
+              AND content IS NOT NULL
+            ORDER BY timestamp, id
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+        first_user_content = row["content"] if row else None
+        preview = self._message_preview_text(first_user_content)
+        display_title = self._message_display_title_text(first_user_content)
+        conn.execute(
+            """
+            UPDATE sessions
+            SET
+                message_count = (
+                    SELECT COUNT(1)
+                    FROM messages m
+                    WHERE m.session_id = sessions.id
+                      AND m.active = 1
+                ),
+                preview = ?,
+                display_title = CASE
+                    WHEN COALESCE(display_title_source, '') = 'user' THEN COALESCE(display_title, '')
+                    ELSE ?
+                END,
+                display_title_source = CASE
+                    WHEN COALESCE(display_title_source, '') = 'user' THEN 'user'
+                    WHEN ? != '' THEN 'first_user_message'
+                    ELSE ''
+                END,
+                last_active = (
+                    SELECT MAX(m.timestamp)
+                    FROM messages m
+                    WHERE m.session_id = sessions.id
+                      AND m.active = 1
+                )
+            WHERE id = ?
+            """,
+            (preview, display_title, display_title, session_id),
+        )
 
     def append_message(
         self,
@@ -1937,6 +2429,9 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
         num_tool_calls = 0
         if tool_calls is not None:
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
+        message_timestamp = time.time()
+        preview = self._message_preview_text(content) if role == "user" else ""
+        display_title = self._message_display_title_text(content) if role == "user" else ""
 
         def _do(conn):
             cursor = conn.execute(
@@ -1952,7 +2447,7 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                     tool_call_id,
                     tool_calls_json,
                     tool_name,
-                    time.time(),
+                    message_timestamp,
                     token_count,
                     finish_reason,
                     reasoning,
@@ -1970,13 +2465,58 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
             if num_tool_calls > 0:
                 conn.execute(
                     """UPDATE sessions SET message_count = message_count + 1,
-                       tool_call_count = tool_call_count + ? WHERE id = ?""",
-                    (num_tool_calls, session_id),
+                       tool_call_count = tool_call_count + ?,
+                       preview = CASE
+                           WHEN ? != '' AND COALESCE(preview, '') = '' THEN ?
+                           ELSE COALESCE(preview, '')
+                       END,
+                       display_title = CASE
+                           WHEN ? != '' AND COALESCE(display_title, '') = '' THEN ?
+                           ELSE COALESCE(display_title, '')
+                       END,
+                       display_title_source = CASE
+                           WHEN ? != '' AND COALESCE(display_title_source, '') = '' THEN 'first_user_message'
+                           ELSE COALESCE(display_title_source, '')
+                       END,
+                       last_active = ?
+                       WHERE id = ?""",
+                    (
+                        num_tool_calls,
+                        preview,
+                        preview,
+                        display_title,
+                        display_title,
+                        display_title,
+                        message_timestamp,
+                        session_id,
+                    ),
                 )
             else:
                 conn.execute(
-                    "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
-                    (session_id,),
+                    """UPDATE sessions SET message_count = message_count + 1,
+                       preview = CASE
+                           WHEN ? != '' AND COALESCE(preview, '') = '' THEN ?
+                           ELSE COALESCE(preview, '')
+                       END,
+                       display_title = CASE
+                           WHEN ? != '' AND COALESCE(display_title, '') = '' THEN ?
+                           ELSE COALESCE(display_title, '')
+                       END,
+                       display_title_source = CASE
+                           WHEN ? != '' AND COALESCE(display_title_source, '') = '' THEN 'first_user_message'
+                           ELSE COALESCE(display_title_source, '')
+                       END,
+                       last_active = ?
+                       WHERE id = ?""",
+                    (
+                        preview,
+                        preview,
+                        display_title,
+                        display_title,
+                        display_title,
+                        message_timestamp,
+                        session_id,
+                    ),
                 )
             return msg_id
 
@@ -1995,16 +2535,20 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                 "DELETE FROM messages WHERE session_id = ?", (session_id,)
             )
             conn.execute(
-                "UPDATE sessions SET message_count = 0, tool_call_count = 0 WHERE id = ?",
+                "UPDATE sessions SET message_count = 0, tool_call_count = 0, preview = '', last_active = NULL WHERE id = ?",
                 (session_id,),
             )
 
             now_ts = time.time()
             total_messages = 0
             total_tool_calls = 0
+            first_user_preview = ""
+            first_user_display_title = ""
+            last_message_ts = None
             for msg in messages:
                 role = msg.get("role", "unknown")
                 tool_calls = msg.get("tool_calls")
+                message_ts = now_ts
                 reasoning_details = msg.get("reasoning_details") if role == "assistant" else None
                 codex_reasoning_items = (
                     msg.get("codex_reasoning_items") if role == "assistant" else None
@@ -2043,7 +2587,7 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                         msg.get("tool_call_id"),
                         tool_calls_json,
                         msg.get("tool_name"),
-                        now_ts,
+                        message_ts,
                         msg.get("token_count"),
                         msg.get("finish_reason"),
                         msg.get("reasoning") if role == "assistant" else None,
@@ -2056,6 +2600,10 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                     ),
                 )
                 total_messages += 1
+                if role == "user" and not first_user_preview:
+                    first_user_preview = self._message_preview_text(msg.get("content"))
+                    first_user_display_title = self._message_display_title_text(msg.get("content"))
+                last_message_ts = message_ts
                 if tool_calls is not None:
                     total_tool_calls += (
                         len(tool_calls) if isinstance(tool_calls, list) else 1
@@ -2063,8 +2611,32 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                 now_ts += 1e-6
 
             conn.execute(
-                "UPDATE sessions SET message_count = ?, tool_call_count = ? WHERE id = ?",
-                (total_messages, total_tool_calls, session_id),
+                """
+                UPDATE sessions
+                SET message_count = ?,
+                    tool_call_count = ?,
+                    preview = ?,
+                    display_title = CASE
+                        WHEN COALESCE(display_title_source, '') = 'user' THEN COALESCE(display_title, '')
+                        ELSE ?
+                    END,
+                    display_title_source = CASE
+                        WHEN COALESCE(display_title_source, '') = 'user' THEN 'user'
+                        WHEN ? != '' THEN 'first_user_message'
+                        ELSE ''
+                    END,
+                    last_active = ?
+                WHERE id = ?
+                """,
+                (
+                    total_messages,
+                    total_tool_calls,
+                    first_user_preview,
+                    first_user_display_title,
+                    first_user_display_title,
+                    last_message_ts,
+                    session_id,
+                ),
             )
 
         self._execute_write(_do)
@@ -2913,6 +3485,7 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                 "WHERE id = ?",
                 (session_id,),
             )
+            self._rebuild_session_list_summary(conn, session_id)
             return ids
 
         rewound_ids = self._execute_write(_do)
@@ -2946,6 +3519,7 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                     f"UPDATE messages SET active = 1 WHERE id IN ({placeholders})",
                     ids,
                 )
+            self._rebuild_session_list_summary(conn, session_id)
             return len(ids)
 
         return self._execute_write(_do)
@@ -3451,33 +4025,37 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
     ) -> List[Dict[str, Any]]:
         """List sessions, optionally filtered by source.
 
-        Returns rows enriched with a computed ``last_active`` column (latest
-        message timestamp for the session, falling back to ``started_at``),
-        ordered by most-recently-used first.
+        Returns rows with the denormalized ``last_active`` list field,
+        falling back to ``started_at``, ordered by most-recently-used first.
         """
         select_with_last_active = (
-            "SELECT s.*, COALESCE(m.last_active, s.started_at) AS last_active "
+            "SELECT s.*, COALESCE(s.last_active, s.started_at) AS _last_active_summary "
             "FROM sessions s "
-            "LEFT JOIN ("
-            "SELECT session_id, MAX(timestamp) AS last_active "
-            "FROM messages WHERE active = 1 GROUP BY session_id"
-            ") m ON m.session_id = s.id "
         )
         with self._lock:
             if source:
                 cursor = self._conn.execute(
                     f"{select_with_last_active}"
                     "WHERE s.source = ? "
-                    "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
+                    "ORDER BY _last_active_summary DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
                     (source, limit, offset),
                 )
             else:
                 cursor = self._conn.execute(
                     f"{select_with_last_active}"
-                    "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
+                    "ORDER BY _last_active_summary DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
                     (limit, offset),
                 )
-            return [dict(row) for row in cursor.fetchall()]
+            rows = cursor.fetchall()
+        sessions = []
+        for row in rows:
+            session = dict(row)
+            session["last_active"] = session.pop(
+                "_last_active_summary",
+                session.get("last_active") or session.get("started_at") or 0,
+            )
+            sessions.append(session)
+        return sessions
 
     # =========================================================================
     # Utility
@@ -3536,7 +4114,7 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                 "DELETE FROM messages WHERE session_id = ?", (session_id,)
             )
             conn.execute(
-                "UPDATE sessions SET message_count = 0, tool_call_count = 0 WHERE id = ?",
+                "UPDATE sessions SET message_count = 0, tool_call_count = 0, preview = '', last_active = NULL WHERE id = ?",
                 (session_id,),
             )
         self._execute_write(_do)
@@ -3593,6 +4171,20 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                 "WHERE parent_session_id = ?",
                 (session_id,),
             )
+            conn.execute(
+                "UPDATE session_lineage SET parent_session_id = NULL "
+                "WHERE parent_session_id = ?",
+                (session_id,),
+            )
+            conn.execute(
+                "DELETE FROM session_branch_requests "
+                "WHERE source_session_id = ? OR result_session_id = ?",
+                (session_id, session_id),
+            )
+            conn.execute(
+                "DELETE FROM session_lineage WHERE session_id = ?",
+                (session_id,),
+            )
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             return True
@@ -3642,6 +4234,22 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
             conn.execute(
                 f"UPDATE sessions SET parent_session_id = NULL "
                 f"WHERE parent_session_id IN ({placeholders})",
+                list(session_ids),
+            )
+            conn.execute(
+                f"UPDATE session_lineage SET parent_session_id = NULL "
+                f"WHERE parent_session_id IN ({placeholders})",
+                list(session_ids),
+            )
+            conn.execute(
+                f"DELETE FROM session_branch_requests "
+                f"WHERE source_session_id IN ({placeholders}) "
+                f"OR result_session_id IN ({placeholders})",
+                list(session_ids) + list(session_ids),
+            )
+            conn.execute(
+                f"DELETE FROM session_lineage "
+                f"WHERE session_id IN ({placeholders})",
                 list(session_ids),
             )
 
@@ -4049,17 +4657,8 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                 rows = self._conn.execute(
                     """
                     SELECT s.*,
-                        COALESCE(
-                            (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
-                             FROM messages m
-                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
-                             ORDER BY m.timestamp, m.id LIMIT 1),
-                            ''
-                        ) AS _preview_raw,
-                        COALESCE(
-                            (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
-                            s.started_at
-                        ) AS last_active
+                        COALESCE(s.preview, '') AS _preview_summary,
+                        COALESCE(s.last_active, s.started_at) AS _last_active_summary
                     FROM sessions s
                     WHERE s.source = 'telegram'
                       AND s.user_id = ?
@@ -4067,7 +4666,7 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                           SELECT 1 FROM telegram_dm_topic_bindings b
                           WHERE b.session_id = s.id
                       )
-                    ORDER BY last_active DESC, s.started_at DESC
+                    ORDER BY _last_active_summary DESC, s.started_at DESC
                     LIMIT ?
                     """,
                     (str(user_id), int(limit)),
@@ -4078,21 +4677,12 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
                 rows = self._conn.execute(
                     """
                     SELECT s.*,
-                        COALESCE(
-                            (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
-                             FROM messages m
-                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
-                             ORDER BY m.timestamp, m.id LIMIT 1),
-                            ''
-                        ) AS _preview_raw,
-                        COALESCE(
-                            (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
-                            s.started_at
-                        ) AS last_active
+                        COALESCE(s.preview, '') AS _preview_summary,
+                        COALESCE(s.last_active, s.started_at) AS _last_active_summary
                     FROM sessions s
                     WHERE s.source = 'telegram'
                       AND s.user_id = ?
-                    ORDER BY last_active DESC, s.started_at DESC
+                    ORDER BY _last_active_summary DESC, s.started_at DESC
                     LIMIT ?
                     """,
                     (str(user_id), int(limit)),
@@ -4101,8 +4691,11 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
         sessions: List[Dict[str, Any]] = []
         for row in rows:
             session = dict(row)
-            raw = str(session.pop("_preview_raw", "") or "").strip()
-            session["preview"] = raw[:60] + ("..." if len(raw) > 60 else "") if raw else ""
+            session["preview"] = str(session.pop("_preview_summary", session.get("preview") or "") or "")
+            session["last_active"] = session.pop(
+                "_last_active_summary",
+                session.get("last_active") or session.get("started_at") or 0,
+            )
             sessions.append(session)
         return sessions
 
@@ -4202,6 +4795,64 @@ class SessionDB(SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, Session
             logger.warning("state.db auto-maintenance failed: %s", exc)
             result["error"] = str(exc)
 
+        return result
+
+    def maybe_auto_compact_run_events(
+        self,
+        min_interval_hours: int = 24,
+        vacuum: bool = True,
+    ) -> Dict[str, Any]:
+        """Idempotent run-event maintenance for token-stream storage.
+
+        Live streaming emits token-sized events, but the durable run history
+        should keep coalesced replay segments. This maintenance is separate
+        from session pruning so desktop/profile runtimes can reclaim old
+        chunk rows even when session retention pruning is disabled.
+        """
+        result: Dict[str, Any] = {
+            "skipped": False,
+            "deleted_events": 0,
+            "compacted_segments": 0,
+            "deduplicated_terminal_groups": 0,
+            "updated_events": 0,
+            "vacuumed": False,
+        }
+        try:
+            last_raw = self.get_meta("last_auto_run_event_compaction_v1")
+            now = time.time()
+            if last_raw:
+                try:
+                    last_ts = float(last_raw)
+                    if now - last_ts < min_interval_hours * 3600:
+                        result["skipped"] = True
+                        return result
+                except (TypeError, ValueError):
+                    pass
+
+            compacted = self.compact_run_events()
+            result.update({
+                "deleted_events": int(compacted.get("deleted_events") or 0),
+                "compacted_segments": int(compacted.get("compacted_segments") or 0),
+                "deduplicated_terminal_groups": int(compacted.get("deduplicated_terminal_groups") or 0),
+                "updated_events": int(compacted.get("updated_events") or 0),
+            })
+            if vacuum and result["deleted_events"] > 0:
+                try:
+                    self.vacuum()
+                    result["vacuumed"] = True
+                except Exception as exc:
+                    logger.warning("state.db run-event VACUUM failed: %s", exc)
+            self.set_meta("last_auto_run_event_compaction_v1", str(now))
+            if result["deleted_events"] > 0:
+                logger.info(
+                    "state.db run-event maintenance: compacted %d segment(s), deleted %d event row(s)%s",
+                    result["compacted_segments"],
+                    result["deleted_events"],
+                    " + VACUUM" if result["vacuumed"] else "",
+                )
+        except Exception as exc:
+            logger.warning("state.db run-event maintenance failed: %s", exc)
+            result["error"] = str(exc)
         return result
 
     # ── Handoff (cross-platform session transfer) ──────────────────────────
