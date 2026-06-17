@@ -115,6 +115,17 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         _build_context_files_prompt,
     )
 
+    # Resolve the model's context window once so context-file caps can scale
+    # to it (dynamic cap — see prompt_builder._dynamic_context_file_max_chars).
+    # None falls back to the historical flat default. This value is stable for
+    # the life of the conversation, so it does not threaten prompt caching.
+    _ctx_len: Optional[int] = None
+    _cc = getattr(agent, "context_compressor", None)
+    if _cc is not None:
+        _cc_len = getattr(_cc, "context_length", None)
+        if isinstance(_cc_len, int) and _cc_len > 0:
+            _ctx_len = _cc_len
+
     # ── Stable tier ────────────────────────────────────────────────
     stable_parts: List[str] = []
 
@@ -124,7 +135,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     _soul_loaded = False
     if agent.load_soul_identity or not agent.skip_context_files:
         _log_dovie_system_prompt_stage(agent, "load-soul-start")
-        _soul_content = load_soul_md()
+        _soul_content = load_soul_md(_ctx_len)
         _log_dovie_system_prompt_stage(
             agent,
             "load-soul-end",
@@ -383,7 +394,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             skip_soul=_soul_loaded,
         )
         context_files_prompt = build_context_files_prompt(
-            cwd=_context_cwd, skip_soul=_soul_loaded)
+            cwd=_context_cwd, skip_soul=_soul_loaded, context_length=_ctx_len)
         _log_dovie_system_prompt_stage(
             agent,
             "context-files-end",
