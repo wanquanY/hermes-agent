@@ -1,5 +1,8 @@
 """Tests for tools/skills_sync.py — manifest-based skill seeding and updating."""
 
+import shutil
+import json
+import pytest
 from pathlib import Path
 from unittest.mock import patch
 
