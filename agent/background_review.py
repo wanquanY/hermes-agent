@@ -256,6 +256,43 @@ def summarize_background_review_actions(
             if isinstance(content, str):
                 existing_tool_contents.add(content)
 
+    # Map review-agent tool results back to the calls that produced them.  The
+    # result JSON only says "Entry added"; the call arguments contain action,
+    # target, and content previews.  Restricting to notify_tools also prevents
+    # helper tools from surfacing as memory work just because they succeeded.
+    notify_tools = {"memory", "skill_manage"}
+    all_tool_call_ids: set = set()
+    call_details: dict = {}
+    for msg in review_messages or []:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls", []) or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function", {}) or {}
+            fn_name = fn.get("name", "")
+            tcid = tc.get("id")
+            if tcid:
+                all_tool_call_ids.add(tcid)
+            if fn_name not in notify_tools:
+                continue
+            try:
+                args = json.loads(fn.get("arguments", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+            if tcid:
+                call_details[tcid] = {
+                    "tool": fn_name,
+                    "action": args.get("action", "?"),
+                    "target": args.get("target", "memory"),
+                    "content": args.get("content", ""),
+                    "old_text": args.get("old_text", ""),
+                    "operations": args.get("operations") or [],
+                    "name": args.get("name", ""),
+                    "old_string": args.get("old_string", ""),
+                    "new_string": args.get("new_string", ""),
+                }
+
     actions: List[str] = []
     for msg in review_messages or []:
         if not isinstance(msg, dict) or msg.get("role") != "tool":
@@ -287,6 +324,72 @@ def summarize_background_review_actions(
             actions.append(f"{label} updated")
         elif "removed" in message.lower() or "replaced" in message.lower():
             label = "Memory" if target == "memory" else "User profile" if target == "user" else target
+        else:
+            continue
+
+        if verbose:
+            action = detail.get("action", "")
+            content = detail.get("content", "")
+            old_text = detail.get("old_text", "")
+            skill_name = detail.get("name", "")
+            operations = detail.get("operations") or []
+            max_preview = 120
+            if is_skill:
+                change = data.get("_change", {})
+                old_string = change.get("old", "") or detail.get("old_string", "")
+                new_string = change.get("new", "") or detail.get("new_string", "")
+                description = change.get("description", "")
+                if action == "patch" and (old_string or new_string):
+                    old_preview = old_string[:80].replace("\n", " ") + (
+                        "…" if len(old_string) > 80 else ""
+                    )
+                    new_preview = new_string[:80].replace("\n", " ") + (
+                        "…" if len(new_string) > 80 else ""
+                    )
+                    actions.append(
+                        f"📝 Skill '{skill_name}' patched: "
+                        f"\"{old_preview}\" → \"{new_preview}\""
+                    )
+                elif action == "create" and description:
+                    actions.append(f"📝 Skill '{skill_name}' created: {description}")
+                elif action == "edit" and description:
+                    actions.append(f"📝 Skill '{skill_name}' rewritten: {description}")
+                else:
+                    actions.append(f"📝 {message}" if message else f"Skill {action}")
+            elif operations:
+                for op in operations:
+                    op = op or {}
+                    op_act = op.get("action", "")
+                    op_content = (op.get("content") or "")
+                    op_old = (op.get("old_text") or "")
+                    if op_act == "add" and op_content:
+                        preview = op_content[:max_preview] + ("…" if len(op_content) > max_preview else "")
+                        actions.append(f"{label} ➕ {preview}")
+                    elif op_act == "replace" and op_content:
+                        preview = op_content[:max_preview] + ("…" if len(op_content) > max_preview else "")
+                        actions.append(f"{label} ✏️ {preview}")
+                    elif op_act == "remove" and op_old:
+                        preview = op_old[:60] + ("…" if len(op_old) > 60 else "")
+                        actions.append(f"{label} ➖ {preview}")
+            elif action == "add" and content:
+                preview = content[:max_preview] + ("…" if len(content) > max_preview else "")
+                actions.append(f"{label} ➕ {preview}")
+            elif action == "replace" and content:
+                preview = content[:max_preview] + ("…" if len(content) > max_preview else "")
+                actions.append(f"{label} ✏️ {preview}")
+            elif action == "remove" and old_text:
+                preview = old_text[:60] + ("…" if len(old_text) > 60 else "")
+                actions.append(f"{label} ➖ {preview}")
+            else:
+                actions.append(f"{label} updated")
+        elif (
+            "added" in message_lower
+            or "replaced" in message_lower
+            or "removed" in message_lower
+            or "applied" in message_lower
+            or (target and "add" in message.lower())
+            or "Entry added" in message
+        ):
             actions.append(f"{label} updated")
     return actions
 
