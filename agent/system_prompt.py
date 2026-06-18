@@ -666,6 +666,55 @@ def _resolve_platform_hint(agent: Any, platform_key: str, default_hint: str) -> 
     return base
 
 
+def _resolve_platform_hint(agent: Any, platform_key: str, default_hint: str) -> str:
+    """Apply a per-platform prompt-hint override to the default hint.
+
+    Reads ``agent._platform_hint_overrides`` (populated from
+    ``config.yaml`` ``platform_hints`` by ``agent_init``) and resolves the
+    effective hint for *platform_key*:
+
+      * ``replace`` — substitute the default hint entirely.
+      * ``append``  — keep the default and append the extra text.
+      * a bare string value — treated as ``append`` (convenience shorthand).
+
+    Precedence: ``replace`` wins over ``append`` if both are present.
+    Override text is added on top of (not instead of) the SOUL/context/
+    memory tiers — it only affects the platform-hint segment, so other
+    platforms are unaffected and general system instructions still apply.
+
+    Defensive: any malformed entry falls back to the unmodified default so
+    a bad config value can never break prompt assembly or leak across
+    platforms.
+    """
+    if not platform_key:
+        return default_hint
+    overrides = getattr(agent, "_platform_hint_overrides", None)
+    if not isinstance(overrides, dict) or not overrides:
+        return default_hint
+    spec = overrides.get(platform_key)
+    if spec is None:
+        return default_hint
+
+    # Shorthand: a bare string is treated as append text.
+    if isinstance(spec, str):
+        extra = spec.strip()
+        return f"{default_hint}\n\n{extra}".strip() if extra else default_hint
+
+    if not isinstance(spec, dict):
+        return default_hint
+
+    replace_text = spec.get("replace")
+    if isinstance(replace_text, str) and replace_text.strip():
+        base = replace_text.strip()
+    else:
+        base = default_hint
+
+    append_text = spec.get("append")
+    if isinstance(append_text, str) and append_text.strip():
+        return f"{base}\n\n{append_text.strip()}".strip()
+    return base
+
+
 def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) -> Dict[str, str]:
     """Assemble the system prompt as three ordered parts.
 
