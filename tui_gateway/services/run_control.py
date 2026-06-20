@@ -1237,7 +1237,13 @@ def record_event(
                 **_stream_trace_summary(frame),
             )
     if stable and (method := _db_method(db, "append_run_event")):
+        prev_projecting = getattr(db, "_team_mission_projecting", False)
         try:
+            # record_event performs its own canonical projection (canonicalize +
+            # reduce + mirror) below, so suppress append_run_event's write-time
+            # projection hook for this call and for the mirror's nested
+            # append_run_event — otherwise the event would be projected twice.
+            setattr(db, "_team_mission_projecting", True)
             saved = method(stable, frame)
             if (
                 isinstance(saved, dict)
@@ -1365,6 +1371,11 @@ def record_event(
                 error=str(exc),
             )
             logger.warning("failed to persist run event", exc_info=True)
+        finally:
+            try:
+                setattr(db, "_team_mission_projecting", prev_projecting)
+            except Exception:
+                pass
     elif terminal_event:
         _diagnostic_warning(
             "terminal-event-not-persisted-no-db-method",

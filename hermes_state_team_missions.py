@@ -96,7 +96,6 @@ _ACTIVE_RUN_STATUSES = {
 _TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 _EXECUTION_MODES_REQUIRE_FINALIZERS = {"supervised_mission", "autonomous_mission", "manual_graph"}
 _NON_WORK_NODE_KINDS = TEAM_MISSION_CONTROL_NODE_KINDS
-_TEAM_MISSION_EVENT_SEQ_FACTOR = 1_000_000_000
 _TEAM_MISSION_RUNTIME_EVENT_TYPE = "team_mission.runtime.event"
 _TEAM_MISSION_CONVERSATION_STATUS_EVENT_TYPE = "team_mission.conversation.status"
 _TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES = {
@@ -399,62 +398,6 @@ def _runtime_event_with_team_mission_identity(
             frame[key] = value
     frame["payload"] = payload
     return frame
-
-
-def _team_mission_runtime_projection_event(
-    source_event: Dict[str, Any],
-    identity: Dict[str, str],
-    *,
-    source_seq: int = 0,
-    mission_event_seq: int = 0,
-) -> Dict[str, Any]:
-    source_event = dict(source_event or {})
-    source_type = _text(source_event.get("type"))
-    source_payload = source_event.get("payload") if isinstance(source_event.get("payload"), dict) else {}
-    timestamp = float(source_event.get("timestamp") or time.time())
-    payload: Dict[str, Any] = {
-        "event_type": source_type,
-        "eventType": source_type,
-        "source_event_type": source_type,
-        "sourceEventType": source_type,
-        "source_event": source_event,
-        "sourceEvent": source_event,
-        "runtime_event": source_event,
-        "runtimeEvent": source_event,
-        "source_payload": dict(source_payload),
-        "sourcePayload": dict(source_payload),
-    }
-    for key, value in identity.items():
-        if _text(value):
-            payload[key] = value
-    if source_seq > 0:
-        payload["source_seq"] = source_seq
-        payload["sourceSeq"] = source_seq
-    if mission_event_seq > 0:
-        payload["seq"] = mission_event_seq
-        payload["team_mission_event_seq"] = mission_event_seq
-        payload["teamMissionEventSeq"] = mission_event_seq
-    for key in ("run_id", "runId", "turn_id", "turnId"):
-        value = source_event.get(key)
-        if _text(value):
-            payload[key] = value
-    projection: Dict[str, Any] = {
-        "type": _TEAM_MISSION_RUNTIME_EVENT_TYPE,
-        "seq": mission_event_seq,
-        "source_seq": source_seq,
-        "team_mission_event_seq": mission_event_seq,
-        "timestamp": timestamp,
-        "payload": payload,
-    }
-    for key in ("mission_id", "conversation_id", "stable_session_id", "node_id", "task_id", "task_frame_id"):
-        value = _text(identity.get(key))
-        if value:
-            projection[key] = value
-    for key in ("run_id", "turn_id"):
-        value = _text(source_event.get(key))
-        if value:
-            projection[key] = value
-    return projection
 
 
 def _node_matches_task(node: Dict[str, Any] | None, task_id: str) -> bool:
@@ -3042,19 +2985,53 @@ class SessionDBTeamMissionMixin:
             "payload": payload,
         })
         frame = _runtime_event_with_team_mission_identity(frame, identity)
-        saved = self.append_run_event(str(binding["session_id"] or ""), frame)
-        if (
-            isinstance(saved, dict)
-            and saved.get("_persistence_disposition") in {"duplicate_terminal", "ignored_after_terminal"}
-        ):
+        prev_projecting = getattr(self, "_team_mission_projecting", False)
+        # Guard so the inner append_run_event (and any conversation mirror it
+        # triggers) does not re-enter the write-time projection hook; this
+        # explicit path performs the canonical projection itself below.
+        self._team_mission_projecting = True
+        try:
+            saved = self.append_run_event(str(binding["session_id"] or ""), frame)
+            if (
+                isinstance(saved, dict)
+                and saved.get("_persistence_disposition") in {"duplicate_terminal", "ignored_after_terminal"}
+            ):
+                return saved
+            source_event = saved or frame
+            if _text(frame.get("type")) == "message.delta":
+                source_event = dict(frame)
+                if isinstance(saved, dict):
+                    for key in ("seq", "timestamp", "session_id", "stored_session_id", "runtime_scope_key", "runtime_session_id"):
+                        if saved.get(key) is not None and not source_event.get(key):
+                            source_event[key] = saved.get(key)
+            self._project_team_mission_run_event_locked(
+                mission_id=mission_id,
+                run_id=run_id,
+                binding=binding_value,
+                identity=identity,
+                source_event=source_event,
+            )
             return saved
-        source_event = saved or frame
-        if _text(frame.get("type")) == "message.delta":
-            source_event = dict(frame)
-            if isinstance(saved, dict):
-                for key in ("seq", "timestamp", "session_id", "stored_session_id", "runtime_scope_key", "runtime_session_id"):
-                    if saved.get(key) is not None and not source_event.get(key):
-                        source_event[key] = saved.get(key)
+        finally:
+            self._team_mission_projecting = prev_projecting
+
+    def _project_team_mission_run_event_locked(
+        self,
+        *,
+        mission_id: str,
+        run_id: str,
+        binding: Dict[str, Any],
+        identity: Dict[str, str],
+        source_event: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Canonical projection for one runtime event of a team-mission-bound run.
+
+        Single implementation shared by both the explicit
+        ``append_team_mission_run_event`` path and the write-time hook in
+        ``append_run_event`` (directly-delivered node events). Callers MUST set
+        ``self._team_mission_projecting`` for the duration so the conversation
+        mirror's nested ``append_run_event`` does not re-enter the hook.
+        """
         mission_event = _event_log.append_team_mission_runtime_event(
             self,
             mission_id=mission_id,
@@ -3067,7 +3044,7 @@ class SessionDBTeamMissionMixin:
             _mirror_team_mission_event(
                 self,
                 mission_id=mission_id,
-                binding=binding_value,
+                binding=binding,
                 event=source_event,
                 source="team_mission_run_event",
             )
@@ -3084,7 +3061,61 @@ class SessionDBTeamMissionMixin:
                 source_event=source_event,
                 source_mission_seq=_event_seq(mission_event),
             )
-        return saved
+        return mission_event
+
+    def _project_team_mission_run_event(self, *, run_id: str, saved: Dict[str, Any]) -> None:
+        """Write-time canonical projection for directly-delivered run events.
+
+        Invoked from ``append_run_event`` for runtime events recorded straight
+        onto a node's session (the streaming path that does not go through
+        ``append_team_mission_run_event``). Replaces the removed read-time
+        ``run_events`` -> mission projection so replay/live share one seq domain.
+        """
+        run_id = str(run_id or "").strip()
+        if not run_id or not isinstance(saved, dict):
+            return
+        if saved.get("_persistence_disposition") in {
+            "duplicate_terminal",
+            "ignored_after_terminal",
+            "duplicate_mission_event",
+        }:
+            return
+        binding = self.get_team_mission_run_binding(run_id)
+        if not binding:
+            return
+        mission_id = str(binding.get("mission_id") or "").strip()
+        if not mission_id:
+            return
+        node = self.get_team_mission_node(mission_id, str(binding.get("node_id") or "")) or {}
+        with self._lock:
+            mission_row = self._conn.execute(
+                "SELECT * FROM team_missions WHERE mission_id = ?",
+                (mission_id,),
+            ).fetchone()
+        mission = self._team_mission_from_row(mission_row) or {"mission_id": mission_id}
+        identity = _team_mission_runtime_event_identity(
+            mission=mission,
+            node=node,
+            binding=binding,
+        )
+        prev_projecting = getattr(self, "_team_mission_projecting", False)
+        self._team_mission_projecting = True
+        try:
+            # Directly-delivered runtime events only need to exist in the
+            # canonical log so replay/live share one seq domain (INV-1). Node
+            # status reduction, conversation mirroring and status projection are
+            # owned by the explicit streaming paths (append_team_mission_run_event
+            # and run_control.record_event); doing them here would double-mirror
+            # and rewrite conversation stream history.
+            _event_log.append_team_mission_runtime_event(
+                self,
+                mission_id=mission_id,
+                run_id=run_id,
+                source_event=dict(saved),
+                identity=identity,
+            )
+        finally:
+            self._team_mission_projecting = prev_projecting
 
     def get_team_mission_graph(self, mission_id: str) -> Dict[str, Any]:
         mission_id = str(mission_id or "").strip()
@@ -3597,135 +3628,14 @@ class SessionDBTeamMissionMixin:
         if not mission_id:
             return []
         after_seq = int(after_seq or 0)
-        canonical_events = self.list_team_mission_events(
+        # §§5.1 ABI convergence: the canonical team_mission_events log is the
+        # single source of truth for replay. Runtime events are appended to it
+        # at write time (append_team_mission_run_event), so replay and live
+        # share one monotonic per-mission seq domain. The legacy run_events
+        # derived projection (rowid * 1e9 + seq) created a second, incompatible
+        # seq domain and has been removed (INV-1 / single source of truth).
+        return self.list_team_mission_events(
             mission_id,
             after_seq=after_seq,
             limit=limit,
         )
-        if canonical_events:
-            return canonical_events
-        if after_seq > 0:
-            return []
-        projection_source_placeholders = ",".join(
-            "?" for _ in _TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES
-        )
-        projection_source_event_types = tuple(sorted(_TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES))
-        with self._lock:
-            rows = self._conn.execute(
-                f"""
-                SELECT (
-                    e.id * {_TEAM_MISSION_EVENT_SEQ_FACTOR}
-                    + COALESCE(e.seq, 0)
-                ) AS mission_event_seq,
-                e.event_json,
-                b.node_id AS binding_node_id,
-                b.session_id AS binding_session_id,
-                b.runtime_session_id AS binding_runtime_session_id,
-                b.runtime_scope_key AS binding_runtime_scope_key,
-                b.role AS binding_role,
-                b.metadata_json AS binding_metadata_json,
-                m.mission_id AS mission_id,
-                m.conversation_id AS mission_conversation_id,
-                m.team_id AS mission_team_id,
-                m.leader_session_id AS mission_leader_session_id,
-                m.metadata_json AS mission_metadata_json,
-                n.kind AS node_kind,
-                n.metadata_json AS node_metadata_json
-	                FROM run_events e
-	                INNER JOIN team_mission_run_bindings b
-	                    ON b.run_id = e.run_id
-	                   AND b.session_id = e.session_id
-                INNER JOIN team_missions m
-                    ON m.mission_id = b.mission_id
-                LEFT JOIN team_mission_nodes n
-                    ON n.mission_id = b.mission_id
-                   AND n.node_id = b.node_id
-	                WHERE b.mission_id = ?
-	                  AND (
-	                    (
-	                      e.id * {_TEAM_MISSION_EVENT_SEQ_FACTOR}
-	                      + COALESCE(e.seq, 0)
-	                    ) > ?
-	                    OR (
-	                      (
-	                        e.id * {_TEAM_MISSION_EVENT_SEQ_FACTOR}
-	                        + COALESCE(e.seq, 0)
-	                      ) + 1 > ?
-	                      AND e.event_type IN ({projection_source_placeholders})
-	                    )
-	                  )
-	                ORDER BY mission_event_seq ASC
-	                LIMIT ?
-	                """,
-                (
-                    mission_id,
-                    after_seq,
-                    after_seq,
-                    *projection_source_event_types,
-                    max(1, min(int(limit or 2000), 10000)),
-                ),
-            ).fetchall()
-        events: List[Dict[str, Any]] = []
-        for row in rows:
-            event = _json_loads(row["event_json"], {})
-            if isinstance(event, dict):
-                source_seq = int(event.get("seq") or 0)
-                mission_seq = int(row["mission_event_seq"] or 0)
-                mission_metadata = _json_loads(_row_value(row, "mission_metadata_json", ""), {})
-                binding_metadata = _json_loads(_row_value(row, "binding_metadata_json", ""), {})
-                node_metadata = _json_loads(_row_value(row, "node_metadata_json", ""), {})
-                mission = {
-                    "mission_id": _text(_row_value(row, "mission_id", "")),
-                    "conversation_id": _text(_row_value(row, "mission_conversation_id", "")),
-                    "team_id": _text(_row_value(row, "mission_team_id", "")),
-                    "leader_session_id": _text(_row_value(row, "mission_leader_session_id", "")),
-                    "metadata": mission_metadata if isinstance(mission_metadata, dict) else {},
-                }
-                binding = {
-                    "mission_id": _text(_row_value(row, "mission_id", "")),
-                    "node_id": _text(_row_value(row, "binding_node_id", "")),
-                    "run_id": _text(event.get("run_id")),
-                    "session_id": _text(_row_value(row, "binding_session_id", "")),
-                    "runtime_session_id": _text(_row_value(row, "binding_runtime_session_id", "")),
-                    "runtime_scope_key": _text(_row_value(row, "binding_runtime_scope_key", "")),
-                    "role": _text(_row_value(row, "binding_role", "")),
-                    "metadata": binding_metadata if isinstance(binding_metadata, dict) else {},
-                }
-                node = {
-                    "mission_id": _text(_row_value(row, "mission_id", "")),
-                    "node_id": _text(_row_value(row, "binding_node_id", "")),
-                    "kind": _text(_row_value(row, "node_kind", "")),
-                    "metadata": node_metadata if isinstance(node_metadata, dict) else {},
-                }
-                identity = _team_mission_runtime_event_identity(
-                    mission=mission,
-                    node=node,
-                    binding=binding,
-                )
-                source_event = _runtime_event_with_team_mission_identity(
-                    event,
-                    identity,
-                    source_seq=source_seq,
-                    mission_event_seq=mission_seq,
-                )
-                projected_event = _team_mission_runtime_projection_event(
-                    source_event,
-                    identity,
-                    source_seq=source_seq,
-                    mission_event_seq=mission_seq,
-                )
-                if mission_seq > after_seq:
-                    events.append(projected_event)
-                if (
-                    _should_emit_conversation_status_projection(source_event)
-                    and mission_seq + 1 > after_seq
-                ):
-                    projection_event = self._team_mission_conversation_status_event(
-                        mission_id=_text(_row_value(row, "mission_id", "")),
-                        source_event=source_event,
-                        source_seq=mission_seq,
-                        projection_seq=mission_seq + 1,
-                    )
-                    if projection_event:
-                        events.append(projection_event)
-        return events

@@ -1086,6 +1086,20 @@ class SessionDBRunMixin:
                 self.prune_run_events(session_id=stable)
             except Exception as exc:
                 logger.debug("run event retention skipped for %s: %s", stable, exc)
+        # Write-time canonical projection for team-mission-bound runs. Runtime
+        # events recorded straight onto a node's session (the streaming path
+        # that bypasses append_team_mission_run_event) are projected into the
+        # canonical team_mission_events log here, so replay and live share one
+        # monotonic seq domain (replaces the removed read-time run_events
+        # fallback). The _team_mission_projecting guard prevents the explicit
+        # append_team_mission_run_event path and the conversation mirror from
+        # re-entering this hook.
+        if (
+            run_id
+            and not getattr(self, "_team_mission_projecting", False)
+            and hasattr(self, "_project_team_mission_run_event")
+        ):
+            self._project_team_mission_run_event(run_id=run_id, saved=saved)
         return saved
 
     def list_run_events(
