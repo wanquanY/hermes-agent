@@ -434,24 +434,25 @@ def projection_event(
     timestamp = float(source_event.get("timestamp") or time.time())
     subject = _canonical_subject(source_event, identity)
     text_stream = _text_stream_contract(source_event, subject)
+    # Keep exactly one copy of each field. The previous projection duplicated
+    # source_event 4x (source_event/sourceEvent/runtime_event/runtimeEvent),
+    # source_payload 2x and text_stream 2x, bloating every streamed delta to
+    # ~12-15KB. All Doxie/reconcile consumers read the snake_case primary first
+    # (with camelCase only as a historical fallback), and derive source_payload
+    # from source_event, so the duplicates are pure transport overhead that made
+    # live streaming chunky. source_event is retained for diagnostics per the
+    # ABI spec.
     payload: Dict[str, Any] = {
         "protocol": TEAM_MISSION_EVENT_PROTOCOL,
         "kind": mission_event_kind(source_event, identity),
         "subject": subject,
         "event_type": event_type,
-        "eventType": event_type,
         "source_event_type": event_type,
-        "sourceEventType": event_type,
         "source_event": source_event,
-        "sourceEvent": source_event,
-        "runtime_event": source_event,
-        "runtimeEvent": source_event,
         "source_payload": dict(source_payload),
-        "sourcePayload": dict(source_payload),
     }
     if text_stream:
         payload["text_stream"] = text_stream
-        payload["textStream"] = text_stream
     for key, value in identity.items():
         if key in {"node_id", "nodeId"} and _subject_node_id(subject):
             continue
