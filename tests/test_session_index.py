@@ -197,3 +197,22 @@ def test_team_conversation_touch_preserves_live_mission_status(tmp_path: Path):
     assert it["title"] == "renamed"
     assert it["running"] is True
     assert it["status"] == "running"
+
+
+def test_reconcile_excludes_team_internal_node_sessions(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("conv-1", source="cli")
+    db.create_session("team:mission-abc:node:verify-x", source="cli")
+    db.reconcile_session_index()
+    ids = _ids(db.list_session_index())
+    assert "conv-1" in ids
+    assert "team:mission-abc:node:verify-x" not in ids
+
+
+def test_reconcile_purges_previously_leaked_node_rows(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    # simulate a leaked node-session row from an earlier reconcile
+    db.upsert_session_index(session_id="team:mission-abc:node:synthesis", source="cli", started_at=1.0, updated_at=1.0)
+    assert "team:mission-abc:node:synthesis" in _ids(db.list_session_index())
+    db.reconcile_session_index()
+    assert "team:mission-abc:node:synthesis" not in _ids(db.list_session_index())

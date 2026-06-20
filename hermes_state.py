@@ -2450,15 +2450,28 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         """
         excluded = tuple(exclude_sources if exclude_sources is not None else ("tool", "cron"))
         placeholders = ", ".join("?" for _ in excluded) if excluded else ""
+        # Team-mission member-node runtime sessions (id like "team:...:node:...")
+        # are data plane, never user-facing — they must not surface in the sidebar.
+        # Mirrors the frontend isTeamMissionInternalRuntimeSessionId rule.
+        team_internal_clause = "NOT (id LIKE 'team:%' AND id LIKE '%:node:%')"
+        where = [team_internal_clause]
+        params: List[Any] = []
+        if excluded:
+            where.append(f"COALESCE(source,'') NOT IN ({placeholders})")
+            params.extend(excluded)
         select_sql = (
             "SELECT id, source, title, display_title, preview, started_at, "
-            "last_active, message_count, transient FROM sessions"
+            "last_active, message_count, transient FROM sessions WHERE "
+            + " AND ".join(where)
         )
-        if excluded:
-            select_sql += f" WHERE COALESCE(source,'') NOT IN ({placeholders})"
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
-            rows = conn.execute(select_sql, excluded).fetchall()
+            # Purge any team-internal node sessions that a prior reconcile leaked.
+            conn.execute(
+                "DELETE FROM session_index "
+                "WHERE session_id LIKE 'team:%' AND session_id LIKE '%:node:%'"
+            )
+            rows = conn.execute(select_sql, tuple(params)).fetchall()
             upserted = 0
             for row in rows:
                 started = float(row["started_at"] or 0)
