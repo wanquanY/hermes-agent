@@ -95,3 +95,16 @@ def test_project_session_index_marks_transient_draft(tmp_path: Path):
     # transient drafts are excluded from the default sidebar read
     assert db.list_session_index()["sessions"] == []
     assert db.list_session_index(include_transient=True)["sessions"][0]["session_id"] == "draft"
+
+
+def test_session_index_list_reconciles_preexisting_sessions_once(monkeypatch, tmp_path: Path):
+    from tui_gateway.methods import session as session_methods
+    db = _setup(monkeypatch, tmp_path)
+    # session created before the index existed (no index row yet)
+    db.create_session("legacy-1", source="cli")
+    assert db.list_session_index()["sessions"] == []
+    # first sidebar read backfills via reconcile
+    monkeypatch.setattr(session_methods, "_SESSION_INDEX_RECONCILED", False)
+    resp = server._methods["session.index.list"](1, {})
+    ids = [s["id"] for s in resp["result"]["sessions"]]
+    assert "legacy-1" in ids

@@ -107,3 +107,40 @@ def test_reconcile_preserves_live_status(tmp_path: Path):
     assert item["running"] is True
     assert item["status"] == "running"
     assert item["active_run_id"] == "run-9"
+
+
+def test_run_state_projects_into_session_index(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    # user-facing session has an index row (as session.create would create)
+    db.upsert_session_index(session_id="s1", source="cli", started_at=1.0, updated_at=1.0)
+
+    db.upsert_run(run_id="run-1", session_id="s1", status="running", runtime_session_id="rt-1")
+    item = db.list_session_index()["sessions"][0]
+    assert item["running"] is True
+    assert item["status"] == "running"
+    assert item["active_run_id"] == "run-1"
+    assert item["active_runtime_session_id"] == "rt-1"
+
+    db.upsert_run(run_id="run-1", session_id="s1", status="completed")
+    item = db.list_session_index()["sessions"][0]
+    assert item["running"] is False
+    assert item["status"] == "idle"
+    assert item["active_run_id"] == ""
+
+
+def test_run_state_does_not_create_index_row_for_member_sessions(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    # no session_index row exists (e.g. team-member runtime session)
+    db.upsert_run(run_id="run-x", session_id="member-session", status="running")
+    assert db.list_session_index(include_transient=True)["sessions"] == []
+
+
+def test_run_terminal_does_not_clobber_other_active_run(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_session_index(session_id="s1", source="cli", started_at=1.0, updated_at=1.0)
+    db.upsert_run(run_id="run-A", session_id="s1", status="running")
+    # a different (stale) run terminating must not clear the active run-A
+    db.upsert_run(run_id="run-B", session_id="s1", status="completed")
+    item = db.list_session_index()["sessions"][0]
+    assert item["running"] is True
+    assert item["active_run_id"] == "run-A"

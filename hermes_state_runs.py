@@ -606,9 +606,67 @@ class SessionDBRunMixin:
                 "SELECT * FROM runs WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
+            self._project_run_state_to_session_index_locked(
+                conn,
+                session_id=session_id,
+                run_id=run_id,
+                runtime_session_id=runtime_session_id,
+                status=str((row["status"] if row else normalized_status) or ""),
+                updated_at=updated,
+            )
             return self._run_from_row(row) or {}
 
         return self._execute_write(_do)
+
+    def _project_run_state_to_session_index_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        session_id: str,
+        run_id: str,
+        runtime_session_id: str,
+        status: str,
+        updated_at: float,
+    ) -> None:
+        """Write-time projection of run state into the control-plane session_index.
+
+        UPDATE-only: never inserts a row, so runs whose session has no user-facing
+        index row (e.g. team-member runtime sessions) are untouched. Keeps the
+        sidebar's running/status correct without a read-time live merge. Best-effort
+        — a missing session_index table or any error must never fail the run write.
+        """
+        sid = str(session_id or "").strip()
+        if not sid:
+            return
+        is_active = str(status or "") not in TERMINAL_RUN_STATUSES
+        try:
+            if is_active:
+                conn.execute(
+                    """
+                    UPDATE session_index
+                       SET running = 1, status = 'running',
+                           active_run_id = ?, active_runtime_session_id = ?,
+                           updated_at = MAX(updated_at, ?)
+                     WHERE session_id = ?
+                    """,
+                    (run_id, str(runtime_session_id or ""), float(updated_at or 0), sid),
+                )
+            else:
+                # Only clear when this run was the active one (don't clobber a
+                # different concurrently-active run for the same session).
+                conn.execute(
+                    """
+                    UPDATE session_index
+                       SET running = 0, status = 'idle',
+                           active_run_id = '', active_runtime_session_id = '',
+                           updated_at = MAX(updated_at, ?)
+                     WHERE session_id = ? AND (active_run_id = ? OR active_run_id = '')
+                    """,
+                    (float(updated_at or 0), sid, run_id),
+                )
+        except sqlite3.OperationalError:
+            # session_index table absent (legacy worker db) — nothing to project.
+            pass
 
     def create_run_if_session_idle(
         self,
