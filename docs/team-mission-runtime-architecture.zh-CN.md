@@ -103,6 +103,7 @@ Hermes Team Mission Runtime
 4. canonical messages 继续写 Hermes 普通 `messages`。
 5. `team_mission_run_bindings` 是 mission/node 和普通 run/session 的桥梁。
 6. mission event stream 通过 binding 聚合普通 run events。
+7. `team_mission_nodes` 不复制 run/session runtime 身份；所有 graph/read-model 输出必须从 `team_mission_run_bindings` join 最新绑定，并把 `run_id`、`stored_session_id`、`runtime_session_id`、`runtime_scope_key`、`runtime_binding` 投影到对应 node。
 
 ## 6. 数据模型
 
@@ -139,6 +140,13 @@ Gateway：
 3. `team_mission.conversation.list`：按 team/workspace/status 列出 conversation。
 4. `team_mission.conversation.rename`：重命名 canonical conversation，并同步 stable session 标题；不得改写 active mission 的任务标题。
 5. `team_mission.conversation.delete`：删除 canonical conversation、关联 mission graph 和 stable session。
+
+Control-plane 边界：
+
+1. `team_mission.conversation.ensure` 和 `team_mission.message.submit` 是 canonical conversation 写入口，必须在 Hermes control-plane 执行，不能按 Leader `runtime_scope_key` 整个代理到 scoped runtime worker。
+2. Leader 对话的实际模型执行隔离发生在下层 `run.submit`/`session.resume` runtime lease：`message.submit` 先在 control-plane 建立 conversation、workspace binding、run registry，再把 Leader 执行容器按 `team:*:leader-conversation` scope 恢复或复用。
+3. 所有以 team stable session 写入的 transcript、run event、terminal state 和 conversation status projection 必须按 stable session 选择 control-plane DB；当前线程处于 Leader profile context 时也不能写入 profile DB。
+4. Leader owner runtime 校验只用于拒绝已经处在冲突 scoped worker 内的请求；control-plane 入口没有 `DOXIE_HERMES_RUNTIME_SCOPE_KEY` 是合法状态，不能被解释为未进入 owner scope。owner scope 必须作为下层 `run.submit.runtime_scope_key` 传递并由 runtime lease 执行。
 
 未发布阶段不做团队会话历史数据兼容。`team_mission.conversation.ensure` 只负责 canonical conversation 的创建/更新，不扫描旧 mission run events、不回填旧最终交付消息，也不返回 backfill 结果。缺失的历史团队会话数据应删除后重新测试。
 
@@ -249,6 +257,12 @@ Gateway：
 10. `updated_at REAL`
 
 这是最关键的表。它保证 Team Mission 不复制普通运行存储，而是通过绑定关系复用 `runs/run_events/messages`。
+
+读取契约：
+
+1. `team_mission_run_bindings` 是节点 runtime 身份的唯一权威来源。
+2. `team_mission_nodes` 只保存任务图结构、负责人和当前业务状态，不新增 `runtime_session_id` / `runtime_stable_session_id` 等重复列。
+3. `team_mission.graph`、conversation graph、单节点读取和 conversation summary 必须把同一 node 的最新 binding 投影到 node 顶层字段，前端不得再从 metadata、route shell 或 event fallback 拼接节点 runtime 身份。
 
 ### 6.6 `team_mission_artifacts`
 
@@ -421,6 +435,14 @@ Leader 和 worker 的输出仍然使用普通 runtime event：
 4. `session_id`
 5. `runtime_scope_key`
 
+文本流 ABI：
+
+1. `message.delta` 只表示 append-only 增量。当前协议只允许 `mode=append` 或省略 `mode`；`payload.delta` 是本帧新增 suffix，`payload.text` 只能作为同值展示兼容字段，不能表达累计全文。
+2. `message.delta mode=snapshot` 不属于当前 Team Conversation / Team Mission live ABI。需要修正已输出文本时，不得通过 snapshot delta 修正。
+3. 当底层模型 adapter 发出累计文本但该累计文本不能通过追加变成当前已显示文本时，Gateway 必须丢弃该 unsafe frame，不能把公共前缀后的差异伪装成 append delta。
+4. `message.complete` 是同一 `run_id/turn_id/message_id` 的终态边界，必须携带 `payload.text` 作为 authoritative final content；如果 live stream 与 final response 不一致，差异通过 `message.complete.final_text_mismatch=true` 暴露。
+5. DoXie 侧展示只应把 `message.delta` 当追加流，把 `message.complete.text` 当最终收敛文本；任务图、左侧会话和历史 hydration 不得各自定义第二套文本合并语义。
+
 ### 8.3 delta 合并规则
 
 Team Mission 不实现自己的 chunk 合并。所有 `message.delta`、`reasoning.delta`、`thinking.delta` 继续走 `SessionDBRunMixin.append_run_event`。
@@ -431,6 +453,7 @@ Team Mission 不实现自己的 chunk 合并。所有 `message.delta`、`reasoni
 2. 工具事件、状态事件、终止事件保留边界。
 3. canonical message 在 `message.complete` 后进入 `messages`。
 4. mission events 只是查询视图，不是第二份历史。
+5. 合并后的 `message.delta` 仍必须保持 append 语义：`payload.delta` 是从上一条已投递文本到当前文本的真实新增 suffix，不得把累计文本或 complete 文本包装成 delta。
 
 ## 9. 四种团队模式
 
@@ -846,7 +869,16 @@ draft
 ```json
 {
   "mission": {},
-  "nodes": [],
+  "nodes": [
+    {
+      "node_id": "node-worker",
+      "run_id": "run-worker",
+      "stored_session_id": "team:mission-xxx:node:node-worker",
+      "runtime_session_id": "runtime-worker",
+      "runtime_scope_key": "profile:worker",
+      "runtime_binding": {}
+    }
+  ],
   "edges": [],
   "run_bindings": []
 }
@@ -1373,7 +1405,7 @@ DoXie 不应该：
    - 新增 `agent/tool_handoff.py`，支持工具执行路径把 structured handoff 转为最终 assistant 响应。
    - Team Mission Leader tools 可以把任务启动、状态查询等确定性结果以 handoff 形式返回，减少二次模型 follow-up 造成的延迟和卡 running 风险。
 6. Runtime proxy / pool 稳定性：
-   - runtime proxy 透传更多 Team Mission 控制方法，并保留 runtime scope / session binding。
+   - runtime proxy 只透传真正属于 runtime worker 的 Team Mission live control 方法；canonical conversation 写入口必须留在 control-plane。
    - runtime pool 相关测试覆盖 Doxie session / runtime lifecycle，防止 worker 进程和 active run 残留。
 
 ## 17. 验收标准

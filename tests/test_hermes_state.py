@@ -184,7 +184,7 @@ def test_append_run_event_coalesces_adjacent_subagent_reasoning_deltas(db):
     assert events[1]["payload"]["subagent_id"] == "sa-2"
 
 
-def test_append_run_event_coalesces_adjacent_main_message_deltas(db):
+def test_append_run_event_preserves_adjacent_main_message_deltas(db):
     db.append_run_event(
         "stored-1",
         {
@@ -236,11 +236,12 @@ def test_append_run_event_coalesces_adjacent_main_message_deltas(db):
 
     events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
 
-    assert [event["seq"] for event in events] == [2, 3, 4]
-    assert events[0]["payload"] == {"mode": "append", "text": "你好", "delta": "你好", "offset": 0}
-    assert events[1]["payload"]["mode"] == "snapshot"
-    assert events[1]["payload"]["snapshot"] == "你好啊"
-    assert events[2]["payload"]["text"] == "。"
+    assert [event["seq"] for event in events] == [1, 2, 3, 4]
+    assert events[0]["payload"] == {"mode": "append", "text": "你", "delta": "你", "offset": 0}
+    assert events[1]["payload"] == {"mode": "append", "text": "好", "delta": "好", "offset": 1}
+    assert events[2]["payload"]["mode"] == "snapshot"
+    assert events[2]["payload"]["snapshot"] == "你好啊"
+    assert events[3]["payload"]["text"] == "。"
 
 
 def test_append_run_event_skips_delta_coalesce_when_target_seq_is_occupied(db):
@@ -291,7 +292,7 @@ def test_append_run_event_skips_delta_coalesce_when_target_seq_is_occupied(db):
     assert [event["type"] for event in events] == ["message.delta", "tool.start"]
 
 
-def test_append_run_event_coalesces_message_deltas_across_tool_events(db):
+def test_append_run_event_preserves_message_deltas_across_tool_events(db):
     db.append_run_event(
         "stored-1",
         {
@@ -332,9 +333,10 @@ def test_append_run_event_coalesces_message_deltas_across_tool_events(db):
     events = db.list_run_events_filtered("stored-1", limit=10)
     message_events = [event for event in events if event["type"] == "message.delta"]
 
-    assert [event["type"] for event in events] == ["tool.progress", "message.delta"]
-    assert message_events[0]["seq"] == 3
-    assert message_events[0]["payload"] == {"mode": "append", "text": "AB", "delta": "AB", "offset": 0}
+    assert [event["type"] for event in events] == ["message.delta", "tool.progress", "message.delta"]
+    assert [event["seq"] for event in message_events] == [1, 3]
+    assert message_events[0]["payload"] == {"mode": "append", "text": "A", "delta": "A", "offset": 0}
+    assert message_events[1]["payload"] == {"mode": "append", "text": "B", "delta": "B", "offset": 1}
 
 
 def test_append_run_event_does_not_coalesce_message_delta_when_offset_restarts(db):
@@ -377,9 +379,10 @@ def test_append_run_event_does_not_coalesce_message_delta_when_offset_restarts(d
 
     events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
 
-    assert [event["seq"] for event in events] == [2, 3]
-    assert events[0]["payload"] == {"mode": "append", "text": "你好", "delta": "你好", "offset": 0}
-    assert events[1]["payload"] == {
+    assert [event["seq"] for event in events] == [1, 2, 3]
+    assert events[0]["payload"] == {"mode": "append", "text": "你", "delta": "你", "offset": 0}
+    assert events[1]["payload"] == {"mode": "append", "text": "好", "delta": "好", "offset": 1}
+    assert events[2]["payload"] == {
         "mode": "append",
         "text": "重新开始",
         "delta": "重新开始",
@@ -387,7 +390,7 @@ def test_append_run_event_does_not_coalesce_message_delta_when_offset_restarts(d
     }
 
 
-def test_append_run_event_coalesces_cumulative_message_delta_without_duplication(db):
+def test_append_run_event_preserves_cumulative_message_delta_as_source_event(db):
     prefix = "## ✅ 团队任务执行结果整合\n\n本"
     full = (
         "## ✅ 团队任务执行结果整合\n\n"
@@ -425,11 +428,11 @@ def test_append_run_event_coalesces_cumulative_message_delta_without_duplication
 
     events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
 
-    assert [event["seq"] for event in events] == [2]
-    assert events[0]["payload"]["text"] == full
-    assert events[0]["payload"]["delta"] == full
-    assert "本## ✅" not in events[0]["payload"]["text"]
-    assert "\n\n---\n\n## 一、执行结果" in events[0]["payload"]["text"]
+    assert [event["seq"] for event in events] == [1, 2]
+    assert events[0]["payload"]["text"] == prefix
+    assert events[0]["payload"]["delta"] == prefix
+    assert events[1]["payload"]["text"] == full
+    assert events[1]["payload"]["delta"] == full
 
 
 def test_append_run_event_coalesces_adjacent_reasoning_deltas_by_source(db):
@@ -598,6 +601,61 @@ def test_append_run_event_deduplicates_repeated_terminal_for_run(db):
     assert run["last_seq"] == 2
 
 
+def test_append_run_event_ignores_stream_events_after_terminal_for_run(db):
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 1,
+            "payload": {"text": "running"},
+        },
+    )
+    terminal = db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.complete",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 2,
+            "payload": {"status": "complete", "text": "done"},
+        },
+    )
+    late_delta = db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 3,
+            "payload": {"text": "late"},
+        },
+    )
+
+    events = db.list_run_events("stored-1")
+    run = db.get_run("run-1")
+
+    assert terminal["seq"] == 2
+    assert late_delta["_persistence_disposition"] == "ignored_after_terminal"
+    assert late_delta["seq"] == 3
+    assert [event["type"] for event in events] == [
+        "message.delta",
+        "message.complete",
+        "message.delta",
+    ]
+    assert events[-1]["_persistence_disposition"] == "ignored_after_terminal"
+    assert events[-1]["payload"]["text"] == "late"
+    assert run["status"] == "completed"
+    assert run["last_seq"] == 3
+
+
 def test_append_run_event_allows_higher_priority_terminal_upgrade(db):
     db.append_run_event(
         "stored-1",
@@ -632,7 +690,7 @@ def test_append_run_event_allows_higher_priority_terminal_upgrade(db):
     assert run["last_seq"] == 2
 
 
-def test_compact_run_events_coalesces_existing_stream_rows(db):
+def test_compact_run_events_preserves_existing_message_delta_rows(db):
     db.append_run_event(
         "stored-1",
         {
@@ -741,10 +799,13 @@ def test_compact_run_events_coalesces_existing_stream_rows(db):
     result = db.compact_run_events(session_id="stored-1")
     events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
 
-    assert result["deleted_events"] == 1
-    assert [event["seq"] for event in events] == [4, 7]
-    assert events[0]["payload"] == {"mode": "append", "text": "ABC", "delta": "ABC", "offset": 0}
-    assert events[-1]["payload"] == {"mode": "append", "text": "DE", "delta": "DE", "offset": 3}
+    assert result["deleted_events"] == 0
+    assert [event["seq"] for event in events] == [1, 3, 4, 6, 7]
+    assert events[0]["payload"] == {"mode": "append", "text": "A", "delta": "A", "offset": 0}
+    assert events[1]["payload"] == {"mode": "append", "text": "B", "delta": "B", "offset": 1}
+    assert events[2]["payload"] == {"mode": "append", "text": "C", "delta": "C", "offset": 2}
+    assert events[3]["payload"] == {"mode": "append", "text": "D", "delta": "D", "offset": 3}
+    assert events[4]["payload"] == {"mode": "append", "text": "E", "delta": "E", "offset": 4}
 
 
 def test_compact_run_events_does_not_coalesce_restarted_message_append_offsets(db):
@@ -783,10 +844,11 @@ def test_compact_run_events_does_not_coalesce_restarted_message_append_offsets(d
     result = db.compact_run_events(session_id="stored-1")
     events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
 
-    assert result["deleted_events"] == 1
-    assert [event["seq"] for event in events] == [2, 3]
-    assert events[0]["payload"] == {"mode": "append", "text": "AB", "delta": "AB", "offset": 0}
-    assert events[1]["payload"] == {"mode": "append", "text": "RESET", "delta": "RESET", "offset": 0}
+    assert result["deleted_events"] == 0
+    assert [event["seq"] for event in events] == [1, 2, 3]
+    assert events[0]["payload"] == {"mode": "append", "text": "A", "delta": "A", "offset": 0}
+    assert events[1]["payload"] == {"mode": "append", "text": "B", "delta": "B", "offset": 1}
+    assert events[2]["payload"] == {"mode": "append", "text": "RESET", "delta": "RESET", "offset": 0}
 
 
 def test_compact_run_events_deduplicates_existing_terminal_rows(db):
@@ -4246,7 +4308,7 @@ class TestAutoMaintenance:
         # But last-run is still recorded so we don't retry immediately.
         assert db.get_meta("last_auto_prune") is not None
 
-    def test_auto_run_event_compaction_reclaims_stream_chunks_without_session_prune(self, db):
+    def test_auto_run_event_compaction_preserves_message_delta_chunks(self, db):
         for seq, payload in (
             (1, '{"mode":"append","text":"A","delta":"A","offset":0}'),
             (2, '{"mode":"append","text":"B","delta":"B","offset":1}'),
@@ -4284,13 +4346,14 @@ class TestAutoMaintenance:
         events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
 
         assert result["skipped"] is False
-        assert result["deleted_events"] == 1
-        assert result["compacted_segments"] == 1
+        assert result["deleted_events"] == 0
+        assert result["compacted_segments"] == 0
         assert result["vacuumed"] is False
         assert db.get_meta("last_auto_run_event_compaction_v1") is not None
         assert second["skipped"] is True
-        assert [event["seq"] for event in events] == [2]
-        assert events[0]["payload"] == {"mode": "append", "text": "AB", "delta": "AB", "offset": 0}
+        assert [event["seq"] for event in events] == [1, 2]
+        assert events[0]["payload"] == {"mode": "append", "text": "A", "delta": "A", "offset": 0}
+        assert events[1]["payload"] == {"mode": "append", "text": "B", "delta": "B", "offset": 1}
 
     def test_vacuum_disabled_via_flag(self, db):
         self._make_old_ended(db, "old", days_old=100)

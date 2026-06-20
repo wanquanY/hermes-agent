@@ -3,7 +3,7 @@ import json
 from tui_gateway.services.tool_events import GatewayToolEventBridge
 
 
-def _bridge(events, *, tool_progress_enabled=True):
+def _bridge(events, *, tool_progress_enabled=True, before_tool_boundary=None):
     sessions = {"sid": {"session_key": "stored", "tool_started_at": {}}}
     return GatewayToolEventBridge(
         sessions=sessions,
@@ -12,6 +12,7 @@ def _bridge(events, *, tool_progress_enabled=True):
         ),
         tool_progress_enabled=lambda _sid: tool_progress_enabled,
         session_cwd=lambda _session: "/tmp",
+        before_tool_boundary=before_tool_boundary,
     )
 
 
@@ -135,3 +136,27 @@ def test_team_mission_start_task_emits_structured_complete_when_tool_progress_di
     assert result["conversation_id"] == "conversation-1"
     assert result["node"] == {"node_id": "node-1"}
     assert result["run"] == {"run_id": "run-node-1"}
+
+
+def test_tool_boundary_hook_runs_even_when_progress_events_are_disabled():
+    events = []
+    boundaries = []
+    bridge = _bridge(
+        events,
+        tool_progress_enabled=False,
+        before_tool_boundary=lambda sid, event_type: boundaries.append((sid, event_type)),
+    )
+
+    callbacks = bridge.agent_callbacks(
+        "sid",
+        block=lambda *_args, **_kwargs: "",
+        status_update=lambda *_args, **_kwargs: None,
+    )
+    callbacks["tool_gen_callback"]("terminal")
+    callbacks["tool_start_callback"]("tool-1", "terminal", {"command": "pwd"})
+
+    assert events == []
+    assert boundaries == [
+        ("sid", "tool.generating"),
+        ("sid", "tool.start"),
+    ]

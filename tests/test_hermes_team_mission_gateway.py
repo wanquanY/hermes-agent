@@ -27,6 +27,55 @@ def _workspace_kwargs(tmp_path: Path, workspace_id: str = "workspace-1") -> dict
     return {"workspace_id": workspace["workspace_id"], "workspace_path": workspace["workspace_path"]}
 
 
+def test_team_mission_conversation_runtime_session_ids_gateway_is_lightweight(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        team_id="team-1",
+        workspace_id="workspace-1",
+        stable_session_id="team-session-1",
+        title="团队会话",
+        active_mission_id="mission-1",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="测试任务",
+        objective="测试任务",
+        mode="supervised_mission",
+        status="running",
+        leader_session_id="team-session-1",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="worker",
+        run_id="run-worker",
+        session_id="worker-session-1",
+        runtime_session_id="runtime-worker-1",
+        runtime_scope_key="team:mission-1:node:worker",
+        role="worker",
+    )
+
+    response = server._methods["team_mission.conversation.runtime_session_ids"](
+        1,
+        {"team_id": "team-1", "workspace_id": "workspace-1", "mission_id": "mission-1"},
+    )
+
+    assert "error" not in response
+    assert response["result"]["session_ids"] == ["team-session-1", "worker-session-1", "runtime-worker-1"]
+    assert response["result"]["runtime_session_ids"] == response["result"]["session_ids"]
+    assert "conversations" not in response["result"]
+
+
 def _seed_registry_team(db, tmp_path: Path) -> None:
     db.upsert_agent_profile(
         profile_id="profile-leader",
@@ -432,6 +481,34 @@ def test_team_mission_gateway_methods_create_graph_and_replay_events(monkeypatch
     assert message_events[-1]["payload"]["source_event"]["payload"]["delta"] == "规划中"
 
 
+def test_team_mission_create_rejects_autonomous_override_for_supervised_team(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+
+    response = server._methods["team_mission.create"](
+        1,
+        {
+            "mission_id": "mission-autonomous",
+            "team_id": "team-1",
+            "title": "不应自主执行",
+            "objective": "监督团队不能由请求载荷改成自主执行",
+            "mode": "autonomous_mission",
+            "workspace": _workspace_payload(tmp_path),
+        },
+    )
+
+    assert response["error"]["code"] == 4094
+    assert "team policy requires supervised_mission" in response["error"]["message"]
+    assert db.get_team_mission_graph("mission-autonomous") == {}
+
+
 def test_team_mission_graph_returns_conversation_graph_when_conversation_id_is_present(
     monkeypatch,
     tmp_path: Path,
@@ -667,6 +744,123 @@ def test_team_mission_message_submit_derives_conversation_title_from_first_user_
     assert conversation["title"] == "你是谁？ 我是谁？"
     assert conversation["display_title_source"] == "first_user_message"
     assert submitted["persist_user_message"] == "你是谁？ 我是谁？"
+
+
+def test_team_mission_message_submit_rejects_session_id_as_conversation_identity(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+
+    response = server._methods["team_mission.message.submit"](
+        1,
+        {
+            "conversation_session_id": "team-session-1",
+            "team_id": "team-1",
+            "text": "你好",
+            "workspace": _workspace_payload(tmp_path),
+        },
+    )
+
+    assert response["error"]["code"] == 4006
+    assert "mission_id or conversation_id required" in response["error"]["message"]
+    assert db.resolve_team_mission_conversation("team-session-1") == {}
+
+
+def test_team_mission_message_submit_conversation_only_does_not_bind_previous_active_mission(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        title="老团队会话",
+        active_mission_id="mission-old",
+        workspace_id="workspace-1",
+        workspace_path=str(tmp_path),
+    )
+    db.upsert_team_mission(
+        mission_id="mission-old",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="已完成旧任务",
+        objective="历史任务",
+        mode="supervised_mission",
+        status="completed",
+        **_workspace_kwargs(tmp_path),
+        metadata={"conversation_id": "conversation-1", "stableTeamSessionId": "team-session-1"},
+    )
+    submitted = {}
+
+    def fake_run_submit(rid, params):
+        submitted.update(params)
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "status": "streaming",
+                "run_id": params["run_id"],
+                "turn_id": params["turn_id"],
+                "session_id": "runtime-leader-conversation",
+                "stored_session_id": params["stored_session_id"],
+                "runtime_scope_key": params["runtime_scope_key"],
+            },
+        }
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+
+    response = server._methods["team_mission.message.submit"](
+        1,
+        {
+            "conversation_id": "conversation-1",
+            "conversation_session_id": "team-session-1",
+            "team_id": "team-1",
+            "text": "继续这个团队会话，启动一个新的测试任务",
+            "workspace": _workspace_payload(tmp_path),
+        },
+    )
+
+    assert "error" not in response
+    assert response["result"]["mission_id"] == ""
+    assert response["result"]["graph"]["mission"] == {}
+    assert "mission_id" not in submitted
+    team_context = submitted["doxie_product_context"]["team_mission"]
+    assert team_context["conversation_id"] == "conversation-1"
+    assert team_context["conversation_session_id"] == "team-session-1"
+    assert "mission_id" not in team_context
+    assert "mission-old" in submitted["text"]
+
+    submitted.clear()
+    response = server._methods["team_mission.message.submit"](
+        2,
+        {
+            "conversation_id": "conversation-1",
+            "conversation_session_id": "team-session-1",
+            "team_id": "team-1",
+            "text": "解释一下之前团队任务的结果，不要启动团队任务",
+            "workspace": _workspace_payload(tmp_path),
+        },
+    )
+
+    assert "error" not in response
+    assert response["result"]["mission_id"] == ""
+    assert "mission_id" not in submitted
+    assert submitted["enabled_toolsets"] == []
+    assert "mission-old" in submitted["text"]
+    team_context = submitted["doxie_product_context"]["team_mission"]
+    assert team_context["conversation_id"] == "conversation-1"
+    assert team_context["conversation_session_id"] == "team-session-1"
+    assert "mission_id" not in team_context
 
 
 def test_team_conversation_detail_returns_registry_team_members(monkeypatch, tmp_path: Path):
@@ -985,6 +1179,66 @@ def test_team_mission_message_submit_direct_reply_disables_tools_and_reasoning(m
     assert db.get_team_mission_graph("mission-1") == {}
 
 
+def test_team_mission_message_submit_explicit_start_task_overrides_negated_direct_reply(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    submitted = {}
+
+    def fake_run_submit(rid, params):
+        submitted.update(params)
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "status": "streaming",
+                "run_id": params["run_id"],
+                "turn_id": params["turn_id"],
+                "session_id": "runtime-leader-conversation",
+                "stored_session_id": params["stored_session_id"],
+                "runtime_scope_key": params["runtime_scope_key"],
+            },
+        }
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", "team:conversation-1:leader-conversation")
+
+    response = server._methods["team_mission.message.submit"](
+        1,
+        {
+            "conversation_id": "conversation-1",
+            "conversation_session_id": "team-session-conversation-1",
+            "team_id": "team-1",
+            "text": "请必须启动团队任务，不要直接自己完成。让团队创建 hello_team_stream.txt 并验证文件存在，然后由汇总节点给出最终结论。",
+            "runtime_scope_key": "team:conversation-1:leader-conversation",
+            "workspace": _workspace_payload(tmp_path),
+        },
+    )
+
+    assert response["result"]["conversation_session_id"] == "team-session-conversation-1"
+    assert submitted["enabled_toolsets"] == [
+        "team_mission_conversation_leader",
+        "clarify",
+        "vision",
+        "file",
+        "terminal",
+        "todo",
+    ]
+    assert submitted["toolset_scope"] == "exact"
+    assert "team_mission_start_task" in submitted["text"]
+    assert "The user explicitly asked you not to start or launch a team task" not in submitted["text"]
+    assert "Do not call tools, do not create tasks" not in submitted["text"]
+    assert "reasoning_config" not in submitted
+    assert submitted["persist_user_message"].startswith("请必须启动团队任务")
+    assert submitted["doxie_product_context"]["team_mission"]["team_id"] == "team-1"
+
+
 def test_team_mission_message_submit_registers_worker_runtime_session_shell(monkeypatch, tmp_path: Path):
     import importlib
 
@@ -1169,6 +1423,56 @@ def test_team_mission_message_submit_keeps_team_scope_out_of_profile_owner_check
     assert submitted["agent_profile_id"] == "agent-default"
     assert submitted["runtimeScopeKey"] == "profile:agent-default"
     assert submitted["runtime_scope_key"] == "team:conversation-1:leader-conversation"
+
+
+def test_team_mission_message_submit_allows_control_plane_outer_call_to_owner_runtime_scope(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    monkeypatch.delenv("DOXIE_HERMES_RUNTIME_SCOPE_KEY", raising=False)
+    submitted = {}
+
+    def fake_run_submit(rid, params):
+        submitted.update(params)
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "status": "streaming",
+                "run_id": params["run_id"],
+                "turn_id": params["turn_id"],
+                "session_id": "runtime-leader-conversation",
+                "stored_session_id": params["stored_session_id"],
+                "runtime_scope_key": params["runtime_scope_key"],
+            },
+        }
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+
+    response = server._methods["team_mission.message.submit"](
+        1,
+        {
+            "conversation_id": "team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0",
+            "conversation_session_id": "team-session-team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0",
+            "team_id": "team-1",
+            "text": "你好",
+            "agentProfileId": "agent-default",
+            "profileRuntimeScopeKey": "profile:agent-default",
+            "workspace": _workspace_payload(tmp_path),
+        },
+    )
+
+    assert "error" not in response
+    assert response["result"]["conversation_id"] == "team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0"
+    assert response["result"]["conversation_session_id"] == "team-session-team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0"
+    assert submitted["runtime_scope_key"] == "team:team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0:leader-conversation"
+    assert submitted["stored_session_id"] == "team-session-team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0"
+    assert submitted["agent_profile_id"] == "agent-default"
 
 
 def test_team_mission_conversation_ensure_keeps_team_scope_out_of_profile_owner_check(monkeypatch, tmp_path: Path):
@@ -2091,6 +2395,140 @@ def test_team_mission_plan_approve_uses_requested_mission_native_graph(monkeypat
         db.close()
 
 
+def test_team_mission_plan_approve_starts_ready_worker_with_runtime_projection(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+    from tui_gateway.services import run_control
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    _seed_registry_team(db, tmp_path)
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        active_mission_id="mission-current",
+        title="团队会话",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-current",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="当前任务",
+        objective="当前任务",
+        workspace_id="workspace-1",
+        workspace_path=str(workspace_path),
+        mode="supervised_mission",
+        status="waiting_approval",
+        leader_session_id="team-session-1",
+        metadata={"conversation_id": "conversation-1", "stableTeamSessionId": "team-session-1"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-current",
+        node_id="team-mission:mission-current:approval-plan",
+        kind="approval_gate",
+        title="当前审批",
+        status="waiting_approval",
+        metadata={"task_id": "task-current"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-current",
+        node_id="node-worker",
+        kind="worker",
+        title="执行节点",
+        objective="执行节点任务",
+        status="ready",
+        runtime_scope_key="profile:worker-a",
+        output_contract={"format": "artifact"},
+        metadata={"task_id": "task-current"},
+    )
+    db.upsert_team_mission_edge(
+        mission_id="mission-current",
+        from_node_id="team-mission:mission-current:approval-plan",
+        to_node_id="node-worker",
+        kind="depends_on",
+        metadata={"approval_gate": True, "approval_scope": "whole_graph"},
+    )
+
+    def fake_run_submit(rid, params):
+        for seq, event_type, payload in (
+            (1, "message.start", {}),
+            (2, "message.delta", {"delta": "worker-live", "text": "worker-live"}),
+        ):
+            run_control.record_event(
+                {
+                    "type": event_type,
+                    "session_id": "runtime-worker",
+                    "stored_session_id": params["stored_session_id"],
+                    "run_id": params["run_id"],
+                    "turn_id": params["turn_id"],
+                    "runtime_scope_key": params["runtime_scope_key"],
+                    "seq": seq,
+                    "payload": payload,
+                },
+                db=db,
+            )
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "status": "running",
+                "run_id": params["run_id"],
+                "turn_id": params["turn_id"],
+                "session_id": "runtime-worker",
+                "stored_session_id": params["stored_session_id"],
+                "runtime_scope_key": params["runtime_scope_key"],
+            },
+        }
+
+    monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
+
+    response = server._methods["team_mission.plan.approve"](
+        1,
+        {
+            "mission_id": "mission-current",
+            "conversation_id": "conversation-1",
+            "task_id": "task-current",
+            "approved_by": "user",
+        },
+    )
+
+    assert "error" not in response
+    scheduled = response["result"]["scheduled"]
+    assert scheduled["started"][0]["node_id"] == "node-worker"
+    worker = db.get_team_mission_node("mission-current", "node-worker")
+    assert worker["status"] == "running"
+    assert worker["run_id"]
+    assert worker["runtime_stable_session_id"] == "team:mission-current:node:node-worker"
+    assert worker["runtime_session_id"] == "runtime-worker"
+    assert worker["runtime_scope_key"] == "profile:worker-a"
+
+    events = db.list_team_mission_run_events("mission-current")
+    delta_event = next(
+        event
+        for event in events
+        if event["type"] == "team_mission.runtime.event"
+        and event["payload"]["source_event_type"] == "message.delta"
+        and event["payload"]["node_id"] == "node-worker"
+    )
+    assert delta_event["payload"]["kind"] == "node.output.delta"
+    assert delta_event["payload"]["subject"]["runtime_stable_session_id"] == "team:mission-current:node:node-worker"
+    assert delta_event["payload"]["text_stream"]["delta"] == "worker-live"
+    status_events = [event for event in events if event["type"] == "team_mission.conversation.status"]
+    assert status_events
+    latest_status = status_events[-1]["payload"]["conversation"]
+    assert latest_status["conversation_id"] == "conversation-1"
+    assert latest_status["active_mission_id"] == "mission-current"
+    assert latest_status["running"] is True
+    assert latest_status["run_state"] == "running"
+
+
 def test_team_mission_direct_root_task_activation_replaces_draft_objective(monkeypatch, tmp_path: Path):
     import importlib
 
@@ -2307,7 +2745,34 @@ def test_team_mission_synthesis_output_is_mirrored_as_conversation_deliverable(t
     assert [event["type"] for event in mirrored_events] == ["message.start", "message.delta"]
     assert mirrored_events[1]["payload"]["team_mission_final_deliverable"] is True
     assert mirrored_events[1]["payload"]["team_mission_conversation_mirror"] is True
+    assert mirrored_events[1]["payload"]["mode"] == "append"
+    assert mirrored_events[1]["payload"]["delta"] == "最终汇总"
+    assert "snapshot" not in mirrored_events[1]["payload"]
     assert db.get_messages("team-session-1") == []
+
+    run_control.record_event(
+        {
+            "type": "message.delta",
+            "session_id": "runtime-synthesis",
+            "stored_session_id": "synthesis-session-1",
+            "run_id": "run-synthesis",
+            "turn_id": "turn-synthesis",
+            "runtime_scope_key": "team:mission-1:synthesis",
+            "seq": 3,
+            "payload": {"delta": "交付内容", "text": "最终汇总交付内容"},
+        },
+        db=db,
+    )
+    mirrored_events = db.list_run_events("team-session-1")
+    assert [event["type"] for event in mirrored_events] == [
+        "message.start",
+        "message.delta",
+        "message.delta",
+    ]
+    assert mirrored_events[2]["payload"]["mode"] == "append"
+    assert mirrored_events[2]["payload"]["delta"] == "交付内容"
+    assert mirrored_events[2]["payload"]["text"] == "交付内容"
+    assert "snapshot" not in mirrored_events[2]["payload"]
 
     run_control.record_event(
         {
@@ -2317,15 +2782,20 @@ def test_team_mission_synthesis_output_is_mirrored_as_conversation_deliverable(t
             "run_id": "run-synthesis",
             "turn_id": "turn-synthesis",
             "runtime_scope_key": "team:mission-1:synthesis",
-            "seq": 3,
+            "seq": 4,
             "payload": {"text": "最终汇总交付内容", "status": "complete"},
         },
         db=db,
     )
 
     mirrored_events = db.list_run_events("team-session-1")
-    assert [event["type"] for event in mirrored_events] == ["message.start", "message.delta", "message.complete"]
-    mirrored = mirrored_events[2]
+    assert [event["type"] for event in mirrored_events] == [
+        "message.start",
+        "message.delta",
+        "message.delta",
+        "message.complete",
+    ]
+    mirrored = mirrored_events[3]
     assert mirrored["run_id"] == "team-mission:mission-1:conversation:run-synthesis"
     assert mirrored["stored_session_id"] == "team-session-1"
     assert mirrored["payload"]["text"] == "最终汇总交付内容"
@@ -2409,6 +2879,19 @@ def test_team_mission_synthesis_mirror_streams_to_conversation_subscriber(tmp_pa
             },
             db=db,
         )
+        run_control.record_event(
+            {
+                "type": "message.delta",
+                "session_id": "runtime-synthesis",
+                "stored_session_id": "synthesis-session-1",
+                "run_id": "run-synthesis",
+                "turn_id": "turn-synthesis",
+                "runtime_scope_key": "team:mission-1:synthesis",
+                "seq": 3,
+                "payload": {"delta": "第二段", "text": "实时最终交付第二段"},
+            },
+            db=db,
+        )
     finally:
         run_control.unsubscribe_session(subscription_id=subscription_id)
 
@@ -2417,10 +2900,15 @@ def test_team_mission_synthesis_mirror_streams_to_conversation_subscriber(tmp_pa
         for frame in transport.frames
         if frame.get("method") == "event"
     ]
-    assert [event["type"] for event in streamed] == ["message.start", "message.delta"]
+    assert [event["type"] for event in streamed] == ["message.start", "message.delta", "message.delta"]
     assert all(event["stored_session_id"] == "team-session-1" for event in streamed)
     assert all(int(event.get("seq") or 0) > 0 for event in streamed)
+    assert streamed[1]["payload"]["mode"] == "append"
     assert streamed[1]["payload"]["delta"] == "实时最终交付"
+    assert "snapshot" not in streamed[1]["payload"]
+    assert streamed[2]["payload"]["mode"] == "append"
+    assert streamed[2]["payload"]["delta"] == "第二段"
+    assert "snapshot" not in streamed[2]["payload"]
     assert streamed[1]["payload"]["team_mission_final_deliverable"] is True
     assert streamed[1]["payload"]["team_mission_conversation_mirror"] is True
 
@@ -2624,6 +3112,127 @@ def test_team_mission_synthesis_failed_complete_with_text_still_mirrors_delivera
     resolved = db.resolve_team_mission_conversation("mission-1")
     assert resolved["messages"][0]["text"] == "最终汇总交付内容"
     assert resolved["graph"]["last_message"]["text"] == "最终汇总交付内容"
+
+
+def test_final_deliverable_recovery_does_not_rewrite_legacy_snapshot_mirror_events(tmp_path: Path):
+    from hermes_state import SessionDB
+    from hermes_team_mission_conversation_utils import recover_final_deliverable_messages
+
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("team-session-1", source="team_mission", transient=False)
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="监督执行",
+        objective="规划审批后执行",
+        mode="supervised_mission",
+        metadata={"stableTeamSessionId": "team-session-1"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="team-mission:mission-1:synthesis",
+        kind="synthesizer",
+        title="汇总交付",
+        status="completed",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="team-mission:mission-1:synthesis",
+        run_id="run-synthesis",
+        session_id="synthesis-session-1",
+        runtime_session_id="runtime-synthesis",
+        runtime_scope_key="team:mission-1:synthesis",
+        role="member",
+    )
+    db.append_run_event(
+        "synthesis-session-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-synthesis",
+            "stored_session_id": "synthesis-session-1",
+            "run_id": "run-synthesis",
+            "turn_id": "turn-synthesis",
+            "runtime_scope_key": "team:mission-1:synthesis",
+            "seq": 1,
+            "payload": {"mode": "append", "delta": "最终汇总交付内容", "text": "最终汇总交付内容"},
+        },
+    )
+    mirror_payload = {
+        "run_id": "team-mission:mission-1:conversation:run-synthesis",
+        "source_run_id": "run-synthesis",
+        "source_session_id": "synthesis-session-1",
+        "mission_id": "mission-1",
+        "node_id": "team-mission:mission-1:synthesis",
+        "team_mission_final_deliverable": True,
+        "team_mission_conversation_mirror": True,
+    }
+    db.append_run_event(
+        "team-session-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-synthesis",
+            "stored_session_id": "team-session-1",
+            "run_id": "team-mission:mission-1:conversation:run-synthesis",
+            "turn_id": "turn-synthesis",
+            "runtime_scope_key": "team_mission:mission-1",
+            "seq": 1,
+            "payload": {
+                **mirror_payload,
+                "mode": "snapshot",
+                "snapshot": "旧 snapshot 内容",
+                "text": "旧 snapshot 内容",
+            },
+        },
+    )
+    db.append_run_event(
+        "team-session-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-synthesis",
+            "stored_session_id": "team-session-1",
+            "run_id": "team-mission:mission-1:conversation:run-synthesis",
+            "turn_id": "turn-synthesis",
+            "runtime_scope_key": "team_mission:mission-1",
+            "seq": 2,
+            "payload": {
+                **mirror_payload,
+                "mode": "snapshot",
+                "snapshot": "重复旧 snapshot 内容",
+                "text": "重复旧 snapshot 内容",
+            },
+        },
+    )
+    db.append_run_event(
+        "team-session-1",
+        {
+            "type": "message.complete",
+            "session_id": "runtime-synthesis",
+            "stored_session_id": "team-session-1",
+            "run_id": "team-mission:mission-1:conversation:run-synthesis",
+            "turn_id": "turn-synthesis",
+            "runtime_scope_key": "team_mission:mission-1",
+            "seq": 3,
+            "payload": {
+                **mirror_payload,
+                "text": "旧完成内容",
+                "status": "complete",
+            },
+        },
+    )
+
+    assert recover_final_deliverable_messages(db, {"stable_session_id": "team-session-1"}) == 1
+
+    delta_events = [
+        event
+        for event in db.list_run_events("team-session-1")
+        if event["type"] == "message.delta"
+    ]
+    assert len(delta_events) == 2
+    assert delta_events[0]["payload"]["mode"] == "snapshot"
+    assert delta_events[0]["payload"]["snapshot"] == "旧 snapshot 内容"
+    assert delta_events[0]["payload"]["text"] == "旧 snapshot 内容"
+    assert delta_events[1]["payload"]["mode"] == "snapshot"
+    assert delta_events[1]["payload"]["snapshot"] == "重复旧 snapshot 内容"
+    assert delta_events[1]["payload"]["text"] == "重复旧 snapshot 内容"
 
 
 def test_team_mission_cancel_marks_graph_and_cancels_active_runs(monkeypatch, tmp_path: Path):
@@ -2929,7 +3538,53 @@ def test_runtime_proxy_disables_direct_relay_for_duplicate_source_seq(monkeypatc
     db.close()
 
 
-def test_gateway_emit_stream_subscription_does_not_poll_coalesced_duplicate(monkeypatch, tmp_path: Path):
+def test_runtime_proxy_does_not_duplicate_runtime_frame_already_in_state(monkeypatch, tmp_path: Path):
+    from hermes_state import SessionDB
+    from tui_gateway import server
+    from tui_gateway.services import runtime_proxy
+
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    db.append_run_event(
+        "team-session-source-state",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-source-state",
+            "stored_session_id": "team-session-source-state",
+            "run_id": "run-source-state",
+            "turn_id": "turn-source-state",
+            "runtime_scope_key": "team:conversation-source:leader-conversation",
+            "seq": 77,
+            "payload": {"mode": "append", "delta": "原始", "text": "原始", "offset": 0},
+        },
+    )
+    frame = {
+        "jsonrpc": "2.0",
+        "method": "event",
+        "params": {
+            "type": "message.delta",
+            "session_id": "runtime-source-state",
+            "stored_session_id": "team-session-source-state",
+            "run_id": "run-source-state",
+            "turn_id": "turn-source-state",
+            "runtime_scope_key": "team:conversation-source:leader-conversation",
+            "seq": 77,
+            "payload": {"mode": "append", "delta": "原始", "text": "原始", "offset": 0},
+        },
+    }
+
+    result = runtime_proxy._record_relayed_runtime_event(frame)
+
+    assert result.delivered_transports == []
+    assert result.allow_direct_relay is True
+    events = db.list_run_events("team-session-source-state")
+    assert len(events) == 1
+    assert events[0]["seq"] == 77
+    assert "runtime_source_seq" not in events[0]["payload"]
+    db.close()
+
+
+def test_gateway_emit_stream_subscription_persists_append_chunks_without_coalescing(monkeypatch, tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway import server
     from tui_gateway.services import run_control
@@ -3002,11 +3657,11 @@ def test_gateway_emit_stream_subscription_does_not_poll_coalesced_duplicate(monk
         for event in db.list_run_events(stable_session_id)
         if event.get("type") == "message.delta"
     ]
-    assert len(persisted_deltas) == 1
-    assert (persisted_deltas[0].get("payload") or {}).get("delta") == "你好"
+    assert [event["seq"] for event in persisted_deltas] == [1, 2]
+    assert [(event.get("payload") or {}).get("delta") for event in persisted_deltas] == ["你", "好"]
 
 
-def test_run_control_subscription_poll_skips_stream_already_delivered_directly(tmp_path: Path):
+def test_run_control_subscription_poll_delivers_new_append_after_direct_delivery(tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway.services import run_control
 
@@ -3040,7 +3695,7 @@ def test_run_control_subscription_poll_skips_stream_already_delivered_directly(t
             {
                 **direct_event,
                 "seq": 2,
-                "payload": {"mode": "append", "text": "你好", "delta": "你好", "offset": 0},
+                "payload": {"mode": "append", "text": "好", "delta": "好", "offset": 1},
             },
         )
         time.sleep(0.7)
@@ -3053,10 +3708,12 @@ def test_run_control_subscription_poll_skips_stream_already_delivered_directly(t
         for frame in transport.frames
         if (frame.get("params") or {}).get("type") == "message.delta"
     ]
-    assert delta_payloads == []
+    assert [payload.get("delta") for payload in delta_payloads] == ["好"]
+    assert [payload.get("text") for payload in delta_payloads] == ["好"]
+    assert delta_payloads[0].get("offset") == 1
 
 
-def test_run_control_subscription_poll_sends_only_suffix_for_coalesced_stream_row(tmp_path: Path):
+def test_run_control_subscription_poll_delivers_persisted_append_events_without_suffix_cropping(tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway.services import run_control
 
@@ -3317,6 +3974,18 @@ def test_team_mission_subscribe_replays_and_streams_mission_events(monkeypatch, 
         run_id="run-leader",
         event={"type": "message.delta", "seq": 1, "payload": {"delta": "先前事件"}},
     )
+    skipped_snapshot = db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-leader",
+        event={
+            "type": "message.delta",
+            "seq": 2,
+            "payload": {"mode": "snapshot", "snapshot": "历史 snapshot", "text": "历史 snapshot"},
+        },
+    )
+    assert skipped_snapshot["type"] == "message.delta"
+    assert skipped_snapshot["payload"]["mode"] == "snapshot"
+    assert len(db.list_team_mission_events("mission-1")) == 1
 
     transport = _MemoryTransport()
     token = server.bind_transport(transport)
@@ -3330,6 +3999,7 @@ def test_team_mission_subscribe_replays_and_streams_mission_events(monkeypatch, 
 
     subscription_id = subscribed["result"]["subscription_id"]
     assert subscription_id
+    assert len(subscribed["result"]["events"]) == 1
     assert subscribed["result"]["events"][0]["type"] == "team_mission.runtime.event"
     assert subscribed["result"]["events"][0]["payload"]["source_event_type"] == "message.delta"
     assert subscribed["result"]["events"][0]["payload"]["source_event"]["payload"]["delta"] == "先前事件"
@@ -3337,7 +4007,7 @@ def test_team_mission_subscribe_replays_and_streams_mission_events(monkeypatch, 
     db.append_team_mission_run_event(
         mission_id="mission-1",
         run_id="run-leader",
-        event={"type": "message.delta", "seq": 2, "payload": {"delta": "实时事件"}},
+        event={"type": "message.delta", "seq": 3, "payload": {"delta": "实时事件"}},
     )
 
     deadline = time.time() + 2
@@ -3353,6 +4023,98 @@ def test_team_mission_subscribe_replays_and_streams_mission_events(monkeypatch, 
         (((frame.get("params") or {}).get("payload") or {}).get("source_event") or {}).get("payload", {}).get("delta") == "实时事件"
         for frame in transport.frames
     )
+
+    skipped_live_snapshot = db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-leader",
+        event={
+            "type": "message.delta",
+            "seq": 4,
+            "payload": {"mode": "snapshot", "snapshot": "实时 snapshot", "text": "实时 snapshot"},
+        },
+    )
+    assert skipped_live_snapshot["type"] == "message.delta"
+    assert skipped_live_snapshot["payload"]["mode"] == "snapshot"
+    assert len(db.list_team_mission_events("mission-1")) == 2
+    assert not any(
+        (((frame.get("params") or {}).get("payload") or {}).get("source_event") or {}).get("payload", {}).get("snapshot") == "实时 snapshot"
+        for frame in transport.frames
+    )
+
+    removed = run_control.unsubscribe_session(subscription_id=subscription_id)
+    assert removed == 1
+
+
+def test_team_mission_subscribe_replay_is_byte_paged(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+    from tui_gateway.services import run_control
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    db.initialize_team_mission_from_strategy(
+        mission_id="mission-1",
+        title="监督执行",
+        objective="验证 replay 分页",
+        mode="supervised_mission",
+    )
+    root_node_id = db.get_team_mission_graph("mission-1")["nodes"][0]["node_id"]
+    db.upsert_run(
+        run_id="run-leader",
+        session_id="session-leader",
+        runtime_scope_key="team:mission-1:leader",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id=root_node_id,
+        run_id="run-leader",
+        session_id="session-leader",
+        runtime_scope_key="team:mission-1:leader",
+        role="leader",
+    )
+    for idx in range(3):
+        db.append_team_mission_run_event(
+            mission_id="mission-1",
+            run_id="run-leader",
+            event={
+                "type": "message.delta",
+                "seq": idx + 1,
+                "payload": {"delta": f"{idx}-" + ("x" * 40000)},
+            },
+        )
+
+    transport = _MemoryTransport()
+    token = server.bind_transport(transport)
+    try:
+        subscribed = server._methods["team_mission.subscribe"](
+            1,
+            {"mission_id": "mission-1", "limit": 10, "byte_limit": 65536},
+        )
+    finally:
+        server.reset_transport(token)
+
+    result = subscribed["result"]
+    subscription_id = result["subscription_id"]
+    assert subscription_id
+    assert result["has_more"] is True
+    assert len(result["events"]) == 1
+    assert result["last_event_seq"] == result["events"][0]["seq"]
+
+    next_page = server._methods["team_mission.events"](
+        2,
+        {
+            "mission_id": "mission-1",
+            "after_seq": result["last_event_seq"],
+            "limit": 10,
+            "byte_limit": 65536,
+        },
+    )["result"]
+    assert next_page["events"]
+    assert next_page["events"][0]["seq"] > result["last_event_seq"]
 
     removed = run_control.unsubscribe_session(subscription_id=subscription_id)
     assert removed == 1
@@ -3840,6 +4602,17 @@ def test_team_mission_planner_methods_mutate_graph_and_emit_events(monkeypatch, 
         "mission.approval.requested",
         "mission.strategy.actions",
     ]
+    approval_event = next(
+        event for event in events
+        if (
+            event["type"] == "team_mission.runtime.event"
+            and event["payload"]["source_event_type"] == "mission.approval.requested"
+        )
+    )
+    assert approval_event["payload"]["subject"]["type"] == "approval"
+    assert approval_event["payload"]["subject"]["approval_id"] == "team-mission:mission-1:approval-plan"
+    assert approval_event["payload"]["subject"]["node_id"] == "team-mission:mission-1:approval-plan"
+    assert approval_event["payload"]["subject"]["canonical_node_id"] == "team-mission:mission-1:approval-plan"
     assert [event["payload"]["source_event_type"] for event in events if event["type"] == "team_mission.conversation.status"] == [
         "mission.node.created",
         "mission.edge.created",
@@ -3914,6 +4687,12 @@ def test_team_mission_node_start_reuses_run_submit_and_binds_worker_run(monkeypa
     node = next(item for item in graph["nodes"] if item["node_id"] == "node-worker")
     assert node["status"] == "running"
     assert node["metadata"]["run_id"] == "run-worker"
+    assert node["run_id"] == "run-worker"
+    assert node["stored_session_id"] == "team:mission-1:node:node-worker"
+    assert node["actual_stable_session_id"] == "team:mission-1:node:node-worker"
+    assert node["runtime_session_id"] == "runtime-worker"
+    assert node["runtime_scope_key"] == "profile:worker-a"
+    assert node["runtime_binding"]["run_id"] == "run-worker"
     assert graph["run_bindings"][0]["run_id"] == "run-worker"
     assert graph["run_bindings"][0]["runtime_session_id"] == "runtime-worker"
     events = db.list_team_mission_run_events("mission-1")
@@ -4125,8 +4904,14 @@ def test_team_mission_bound_worker_run_event_updates_node_status(tmp_path: Path)
         and event["payload"]["source_event_type"] == "message.complete"
         for event in events
     )
-    assert events[-1]["type"] == "team_mission.runtime.event"
-    assert events[-1]["payload"]["source_event_type"] == "mission.memory.compiled"
+    memory_event = next(
+        event for event in events
+        if event["type"] == "team_mission.runtime.event"
+        and event["payload"]["source_event_type"] == "mission.memory.compiled"
+    )
+    assert memory_event["payload"]["protocol"] == "team_mission.event.v1"
+    assert memory_event["payload"]["kind"] == "memory.compiled"
+    assert any(event["type"] == "team_mission.conversation.status" for event in events)
 
 
 def test_team_mission_schedule_ready_starts_only_dependency_ready_nodes(monkeypatch, tmp_path: Path):

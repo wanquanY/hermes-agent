@@ -148,11 +148,27 @@ def _team_payload(params: dict) -> dict:
 
 def _member_payload(params: dict, *, fallback_team_id: str = "") -> dict:
     raw = params.get("member") if isinstance(params.get("member"), dict) else params
+    profile_name = _text(
+        raw.get("profile_name")
+        or raw.get("profileName")
+        or raw.get("agent_profile_name")
+        or raw.get("agentProfileName")
+        or raw.get("name")
+    )
+    profile_avatar = _text(
+        raw.get("profile_avatar")
+        or raw.get("profileAvatar")
+        or raw.get("agent_profile_avatar")
+        or raw.get("agentProfileAvatar")
+        or raw.get("avatar")
+    )
     return {
         "member_id": _text(raw.get("member_id") or raw.get("memberId") or raw.get("id")) or uuid.uuid4().hex,
         "team_id": _text(raw.get("team_id") or raw.get("teamId") or fallback_team_id),
         "agent_profile_id": _text(raw.get("agent_profile_id") or raw.get("agentProfileId")),
         "agent_profile_version_id": _text(raw.get("agent_profile_version_id") or raw.get("agentProfileVersionId")),
+        "profile_name": profile_name,
+        "profile_avatar": profile_avatar,
         "role": _text(raw.get("role")) or "member",
         "capability_tags": _array(raw.get("capability_tags") or raw.get("capabilityTags")),
         "auto_assignable": raw.get("auto_assignable", raw.get("autoAssignable", True)) is not False,

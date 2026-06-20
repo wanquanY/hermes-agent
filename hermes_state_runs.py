@@ -29,8 +29,9 @@ TERMINAL_RUN_STATUS_RANK = {
 DEFAULT_RUN_EVENT_RETENTION_DAYS = 14
 DEFAULT_RUN_EVENT_MAX_PER_SESSION = 5000
 RUN_EVENT_PRUNE_INTERVAL_EVENTS = 500
+CONTROL_ONLY_ACTIVE_RUN_REPAIR_STALE_SECONDS = 60.0
+CONTROL_ONLY_ACTIVE_RUN_REPAIR_OWNER_DEAD_GRACE_SECONDS = 10.0
 COALESCIBLE_STREAM_EVENT_TYPES = {
-    "message.delta",
     "reasoning.delta",
     "thinking.delta",
     "subagent.output_delta",
@@ -165,6 +166,10 @@ def _event_opens_active_run(event_type: str) -> bool:
     return str(event_type or "").strip() in RUN_OPENING_EVENT_TYPES
 
 
+def _event_reopens_terminal_run(event_type: str) -> bool:
+    return _event_opens_active_run(event_type)
+
+
 def _runtime_lifecycle_event_sql(column: str) -> str:
     escaped_prefixes = [prefix.replace("'", "''") for prefix in RUNTIME_LIFECYCLE_EVENT_PREFIXES]
     prefix_checks = " OR ".join(f"{column} LIKE '{prefix}%'" for prefix in escaped_prefixes)
@@ -241,12 +246,7 @@ def _event_is_coalescible_stream_delta(event: Dict[str, Any]) -> bool:
     event_type = str(event.get("type") or "").strip()
     if event_type not in COALESCIBLE_STREAM_EVENT_TYPES:
         return False
-    if not _event_text_delta(event):
-        return False
-    mode = _event_stream_mode(event)
-    if event_type == "message.delta" and mode not in {"", "append"}:
-        return False
-    return True
+    return bool(_event_text_delta(event))
 
 
 def _event_stream_identity(event: Dict[str, Any]) -> tuple[Any, ...]:
@@ -280,52 +280,12 @@ def _boundary_stream_types(event_type: str) -> set[str] | None:
     return set()
 
 
-def _payload_int(payload: Dict[str, Any], key: str) -> int | None:
-    if key not in payload:
-        return None
-    try:
-        return int(payload.get(key))
-    except (TypeError, ValueError):
-        return None
-
-
 def _stream_events_can_coalesce(previous_event: Dict[str, Any], event: Dict[str, Any]) -> bool:
-    if not (
+    return (
         _event_is_coalescible_stream_delta(previous_event)
         and _event_is_coalescible_stream_delta(event)
         and _event_stream_identity(previous_event) == _event_stream_identity(event)
-    ):
-        return False
-    if str(event.get("type") or "") != "message.delta":
-        return True
-    previous_payload = (
-        previous_event.get("payload")
-        if isinstance(previous_event.get("payload"), dict)
-        else {}
     )
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    previous_offset = _payload_int(previous_payload, "offset")
-    next_offset = _payload_int(payload, "offset")
-    if previous_offset is None or next_offset is None:
-        return True
-    return next_offset == previous_offset + len(_event_text_delta(previous_event))
-
-
-def _stream_events_require_contiguous_rows(
-    previous_event: Dict[str, Any],
-    event: Dict[str, Any],
-) -> bool:
-    if str(previous_event.get("type") or "") != "message.delta":
-        return False
-    if str(event.get("type") or "") != "message.delta":
-        return False
-    previous_payload = (
-        previous_event.get("payload")
-        if isinstance(previous_event.get("payload"), dict)
-        else {}
-    )
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    return _payload_int(previous_payload, "offset") is None or _payload_int(payload, "offset") is None
 
 
 def _merge_stream_payload(previous_event: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
@@ -334,34 +294,10 @@ def _merge_stream_payload(previous_event: Dict[str, Any], event: Dict[str, Any])
     merged_payload = dict(previous_payload)
     previous_text = _event_text_delta(previous_event)
     incoming_text = _event_text_delta(event)
-    previous_offset = _payload_int(previous_payload, "offset")
-    next_offset = _payload_int(payload, "offset")
-    incoming_is_cumulative = bool(
-        previous_text
-        and incoming_text
-        and (
-            incoming_text == previous_text
-            or incoming_text in previous_text
-            or incoming_text.startswith(previous_text)
-        )
-    )
-    if (
-        str(event.get("type") or "") == "message.delta"
-        and previous_offset is not None
-        and next_offset is not None
-        and next_offset > previous_offset
-        and not incoming_is_cumulative
-    ):
-        merged_text = previous_text[:next_offset] + incoming_text
-    else:
-        merged_text = _merge_stream_text(previous_text, incoming_text)
+    merged_text = _merge_stream_text(previous_text, incoming_text)
     for key in ("text", "delta", "output"):
         if key in previous_payload or key in payload:
             merged_payload[key] = merged_text
-    if str(event.get("type") or "") == "message.delta":
-        merged_payload["mode"] = "append"
-        merged_payload.setdefault("offset", previous_payload.get("offset", 0))
-        merged_payload.pop("snapshot", None)
     # Rendered fragments are live transport hints. After storage coalescing,
     # the aggregate text is the durable representation.
     merged_payload.pop("rendered", None)
@@ -397,6 +333,55 @@ class SessionDBRunMixin:
             run["runtime_scope_key"] = run.get("session_id") or ""
         return run
 
+    def _live_owner_control_only_active_run_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        session_id: str,
+        exclude_run_id: str = "",
+    ) -> sqlite3.Row | None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return None
+        active_statuses = _sql_status_literals(ACTIVE_RUN_STATUSES)
+        lifecycle_sql = _runtime_lifecycle_event_sql("e.event_type")
+        params: list[Any] = [stable]
+        exclude_clause = ""
+        normalized_exclude = str(exclude_run_id or "").strip()
+        if normalized_exclude:
+            exclude_clause = "AND r.run_id != ?"
+            params.append(normalized_exclude)
+        rows = conn.execute(
+            f"""
+            SELECT r.*
+            FROM runs r
+            WHERE r.session_id = ?
+              {exclude_clause}
+              AND r.status IN ({active_statuses})
+              AND EXISTS (
+                SELECT 1 FROM run_events e
+                WHERE e.run_id = r.run_id
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM run_events e
+                WHERE e.run_id = r.run_id
+                  AND {lifecycle_sql}
+              )
+            ORDER BY r.updated_at DESC, r.started_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        for row in rows:
+            metadata = _json_loads(row["metadata_json"], {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            try:
+                owner_pid = int(metadata.get("gateway_pid") or 0)
+            except (TypeError, ValueError):
+                owner_pid = 0
+            if owner_pid > 0 and _pid_is_alive(owner_pid):
+                return row
+        return None
+
     def _repair_control_only_active_runs_locked(
         self,
         conn: sqlite3.Connection,
@@ -404,11 +389,17 @@ class SessionDBRunMixin:
         session_id: str = "",
         now: float | None = None,
     ) -> int:
-        """Close active rows that were opened only by mission control events.
+        """Close stale active rows that were opened only by mission control events.
 
         ``runs`` models live runtime turns.  Team Mission control events such as
         ``mission.approval.requested`` must remain in ``run_events`` for graph
         replay, but they must not make the leader conversation busy.
+
+        A newly-started runtime turn can legitimately have only control frames
+        such as ``session.info`` before the first ``message.start`` arrives.
+        Those rows are still owned by a live gateway worker and must remain
+        active; otherwise a status read can terminalize the run before any
+        assistant output is persisted.
         """
         active_statuses = _sql_status_literals(ACTIVE_RUN_STATUSES)
         lifecycle_sql = _runtime_lifecycle_event_sql("e.event_type")
@@ -439,10 +430,25 @@ class SessionDBRunMixin:
         if not rows:
             return 0
         repaired_at = float(now or time.time())
+        stale_after = CONTROL_ONLY_ACTIVE_RUN_REPAIR_STALE_SECONDS
+        owner_dead_grace = CONTROL_ONLY_ACTIVE_RUN_REPAIR_OWNER_DEAD_GRACE_SECONDS
         for row in rows:
             metadata = _json_loads(row["metadata_json"], {})
             if not isinstance(metadata, dict):
                 metadata = {}
+            updated_at = float(row["updated_at"] or row["started_at"] or 0)
+            updated_age = repaired_at - updated_at
+            try:
+                owner_pid = int(metadata.get("gateway_pid") or 0)
+            except (TypeError, ValueError):
+                owner_pid = 0
+            if owner_pid > 0:
+                if _pid_is_alive(owner_pid):
+                    continue
+                if updated_age < owner_dead_grace:
+                    continue
+            elif updated_age < stale_after:
+                continue
             metadata["recovery_reason"] = "control-only run events are not active runtime runs"
             metadata["recovered_at"] = repaired_at
             conn.execute(
@@ -658,6 +664,16 @@ class SessionDBRunMixin:
             ).fetchone()
             if active is not None:
                 return {"run": None, "conflict": self._run_from_row(active), "created": False}
+            live_control_only_active = self._live_owner_control_only_active_run_locked(
+                conn,
+                session_id=stable,
+            )
+            if live_control_only_active is not None:
+                return {
+                    "run": None,
+                    "conflict": self._run_from_row(live_control_only_active),
+                    "created": False,
+                }
 
             try:
                 conn.execute(
@@ -750,9 +766,11 @@ class SessionDBRunMixin:
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
             inserted_event = frame
+            event_json_for_insert = event_json
             coalesced = False
             existing = None
             existing_status = ""
+            ignored_after_terminal = False
             if run_id:
                 existing = conn.execute(
                     "SELECT * FROM runs WHERE run_id = ?",
@@ -788,6 +806,14 @@ class SessionDBRunMixin:
                         }
                         duplicate_event["_persistence_disposition"] = "duplicate_terminal"
                         return duplicate_event
+                ignored_after_terminal = bool(
+                    existing_status in TERMINAL_RUN_STATUSES
+                    and terminal_status is None
+                    and _event_reopens_terminal_run(event_type)
+                )
+                if ignored_after_terminal:
+                    frame["_persistence_disposition"] = "ignored_after_terminal"
+                    event_json_for_insert = _json_dumps(frame)
             if _event_is_coalescible_stream_delta(frame):
                 boundary_event_types = _stream_compaction_boundary_event_types(event_type)
                 boundary_placeholders = ",".join("?" for _ in boundary_event_types)
@@ -842,32 +868,6 @@ class SessionDBRunMixin:
                         isinstance(candidate_event, dict)
                         and _stream_events_can_coalesce(candidate_event, frame)
                     ):
-                        if _stream_events_require_contiguous_rows(candidate_event, frame):
-                            interleaving = conn.execute(
-                                """
-                                SELECT 1
-                                FROM run_events
-                                WHERE session_id = ?
-                                  AND (? = '' OR run_id = ?)
-                                  AND (? = '' OR turn_id = ?)
-                                  AND COALESCE(runtime_scope_key, '') = ?
-                                  AND seq > ?
-                                  AND seq < ?
-                                LIMIT 1
-                                """,
-                                (
-                                    stable,
-                                    run_id,
-                                    run_id,
-                                    turn_id,
-                                    turn_id,
-                                    runtime_scope_key,
-                                    int(_row_value(candidate, "seq", 0) or 0),
-                                    seq,
-                                ),
-                            ).fetchone()
-                            if interleaving is not None:
-                                continue
                         previous = candidate
                         previous_event = candidate_event
                         break
@@ -945,8 +945,8 @@ class SessionDBRunMixin:
                         seq,
                         timestamp,
                         _json_dumps(payload),
-                        event_json,
-                        terminal_status or "",
+                        event_json_for_insert,
+                        "ignored_after_terminal" if ignored_after_terminal else terminal_status or "",
                     ),
                 )
             if run_id:
@@ -985,6 +985,12 @@ class SessionDBRunMixin:
                         """,
                         (stable, run_id),
                     ).fetchone()
+                    if active is None:
+                        active = self._live_owner_control_only_active_run_locked(
+                            conn,
+                            session_id=stable,
+                            exclude_run_id=run_id,
+                        )
                     if active is not None:
                         active_run_id = str(_row_value(active, "run_id", "") or "")
                         rejected_duplicate_active = (
@@ -1162,6 +1168,48 @@ class SessionDBRunMixin:
             "(instr(payload_json, ?) > 0 OR instr(event_json, ?) > 0)",
         ]
         params: list[Any] = [stable, source_token, source_token]
+        normalized_run_id = str(run_id or "").strip()
+        if normalized_run_id:
+            clauses.append("run_id = ?")
+            params.append(normalized_run_id)
+        normalized_runtime_session_id = str(runtime_session_id or "").strip()
+        if normalized_runtime_session_id:
+            clauses.append("runtime_session_id = ?")
+            params.append(normalized_runtime_session_id)
+        normalized_type = str(event_type or "").strip()
+        if normalized_type:
+            clauses.append("event_type = ?")
+            params.append(normalized_type)
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT 1
+                FROM run_events
+                WHERE {" AND ".join(clauses)}
+                LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+        return row is not None
+
+    def has_run_event_frame(
+        self,
+        session_id: str,
+        *,
+        seq: int = 0,
+        run_id: str = "",
+        runtime_session_id: str = "",
+        event_type: str = "",
+    ) -> bool:
+        stable = str(session_id or "").strip()
+        try:
+            source_seq = int(seq or 0)
+        except (TypeError, ValueError):
+            source_seq = 0
+        if not stable or source_seq <= 0:
+            return False
+        clauses = ["session_id = ?", "seq = ?"]
+        params: list[Any] = [stable, source_seq]
         normalized_run_id = str(run_id or "").strip()
         if normalized_run_id:
             clauses.append("run_id = ?")
@@ -1669,7 +1717,6 @@ class SessionDBRunMixin:
             deduplicated_terminal_groups = 0
             updated_events = 0
             pending_by_key: dict[tuple[Any, ...], list[tuple[sqlite3.Row, Dict[str, Any]]]] = {}
-            interrupted_pending_keys: set[tuple[Any, ...]] = set()
             affected_run_ids: set[str] = set()
 
             def compact_terminal_duplicates() -> None:
@@ -1769,7 +1816,6 @@ class SessionDBRunMixin:
 
             def flush_pending_key(key: tuple[Any, ...]) -> None:
                 nonlocal compacted_segments, deleted_events, updated_events
-                interrupted_pending_keys.discard(key)
                 pending = pending_by_key.pop(key, [])
                 if len(pending) <= 1:
                     return
@@ -1840,31 +1886,6 @@ class SessionDBRunMixin:
                         for key in list(pending_by_key.keys()):
                             if len(key) > 1 and key[1] in boundary_stream_types:
                                 flush_pending_key(key)
-                    else:
-                        row_session_id = str(_row_value(row, "session_id", "") or "")
-                        row_run_id = str(_row_value(row, "run_id", "") or _event_run_id(event_dict) or "")
-                        row_turn_id = str(_row_value(row, "turn_id", "") or _event_turn_id(event_dict) or "")
-                        row_scope_key = str(
-                            _row_value(row, "runtime_scope_key", "")
-                            or _event_runtime_scope_key(event_dict)
-                            or ""
-                        )
-                        for key in list(pending_by_key.keys()):
-                            if len(key) <= 4 or key[1] != "message.delta":
-                                continue
-                            pending_session_id = str(key[0] or "")
-                            pending_run_id = str(key[2] or "")
-                            pending_turn_id = str(key[3] or "")
-                            pending_scope_key = str(key[4] or "")
-                            if pending_session_id != row_session_id:
-                                continue
-                            if pending_scope_key != row_scope_key:
-                                continue
-                            if pending_run_id and pending_run_id != row_run_id:
-                                continue
-                            if pending_turn_id and pending_turn_id != row_turn_id:
-                                continue
-                            interrupted_pending_keys.add(key)
                     continue
                 key = (str(row["session_id"] or ""), *_event_stream_identity(event))
                 pending = pending_by_key.get(key, [])
@@ -1873,16 +1894,9 @@ class SessionDBRunMixin:
                     and str(row["session_id"] or "") == str(pending[-1][0]["session_id"] or "")
                     and _stream_events_can_coalesce(pending[-1][1], event)
                 )
-                if (
-                    can_append_to_pending
-                    and key in interrupted_pending_keys
-                    and _stream_events_require_contiguous_rows(pending[-1][1], event)
-                ):
-                    can_append_to_pending = False
                 if can_append_to_pending:
                     pending.append((row, event))
                     pending_by_key[key] = pending
-                    interrupted_pending_keys.discard(key)
                     continue
                 flush_pending_key(key)
                 pending_by_key[key] = [(row, event)]
@@ -1944,6 +1958,11 @@ class SessionDBRunMixin:
                 """,
                 (stable,),
             ).fetchone()
+            if active is None:
+                active = self._live_owner_control_only_active_run_locked(
+                    self._conn,
+                    session_id=stable,
+                )
             last = self._conn.execute(
                 "SELECT COALESCE(MAX(seq), 0) AS last_seq FROM run_events WHERE session_id = ?",
                 (stable,),

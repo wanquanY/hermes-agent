@@ -42,7 +42,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 22
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -351,6 +351,8 @@ CREATE TABLE IF NOT EXISTS agent_team_members (
     team_id TEXT NOT NULL REFERENCES agent_teams(id) ON DELETE CASCADE,
     agent_profile_id TEXT NOT NULL,
     agent_profile_version_id TEXT,
+    profile_name TEXT,
+    profile_avatar TEXT,
     role TEXT NOT NULL,
     capability_tags_json TEXT NOT NULL,
     auto_assignable INTEGER NOT NULL,
@@ -470,6 +472,10 @@ CREATE TABLE IF NOT EXISTS team_mission_nodes (
     status TEXT NOT NULL,
     assignee_profile_id TEXT,
     assignee_profile_version_id TEXT,
+    canonical_node_id TEXT,
+    task_frame_id TEXT,
+    runtime_stable_session_id TEXT,
+    runtime_session_id TEXT,
     runtime_scope_key TEXT,
     output_contract_json TEXT,
     metadata_json TEXT,
@@ -501,6 +507,25 @@ CREATE TABLE IF NOT EXISTS team_mission_run_bindings (
     metadata_json TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_mission_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    source_event_type TEXT,
+    source_run_id TEXT,
+    source_session_id TEXT,
+    source_seq INTEGER DEFAULT 0,
+    dedupe_key TEXT NOT NULL,
+    timestamp REAL NOT NULL,
+    payload_json TEXT,
+    source_event_json TEXT,
+    event_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE(mission_id, seq),
+    UNIQUE(mission_id, dedupe_key)
 );
 
 CREATE TABLE IF NOT EXISTS team_mission_artifacts (
@@ -639,6 +664,10 @@ CREATE INDEX IF NOT EXISTS idx_team_mission_run_bindings_mission
     ON team_mission_run_bindings(mission_id, node_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_run_bindings_session
     ON team_mission_run_bindings(session_id, run_id);
+CREATE INDEX IF NOT EXISTS idx_team_mission_events_mission_seq
+    ON team_mission_events(mission_id, seq ASC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_events_source_run
+    ON team_mission_events(source_run_id, source_seq);
 CREATE INDEX IF NOT EXISTS idx_team_mission_artifacts_mission
     ON team_mission_artifacts(mission_id, node_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_mission
@@ -1048,6 +1077,10 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 status TEXT NOT NULL,
                 assignee_profile_id TEXT,
                 assignee_profile_version_id TEXT,
+                canonical_node_id TEXT,
+                task_frame_id TEXT,
+                runtime_stable_session_id TEXT,
+                runtime_session_id TEXT,
                 runtime_scope_key TEXT,
                 output_contract_json TEXT,
                 metadata_json TEXT,
@@ -1063,13 +1096,17 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             """
             INSERT OR REPLACE INTO team_mission_nodes (
                 node_id, mission_id, kind, title, objective, status,
-                assignee_profile_id, assignee_profile_version_id, runtime_scope_key,
+                assignee_profile_id, assignee_profile_version_id,
+                canonical_node_id, task_frame_id, runtime_stable_session_id,
+                runtime_session_id, runtime_scope_key,
                 output_contract_json, metadata_json, position_x, position_y,
                 created_at, updated_at
             )
             SELECT
                 node_id, mission_id, kind, title, objective, status,
-                assignee_profile_id, assignee_profile_version_id, runtime_scope_key,
+                assignee_profile_id, assignee_profile_version_id,
+                canonical_node_id, task_frame_id, runtime_stable_session_id,
+                runtime_session_id, runtime_scope_key,
                 output_contract_json, metadata_json, position_x, position_y,
                 created_at, updated_at
             FROM team_mission_nodes_legacy_pk

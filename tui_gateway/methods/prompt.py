@@ -100,7 +100,7 @@ def _mark_prompt_run_failed(
     turn_id: str = "",
     message: str = "",
 ) -> None:
-    db = _get_db()
+    db = _db_for_stable_session(stored_session_id)
     if db is None or not run_id or not stored_session_id:
         return
     run_control.publish_run_terminal_event(
@@ -123,7 +123,7 @@ def _mark_prompt_run_cancelled(
     turn_id: str = "",
     message: str = "",
 ) -> dict:
-    db = _get_db()
+    db = _db_for_stable_session(stored_session_id)
     event = None
     if db is not None and run_id and stored_session_id:
         event = run_control.publish_run_terminal_event(
@@ -178,43 +178,43 @@ def _fail_unavailable_runtime_agent(
 class _MessageDeltaNormalizer:
     """Normalizes agent stream callbacks into explicit Gateway text events.
 
-    Most model adapters call stream callbacks with append-only token deltas, but
-    some paths can resend the current visible snapshot or a chunk overlapping
-    text already delivered.  The Gateway ABI should expose that distinction
-    explicitly so clients can run deterministic reducers instead of guessing
-    from message text.
+    The Gateway ABI is append-only for string stream callbacks.  Earlier
+    versions tried to infer cumulative/snapshot callbacks from text content,
+    but that is not a valid protocol: legitimate chunks can share a prefix with
+    prior output (for example later markdown labels beginning with the same
+    Chinese word as the response).  Any producer that needs snapshot semantics
+    must send an explicit structured callback instead of a bare string.
     """
-
-    _SNAPSHOT_COMMON_PREFIX_MIN = 8
-    _OVERLAP_MIN = 8
 
     def __init__(self) -> None:
         self.text = ""
         self._pending_trailing_newlines = ""
 
     @staticmethod
-    def _common_prefix_len(left: str, right: str) -> int:
-        limit = min(len(left), len(right))
-        index = 0
-        while index < limit and left[index] == right[index]:
-            index += 1
-        return index
+    def _structured_value(value) -> dict:
+        if not isinstance(value, dict):
+            return {}
+        return value
 
     @staticmethod
-    def _suffix_prefix_overlap(left: str, right: str) -> int:
-        limit = min(len(left), len(right))
-        for size in range(limit, 0, -1):
-            if left.endswith(right[:size]):
-                return size
-        return 0
+    def _protocol_offset(value: str) -> int:
+        return len(str(value or "").encode("utf-16-le")) // 2
 
     def feed(self, value) -> dict | None:
         if value is None:
             self.discard_pending_trailing_newlines()
             return None
-        incoming = str(value or "")
+        structured = self._structured_value(value)
+        mode = str(structured.get("mode") or "").strip().lower()
+        if structured:
+            raw_value = structured.get("delta") or structured.get("text") or structured.get("output")
+        else:
+            raw_value = value
+        incoming = str(raw_value or "")
         if not incoming:
             return None
+        if mode in {"snapshot", "replace", "cumulative"}:
+            return self.feed_snapshot(incoming)
         if self._pending_trailing_newlines:
             incoming = self._pending_trailing_newlines + incoming
             self._pending_trailing_newlines = ""
@@ -224,55 +224,7 @@ class _MessageDeltaNormalizer:
         if not incoming:
             return None
         current = self.text
-        if not current:
-            self.text = incoming
-            return {
-                "mode": "append",
-                "text": incoming,
-                "delta": incoming,
-                "offset": 0,
-            }
-        if incoming == current or current.startswith(incoming):
-            return None
-        if incoming.startswith(current):
-            delta = incoming[len(current):]
-            offset = len(current)
-            self.text = incoming
-            return {
-                "mode": "append",
-                "text": delta,
-                "delta": delta,
-                "offset": offset,
-            }
-
-        common_prefix = self._common_prefix_len(current, incoming)
-        if (
-            common_prefix >= self._SNAPSHOT_COMMON_PREFIX_MIN
-            and len(incoming) >= common_prefix
-        ):
-            self.text = incoming
-            return {
-                "mode": "snapshot",
-                "text": incoming,
-                "snapshot": incoming,
-                "offset": 0,
-            }
-
-        overlap = self._suffix_prefix_overlap(current, incoming)
-        if overlap >= self._OVERLAP_MIN:
-            delta = incoming[overlap:]
-            if not delta:
-                return None
-            offset = len(current)
-            self.text = current + delta
-            return {
-                "mode": "append",
-                "text": delta,
-                "delta": delta,
-                "offset": offset,
-            }
-
-        offset = len(current)
+        offset = self._protocol_offset(self.text)
         self.text = current + incoming
         return {
             "mode": "append",
@@ -281,7 +233,35 @@ class _MessageDeltaNormalizer:
             "offset": offset,
         }
 
+    def feed_snapshot(self, value: str) -> dict | None:
+        snapshot = str(value or "")
+        if not snapshot:
+            return None
+        if snapshot == self.text:
+            return None
+        if not snapshot.startswith(self.text):
+            return None
+        delta = snapshot[len(self.text):]
+        if not delta:
+            return None
+        offset = self._protocol_offset(self.text)
+        self.text = snapshot
+        self._pending_trailing_newlines = ""
+        return {
+            "mode": "append",
+            "text": delta,
+            "delta": delta,
+            "offset": offset,
+        }
+
+    def reconcile_final_text(self, value: str) -> dict | None:
+        return self.feed_snapshot(str(value or ""))
+
     def discard_pending_trailing_newlines(self) -> None:
+        self._pending_trailing_newlines = ""
+
+    def reset(self) -> None:
+        self.text = ""
         self._pending_trailing_newlines = ""
 
 
@@ -426,7 +406,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 flush=True,
             )
         if not session.get("transient"):
-            db = _get_db()
+            db = _db_for_stable_session(stable_session_id)
             if db is not None:
                 try:
                     normalize_team_mission_conversation_session(
@@ -647,7 +627,7 @@ def _latest_assistant_message_id_for_turn(session_id: str, turn_metadata: dict |
     target = _turn_identity(turn_metadata)
     if not session_id or not target:
         return ""
-    db = _get_db()
+    db = _db_for_stable_session(session_id)
     if db is None:
         return ""
     try:
@@ -718,7 +698,8 @@ def _run_prompt_submit(
     def terminalize_if_still_active(reason: str) -> None:
         if session.get("transient") or not turn_run_id:
             return
-        db = _get_db()
+        stored_session_id = str(session.get("session_key") or sid)
+        db = _db_for_stable_session(stored_session_id)
         if db is None:
             return
         try:
@@ -738,14 +719,14 @@ def _run_prompt_submit(
         logger.warning(
             "[doxie-prompt] terminal fallback for active run sid=%s stored_session_id=%s run_id=%s turn_id=%s status=%s reason=%s",
             sid,
-            session.get("session_key") or sid,
+            stored_session_id,
             turn_run_id,
             turn_id,
             status,
             reason,
         )
         run_control.publish_run_terminal_event(
-            stored_session_id=str(session.get("session_key") or sid),
+            stored_session_id=stored_session_id,
             run_id=turn_run_id,
             turn_id=turn_id,
             runtime_scope_key=str(
@@ -798,6 +779,30 @@ def _run_prompt_submit(
             return stale
 
     delta_normalizer = _MessageDeltaNormalizer()
+    message_segment_index = 0
+
+    def current_client_message_id() -> str:
+        base = str(turn_id or turn_run_id or sid or "prompt-turn").strip()
+        return f"{base}:assistant-segment:{message_segment_index}"
+
+    def close_current_text_segment(reason: str = "stream_boundary") -> None:
+        nonlocal message_segment_index
+        current_text = str(delta_normalizer.text or "")
+        if not current_text:
+            delta_normalizer.reset()
+            return
+        _log_prompt_stage(
+            session,
+            sid,
+            "stream-text-segment-closed",
+            run_id=turn_run_id,
+            turn_id=turn_id,
+            reason=reason,
+            segment_index=message_segment_index,
+            accumulated_text_len=len(current_text),
+        )
+        message_segment_index += 1
+        delta_normalizer.reset()
 
     def persist_interrupted_partial(base_messages: list[dict] | None = None) -> None:
         partial = delta_normalizer.text.strip()
@@ -1112,8 +1117,11 @@ def _run_prompt_submit(
             stream_delta_emitted = False
 
             def _stream(delta):
-                nonlocal stream_delta_emitted
+                nonlocal stream_delta_emitted, message_segment_index
                 if is_turn_interrupted():
+                    return
+                if delta is None:
+                    close_current_text_segment("stream_callback_none")
                     return
                 input_probe = _text_probe(delta)
                 payload = delta_normalizer.feed(delta)
@@ -1137,7 +1145,9 @@ def _run_prompt_submit(
                 )
                 if payload is None:
                     return
-                render_delta = payload.get("delta") or payload.get("snapshot") or payload.get("text") or ""
+                payload["client_message_id"] = current_client_message_id()
+                payload["clientMessageId"] = payload["client_message_id"]
+                render_delta = payload.get("delta") or payload.get("text") or ""
                 if streamer and (r := streamer.feed(render_delta)) is not None:
                     payload["rendered"] = r
                 _emit("message.delta", sid, payload)
@@ -1154,6 +1164,11 @@ def _run_prompt_submit(
                 else None
             )
             try:
+                previous_stream_text_boundary_callback = session.get(
+                    "stream_text_boundary_callback",
+                    active_context_missing,
+                )
+                session["stream_text_boundary_callback"] = close_current_text_segment
                 previous_inject_tool_breaks = getattr(agent, "_stream_inject_tool_breaks", True)
                 agent._stream_inject_tool_breaks = False
                 agent._hermes_active_run_id = turn_run_id
@@ -1224,6 +1239,11 @@ def _run_prompt_submit(
                     },
                 )
             finally:
+                if "previous_stream_text_boundary_callback" in locals():
+                    if previous_stream_text_boundary_callback is active_context_missing:
+                        session.pop("stream_text_boundary_callback", None)
+                    else:
+                        session["stream_text_boundary_callback"] = previous_stream_text_boundary_callback
                 if "previous_inject_tool_breaks" in locals():
                     agent._stream_inject_tool_breaks = previous_inject_tool_breaks
                 if previous_active_run_id is active_context_missing:
@@ -1361,7 +1381,7 @@ def _run_prompt_submit(
                     stream_startswith_raw=current_stream_text.startswith(raw_text),
                 )
                 if should_emit_final_delta:
-                    final_delta_payload = delta_normalizer.feed(raw_text)
+                    final_delta_payload = delta_normalizer.reconcile_final_text(raw_text)
                     if final_delta_payload is not None:
                         render_delta = (
                             final_delta_payload.get("delta")
@@ -1371,27 +1391,20 @@ def _run_prompt_submit(
                         if streamer and (r := streamer.feed(render_delta)) is not None:
                             final_delta_payload["rendered"] = r
                         final_delta_payload["source"] = "final_response_reconciliation"
+                        final_delta_payload["client_message_id"] = current_client_message_id()
+                        final_delta_payload["clientMessageId"] = final_delta_payload["client_message_id"]
                         _emit("message.delta", sid, final_delta_payload)
                         stream_delta_emitted = True
                 elif current_stream_text and raw_text != current_stream_text:
                     final_delta_mismatch = True
-                    final_delta_payload = {
-                        "mode": "snapshot",
-                        "text": raw_text,
-                        "snapshot": raw_text,
-                        "offset": 0,
-                        "source": "final_response_reconciliation",
-                        "final_text_mismatch": True,
-                    }
-                    if streamer and (r := streamer.feed(raw_text)) is not None:
-                        final_delta_payload["rendered"] = r
-                    _emit("message.delta", sid, final_delta_payload)
-                    stream_delta_emitted = True
 
             payload = {
                 "usage": _get_usage(agent),
                 "status": status,
                 "streamed": stream_delta_emitted,
+                "text": raw_text,
+                "client_message_id": current_client_message_id(),
+                "clientMessageId": current_client_message_id(),
                 **terminal_text_metadata(raw_text, prefix="text"),
             }
             if interrupt_detail:
@@ -1481,7 +1494,7 @@ def _run_prompt_submit(
                 if session.get("transient"):
                     session["pending_title"] = None
                 else:
-                    _pdb = _get_db()
+                    _pdb = _db_for_stable_session(session.get("session_key") or sid)
                     if _pdb:
                         _session_key = session.get("session_key") or sid
                         try:
@@ -1590,7 +1603,7 @@ def _run_prompt_submit(
                 run_id=followup_run_id,
                 turn_id=followup_turn_id,
                 runtime_scope_key=followup_scope_key,
-                db=_get_db(),
+                db=_db_for_stable_session(stable_session_id),
             )
             if isinstance(reservation, dict) and reservation.get("conflict"):
                 with session["history_lock"]:
@@ -1609,7 +1622,7 @@ def _run_prompt_submit(
                     "gateway_pid": os.getpid(),
                     "gateway_instance_id": _GATEWAY_INSTANCE_ID,
                 },
-                db=_get_db(),
+                db=_db_for_stable_session(stable_session_id),
             )
             try:
                 _run_prompt_submit(
@@ -1828,6 +1841,23 @@ def _respond(rid, params, key):
     return _ok(rid, {"status": "ok"})
 
 
+def _respond_gateway_clarify(rid, params: dict):
+    r = str(params.get("request_id", "") or "").strip()
+    if not r:
+        return None
+    try:
+        from tools import clarify_gateway as _clarify_mod
+    except Exception:
+        return None
+    try:
+        resolved = _clarify_mod.resolve_gateway_clarify(r, params.get("answer", ""))
+    except Exception as exc:
+        return _err(rid, 5004, str(exc))
+    if not resolved:
+        return None
+    return _ok(rid, {"status": "ok", "source": "clarify_gateway"})
+
+
 def _approval_session_key(params: dict, rid):
     requested = str(
         params.get("stored_session_id")
@@ -1847,7 +1877,7 @@ def _approval_session_key(params: dict, rid):
         if str((live_session or {}).get("session_key") or "") == requested:
             return str((live_session or {}).get("session_key") or runtime_sid), None
 
-    db = _get_db()
+    db = _db_for_stable_session(requested)
     if db is not None:
         try:
             stored = db.get_session(requested)
@@ -1863,6 +1893,9 @@ def _approval_session_key(params: dict, rid):
 
 @method("clarify.respond")
 def _(rid, params: dict) -> dict:
+    gateway_response = _respond_gateway_clarify(rid, params)
+    if gateway_response is not None:
+        return gateway_response
     return _respond(rid, params, "answer")
 
 

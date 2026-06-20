@@ -46,9 +46,6 @@ def expected_parent_pid() -> int:
 def parent_process_still_owns_sidecar(parent_pid: int) -> bool:
     if parent_pid <= 0:
         return True
-    getppid = getattr(os, "getppid", None)
-    if callable(getppid) and int(getppid()) != parent_pid:
-        return False
     try:
         os.kill(parent_pid, 0)
     except ProcessLookupError:
@@ -57,6 +54,18 @@ def parent_process_still_owns_sidecar(parent_pid: int) -> bool:
         return True
     except OSError:
         return False
+    getppid = getattr(os, "getppid", None)
+    if callable(getppid):
+        try:
+            actual_parent = int(getppid())
+        except Exception:
+            actual_parent = parent_pid
+        if actual_parent not in {0, parent_pid}:
+            print(
+                "[doxie-sidecar] parent pid is alive but process was reparented; "
+                f"expected_parent_pid={parent_pid} actual_parent_pid={actual_parent}",
+                flush=True,
+            )
     return True
 
 
@@ -69,6 +78,11 @@ def start_parent_watchdog() -> threading.Thread | None:
         while True:
             time.sleep(_PARENT_WATCHDOG_INTERVAL_SECONDS)
             if not parent_process_still_owns_sidecar(parent_pid):
+                print(
+                    "[doxie-sidecar] expected parent process is gone; shutting down "
+                    f"expected_parent_pid={parent_pid} actual_parent_pid={os.getppid()}",
+                    flush=True,
+                )
                 try:
                     from tui_gateway import server as tui_gateway_server
 

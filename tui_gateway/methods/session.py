@@ -911,7 +911,7 @@ def _(rid, params: dict) -> dict:
     target = params.get("session_id", "")
     if not target:
         return _err(rid, 4006, "session_id required")
-    db = _get_db()
+    db = _db_for_stable_session(target)
     if db is None:
         return _err(rid, 4007, "session not found")
     found = db.get_session(target)

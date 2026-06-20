@@ -3501,6 +3501,26 @@ def test_respond_unpacks_sid_tuple_correctly():
         server._answers.pop("rid-x", None)
 
 
+def test_clarify_respond_resolves_gateway_clarify_registry():
+    """Team-runtime clarify requests use tools.clarify_gateway, not _pending."""
+    from tools import clarify_gateway as cm
+
+    entry = cm.register("cid-gateway", "session-gateway", "Pick one", ["A", "B"])
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "clarify.respond",
+                "params": {"request_id": "cid-gateway", "answer": "A"},
+            }
+        )
+        assert resp.get("result") == {"status": "ok", "source": "clarify_gateway"}
+        assert entry.event.is_set()
+        assert cm.wait_for_response("cid-gateway", 0.1) == "A"
+    finally:
+        cm.clear_session("session-gateway")
+
+
 # ---------------------------------------------------------------------------
 # /model switch and other agent-mutating commands must reject while the
 # session is running.  agent.switch_model() mutates self.model, self.provider,
@@ -4395,23 +4415,24 @@ class _ImmediateThread:
         self._target()
 
 
-def test_prompt_submit_emits_explicit_append_and_snapshot_message_delta(monkeypatch):
-    """Gateway text events expose deterministic reducer semantics to clients."""
+def test_prompt_submit_emits_append_only_message_delta(monkeypatch):
+    """Gateway text deltas stay append-only; complete carries the canonical text."""
 
     class _Agent:
         session_id = "session-key"
 
         def run_conversation(self, prompt, conversation_history=None, stream_callback=None, **_kwargs):
-            stream_callback("你好，我是小多～很高兴见到。")
-            stream_callback("你好，我是小多～很高兴见到你。\n\n如果你愿意，我们可以先对齐一下合作方式。")
-            stream_callback(" 继续说。")
+            stream_callback("文件已创建完成。")
+            stream_callback("\n\n- **")
+            stream_callback("文件名**")
+            stream_callback("：`team_stream_refactor_check.txt`")
             return {
-                "final_response": "你好，我是小多～很高兴见到你。\n\n如果你愿意，我们可以先对齐一下合作方式。 继续说。",
+                "final_response": "文件已创建完成。\n\n- **文件名**：`team_stream_refactor_check.txt`",
                 "messages": [
                     {"role": "user", "content": "你好"},
                     {
                         "role": "assistant",
-                        "content": "你好，我是小多～很高兴见到你。\n\n如果你愿意，我们可以先对齐一下合作方式。 继续说。",
+                        "content": "文件已创建完成。\n\n- **文件名**：`team_stream_refactor_check.txt`",
                     },
                 ],
             }
@@ -4442,16 +4463,21 @@ def test_prompt_submit_emits_explicit_append_and_snapshot_message_delta(monkeypa
         server._sessions.pop("sid", None)
 
     deltas = [args[2] for args in emitted if args[0] == "message.delta"]
-    assert [payload["mode"] for payload in deltas] == ["append", "snapshot", "append"]
-    assert deltas[0]["delta"] == "你好，我是小多～很高兴见到。"
+    assert [payload["mode"] for payload in deltas] == ["append", "append", "append", "append"]
+    assert [payload["delta"] for payload in deltas] == [
+        "文件已创建完成。",
+        "\n\n- **",
+        "文件名**",
+        "：`team_stream_refactor_check.txt`",
+    ]
     assert deltas[0]["offset"] == 0
-    assert deltas[1]["snapshot"].startswith("你好，我是小多～很高兴见到你。")
-    assert deltas[1]["text"] == deltas[1]["snapshot"]
-    assert deltas[2]["delta"] == " 继续说。"
+    assert [payload["offset"] for payload in deltas] == [0, 8, 14, 19]
+    complete_events = [args[2] for args in emitted if args[0] == "message.complete"]
+    assert complete_events[-1]["text"] == "文件已创建完成。\n\n- **文件名**：`team_stream_refactor_check.txt`"
 
 
-def test_prompt_submit_reconciles_diverged_stream_with_final_snapshot(monkeypatch):
-    """A bad live stream must be corrected by the final persisted answer."""
+def test_prompt_submit_reconciles_diverged_stream_with_message_complete_text(monkeypatch):
+    """A bad live stream is corrected only by the terminal canonical answer."""
 
     class _Agent:
         session_id = "session-key"
@@ -4483,8 +4509,8 @@ def test_prompt_submit_reconciles_diverged_stream_with_final_snapshot(monkeypatc
                     "_run_registry_reserved": True,
                     "session_id": "sid",
                     "text": "嘟嘟嘟",
-                    "run_id": "run-final-snapshot",
-                    "turn_id": "turn-final-snapshot",
+                    "run_id": "run-final-complete",
+                    "turn_id": "turn-final-complete",
                 },
             }
         )
@@ -4492,16 +4518,78 @@ def test_prompt_submit_reconciles_diverged_stream_with_final_snapshot(monkeypatc
         server._sessions.pop("sid", None)
 
     deltas = [args[2] for args in emitted if args[0] == "message.delta"]
-    assert [payload["mode"] for payload in deltas] == ["append", "snapshot"]
+    assert [payload["mode"] for payload in deltas] == ["append"]
     assert deltas[0]["delta"] == "收到信号信号！！有什么有什么"
-    assert deltas[1]["snapshot"] == "收到信号！有什么我可以帮你的吗？"
-    assert deltas[1]["source"] == "final_response_reconciliation"
-    assert deltas[1]["final_text_mismatch"] is True
 
     complete_events = [args[2] for args in emitted if args[0] == "message.complete"]
     assert complete_events[-1]["final_text_mismatch"] is True
     assert complete_events[-1]["text_available"] is True
+    assert complete_events[-1]["text"] == "收到信号！有什么我可以帮你的吗？"
     assert complete_events[-1]["text_length"] == len("收到信号！有什么我可以帮你的吗？")
+
+
+def test_prompt_submit_splits_tool_event_stream_segments_with_client_message_ids(monkeypatch):
+    """Structured tool events close the live text segment without terminalizing the run."""
+
+    class _Agent:
+        session_id = "session-key"
+
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None, **_kwargs):
+            stream_callback("我先检查文件。")
+            callbacks = server._agent_cbs("sid")
+            callbacks["tool_gen_callback"]("terminal")
+            callbacks["tool_start_callback"]("tool-1", "terminal", {"command": "pwd"})
+            stream_callback("文件确认无误，下面是最终结论。")
+            return {
+                "final_response": "文件确认无误，下面是最终结论。",
+                "messages": [
+                    {"role": "user", "content": "检查文件"},
+                    {"role": "assistant", "content": "我先检查文件。"},
+                    {"role": "tool", "content": "ok"},
+                    {"role": "assistant", "content": "文件确认无误，下面是最终结论。"},
+                ],
+            }
+
+    emitted = []
+    server._sessions["sid"] = _session(agent=_Agent(), transient=True)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    try:
+        server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "_run_registry_reserved": True,
+                    "session_id": "sid",
+                    "text": "检查文件",
+                    "run_id": "run-segmented-stream",
+                    "turn_id": "turn-segmented-stream",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    deltas = [args[2] for args in emitted if args[0] == "message.delta"]
+    assert [payload["delta"] for payload in deltas] == [
+        "我先检查文件。",
+        "文件确认无误，下面是最终结论。",
+    ]
+    assert [payload["offset"] for payload in deltas] == [0, 0]
+    assert [payload["client_message_id"] for payload in deltas] == [
+        "turn-segmented-stream:assistant-segment:0",
+        "turn-segmented-stream:assistant-segment:1",
+    ]
+
+    complete_events = [args[2] for args in emitted if args[0] == "message.complete"]
+    assert complete_events[-1].get("final_text_mismatch") is not True
+    assert complete_events[-1]["client_message_id"] == "turn-segmented-stream:assistant-segment:1"
+    assert complete_events[-1]["text"] == "文件确认无误，下面是最终结论。"
 
 
 def test_emit_does_not_echo_direct_stream_event_to_same_run_subscription(monkeypatch):
@@ -4666,7 +4754,7 @@ def test_prompt_submit_does_not_surface_interrupt_diagnostic_as_text(monkeypatch
     assert complete_events, "expected message.complete to be emitted"
     payload = complete_events[-1][2]
     assert payload.get("status") == "interrupted"
-    assert "text" not in payload
+    assert payload.get("text") == ""
     assert payload.get("text_available") is False
     assert payload.get("interrupt_detail", "").startswith("Operation interrupted:")
 
@@ -4888,7 +4976,7 @@ def test_prompt_submit_surfaces_backend_error_as_visible_text(monkeypatch):
     assert complete_events, "expected message.complete to be emitted"
     payload = complete_events[-1][2]
     assert payload.get("status") == "error"
-    assert "text" not in payload
+    assert payload.get("text") == delta_payload.get("delta")
     assert payload.get("text_available") is True
     assert payload.get("text_length") == len(delta_payload["delta"])
 
@@ -4942,8 +5030,8 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
     payload = complete_events[-1][2]
     # Status stays "complete" because no error flag was set
     assert payload.get("status") == "complete"
-    # Text stays empty and complete carries only terminal metadata.
-    assert "text" not in payload
+    # Text stays empty, but complete always carries the terminal text field.
+    assert payload.get("text") == ""
     assert payload.get("text_available") is False
     assert payload.get("text_length") == 0
 

@@ -41,11 +41,23 @@ def test_team_mission_graph_and_run_binding_are_native_hermes_state(tmp_path: Pa
         node_id="node-leader",
         run_id="run-leader",
         session_id="session-leader",
+        runtime_session_id="runtime-leader",
         runtime_scope_key="team:mission-1:leader",
         role="leader",
     )
 
     graph = db.get_team_mission_graph("mission-1")
+    graph_node = graph["nodes"][0]
+    direct_node = db.get_team_mission_node("mission-1", "node-leader")
+    durable_node = db._conn.execute(  # noqa: SLF001 - contract test for node-owned runtime identity.
+        """
+        SELECT canonical_node_id, task_frame_id, runtime_stable_session_id,
+               runtime_session_id, runtime_scope_key
+        FROM team_mission_nodes
+        WHERE mission_id = ? AND node_id = ?
+        """,
+        ("mission-1", "node-leader"),
+    ).fetchone()
 
     assert mission["mission_id"] == "mission-1"
     assert node["node_id"] == "node-leader"
@@ -58,6 +70,65 @@ def test_team_mission_graph_and_run_binding_are_native_hermes_state(tmp_path: Pa
     assert graph["conversation"]["active_mission_id"] == "mission-1"
     assert [item["node_id"] for item in graph["nodes"]] == ["node-leader"]
     assert [item["run_id"] for item in graph["run_bindings"]] == ["run-leader"]
+    assert graph_node["run_id"] == "run-leader"
+    assert graph_node["stored_session_id"] == "session-leader"
+    assert graph_node["actual_stable_session_id"] == "session-leader"
+    assert graph_node["runtime_session_id"] == "runtime-leader"
+    assert graph_node["runtime_scope_key"] == "team:mission-1:leader"
+    assert graph_node["runtime_binding"]["run_id"] == "run-leader"
+    assert direct_node["run_id"] == "run-leader"
+    assert direct_node["stored_session_id"] == "session-leader"
+    assert direct_node["runtime_session_id"] == "runtime-leader"
+    assert durable_node["canonical_node_id"] == "mission-1:node-leader"
+    assert durable_node["task_frame_id"] == "mission-frame:mission-1"
+    assert durable_node["runtime_stable_session_id"] == "session-leader"
+    assert durable_node["runtime_session_id"] == "runtime-leader"
+    assert durable_node["runtime_scope_key"] == "team:mission-1:leader"
+
+
+def test_team_mission_node_runtime_projection_uses_latest_run_binding(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        objective="Run node twice",
+        mode="supervised_mission",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-worker",
+        kind="worker",
+        title="Worker",
+        objective="Complete task",
+        status="running",
+        runtime_scope_key="profile:worker",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="node-worker",
+        run_id="run-a-old",
+        session_id="session-old",
+        runtime_session_id="runtime-old",
+        runtime_scope_key="profile:worker",
+        role="worker",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="node-worker",
+        run_id="run-z-new",
+        session_id="session-new",
+        runtime_session_id="runtime-new",
+        runtime_scope_key="profile:worker",
+        role="worker",
+    )
+
+    graph_node = db.get_team_mission_graph("mission-1")["nodes"][0]
+
+    assert graph_node["run_id"] == "run-z-new"
+    assert graph_node["stored_session_id"] == "session-new"
+    assert graph_node["runtime_session_id"] == "runtime-new"
+    assert graph_node["runtime_binding"]["run_id"] == "run-z-new"
 
 
 def test_team_mission_conversation_is_canonical_and_resolvable(tmp_path: Path):
@@ -238,6 +309,48 @@ def test_team_mission_conversation_runtime_summary_returns_frames_and_runtime_se
     assert summary["pending_approval_count"] == 1
     assert summary["pending_approvals"][0]["nodeId"] == "mission-2:approval"
     assert summary["run_session_ids"] == ["worker-session-1", "runtime-worker-1"]
+
+
+def test_team_mission_conversation_runtime_session_ids_are_lightweight(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        team_id="team-1",
+        workspace_id="workspace-1",
+        stable_session_id="team-session-1",
+        title="团队会话",
+        active_mission_id="mission-1",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="测试任务",
+        objective="测试任务",
+        mode="supervised_mission",
+        status="running",
+        leader_session_id="team-session-1",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="worker",
+        run_id="run-worker",
+        session_id="worker-session-1",
+        runtime_session_id="runtime-worker-1",
+        runtime_scope_key="team:mission-1:node:worker",
+        role="worker",
+    )
+
+    assert db.list_team_mission_conversation_runtime_session_ids(
+        team_id="team-1",
+        workspace_id="workspace-1",
+        mission_id="mission-1",
+    ) == ["team-session-1", "worker-session-1", "runtime-worker-1"]
+
+    assert db.list_team_mission_conversation_runtime_session_ids(
+        mission_id="conversation-1",
+    ) == ["team-session-1", "worker-session-1", "runtime-worker-1"]
 
 
 def test_team_mission_conversation_projection_returns_final_deliverable_and_artifacts(tmp_path: Path):
@@ -1004,13 +1117,15 @@ def test_team_mission_runtime_events_reuse_ordinary_run_event_coalescing(tmp_pat
         "team_mission.runtime.event",
         "team_mission.runtime.event",
         "team_mission.runtime.event",
+        "team_mission.runtime.event",
     ]
     assert [event["payload"]["source_event_type"] for event in events] == [
+        "message.delta",
         "message.delta",
         "tool.start",
         "message.delta",
     ]
-    assert events[0]["source_seq"] == 2
+    assert events[0]["source_seq"] == 1
     assert events[0]["team_mission_event_seq"] == events[0]["seq"]
     assert events[0]["mission_id"] == "mission-1"
     assert events[0]["conversation_id"] == "conversation-1"
@@ -1018,7 +1133,14 @@ def test_team_mission_runtime_events_reuse_ordinary_run_event_coalescing(tmp_pat
     assert events[0]["node_id"] == "node-leader"
     assert events[0]["task_id"] == "task-1"
     assert events[0]["task_frame_id"] == "mission-frame:mission-1"
-    assert events[0]["payload"]["source_event"]["payload"]["delta"] == "Plan graph"
+    assert events[0]["payload"]["source_event"]["payload"]["delta"] == "Plan "
+    assert events[0]["payload"]["subject"]["type"] == "node"
+    assert events[0]["payload"]["subject"]["node_id"] == "node-leader"
+    assert events[0]["payload"]["subject"]["canonical_node_id"] == "mission-1:node-leader"
+    assert events[0]["payload"]["text_stream"]["mode"] == "append"
+    assert events[0]["payload"]["text_stream"]["delta"] == "Plan "
+    assert events[1]["payload"]["source_event"]["payload"]["delta"] == "graph"
+    assert events[1]["payload"]["text_stream"]["delta"] == "graph"
     assert events[0]["payload"]["mission_id"] == "mission-1"
     assert events[0]["payload"]["missionId"] == "mission-1"
     assert events[0]["payload"]["conversation_id"] == "conversation-1"
@@ -1028,9 +1150,119 @@ def test_team_mission_runtime_events_reuse_ordinary_run_event_coalescing(tmp_pat
     assert events[0]["payload"]["nodeId"] == "node-leader"
     assert events[0]["payload"]["task_id"] == "task-1"
     assert events[0]["payload"]["taskFrameId"] == "mission-frame:mission-1"
-    assert events[0]["payload"]["source_seq"] == 2
+    assert events[0]["payload"]["source_seq"] == 1
     assert events[0]["payload"]["team_mission_event_seq"] == events[0]["seq"]
-    assert events[2]["payload"]["source_event"]["payload"]["delta"] == " after tool"
+    assert events[3]["payload"]["source_event"]["payload"]["delta"] == " after tool"
+    rows = db._conn.execute(  # noqa: SLF001 - contract test for the canonical mission event log.
+        """
+        SELECT seq, event_type, source_event_type
+        FROM team_mission_events
+        WHERE mission_id = ?
+        ORDER BY seq ASC
+        """,
+        ("mission-1",),
+    ).fetchall()
+    assert [(row["event_type"], row["source_event_type"]) for row in rows] == [
+        ("team_mission.runtime.event", "message.delta"),
+        ("team_mission.runtime.event", "message.delta"),
+        ("team_mission.runtime.event", "tool.start"),
+        ("team_mission.runtime.event", "message.delta"),
+    ]
+    assert [row["seq"] for row in rows] == [event["seq"] for event in events]
+
+
+def test_team_mission_structural_events_use_subject_node_identity_not_bound_runtime_node(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        title="Mission",
+        mode="supervised_mission",
+        leader_session_id="team-session-1",
+        metadata={"task_id": "task-1", "stableTeamSessionId": "team-session-1"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="team-mission:mission-1:root",
+        kind="root",
+        title="Plan",
+        status="running",
+        metadata={"task_id": "task-1"},
+    )
+    db.upsert_run(
+        run_id="run-root",
+        session_id="session-root",
+        runtime_scope_key="profile:leader",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="team-mission:mission-1:root",
+        run_id="run-root",
+        session_id="session-root",
+        runtime_scope_key="profile:leader",
+        role="leader",
+    )
+
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-root",
+        event={
+            "type": "mission.node.created",
+            "seq": 1,
+            "payload": {
+                "node": {
+                    "node_id": "node-worker",
+                    "kind": "worker",
+                    "title": "Worker",
+                    "status": "pending",
+                },
+            },
+        },
+    )
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-root",
+        event={
+            "type": "mission.approval.requested",
+            "seq": 2,
+            "payload": {
+                "approval_id": "team-mission:mission-1:approval-plan",
+                "message": "Approve plan",
+            },
+        },
+    )
+
+    raw_events = db.list_run_events("session-root")
+    assert "node_id" not in raw_events[0]
+    assert "node_id" not in raw_events[0]["payload"]
+    assert raw_events[0]["payload"]["node"]["node_id"] == "node-worker"
+    assert "node_id" not in raw_events[1]
+    assert "node_id" not in raw_events[1]["payload"]
+    assert raw_events[1]["payload"]["approval_id"] == "team-mission:mission-1:approval-plan"
+
+    mission_events = db.list_team_mission_run_events("mission-1")
+    node_event = next(
+        event for event in mission_events
+        if event["type"] == "team_mission.runtime.event"
+        and event["payload"]["source_event_type"] == "mission.node.created"
+    )
+    approval_event = next(
+        event for event in mission_events
+        if event["type"] == "team_mission.runtime.event"
+        and event["payload"]["source_event_type"] == "mission.approval.requested"
+    )
+    assert node_event["node_id"] == "node-worker"
+    assert node_event["payload"]["node_id"] == "node-worker"
+    assert node_event["payload"]["nodeId"] == "node-worker"
+    assert node_event["payload"]["subject"]["canonical_node_id"] == "mission-1:node-worker"
+    assert node_event["payload"]["source_payload"]["node"]["node_id"] == "node-worker"
+    assert "node_id" not in node_event["payload"]["source_payload"]
+    assert approval_event["node_id"] == "team-mission:mission-1:approval-plan"
+    assert approval_event["payload"]["node_id"] == "team-mission:mission-1:approval-plan"
+    assert approval_event["payload"]["approval_id"] == "team-mission:mission-1:approval-plan"
+    assert approval_event["payload"]["subject"]["canonical_node_id"] == "team-mission:mission-1:approval-plan"
+    assert "node_id" not in approval_event["payload"]["source_payload"]
 
 
 def test_team_mission_run_events_include_conversation_status_projection(tmp_path: Path):
@@ -1104,11 +1336,14 @@ def test_team_mission_run_events_include_conversation_status_projection(tmp_path
     status_event = next(event for event in events if event["type"] == "team_mission.conversation.status")
     projection = status_event["payload"]["conversation"]
 
-    assert status_event["seq"] == complete_event["seq"] + 1
+    assert status_event["seq"] > complete_event["seq"]
     assert status_event["mission_id"] == "mission-1"
     assert status_event["conversation_id"] == "conversation-1"
     assert status_event["stable_session_id"] == "team-session-1"
+    assert status_event["payload"]["protocol"] == "team_mission.event.v1"
+    assert status_event["payload"]["kind"] == "conversation.status.updated"
     assert status_event["payload"]["source_event_type"] == "message.complete"
+    assert status_event["payload"]["source_event_seq"] == complete_event["seq"]
     assert projection["conversation_id"] == "conversation-1"
     assert projection["stable_session_id"] == "team-session-1"
     assert projection["active_mission_id"] == "mission-1"
@@ -1117,11 +1352,181 @@ def test_team_mission_run_events_include_conversation_status_projection(tmp_path
     assert projection["run_state"] == "idle"
 
     after_complete = db.list_team_mission_run_events("mission-1", after_seq=complete_event["seq"])
-    assert after_complete[0]["type"] == "team_mission.conversation.status"
+    assert any(event["type"] == "team_mission.conversation.status" for event in after_complete)
     assert all(
         event["seq"] > status_event["seq"]
         for event in db.list_team_mission_run_events("mission-1", after_seq=status_event["seq"])
     )
+
+
+def test_team_mission_conversation_status_projection_uses_active_member_run_binding(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        active_mission_id="mission-1",
+        title="Mission",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="ready",
+        leader_session_id="team-session-1",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-verify",
+        kind="verifier",
+        title="Verify",
+        status="ready",
+        runtime_scope_key="team:mission-1:node:node-verify",
+    )
+    db.upsert_run(
+        run_id="run-verify",
+        session_id="team:mission-1:node:node-verify",
+        runtime_scope_key="team:mission-1:node:node-verify",
+        runtime_session_id="runtime-verify",
+        turn_id="turn-verify",
+        status="running",
+        updated_at=300,
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="node-verify",
+        run_id="run-verify",
+        session_id="team:mission-1:node:node-verify",
+        runtime_session_id="runtime-verify",
+        runtime_scope_key="team:mission-1:node:node-verify",
+        role="verifier",
+    )
+
+    projection = db.get_team_mission_conversation_status_projection("conversation-1")
+
+    assert projection["mission_status"] == "ready"
+    assert projection["running"] is True
+    assert projection["run_state"] == "running"
+    assert projection["active_run_id"] == "run-verify"
+    assert projection["active_runtime_session_id"] == "runtime-verify"
+    assert projection["active_node_count"] == 1
+
+
+def test_team_mission_runtime_projection_uses_structured_final_node_contract(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="Mission",
+        objective="Create report",
+        workspace_id="workspace-1",
+        workspace_path="/tmp/workspace",
+        mode="supervised_mission",
+        leader_session_id="team-session-1",
+        metadata={"stableTeamSessionId": "team-session-1"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-worker",
+        kind="worker",
+        title="Worker",
+        status="running",
+        output_contract={"format": "artifact"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="team-mission:mission-1:synthesis",
+        kind="synthesis",
+        title="Synthesis",
+        status="running",
+        output_contract={"format": "final_deliverable"},
+    )
+    db.upsert_run(
+        run_id="run-worker",
+        session_id="runtime-worker",
+        runtime_scope_key="team:mission-1:node-worker",
+        status="running",
+    )
+    db.upsert_run(
+        run_id="run-synthesis",
+        session_id="runtime-synthesis",
+        runtime_scope_key="team:mission-1:synthesis",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="node-worker",
+        run_id="run-worker",
+        session_id="worker-session-1",
+        runtime_session_id="runtime-worker",
+        runtime_scope_key="team:mission-1:node-worker",
+        role="worker",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="team-mission:mission-1:synthesis",
+        run_id="run-synthesis",
+        session_id="synthesis-session-1",
+        runtime_session_id="runtime-synthesis",
+        runtime_scope_key="team:mission-1:synthesis",
+        role="synthesis",
+    )
+
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-worker",
+        event={"type": "message.delta", "seq": 1, "payload": {"delta": "worker"}},
+    )
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-synthesis",
+        event={"type": "message.delta", "seq": 1, "payload": {"delta": "final"}},
+    )
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-synthesis",
+        event={"type": "message.complete", "seq": 2, "payload": {"status": "complete", "text": "final text"}},
+    )
+
+    runtime_events = [
+        event
+        for event in db.list_team_mission_run_events("mission-1")
+        if event["type"] == "team_mission.runtime.event"
+    ]
+    worker_delta = next(
+        event
+        for event in runtime_events
+        if event["payload"]["source_event_type"] == "message.delta"
+        and event["payload"]["run_id"] == "run-worker"
+    )
+    synthesis_delta = next(
+        event
+        for event in runtime_events
+        if event["payload"]["source_event_type"] == "message.delta"
+        and event["payload"]["run_id"] == "run-synthesis"
+    )
+    synthesis_complete = next(
+        event
+        for event in runtime_events
+        if event["payload"]["source_event_type"] == "message.complete"
+        and event["payload"]["run_id"] == "run-synthesis"
+    )
+
+    assert worker_delta["payload"]["kind"] == "node.output.delta"
+    assert worker_delta["payload"]["node_kind"] == "worker"
+    assert worker_delta["payload"]["subject"]["runtime_stable_session_id"] == "worker-session-1"
+    assert synthesis_delta["payload"]["kind"] == "final.output.delta"
+    assert synthesis_delta["payload"]["node_kind"] == "synthesis"
+    assert synthesis_delta["payload"]["output_contract_format"] == "final_deliverable"
+    assert synthesis_delta["payload"]["subject"]["runtime_stable_session_id"] == "synthesis-session-1"
+    assert synthesis_delta["payload"]["text_stream"]["mode"] == "append"
+    assert synthesis_delta["payload"]["text_stream"]["delta"] == "final"
+    assert synthesis_complete["payload"]["kind"] == "final.completed"
+    assert synthesis_complete["payload"]["subject"]["node_id"] == "team-mission:mission-1:synthesis"
+    assert synthesis_complete["payload"]["text_stream"]["text"] == "final text"
 
 
 def test_team_mission_event_cursor_is_global_across_node_sessions(tmp_path: Path):
@@ -1277,6 +1682,79 @@ def test_team_mission_duplicate_terminal_event_does_not_reduce_or_compile_memory
     assert duplicate["_persistence_disposition"] == "duplicate_terminal"
     assert source_event_types.count("message.complete") == 1
     assert source_event_types.count("mission.memory.compiled") == 1
+
+
+def test_team_mission_late_stream_event_after_terminal_does_not_reopen_node(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="Mission",
+        objective="Build",
+        mode="autonomous_mission",
+        metadata={"stableTeamSessionId": "team-session-1"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-worker",
+        kind="worker",
+        title="Worker",
+        status="running",
+    )
+    db.upsert_run(
+        run_id="run-worker",
+        session_id="session-worker",
+        runtime_scope_key="team:mission-1:node:node-worker",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="node-worker",
+        run_id="run-worker",
+        session_id="session-worker",
+        runtime_scope_key="team:mission-1:node:node-worker",
+        role="worker",
+    )
+
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-worker",
+        event={
+            "type": "message.delta",
+            "seq": 1,
+            "payload": {"delta": "final text", "mode": "append"},
+        },
+    )
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-worker",
+        event={
+            "type": "message.complete",
+            "seq": 2,
+            "payload": {"status": "complete"},
+        },
+    )
+    late_delta = db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-worker",
+        event={
+            "type": "message.delta",
+            "seq": 3,
+            "payload": {"delta": "late text", "mode": "append"},
+        },
+    )
+
+    node = db.get_team_mission_node("mission-1", "node-worker")
+    source_event_types = [
+        event["payload"]["source_event_type"]
+        for event in db.list_team_mission_run_events("mission-1")
+        if event["type"] == "team_mission.runtime.event"
+    ]
+
+    assert late_delta["_persistence_disposition"] == "ignored_after_terminal"
+    assert node["status"] == "completed"
+    assert node["metadata"]["last_run_terminal_seq"] == 2
+    assert source_event_types.count("message.delta") == 1
+    assert source_event_types.count("message.complete") == 1
 
 
 def test_team_mission_successful_terminal_event_is_not_overwritten_by_late_failure(tmp_path: Path):
@@ -1583,9 +2061,14 @@ def test_team_mission_terminal_run_event_compiles_structured_memory(tmp_path: Pa
     assert items[0]["source_run_ids"] == ["run-worker"]
 
     events = db.list_team_mission_run_events("mission-1")
-    assert events[-1]["type"] == "team_mission.runtime.event"
-    assert events[-1]["payload"]["source_event_type"] == "mission.memory.compiled"
-    assert events[-1]["payload"]["source_event"]["payload"]["memory_item_ids"] == [items[0]["id"]]
+    memory_event = next(
+        event for event in events
+        if event["type"] == "team_mission.runtime.event"
+        and event["payload"]["source_event_type"] == "mission.memory.compiled"
+    )
+    assert memory_event["payload"]["protocol"] == "team_mission.event.v1"
+    assert memory_event["payload"]["kind"] == "memory.compiled"
+    assert memory_event["payload"]["source_event"]["payload"]["memory_item_ids"] == [items[0]["id"]]
 
 
 def test_team_mission_memory_pack_reuses_previous_task_in_same_conversation(tmp_path: Path):
@@ -1963,6 +2446,36 @@ def test_team_mission_graph_reducer_marks_dependency_waiting_mission_without_blo
     assert db.get_team_mission_node("mission-1", "node-b")["status"] == "blocked_waiting_dependency"
 
 
+def test_team_mission_graph_reducer_does_not_complete_supervised_mission_after_approval_only(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="waiting_approval",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="root",
+        kind="root",
+        title="Plan",
+        status="completed",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="approval",
+        kind="approval_gate",
+        title="Approve graph",
+        status="completed",
+    )
+
+    reduced = db.reduce_team_mission_graph("mission-1")
+
+    assert reduced["mission_status"] == "running"
+    assert reduced["ready_node_ids"] == []
+    assert db.get_team_mission_graph("mission-1")["mission"]["status"] == "running"
+
+
 def test_team_mission_node_start_claim_is_atomic(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
@@ -2034,6 +2547,12 @@ def test_team_mission_graph_reducer_creates_verifier_and_synthesis_for_execution
         ("node-a", "team-mission:mission-1:verifier"),
         ("node-b", "team-mission:mission-1:verifier"),
     }
+    verifier_events = db.list_team_mission_events("mission-1")
+    verifier_node_events = [
+        event for event in verifier_events
+        if event["payload"]["source_event_type"] == "mission.node.created"
+    ]
+    assert [event["payload"]["node_id"] for event in verifier_node_events] == ["team-mission:mission-1:verifier"]
 
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -2050,6 +2569,24 @@ def test_team_mission_graph_reducer_creates_verifier_and_synthesis_for_execution
     assert synthesis_nodes[0]["assignee_member_id"] == "leader"
     assert synthesis_nodes[0]["assignee_profile_id"] == "profile-leader"
     assert synthesis_step["ready_node_ids"] == ["team-mission:mission-1:synthesis"]
+    synthesis_events = db.list_team_mission_events("mission-1")
+    finalizer_node_events = [
+        event for event in synthesis_events
+        if event["payload"]["source_event_type"] == "mission.node.created"
+    ]
+    assert [event["payload"]["node_id"] for event in finalizer_node_events] == [
+        "team-mission:mission-1:verifier",
+        "team-mission:mission-1:synthesis",
+    ]
+    db.reduce_team_mission_graph("mission-1")
+    assert [
+        event["payload"]["node_id"]
+        for event in db.list_team_mission_events("mission-1")
+        if event["payload"]["source_event_type"] == "mission.node.created"
+    ] == [
+        "team-mission:mission-1:verifier",
+        "team-mission:mission-1:synthesis",
+    ]
 
 
 def test_team_mission_node_upsert_normalizes_kind_and_replaces_invalid_member_assignee(tmp_path: Path):

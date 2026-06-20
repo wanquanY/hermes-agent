@@ -125,7 +125,7 @@ def test_synthesis_empty_complete_closes_conversation_mirror_run(tmp_path: Path)
     assert summary["task_frames"][0]["artifactRefs"] == artifact_refs
 
 
-def test_synthesis_cumulative_deltas_mirror_as_append_suffixes(tmp_path: Path):
+def test_synthesis_append_deltas_mirror_as_independent_chunks(tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway.services import run_control
 
@@ -168,8 +168,8 @@ def test_synthesis_cumulative_deltas_mirror_as_append_suffixes(tmp_path: Path):
         for seq, event_type, payload in (
             (1, "message.start", {}),
             (2, "message.delta", {"mode": "append", "delta": "团", "text": "团"}),
-            (3, "message.delta", {"mode": "append", "delta": "团队", "text": "团队"}),
-            (4, "message.delta", {"mode": "append", "delta": "团队协作", "text": "团队协作"}),
+            (3, "message.delta", {"mode": "append", "delta": "队", "text": "队", "offset": 1}),
+            (4, "message.delta", {"mode": "append", "delta": "协作", "text": "协作", "offset": 2}),
             (5, "message.complete", {"status": "complete"}),
         ):
             run_control.record_event(
@@ -196,17 +196,19 @@ def test_synthesis_cumulative_deltas_mirror_as_append_suffixes(tmp_path: Path):
     streamed_deltas = [event for event in streamed if event["type"] == "message.delta"]
     assert [event["payload"]["delta"] for event in streamed_deltas] == ["团", "队", "协作"]
     assert [event["payload"]["text"] for event in streamed_deltas] == ["团", "队", "协作"]
-    assert [event["payload"]["offset"] for event in streamed_deltas] == [0, 1, 2]
+    assert [event["payload"].get("offset", 0) for event in streamed_deltas] == [0, 1, 2]
 
     mirrored_events = db.list_run_events("team-session-1")
     assert [event["type"] for event in mirrored_events] == [
         "message.start",
         "message.delta",
+        "message.delta",
+        "message.delta",
         "message.complete",
     ]
-    assert mirrored_events[1]["payload"]["text"] == "团队协作"
-    assert mirrored_events[1]["payload"]["delta"] == "团队协作"
-    assert mirrored_events[2]["payload"]["text"] == "团队协作"
+    assert [event["payload"]["text"] for event in mirrored_events[1:4]] == ["团", "队", "协作"]
+    assert [event["payload"]["delta"] for event in mirrored_events[1:4]] == ["团", "队", "协作"]
+    assert mirrored_events[4]["payload"]["text"] == "团队协作"
     messages = db.get_messages("team-session-1")
     assert len(messages) == 1
     assert messages[0]["content"] == "团队协作"
@@ -284,9 +286,16 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         streamed = [
             frame.get("params") or {}
             for frame in transport.frames
-            if frame.get("method") == "event"
+            if (
+                frame.get("method") == "event"
+                and (frame.get("params") or {}).get("type") == "team_mission.runtime.event"
+                and isinstance((frame.get("params") or {}).get("payload"), dict)
+                and ((frame.get("params") or {}).get("payload") or {}).get("source_event_type") == "message.delta"
+            )
         ]
-        assert [event["payload"]["delta"] for event in streamed] == ["最终", "交付", "完成"]
+        assert [event["payload"]["source_payload"]["delta"] for event in streamed] == ["最终", "交付", "完成"]
+        assert [event["payload"]["text_stream"]["delta"] for event in streamed] == ["最终", "交付", "完成"]
+        assert [event["payload"]["text_stream"]["offset"] for event in streamed] == [0, 2, 4]
 
         mission_deltas = [
             event
@@ -299,8 +308,10 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         assert mission_deltas
         assert all(event.get("mission_id") == "mission-1" for event in mission_deltas)
         assert all(event["payload"]["source_event"]["type"] == "message.delta" for event in mission_deltas)
+        assert [event["payload"]["text_stream"]["delta"] for event in mission_deltas] == ["最终", "交付", "完成"]
+        assert all(event["payload"]["subject"]["type"] == "node" for event in mission_deltas)
 
-        subscription = run_control._subscriptions_by_id[mission_subscription_id]
+        subscription = {"kind": "team_mission"}
         redelivered = [
             run_control._delta_event_for_subscription(subscription, event)
             for event in mission_deltas
@@ -607,7 +618,84 @@ def test_final_deliverable_complete_prefers_source_markdown_over_polluted_mirror
     assert "\n\n---\n\n## 一、执行结果" in messages[0]["content"]
 
 
-def test_conversation_resolve_repairs_polluted_final_deliverable_from_source_history(
+def test_final_deliverable_rebuild_preserves_repeated_markdown_chunks(tmp_path: Path):
+    from hermes_state import SessionDB
+    from hermes_team_mission_conversation_utils import mirror_event_to_conversation
+
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        title="监督执行",
+        objective="规划审批后执行",
+        mode="supervised_mission",
+        leader_session_id="team-session-1",
+        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="team-mission:mission-1:synthesis",
+        kind="synthesis",
+        title="汇总交付",
+        status="running",
+        metadata={"task_id": "task-1"},
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="team-mission:mission-1:synthesis",
+        run_id="run-synthesis",
+        session_id="synthesis-session-1",
+        runtime_session_id="runtime-synthesis",
+        runtime_scope_key="team:mission-1:synthesis",
+        role="member",
+    )
+    chunks = [
+        "## 整合报告\n\n",
+        "| 项目 | 内容 |\n",
+        "|---|---|\n",
+        "| **任务名称** | team_stream_refactor_check.txt |\n",
+        "|---|---|\n",
+        "✅ 验证通过\n",
+    ]
+    for seq, chunk in enumerate(chunks, start=1):
+        db.append_run_event(
+            "synthesis-session-1",
+            {
+                "type": "message.delta",
+                "stored_session_id": "synthesis-session-1",
+                "run_id": "run-synthesis",
+                "turn_id": "turn-synthesis",
+                "runtime_scope_key": "team:mission-1:synthesis",
+                "seq": seq,
+                "payload": {"mode": "append", "text": chunk, "delta": chunk},
+            },
+        )
+
+    saved = mirror_event_to_conversation(
+        db,
+        mission_id="mission-1",
+        event={
+            "type": "message.complete",
+            "session_id": "runtime-synthesis",
+            "stored_session_id": "synthesis-session-1",
+            "run_id": "run-synthesis",
+            "turn_id": "turn-synthesis",
+            "runtime_scope_key": "team:mission-1:synthesis",
+            "seq": 42,
+            "payload": {"status": "complete"},
+        },
+    )
+
+    expected = "".join(chunks).strip()
+    assert saved["payload"]["text"] == expected
+    assert saved["payload"]["text"].count("|---|---|") == 2
+    messages = db.get_messages("team-session-1")
+    assert len(messages) == 1
+    assert messages[0]["content"] == expected
+    assert messages[0]["content"].count("|---|---|") == 2
+
+
+def test_conversation_resolve_recovers_final_message_without_rewriting_stream_history(
     monkeypatch,
     tmp_path: Path,
 ):
@@ -734,10 +822,10 @@ def test_conversation_resolve_repairs_polluted_final_deliverable_from_source_his
     events = db.list_run_events("team-session-1", run_id=mirror_run_id)
     delta_event = next(event for event in events if event["type"] == "message.delta")
     complete_event = next(event for event in events if event["type"] == "message.complete")
-    assert delta_event["payload"]["mode"] == "snapshot"
-    assert delta_event["payload"]["snapshot"] == source_markdown.strip()
-    assert "delta" not in delta_event["payload"]
-    assert complete_event["payload"]["text"] == source_markdown.strip()
+    assert delta_event["payload"]["mode"] == "append"
+    assert delta_event["payload"]["text"] == polluted_text
+    assert delta_event["payload"]["delta"] == polluted_text
+    assert complete_event["payload"]["text"] == polluted_text
 
 
 def test_conversation_projection_exposes_final_deliverable_artifacts_to_list_and_resolve(

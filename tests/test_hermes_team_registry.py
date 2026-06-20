@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,8 @@ def test_agent_team_registry_is_native_hermes_state(tmp_path: Path):
     assert updated_member["id"] == "member-leader-v2"
     assert len(updated_members) == 1
     assert updated_members[0]["capability_tags"] == ["planning", "review"]
+    assert updated_members[0]["profile_name"] == "Leader v1"
+    assert updated_members[0]["profile_avatar"] == "https://example.test/leader-v1.png"
 
     archived = db.archive_agent_team("team-1")
     assert archived["status"] == "archived"
@@ -144,6 +147,8 @@ def test_team_registry_gateway_crud(monkeypatch, tmp_path: Path):
                 "id": "member-builder",
                 "teamId": "team-1",
                 "agentProfileId": "profile-builder",
+                "name": "推进工程师",
+                "avatar": "doxie-avatar://builder",
                 "role": "builder",
             }
         },
@@ -197,7 +202,11 @@ def test_team_registry_gateway_crud(monkeypatch, tmp_path: Path):
     assert list_response["result"]["teams"][0]["displayMembers"][0]["profileName"] == "Leader v1"
     assert "members" not in list_response["result"]["teams"][0]
     assert member_list_response["result"]["members"][0]["id"] == "member-leader"
+    assert member_list_response["result"]["members"][0]["profile_name"] == "Leader v1"
+    assert member_list_response["result"]["members"][0]["profile_avatar"] == "https://example.test/leader-v1.png"
     assert member_response["result"]["member"]["id"] == "member-builder"
+    assert member_response["result"]["member"]["profileName"] == "推进工程师"
+    assert member_response["result"]["member"]["profileAvatar"] == "doxie-avatar://builder"
     assert removed_response["result"]["removed"]["id"] == "member-builder"
     assert archived_response["result"]["team"]["status"] == "archived"
     assert archived_team_upsert_response["error"]["code"] == 4006
@@ -206,3 +215,75 @@ def test_team_registry_gateway_crud(monkeypatch, tmp_path: Path):
     assert archived_member_upsert_response["error"]["message"] == "team archived: team-1"
     assert archived_member_delete_response["error"]["code"] == 4006
     assert archived_member_delete_response["error"]["message"] == "team archived: team-1"
+
+
+def test_agent_team_member_display_columns_are_migrated_from_legacy_state(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE schema_version (version INTEGER);
+            INSERT INTO schema_version (version) VALUES (21);
+
+            CREATE TABLE agent_teams (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                avatar_json TEXT,
+                description TEXT,
+                lead_agent_profile_id TEXT,
+                default_mode TEXT NOT NULL,
+                policy_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+
+            CREATE TABLE agent_team_members (
+                id TEXT PRIMARY KEY,
+                team_id TEXT NOT NULL REFERENCES agent_teams(id) ON DELETE CASCADE,
+                agent_profile_id TEXT NOT NULL,
+                agent_profile_version_id TEXT,
+                role TEXT NOT NULL,
+                capability_tags_json TEXT NOT NULL,
+                auto_assignable INTEGER NOT NULL,
+                max_concurrent_nodes INTEGER NOT NULL,
+                permission_mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(team_id, agent_profile_id)
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db = SessionDB(db_path)
+
+    with db._lock:
+        columns = {
+            row["name"]
+            for row in db._conn.execute("PRAGMA table_info(agent_team_members)").fetchall()
+        }
+    assert "profile_name" in columns
+    assert "profile_avatar" in columns
+
+    db.upsert_agent_team(
+        team_id="team-legacy",
+        name="Legacy Team",
+        default_mode="supervised_mission",
+        policy={},
+    )
+    member = db.upsert_agent_team_member(
+        member_id="member-legacy",
+        team_id="team-legacy",
+        agent_profile_id="profile-legacy",
+        profile_name="舱门质检官",
+        profile_avatar="doxie-avatar://qa",
+        role="qa",
+    )
+
+    assert member["profileName"] == "舱门质检官"
+    assert member["profileAvatar"] == "doxie-avatar://qa"

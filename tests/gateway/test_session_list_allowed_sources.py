@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from hermes_state import SessionDB
 from tui_gateway import server
-from tui_gateway.services import runtime_proxy
+from tui_gateway.services import run_control, runtime_proxy
 
 
 class _StubDB:
@@ -521,6 +521,91 @@ def test_team_conversation_list_projects_active_mission_runtime_state(tmp_path, 
         assert conversation["task_frame_count"] == 1
         assert conversation["task_frames"][0]["missionId"] == "mission-running"
         assert conversation["run_session_ids"] == ["worker-session-1", "runtime-worker-1"]
+    finally:
+        for db in list(server._db_by_home.values()):
+            db.close()
+
+
+def test_team_conversation_list_uses_active_member_run_bindings_when_mission_status_is_stale(tmp_path, monkeypatch):
+    profile_home = tmp_path / "profile-home"
+    seed_db = SessionDB(profile_home / "state.db")
+    try:
+        seed_db.upsert_team_mission_conversation(
+            conversation_id="conversation-member-running",
+            team_id="team-1",
+            stable_session_id="team-session-member-running",
+            title="成员执行团队会话",
+            active_mission_id="mission-member-running",
+            created_at=100,
+            updated_at=200,
+        )
+        seed_db.create_session("team-session-member-running", source="team_mission", transient=False)
+        seed_db.upsert_team_mission(
+            mission_id="mission-member-running",
+            conversation_id="conversation-member-running",
+            team_id="team-1",
+            title="成员执行任务",
+            mode="supervised_mission",
+            status="ready",
+            leader_session_id="team-session-member-running",
+        )
+        seed_db.upsert_team_mission_node(
+            mission_id="mission-member-running",
+            node_id="node-verify",
+            kind="verifier",
+            title="验收节点",
+            status="ready",
+            runtime_scope_key="team:mission-member-running:node:node-verify",
+        )
+        run_control.record_event(
+            {
+                "type": "message.start",
+                "stored_session_id": "team:mission-member-running:node:node-verify",
+                "session_id": "runtime-verify",
+                "runtime_scope_key": "team:mission-member-running:node:node-verify",
+                "run_id": "run-verify",
+                "turn_id": "turn-verify",
+                "seq": 1,
+                "payload": {},
+            },
+            db=seed_db,
+        )
+        seed_db.bind_team_mission_run(
+            mission_id="mission-member-running",
+            node_id="node-verify",
+            run_id="run-verify",
+            session_id="team:mission-member-running:node:node-verify",
+            runtime_session_id="runtime-verify",
+            runtime_scope_key="team:mission-member-running:node:node-verify",
+            role="verifier",
+        )
+    finally:
+        seed_db.close()
+
+    monkeypatch.setattr(server, "_db_by_home", {})
+    monkeypatch.setattr(server, "_db_error_by_home", {})
+    try:
+        resp = server.handle_request({
+            "id": "1",
+            "method": "team_mission.conversation.list",
+            "params": {
+                "doxie_profile": {
+                    "id": "agent-a",
+                    "agentProfileVersionId": "version-1",
+                    "runtimeScopeKey": "profile:agent-a:version:version-1",
+                    "hermesHomePath": str(profile_home),
+                },
+            },
+        })
+        assert "error" not in resp
+        [conversation] = resp["result"]["conversations"]
+        assert conversation["conversation_id"] == "conversation-member-running"
+        assert conversation["running"] is True
+        assert conversation["run_state"] == "running"
+        assert conversation["mission_status"] == "ready"
+        assert conversation["active_run_id"] == "run-verify"
+        assert conversation["active_runtime_session_id"] == "runtime-verify"
+        assert conversation["active_node_count"] == 1
     finally:
         for db in list(server._db_by_home.values()):
             db.close()

@@ -172,6 +172,7 @@ class GatewayToolEventBridge:
         tool_args_payload: Callable[[dict | None], dict] = default_tool_args_payload,
         tool_args_text: Callable[[dict], str] | None = None,
         tool_result_text: Callable[[object], str] | None = None,
+        before_tool_boundary: Callable[[str, str], Any] | None = None,
         thinking_event: str = "agent.musing",
     ) -> None:
         self._sessions = sessions
@@ -183,12 +184,30 @@ class GatewayToolEventBridge:
         self._tool_args_payload = tool_args_payload
         self._tool_args_text = tool_args_text
         self._tool_result_text = tool_result_text
+        self._before_tool_boundary = before_tool_boundary
         self._thinking_event = thinking_event
+
+    def _notify_tool_boundary(self, sid: str, event_type: str) -> None:
+        if self._before_tool_boundary is None:
+            return
+        try:
+            self._before_tool_boundary(sid, event_type)
+        except Exception:
+            pass
+
+    def on_tool_generating(self, sid: str, name: str | None) -> None:
+        session = self._sessions.get(sid)
+        if session_interrupted(session):
+            return
+        self._notify_tool_boundary(sid, "tool.generating")
+        if self._tool_progress_enabled(sid):
+            self._emit("tool.generating", sid, {"name": name})
 
     def on_tool_start(self, sid: str, tool_call_id: str, name: str, args: dict) -> None:
         session = self._sessions.get(sid)
         if session_interrupted(session):
             return
+        self._notify_tool_boundary(sid, "tool.start")
         enabled = self._tool_progress_enabled(sid)
         if session is not None:
             try:
@@ -460,8 +479,7 @@ class GatewayToolEventBridge:
             "tool_progress_callback": lambda event_type, name=None, preview=None, args=None, **kwargs: self.on_tool_progress(
                 sid, event_type, name, preview, args, **kwargs
             ),
-            "tool_gen_callback": lambda name: self._tool_progress_enabled(sid)
-            and self._emit("tool.generating", sid, {"name": name}),
+            "tool_gen_callback": lambda name: self.on_tool_generating(sid, name),
             "thinking_callback": lambda text: self._emit(self._thinking_event, sid, {"text": text}),
             "reasoning_callback": lambda text: self._emit(
                 "reasoning.delta",

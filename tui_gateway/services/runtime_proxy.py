@@ -65,6 +65,8 @@ _RUNTIME_PROXY_CONTROL_METHODS = frozenset(
         "team_mission.conversation.delete",
         "team_mission.conversation.ensure",
         "team_mission.conversation.list",
+        "team_mission.conversation.runtime_session_ids",
+        "team_mission.message.submit",
         "team_mission.conversation.rename",
         "team_mission.conversation.render",
         "team_mission.conversation.resolve",
@@ -108,8 +110,6 @@ _RUNTIME_SCOPED_CONTROL_METHODS = frozenset(
         "secret.respond",
         "session.create",
         "skills.reload",
-        "team_mission.conversation.ensure",
-        "team_mission.message.submit",
         "team_mission.node.update",
         "team_mission.plan.approve",
         "team_mission.plan.reject",
@@ -127,12 +127,10 @@ _SIDECAR_TOKEN_ENV = "DOXIE_SIDECAR_TOKEN"
 _SIDECAR_PARENT_PID_ENV = "DOXIE_SIDECAR_PARENT_PID"
 _CONTROL_HOME_ENV = "DOXIE_HERMES_CONTROL_HOME"
 _CRON_CONTROL_PLANE_READ_ACTIONS = frozenset({"", "list", "status", "runs"})
-_TEAM_LEADER_RUNTIME_METHODS = frozenset(
-    {
-        "team_mission.conversation.ensure",
-        "team_mission.message.submit",
-    }
-)
+# Whole Team conversation writes are canonical control-plane methods. Leader
+# execution is isolated by the lower run.submit runtime lease, not by proxying
+# the enclosing conversation RPC into a scoped worker DB.
+_TEAM_LEADER_RUNTIME_METHODS = frozenset()
 
 
 class AsyncFrameTransport(Protocol):
@@ -687,10 +685,11 @@ class RuntimeWorkerPool:
                 if existing.launch_fingerprint != target_fingerprint:
                     if existing.bridge_count > 0 or _worker_has_active_runs(existing):
                         _log.warning(
-                            "runtime worker %s launch environment changed while active; detaching old worker from new requests",
+                            "runtime worker %s launch environment changed while active; keeping existing worker for in-flight scope",
                             scope.runtime_scope_key,
                         )
-                        self._workers.pop(scope.runtime_scope_key, None)
+                        existing.mark_used()
+                        return existing
                     _log.info(
                         "restarting runtime worker %s because its launch environment changed",
                         scope.runtime_scope_key,
@@ -750,8 +749,12 @@ class RuntimeWorkerPool:
 
     async def ensure_worker_ready(self, scope: RuntimeScope, params: dict[str, Any]) -> RuntimeWorker:
         worker = await self.ensure_worker(scope, params)
-        await self._probe_worker_ready(worker)
-        worker.mark_used()
+        await self.retain_bridge(worker.scope_key)
+        try:
+            await self._probe_worker_ready(worker)
+            worker.mark_used()
+        finally:
+            await self.release_bridge(worker.scope_key)
         return worker
 
     def snapshot(self) -> dict[str, Any]:
@@ -1080,9 +1083,6 @@ def _record_relayed_runtime_event(
         from tui_gateway import server as tui_gateway_server
         from tui_gateway.services import run_control
 
-        db = tui_gateway_server._get_db()
-        if db is None:
-            return RelayedRuntimeEventPersistence([], allow_direct_relay=True)
         persisted = dict(params)
         stable = str(
             persisted.get("stored_session_id")
@@ -1090,11 +1090,23 @@ def _record_relayed_runtime_event(
             or persisted.get("session_id")
             or ""
         ).strip()
+        db = tui_gateway_server._db_for_stable_session(stable)
+        if db is None:
+            return RelayedRuntimeEventPersistence([], allow_direct_relay=True)
         try:
             source_seq = int(persisted.get("seq") or 0)
         except (TypeError, ValueError):
             source_seq = 0
         if source_seq > 0:
+            has_frame = getattr(db, "has_run_event_frame", None)
+            if callable(has_frame) and has_frame(
+                stable,
+                seq=source_seq,
+                run_id=str(persisted.get("run_id") or ""),
+                runtime_session_id=str(persisted.get("session_id") or ""),
+                event_type=event_type,
+            ):
+                return RelayedRuntimeEventPersistence([], allow_direct_relay=True)
             persisted["runtime_source_seq"] = source_seq
             persisted["payload"] = {
                 **payload,
@@ -1171,6 +1183,10 @@ async def proxy_to_runtime(req: Any, transport: Any) -> bool:
     scope = runtime_scope_from_request(resolved_req)
     pool = runtime_proxy_pool()
     worker = await pool.ensure_worker(scope, params)
-    bridge = await transport.runtime_bridge(worker)
-    await bridge.send(resolved_req)
+    await pool.retain_bridge(worker.scope_key)
+    try:
+        bridge = await transport.runtime_bridge(worker)
+        await bridge.send(resolved_req)
+    finally:
+        await pool.release_bridge(worker.scope_key)
     return True

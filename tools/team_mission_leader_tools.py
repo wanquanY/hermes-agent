@@ -162,16 +162,7 @@ def _leader_member(team_context: dict[str, Any]) -> dict[str, Any]:
     ) or next((dict(item) for item in members if isinstance(item, Mapping)), {})
 
 
-def _task_execution_mode(args: Mapping[str, Any], team_context: Mapping[str, Any]) -> str:
-    explicit_mode = _text(
-        args.get("execution_mode")
-        or args.get("executionMode")
-        or args.get("mission_mode")
-        or args.get("missionMode")
-        or args.get("mode")
-    )
-    if explicit_mode in _TEAM_TASK_PLANNING_MODES:
-        return explicit_mode
+def _task_execution_mode(team_context: Mapping[str, Any]) -> str:
     context_mode = _text(
         team_context.get("task_execution_mode")
         or team_context.get("taskExecutionMode")
@@ -288,7 +279,7 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
         )
     members = list(team_context.get("members") or []) if isinstance(team_context.get("members"), list) else []
     conversation_mode = _text(team_context.get("mode"))
-    task_execution_mode = _task_execution_mode(args if isinstance(args, Mapping) else {}, team_context)
+    task_execution_mode = _task_execution_mode(team_context)
     metadata = {
         "conversation_id": conversation_id,
         "stableTeamSessionId": conversation_session_id,
@@ -385,11 +376,6 @@ registry.register(
                 "objective": {"type": "string", "description": "Self-contained objective for the new team task."},
                 "task_id": {"type": "string", "description": "Optional stable task id."},
                 "node_id": {"type": "string", "description": "Optional stable root planning node id."},
-                "execution_mode": {
-                    "type": "string",
-                    "enum": ["supervised_mission", "autonomous_mission"],
-                    "description": "Optional planning execution mode for the task. Omit for supervised planning.",
-                },
             },
             "required": ["objective"],
         },

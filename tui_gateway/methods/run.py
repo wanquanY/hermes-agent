@@ -31,6 +31,13 @@ def _stored_session_id_from_params(params: dict) -> str:
     ).strip()
 
 
+def _run_db_for_stable_session(stored_session_id: str):
+    stable = str(stored_session_id or "").strip()
+    if stable and _is_control_plane_stable_session_id(stable):
+        return _db_for_stable_session(stable)
+    return _get_db()
+
+
 def _status_filters_from_params(params: dict) -> list[str]:
     raw = params.get("statuses") or params.get("status") or []
     if isinstance(raw, str):
@@ -79,7 +86,7 @@ def _mark_registered_run_failed(
     turn_id: str = "",
     message: str = "",
 ) -> None:
-    db = _get_db()
+    db = _run_db_for_stable_session(stored_session_id)
     if db is None or not run_id or not stored_session_id:
         return
     run_control.publish_run_terminal_event(
@@ -128,6 +135,7 @@ def _(rid, params: dict) -> dict:
         or params.get("controlPlaneReserved")
     )
     transient = bool(params.get("transient") or params.get("temporary") or params.get("ephemeral"))
+    run_db = _run_db_for_stable_session(target) if target else _get_db()
     if target and requested_run_id and not control_plane_reserved and not transient:
         reservation = run_control.create_run_if_session_idle(
             stored_session_id=target,
@@ -138,7 +146,7 @@ def _(rid, params: dict) -> dict:
                 "gateway_pid": os.getpid(),
                 "gateway_instance_id": _GATEWAY_INSTANCE_ID,
             },
-            db=_get_db(),
+            db=run_db,
         )
         conflict = reservation.get("conflict") if isinstance(reservation, dict) else None
         if isinstance(conflict, dict) and conflict:
@@ -236,7 +244,7 @@ def _(rid, params: dict) -> dict:
                     "gateway_pid": os.getpid(),
                     "gateway_instance_id": _GATEWAY_INSTANCE_ID,
                 },
-                db=_get_db(),
+                db=run_db,
             )
         result["runtime_scope_key"] = runtime_scope_key
     return response
@@ -265,6 +273,7 @@ def _(rid, params: dict) -> dict:
                 "transient": True,
             },
         )
+    run_db = _run_db_for_stable_session(target)
     reservation = run_control.create_run_if_session_idle(
         stored_session_id=target,
         run_id=requested_run_id,
@@ -275,7 +284,7 @@ def _(rid, params: dict) -> dict:
             "gateway_instance_id": _GATEWAY_INSTANCE_ID,
             "reserved_by": "control_plane",
         },
-        db=_get_db(),
+        db=run_db,
     )
     conflict = reservation.get("conflict") if isinstance(reservation, dict) else None
     if isinstance(conflict, dict) and conflict:
@@ -328,7 +337,8 @@ def _(rid, params: dict) -> dict:
     stable_session_id = _stored_session_id_from_params(params)
     if not run_id or not stable_session_id:
         return _err(rid, 4006, "run_id and stored_session_id required")
-    state = run_control.get_run(run_id, db=_get_db()) or {}
+    run_db = _run_db_for_stable_session(stable_session_id)
+    state = run_control.get_run(run_id, db=run_db) or {}
     turn_id = str(params.get("turn_id") or params.get("turnId") or state.get("turn_id") or "").strip()
     runtime_scope_key = str(
         params.get("runtime_scope_key")
@@ -345,7 +355,7 @@ def _(rid, params: dict) -> dict:
         turn_id=turn_id,
         status="failed",
         message=message,
-        db=_get_db(),
+        db=run_db,
         owner_transport=current_transport(),
     )
     return _ok(
@@ -390,11 +400,12 @@ def _(rid, params: dict) -> dict:
     ).strip()
     if not stable_session_id:
         return _err(rid, 4006, "run_id or stored_session_id required")
+    db = _run_db_for_stable_session(stable_session_id)
     return _ok(
         rid,
         run_control.session_status(
             stable_session_id,
-            db=_get_db(),
+            db=db,
             current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
         ),
     )
@@ -407,12 +418,13 @@ def _(rid, params: dict) -> dict:
     statuses = _status_filters_from_params(params)
     if not stable_session_id and not runtime_scope_key and not statuses:
         return _err(rid, 4006, "stored_session_id, runtime_scope_key, or status required")
+    db = _run_db_for_stable_session(stable_session_id) if stable_session_id else _get_db()
     return _ok(
         rid,
         {
             "runs": run_control.list_runs(
                 stable_session_id,
-                db=_get_db(),
+                db=db,
                 runtime_scope_key=runtime_scope_key,
                 statuses=statuses,
                 limit=_bounded_limit(params.get("limit")),
@@ -442,7 +454,7 @@ def _(rid, params: dict) -> dict:
     if isinstance(response, dict) and isinstance(response.get("result"), dict):
         response["result"]["status"] = "cancelled"
     if response.get("error") and run_id:
-        db = _get_db()
+        db = _run_db_for_stable_session(stable_session_id) if stable_session_id else _get_db()
         if db is not None:
             try:
                 state = run_control.get_run(run_id, db=db) or {}
@@ -489,13 +501,14 @@ def _(rid, params: dict) -> dict:
     runtime_scope_key = str(
         params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
     ).strip()
+    db = _run_db_for_stable_session(stable_session_id)
     subscription_id, replay = run_control.subscribe_session_with_id(
         stored_session_id=stable_session_id,
         transport=current_transport(),
         after_seq=after_seq,
         active_only=bool(params.get("active_only") or params.get("activeOnly")),
         runtime_scope_key=runtime_scope_key,
-        db=_get_db(),
+        db=db,
     )
     return _ok(
         rid,
@@ -526,7 +539,7 @@ def _(rid, params: dict) -> dict:
         params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
     ).strip()
     run_id = str(params.get("run_id") or params.get("runId") or "").strip()
-    db = _get_db()
+    db = _run_db_for_stable_session(stable_session_id)
     run_control.session_status(
         stable_session_id,
         db=db,
@@ -562,7 +575,7 @@ def _list_filtered_run_events(
     payload_contains: str = "",
     limit: int = 2000,
 ) -> list[dict]:
-    db = _get_db()
+    db = _run_db_for_stable_session(stored_session_id) if stored_session_id else _get_db()
     if db is None:
         return []
     list_filtered = getattr(db, "list_run_events_filtered", None)
@@ -691,10 +704,10 @@ def _(rid, params: dict) -> dict:
 
 @method("events.prune")
 def _(rid, params: dict) -> dict:
-    db = _get_db()
+    stable_session_id = _stored_session_id_from_params(params)
+    db = _run_db_for_stable_session(stable_session_id) if stable_session_id else _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5006)
-    stable_session_id = _stored_session_id_from_params(params)
     result = db.prune_run_events(
         session_id=stable_session_id,
         retention_days=int(params.get("retention_days") or params.get("retentionDays") or 14),
@@ -705,14 +718,15 @@ def _(rid, params: dict) -> dict:
 
 @method("events.compact")
 def _(rid, params: dict) -> dict:
-    db = _get_db()
+    stable_session_id = _stored_session_id_from_params(params)
+    db = _run_db_for_stable_session(stable_session_id) if stable_session_id else _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5006)
     compact = getattr(db, "compact_run_events", None)
     if not callable(compact):
         return _err(rid, 5006, "run event compaction is not available")
     result = compact(
-        session_id=_stored_session_id_from_params(params),
+        session_id=stable_session_id,
         vacuum=bool(params.get("vacuum")),
     )
     return _ok(rid, result)

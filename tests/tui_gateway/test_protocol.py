@@ -129,6 +129,76 @@ def test_message_delta_normalizer_discards_trailing_newlines_on_tool_boundary():
     }
 
 
+def test_message_delta_normalizer_preserves_append_chunk_matching_prior_prefix():
+    from tui_gateway.methods.prompt import _MessageDeltaNormalizer
+
+    normalizer = _MessageDeltaNormalizer()
+
+    assert normalizer.feed("文件已创建完成。") == {
+        "mode": "append",
+        "text": "文件已创建完成。",
+        "delta": "文件已创建完成。",
+        "offset": 0,
+    }
+    assert normalizer.feed("\n- **") == {
+        "mode": "append",
+        "text": "\n- **",
+        "delta": "\n- **",
+        "offset": 8,
+    }
+    assert normalizer.feed("文件名**") == {
+        "mode": "append",
+        "text": "文件名**",
+        "delta": "文件名**",
+        "offset": 13,
+    }
+    assert normalizer.text == "文件已创建完成。\n- **文件名**"
+
+
+def test_message_delta_normalizer_accepts_explicit_snapshot_only():
+    from tui_gateway.methods.prompt import _MessageDeltaNormalizer
+
+    normalizer = _MessageDeltaNormalizer()
+
+    assert normalizer.feed("你好") == {
+        "mode": "append",
+        "text": "你好",
+        "delta": "你好",
+        "offset": 0,
+    }
+    assert normalizer.feed({"mode": "snapshot", "text": "你好，世界"}) == {
+        "mode": "append",
+        "text": "，世界",
+        "delta": "，世界",
+        "offset": 2,
+    }
+
+
+def test_message_delta_normalizer_offsets_use_utf16_code_units():
+    from tui_gateway.methods.prompt import _MessageDeltaNormalizer
+
+    normalizer = _MessageDeltaNormalizer()
+
+    assert normalizer.feed("📋") == {
+        "mode": "append",
+        "text": "📋",
+        "delta": "📋",
+        "offset": 0,
+    }
+    assert normalizer.feed(" 表格") == {
+        "mode": "append",
+        "text": " 表格",
+        "delta": " 表格",
+        "offset": 2,
+    }
+    assert normalizer.feed({"mode": "snapshot", "text": "📋 表格✅"}) == {
+        "mode": "append",
+        "text": "✅",
+        "delta": "✅",
+        "offset": 5,
+    }
+
+
 def test_write_json_closed_stream_returns_false(server):
     """ValueError ('I/O on closed file') used to bubble up; treat as gone."""
 

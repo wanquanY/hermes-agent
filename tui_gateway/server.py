@@ -395,7 +395,7 @@ def _finalize_session(
         # continuation. Fix for #20001.
         if session_id:
             try:
-                db = _get_db()
+                db = _db_for_stable_session(str(session_id or session_key or ""))
                 if db is not None:
                     db.end_session(session_id, end_reason)
             except Exception:
@@ -413,7 +413,7 @@ def _terminalize_active_run_for_shutdown(
     stable_session_id = str(session.get("session_key") or runtime_sid or "").strip()
     if not stable_session_id:
         return
-    db = _get_db()
+    db = _db_for_stable_session(stable_session_id)
     if db is None:
         return
     run_id = str(session.get("active_run_id") or "").strip()
@@ -506,6 +506,42 @@ def _get_db():
     return result.db
 
 
+def _is_control_plane_stable_session_id(stable_session_id: str) -> bool:
+    stable = str(stable_session_id or "").strip()
+    return stable.startswith(
+        (
+            "team:mission-",
+            "team-session-team-conversation-",
+            "team-conversation-",
+        )
+    )
+
+
+def _get_control_plane_db():
+    global _db, _db_error
+    default_home = _resolve_home_path(_hermes_home, fallback=_hermes_home)
+    create_if_missing = _current_method.get("") not in _READ_ONLY_DB_METHODS
+    result = _get_session_db_for_home(
+        active_home=default_home,
+        default_home=default_home,
+        default_db=_db,
+        default_error=_db_error,
+        db_by_home=_db_by_home,
+        db_error_by_home=_db_error_by_home,
+        logger=logger,
+        create_if_missing=create_if_missing,
+    )
+    _db = result.default_db
+    _db_error = result.default_error
+    return result.db
+
+
+def _db_for_stable_session(stable_session_id: str):
+    if _is_control_plane_stable_session_id(stable_session_id):
+        return _get_control_plane_db()
+    return _get_db()
+
+
 def _db_unavailable_error(rid, *, code: int):
     try:
         active_home = _resolve_home_path(_active_hermes_home, fallback=_hermes_home)
@@ -578,6 +614,7 @@ def _emit(event: str, sid: str, payload: dict | None = None):
         context_transport = current_transport()
         direct_transport = session_transport or context_transport or _stdio_transport
         if stable_session_id and run_id:
+            event_db = _db_for_stable_session(stable_session_id)
             frame = {
                 "type": event,
                 "session_id": sid,
@@ -592,12 +629,12 @@ def _emit(event: str, sid: str, payload: dict | None = None):
                 },
                 "payload": event_payload,
             }
-            frame["seq"] = run_control.next_event_seq(stable_session_id, db=_get_db())
+            frame["seq"] = run_control.next_event_seq(stable_session_id, db=event_db)
             params["seq"] = frame["seq"]
             terminal_event = _is_terminal_run_event(event)
             recorded_deliveries = run_control.publish_recorded_event(
                 frame,
-                db=_get_db(),
+                db=event_db,
                 owner_transport=direct_transport,
                 skip_owner_transport=True,
                 before_deliver=(lambda: _release_terminal_session_run(sid, run_id))
@@ -1812,8 +1849,18 @@ def _tool_event_bridge() -> GatewayToolEventBridge:
         session_verbose=_session_verbose,
         tool_args_text=_tool_args_text,
         tool_result_text=_tool_result_text,
+        before_tool_boundary=_before_tool_text_boundary,
         thinking_event="thinking.delta",
     )
+
+
+def _before_tool_text_boundary(sid: str, event_type: str) -> None:
+    session = _sessions.get(sid)
+    if not isinstance(session, dict):
+        return
+    callback = session.get("stream_text_boundary_callback")
+    if callable(callback):
+        callback(event_type)
 
 
 def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict) -> None:
@@ -2075,7 +2122,7 @@ def _make_agent(
         disabled_toolsets=disabled_toolsets,
         platform="tui",
         session_id=session_id or key,
-        session_db=_get_db(),
+        session_db=_db_for_stable_session(session_id or key),
         ephemeral_system_prompt=system_prompt or None,
         cwd=cwd,
         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),

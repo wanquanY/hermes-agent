@@ -97,8 +97,14 @@ class SessionDBTeamRegistryMixin:
             "created_at": float(_row_value(row, "created_at", 0) or 0),
             "updated_at": float(_row_value(row, "updated_at", 0) or 0),
         }
-        profile_name = _text(_row_value(row, "profile_name", ""))
-        profile_avatar = _text(_row_value(row, "profile_avatar", ""))
+        profile_name = _text(
+            _row_value(row, "display_profile_name", "")
+            or _row_value(row, "profile_name", "")
+        )
+        profile_avatar = _text(
+            _row_value(row, "display_profile_avatar", "")
+            or _row_value(row, "profile_avatar", "")
+        )
         if profile_name:
             member.update({
                 "name": profile_name,
@@ -281,8 +287,8 @@ class SessionDBTeamRegistryMixin:
                     leader.agent_profile_version_id AS leader_agent_profile_version_id,
                     leader.role AS leader_role,
                     leader.status AS leader_status,
-                    COALESCE(leader_profile.name, '') AS leader_profile_name,
-                    COALESCE(leader_profile.avatar, '') AS leader_profile_avatar
+                    COALESCE(NULLIF(leader.profile_name, ''), leader_profile.name, '') AS leader_profile_name,
+                    COALESCE(NULLIF(leader.profile_avatar, ''), leader_profile.avatar, '') AS leader_profile_avatar
                 FROM agent_teams t
                 LEFT JOIN (
                     SELECT team_id, COUNT(*) AS member_count
@@ -314,8 +320,8 @@ class SessionDBTeamRegistryMixin:
                     WITH ranked_members AS (
                         SELECT
                             m.*,
-                            COALESCE(p.name, '') AS profile_name,
-                            COALESCE(p.avatar, '') AS profile_avatar,
+                            COALESCE(NULLIF(m.profile_name, ''), p.name, '') AS display_profile_name,
+                            COALESCE(NULLIF(m.profile_avatar, ''), p.avatar, '') AS display_profile_avatar,
                             ROW_NUMBER() OVER (
                                 PARTITION BY m.team_id
                                 ORDER BY
@@ -383,6 +389,8 @@ class SessionDBTeamRegistryMixin:
         max_concurrent_nodes: int = 1,
         permission_mode: str = "inherit_profile",
         status: str = "active",
+        profile_name: str = "",
+        profile_avatar: str = "",
         created_at: float | None = None,
         updated_at: float | None = None,
     ) -> Dict[str, Any]:
@@ -425,6 +433,8 @@ class SessionDBTeamRegistryMixin:
                 resolved_team_id,
                 resolved_profile_id,
                 _text(agent_profile_version_id),
+                _text(profile_name),
+                _text(profile_avatar),
                 _text(role) or "member",
                 _json_dumps(_string_list(capability_tags or [])),
                 1 if auto_assignable is not False else 0,
@@ -442,6 +452,8 @@ class SessionDBTeamRegistryMixin:
                         team_id = ?,
                         agent_profile_id = ?,
                         agent_profile_version_id = ?,
+                        profile_name = ?,
+                        profile_avatar = ?,
                         role = ?,
                         capability_tags_json = ?,
                         auto_assignable = ?,
@@ -459,16 +471,26 @@ class SessionDBTeamRegistryMixin:
                     """
                     INSERT INTO agent_team_members (
                         id, team_id, agent_profile_id, agent_profile_version_id,
+                        profile_name, profile_avatar,
                         role, capability_tags_json, auto_assignable,
                         max_concurrent_nodes, permission_mode, status,
                         created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     values,
                 )
             return self._agent_team_member_from_row(conn.execute(
-                "SELECT * FROM agent_team_members WHERE id = ?",
+                """
+                SELECT
+                    m.*,
+                    COALESCE(NULLIF(m.profile_name, ''), p.name, '') AS display_profile_name,
+                    COALESCE(NULLIF(m.profile_avatar, ''), p.avatar, '') AS display_profile_avatar
+                FROM agent_team_members m
+                LEFT JOIN agent_profiles p
+                  ON p.id = m.agent_profile_id
+                WHERE m.id = ?
+                """,
                 (resolved_member_id,),
             ).fetchone())
 
@@ -480,7 +502,16 @@ class SessionDBTeamRegistryMixin:
             return {}
         with self._lock:
             return self._agent_team_member_from_row(self._conn.execute(
-                "SELECT * FROM agent_team_members WHERE id = ?",
+                """
+                SELECT
+                    m.*,
+                    COALESCE(NULLIF(m.profile_name, ''), p.name, '') AS display_profile_name,
+                    COALESCE(NULLIF(m.profile_avatar, ''), p.avatar, '') AS display_profile_avatar
+                FROM agent_team_members m
+                LEFT JOIN agent_profiles p
+                  ON p.id = m.agent_profile_id
+                WHERE m.id = ?
+                """,
                 (normalized,),
             ).fetchone())
 
@@ -491,9 +522,15 @@ class SessionDBTeamRegistryMixin:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT * FROM agent_team_members
-                WHERE team_id = ?
-                ORDER BY role = 'lead' DESC, created_at ASC, id ASC
+                SELECT
+                    m.*,
+                    COALESCE(NULLIF(m.profile_name, ''), p.name, '') AS display_profile_name,
+                    COALESCE(NULLIF(m.profile_avatar, ''), p.avatar, '') AS display_profile_avatar
+                FROM agent_team_members m
+                LEFT JOIN agent_profiles p
+                  ON p.id = m.agent_profile_id
+                WHERE m.team_id = ?
+                ORDER BY m.role = 'lead' DESC, m.created_at ASC, m.id ASC
                 """,
                 (normalized,),
             ).fetchall()

@@ -26,6 +26,7 @@ from hermes_team_mission_conversation_projection import message_summary_from_mes
 from hermes_team_mission_conversation_projection import message_with_deliverable_artifact_refs as _message_with_deliverable_artifact_refs
 import hermes_team_mission_memory_state as _memory_state
 import hermes_team_mission_graph_state as _graph_state
+import hermes_team_mission_event_log as _event_log
 from hermes_team_mission_assignees import assignee_public_fields as _assignee_public_fields
 from hermes_team_mission_assignees import mission_metadata_with_members as _mission_metadata_with_members
 from hermes_team_mission_assignees import resolve_node_assignee as _resolve_node_assignee
@@ -260,7 +261,16 @@ def _task_id_from_node_and_binding(node: Dict[str, Any] | None, binding: Dict[st
 
 
 def _conversation_graph_node_id(mission_id: str, node_id: str) -> str:
-    return f"{_text(mission_id)}:{_text(node_id)}"
+    mission_id = _text(mission_id)
+    node_id = _text(node_id)
+    if not node_id:
+        return ""
+    if mission_id and (
+        node_id.startswith(f"{mission_id}:")
+        or node_id.startswith(f"team-mission:{mission_id}:")
+    ):
+        return node_id
+    return f"{mission_id}:{node_id}" if mission_id else node_id
 
 
 def _task_id_from_mission(mission: Dict[str, Any] | None) -> str:
@@ -282,6 +292,17 @@ def _team_mission_runtime_event_identity(
     mission_id = _text(mission.get("mission_id") or binding.get("mission_id") or node.get("mission_id"))
     mission_metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
     node_id = _text(node.get("node_id") or binding.get("node_id"))
+    node_kind = _normalize_node_kind(node.get("kind"))
+    output_contract = node.get("output_contract") if isinstance(node.get("output_contract"), dict) else {}
+    output_contract_format = _text(output_contract.get("format"))
+    runtime_stable_session_id = _text(
+        binding.get("session_id")
+        or node.get("runtime_stable_session_id")
+        or node.get("stored_session_id")
+        or node.get("actual_stable_session_id")
+    )
+    runtime_session_id = _text(binding.get("runtime_session_id") or node.get("runtime_session_id"))
+    runtime_scope_key = _text(binding.get("runtime_scope_key") or node.get("runtime_scope_key"))
     task_id = (
         _task_id_from_node_and_binding(node, binding)
         or _task_id_from_mission(mission)
@@ -304,11 +325,46 @@ def _team_mission_runtime_event_identity(
         "stableSessionId": stable_session_id,
         "node_id": node_id,
         "nodeId": node_id,
+        "node_kind": node_kind,
+        "nodeKind": node_kind,
+        "output_contract_format": output_contract_format,
+        "outputContractFormat": output_contract_format,
+        "runtime_stable_session_id": runtime_stable_session_id,
+        "runtimeStableSessionId": runtime_stable_session_id,
+        "runtime_session_id": runtime_session_id,
+        "runtimeSessionId": runtime_session_id,
+        "runtime_scope_key": runtime_scope_key,
+        "runtimeScopeKey": runtime_scope_key,
         "task_id": task_id,
         "taskId": task_id,
         "task_frame_id": f"mission-frame:{mission_id}" if mission_id else "",
         "taskFrameId": f"mission-frame:{mission_id}" if mission_id else "",
     }
+
+
+def _event_payload_declares_business_subject(event_type: str, payload: Dict[str, Any]) -> bool:
+    event_type = _text(event_type)
+    payload = payload if isinstance(payload, dict) else {}
+    if event_type.startswith("mission.node.") and (
+        isinstance(payload.get("node"), dict) or isinstance(payload.get("nodes"), list)
+    ):
+        return True
+    if event_type == "mission.edge.created" and (
+        isinstance(payload.get("edge"), dict) or isinstance(payload.get("edges"), list)
+    ):
+        return True
+    if event_type == "mission.approval.requested" and _text(
+        payload.get("approval_id") or payload.get("approvalId") or payload.get("id")
+    ):
+        return True
+    if event_type == "mission.strategy.actions" and (
+        isinstance(payload.get("nodes"), list)
+        or isinstance(payload.get("edges"), list)
+        or isinstance(payload.get("approval_requests"), list)
+        or isinstance(payload.get("approvalRequests"), list)
+    ):
+        return True
+    return False
 
 
 def _runtime_event_with_team_mission_identity(
@@ -321,7 +377,10 @@ def _runtime_event_with_team_mission_identity(
     frame = dict(event or {})
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     payload = dict(payload)
+    payload_declares_subject = _event_payload_declares_business_subject(_text(frame.get("type")), payload)
     for key, value in identity.items():
+        if payload_declares_subject and key in {"node_id", "nodeId"}:
+            continue
         if _text(value) and not _text(payload.get(key)):
             payload[key] = value
     if source_seq > 0:
@@ -333,6 +392,8 @@ def _runtime_event_with_team_mission_identity(
         payload["team_mission_event_seq"] = mission_event_seq
         payload["teamMissionEventSeq"] = mission_event_seq
     for key in ("mission_id", "conversation_id", "stable_session_id", "node_id", "task_id", "task_frame_id"):
+        if payload_declares_subject and key == "node_id":
+            continue
         value = _text(identity.get(key))
         if value and not _text(frame.get(key)):
             frame[key] = value
@@ -487,6 +548,19 @@ class SessionDBTeamMissionMixin:
     stay identical to ordinary sessions.
     """
 
+    def _team_mission_runtime_event_identity(
+        self,
+        *,
+        mission: Dict[str, Any] | None,
+        node: Dict[str, Any] | None,
+        binding: Dict[str, Any] | None,
+    ) -> Dict[str, str]:
+        return _team_mission_runtime_event_identity(
+            mission=mission,
+            node=node,
+            binding=binding,
+        )
+
     def _team_mission_conversation_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
         if row is None:
             return None
@@ -553,7 +627,30 @@ class SessionDBTeamMissionMixin:
             "status": str(row["status"] or ""),
             "assignee_profile_id": str(row["assignee_profile_id"] or ""),
             "assignee_profile_version_id": str(row["assignee_profile_version_id"] or ""),
+            "canonical_node_id": _text(_row_value(row, "canonical_node_id", "")) or _conversation_graph_node_id(
+                _text(_row_value(row, "mission_id", "")),
+                _text(_row_value(row, "node_id", "")),
+            ),
+            "canonicalNodeId": _text(_row_value(row, "canonical_node_id", "")) or _conversation_graph_node_id(
+                _text(_row_value(row, "mission_id", "")),
+                _text(_row_value(row, "node_id", "")),
+            ),
+            "task_frame_id": _text(_row_value(row, "task_frame_id", "")) or (
+                f"mission-frame:{_text(_row_value(row, 'mission_id', ''))}"
+                if _text(_row_value(row, "mission_id", ""))
+                else ""
+            ),
+            "taskFrameId": _text(_row_value(row, "task_frame_id", "")) or (
+                f"mission-frame:{_text(_row_value(row, 'mission_id', ''))}"
+                if _text(_row_value(row, "mission_id", ""))
+                else ""
+            ),
+            "runtime_stable_session_id": _text(_row_value(row, "runtime_stable_session_id", "")),
+            "runtimeStableSessionId": _text(_row_value(row, "runtime_stable_session_id", "")),
+            "runtime_session_id": _text(_row_value(row, "runtime_session_id", "")),
+            "runtimeSessionId": _text(_row_value(row, "runtime_session_id", "")),
             "runtime_scope_key": str(row["runtime_scope_key"] or ""),
+            "runtimeScopeKey": str(row["runtime_scope_key"] or ""),
             "output_contract": _json_loads(row["output_contract_json"], {}),
             "metadata": metadata,
             **_assignee_public_fields(metadata),
@@ -638,6 +735,102 @@ class SessionDBTeamMissionMixin:
             "created_at": float(row["created_at"] or 0),
             "updated_at": float(row["updated_at"] or 0),
         }
+
+    def _team_mission_latest_run_bindings_by_node(
+        self,
+        bindings: List[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        latest: Dict[str, Dict[str, Any]] = {}
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                continue
+            node_id = _text(binding.get("node_id"))
+            if not node_id:
+                continue
+            current = latest.get(node_id)
+            if current is None:
+                latest[node_id] = binding
+                continue
+            current_key = (
+                float(current.get("updated_at") or 0),
+                float(current.get("created_at") or 0),
+                _text(current.get("run_id")),
+            )
+            binding_key = (
+                float(binding.get("updated_at") or 0),
+                float(binding.get("created_at") or 0),
+                _text(binding.get("run_id")),
+            )
+            if binding_key >= current_key:
+                latest[node_id] = binding
+        return latest
+
+    def _team_mission_node_with_runtime_binding(
+        self,
+        node: Dict[str, Any] | None,
+        binding: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
+        if not isinstance(node, dict) or not node:
+            return {}
+        if not isinstance(binding, dict) or not binding:
+            return node
+        node_id = _text(node.get("node_id"))
+        if node_id and _text(binding.get("node_id")) and node_id != _text(binding.get("node_id")):
+            return node
+
+        session_id = _text(node.get("runtime_stable_session_id")) or _text(binding.get("session_id"))
+        runtime_session_id = _text(node.get("runtime_session_id")) or _text(binding.get("runtime_session_id"))
+        runtime_scope_key = _text(node.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key"))
+        run_id = _text(binding.get("run_id"))
+        canonical_node_id = _text(node.get("canonical_node_id")) or _conversation_graph_node_id(
+            _text(node.get("mission_id") or binding.get("mission_id")),
+            node_id,
+        )
+        task_frame_id = _text(node.get("task_frame_id")) or (
+            f"mission-frame:{_text(node.get('mission_id') or binding.get('mission_id'))}"
+            if _text(node.get("mission_id") or binding.get("mission_id"))
+            else ""
+        )
+
+        return {
+            **node,
+            "canonical_node_id": canonical_node_id,
+            "canonicalNodeId": canonical_node_id,
+            "task_frame_id": task_frame_id,
+            "taskFrameId": task_frame_id,
+            "run_id": run_id,
+            "runId": run_id,
+            "session_id": session_id,
+            "sessionId": session_id,
+            "stable_session_id": session_id,
+            "stableSessionId": session_id,
+            "stored_session_id": session_id,
+            "storedSessionId": session_id,
+            "actual_stable_session_id": session_id,
+            "actualStableSessionId": session_id,
+            "runtime_stable_session_id": session_id,
+            "runtimeStableSessionId": session_id,
+            "runtime_session_id": runtime_session_id,
+            "runtimeSessionId": runtime_session_id,
+            "runtime_scope_key": runtime_scope_key,
+            "runtimeScopeKey": runtime_scope_key,
+            "runtime_binding": binding,
+            "runtimeBinding": binding,
+        }
+
+    def _team_mission_nodes_with_runtime_bindings(
+        self,
+        nodes: List[Dict[str, Any]],
+        bindings: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        latest_by_node = self._team_mission_latest_run_bindings_by_node(bindings)
+        return [
+            self._team_mission_node_with_runtime_binding(
+                node,
+                latest_by_node.get(_text(node.get("node_id"))),
+            )
+            for node in nodes
+        ]
 
     def _team_mission_memory_item_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
         if row is None:
@@ -995,6 +1188,156 @@ class SessionDBTeamMissionMixin:
             ) if conversation is not None
         ]
 
+    def list_team_mission_conversation_runtime_session_ids(
+        self,
+        *,
+        team_id: str = "",
+        workspace_id: str = "",
+        status: str = "",
+        mission_id: str = "",
+        limit: int = 500,
+    ) -> List[str]:
+        """Return only Team Mission conversation and node runtime session ids.
+
+        This is intentionally separate from ``list_team_mission_conversations``.
+        Sidebar/runtime indexing needs identifiers, not graph, message, or
+        deliverable payloads. Keeping this query narrow prevents history size
+        from inflating WebSocket responses.
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if _text(team_id):
+            clauses.append("c.team_id = ?")
+            params.append(_text(team_id))
+        if _text(workspace_id):
+            clauses.append("c.workspace_id = ?")
+            params.append(_text(workspace_id))
+        if _text(status):
+            clauses.append("c.status = ?")
+            params.append(_conversation_status(status))
+        normalized_mission_id = _text(mission_id)
+        if normalized_mission_id:
+            clauses.append(
+                """(
+                    c.active_mission_id = ?
+                    OR c.conversation_id = ?
+                    OR c.stable_session_id = ?
+                    OR EXISTS (
+                        SELECT 1
+                        FROM team_missions mission_filter
+                        WHERE mission_filter.conversation_id = c.conversation_id
+                          AND mission_filter.mission_id = ?
+                    )
+                )"""
+            )
+            params.extend([
+                normalized_mission_id,
+                normalized_mission_id,
+                normalized_mission_id,
+                normalized_mission_id,
+            ])
+        clauses.append(_conversation_history_sql("c"))
+        where_sql = f"WHERE {' AND '.join(clauses)}"
+        bounded_limit = max(1, min(int(limit or 500), 500))
+
+        def append_unique(target: list[str], seen: set[str], *values: Any) -> None:
+            for value in values:
+                normalized = _text(value)
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    target.append(normalized)
+
+        with self._lock:
+            conversation_rows = self._conn.execute(
+                f"""
+                SELECT c.conversation_id, c.stable_session_id
+                FROM team_mission_conversations c
+                {where_sql}
+                ORDER BY COALESCE(c.updated_at, c.created_at, 0) DESC,
+                         c.created_at DESC,
+                         c.conversation_id ASC
+                LIMIT ?
+                """,
+                (*params, bounded_limit),
+            ).fetchall()
+
+            conversation_ids = [
+                _text(_row_value(row, "conversation_id", ""))
+                for row in conversation_rows
+                if _text(_row_value(row, "conversation_id", ""))
+            ]
+            stable_session_ids = [
+                _text(_row_value(row, "stable_session_id", ""))
+                for row in conversation_rows
+                if _text(_row_value(row, "stable_session_id", ""))
+            ]
+
+            mission_rows: list[sqlite3.Row] = []
+            binding_rows: list[sqlite3.Row] = []
+            if conversation_ids:
+                conversation_placeholders = ",".join("?" for _ in conversation_ids)
+                mission_rows = self._conn.execute(
+                    f"""
+                    SELECT mission_id, leader_session_id
+                    FROM team_missions
+                    WHERE conversation_id IN ({conversation_placeholders})
+                    ORDER BY created_at ASC, mission_id ASC
+                    """,
+                    tuple(conversation_ids),
+                ).fetchall()
+                mission_ids = [
+                    _text(_row_value(row, "mission_id", ""))
+                    for row in mission_rows
+                    if _text(_row_value(row, "mission_id", ""))
+                ]
+                if mission_ids:
+                    mission_placeholders = ",".join("?" for _ in mission_ids)
+                    binding_rows = self._conn.execute(
+                        f"""
+                        SELECT session_id, runtime_session_id
+                        FROM team_mission_run_bindings
+                        WHERE mission_id IN ({mission_placeholders})
+                        ORDER BY created_at ASC, run_id ASC
+                        """,
+                        tuple(mission_ids),
+                    ).fetchall()
+
+            active_run_rows: list[sqlite3.Row] = []
+            if stable_session_ids:
+                stable_placeholders = ",".join("?" for _ in stable_session_ids)
+                status_placeholders = ",".join("?" for _ in _ACTIVE_RUN_STATUSES)
+                active_run_rows = self._conn.execute(
+                    f"""
+                    SELECT session_id, runtime_session_id
+                    FROM runs
+                    WHERE session_id IN ({stable_placeholders})
+                      AND status IN ({status_placeholders})
+                    ORDER BY updated_at DESC, started_at DESC, run_id ASC
+                    """,
+                    (*stable_session_ids, *sorted(_ACTIVE_RUN_STATUSES)),
+                ).fetchall()
+
+        ids: list[str] = []
+        seen_ids: set[str] = set()
+        append_unique(ids, seen_ids, *stable_session_ids)
+        for row in mission_rows:
+            append_unique(ids, seen_ids, _row_value(row, "leader_session_id", ""))
+        for row in active_run_rows:
+            append_unique(
+                ids,
+                seen_ids,
+                _row_value(row, "session_id", ""),
+                _row_value(row, "runtime_session_id", ""),
+            )
+        for row in binding_rows:
+            append_unique(
+                ids,
+                seen_ids,
+                _row_value(row, "session_id", ""),
+                _row_value(row, "runtime_session_id", ""),
+            )
+        return ids
+
     def _team_mission_conversation_deliverable_projection(
         self,
         conversation: Dict[str, Any],
@@ -1218,6 +1561,7 @@ class SessionDBTeamMissionMixin:
             nodes_by_mission.setdefault(_text(node.get("mission_id")), []).append(node)
 
         bindings: List[Dict[str, Any]] = []
+        bindings_by_mission: Dict[str, List[Dict[str, Any]]] = {}
         run_session_ids: List[str] = []
         seen_run_session_ids: set[str] = set()
         for row in binding_rows:
@@ -1225,11 +1569,18 @@ class SessionDBTeamMissionMixin:
             if not binding:
                 continue
             bindings.append(binding)
+            bindings_by_mission.setdefault(_text(binding.get("mission_id")), []).append(binding)
             for key in ("session_id", "runtime_session_id"):
                 value = _text(binding.get(key))
                 if value and value not in seen_run_session_ids:
                     seen_run_session_ids.add(value)
                     run_session_ids.append(value)
+
+        for mission_id, mission_nodes in list(nodes_by_mission.items()):
+            nodes_by_mission[mission_id] = self._team_mission_nodes_with_runtime_bindings(
+                mission_nodes,
+                bindings_by_mission.get(mission_id) or [],
+            )
 
         active_mission_id = _text(conversation.get("active_mission_id"))
         latest_mission = missions[-1]
@@ -1276,6 +1627,16 @@ class SessionDBTeamMissionMixin:
                         "hermesNodeId": original_node_id,
                         "title": _text(node.get("title")) or "审批任务图",
                         "status": node_status,
+                        "run_id": _text(node.get("run_id")),
+                        "runId": _text(node.get("run_id")),
+                        "stored_session_id": _text(node.get("stored_session_id")),
+                        "storedSessionId": _text(node.get("stored_session_id")),
+                        "runtime_session_id": _text(node.get("runtime_session_id")),
+                        "runtimeSessionId": _text(node.get("runtime_session_id")),
+                        "runtime_scope_key": _text(node.get("runtime_scope_key")),
+                        "runtimeScopeKey": _text(node.get("runtime_scope_key")),
+                        "runtime_binding": dict(node.get("runtime_binding") or {}),
+                        "runtimeBinding": dict(node.get("runtime_binding") or {}),
                     })
             task_id = _task_id_from_mission(mission)
             frame_artifact_refs = _dedupe_artifact_refs([
@@ -1369,6 +1730,32 @@ class SessionDBTeamMissionMixin:
         except Exception:
             return {}
 
+    def _team_mission_active_node_run_from_bindings(
+        self,
+        bindings: List[Dict[str, Any]] | None,
+    ) -> Dict[str, Any]:
+        active_run: Dict[str, Any] = {}
+        for binding in bindings or []:
+            if not isinstance(binding, dict):
+                continue
+            run_id = _text(binding.get("run_id") or binding.get("runId"))
+            if not run_id:
+                continue
+            run = self.get_run(run_id) if hasattr(self, "get_run") else None
+            if _text((run or {}).get("status")).lower() not in _ACTIVE_RUN_STATUSES:
+                continue
+            merged_run = {
+                **binding,
+                **dict(run or {}),
+                "run_id": run_id,
+                "runtime_session_id": _text((run or {}).get("runtime_session_id") or binding.get("runtime_session_id")),
+                "runtime_scope_key": _text((run or {}).get("runtime_scope_key") or binding.get("runtime_scope_key")),
+                "turn_id": _text((run or {}).get("turn_id") or binding.get("turn_id")),
+            }
+            if not active_run or float(merged_run.get("updated_at") or 0) >= float(active_run.get("updated_at") or 0):
+                active_run = merged_run
+        return active_run
+
     def _team_mission_conversation_message_count(self, stable_session_id: str) -> int:
         stable_session_id = _text(stable_session_id)
         if not stable_session_id:
@@ -1402,14 +1789,22 @@ class SessionDBTeamMissionMixin:
             return {}
         stable_session_id = _text(conversation.get("stable_session_id") or conversation.get("stableSessionId"))
         active_run = self._team_mission_conversation_active_run(stable_session_id)
+        active_node_run = self._team_mission_active_node_run_from_bindings(
+            [
+                item for item in summary.get("run_bindings") or []
+                if isinstance(item, dict)
+            ],
+        )
         pending_approvals = [
             item for item in summary.get("pending_approvals") or []
             if isinstance(item, dict)
         ]
         mission_status = _text(summary.get("mission_status") or conversation.get("status"))
         active_node_count = int(summary.get("active_node_count") or 0)
+        if active_node_run and active_node_count <= 0:
+            active_node_count = 1
         terminal = mission_status in _TERMINAL_MISSION_STATUSES
-        running = bool(active_run) or (
+        running = bool(active_run) or bool(active_node_run) or (
             not terminal
             and (active_node_count > 0 or mission_status in _RUNNING_MISSION_STATUSES)
         )
@@ -1420,7 +1815,11 @@ class SessionDBTeamMissionMixin:
             else "cancelled" if mission_status in {"cancelled", "canceled", "interrupted"}
             else "idle"
         )
-        run_updated_at = active_run.get("updated_at") or 0
+        projected_active_run = active_run or active_node_run
+        run_updated_at = max(
+            float((active_run or {}).get("updated_at") or 0),
+            float((active_node_run or {}).get("updated_at") or 0),
+        )
         last_message_at = summary.get("last_message_at") or 0
         updated_at = max(
             float(conversation.get("updated_at") or 0),
@@ -1442,11 +1841,11 @@ class SessionDBTeamMissionMixin:
             "waiting_approval": waiting_approval,
             "pending_approval_count": len(pending_approvals),
             "pending_approvals": pending_approvals,
-            "active_run_id": _text(active_run.get("run_id")) if running and active_run else "",
-            "active_turn_id": _text(active_run.get("turn_id")) if running and active_run else "",
-            "active_runtime_session_id": _text(active_run.get("runtime_session_id")) if running and active_run else "",
-            "runtime_scope_key": _text(active_run.get("runtime_scope_key")) if running and active_run else "",
-            "run_started_at": active_run.get("started_at") or 0 if running and active_run else 0,
+            "active_run_id": _text(projected_active_run.get("run_id")) if running and projected_active_run else "",
+            "active_turn_id": _text(projected_active_run.get("turn_id")) if running and projected_active_run else "",
+            "active_runtime_session_id": _text(projected_active_run.get("runtime_session_id")) if running and projected_active_run else "",
+            "runtime_scope_key": _text(projected_active_run.get("runtime_scope_key")) if running and projected_active_run else "",
+            "run_started_at": projected_active_run.get("started_at") or 0 if running and projected_active_run else 0,
             "run_updated_at": run_updated_at,
             "active_node_count": active_node_count,
             "task_frames": list(summary.get("task_frames") or []),
@@ -1723,6 +2122,10 @@ class SessionDBTeamMissionMixin:
         status: str = "todo",
         assignee_profile_id: str = "",
         assignee_profile_version_id: str = "",
+        canonical_node_id: str = "",
+        task_frame_id: str = "",
+        runtime_stable_session_id: str = "",
+        runtime_session_id: str = "",
         runtime_scope_key: str = "",
         output_contract: Dict[str, Any] | None = None,
         metadata: Dict[str, Any] | None = None,
@@ -1782,15 +2185,39 @@ class SessionDBTeamMissionMixin:
                 existing_node=existing_node,
                 leader_node=leader_node,
             )
+            existing_canonical_node_id = _text(_row_value(existing, "canonical_node_id", ""))
+            existing_task_frame_id = _text(_row_value(existing, "task_frame_id", ""))
+            existing_runtime_stable_session_id = _text(_row_value(existing, "runtime_stable_session_id", ""))
+            existing_runtime_session_id = _text(_row_value(existing, "runtime_session_id", ""))
+            effective_canonical_node_id = (
+                _text(canonical_node_id)
+                or existing_canonical_node_id
+                or _conversation_graph_node_id(mission_id, node_id)
+            )
+            effective_task_frame_id = (
+                _text(task_frame_id)
+                or existing_task_frame_id
+                or (f"mission-frame:{mission_id}" if mission_id else "")
+            )
+            effective_runtime_stable_session_id = (
+                _text(runtime_stable_session_id)
+                or existing_runtime_stable_session_id
+            )
+            effective_runtime_session_id = (
+                _text(runtime_session_id)
+                or existing_runtime_session_id
+            )
             conn.execute(
                 """
                 INSERT INTO team_mission_nodes (
                     node_id, mission_id, kind, title, objective, status,
-                    assignee_profile_id, assignee_profile_version_id, runtime_scope_key,
+                    assignee_profile_id, assignee_profile_version_id,
+                    canonical_node_id, task_frame_id, runtime_stable_session_id,
+                    runtime_session_id, runtime_scope_key,
                     output_contract_json, metadata_json, position_x, position_y,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(mission_id, node_id) DO UPDATE SET
                     kind = excluded.kind,
                     title = excluded.title,
@@ -1798,6 +2225,10 @@ class SessionDBTeamMissionMixin:
                     status = excluded.status,
                     assignee_profile_id = excluded.assignee_profile_id,
                     assignee_profile_version_id = excluded.assignee_profile_version_id,
+                    canonical_node_id = excluded.canonical_node_id,
+                    task_frame_id = excluded.task_frame_id,
+                    runtime_stable_session_id = excluded.runtime_stable_session_id,
+                    runtime_session_id = excluded.runtime_session_id,
                     runtime_scope_key = excluded.runtime_scope_key,
                     output_contract_json = excluded.output_contract_json,
                     metadata_json = excluded.metadata_json,
@@ -1814,6 +2245,10 @@ class SessionDBTeamMissionMixin:
                     str(status or "todo"),
                     resolved_profile_id,
                     resolved_profile_version_id,
+                    effective_canonical_node_id,
+                    effective_task_frame_id,
+                    effective_runtime_stable_session_id,
+                    effective_runtime_session_id,
                     resolved_runtime_scope_key,
                     _json_dumps(output_contract or {}),
                     _json_dumps(resolved_metadata),
@@ -1853,11 +2288,25 @@ class SessionDBTeamMissionMixin:
                 """,
                 (mission_id, "root"),
             ).fetchone()
+            binding_row = self._conn.execute(
+                """
+                SELECT *
+                FROM team_mission_run_bindings
+                WHERE mission_id = ? AND node_id = ?
+                ORDER BY updated_at DESC, created_at DESC, run_id DESC
+                LIMIT 1
+                """,
+                (mission_id, node_id),
+            ).fetchone()
         mission = self._team_mission_from_row(mission_row) or {}
-        return self._team_mission_node_with_resolved_assignee(
+        resolved_node = self._team_mission_node_with_resolved_assignee(
             self._team_mission_node_from_row(row) or {},
             mission_metadata=dict(mission.get("metadata") or {}),
             leader_node=self._team_mission_node_from_row(leader_row) or {},
+        )
+        return self._team_mission_node_with_runtime_binding(
+            resolved_node,
+            self._team_mission_run_binding_from_row(binding_row) or {},
         )
 
     def claim_team_mission_node_start(
@@ -2368,6 +2817,32 @@ class SessionDBTeamMissionMixin:
                     now,
                 ),
             )
+            if str(node_id or "").strip():
+                canonical_node_id = _conversation_graph_node_id(mission_id, str(node_id or ""))
+                task_frame_id = f"mission-frame:{mission_id}" if mission_id else ""
+                conn.execute(
+                    """
+                    UPDATE team_mission_nodes
+                       SET canonical_node_id = COALESCE(NULLIF(canonical_node_id, ''), ?),
+                           task_frame_id = COALESCE(NULLIF(task_frame_id, ''), ?),
+                           runtime_stable_session_id = COALESCE(NULLIF(?, ''), runtime_stable_session_id),
+                           runtime_session_id = COALESCE(NULLIF(?, ''), runtime_session_id),
+                           runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
+                           updated_at = ?
+                     WHERE mission_id = ?
+                       AND node_id = ?
+                    """,
+                    (
+                        canonical_node_id,
+                        task_frame_id,
+                        session_id,
+                        str(runtime_session_id or ""),
+                        str(runtime_scope_key or ""),
+                        now,
+                        mission_id,
+                        str(node_id or ""),
+                    ),
+                )
             return self._team_mission_run_binding_from_row(conn.execute(
                 "SELECT * FROM team_mission_run_bindings WHERE run_id = ?",
                 (run_id,),
@@ -2568,19 +3043,47 @@ class SessionDBTeamMissionMixin:
         })
         frame = _runtime_event_with_team_mission_identity(frame, identity)
         saved = self.append_run_event(str(binding["session_id"] or ""), frame)
-        if isinstance(saved, dict) and saved.get("_persistence_disposition") == "duplicate_terminal":
+        if (
+            isinstance(saved, dict)
+            and saved.get("_persistence_disposition") in {"duplicate_terminal", "ignored_after_terminal"}
+        ):
             return saved
-        self.reduce_team_mission_run_event(run_id=run_id, event=saved or frame)
+        source_event = saved or frame
+        if _text(frame.get("type")) == "message.delta":
+            source_event = dict(frame)
+            if isinstance(saved, dict):
+                for key in ("seq", "timestamp", "session_id", "stored_session_id", "runtime_scope_key", "runtime_session_id"):
+                    if saved.get(key) is not None and not source_event.get(key):
+                        source_event[key] = saved.get(key)
+        mission_event = _event_log.append_team_mission_runtime_event(
+            self,
+            mission_id=mission_id,
+            run_id=run_id,
+            source_event=source_event,
+            identity=identity,
+        )
+        self.reduce_team_mission_run_event(run_id=run_id, event=source_event)
         try:
             _mirror_team_mission_event(
                 self,
                 mission_id=mission_id,
                 binding=binding_value,
-                event=saved or frame,
+                event=source_event,
                 source="team_mission_run_event",
             )
         except Exception:
             pass
+        if (
+            isinstance(mission_event, dict)
+            and not mission_event.get("_persistence_disposition")
+            and _should_emit_conversation_status_projection(source_event)
+        ):
+            _event_log.append_team_mission_conversation_status_event(
+                self,
+                mission_id=mission_id,
+                source_event=source_event,
+                source_mission_seq=_event_seq(mission_event),
+            )
         return saved
 
     def get_team_mission_graph(self, mission_id: str) -> Dict[str, Any]:
@@ -2629,6 +3132,7 @@ class SessionDBTeamMissionMixin:
                     ).fetchall()
                 ) if binding is not None
             ]
+            nodes = self._team_mission_nodes_with_runtime_bindings(nodes, run_bindings)
         return {
             "mission": mission,
             "conversation": conversation or {},
@@ -3026,6 +3530,62 @@ class SessionDBTeamMissionMixin:
             edges=edges,
         )
 
+    def append_team_mission_event_for_run(
+        self,
+        *,
+        run_id: str,
+        event: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return _event_log.append_team_mission_event_for_run(
+            self,
+            run_id=run_id,
+            event=event,
+        )
+
+    def append_team_mission_structural_event(
+        self,
+        *,
+        mission_id: str,
+        source_event: Dict[str, Any],
+        identity: Dict[str, str] | None = None,
+        dedupe_key: str = "",
+    ) -> Dict[str, Any]:
+        return _event_log.append_team_mission_structural_event(
+            self,
+            mission_id=mission_id,
+            source_event=source_event,
+            identity=identity,
+            dedupe_key=dedupe_key,
+        )
+
+    def append_team_mission_conversation_status_event(
+        self,
+        *,
+        mission_id: str,
+        source_event: Dict[str, Any],
+        source_mission_seq: int,
+    ) -> Dict[str, Any]:
+        return _event_log.append_team_mission_conversation_status_event(
+            self,
+            mission_id=mission_id,
+            source_event=source_event,
+            source_mission_seq=source_mission_seq,
+        )
+
+    def list_team_mission_events(
+        self,
+        mission_id: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 2000,
+    ) -> List[Dict[str, Any]]:
+        return _event_log.list_team_mission_events(
+            self,
+            mission_id,
+            after_seq=after_seq,
+            limit=limit,
+        )
+
     def list_team_mission_run_events(
         self,
         mission_id: str,
@@ -3037,6 +3597,15 @@ class SessionDBTeamMissionMixin:
         if not mission_id:
             return []
         after_seq = int(after_seq or 0)
+        canonical_events = self.list_team_mission_events(
+            mission_id,
+            after_seq=after_seq,
+            limit=limit,
+        )
+        if canonical_events:
+            return canonical_events
+        if after_seq > 0:
+            return []
         projection_source_placeholders = ",".join(
             "?" for _ in _TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES
         )

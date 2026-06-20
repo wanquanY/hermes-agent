@@ -71,6 +71,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.conversation.resolve" in response["result"]["methods"]
     assert "team_mission.conversation.render" in response["result"]["methods"]
     assert "team_mission.conversation.list" in response["result"]["methods"]
+    assert "team_mission.conversation.runtime_session_ids" in response["result"]["methods"]
     assert "team_mission.conversation.rename" in response["result"]["methods"]
     assert "team_mission.conversation.delete" in response["result"]["methods"]
     assert "team_mission.message.submit" in response["result"]["methods"]
@@ -124,6 +125,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.conversation.resolve" in server._methods
     assert "team_mission.conversation.render" in server._methods
     assert "team_mission.conversation.list" in server._methods
+    assert "team_mission.conversation.runtime_session_ids" in server._methods
     assert "team_mission.conversation.rename" in server._methods
     assert "team_mission.conversation.delete" in server._methods
     assert "team_mission.message.submit" in server._methods
@@ -187,6 +189,7 @@ def test_extracted_gateway_methods_own_registered_handlers():
     assert server._methods["team_mission.conversation.resolve"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.conversation.render"].__module__ == "tui_gateway.methods.conversation_render_snapshot"
     assert server._methods["team_mission.conversation.list"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.conversation.runtime_session_ids"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.conversation.rename"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.conversation.delete"].__module__ == "tui_gateway.methods.team_mission"
     assert server._methods["team_mission.message.submit"].__module__ == "tui_gateway.methods.team_mission"
@@ -1390,12 +1393,15 @@ def test_session_db_repairs_legacy_control_only_active_runs(tmp_path):
     db = SessionDB(tmp_path / "state.db")
     try:
         db.create_session("team-session-1", "tui")
+        stale_time = time.time() - 120
         db.upsert_run(
             run_id="team-mission:mission-1:conversation:legacy",
             session_id="team-session-1",
             runtime_scope_key="team_mission:mission-1",
             runtime_session_id="runtime-control",
             status="running",
+            started_at=stale_time,
+            updated_at=stale_time,
         )
         db.append_run_event(
             "team-session-1",
@@ -1405,6 +1411,7 @@ def test_session_db_repairs_legacy_control_only_active_runs(tmp_path):
                 "run_id": "team-mission:mission-1:conversation:legacy",
                 "runtime_scope_key": "team_mission:mission-1",
                 "seq": 1,
+                "timestamp": stale_time,
                 "payload": {"mission_id": "mission-1"},
             },
         )
@@ -1426,6 +1433,61 @@ def test_session_db_repairs_legacy_control_only_active_runs(tmp_path):
         )
         assert next_run["created"] is True
         assert next_run["conflict"] is None
+    finally:
+        db.close()
+
+
+def test_session_db_does_not_repair_live_control_only_team_leader_run(tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("team-session-1", "tui")
+        db.upsert_run(
+            run_id="team-leader-run-1",
+            session_id="team-session-1",
+            runtime_scope_key="team:team-conversation-1:leader-conversation",
+            turn_id="turn-1",
+            runtime_session_id="runtime-leader",
+            status="running",
+            metadata={
+                "gateway_pid": os.getpid(),
+                "gateway_instance_id": "test-live-worker",
+            },
+        )
+        db.append_run_event(
+            "team-session-1",
+            {
+                "type": "session.info",
+                "session_id": "runtime-leader",
+                "stored_session_id": "team-session-1",
+                "run_id": "team-leader-run-1",
+                "turn_id": "turn-1",
+                "runtime_scope_key": "team:team-conversation-1:leader-conversation",
+                "seq": 1,
+                "payload": {"status": "starting"},
+            },
+        )
+
+        status = db.get_session_run_status("team-session-1")
+        run = db.get_run("team-leader-run-1")
+
+        assert status["running"] is True
+        assert status["active_run_id"] == "team-leader-run-1"
+        assert status["runtime_scope_key"] == "team:team-conversation-1:leader-conversation"
+        assert run["status"] == "running"
+        assert "recovery_reason" not in run["metadata"]
+
+        next_run = db.create_run_if_session_idle(
+            run_id="team-leader-run-2",
+            session_id="team-session-1",
+            runtime_scope_key="team:team-conversation-1:leader-conversation",
+            turn_id="turn-2",
+            runtime_session_id="runtime-leader-2",
+        )
+        assert next_run["created"] is False
+        assert next_run["run"] is None
+        assert next_run["conflict"]["run_id"] == "team-leader-run-1"
     finally:
         db.close()
 

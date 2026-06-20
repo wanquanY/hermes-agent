@@ -95,6 +95,7 @@ def test_start_task_does_not_inherit_non_planning_conversation_mode(monkeypatch,
                     "task_id": "task-1",
                     "title": "简单测试任务",
                     "objective": "创建一个简单测试任务并先规划",
+                    "execution_mode": "autonomous_mission",
                 },
                 parent_agent=SimpleNamespace(_session_db=db, _hermes_active_run_id="run-leader-conversation"),
             )

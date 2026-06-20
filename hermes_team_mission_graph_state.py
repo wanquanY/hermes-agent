@@ -55,6 +55,50 @@ def _metadata_with_task_id(metadata: Dict[str, Any] | None, task_id: str) -> Dic
     return result
 
 
+def _append_structural_event(db: Any, mission_id: str, event: Dict[str, Any]) -> None:
+    append = getattr(db, "append_team_mission_structural_event", None)
+    if not callable(append):
+        return
+    append(mission_id=mission_id, source_event=event)
+
+
+def _execution_mode_requires_finalizers(mode: str) -> bool:
+    return mode in _EXECUTION_MODES_REQUIRE_FINALIZERS
+
+
+def _execution_scope_nodes(nodes: List[Dict[str, Any]], task_id: str) -> List[Dict[str, Any]]:
+    return [node for node in nodes if _node_matches_task(node, task_id)]
+
+
+def _required_execution_completed(
+    *,
+    mode: str,
+    nodes: List[Dict[str, Any]],
+    task_id: str,
+) -> bool:
+    if not _execution_mode_requires_finalizers(mode):
+        return True
+    scoped_nodes = _execution_scope_nodes(nodes, task_id)
+    work_nodes = [
+        node for node in scoped_nodes
+        if normalize_team_mission_node_kind(node.get("kind")) not in _NON_WORK_NODE_KINDS
+    ]
+    synthesis_nodes = [
+        node for node in scoped_nodes
+        if normalize_team_mission_node_kind(node.get("kind")) == "synthesis"
+    ]
+    if not work_nodes or not synthesis_nodes:
+        return False
+    required_nodes = [
+        node for node in scoped_nodes
+        if normalize_team_mission_node_kind(node.get("kind")) not in {"root", "approval_gate"}
+    ]
+    return bool(required_nodes) and all(
+        str(node.get("status") or "") in _DEPENDENCY_SATISFIED_STATUSES
+        for node in required_nodes
+    )
+
+
 def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
     mission_id = str(mission_id or "").strip()
     graph = db.get_team_mission_graph(mission_id)
@@ -138,6 +182,19 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
     updated_nodes = [node for node in updated_graph.get("nodes", []) if isinstance(node, dict)]
     statuses = {str(node.get("status") or "") for node in updated_nodes}
     mode = str(mission.get("mode") or "")
+    mission_metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+    active_task_id = _task_id_from_metadata(mission_metadata)
+    completion_satisfied = bool(updated_nodes) and statuses <= _DEPENDENCY_SATISFIED_STATUSES
+    required_execution_completed = _required_execution_completed(
+        mode=mode,
+        nodes=updated_nodes,
+        task_id=active_task_id,
+    )
+    completion_blocked_by_required_execution = (
+        completion_satisfied
+        and _execution_mode_requires_finalizers(mode)
+        and not required_execution_completed
+    )
     approval_pending = (
         mode == "supervised_mission"
         and any(
@@ -149,7 +206,7 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
     active = bool(statuses & _ACTIVE_NODE_STATUSES)
     if approval_pending:
         mission_status = "waiting_approval"
-    elif updated_nodes and statuses <= _DEPENDENCY_SATISFIED_STATUSES:
+    elif completion_satisfied and required_execution_completed:
         mission_status = "completed"
     elif "failed" in statuses:
         mission_status = "failed"
@@ -157,6 +214,8 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
         mission_status = "running"
     elif ready_node_ids:
         mission_status = "ready"
+    elif completion_blocked_by_required_execution:
+        mission_status = "running"
     elif "blocked" in statuses:
         mission_status = "blocked"
     elif "blocked_waiting_dependency" in statuses:
@@ -236,6 +295,11 @@ def ensure_team_mission_finalizers(
             position_y=720,
         )
         changed.append(verifier)
+        _append_structural_event(
+            db,
+            mission_id,
+            {"type": "mission.node.created", "payload": {"node": verifier}},
+        )
         existing_pairs = {
             (str(edge.get("from_node_id") or ""), str(edge.get("to_node_id") or ""))
             for edge in edges
@@ -243,12 +307,17 @@ def ensure_team_mission_finalizers(
         for node in work_nodes:
             node_id = str(node.get("node_id") or "")
             if node_id and (node_id, verifier_id) not in existing_pairs:
-                db.upsert_team_mission_edge(
+                edge = db.upsert_team_mission_edge(
                     mission_id=mission_id,
                     from_node_id=node_id,
                     to_node_id=verifier_id,
                     kind="depends_on",
                     metadata=_metadata_with_task_id({"auto_finalizer": True}, active_task_id),
+                )
+                _append_structural_event(
+                    db,
+                    mission_id,
+                    {"type": "mission.edge.created", "payload": {"edge": edge}},
                 )
         return changed
     verifier_terminal = all(
@@ -275,14 +344,24 @@ def ensure_team_mission_finalizers(
             position_y=960,
         )
         changed.append(synthesis)
+        _append_structural_event(
+            db,
+            mission_id,
+            {"type": "mission.node.created", "payload": {"node": synthesis}},
+        )
         for verifier in verifier_nodes:
             verifier_id = str(verifier.get("node_id") or "")
             if verifier_id:
-                db.upsert_team_mission_edge(
+                edge = db.upsert_team_mission_edge(
                     mission_id=mission_id,
                     from_node_id=verifier_id,
                     to_node_id=synthesis_id,
                     kind="depends_on",
                     metadata=_metadata_with_task_id({"auto_finalizer": True}, active_task_id),
+                )
+                _append_structural_event(
+                    db,
+                    mission_id,
+                    {"type": "mission.edge.created", "payload": {"edge": edge}},
                 )
     return changed

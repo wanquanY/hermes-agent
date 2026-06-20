@@ -27,6 +27,8 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import time
+import uuid
 from collections import deque
 from typing import Any
 
@@ -44,6 +46,18 @@ _log = logging.getLogger(__name__)
 # to flush a WS frame before we mark the transport dead. Protects handler
 # threads from a wedged socket.
 _WS_WRITE_TIMEOUT_S = 10.0
+_WS_LARGE_FRAME_BYTES = 512 * 1024
+_WS_DIAGNOSTIC_METHODS = frozenset(
+    {
+        "approval.respond",
+        "events.subscribe",
+        "events.unsubscribe",
+        "run.events",
+        "team_mission.message.submit",
+        "team_mission.node.history",
+        "team_mission.subscribe",
+    }
+)
 _WS_CONTROL_METHODS = frozenset(
     {
         "events.compact",
@@ -75,6 +89,8 @@ _WS_CONTROL_METHODS = frozenset(
         "team_mission.conversation.delete",
         "team_mission.conversation.ensure",
         "team_mission.conversation.list",
+        "team_mission.conversation.runtime_session_ids",
+        "team_mission.message.submit",
         "team_mission.conversation.rename",
         "team_mission.conversation.render",
         "team_mission.conversation.resolve",
@@ -113,6 +129,60 @@ def _runtime_scope_key(req: Any) -> str:
     except Exception:
         return ""
 
+
+def _frame_meta(line: str) -> dict[str, Any]:
+    text = str(line or "")
+    meta: dict[str, Any] = {
+        "bytes": len(text.encode("utf-8")),
+    }
+    try:
+        frame = json.loads(text)
+    except Exception:
+        return meta
+    if not isinstance(frame, dict):
+        return meta
+    params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    result = frame.get("result") if isinstance(frame.get("result"), dict) else {}
+    error = frame.get("error") if isinstance(frame.get("error"), dict) else {}
+    meta.update(
+        {
+            "id": frame.get("id") or "",
+            "method": str(frame.get("method") or ""),
+            "response": bool(frame.get("id") and not frame.get("method")),
+            "error_code": error.get("code") or "",
+            "result_keys": list(result.keys())[:16] if result else [],
+            "replay_event_count": len(result.get("events") or [])
+            if isinstance(result.get("events"), list)
+            else None,
+            "replay_last_seq": result.get("last_event_seq")
+            or result.get("last_seq")
+            or result.get("lastSeq")
+            or None,
+            "subscription_id": result.get("subscription_id")
+            or result.get("subscriptionId")
+            or "",
+            "event_type": str(params.get("type") or ""),
+            "session_id": params.get("session_id") or payload.get("session_id") or "",
+            "stored_session_id": params.get("stored_session_id")
+            or payload.get("stored_session_id")
+            or "",
+            "run_id": params.get("run_id") or payload.get("run_id") or "",
+            "turn_id": params.get("turn_id") or payload.get("turn_id") or "",
+            "mission_id": params.get("mission_id") or payload.get("mission_id") or "",
+            "node_id": params.get("node_id") or payload.get("node_id") or "",
+        }
+    )
+    return meta
+
+
+def _should_log_frame(meta: dict[str, Any]) -> bool:
+    if int(meta.get("bytes") or 0) >= _WS_LARGE_FRAME_BYTES:
+        return True
+    if str(meta.get("response_to_method") or "") in _WS_DIAGNOSTIC_METHODS:
+        return True
+    return str(meta.get("method") or "") in _WS_DIAGNOSTIC_METHODS
+
 # Keep starlette optional at import time; handle_ws uses the real class when
 # it's available and falls back to a generic Exception sentinel otherwise.
 try:
@@ -140,10 +210,63 @@ class WSTransport:
     def __init__(self, ws: Any, loop: asyncio.AbstractEventLoop) -> None:
         self._ws = ws
         self._loop = loop
+        self._connection_id = uuid.uuid4().hex[:12]
+        self._created_at = time.time()
         self._closed = False
+        self._sent_count = 0
+        self._bytes_sent = 0
+        self._last_send_meta: dict[str, Any] | None = None
+        self._pending_requests: dict[str, dict[str, Any]] = {}
         self._send_queue: deque[tuple[bool, str, asyncio.Future | None]] = deque()
         self._send_worker: asyncio.Task | None = None
         self._runtime_bridges: dict[str, RuntimeProxyBridge] = {}
+
+    def _diagnostics(self) -> dict[str, Any]:
+        return {
+            "connection_id": self._connection_id,
+            "age_s": round(time.time() - self._created_at, 3),
+            "closed": self._closed,
+            "sent_count": self._sent_count,
+            "bytes_sent": self._bytes_sent,
+            "queue_size": len(self._send_queue),
+            "pending_request_count": len(self._pending_requests),
+            "last_send": self._last_send_meta,
+        }
+
+    def remember_request(self, req: dict[str, Any], meta: dict[str, Any]) -> None:
+        request_id = req.get("id")
+        method = str(req.get("method") or "")
+        if request_id is None or not method:
+            return
+        self._pending_requests[str(request_id)] = {
+            "method": method,
+            "bytes": int(meta.get("bytes") or 0),
+            "mission_id": meta.get("mission_id") or "",
+            "stored_session_id": meta.get("stored_session_id") or "",
+            "run_id": meta.get("run_id") or "",
+            "runtime_scope_key": _runtime_scope_key(req),
+            "received_at": time.time(),
+        }
+
+    def _attach_response_request_context(self, meta: dict[str, Any]) -> dict[str, Any]:
+        if not meta.get("response") or not meta.get("id"):
+            return meta
+        request = self._pending_requests.pop(str(meta.get("id")), None)
+        if not request:
+            return meta
+        enriched = dict(meta)
+        enriched.update(
+            {
+                "response_to_method": request["method"],
+                "response_to_mission_id": request["mission_id"],
+                "response_to_stored_session_id": request["stored_session_id"],
+                "response_to_run_id": request["run_id"],
+                "response_to_runtime_scope_key": request["runtime_scope_key"],
+                "request_bytes": request["bytes"],
+                "request_latency_ms": int((time.time() - request["received_at"]) * 1000),
+            }
+        )
+        return enriched
 
     def write(self, obj: dict) -> bool:
         if self._closed:
@@ -167,12 +290,22 @@ class WSTransport:
             fut = safe_schedule_threadsafe(self._send_from_worker(line), self._loop)
             if fut is None:
                 self._closed = True
+                _log.warning(
+                    "gateway ws write failed: loop scheduling returned none %s",
+                    self._diagnostics(),
+                )
                 return False
             fut.result(timeout=_WS_WRITE_TIMEOUT_S)
             return not self._closed
         except Exception as exc:
             self._closed = True
-            _log.debug("ws write failed: %s", exc)
+            _log.warning(
+                "gateway ws write failed: %s %s %s frame=%s",
+                type(exc).__name__,
+                exc,
+                self._diagnostics(),
+                _frame_meta(line),
+            )
             return False
 
     async def write_async(self, obj: dict) -> bool:
@@ -217,13 +350,31 @@ class WSTransport:
                 fut.set_result(False)
 
     async def _safe_send(self, line: str) -> None:
+        meta = self._attach_response_request_context(_frame_meta(line))
+        self._last_send_meta = meta
+        if _should_log_frame(meta):
+            _log.info(
+                "gateway ws send frame %s frame=%s",
+                self._diagnostics(),
+                meta,
+            )
         try:
             await self._ws.send_text(line)
+            self._sent_count += 1
+            self._bytes_sent += int(meta.get("bytes") or 0)
         except Exception as exc:
             self._closed = True
-            _log.debug("ws send failed: %s", exc)
+            _log.warning(
+                "gateway ws send failed: %s %s %s frame=%s",
+                type(exc).__name__,
+                exc,
+                self._diagnostics(),
+                meta,
+            )
 
     def close(self) -> None:
+        if not self._closed:
+            _log.info("gateway ws transport closing %s", self._diagnostics())
         self._closed = True
 
     async def runtime_bridge(self, worker: RuntimeWorker) -> RuntimeProxyBridge:
@@ -256,6 +407,7 @@ async def handle_ws(ws: Any) -> None:
     await ws.accept()
 
     transport = WSTransport(ws, asyncio.get_running_loop())
+    _log.info("gateway ws accepted %s", transport._diagnostics())
 
     await transport.write_async(
         {
@@ -272,12 +424,24 @@ async def handle_ws(ws: Any) -> None:
         while True:
             try:
                 raw = await ws.receive_text()
-            except _WebSocketDisconnect:
+            except _WebSocketDisconnect as exc:
+                _log.warning(
+                    "gateway ws client disconnected: code=%s %s",
+                    getattr(exc, "code", ""),
+                    transport._diagnostics(),
+                )
                 break
 
             line = raw.strip()
             if not line:
                 continue
+            line_meta = _frame_meta(line)
+            if _should_log_frame(line_meta):
+                _log.info(
+                    "gateway ws receive frame %s frame=%s",
+                    transport._diagnostics(),
+                    line_meta,
+                )
 
             try:
                 req = json.loads(line)
@@ -292,6 +456,9 @@ async def handle_ws(ws: Any) -> None:
                 if not ok:
                     break
                 continue
+
+            if isinstance(req, dict):
+                transport.remember_request(req, line_meta)
 
             try:
                 if await proxy_to_runtime(req, transport):
@@ -340,6 +507,7 @@ async def handle_ws(ws: Any) -> None:
                 break
     finally:
         await transport.aclose()
+        _log.info("gateway ws closed %s", transport._diagnostics())
 
         # Detach the transport from any sessions it owned so later emits
         # fall back to stdio instead of crashing into a closed socket.

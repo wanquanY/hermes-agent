@@ -7,7 +7,16 @@ from hermes_team_mission_memory_utils import text
 
 
 def _conversation_graph_node_id(mission_id: str, node_id: str) -> str:
-    return f"{text(mission_id)}:{text(node_id)}"
+    mission_id = text(mission_id)
+    node_id = text(node_id)
+    if not node_id:
+        return ""
+    if mission_id and (
+        node_id.startswith(f"{mission_id}:")
+        or node_id.startswith(f"team-mission:{mission_id}:")
+    ):
+        return node_id
+    return f"{mission_id}:{node_id}" if mission_id else node_id
 
 
 def dedupe_artifact_refs(artifacts: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -53,7 +62,10 @@ def final_deliverable_from_message(message: dict[str, Any] | None) -> dict[str, 
         return {}
     raw_node_id = text(team_ref.get("node_id") or team_ref.get("nodeId"))
     node_id = raw_node_id
-    if raw_node_id and not raw_node_id.startswith(f"{mission_id}:"):
+    if raw_node_id and not (
+        raw_node_id.startswith(f"{mission_id}:")
+        or raw_node_id.startswith(f"team-mission:{mission_id}:")
+    ):
         node_id = _conversation_graph_node_id(mission_id, raw_node_id)
     message_id = text(message.get("id"))
     timestamp = message.get("timestamp") or 0

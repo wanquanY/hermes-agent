@@ -199,35 +199,11 @@ def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _payload_stream_text(payload: dict[str, Any]) -> str:
-    return text(
-        payload.get("delta")
-        or payload.get("text")
-        or payload.get("snapshot")
-    )
-
-
-def _suffix_prefix_overlap(left: str, right: str) -> int:
-    if not left or not right:
-        return 0
-    max_len = min(len(left), len(right))
-    for size in range(max_len, 0, -1):
-        if left[-size:] == right[:size]:
-            return size
-    return 0
-
-
-def _merge_stream_text(previous: str, incoming: str) -> str:
-    previous = previous or ""
-    incoming = incoming or ""
-    if not incoming:
-        return previous
-    if not previous:
-        return incoming
-    if incoming == previous or incoming in previous:
-        return previous
-    if incoming.startswith(previous):
-        return incoming
-    return previous + incoming[_suffix_prefix_overlap(previous, incoming):]
+    for key in ("delta", "text", "snapshot"):
+        value = payload.get(key)
+        if value is not None:
+            return str(value)
+    return ""
 
 
 def _stream_text_from_events(events: list[dict[str, Any]]) -> str:
@@ -243,56 +219,8 @@ def _stream_text_from_events(events: list[dict[str, Any]]) -> str:
         if mode == "snapshot" or payload.get("snapshot") is not None:
             content = chunk
         else:
-            content = _merge_stream_text(content, chunk)
+            content += chunk
     return text(content)
-
-
-def _normalized_conversation_delta_payload(
-    db: Any,
-    *,
-    target_session_id: str,
-    conversation_run_id: str,
-    payload: dict[str, Any],
-) -> dict[str, Any] | None:
-    incoming = _payload_stream_text(payload)
-    if not incoming:
-        return None
-    normalized = dict(payload)
-    mode = text(normalized.get("mode")).lower()
-    if mode == "snapshot" or normalized.get("snapshot") is not None:
-        normalized["mode"] = "snapshot"
-        normalized["snapshot"] = incoming
-        normalized["text"] = incoming
-        normalized.pop("delta", None)
-        normalized.pop("output", None)
-        return normalized
-
-    previous = _final_deliverable_text_from_history(
-        db,
-        target_session_id=target_session_id,
-        conversation_run_id=conversation_run_id,
-        source_session_id="",
-        source_run_id="",
-    )
-    if previous and incoming == previous:
-        return None
-    suffix = incoming
-    if previous and incoming.startswith(previous):
-        suffix = incoming[len(previous):]
-    elif previous:
-        overlap = _suffix_prefix_overlap(previous, incoming)
-        if overlap > 0:
-            suffix = incoming[overlap:]
-    if not suffix:
-        return None
-    normalized["mode"] = "append"
-    normalized["text"] = suffix
-    normalized["delta"] = suffix
-    if "output" in normalized:
-        normalized["output"] = suffix
-    normalized["offset"] = len(previous)
-    normalized.pop("snapshot", None)
-    return normalized
 
 
 def _final_deliverable_text_from_history(
@@ -459,90 +387,6 @@ def _append_final_deliverable_message(
     )
 
 
-def _repair_final_deliverable_mirror_events(
-    db: Any,
-    *,
-    target_session_id: str,
-    conversation_run_id: str,
-    mission_id: str,
-    node_id: str,
-    source_run_id: str,
-    content: str,
-) -> int:
-    canonical = text(content)
-    if not target_session_id or not conversation_run_id or not canonical:
-        return 0
-
-    def _payload_matches(payload: dict[str, Any]) -> bool:
-        if not payload.get("team_mission_conversation_mirror"):
-            return False
-        if not payload.get("team_mission_final_deliverable"):
-            return False
-        if mission_id and text(payload.get("mission_id")) != mission_id:
-            return False
-        if source_run_id and text(payload.get("source_run_id")) != source_run_id:
-            return False
-        if node_id and text(payload.get("node_id")) != node_id:
-            return False
-        return True
-
-    def _do(conn: Any) -> int:
-        rows = conn.execute(
-            """
-            SELECT id, event_type, payload_json, event_json
-            FROM run_events
-            WHERE session_id = ?
-              AND run_id = ?
-              AND event_type IN ('message.delta', 'message.complete')
-            ORDER BY seq ASC, id ASC
-            """,
-            (target_session_id, conversation_run_id),
-        ).fetchall()
-        updated = 0
-        for row in rows:
-            payload = _json_loads(row["payload_json"])
-            if not _payload_matches(payload):
-                continue
-            event_type = text(row["event_type"])
-            next_payload = dict(payload)
-            if event_type == "message.delta":
-                next_payload["mode"] = "snapshot"
-                next_payload["text"] = canonical
-                next_payload["snapshot"] = canonical
-                next_payload.pop("delta", None)
-                next_payload.pop("output", None)
-            elif event_type == "message.complete":
-                next_payload["text"] = canonical
-            else:
-                continue
-            if next_payload == payload:
-                continue
-            event = _json_loads(row["event_json"])
-            if event:
-                event["payload"] = next_payload
-            conn.execute(
-                """
-                UPDATE run_events
-                SET payload_json = ?, event_json = ?
-                WHERE id = ?
-                """,
-                (
-                    _json_dumps(next_payload),
-                    _json_dumps(event) if event else row["event_json"],
-                    row["id"],
-                ),
-            )
-            updated += 1
-        return updated
-
-    try:
-        if hasattr(db, "_execute_write"):
-            return int(db._execute_write(_do) or 0)
-    except Exception:
-        return 0
-    return 0
-
-
 def recover_final_deliverable_messages(db: Any, conversation: dict[str, Any] | None) -> int:
     if not isinstance(conversation, dict):
         return 0
@@ -589,15 +433,6 @@ def recover_final_deliverable_messages(db: Any, conversation: dict[str, Any] | N
             binding = db.get_team_mission_run_binding(source_run_id)
         except Exception:
             binding = {}
-        _repair_final_deliverable_mirror_events(
-            db,
-            target_session_id=target_session_id,
-            conversation_run_id=conversation_run_id,
-            mission_id=mission_id,
-            node_id=node_id,
-            source_run_id=source_run_id,
-            content=final_deliverable_text,
-        )
         if _append_final_deliverable_message(
             db,
             mission_id=mission_id,
@@ -780,20 +615,16 @@ def mirror_event_to_conversation(
             source_run_id=source_run_id,
             prefer_source=True,
         )
-    elif is_final_deliverable:
-        final_deliverable_text = primary_deliverable_text(payload)
-    if final_deliverable_text:
+    if final_deliverable_text and event_type == "message.complete":
         payload["text"] = final_deliverable_text
-    if is_final_deliverable and event_type == "message.delta":
-        normalized_delta_payload = _normalized_conversation_delta_payload(
-            db,
-            target_session_id=target_session_id,
-            conversation_run_id=mirror_run_id,
-            payload=payload,
-        )
-        if normalized_delta_payload is None:
-            return {}
-        payload = normalized_delta_payload
+    if event_type == "message.delta":
+        stream_text = _payload_stream_text(payload)
+        if stream_text and not text(payload.get("mode")):
+            payload["mode"] = "append"
+        if text(payload.get("mode")).lower() == "append":
+            payload["delta"] = stream_text
+            payload["text"] = stream_text
+            payload.pop("snapshot", None)
     if (
         is_final_deliverable
         and event_type == "message.complete"
