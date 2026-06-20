@@ -953,6 +953,93 @@ def test_run_control_session_subscription_ignores_team_mission_projection_events
     assert delivered_events[0]["payload"]["delta"] == "leader"
 
 
+def test_team_mission_live_push_backfills_out_of_order_notify(tmp_path):
+    # The append listener fires outside the seq-assignment lock, so concurrent
+    # member-node appends can notify the live push out of seq order. The live push
+    # must deliver strictly contiguous in seq order (filling from the canonical log)
+    # so the subscriber never sees a gap — otherwise node streaming goes choppy.
+    from hermes_state import SessionDB
+    from tui_gateway.services import run_control
+    import hermes_team_mission_event_log as event_log
+
+    db = SessionDB(tmp_path / "state.db")
+    delivered = []
+
+    class CapturingTransport:
+        def write(self, obj):
+            delivered.append(obj)
+            return True
+
+    transport = CapturingTransport()
+    # team_mission_events.mission_id FK-references team_missions, so the mission must
+    # exist before events can be appended.
+    db.upsert_team_mission(
+        mission_id="mission-x", team_id="team-x", title="X",
+        mode="supervised_mission", status="running",
+    )
+    # Append 3 canonical events to the log WITHOUT firing the live notify, so the DB
+    # holds seqs 1,2,3 while the subscription is still at last_seq=0.
+    saved_listeners = list(event_log._event_listeners)
+    event_log._event_listeners.clear()
+    stored = []
+    try:
+        for index, delta in enumerate(["a", "b", "c"], start=1):
+            stored.append(event_log.append_team_mission_event(
+                db,
+                mission_id="mission-x",
+                event={
+                    "type": "team_mission.runtime.event",
+                    "mission_id": "mission-x",
+                    "payload": {
+                        "protocol": "team_mission.event.v1",
+                        "kind": "node.output.delta",
+                        "source_event_type": "message.delta",
+                        "mission_id": "mission-x",
+                        "text_stream": {"mode": "append", "delta": delta, "offset": 0},
+                    },
+                },
+                dedupe_key=f"dk-{index}",
+            ))
+    finally:
+        event_log._event_listeners[:] = saved_listeners
+
+    subscription_id = "sub-test-backfill"
+    with run_control._lock:
+        run_control._subscriptions_by_id[subscription_id] = {
+            "id": subscription_id,
+            "kind": "team_mission",
+            "mission_id": "mission-x",
+            "stored_session_id": "",
+            "transport": transport,
+            "last_seq": 0,
+            "db": db,
+            "active_only": False,
+            "runtime_scope_key": "",
+            "active_run_ids": set(),
+        }
+        run_control._subscription_ids_by_mission["mission-x"].add(subscription_id)
+    try:
+        # Fire the seq-3 notify FIRST (out of order). seq 3 > last_seq(0)+1 → the live
+        # push backfills 1,2,3 from the canonical log in order.
+        run_control._deliver_team_mission_events("mission-x", [stored[2]])
+        # The lower seqs arrive late → deduped by the per-seq reservation.
+        run_control._deliver_team_mission_events("mission-x", [stored[0]])
+        run_control._deliver_team_mission_events("mission-x", [stored[1]])
+    finally:
+        with run_control._lock:
+            run_control._subscriptions_by_id.pop(subscription_id, None)
+            run_control._subscription_ids_by_mission.get("mission-x", set()).discard(subscription_id)
+        db.close()
+
+    seqs = [
+        (item.get("params") or {}).get("seq")
+        for item in delivered
+        if item.get("method") == "event"
+    ]
+    # strictly contiguous, in order, no gap, no duplicate
+    assert seqs == [1, 2, 3]
+
+
 def test_run_control_replaces_duplicate_session_subscriptions_per_transport(tmp_path):
     from hermes_state import SessionDB
     from tui_gateway.services import run_control
