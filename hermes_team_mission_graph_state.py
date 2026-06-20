@@ -12,6 +12,7 @@ _DEPENDENCY_SATISFIED_STATUSES = {"completed", "verified"}
 _STARTABLE_NODE_STATUSES = {"ready"}
 _WAITING_DEPENDENCY_STATUSES = {"todo", "waiting_dependency", "blocked_waiting_dependency"}
 _ACTIVE_NODE_STATUSES = {"running", "starting", "waiting_approval"}
+_TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 _EXECUTION_MODES_REQUIRE_FINALIZERS = {"supervised_mission", "autonomous_mission", "manual_graph"}
 _NON_WORK_NODE_KINDS = TEAM_MISSION_CONTROL_NODE_KINDS
 
@@ -222,7 +223,8 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
         mission_status = "waiting_dependency"
     else:
         mission_status = str(mission.get("status") or "draft")
-    if mission_status != str(mission.get("status") or ""):
+    prior_mission_status = str(mission.get("status") or "")
+    if mission_status != prior_mission_status:
         db.upsert_team_mission(
             mission_id=mission_id,
             team_id=str(mission.get("team_id") or ""),
@@ -236,6 +238,21 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
             metadata=dict(mission.get("metadata") or {}),
         )
         updated_graph = db.get_team_mission_graph(mission_id)
+        # Cap canonical-log growth at the source: the instant a mission first
+        # reaches a terminal state, prune its high-volume stream deltas. This
+        # runs once per mission at completion regardless of whether the
+        # conversation is ever reopened, so team_mission_events cannot
+        # accumulate unbounded across never-revisited missions.
+        if (
+            mission_status.lower() in _TERMINAL_MISSION_STATUSES
+            and prior_mission_status.lower() not in _TERMINAL_MISSION_STATUSES
+        ):
+            pruner = getattr(db, "prune_team_mission_events", None)
+            if callable(pruner):
+                try:
+                    pruner(mission_id)
+                except Exception:
+                    pass
     return {
         "mission_id": mission_id,
         "graph": updated_graph,
