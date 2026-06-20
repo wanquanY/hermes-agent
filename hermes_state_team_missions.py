@@ -947,7 +947,83 @@ class SessionDBTeamMissionMixin:
                 (conversation_id,),
             ).fetchone()) or {}
 
-        return self._execute_write(_do)
+        record = self._execute_write(_do)
+        self._project_team_conversation_to_session_index(record)
+        return record
+
+    def _project_team_conversation_to_session_index(self, record: Dict[str, Any]) -> None:
+        """Surface a team-mission conversation in the control-plane session_index.
+
+        ON CONFLICT updates only the static/team fields — never the live status
+        projection (that is owned by update_session_index_for_mission, driven by
+        the graph reducer). Keyed by the conversation's stable session id; carries
+        mission_id so mission-status updates can target it. Best-effort."""
+        if not record:
+            return
+        sid = _text(record.get("stable_session_id")) or _text(record.get("conversation_id"))
+        if not sid:
+            return
+        title = _text(record.get("title"))
+        team_id = _text(record.get("team_id"))
+        conversation_id = _text(record.get("conversation_id"))
+        mission_id = _text(record.get("active_mission_id"))
+        message_count = int(record.get("message_count") or 0)
+        started = float(record.get("created_at") or 0)
+        updated = float(record.get("updated_at") or 0) or started
+
+        def _do(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                INSERT INTO session_index (
+                    session_id, title, source, session_kind, team_id,
+                    conversation_id, mission_id, message_count, started_at, updated_at
+                ) VALUES (?, ?, 'team_mission', 'team_mission', ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    title=excluded.title,
+                    source=excluded.source,
+                    session_kind=excluded.session_kind,
+                    team_id=excluded.team_id,
+                    conversation_id=excluded.conversation_id,
+                    mission_id=excluded.mission_id,
+                    message_count=excluded.message_count,
+                    updated_at=excluded.updated_at
+                """,
+                (sid, title, team_id, conversation_id, mission_id, message_count, started, updated),
+            )
+
+        try:
+            self._execute_write(_do)
+        except Exception:
+            pass
+
+    def update_session_index_for_mission(
+        self,
+        mission_id: str,
+        *,
+        status: str,
+        running: bool,
+        waiting_approval: bool = False,
+    ) -> int:
+        """Project a mission's live state onto its conversation's session_index row
+        (matched by mission_id). UPDATE-only; returns rows affected."""
+        mid = _text(mission_id)
+        if not mid:
+            return 0
+
+        def _do(conn: sqlite3.Connection) -> int:
+            return int(conn.execute(
+                """
+                UPDATE session_index
+                   SET status = ?, running = ?, waiting_approval = ?
+                 WHERE mission_id = ?
+                """,
+                (str(status or "idle"), 1 if running else 0, 1 if waiting_approval else 0, mid),
+            ).rowcount or 0)
+
+        try:
+            return self._execute_write(_do)
+        except Exception:
+            return 0
 
     def ensure_team_mission_conversation(
         self,

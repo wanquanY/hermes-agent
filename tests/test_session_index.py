@@ -144,3 +144,56 @@ def test_run_terminal_does_not_clobber_other_active_run(tmp_path: Path):
     item = db.list_session_index()["sessions"][0]
     assert item["running"] is True
     assert item["active_run_id"] == "run-A"
+
+
+def test_team_conversation_projects_into_session_index(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-1",
+        team_id="team-1",
+        stable_session_id="team-session-1",
+        title="团队会话",
+        active_mission_id="mission-1",
+    )
+    items = db.list_session_index()["sessions"]
+    assert len(items) == 1
+    it = items[0]
+    assert it["session_id"] == "team-session-1"
+    assert it["session_kind"] == "team_mission"
+    assert it["team_id"] == "team-1"
+    assert it["mission_id"] == "mission-1"
+    assert it["title"] == "团队会话"
+
+
+def test_update_session_index_for_mission_sets_running(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-1", team_id="team-1",
+        stable_session_id="team-session-1", title="t", active_mission_id="mission-1",
+    )
+    assert db.update_session_index_for_mission("mission-1", status="running", running=True) == 1
+    it = db.list_session_index()["sessions"][0]
+    assert it["running"] is True and it["status"] == "running"
+
+    db.update_session_index_for_mission("mission-1", status="waiting_approval", running=False, waiting_approval=True)
+    it = db.list_session_index()["sessions"][0]
+    assert it["waiting_approval"] is True and it["status"] == "waiting_approval"
+
+
+def test_team_conversation_touch_preserves_live_mission_status(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-1", team_id="team-1",
+        stable_session_id="team-session-1", title="t", active_mission_id="mission-1",
+    )
+    db.update_session_index_for_mission("mission-1", status="running", running=True)
+    # a later conversation touch (e.g. title update) must NOT reset running
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-1", team_id="team-1",
+        stable_session_id="team-session-1", title="renamed", active_mission_id="mission-1",
+        replace_title=True,
+    )
+    it = db.list_session_index()["sessions"][0]
+    assert it["title"] == "renamed"
+    assert it["running"] is True
+    assert it["status"] == "running"

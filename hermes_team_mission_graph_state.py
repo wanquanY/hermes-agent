@@ -238,6 +238,28 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
             metadata=dict(mission.get("metadata") or {}),
         )
         updated_graph = db.get_team_mission_graph(mission_id)
+        # Project the mission's live state onto its conversation's session_index
+        # row so the sidebar's running/approval indicator stays correct from the
+        # single-query read (no read-time mission-graph walk). Only on status
+        # change, so this is low frequency.
+        index_updater = getattr(db, "update_session_index_for_mission", None)
+        if callable(index_updater):
+            ms = mission_status.lower()
+            if ms in _TERMINAL_MISSION_STATUSES:
+                idx_status, idx_running, idx_waiting = "idle", False, False
+            elif ms == "waiting_approval":
+                idx_status, idx_running, idx_waiting = "waiting_approval", False, True
+            else:
+                idx_status, idx_running, idx_waiting = "running", True, False
+            try:
+                index_updater(
+                    mission_id,
+                    status=idx_status,
+                    running=idx_running,
+                    waiting_approval=idx_waiting,
+                )
+            except Exception:
+                pass
         # Cap canonical-log growth at the source: the instant a mission first
         # reaches a terminal state, prune its high-volume stream deltas. This
         # runs once per mission at completion regardless of whether the
