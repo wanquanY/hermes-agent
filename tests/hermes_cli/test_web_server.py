@@ -1086,6 +1086,454 @@ class TestWebServerEndpoints:
         if resp.status_code == 200:
             assert "FastAPI" not in resp.text  # Should not serve the actual source
 
+    def test_spa_assets_are_read_as_utf8(self, monkeypatch, tmp_path):
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+        import hermes_cli.web_server as ws
+
+        dist = tmp_path / "web_dist"
+        assets = dist / "assets"
+        assets.mkdir(parents=True)
+        index_path = dist / "index.html"
+        css_path = assets / "app.css"
+        index_path.write_text("<html><head></head><body>cafe cafe</body></html>", encoding="utf-8")
+        css_path.write_text("body::before { content: 'cafe'; }", encoding="utf-8")
+
+        original_read_text = Path.read_text
+        seen_encodings = {}
+
+        def tracking_read_text(path_self, *args, **kwargs):
+            if path_self == index_path:
+                seen_encodings["index"] = kwargs.get("encoding")
+            elif path_self == css_path:
+                seen_encodings["css"] = kwargs.get("encoding")
+            return original_read_text(path_self, *args, **kwargs)
+
+        monkeypatch.setattr(ws, "WEB_DIST", dist)
+        monkeypatch.setattr(Path, "read_text", tracking_read_text)
+        spa_app = FastAPI()
+        ws.mount_spa(spa_app)
+        spa_client = TestClient(spa_app)
+
+        index_resp = spa_client.get("/chat")
+        assert index_resp.status_code == 200
+        assert "cafe cafe" in index_resp.text
+
+        css_resp = spa_client.get("/assets/app.css", headers={"x-forwarded-prefix": "/hermes"})
+        assert css_resp.status_code == 200
+        assert "content: 'cafe';" in css_resp.text
+
+        assert seen_encodings == {"index": "utf-8", "css": "utf-8"}
+
+    def test_set_model_main_nous_applies_gateway_defaults(self, monkeypatch):
+        """Switching the main provider to Nous calls apply_nous_managed_defaults
+        (mirroring the CLI's post-model-selection Tool Gateway routing) and
+        surfaces the routed tools in the response."""
+        import hermes_cli.nous_subscription as ns
+
+        called = {}
+
+        def fake_apply(config, *, enabled_toolsets=None, force_fresh=False):
+            called["enabled"] = set(enabled_toolsets or ())
+            called["force_fresh"] = force_fresh
+            # Simulate routing the unconfigured web tool through the gateway.
+            web = config.setdefault("web", {})
+            web["backend"] = "firecrawl"
+            return {"web"}
+
+        monkeypatch.setattr(ns, "apply_nous_managed_defaults", fake_apply)
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "nous", "model": "hermes-4"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["provider"] == "nous"
+        assert data["gateway_tools"] == ["web"]
+        assert called["force_fresh"] is True
+
+    def test_set_model_main_non_nous_skips_gateway_defaults(self, monkeypatch):
+        """Non-Nous providers must NOT trigger Tool Gateway auto-routing."""
+        import hermes_cli.nous_subscription as ns
+
+        def boom(*args, **kwargs):  # pragma: no cover - must not be called
+            raise AssertionError("apply_nous_managed_defaults called for non-nous provider")
+
+        monkeypatch.setattr(ns, "apply_nous_managed_defaults", boom)
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data.get("gateway_tools", []) == []
+
+    def test_apply_main_model_assignment_base_url_and_context_reconcile(self):
+        """The shared main-slot assignment helper must persist a supplied
+        base_url, clear a stale base_url only when switching providers, preserve
+        it on same-provider re-assignment, and always drop a hardcoded
+        context_length override. Both POST /api/model/set and profile-model
+        writes route through this, so the contract is pinned here."""
+        from hermes_cli.web_server import _apply_main_model_assignment
+
+        # Custom + base_url → persisted; stale context_length dropped.
+        out = _apply_main_model_assignment(
+            {"context_length": 8192}, "custom", "llama-3.1-8b", "http://127.0.0.1:8000/v1"
+        )
+        assert out["provider"] == "custom"
+        assert out["default"] == "llama-3.1-8b"
+        assert out["base_url"] == "http://127.0.0.1:8000/v1"
+        assert "context_length" not in out
+
+        # Switching providers (custom → openrouter) → stale base_url cleared.
+        out = _apply_main_model_assignment(
+            {"provider": "custom", "base_url": "http://127.0.0.1:8000/v1"},
+            "openrouter",
+            "anthropic/claude-opus-4.8",
+        )
+        assert out["provider"] == "openrouter"
+        assert out["base_url"] == ""
+
+        # Same provider, no new base_url → existing custom endpoint preserved.
+        # Regression: picking a different MiMo model under xiaomi must NOT wipe a
+        # Token Plan base_url (https://token-plan-*.xiaomimimo.com/v1).
+        out = _apply_main_model_assignment(
+            {"provider": "xiaomi", "base_url": "https://token-plan-ams.xiaomimimo.com/v1"},
+            "xiaomi",
+            "mimo-v2.5-pro",
+        )
+        assert out["provider"] == "xiaomi"
+        assert out["default"] == "mimo-v2.5-pro"
+        assert out["base_url"] == "https://token-plan-ams.xiaomimimo.com/v1"
+
+        # A supplied base_url is honored for any provider, not just custom.
+        out = _apply_main_model_assignment(
+            {"provider": "xiaomi"},
+            "xiaomi",
+            "mimo-v2.5",
+            "https://token-plan-cn.xiaomimimo.com/v1",
+        )
+        assert out["base_url"] == "https://token-plan-cn.xiaomimimo.com/v1"
+
+        # Switching providers without a base_url → don't invent one, clear stale.
+        out = _apply_main_model_assignment(
+            {"provider": "openrouter", "base_url": "http://stale:1/v1"}, "custom", "m"
+        )
+        assert out["base_url"] == ""
+
+        # Non-dict input is coerced to a fresh dict (never raises).
+        out = _apply_main_model_assignment("not-a-dict", "custom", "m", "http://x/v1")
+        assert out == {"provider": "custom", "default": "m", "base_url": "http://x/v1"}
+
+        # api_key follows the same lifecycle as base_url:
+        # supplied → persisted.
+        out = _apply_main_model_assignment(
+            {"api": "sk-legacy-old"}, "custom", "m", "http://x/v1", "sk-secret"
+        )
+        assert out["api_key"] == "sk-secret"
+        assert "api" not in out
+
+        # same provider, no new key → existing key preserved (re-picking a model
+        # on the same custom endpoint must not wipe the saved key).
+        out = _apply_main_model_assignment(
+            {"provider": "custom", "base_url": "http://x/v1", "api_key": "sk-keep"},
+            "custom",
+            "m2",
+        )
+        assert out["api_key"] == "sk-keep"
+
+        # switching providers without a new key → stale key cleared.
+        out = _apply_main_model_assignment(
+            {"provider": "custom", "api_key": "sk-old", "api_mode": "anthropic_messages"},
+            "openrouter",
+            "m",
+        )
+        assert "api_key" not in out
+        assert "api_mode" not in out
+
+    def test_parse_model_ids_handles_openai_and_bare_shapes(self):
+        """Model discovery must tolerate the common /v1/models shapes and
+        never raise (so a slightly non-standard local endpoint still works)."""
+        from hermes_cli.web_server import _parse_model_ids
+
+        class FakeResp:
+            def __init__(self, payload, ok=True):
+                self._payload = payload
+                self.is_success = ok
+
+            def json(self):
+                if isinstance(self._payload, Exception):
+                    raise self._payload
+                return self._payload
+
+        # OpenAI / vLLM / llama.cpp shape.
+        assert _parse_model_ids(
+            FakeResp({"data": [{"id": "llama-3.1-8b"}, {"id": "qwen2.5-7b"}]})
+        ) == ["llama-3.1-8b", "qwen2.5-7b"]
+        # Bare list of ids.
+        assert _parse_model_ids(FakeResp({"data": ["m1", "m2"]})) == ["m1", "m2"]
+        # Top-level list.
+        assert _parse_model_ids(FakeResp([{"id": "x"}])) == ["x"]
+        # Non-success / malformed / exception → [] (never raises).
+        assert _parse_model_ids(FakeResp({"data": []}, ok=False)) == []
+        assert _parse_model_ids(FakeResp({"nope": 1})) == []
+        assert _parse_model_ids(FakeResp(ValueError("bad json"))) == []
+
+    def test_set_model_main_custom_persists_base_url(self):
+        """Custom/local providers must persist model.base_url so the runtime
+        resolver (which ignores OPENAI_BASE_URL) can route to a self-hosted
+        endpoint without an API key. Regression for the desktop onboarding bug
+        where 'Local / custom endpoint' could never be configured."""
+        from hermes_cli.config import load_config
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "custom",
+                "model": "llama-3.1-8b",
+                "base_url": "http://127.0.0.1:8000/v1",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["provider"] == "custom"
+        assert data["base_url"] == "http://127.0.0.1:8000/v1"
+
+        model_cfg = load_config().get("model")
+        assert isinstance(model_cfg, dict)
+        assert model_cfg["provider"] == "custom"
+        assert model_cfg["default"] == "llama-3.1-8b"
+        assert model_cfg["base_url"] == "http://127.0.0.1:8000/v1"
+
+    def test_set_model_main_custom_persists_api_key_and_registers_provider(self):
+        """A custom endpoint that requires auth must persist model.api_key (where
+        the runtime reads it) AND register a named custom_providers entry so the
+        endpoint reappears as a ready row in the picker — matching the
+        ``hermes model`` custom flow. Regression for the desktop loop where a
+        keyed custom endpoint could never be configured from the GUI."""
+        from hermes_cli.config import load_config
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "custom",
+                "model": "gpt-oss-120b",
+                "base_url": "https://text.example.com/v1",
+                "api_key": "sk-secret",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+        cfg = load_config()
+        model_cfg = cfg.get("model")
+        assert isinstance(model_cfg, dict)
+        assert model_cfg["provider"] == "custom"
+        assert model_cfg["base_url"] == "https://text.example.com/v1"
+        assert model_cfg["api_key"] == "sk-secret"
+
+        # Registered in custom_providers (dedup by base_url) so the picker shows
+        # a proper ready row instead of the "needs setup" dead-end.
+        custom = cfg.get("custom_providers") or []
+        assert any(
+            isinstance(e, dict)
+            and e.get("base_url") == "https://text.example.com/v1"
+            and e.get("api_key") == "sk-secret"
+            and e.get("model") == "gpt-oss-120b"
+            for e in custom
+        )
+
+    def test_set_model_main_non_custom_clears_stale_base_url(self):
+        """Switching to a hosted provider must clear a stale base_url so the
+        resolver picks that provider's own default endpoint."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg["model"] = {
+            "provider": "custom",
+            "default": "llama-3.1-8b",
+            "base_url": "http://127.0.0.1:8000/v1",
+        }
+        save_config(cfg)
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["base_url"] == ""
+
+    def test_set_model_main_same_provider_preserves_base_url(self):
+        """Re-picking a model under the SAME provider must NOT wipe a configured
+        base_url. Regression for the desktop bug where selecting a Xiaomi MiMo
+        model reset a Token Plan endpoint back to the registry default, breaking
+        Token Plan keys (https://token-plan-*.xiaomimimo.com/v1)."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg["model"] = {
+            "provider": "xiaomi",
+            "default": "mimo-v2.5-pro",
+            "base_url": "https://token-plan-ams.xiaomimimo.com/v1",
+        }
+        save_config(cfg)
+
+        # Desktop model picker sends provider+model only (no base_url).
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "xiaomi", "model": "mimo-v2.5"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["base_url"] == "https://token-plan-ams.xiaomimimo.com/v1"
+
+        model_cfg = load_config().get("model")
+        assert isinstance(model_cfg, dict)
+        assert model_cfg["default"] == "mimo-v2.5"
+        assert model_cfg["base_url"] == "https://token-plan-ams.xiaomimimo.com/v1"
+
+    def test_set_model_main_reports_stale_auxiliary_pins(self):
+        """Switching the main provider must report auxiliary slots still pinned
+        to a *different* provider so the UI can warn the user their helper tasks
+        aren't following the switch (the silent credit-burn path)."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg["model"] = {"provider": "nous", "default": "hermes-4"}
+        cfg["auxiliary"] = {
+            # Pinned to nous — same as the OLD main, becomes stale after switch.
+            "compression": {"provider": "nous", "model": "anthropic/claude-sonnet-4.6"},
+            # Auto — follows main, never stale.
+            "vision": {"provider": "auto", "model": ""},
+            # Pinned to a third provider — also stale vs the new main.
+            "curator": {"provider": "deepseek", "model": "deepseek-chat"},
+        }
+        save_config(cfg)
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+        )
+        assert resp.status_code == 200
+        stale = resp.json()["stale_aux"]
+        stale_tasks = {entry["task"] for entry in stale}
+        assert stale_tasks == {"compression", "curator"}
+        # auto slot must never appear.
+        assert "vision" not in stale_tasks
+        # Provider/model echoed back for the UI label.
+        comp = next(e for e in stale if e["task"] == "compression")
+        assert comp["provider"] == "nous"
+        assert comp["model"] == "anthropic/claude-sonnet-4.6"
+
+    def test_set_model_main_no_stale_when_aux_matches_new_provider(self):
+        """Aux slots pinned to the SAME provider as the new main are not stale."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg["model"] = {"provider": "nous", "default": "hermes-4"}
+        cfg["auxiliary"] = {
+            "compression": {"provider": "openrouter", "model": "google/gemini-2.5-flash"},
+            "vision": {"provider": "auto", "model": ""},
+        }
+        save_config(cfg)
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["stale_aux"] == []
+
+        model_cfg = load_config().get("model")
+        assert model_cfg["provider"] == "openrouter"
+        assert model_cfg.get("base_url", "") == ""
+
+    def test_set_model_main_gateway_failure_does_not_block_save(self, monkeypatch):
+        """A Portal/gateway hiccup must never prevent saving the model."""
+        import hermes_cli.nous_subscription as ns
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("portal unreachable")
+
+        monkeypatch.setattr(ns, "apply_nous_managed_defaults", boom)
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "nous", "model": "hermes-4"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data.get("gateway_tools", []) == []
+
+    def test_recommended_default_nous_honors_free_tier(self, monkeypatch):
+        """For a free-tier Nous user, the recommended default must be a free
+        model (mirroring `hermes model`), not the first curated paid entry."""
+        import hermes_cli.models as models_mod
+
+        monkeypatch.setattr(models_mod, "get_curated_nous_model_ids", lambda: ["paid/expensive", "free/cheap"])
+        monkeypatch.setattr(
+            models_mod, "get_pricing_for_provider",
+            lambda provider: {"paid/expensive": {"input": "1"}, "free/cheap": {"input": "0"}},
+        )
+        monkeypatch.setattr(models_mod, "check_nous_free_tier", lambda *, force_fresh=False: True)
+        monkeypatch.setattr(
+            models_mod, "union_with_portal_free_recommendations",
+            lambda ids, pricing, url: (ids, pricing),
+        )
+        # Free partition keeps only the free model selectable.
+        monkeypatch.setattr(
+            models_mod, "partition_nous_models_by_tier",
+            lambda ids, pricing, free_tier: (["free/cheap"], ["paid/expensive"]),
+        )
+
+        resp = self.client.get("/api/model/recommended-default?provider=nous")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["provider"] == "nous"
+        assert data["model"] == "free/cheap"
+        assert data["free_tier"] is True
+
+    def test_recommended_default_nous_paid_uses_curated_default(self, monkeypatch):
+        """A paid Nous user gets the first curated/paid-augmented model."""
+        import hermes_cli.models as models_mod
+
+        monkeypatch.setattr(models_mod, "get_curated_nous_model_ids", lambda: ["top/model", "other/model"])
+        monkeypatch.setattr(models_mod, "get_pricing_for_provider", lambda provider: {})
+        monkeypatch.setattr(models_mod, "check_nous_free_tier", lambda *, force_fresh=False: False)
+        monkeypatch.setattr(
+            models_mod, "union_with_portal_paid_recommendations",
+            lambda ids, pricing, url: (ids, pricing),
+        )
+
+        resp = self.client.get("/api/model/recommended-default?provider=nous")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["provider"] == "nous"
+        assert data["model"] == "top/model"
+        assert data["free_tier"] is False
+
+    def test_recommended_default_handles_failure_gracefully(self, monkeypatch):
+        """Endpoint never 500s — returns empty model on internal error."""
+        import hermes_cli.models as models_mod
+
+        def boom():
+            raise RuntimeError("portal down")
+
+        monkeypatch.setattr(models_mod, "get_curated_nous_model_ids", boom)
+
+        resp = self.client.get("/api/model/recommended-default?provider=nous")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["model"] == ""
+        assert data["free_tier"] is None
+
 
 # ---------------------------------------------------------------------------
 # _build_schema_from_config tests
