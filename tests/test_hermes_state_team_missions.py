@@ -1041,6 +1041,128 @@ def test_cancel_team_mission_marks_active_graph_and_returns_run_bindings(tmp_pat
     assert result["graph"]["mission"]["metadata"]["cancel_reason"] == "用户终止团队任务"
 
 
+def test_cancel_team_mission_reaps_zombie_running_run(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="running",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="verify-stats-report",
+        kind="worker",
+        title="Verify",
+        status="running",
+    )
+    # A member-node run that was started by the scheduler around/after cancel and
+    # is left 'running' in the control-plane runs table.
+    db.upsert_run(
+        run_id="run-verify",
+        session_id="team:mission-1:node:verify-stats-report",
+        runtime_scope_key="team:mission-1:node:verify-stats-report",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="verify-stats-report",
+        run_id="run-verify",
+        session_id="team:mission-1:node:verify-stats-report",
+        runtime_scope_key="team:mission-1:node:verify-stats-report",
+    )
+
+    result = db.cancel_team_mission(mission_id="mission-1", canceled_by="user")
+
+    assert result["mission_status"] == "cancelled"
+    assert [b["run_id"] for b in result["cancel_run_bindings"]] == ["run-verify"]
+    # The reaper must have forced the zombie run terminal in the runs table.
+    assert db.get_run("run-verify")["status"] == "cancelled"
+
+
+def test_cancel_already_terminal_mission_reaps_leftover_running_run(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    # Mission is ALREADY terminal (a prior cancel completed) but a member-node
+    # worker run got scheduled after that and is still 'running'.
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="cancelled",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="verify-stats-report",
+        kind="worker",
+        title="Verify",
+        status="running",
+    )
+    db.upsert_run(
+        run_id="run-verify",
+        session_id="team:mission-1:node:verify-stats-report",
+        runtime_scope_key="team:mission-1:node:verify-stats-report",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="verify-stats-report",
+        run_id="run-verify",
+        session_id="team:mission-1:node:verify-stats-report",
+        runtime_scope_key="team:mission-1:node:verify-stats-report",
+    )
+
+    result = db.cancel_team_mission(mission_id="mission-1", canceled_by="user")
+
+    # Even though the mission was already terminal, the leftover running run is
+    # surfaced for worker termination AND reaped terminal in the DB.
+    assert [b["run_id"] for b in result["cancel_run_bindings"]] == ["run-verify"]
+    assert db.get_run("run-verify")["status"] == "cancelled"
+
+
+def test_complete_plan_approval_gate_inherits_leader_owner(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    # Mission whose metadata members list is empty, but the leader/root node
+    # already carries the real leader profile. The approval gate created on plan
+    # completion must be owned by that leader, not the synthetic placeholder.
+    db.upsert_team_mission(
+        mission_id="m1",
+        team_id="t1",
+        title="Supervised",
+        mode="supervised_mission",
+        status="planning",
+        leader_session_id="team-session-1",
+    )
+    db.upsert_team_mission_node(
+        mission_id="m1",
+        node_id="m1::root",
+        kind="root",
+        title="Plan",
+        status="running",
+        assignee_profile_id="profile-leader",
+        assignee_profile_version_id="version-leader",
+        metadata={"role": "leader", "phase": "planning"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="m1",
+        node_id="w1",
+        kind="worker",
+        title="Work",
+        status="todo",
+    )
+
+    db.complete_team_mission_plan(mission_id="m1")
+
+    graph = db.get_team_mission_graph("m1")
+    approval = [n for n in graph["nodes"] if n["kind"] == "approval_gate"]
+    assert len(approval) == 1
+    assert approval[0]["assignee_profile_id"] == "profile-leader"
+    assert approval[0]["assignee_profile_version_id"] == "version-leader"
+    # No synthetic "Leader" placeholder owner.
+    assert approval[0].get("assignee_display_name") != "Leader"
+
+
 def test_team_mission_runtime_events_reuse_ordinary_run_event_coalescing(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(

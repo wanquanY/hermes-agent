@@ -93,6 +93,10 @@ _ACTIVE_RUN_STATUSES = {
     "cancelling",
     "finalizing",
 }
+# Any run status that is NOT in this set is treated as still-live by the cancel
+# reaper, so unexpected/intermediate statuses can never survive a mission cancel
+# as zombie "running" runs in the control-plane DB.
+_TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 _TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 _EXECUTION_MODES_REQUIRE_FINALIZERS = {"supervised_mission", "autonomous_mission", "manual_graph"}
 _NON_WORK_NODE_KINDS = TEAM_MISSION_CONTROL_NODE_KINDS
@@ -2446,6 +2450,72 @@ class SessionDBTeamMissionMixin:
             )
         return self.get_team_mission_graph(mission_id)
 
+    def _approval_actions_with_leader_assignee(
+        self,
+        mission_id: str,
+        actions: TeamMissionStrategyActions,
+    ) -> TeamMissionStrategyActions:
+        """Stamp approval-gate node specs with the resolved leader assignee.
+
+        The mode strategy creates the approval gate without an assignee. This
+        backfills the leader/root node's already-resolved assignee (profile +
+        member id + display name) onto each approval-gate spec so the approval
+        node is owned by the real leader instead of the synthetic "Leader"
+        placeholder when the mission members list is momentarily unavailable.
+        """
+        if not any(_normalize_node_kind(node.kind) == "approval_gate" for node in actions.nodes):
+            return actions
+        graph = self.get_team_mission_graph(mission_id)
+        graph_nodes = graph.get("nodes", []) if isinstance(graph, dict) else []
+        leader_node = next(
+            (
+                node
+                for node in graph_nodes
+                if isinstance(node, dict) and _normalize_node_kind(node.get("kind")) == "root"
+            ),
+            None,
+        )
+        if not isinstance(leader_node, dict):
+            return actions
+        leader_profile_id = _text(leader_node.get("assignee_profile_id"))
+        leader_profile_version_id = _text(leader_node.get("assignee_profile_version_id"))
+        leader_metadata = leader_node.get("metadata") if isinstance(leader_node.get("metadata"), dict) else {}
+        leader_member_id = _text(
+            leader_metadata.get("assignee_member_id") or leader_metadata.get("assigneeMemberId")
+        )
+        # The synthetic placeholder owner uses member_id == "leader"; never
+        # propagate it as if it were a real member.
+        if leader_member_id == "leader" and not leader_profile_id:
+            leader_member_id = ""
+        leader_display_name = _text(
+            leader_metadata.get("assignee_display_name") or leader_metadata.get("assigneeDisplayName")
+        )
+        # Nothing real to inherit (mission has no resolvable leader); leave the
+        # spec untouched so existing fallback resolution still applies.
+        if not leader_profile_id and not leader_member_id:
+            return actions
+
+        def _with_leader(node: TeamMissionNodeSpec) -> TeamMissionNodeSpec:
+            if _normalize_node_kind(node.kind) != "approval_gate":
+                return node
+            metadata = dict(node.metadata or {})
+            metadata.setdefault("role", "leader")
+            metadata.setdefault("phase", "approval")
+            if leader_member_id:
+                metadata["assignee_member_id"] = leader_member_id
+                metadata["assigneeMemberId"] = leader_member_id
+            if leader_display_name:
+                metadata.setdefault("assignee_display_name", leader_display_name)
+                metadata.setdefault("assigneeDisplayName", leader_display_name)
+            return replace(
+                node,
+                assignee_profile_id=node.assignee_profile_id or leader_profile_id,
+                assignee_profile_version_id=node.assignee_profile_version_id or leader_profile_version_id,
+                metadata=metadata,
+            )
+
+        return replace(actions, nodes=tuple(_with_leader(node) for node in actions.nodes))
+
     def complete_team_mission_plan(
         self,
         *,
@@ -2491,6 +2561,14 @@ class SessionDBTeamMissionMixin:
             planned_edges=planned_edges,
         )
         actions = _strategy_actions_with_task_id(actions, normalized_task_id)
+        # Approval-gate nodes are leader-owned. The mode strategy has no DB
+        # access, so it cannot stamp the real leader assignee on the approval
+        # node and leaves it blank. If we persist it blank and the mission
+        # members list is not resolvable at that instant, assignee resolution
+        # falls back to the synthetic "Leader" placeholder and the approval node
+        # appears undispatched. Seed the approval node spec with the leader/root
+        # node's already-resolved assignee so it is owned by the real leader.
+        actions = self._approval_actions_with_leader_assignee(mission_id, actions)
         updated_graph = self.apply_team_mission_strategy_actions(
             mission_id=mission_id,
             actions=actions,
@@ -2619,26 +2697,56 @@ class SessionDBTeamMissionMixin:
         mission_status = _text(mission.get("status")).lower()
         nodes = [node for node in graph.get("nodes", []) if isinstance(node, dict)]
         bindings = [binding for binding in graph.get("run_bindings", []) if isinstance(binding, dict)]
+        canceled_at = time.time()
+
+        # Safety reaper: re-read the *current* run status for EVERY run bound to
+        # this mission (not just a stale graph snapshot) and force any run that
+        # is not already terminal to a terminal status in the control-plane DB.
+        # This guarantees no member-node worker run can survive a mission cancel
+        # as a zombie "running" run, even if the scheduler started it around or
+        # after the cancel.
         cancel_run_bindings: list[Dict[str, Any]] = []
         active_run_ids: set[str] = set()
         for binding in bindings:
             run_id = _text(binding.get("run_id"))
-            if not run_id:
+            if not run_id or run_id in active_run_ids:
                 continue
             run = self.get_run(run_id) if hasattr(self, "get_run") else None
             run_status = _text((run or {}).get("status")).lower()
-            if run_status in _ACTIVE_RUN_STATUSES:
+            if run and run_status not in _TERMINAL_RUN_STATUSES:
                 active_run_ids.add(run_id)
                 cancel_run_bindings.append(binding)
+                if hasattr(self, "upsert_run"):
+                    # Reap the run to a terminal status so the control-plane DB
+                    # can never report it as 'running' after a cancel. The
+                    # gateway still issues run.cancel for live worker
+                    # termination; this is the durable backstop.
+                    self.upsert_run(
+                        run_id=run_id,
+                        session_id=_text(run.get("session_id")) or _text(binding.get("session_id")),
+                        runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key")),
+                        turn_id=_text(run.get("turn_id")),
+                        runtime_session_id=_text(run.get("runtime_session_id")) or _text(binding.get("runtime_session_id")),
+                        status="cancelled",
+                        completed_at=canceled_at,
+                        metadata={
+                            "cancelled_by": _text(canceled_by) or "team_mission.cancel",
+                            "cancel_reason": _text(reason),
+                            "cancelled_mission_id": mission_id,
+                        },
+                    )
+
         if mission_status in _TERMINAL_MISSION_STATUSES:
+            # Mission is already terminal, but we still return (and have just
+            # reaped) any runs that were left non-terminal so the gateway can
+            # terminate the live worker runs and clear the zombie state.
             return {
                 "mission_id": mission_id,
                 "mission_status": mission_status or "cancelled",
                 "canceled_nodes": [],
                 "cancel_run_bindings": cancel_run_bindings,
-                "graph": graph,
+                "graph": self.get_team_mission_graph(mission_id),
             }
-        canceled_at = time.time()
         cancellation_metadata = {
             "canceled_by": _text(canceled_by),
             "cancel_reason": _text(reason),
@@ -2680,6 +2788,26 @@ class SessionDBTeamMissionMixin:
             if run_id in active_run_ids or node_id in canceled_node_ids:
                 if not any(_text(item.get("run_id")) == run_id for item in cancel_run_bindings):
                     cancel_run_bindings.append(binding)
+                if run_id not in active_run_ids and hasattr(self, "get_run") and hasattr(self, "upsert_run"):
+                    # Reap runs surfaced only via a cancelled node (not seen in
+                    # the first status sweep) so they cannot stay non-terminal.
+                    run = self.get_run(run_id)
+                    if run and _text(run.get("status")).lower() not in _TERMINAL_RUN_STATUSES:
+                        active_run_ids.add(run_id)
+                        self.upsert_run(
+                            run_id=run_id,
+                            session_id=_text(run.get("session_id")) or _text(binding.get("session_id")),
+                            runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key")),
+                            turn_id=_text(run.get("turn_id")),
+                            runtime_session_id=_text(run.get("runtime_session_id")) or _text(binding.get("runtime_session_id")),
+                            status="cancelled",
+                            completed_at=canceled_at,
+                            metadata={
+                                "cancelled_by": _text(canceled_by) or "team_mission.cancel",
+                                "cancel_reason": _text(reason),
+                                "cancelled_mission_id": mission_id,
+                            },
+                        )
         self.upsert_team_mission(
             mission_id=mission_id,
             team_id=str(mission.get("team_id") or ""),

@@ -3323,6 +3323,60 @@ def test_team_mission_cancel_marks_graph_and_cancels_active_runs(monkeypatch, tm
     ]
 
 
+def test_team_mission_cancel_reaps_zombie_run_on_already_terminal_mission(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    # Mission already terminal, but the scheduler started a member node run
+    # afterwards that is still 'running' (the zombie the user observed).
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="执行任务",
+        mode="supervised_mission",
+        status="cancelled",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="verify-stats-report",
+        kind="worker",
+        title="验证",
+        status="running",
+    )
+    db.upsert_run(
+        run_id="run-verify",
+        session_id="team:mission-1:node:verify-stats-report",
+        runtime_scope_key="team:mission-1:node:verify-stats-report",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="verify-stats-report",
+        run_id="run-verify",
+        session_id="team:mission-1:node:verify-stats-report",
+        runtime_scope_key="team:mission-1:node:verify-stats-report",
+        role="worker",
+    )
+    canceled = []
+
+    def fake_run_cancel(rid, params):
+        canceled.append(params["run_id"])
+        return {"jsonrpc": "2.0", "id": rid, "result": {"status": "cancelled", "run_id": params["run_id"]}}
+
+    monkeypatch.setitem(server._methods, "run.cancel", fake_run_cancel)
+
+    response = server._methods["team_mission.cancel"](1, {"mission_id": "mission-1", "canceled_by": "user"})
+
+    # The leftover run is surfaced for worker termination AND reaped terminal.
+    assert "run-verify" in canceled
+    assert db.get_run("run-verify")["status"] == "cancelled"
+
+
 def test_gateway_emit_publishes_terminal_event_to_session_subscribers(monkeypatch):
     from tui_gateway import server
     from tui_gateway.services import run_control
