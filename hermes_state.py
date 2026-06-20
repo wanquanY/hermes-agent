@@ -42,7 +42,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -234,6 +234,36 @@ CREATE TABLE IF NOT EXISTS sessions (
     rewind_count INTEGER NOT NULL DEFAULT 0,
     transient INTEGER DEFAULT 0,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
+);
+
+-- Control-plane denormalized session index. One row per user-visible session.
+-- Status fields are a WRITE-TIME projection so the sidebar read path is a single
+-- indexed query (no recursive CTE / live merge / per-session approval / per-profile
+-- fan-out). It is a projection of the source of truth (sessions + runs + team
+-- mission events) and can always be rebuilt via reconcile_session_index().
+CREATE TABLE IF NOT EXISTS session_index (
+    session_id TEXT PRIMARY KEY,
+    owner_agent_profile_id TEXT NOT NULL DEFAULT '',
+    owner_profile_version_id TEXT NOT NULL DEFAULT '',
+    runtime_scope_key TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    preview TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'unknown',
+    transient INTEGER NOT NULL DEFAULT 0,
+    session_kind TEXT NOT NULL DEFAULT 'hermes_session',
+    status TEXT NOT NULL DEFAULT 'idle',
+    running INTEGER NOT NULL DEFAULT 0,
+    waiting_approval INTEGER NOT NULL DEFAULT 0,
+    active_run_id TEXT NOT NULL DEFAULT '',
+    active_runtime_session_id TEXT NOT NULL DEFAULT '',
+    pending_approval_count INTEGER NOT NULL DEFAULT 0,
+    team_id TEXT NOT NULL DEFAULT '',
+    mission_id TEXT NOT NULL DEFAULT '',
+    conversation_id TEXT NOT NULL DEFAULT '',
+    message_count INTEGER NOT NULL DEFAULT 0,
+    started_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    last_activity REAL
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -616,6 +646,10 @@ CREATE INDEX IF NOT EXISTS idx_sessions_started
     ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_effective_last_active
     ON sessions(COALESCE(last_active, started_at) DESC, started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_session_index_order
+    ON session_index(updated_at DESC, started_at DESC, session_id DESC);
+CREATE INDEX IF NOT EXISTS idx_session_index_profile
+    ON session_index(owner_agent_profile_id, owner_profile_version_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session
     ON messages(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_session_active
@@ -2249,6 +2283,218 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             sessions = projected
 
         return sessions
+
+    # ------------------------------------------------------------------
+    # Control-plane session_index (write-time projection; single-query read)
+    # ------------------------------------------------------------------
+    _SESSION_INDEX_COLUMNS = (
+        "session_id", "owner_agent_profile_id", "owner_profile_version_id",
+        "runtime_scope_key", "title", "preview", "source", "transient",
+        "session_kind", "status", "running", "waiting_approval", "active_run_id",
+        "active_runtime_session_id", "pending_approval_count", "team_id",
+        "mission_id", "conversation_id", "message_count", "started_at",
+        "updated_at", "last_activity",
+    )
+
+    @staticmethod
+    def _session_index_row_to_item(row: sqlite3.Row) -> Dict[str, Any]:
+        item = {key: row[key] for key in row.keys()}
+        for flag in ("transient", "running", "waiting_approval"):
+            item[flag] = bool(item.get(flag))
+        item["_page_cursor"] = {
+            "updated_at": row["updated_at"],
+            "started_at": row["started_at"],
+            "session_id": row["session_id"],
+        }
+        return item
+
+    def upsert_session_index(
+        self,
+        *,
+        session_id: str,
+        owner_agent_profile_id: str = "",
+        owner_profile_version_id: str = "",
+        runtime_scope_key: str = "",
+        title: str = "",
+        preview: str = "",
+        source: str = "unknown",
+        transient: bool = False,
+        session_kind: str = "hermes_session",
+        status: str = "idle",
+        running: bool = False,
+        waiting_approval: bool = False,
+        active_run_id: str = "",
+        active_runtime_session_id: str = "",
+        pending_approval_count: int = 0,
+        team_id: str = "",
+        mission_id: str = "",
+        conversation_id: str = "",
+        message_count: int = 0,
+        started_at: Optional[float] = None,
+        updated_at: Optional[float] = None,
+        last_activity: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Full upsert of a control-plane session_index row (idempotent by id)."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id required for upsert_session_index")
+        now = time.time()
+        started = float(started_at if started_at is not None else now)
+        updated = float(updated_at if updated_at is not None else now)
+        values = {
+            "session_id": sid,
+            "owner_agent_profile_id": str(owner_agent_profile_id or ""),
+            "owner_profile_version_id": str(owner_profile_version_id or ""),
+            "runtime_scope_key": str(runtime_scope_key or ""),
+            "title": str(title or ""),
+            "preview": str(preview or ""),
+            "source": str(source or "unknown"),
+            "transient": 1 if transient else 0,
+            "session_kind": str(session_kind or "hermes_session"),
+            "status": str(status or "idle"),
+            "running": 1 if running else 0,
+            "waiting_approval": 1 if waiting_approval else 0,
+            "active_run_id": str(active_run_id or ""),
+            "active_runtime_session_id": str(active_runtime_session_id or ""),
+            "pending_approval_count": int(pending_approval_count or 0),
+            "team_id": str(team_id or ""),
+            "mission_id": str(mission_id or ""),
+            "conversation_id": str(conversation_id or ""),
+            "message_count": int(message_count or 0),
+            "started_at": started,
+            "updated_at": updated,
+            "last_activity": last_activity,
+        }
+        cols = list(values.keys())
+        placeholders = ", ".join(f":{c}" for c in cols)
+        update_cols = [c for c in cols if c != "session_id"]
+        set_clause = ", ".join(f"{c}=excluded.{c}" for c in update_cols)
+
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            conn.execute(
+                f"INSERT INTO session_index ({', '.join(cols)}) VALUES ({placeholders}) "
+                f"ON CONFLICT(session_id) DO UPDATE SET {set_clause}",
+                values,
+            )
+            return values
+
+        return self._execute_write(_do)
+
+    def delete_session_index(self, session_id: str) -> int:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return 0
+
+        def _do(conn: sqlite3.Connection) -> int:
+            return int(conn.execute(
+                "DELETE FROM session_index WHERE session_id = ?", (sid,)
+            ).rowcount or 0)
+
+        return self._execute_write(_do)
+
+    def list_session_index(
+        self,
+        *,
+        limit: int = 200,
+        cursor: Optional[Dict[str, Any]] = None,
+        include_transient: bool = False,
+    ) -> Dict[str, Any]:
+        """Single indexed read for the sidebar: keyset-paginated, newest first.
+
+        No recursive CTE, no live merge, no per-session approval lookup, no
+        per-profile fan-out — the status fields are already projected at write
+        time. Ordering: updated_at DESC, started_at DESC, session_id DESC.
+        """
+        capped = max(1, min(int(limit or 200), 200))
+        where = []
+        params: List[Any] = []
+        if not include_transient:
+            where.append("transient = 0")
+        if isinstance(cursor, dict) and cursor.get("session_id"):
+            cu = float(cursor.get("updated_at") or 0)
+            cs = float(cursor.get("started_at") or 0)
+            ci = str(cursor.get("session_id") or "")
+            where.append(
+                "(updated_at < ? OR (updated_at = ? AND started_at < ?) "
+                "OR (updated_at = ? AND started_at = ? AND session_id < ?))"
+            )
+            params.extend([cu, cu, cs, cu, cs, ci])
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        sql = (
+            "SELECT * FROM session_index" + where_sql +
+            " ORDER BY updated_at DESC, started_at DESC, session_id DESC LIMIT ?"
+        )
+        params.append(capped + 1)
+        with self._lock:
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
+        has_more = len(rows) > capped
+        page = rows[:capped]
+        items = [self._session_index_row_to_item(r) for r in page]
+        next_cursor = items[-1]["_page_cursor"] if (has_more and items) else None
+        return {
+            "sessions": items,
+            "pageInfo": {"hasMore": has_more, "nextCursor": next_cursor},
+        }
+
+    def reconcile_session_index(
+        self,
+        *,
+        exclude_sources: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Backfill/repair the index from the source of truth (sessions table).
+
+        Upserts the static/display fields for every non-excluded session,
+        preserving any live status fields already projected by write-time hooks
+        (only inserts defaults for brand-new rows). Safe to run on startup and
+        periodically; the index is always rebuildable from this.
+        """
+        excluded = tuple(exclude_sources if exclude_sources is not None else ("tool", "cron"))
+        placeholders = ", ".join("?" for _ in excluded) if excluded else ""
+        select_sql = (
+            "SELECT id, source, title, display_title, preview, started_at, "
+            "last_active, message_count, transient FROM sessions"
+        )
+        if excluded:
+            select_sql += f" WHERE COALESCE(source,'') NOT IN ({placeholders})"
+
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            rows = conn.execute(select_sql, excluded).fetchall()
+            upserted = 0
+            for row in rows:
+                started = float(row["started_at"] or 0)
+                updated = float(row["last_active"] or row["started_at"] or 0)
+                title = str(row["display_title"] or row["title"] or "")
+                # Insert defaults for new rows; on conflict refresh only the
+                # static/display fields, never the live status projection.
+                conn.execute(
+                    """
+                    INSERT INTO session_index (
+                        session_id, title, preview, source, transient,
+                        message_count, started_at, updated_at, last_activity
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        title=excluded.title,
+                        preview=excluded.preview,
+                        source=excluded.source,
+                        transient=excluded.transient,
+                        message_count=excluded.message_count
+                    """,
+                    (
+                        str(row["id"]),
+                        title,
+                        str(row["preview"] or ""),
+                        str(row["source"] or "unknown"),
+                        1 if row["transient"] else 0,
+                        int(row["message_count"] or 0),
+                        started,
+                        updated,
+                        updated,
+                    ),
+                )
+                upserted += 1
+            return {"reconciled": upserted}
+
+        return self._execute_write(_do)
 
     def _get_session_rich_row(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a single session with the same enriched columns as
