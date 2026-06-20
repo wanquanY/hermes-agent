@@ -2909,6 +2909,12 @@ class SessionDBTeamMissionMixin:
                 **cancellation_metadata,
             },
         )
+        # Cancel does NOT go through reduce_team_mission_graph, so project the now-
+        # terminal status onto the conversation's session_index here — otherwise the
+        # sidebar keeps showing the cancelled mission as "running" after restart.
+        self.update_session_index_for_mission(
+            mission_id, status="idle", running=False, waiting_approval=False,
+        )
         return {
             "mission_id": mission_id,
             "mission_status": "cancelled",

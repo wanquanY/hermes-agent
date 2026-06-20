@@ -216,3 +216,38 @@ def test_reconcile_purges_previously_leaked_node_rows(tmp_path: Path):
     assert "team:mission-abc:node:synthesis" in _ids(db.list_session_index())
     db.reconcile_session_index()
     assert "team:mission-abc:node:synthesis" not in _ids(db.list_session_index())
+
+
+def test_reconcile_heals_terminal_mission_conversation_stuck_running(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(mission_id="m-x", team_id="t", title="T", mode="supervised_mission", status="cancelled")
+    db.upsert_team_mission_conversation(
+        conversation_id="c-x", team_id="t", stable_session_id="team-session-x",
+        title="t", active_mission_id="m-x",
+    )
+    # simulate the stale running projection (cancel bypassed the reducer)
+    db.update_session_index_for_mission("m-x", status="running", running=True)
+    assert db.list_session_index()["sessions"][0]["running"] is True
+
+    db.reconcile_session_index()
+
+    item = db.list_session_index()["sessions"][0]
+    assert item["running"] is False
+    assert item["status"] == "idle"
+
+
+def test_cancel_team_mission_sets_conversation_index_idle(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(mission_id="m-y", team_id="t", title="T", mode="supervised_mission", status="running")
+    db.upsert_team_mission_conversation(
+        conversation_id="c-y", team_id="t", stable_session_id="team-session-y",
+        title="t", active_mission_id="m-y",
+    )
+    db.update_session_index_for_mission("m-y", status="running", running=True)
+    assert db.list_session_index()["sessions"][0]["running"] is True
+
+    db.cancel_team_mission(mission_id="m-y", canceled_by="user")
+
+    item = db.list_session_index()["sessions"][0]
+    assert item["running"] is False
+    assert item["status"] == "idle"

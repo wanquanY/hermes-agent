@@ -2505,6 +2505,23 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                     ),
                 )
                 upserted += 1
+            # Heal team-mission conversation rows whose mission is already terminal
+            # but whose status projection is still "running"/waiting (e.g. a cancel
+            # that bypassed the graph reducer) — otherwise the sidebar shows a
+            # finished team task as running after restart.
+            conn.execute(
+                """
+                UPDATE session_index
+                   SET running = 0, status = 'idle', waiting_approval = 0
+                 WHERE session_kind = 'team_mission'
+                   AND (running = 1 OR waiting_approval = 1 OR status != 'idle')
+                   AND mission_id IN (
+                       SELECT mission_id FROM team_missions
+                        WHERE LOWER(COALESCE(status,'')) IN
+                              ('completed','failed','cancelled','canceled','interrupted')
+                   )
+                """
+            )
             return {"reconciled": upserted}
 
         return self._execute_write(_do)
