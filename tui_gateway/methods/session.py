@@ -860,6 +860,84 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5006, str(e))
 
 
+def _session_index_list_item(row: dict) -> dict:
+    """Map a control-plane session_index row to the desktop session list shape."""
+    return {
+        "id": row.get("session_id") or "",
+        "title": row.get("title") or "",
+        "display_title": row.get("title") or "",
+        "displayTitle": row.get("title") or "",
+        "preview": row.get("preview") or "",
+        "started_at": row.get("started_at") or 0,
+        "updated_at": row.get("updated_at") or row.get("started_at") or 0,
+        "message_count": row.get("message_count") or 0,
+        "source": row.get("source") or "",
+        "transient": bool(row.get("transient")),
+        "session_kind": row.get("session_kind") or "hermes_session",
+        "agentProfileId": row.get("owner_agent_profile_id") or "",
+        "agent_profile_id": row.get("owner_agent_profile_id") or "",
+        "agentProfileVersionId": row.get("owner_profile_version_id") or "",
+        "runtimeScopeKey": row.get("runtime_scope_key") or "",
+        "runtime_scope_key": row.get("runtime_scope_key") or "",
+        "conversation_id": row.get("conversation_id") or "",
+        "team_id": row.get("team_id") or "",
+        "mission_id": row.get("mission_id") or "",
+        "active_mission_id": row.get("mission_id") or "",
+        "status": row.get("status") or "",
+        "running": bool(row.get("running")),
+        "waiting_approval": bool(row.get("waiting_approval")),
+        "pending_approval_count": row.get("pending_approval_count") or 0,
+        "active_run_id": row.get("active_run_id") or "",
+        "active_runtime_session_id": row.get("active_runtime_session_id") or "",
+    }
+
+
+@method("session.index.list")
+def _(rid, params: dict) -> dict:
+    """Single-query sidebar read from the control-plane session_index.
+
+    Replaces the per-profile fan-out of expensive session.list / activity calls
+    with one indexed, keyset-paginated read (status is projected at write time).
+    """
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5006)
+    lister = getattr(db, "list_session_index", None)
+    if not callable(lister):
+        return _err(rid, 5006, "session_index unavailable")
+    try:
+        limit = _bounded_page_limit(params.get("limit"), default=200, maximum=200)
+        cursor = _decode_page_cursor(params.get("cursor"))
+        include_transient = is_truthy_value(
+            params.get("include_transient")
+            if params.get("include_transient") is not None
+            else params.get("includeTransient")
+        )
+        result = lister(
+            limit=limit,
+            cursor=cursor or None,
+            include_transient=include_transient,
+        )
+        items = [
+            sanitize_session_list_item(_session_index_list_item(row))
+            for row in (result.get("sessions") or [])
+        ]
+        page = result.get("pageInfo") or {}
+        next_cursor = _encode_page_cursor(page.get("nextCursor")) if page.get("nextCursor") else ""
+        return _ok(
+            rid,
+            {
+                "sessions": items,
+                "pageInfo": {
+                    "nextCursor": next_cursor,
+                    "hasMore": bool(page.get("hasMore")),
+                },
+            },
+        )
+    except Exception as e:
+        return _err(rid, 5006, str(e))
+
+
 @method("session.most_recent")
 def _(rid, params: dict) -> dict:
     """Return the most recent human-facing session id, or ``None``.
