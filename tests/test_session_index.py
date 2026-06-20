@@ -251,3 +251,42 @@ def test_cancel_team_mission_sets_conversation_index_idle(tmp_path: Path):
     item = db.list_session_index()["sessions"][0]
     assert item["running"] is False
     assert item["status"] == "idle"
+
+
+def test_update_for_mission_not_running_clears_active_run_id(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_session_index(
+        session_id="team-session-z", session_kind="team_mission", mission_id="m-z",
+        running=True, status="running", active_run_id="team-leader-run-z",
+        active_runtime_session_id="rt-z", started_at=1.0, updated_at=1.0,
+    )
+
+    db.update_session_index_for_mission("m-z", status="idle", running=False)
+
+    item = db.list_session_index()["sessions"][0]
+    assert item["running"] is False
+    # the sidebar treats a non-empty active_run_id as running — it MUST be cleared.
+    assert item["active_run_id"] == ""
+    assert item["active_runtime_session_id"] == ""
+
+
+def test_reconcile_clears_stale_active_run_on_already_idle_terminal_mission(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(mission_id="m-w", team_id="t", title="T", mode="supervised_mission", status="completed")
+    db.upsert_team_mission_conversation(
+        conversation_id="c-w", team_id="t", stable_session_id="team-session-w",
+        title="t", active_mission_id="m-w",
+    )
+    # running/status already healed to idle, but a stale active_run_id lingers —
+    # the exact state that kept finished team conversations spinning after restart.
+    db.upsert_session_index(
+        session_id="team-session-w", session_kind="team_mission", mission_id="m-w",
+        running=False, status="idle", active_run_id="team-leader-run-w",
+        active_runtime_session_id="rt-w", started_at=1.0, updated_at=1.0,
+    )
+
+    db.reconcile_session_index()
+
+    item = db.list_session_index()["sessions"][0]
+    assert item["active_run_id"] == ""
+    assert item["active_runtime_session_id"] == ""

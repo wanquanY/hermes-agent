@@ -2512,9 +2512,12 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             conn.execute(
                 """
                 UPDATE session_index
-                   SET running = 0, status = 'idle', waiting_approval = 0
+                   SET running = 0, status = 'idle', waiting_approval = 0,
+                       active_run_id = '', active_runtime_session_id = '',
+                       pending_approval_count = 0
                  WHERE session_kind = 'team_mission'
-                   AND (running = 1 OR waiting_approval = 1 OR status != 'idle')
+                   AND (running = 1 OR waiting_approval = 1 OR status != 'idle'
+                        OR active_run_id != '' OR active_runtime_session_id != '')
                    AND mission_id IN (
                        SELECT mission_id FROM team_missions
                         WHERE LOWER(COALESCE(status,'')) IN

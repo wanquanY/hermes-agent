@@ -1011,13 +1011,28 @@ class SessionDBTeamMissionMixin:
             return 0
 
         def _do(conn: sqlite3.Connection) -> int:
+            if not running:
+                # A not-running row must NOT keep a stale active_run_id /
+                # active_runtime_session_id. The sidebar derives running as
+                # (running || active_run_id), so a leftover active_run_id makes a
+                # finished team conversation spin forever even with running=0.
+                return int(conn.execute(
+                    """
+                    UPDATE session_index
+                       SET status = ?, running = 0, waiting_approval = ?,
+                           active_run_id = '', active_runtime_session_id = '',
+                           pending_approval_count = 0
+                     WHERE mission_id = ?
+                    """,
+                    (str(status or "idle"), 1 if waiting_approval else 0, mid),
+                ).rowcount or 0)
             return int(conn.execute(
                 """
                 UPDATE session_index
-                   SET status = ?, running = ?, waiting_approval = ?
+                   SET status = ?, running = 1, waiting_approval = ?
                  WHERE mission_id = ?
                 """,
-                (str(status or "idle"), 1 if running else 0, 1 if waiting_approval else 0, mid),
+                (str(status or "idle"), 1 if waiting_approval else 0, mid),
             ).rowcount or 0)
 
         try:
