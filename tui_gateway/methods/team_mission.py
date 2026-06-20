@@ -2314,6 +2314,21 @@ def _(rid, params: dict) -> dict:
     )
 
 
+def _reduced_team_mission_graph(db, mission_id: str) -> dict:
+    """Return the freshly reduced mission graph (dependency statuses recomputed),
+    falling back to the raw persisted graph if reduction is unavailable. Used for
+    the room/render snapshot so it never serves stale dependency state."""
+    reducer = getattr(db, "reduce_team_mission_graph", None)
+    if callable(reducer):
+        try:
+            reduced = reducer(mission_id)
+            if isinstance(reduced, dict) and isinstance(reduced.get("graph"), dict):
+                return reduced["graph"]
+        except Exception:
+            pass
+    return db.get_team_mission_graph(mission_id) or {}
+
+
 @method("team_mission.conversation.resolve")
 def _(rid, params: dict) -> dict:
     db = _get_db()
@@ -2523,7 +2538,13 @@ def _(rid, params: dict) -> dict:
     conversation_session_id = _conversation_session_id_from_params(params, {})
     if not mission_id and not conversation_id:
         return _err(rid, 4006, "mission_id or conversation_id required")
-    graph = db.get_team_mission_graph(mission_id) if mission_id else {}
+    # Serve a freshly REDUCED graph for the room/render snapshot. The raw
+    # persisted graph can lag dependency propagation, so on reopening a running
+    # mission a node whose upstream already completed briefly shows
+    # "waiting_dependency" until catch-up replays. reduce_team_mission_graph
+    # recomputes dependency satisfaction (and is idempotent — a no-op write when
+    # nothing changed), so the snapshot is consistent before it is sent.
+    graph = _reduced_team_mission_graph(db, mission_id) if mission_id else {}
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     if mission_id and (not isinstance(mission, dict) or not mission):
         if not conversation_id:
