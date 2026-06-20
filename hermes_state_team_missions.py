@@ -97,6 +97,16 @@ _ACTIVE_RUN_STATUSES = {
 # reaper, so unexpected/intermediate statuses can never survive a mission cancel
 # as zombie "running" runs in the control-plane DB.
 _TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
+# High-volume per-token stream deltas pruned from team_mission_events once a
+# mission is terminal (final text is preserved in the kept message.complete rows;
+# message.start / tool.start / tool.complete / structural / approval events stay).
+_TEAM_MISSION_PRUNABLE_SOURCE_TYPES = (
+    "message.delta",
+    "reasoning.delta",
+    "thinking.delta",
+    "tool.progress",
+    "tool.generating",
+)
 _TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 _EXECUTION_MODES_REQUIRE_FINALIZERS = {"supervised_mission", "autonomous_mission", "manual_graph"}
 _NON_WORK_NODE_KINDS = TEAM_MISSION_CONTROL_NODE_KINDS
@@ -2882,6 +2892,45 @@ class SessionDBTeamMissionMixin:
             )
             reaped += 1
         return reaped
+
+    def prune_team_mission_events(self, mission_id: str) -> int:
+        """Drop high-volume streaming delta rows for an already-terminal mission.
+
+        team_mission_events had no retention (unlike run_events), so every
+        streamed token delta accumulated forever — the canonical log grew into
+        the GBs, which slowed every query and made the concurrent session-list
+        loads time out (manifesting as 'lost' running state). Once a mission is
+        terminal its per-token deltas are no longer needed: the final text lives
+        in the kept message.complete events, and structure/tool boundaries are
+        kept too, so reopening a finished mission still renders its result. Only
+        prunes terminal missions; active missions are never touched. Idempotent;
+        freed pages are reused so growth is capped without a VACUUM."""
+        mission_id = _text(mission_id)
+        if not mission_id:
+            return 0
+        with self._lock:
+            mission_row = self._conn.execute(
+                "SELECT status FROM team_missions WHERE mission_id = ?",
+                (mission_id,),
+            ).fetchone()
+            if mission_row is None:
+                return 0
+            if _text(_row_value(mission_row, "status", "")).lower() not in _TERMINAL_MISSION_STATUSES:
+                return 0
+        placeholders = ",".join("?" for _ in _TEAM_MISSION_PRUNABLE_SOURCE_TYPES)
+
+        def _do(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
+                f"""
+                DELETE FROM team_mission_events
+                WHERE mission_id = ?
+                  AND source_event_type IN ({placeholders})
+                """,
+                (mission_id, *_TEAM_MISSION_PRUNABLE_SOURCE_TYPES),
+            )
+            return int(cursor.rowcount or 0)
+
+        return self._execute_write(_do)
 
     def bind_team_mission_run(
         self,

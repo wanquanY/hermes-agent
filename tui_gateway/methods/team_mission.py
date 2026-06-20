@@ -2843,6 +2843,15 @@ def _(rid, params: dict) -> dict:
             reaper(mission_id)
         except Exception:
             pass
+    # Cap canonical-log growth: prune per-token stream deltas of a terminal
+    # mission (unbounded team_mission_events bloated the DB into the GBs, slowing
+    # session-list loads into timeouts). Lazy, idempotent, terminal-only.
+    pruner = getattr(db, "prune_team_mission_events", None)
+    if callable(pruner):
+        try:
+            pruner(mission_id)
+        except Exception:
+            pass
     try:
         after_seq = int(params.get("after_seq") or params.get("afterSeq") or 0)
     except (TypeError, ValueError):

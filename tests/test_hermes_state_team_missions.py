@@ -2973,3 +2973,90 @@ def test_reap_terminal_mission_runs_leaves_active_mission_runs(tmp_path: Path):
 
     assert reaped == 0
     assert db.get_run("run-impl")["status"] == "running"
+
+
+def test_prune_team_mission_events_drops_terminal_deltas_keeps_completes(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="completed",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="n1",
+        kind="worker",
+        title="N",
+        status="done",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="n1",
+        run_id="r1",
+        session_id="team:mission-1:node:n1",
+        runtime_scope_key="team:mission-1:node:n1",
+    )
+    for seq in (1, 2, 3):
+        db.append_team_mission_run_event(
+            mission_id="mission-1",
+            run_id="r1",
+            event={"type": "message.delta", "seq": seq, "payload": {"delta": "x", "mode": "append"}},
+        )
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="r1",
+        event={"type": "message.complete", "seq": 4, "payload": {"text": "final output", "status": "complete"}},
+    )
+
+    before = db.list_team_mission_events("mission-1")
+    before_types = {e.get("payload", {}).get("source_event_type") for e in before}
+    assert "message.delta" in before_types
+    assert "message.complete" in before_types
+
+    # Prune runs once the mission is terminal with no further events arriving.
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="completed",
+    )
+    deleted = db.prune_team_mission_events("mission-1")
+
+    after = db.list_team_mission_events("mission-1")
+    after_types = [e.get("payload", {}).get("source_event_type") for e in after]
+    assert deleted >= 3
+    assert "message.delta" not in after_types
+    assert "message.complete" in after_types
+
+
+def test_prune_team_mission_events_leaves_active_mission(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="running",
+    )
+    db.upsert_team_mission_node(mission_id="mission-1", node_id="n1", kind="worker", title="N", status="running")
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="n1",
+        run_id="r1",
+        session_id="team:mission-1:node:n1",
+        runtime_scope_key="team:mission-1:node:n1",
+    )
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="r1",
+        event={"type": "message.delta", "seq": 1, "payload": {"delta": "x", "mode": "append"}},
+    )
+
+    deleted = db.prune_team_mission_events("mission-1")
+
+    assert deleted == 0
+    after_types = [e.get("payload", {}).get("source_event_type") for e in db.list_team_mission_events("mission-1")]
+    assert "message.delta" in after_types
