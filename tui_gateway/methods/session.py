@@ -92,6 +92,50 @@ def _requested_runtime_scope_key(params: dict | None = None) -> str:
     ).strip()
 
 
+def _requested_agent_profile_id(params: dict | None = None) -> str:
+    return str(
+        (params or {}).get("agent_profile_id")
+        or (params or {}).get("agentProfileId")
+        or ""
+    ).strip()
+
+
+def _requested_profile_version_id(params: dict | None = None) -> str:
+    return str(
+        (params or {}).get("agent_profile_version_id")
+        or (params or {}).get("agentProfileVersionId")
+        or ""
+    ).strip()
+
+
+def _project_session_index_on_create(
+    db, session_id: str, params: dict, runtime_scope_key: str, transient: bool
+) -> None:
+    """Persist the owning agent profile into the control-plane session_index at
+    create time. This is the keystone of the single-query sidebar read: the
+    session->profile association was previously known only client-side (forcing
+    the per-profile fan-out). Best-effort; never breaks session creation."""
+    upsert = getattr(db, "upsert_session_index", None)
+    if not callable(upsert):
+        return
+    profile_id = _requested_agent_profile_id(params)
+    scope = str(runtime_scope_key or "")
+    if not profile_id and scope.startswith("profile:"):
+        profile_id = scope.split("profile:", 1)[1].strip()
+    try:
+        upsert(
+            session_id=session_id,
+            owner_agent_profile_id=profile_id,
+            owner_profile_version_id=_requested_profile_version_id(params),
+            runtime_scope_key=scope,
+            source="tui",
+            transient=bool(transient),
+            session_kind="hermes_session",
+        )
+    except Exception:
+        pass
+
+
 def _requested_tool_progress_mode(params: dict | None = None) -> str:
     raw = (
         (params or {}).get("tool_progress_mode")
@@ -662,6 +706,7 @@ def _(rid, params: dict) -> dict:
             db.create_session(key, source="tui", model=model, transient=transient)
         except Exception as exc:
             return _err(rid, 5000, f"session create failed: {exc}")
+        _project_session_index_on_create(db, key, params, runtime_scope_key, transient)
 
     if control_plane_only:
         return _ok(

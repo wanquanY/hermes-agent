@@ -66,3 +66,32 @@ def test_session_index_list_paginates_with_cursor(monkeypatch, tmp_path: Path):
     assert set(first_ids).isdisjoint(second_ids)
     assert first_ids == ["s4", "s3"]
     assert second_ids == ["s2", "s1"]
+
+
+def test_project_session_index_on_create_persists_owner_profile(tmp_path: Path):
+    from tui_gateway.methods import session as session_methods
+    db = SessionDB(tmp_path / "state.db")
+    session_methods._project_session_index_on_create(
+        db, "s1", {"agentProfileId": "agent-7"}, "profile:agent-7", False
+    )
+    item = db.list_session_index()["sessions"][0]
+    assert item["session_id"] == "s1"
+    assert item["owner_agent_profile_id"] == "agent-7"
+    assert item["runtime_scope_key"] == "profile:agent-7"
+
+
+def test_project_session_index_derives_profile_from_scope(tmp_path: Path):
+    from tui_gateway.methods import session as session_methods
+    db = SessionDB(tmp_path / "state.db")
+    session_methods._project_session_index_on_create(db, "s2", {}, "profile:agent-9", False)
+    item = db.list_session_index()["sessions"][0]
+    assert item["owner_agent_profile_id"] == "agent-9"
+
+
+def test_project_session_index_marks_transient_draft(tmp_path: Path):
+    from tui_gateway.methods import session as session_methods
+    db = SessionDB(tmp_path / "state.db")
+    session_methods._project_session_index_on_create(db, "draft", {"agentProfileId": "a"}, "profile:a", True)
+    # transient drafts are excluded from the default sidebar read
+    assert db.list_session_index()["sessions"] == []
+    assert db.list_session_index(include_transient=True)["sessions"][0]["session_id"] == "draft"
