@@ -2833,6 +2833,16 @@ def _(rid, params: dict) -> dict:
     mission_id = _mission_id_from_params(params)
     if not mission_id:
         return _err(rid, 4006, "mission_id required")
+    # Stale-run watchdog: clear any run left active under an already-terminal
+    # mission (cancel race / completion without a node terminal event / a run
+    # that stalled on a live gateway). Self-heals the spinning card + lingering
+    # runtime state when the conversation is opened/refreshed.
+    reaper = getattr(db, "reap_terminal_mission_runs", None)
+    if callable(reaper):
+        try:
+            reaper(mission_id)
+        except Exception:
+            pass
     try:
         after_seq = int(params.get("after_seq") or params.get("afterSeq") or 0)
     except (TypeError, ValueError):

@@ -2915,3 +2915,61 @@ def test_team_mission_graph_reducer_scopes_finalizers_to_active_task(tmp_path: P
     synthesis_nodes = [node for node in synthesis_step["graph"]["nodes"] if node["kind"] == "synthesis"]
     assert [node["node_id"] for node in synthesis_nodes] == ["team-mission:mission-1:task-2:synthesis"]
     assert synthesis_nodes[0]["metadata"]["task_id"] == "task-2"
+
+
+def test_reap_terminal_mission_runs_clears_zombie_running_run(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="cancelled",
+    )
+    db.upsert_run(
+        run_id="run-verify",
+        session_id="team:mission-1:node:verify-stats-report",
+        runtime_scope_key="team:mission-1:node:verify-stats-report",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="verify-stats-report",
+        run_id="run-verify",
+        session_id="team:mission-1:node:verify-stats-report",
+        runtime_scope_key="team:mission-1:node:verify-stats-report",
+    )
+
+    reaped = db.reap_terminal_mission_runs("mission-1")
+
+    assert reaped == 1
+    assert db.get_run("run-verify")["status"] in {"interrupted", "cancelled", "canceled"}
+
+
+def test_reap_terminal_mission_runs_leaves_active_mission_runs(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="running",
+    )
+    db.upsert_run(
+        run_id="run-impl",
+        session_id="team:mission-1:node:impl",
+        runtime_scope_key="team:mission-1:node:impl",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="impl",
+        run_id="run-impl",
+        session_id="team:mission-1:node:impl",
+        runtime_scope_key="team:mission-1:node:impl",
+    )
+
+    reaped = db.reap_terminal_mission_runs("mission-1")
+
+    assert reaped == 0
+    assert db.get_run("run-impl")["status"] == "running"

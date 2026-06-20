@@ -2831,6 +2831,58 @@ class SessionDBTeamMissionMixin:
             "graph": self.get_team_mission_graph(mission_id),
         }
 
+    def reap_terminal_mission_runs(self, mission_id: str) -> int:
+        """Force any still-active run bound to an already-terminal mission to a
+        terminal status. Stale-run watchdog: a member-node run can be left
+        'running' in the control-plane DB after its mission reached a terminal
+        state (cancel race, completion without a node terminal event, or a run
+        that stalled while its gateway stayed alive — none of which the
+        orphaned-run recovery catches, since it only fails runs of a DEAD
+        gateway). Scoped to terminal missions, so it never touches a slow or
+        approval-waiting run of an active mission. Idempotent; returns the count
+        reaped. Call it when a mission is observed (subscribe/status)."""
+        mission_id = _text(mission_id)
+        if not mission_id or not hasattr(self, "upsert_run"):
+            return 0
+        with self._lock:
+            mission_row = self._conn.execute(
+                "SELECT status FROM team_missions WHERE mission_id = ?",
+                (mission_id,),
+            ).fetchone()
+            if mission_row is None:
+                return 0
+            if _text(_row_value(mission_row, "status", "")).lower() not in _TERMINAL_MISSION_STATUSES:
+                return 0
+            binding_rows = self._conn.execute(
+                """
+                SELECT run_id, session_id, runtime_scope_key, runtime_session_id
+                FROM team_mission_run_bindings
+                WHERE mission_id = ?
+                """,
+                (mission_id,),
+            ).fetchall()
+        reaped = 0
+        for row in binding_rows:
+            run_id = _text(_row_value(row, "run_id", ""))
+            if not run_id:
+                continue
+            run = self.get_run(run_id) if hasattr(self, "get_run") else None
+            if not run or _text(run.get("status")).lower() in _TERMINAL_RUN_STATUSES:
+                continue
+            self.upsert_run(
+                run_id=run_id,
+                session_id=_text(run.get("session_id")) or _text(_row_value(row, "session_id", "")),
+                runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(_row_value(row, "runtime_scope_key", "")),
+                turn_id=_text(run.get("turn_id")),
+                runtime_session_id=_text(run.get("runtime_session_id")) or _text(_row_value(row, "runtime_session_id", "")),
+                status="interrupted",
+                completed_at=time.time(),
+                error="runtime run reaped: bound team mission already terminal",
+                metadata={**dict(run.get("metadata") or {}), "reaped_reason": "terminal_mission_stale_run"},
+            )
+            reaped += 1
+        return reaped
+
     def bind_team_mission_run(
         self,
         *,
