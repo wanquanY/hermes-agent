@@ -1536,6 +1536,49 @@ def test_team_mission_conversation_status_projection_uses_active_member_run_bind
     assert projection["active_node_count"] == 1
 
 
+def test_team_mission_conversation_status_projection_terminal_mission_never_running(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        active_mission_id="mission-1",
+        title="Mission",
+    )
+    # mission is terminal (cancelled) — the conversation lifecycle status is still
+    # "active" (= not archived), which must NOT be read as a run state.
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="cancelled",
+        leader_session_id="team-session-1",
+    )
+    # a lingering "running" node + run (zombie that never emitted its terminal event)
+    db.upsert_team_mission_node(
+        mission_id="mission-1", node_id="node-x", kind="worker", title="X",
+        status="running", runtime_scope_key="team:mission-1:node:node-x",
+    )
+    db.upsert_run(
+        run_id="run-x", session_id="team:mission-1:node:node-x",
+        runtime_scope_key="team:mission-1:node:node-x", runtime_session_id="rt-x",
+        status="running", updated_at=300,
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1", node_id="node-x", run_id="run-x",
+        session_id="team:mission-1:node:node-x", runtime_session_id="rt-x",
+        runtime_scope_key="team:mission-1:node:node-x", role="worker",
+    )
+
+    projection = db.get_team_mission_conversation_status_projection("conversation-1")
+
+    assert projection["mission_status"] == "cancelled"
+    assert projection["running"] is False
+    assert projection["run_state"] == "cancelled"
+
+
 def test_team_mission_runtime_projection_uses_structured_final_node_contract(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(

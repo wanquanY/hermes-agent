@@ -1832,14 +1832,36 @@ class SessionDBTeamMissionMixin:
             item for item in summary.get("pending_approvals") or []
             if isinstance(item, dict)
         ]
-        mission_status = _text(summary.get("mission_status") or conversation.get("status"))
+        mission_status = _text(summary.get("mission_status"))
+        # Resolve the run state from the ACTIVE MISSION's real status. Never fall
+        # back to conversation.get("status") — that is the conversation lifecycle
+        # state ('active' = not archived), NOT a run state, and treating it as
+        # non-terminal made finished team conversations show as "running".
+        if not mission_status:
+            active_mission_id = _text(
+                conversation.get("active_mission_id") or conversation.get("activeMissionId")
+            )
+            if active_mission_id:
+                with self._lock:
+                    mission_row = self._conn.execute(
+                        "SELECT status FROM team_missions WHERE mission_id = ?",
+                        (active_mission_id,),
+                    ).fetchone()
+                if mission_row is not None:
+                    mission_status = _text(_row_value(mission_row, "status", ""))
         active_node_count = int(summary.get("active_node_count") or 0)
         if active_node_run and active_node_count <= 0:
             active_node_count = 1
         terminal = mission_status in _TERMINAL_MISSION_STATUSES
-        running = bool(active_run) or bool(active_node_run) or (
-            not terminal
-            and (active_node_count > 0 or mission_status in _RUNNING_MISSION_STATUSES)
+        # A terminal mission's conversation is NEVER running — ignore any lingering
+        # active_run / active_node_run / stale active node count (those are zombies
+        # from a worker that didn't get to emit its terminal event). This is the
+        # robust source of truth and does not depend on a fresh graph reduce.
+        running = (not terminal) and (
+            bool(active_run)
+            or bool(active_node_run)
+            or active_node_count > 0
+            or mission_status in _RUNNING_MISSION_STATUSES
         )
         waiting_approval = bool(pending_approvals) or mission_status == "waiting_approval"
         projected_state = "waiting_approval" if waiting_approval else "running" if running else (
