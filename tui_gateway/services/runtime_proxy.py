@@ -492,10 +492,23 @@ def _interactive_respond_is_local(method: str, params: dict[str, Any]) -> bool:
     if method == "approval.respond":
         try:
             from tui_gateway.methods.prompt import resolve_approval_session_key
-            from tools.approval import has_pending_session
-
-            session_key = resolve_approval_session_key(params)
-            if session_key and has_pending_session(session_key):
+            # IMPORTANT: command-approval entries live in `_gateway_queues`, checked by
+            # `has_blocking_approval`. `has_pending_session` is a sibling helper that
+            # inspects the UNRELATED `_pending` dict (clarify/secret/sudo); using it
+            # here always returned False even when the queue had an entry, so every
+            # approval.respond got proxied to a worker with an empty queue -> 4001.
+            from tools.approval import has_blocking_approval
+            requested = str(
+                params.get("stored_session_id")
+                or params.get("storedSessionId")
+                or params.get("session_id")
+                or params.get("sessionId")
+                or ""
+            ).strip()
+            if requested and has_blocking_approval(requested):
+                return True
+            resolved_key = resolve_approval_session_key(params)
+            if resolved_key and has_blocking_approval(resolved_key):
                 return True
         except Exception:
             pass

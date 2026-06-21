@@ -1953,6 +1953,42 @@ def _(rid, params: dict) -> dict:
 
 @method("approval.respond")
 def _(rid, params: dict) -> dict:
+    # Identity-symmetry with clarify.respond: a command approval is queued in
+    # _gateway_queues keyed by session_key = the run's stable session id (set via
+    # set_current_session_key(session["session_key"]) when the turn starts), which is
+    # exactly the stored_session_id/session_id the client echoes back here. Resolve the
+    # queue DIRECTLY by that id when an approval is actually pending, BEFORE the
+    # _approval_session_key existence guard — which 4001s ("session not found") for a
+    # team member node because _sessions is keyed by the runtime sid (not the stable id),
+    # no live session_key scan matches, and the DB fallback classifies any "team:mission-"
+    # id as control-plane and queries the wrong db. clarify.respond never hits this because
+    # it resolves purely by request_id. resolve_gateway_approval is a safe no-op (returns 0)
+    # if nothing is queued, so when no approval is pending we fall through to the original
+    # session-resolution path unchanged.
+    requested = str(
+        params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or params.get("session_id")
+        or params.get("sessionId")
+        or ""
+    ).strip()
+    try:
+        from tools.approval import has_blocking_approval, resolve_gateway_approval
+
+        if requested and has_blocking_approval(requested):
+            return _ok(
+                rid,
+                {
+                    "resolved": resolve_gateway_approval(
+                        requested,
+                        params.get("choice", "deny"),
+                        resolve_all=params.get("all", False),
+                    )
+                },
+            )
+    except Exception as e:
+        return _err(rid, 5004, str(e))
+
     session_key, err = _approval_session_key(params, rid)
     if err:
         return err
