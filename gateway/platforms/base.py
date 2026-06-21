@@ -1577,7 +1577,45 @@ class BasePlatformAdapter(ABC):
     - Sending messages/responses
     - Handling media
     """
-    
+
+    # Whether this platform renders triple-backtick fenced code blocks (i.e.
+    # ``format_message`` translates/preserves markdown fences into a real code
+    # block).  Capability flag for markdown-aware presentation choices.
+    # Default False (plain-text platforms); markdown-rendering adapters set True.
+    # Tool-progress uses this to render a terminal command as a bare fenced code
+    # block (no language tag — Slack mrkdwn would print the tag as a literal
+    # first code line).  Plain-text platforms fall back to the short truncated
+    # preview (see gateway/run.py progress_callback).
+    supports_code_blocks: bool = False
+
+    # Whether this adapter can deliver an ASYNC notification back to the agent
+    # AFTER a turn ends — i.e. wake a fresh turn to surface a background
+    # process completion (terminal notify_on_complete / watch_patterns) or a
+    # detached subagent result (delegate_task background=True).
+    #
+    # True for adapters that hold a persistent outbound channel (Telegram,
+    # Discord, Slack, ... — they have a real ``send()`` and the gateway runs
+    # the watcher/drain loops). False for stateless request/response adapters
+    # (the API server): every route closes its channel when the turn ends, so
+    # there is nowhere to push a later completion. The gateway propagates this
+    # into the ``HERMES_SESSION_ASYNC_DELIVERY`` contextvar at session-bind
+    # time; tools read it via ``async_delivery_supported()`` and refuse to make
+    # a delivery promise they can't keep. A new stateless adapter only needs to
+    # set this to False to stay correct-by-default.
+    supports_async_delivery: bool = True
+
+    # The command prefix users can always TYPE on this platform to reach
+    # Hermes commands.  Default "/" (most platforms deliver "/approve" etc.
+    # as plain message text).  Platforms where typing a leading "/" is
+    # intercepted or restricted by the client (Slack blocks native slash
+    # commands inside threads; Matrix clients reserve "/" for client-local
+    # commands) ship a "!" alias rewrite in their adapter and set this to
+    # "!" so user-facing instruction text ("Reply `!approve` ...") tells
+    # users the form that actually works everywhere.  Capability flag —
+    # shared prompt builders read it via getattr(adapter,
+    # "typed_command_prefix", "/"); no per-platform branching at call sites.
+    typed_command_prefix: str = "/"
+
     def __init__(self, config: PlatformConfig, platform: Platform):
         self.config = config
         self.platform = platform
