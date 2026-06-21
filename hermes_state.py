@@ -2543,6 +2543,27 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                    )
                 """
             )
+            # Heal regular hermes sessions whose active run is already terminal in
+            # the runs table but whose index row still says running=1. This is the
+            # cleanup pass for the streaming append_run_event projection gap fixed
+            # in hermes_state_runs._do (it now mirrors terminal status at write
+            # time, but pre-existing rows accumulated under the gap stay stuck
+            # `running` until something resets them).
+            conn.execute(
+                """
+                UPDATE session_index
+                   SET running = 0, status = 'idle',
+                       active_run_id = '', active_runtime_session_id = ''
+                 WHERE session_kind != 'team_mission'
+                   AND running = 1
+                   AND active_run_id != ''
+                   AND active_run_id IN (
+                       SELECT run_id FROM runs
+                        WHERE LOWER(COALESCE(status,'')) IN
+                              ('completed','failed','cancelled','canceled','interrupted')
+                   )
+                """
+            )
             return {"reconciled": upserted}
 
         return self._execute_write(_do)

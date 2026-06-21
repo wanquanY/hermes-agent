@@ -171,6 +171,48 @@ def test_append_run_event_terminal_clears_session_index_running(tmp_path: Path):
     assert item["active_run_id"] == ""
 
 
+def test_reconcile_heals_stuck_running_regular_session_with_terminal_run(tmp_path: Path):
+    """Pre-fix builds left regular sessions stuck at `running=1` after the
+    streaming append_run_event projection gap. The boot-time reconcile sweeps
+    those up: if the active_run_id is already terminal in the runs table, the
+    session_index row gets reset to idle."""
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("s-stuck", source="cli")
+    # Simulate the pre-fix stuck state: index says running=1 with an
+    # active_run_id, but the run itself completed.
+    db.upsert_session_index(
+        session_id="s-stuck",
+        source="cli",
+        running=True,
+        status="running",
+        active_run_id="run-done",
+        started_at=1.0,
+        updated_at=1.0,
+    )
+    db.upsert_run(run_id="run-done", session_id="s-stuck", status="completed")
+    # Force the index back to the pre-fix stuck shape (upsert_run already
+    # projected idle on the fix path; we simulate the legacy state by
+    # re-running the stuck upsert).
+    db.upsert_session_index(
+        session_id="s-stuck",
+        source="cli",
+        running=True,
+        status="running",
+        active_run_id="run-done",
+        started_at=1.0,
+        updated_at=1.0,
+    )
+    item = db.list_session_index()["sessions"][0]
+    assert item["running"] is True
+
+    db.reconcile_session_index()
+
+    item = db.list_session_index()["sessions"][0]
+    assert item["running"] is False
+    assert item["status"] == "idle"
+    assert item["active_run_id"] == ""
+
+
 def test_run_terminal_does_not_clobber_other_active_run(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_session_index(session_id="s1", source="cli", started_at=1.0, updated_at=1.0)
