@@ -1162,6 +1162,22 @@ def test_complete_plan_approval_gate_inherits_leader_owner(tmp_path: Path):
     # No synthetic "Leader" placeholder owner.
     assert approval[0].get("assignee_display_name") != "Leader"
 
+    # The LIVE mission.approval.requested event payload must also carry the resolved
+    # leader assignee so the frontend renders the real leader on the approval node
+    # immediately, instead of the generic "Leader" placeholder until a graph reload.
+    from hermes_team_mission_modes import TeamMissionNodeSpec, TeamMissionStrategyActions
+
+    actions = TeamMissionStrategyActions(
+        nodes=(TeamMissionNodeSpec(node_id="m1::approval", kind="approval_gate", title="审批任务图"),),
+        events=({"type": "mission.approval.requested", "payload": {"approval_id": "m1::approval"}},),
+    )
+    stamped = db._approval_actions_with_leader_assignee("m1", actions)
+    approval_event = next(e for e in stamped.events if e.get("type") == "mission.approval.requested")
+    assert approval_event["payload"]["assignee_profile_id"] == "profile-leader"
+    assert approval_event["payload"]["assignee_profile_version_id"] == "version-leader"
+    stamped_node = next(n for n in stamped.nodes if n.kind == "approval_gate")
+    assert stamped_node.assignee_profile_id == "profile-leader"
+
 
 def test_team_mission_runtime_events_reuse_ordinary_run_event_coalescing(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")

@@ -2637,7 +2637,35 @@ class SessionDBTeamMissionMixin:
                 metadata=metadata,
             )
 
-        return replace(actions, nodes=tuple(_with_leader(node) for node in actions.nodes))
+        def _with_leader_event(event: Dict[str, Any]) -> Dict[str, Any]:
+            # The strategy builds the mission.approval.requested event before the
+            # leader assignee is known (the mode has no DB access), so the LIVE event
+            # carries no owner and the frontend renders the approval node with the
+            # generic "Leader" placeholder until a graph reload picks up the stamped
+            # node. Copy the resolved leader assignee into the event payload so the
+            # live approval node shows the real leader member immediately.
+            if not isinstance(event, dict) or _text(event.get("type")) != "mission.approval.requested":
+                return event
+            payload = dict(event.get("payload") or {})
+            if leader_member_id:
+                payload.setdefault("assignee_member_id", leader_member_id)
+                payload.setdefault("assigneeMemberId", leader_member_id)
+            if leader_profile_id:
+                payload.setdefault("assignee_profile_id", leader_profile_id)
+                payload.setdefault("agent_profile_id", leader_profile_id)
+                payload.setdefault("agentProfileId", leader_profile_id)
+            if leader_profile_version_id:
+                payload.setdefault("assignee_profile_version_id", leader_profile_version_id)
+            if leader_display_name:
+                payload.setdefault("assignee_display_name", leader_display_name)
+                payload.setdefault("assigneeDisplayName", leader_display_name)
+            return {**event, "payload": payload}
+
+        return replace(
+            actions,
+            nodes=tuple(_with_leader(node) for node in actions.nodes),
+            events=tuple(_with_leader_event(event) for event in actions.events),
+        )
 
     def complete_team_mission_plan(
         self,
