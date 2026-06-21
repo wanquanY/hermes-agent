@@ -1127,6 +1127,23 @@ class SessionDBRunMixin:
                             run_id,
                         ),
                     )
+                # Mirror the run's terminal status into session_index so the
+                # sidebar stops showing this session as `running` after the
+                # streaming finish lands. The non-streaming write path
+                # (`upsert_run`) already invokes this projection at line 609;
+                # the streaming `append_run_event` path was missing it, so
+                # session_index kept `running=1, status='running'` forever
+                # after a `message.complete` / `error` / `tool.complete`
+                # terminal event closed the run.
+                if run_id:
+                    self._project_run_state_to_session_index_locked(
+                        conn,
+                        session_id=stable,
+                        run_id=run_id,
+                        runtime_session_id=runtime_session_id,
+                        status=next_status,
+                        updated_at=timestamp,
+                    )
             return inserted_event
 
         saved = self._execute_write(_do)

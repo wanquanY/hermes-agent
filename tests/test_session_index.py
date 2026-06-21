@@ -135,6 +135,42 @@ def test_run_state_does_not_create_index_row_for_member_sessions(tmp_path: Path)
     assert db.list_session_index(include_transient=True)["sessions"] == []
 
 
+def test_append_run_event_terminal_clears_session_index_running(tmp_path: Path):
+    """The streaming append_run_event path was missing the projection that
+    upsert_run already has, so session_index kept `running=1, status='running'`
+    after a `message.complete` terminal event closed the run. The sidebar
+    showed every completed conversation as still spinning until the next app
+    restart."""
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_session_index(session_id="s-live", source="cli", started_at=1.0, updated_at=1.0)
+    # Run-start path goes through the run-control gateway (upsert_run), which
+    # already had its own projection — emulate that to set the session as
+    # running/active.
+    db.upsert_run(run_id="run-A", session_id="s-live", status="running")
+    item = db.list_session_index()["sessions"][0]
+    assert item["running"] is True
+    assert item["active_run_id"] == "run-A"
+
+    # Terminal streaming event: `append_run_event` is the path the live
+    # streaming pipeline uses to record run_events. Before the fix, this path
+    # updated `runs.status` to `completed` but left `session_index.running=1`,
+    # so the sidebar kept the spinner on every finished session.
+    db.append_run_event(
+        "s-live",
+        {
+            "type": "message.complete",
+            "run_id": "run-A",
+            "turn_id": "turn-A",
+            "seq": 2,
+            "payload": {"status": "completed", "text": "done"},
+        },
+    )
+    item = db.list_session_index()["sessions"][0]
+    assert item["running"] is False
+    assert item["status"] == "idle"
+    assert item["active_run_id"] == ""
+
+
 def test_run_terminal_does_not_clobber_other_active_run(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_session_index(session_id="s1", source="cli", started_at=1.0, updated_at=1.0)
