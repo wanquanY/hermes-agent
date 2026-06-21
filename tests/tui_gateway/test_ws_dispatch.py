@@ -953,6 +953,66 @@ def test_run_control_session_subscription_ignores_team_mission_projection_events
     assert delivered_events[0]["payload"]["delta"] == "leader"
 
 
+def test_team_mission_live_push_skips_out_of_order_seq_for_inorder_poller():
+    # notify_team_mission_event_listeners fires outside the seq-assignment lock, so
+    # concurrent member-node appends arrive scrambled. The live push must NOT advance
+    # the cursor past a gap (that skipped tool.complete events forever → node tools
+    # spinning); it leaves the gap for the in-order poller and delivers only once the
+    # missing seq arrives contiguously.
+    from tui_gateway.services import run_control
+
+    delivered = []
+
+    class CapturingTransport:
+        def write(self, obj):
+            delivered.append(obj)
+            return True
+
+    transport = CapturingTransport()
+    subscription_id = "sub-out-of-order"
+    with run_control._lock:
+        run_control._subscriptions_by_id[subscription_id] = {
+            "id": subscription_id,
+            "kind": "team_mission",
+            "mission_id": "mission-x",
+            "stored_session_id": "",
+            "transport": transport,
+            "last_seq": 1,
+            "db": None,
+            "active_only": False,
+            "runtime_scope_key": "",
+            "active_run_ids": set(),
+        }
+        run_control._subscription_ids_by_mission["mission-x"].add(subscription_id)
+
+    def ev(seq):
+        return {
+            "type": "team_mission.runtime.event",
+            "mission_id": "mission-x",
+            "seq": seq,
+            "payload": {"mission_id": "mission-x", "source_event_type": "message.delta"},
+        }
+
+    def seqs():
+        return [(item.get("params") or {}).get("seq") for item in delivered if item.get("method") == "event"]
+
+    try:
+        # out-of-order: seq 3 while last_seq=1 (gap at 2) → withheld, cursor unchanged
+        run_control._deliver_team_mission_events("mission-x", [ev(3)])
+        assert seqs() == []
+        assert run_control._subscriptions_by_id[subscription_id]["last_seq"] == 1
+        # the missing seq 2 arrives contiguously → delivered, cursor advances
+        run_control._deliver_team_mission_events("mission-x", [ev(2)])
+        # seq 3 is now contiguous → delivered
+        run_control._deliver_team_mission_events("mission-x", [ev(3)])
+    finally:
+        with run_control._lock:
+            run_control._subscriptions_by_id.pop(subscription_id, None)
+            run_control._subscription_ids_by_mission.get("mission-x", set()).discard(subscription_id)
+
+    assert seqs() == [2, 3]
+
+
 def test_run_control_replaces_duplicate_session_subscriptions_per_transport(tmp_path):
     from hermes_state import SessionDB
     from tui_gateway.services import run_control

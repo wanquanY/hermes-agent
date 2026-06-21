@@ -526,6 +526,17 @@ def _deliver_team_mission_events(mission_id: str, events: list[dict[str, Any]]) 
             seq = int(event.get("seq") or 0)
             if seq <= delivered_seq:
                 continue
+            if seq > delivered_seq + 1:
+                # OUT-OF-ORDER live notify. notify_team_mission_event_listeners fires
+                # OUTSIDE the seq-assignment lock (hermes_team_mission_event_log.append_
+                # team_mission_event), so concurrent member-node appends deliver here
+                # scrambled. Do NOT deliver this event or advance the cursor past the
+                # gap: the in-order subscription poller backfills the skipped seqs from
+                # the canonical log (it reads after last_seq). Advancing here would skip
+                # the gap forever — the poller would never re-read it — which left
+                # tool.complete events undelivered and node tools spinning even though
+                # the backend had finished. The gap fills within one poll interval.
+                continue
             event_for_transport = _delta_event_for_subscription(subscription, event)
             if event_for_transport is None:
                 _reserve_subscription_delivery(subscription, event)
