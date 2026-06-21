@@ -1822,6 +1822,110 @@ DEFAULT_CONFIG = {
         "force_ipv4": False,
     },
 
+    # Gateway settings — control how messaging platforms (Telegram, Discord,
+    # Slack, etc.) deliver agent-produced files as native attachments.
+    "gateway": {
+        # Inject a human-readable timestamp prefix (e.g.
+        # "[Tue 2026-04-28 13:40:53 CEST]") onto user messages IN THE MODEL'S
+        # CONTEXT so the agent has temporal awareness of when each message was
+        # sent. Off by default — when off, the model sees clean message text.
+        # Persisted transcripts always stay clean (the timestamp is stored as
+        # message metadata regardless of this toggle), so turning it on later
+        # surfaces send-times for past messages too.
+        "message_timestamps": {
+            "enabled": False,
+        },
+
+        # When false (default), any file path the agent emits is delivered
+        # as a native attachment as long as it isn't under the credential /
+        # system-path denylist (/etc, /proc, ~/.ssh, ~/.aws, ~/.hermes/.env,
+        # auth.json, etc.). This matches the symmetry of inbound delivery
+        # — we accept any document type the user uploads, and the agent
+        # can hand back any file that isn't a credential.
+        #
+        # When true, fall back to the older allowlist+recency-window
+        # behavior: files must live under the Hermes cache, under
+        # ``media_delivery_allow_dirs``, or be freshly produced inside the
+        # ``trust_recent_files_seconds`` window. Recommended for
+        # public-facing gateways where prompt injection from one user
+        # shouldn't be able to exfiltrate the host's secrets to that same
+        # user. Bridged to HERMES_MEDIA_DELIVERY_STRICT.
+        "strict": False,
+        # Extra directories from which model-emitted bare file paths may be
+        # uploaded as native gateway attachments. Files inside the Hermes
+        # cache (~/.hermes/cache/{documents,images,audio,video,screenshots})
+        # are always trusted; this list adds operator-controlled roots
+        # (project dirs, scratch dirs, mounted shares). Accepts a list of
+        # absolute paths or a single os.pathsep-separated string. Bridged
+        # to HERMES_MEDIA_ALLOW_DIRS at gateway startup. Tilde paths are
+        # expanded. Honored in both default and strict mode.
+        "media_delivery_allow_dirs": [],
+        # When true, files whose mtime is within ``trust_recent_files_seconds``
+        # of "now" are trusted for native delivery even outside the cache /
+        # operator allowlist — useful for ``pandoc -o /tmp/report.pdf`` or
+        # PDFs the agent writes into a working directory. System paths
+        # (/etc, /proc, ~/.ssh, ~/.aws, etc.) remain blocked regardless.
+        # Disable to fall back to pure-allowlist mode. Bridged to
+        # HERMES_MEDIA_TRUST_RECENT_FILES. Only consulted when ``strict``
+        # is true; in default mode the denylist alone gates delivery.
+        "trust_recent_files": True,
+        # Recency window in seconds. 600 (10 min) comfortably covers a
+        # multi-tool agent turn. Bridged to HERMES_MEDIA_TRUST_RECENT_SECONDS.
+        # Only consulted when ``strict`` is true.
+        "trust_recent_files_seconds": 600,
+
+        # OpenAI-compatible API server platform
+        # (gateway/platforms/api_server.py).
+        "api_server": {
+            # Maximum number of agent runs the API server will service
+            # concurrently. Requests to /v1/chat/completions, /v1/responses,
+            # and /v1/runs that arrive while this many runs are already
+            # in flight are rejected with HTTP 429 + a Retry-After header,
+            # bounding CPU / memory / upstream-LLM-quota exhaustion from a
+            # request flood. Set to 0 to disable the cap entirely.
+            "max_concurrent_runs": 10,
+        },
+    },
+
+    # Real-time token streaming to messaging platforms (Telegram, Discord,
+    # Slack, etc.). Read at the top level by the gateway; absent this block the
+    # gateway falls back to these same defaults, so adding it here only makes
+    # the feature discoverable in config.yaml — it does not change behavior.
+    #
+    # Disabled by default: streaming costs extra edit/draft API calls per
+    # response. Set ``enabled: true`` and restart the gateway to turn it on.
+    "streaming": {
+        # Master switch. When false, each response is delivered as a single
+        # final message (no progressive updates).
+        "enabled": False,
+        # Transport selection:
+        #   "auto"  — prefer native draft streaming where the platform
+        #             supports it (Telegram DMs via sendMessageDraft,
+        #             Bot API 9.5+) and fall back to edit-based elsewhere.
+        #             Safe global default: platforms without draft support
+        #             (Discord, Slack, Matrix, Telegram groups) transparently
+        #             use the edit path, so "auto" only upgrades chats that
+        #             can render the smoother native preview.
+        #   "draft" — explicitly request native drafts; falls back to edit
+        #             when the platform/chat doesn't support them.
+        #   "edit"  — progressive editMessageText only (legacy behavior).
+        #   "off"   — disable streaming entirely (same as enabled: false).
+        "transport": "auto",
+        # Minimum seconds between progressive edits — tuned for Telegram's
+        # ~1 edit/s flood envelope.
+        "edit_interval": 0.8,
+        # Flush the buffer to the platform once this many characters have
+        # accumulated, so short replies feel near-instant.
+        "buffer_threshold": 24,
+        # Cursor glyph appended to the in-progress message while streaming.
+        "cursor": " \u2589",
+        # When >0, the final edit for a long-running streamed response is
+        # delivered as a fresh message if the preview has been visible at
+        # least this many seconds, so the platform timestamp reflects
+        # completion time. Telegram only; other platforms ignore it.
+        "fresh_final_after_seconds": 0.0,
+    },
+
     # Session storage — controls automatic cleanup of ~/.hermes/state.db.
     # state.db accumulates every session, message, tool call, and FTS5 index
     # entry forever.  Without auto-pruning, a heavy user (gateway + cron)
