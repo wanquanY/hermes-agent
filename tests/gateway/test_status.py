@@ -988,3 +988,70 @@ class TestReadProcessCmdlinePsFallback:
         )
         result = status._read_process_cmdline(12345)
         assert "hermes_cli/main.py" in result
+
+
+class TestCorruptStatusFiles:
+    """A status / pid file holding non-UTF-8 (binary) bytes must read as
+    None, not crash the gateway status path with UnicodeDecodeError."""
+
+    def test_read_json_file_returns_none_on_binary_garbage(self, tmp_path):
+        p = tmp_path / "runtime.json"
+        p.write_bytes(b"\xff\xfe\x00\x80not utf-8\x81")
+        assert status._read_json_file(p) is None
+
+    def test_read_json_file_still_parses_valid_json(self, tmp_path):
+        p = tmp_path / "runtime.json"
+        p.write_text(json.dumps({"pid": 7}), encoding="utf-8")
+        assert status._read_json_file(p) == {"pid": 7}
+
+    def test_read_pid_record_returns_none_on_binary_garbage(self, tmp_path):
+        p = tmp_path / "gateway.pid"
+        p.write_bytes(b"\xff\xfe\x00\x80\x81")
+        assert status._read_pid_record(p) is None
+
+    def test_read_pid_record_still_parses_bare_pid(self, tmp_path):
+        p = tmp_path / "gateway.pid"
+        p.write_text("4242", encoding="utf-8")
+        assert status._read_pid_record(p) == {"pid": 4242}
+
+
+class TestActiveAgentsTurnBoundaryWrite:
+    """The load-bearing Phase 1a contract: writing the in-flight count at a
+    turn boundary must PRESERVE the lifecycle gateway_state. The whole readout
+    depends on active_agents being refreshed per-turn while gateway_state is
+    only touched by lifecycle transitions — so an active_agents-only write must
+    not clobber it."""
+
+    def test_active_agents_only_write_preserves_gateway_state(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        # Lifecycle transition sets running.
+        status.write_runtime_status(gateway_state="running", active_agents=0)
+        assert status.read_runtime_status()["gateway_state"] == "running"
+
+        # Turn-boundary write: ONLY active_agents (gateway_state left _UNSET).
+        status.write_runtime_status(active_agents=2)
+
+        rec = status.read_runtime_status()
+        assert rec["active_agents"] == 2
+        # The state must survive the per-turn write — this is what makes the
+        # _persist_active_agents helper safe to call on every turn.
+        assert rec["gateway_state"] == "running"
+
+    def test_active_agents_only_write_preserves_draining_state(self, tmp_path, monkeypatch):
+        """Same invariant while draining — a turn finishing mid-drain (count
+        falling) must not flip the state back to running."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        status.write_runtime_status(gateway_state="draining", active_agents=3)
+        status.write_runtime_status(active_agents=2)
+
+        rec = status.read_runtime_status()
+        assert rec["active_agents"] == 2
+        assert rec["gateway_state"] == "draining"
+
+    def test_active_agents_clamped_non_negative(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        status.write_runtime_status(gateway_state="running", active_agents=-5)
+        assert status.read_runtime_status()["active_agents"] == 0
+
