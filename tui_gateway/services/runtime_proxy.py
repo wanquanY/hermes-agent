@@ -57,6 +57,10 @@ _RUNTIME_PROXY_CONTROL_METHODS = frozenset(
         "session.create",
         "session.delete",
         "session.list",
+        # 侧栏会话列表的索引化单查(P3)。和 session.list 一样是控制面本地读(查主库),
+        # 绝不能代理到 runtime worker —— 漏登记会让带 scope 的请求被代理到 worker
+        # 子进程,首次触发冷启动 ~600ms(本该 ~2ms)。
+        "session.index.list",
         "session.messages",
         "session.message_metadata.merge",
         "session.status",

@@ -313,8 +313,8 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
         if isinstance(raw_doxie_context, (dict, list))
         else str(raw_doxie_context or "").strip()
     )
-    submitted_images = _submitted_image_paths(params)
     submitted_attachments = _submitted_attachments(params)
+    submitted_images = _submitted_image_paths({"attachments": submitted_attachments})
     session, err = _sess_nowait(params, rid)
     if err:
         return err

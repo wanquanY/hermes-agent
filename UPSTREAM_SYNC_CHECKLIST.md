@@ -32,6 +32,9 @@
 - Skills 目录初始化必须能自愈：如果 `$HERMES_HOME/skills` 或 `.hub` 相关路径被历史损坏成文件，应重命名为 `.invalid-*` 再创建目录，不能直接失败或删除用户数据。
 - Doxie desktop browser bridge 不只负责 tab 操作；navigate、snapshot、click、type、scroll、press、back/forward 都必须优先走 Doxie 可见桌面 browser session。
 - profile-scoped approval 和 cron control RPC 必须代理到 runtime worker；否则 approval policy、pending approval 和 cron 管理会读写 control plane，而不是目标 Doxie profile。
+- `session_index` 是 Doxie 侧栏的索引化读模型；同步后要确认 `session.index.list` 仍在 control plane 本地读主库，不能被 runtime proxy 误代理到 worker。
+- Team Mission conversation 删除必须同时清理 `session_index`，否则会出现正式数据已删但侧栏仍显示且点开报错的幽灵会话。
+- 图片附件必须先走 Doxie `attachments` 归一化，再提取 image paths 做 vision enrichment；不要回退到只读平铺 `image_paths` 的旧入口。
 
 ## 10 分钟快速分诊
 
@@ -48,8 +51,10 @@ git diff --cached --check
 
 - 如果 `tui_gateway/server.py`、`tui_gateway/core/method_registration.py`、`tui_gateway/methods/*.py`、`tui_gateway/services/*.py` 有改动，优先检查 Gateway ABI 和 run control。
 - 如果 `tui_gateway/services/runtime_proxy.py`、`tui_gateway/ws.py`、`tui_gateway/methods/system.py` 有改动，优先检查 `runtime.ensure`、runtime proxy、WS bridge 生命周期和 control-plane 方法分流。
+- 如果 `session.index.list`、`tui_gateway/services/runtime_proxy.py` 或 `tui_gateway/methods/session.py` 有改动，优先检查侧栏索引查询仍在 control plane、不会触发 scoped worker cold start。
 - 如果 `run_agent.py`、`agent/conversation_loop.py`、`agent/tool_executor.py`、`model_tools.py` 有改动，优先检查 metadata、parent agent、tool invocation 和 extension tool registration。
 - 如果 `hermes_state.py`、`hermes_state_runs.py` 有改动，优先检查 run registry、run events、message metadata、transient session migration。
+- 如果 `hermes_state.py` 的 SQLite 初始化顺序有改动，优先检查 `auto_vacuum=INCREMENTAL` 仍在建表前设置，启动时 bounded `incremental_vacuum` 没有被移除。
 - 如果 `tui_gateway/services/persistence/gateway_store.py`、`tui_gateway/services/session_store.py`、`tui_gateway/services/workspaces/service.py`、`tui_gateway/services/artifact_registry/service.py` 有改动，优先检查只读查询不会创建空 DB。
 - 如果 `cron/scheduler.py`、`tools/cronjob_tools.py`、`tools/doxie_automation_task_tool.py`、`tui_gateway/services/doxie_cron_jobs.py`、`toolsets.py` 有改动，优先检查 Doxie automation contract 是否仍替代原生 cronjob tool。
 - 如果 `run_agent.py`、`tui_gateway/methods/prompt.py`、`doxie_extension/display_transcript.py` 有改动，优先检查结构化 stream delta 和 transcript 展示不会引入工具边界空白。

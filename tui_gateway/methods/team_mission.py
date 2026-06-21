@@ -2370,9 +2370,16 @@ def _(rid, params: dict) -> dict:
         status=str(params.get("status") or ""),
         limit=_bounded_limit(params.get("limit"), default=100, maximum=500),
     )
-    for conversation in conversations if isinstance(conversations, list) else []:
-        _recover_conversation_active_run(db, conversation)
-        conversation.update(_conversation_runtime_projection(db, conversation))
+    # 列表级查询(侧栏)只需要列表字段;运行态由 session_index 预计算提供。lightweight
+    # 模式跳过对每个会话的画布级富化(recover active run + runtime projection:每会话
+    # 查 missions/nodes/run_bindings/消息 + 逐个查 run)。那是 O(N) 富化,会话越多越慢,
+    # 而画布详情本就应在打开会话时才加载,不属于列表职责。其他客户端(不传 lightweight)
+    # 保持完整富化,行为不变。
+    lightweight = bool(params.get("lightweight") or params.get("lite"))
+    if not lightweight:
+        for conversation in conversations if isinstance(conversations, list) else []:
+            _recover_conversation_active_run(db, conversation)
+            conversation.update(_conversation_runtime_projection(db, conversation))
     return _ok(rid, {"conversations": conversations})
 
 

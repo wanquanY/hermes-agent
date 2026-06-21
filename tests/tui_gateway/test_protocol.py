@@ -1155,6 +1155,75 @@ def test_run_submit_preserves_prestart_cancelled_run(server, monkeypatch):
     assert server._run_prompt_submit.call_count == 0
 
 
+def test_run_submit_extracts_image_paths_from_prompt_attachments(server, monkeypatch, tmp_path):
+    from tui_gateway.methods import prompt as prompt_methods
+
+    image_path = tmp_path / "screen.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    session = {
+        "agent": MagicMock(model="gpt-test", provider="test-provider"),
+        "session_key": "stored-image-submit",
+        "running": False,
+        "active_run_id": "",
+        "active_turn_id": "",
+        "history": [],
+        "history_lock": threading.Lock(),
+    }
+    server._sessions["runtime-image-submit"] = session
+    submitted = {}
+
+    def fake_run_prompt_submit(rid, sid, target_session, text, submitted_images, turn_metadata):
+        submitted.update({
+            "rid": rid,
+            "sid": sid,
+            "session": target_session,
+            "text": text,
+            "submitted_images": submitted_images,
+            "turn_metadata": turn_metadata,
+        })
+
+    monkeypatch.setattr(prompt_methods, "_start_agent_build", MagicMock())
+    monkeypatch.setattr(prompt_methods, "_wait_agent", MagicMock(return_value=None))
+    monkeypatch.setattr(prompt_methods, "_run_prompt_submit", fake_run_prompt_submit)
+    monkeypatch.setattr(prompt_methods, "ensure_agent_runtime_current", MagicMock())
+    monkeypatch.setattr(prompt_methods, "_apply_doxie_product_runtime_policy", MagicMock())
+
+    resp = server.handle_request(
+        {
+            "id": "submit-image",
+            "method": "run.submit",
+            "params": {
+                "stored_session_id": "stored-image-submit",
+                "run_id": "run-image",
+                "turn_id": "turn-image",
+                "text": "分析图片",
+                "attachments": [
+                    {
+                        "name": "screen.png",
+                        "path": str(image_path),
+                        "mimeType": "image/png",
+                        "kind": "image",
+                    },
+                    {
+                        "name": "notes.txt",
+                        "path": str(tmp_path / "notes.txt"),
+                        "mimeType": "text/plain",
+                        "kind": "file",
+                    },
+                ],
+            },
+        }
+    )
+
+    assert "error" not in resp
+    deadline = time.time() + 2
+    while not submitted and time.time() < deadline:
+        time.sleep(0.01)
+    assert submitted["submitted_images"] == [str(image_path)]
+    assert submitted["turn_metadata"]["attachments"][0]["path"] == str(image_path)
+    assert submitted["turn_metadata"]["attachments"][0]["kind"] == "image"
+
+
 def test_events_subscribe_returns_subscription_id_and_unsubscribes(capture):
     server, _buf = capture
     token = server.bind_transport(server._stdio_transport)

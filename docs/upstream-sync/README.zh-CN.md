@@ -11,6 +11,11 @@
 | `docs/team-mission-runtime-architecture.zh-CN.md` | Team Mission 原生运行时的长期架构设计 | 只有架构原则、数据模型或责任边界变化时更新 |
 | `docs/upstream-sync/doxie-runtime-snapshot-YYYYMMDD.md` | 某次 staged/发布节点的本地 Doxie runtime 落地快照 | 每次大批量本地变更提交前新增一篇 |
 
+当前最新快照：
+
+- `docs/upstream-sync/doxie-runtime-snapshot-20260622.md`：`session_index` 侧栏索引、Team Mission 轻量列表/幽灵索引清理、state.db incremental vacuum、image attachments。
+- `docs/upstream-sync/doxie-runtime-snapshot-20260616.md`：Doxie Gateway contract、profile/team registry、conversation render snapshot、storage stats、Team Mission workspace/recovery。
+
 ## 后续同步检查顺序
 
 1. 先读 `UPSTREAM_SYNC_CHECKLIST.md`，按文件变更范围定位风险模块。

@@ -824,6 +824,14 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             self._conn.row_factory = sqlite3.Row
             apply_wal_with_fallback(self._conn, db_label="state.db")
             self._conn.execute("PRAGMA foreign_keys=ON")
+            # 增量自动回收:删除产生的空闲页进入 freelist 并被后续写入复用,文件不再
+            # 无限膨胀(团队任务的流式 delta「删了不回收」曾把 state.db 撑到 2.5GB、
+            # 61% 空洞,连 15 行的会话列表查询都被拖到 ~1.8s)。对新库立即生效;已有的
+            # NONE 模式库需 VACUUM 一次切换(运维侧已处理)。必须在建表前设置。
+            try:
+                self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            except Exception:
+                pass
 
             self._init_schema()
             try:
@@ -874,6 +882,10 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                     "orphaned state foreign-key repair skipped: %s",
                     repair_fk_exc,
                 )
+            try:
+                self._reclaim_freelist_on_startup()
+            except Exception as reclaim_exc:
+                logger.warning("state.db freelist reclaim skipped: %s", reclaim_exc)
         except Exception as exc:
             # Capture the cause so /resume and friends can surface WHY the
             # session DB is unavailable instead of a bare "Session database
@@ -942,6 +954,29 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         # Retries exhausted (shouldn't normally reach here).
         raise last_err or sqlite3.OperationalError(
             "database is locked after max retries"
+        )
+
+    def _reclaim_freelist_on_startup(self) -> None:
+        """启动时把删除留下的空闲页增量还给操作系统,防止 state.db 膨胀。
+
+        仅对 ``auto_vacuum=INCREMENTAL`` 的库有效(NONE 模式下
+        ``incremental_vacuum`` 是 no-op)。限制单次回收页数,避免积压很多时
+        长时间卡住启动;日常空闲页很少,通常是毫秒级。
+        """
+        MIN_FREE_PAGES = 2560      # ~10MB 以下不值得回收
+        MAX_PAGES = 50000          # 单次最多回收 ~200MB,避免积压时卡启动
+        try:
+            free_pages = int(self._conn.execute("PRAGMA freelist_count").fetchone()[0])
+        except Exception:
+            return
+        if free_pages < MIN_FREE_PAGES:
+            return
+        pages = min(free_pages, MAX_PAGES)
+        with self._lock:
+            self._conn.execute(f"PRAGMA incremental_vacuum({pages})")
+        logger.info(
+            "state.db incremental_vacuum reclaimed up to %d free page(s) (freelist was %d)",
+            pages, free_pages,
         )
 
     def _try_wal_checkpoint(self) -> None:

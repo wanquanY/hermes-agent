@@ -92,6 +92,14 @@ def _delete_session_rows(conn: sqlite3.Connection, session_ids: list[str]) -> li
     if not ordered_ids:
         return []
     placeholders = ",".join("?" for _ in ordered_ids)
+    # session_index 是写时维护的去规范化索引(侧栏列表的单一数据源)。它的行可能
+    # 比 sessions 行活得久 —— 团队会话删除曾清了正式表却漏清索引,导致侧栏一直显示
+    # 一个删不掉的「幽灵会话」,点开还报 "did not return canonical conversation id"。
+    # 所以无条件按 session_id 清索引,即使 sessions 表里已经没有对应行。
+    conn.execute(
+        f"DELETE FROM session_index WHERE session_id IN ({placeholders})",
+        tuple(ordered_ids),
+    )
     existing_ids = {
         _text(row["id"])
         for row in conn.execute(
@@ -540,6 +548,51 @@ def rename_team_mission_conversation(db: Any, identifier: str, title: str) -> Di
     }
 
 
+def _delete_orphan_team_conversation_index(db: Any, identifier: str) -> Dict[str, Any]:
+    """清理「正式数据已删、只剩去规范化索引」的幽灵团队会话。
+
+    当 team_mission_conversations / team_missions / sessions 都已删除,但
+    session_index 行还在时,resolve_team_mission_conversation 找不到正式会话,
+    删除流程会整体放弃 → 这个会话在侧栏删不掉、还报错。这里按 identifier
+    (可能是 conversation_id 或 stable_session_id)直接清掉残留索引行,以及
+    万一还在的 session 残行。
+    """
+    identifier = _text(identifier)
+    if not identifier:
+        return {}
+
+    def _do(conn: sqlite3.Connection) -> list[str]:
+        rows = conn.execute(
+            "SELECT session_id FROM session_index WHERE session_id = ? OR conversation_id = ?",
+            (identifier, identifier),
+        ).fetchall()
+        session_ids = [
+            _text(_row_value(row, "session_id", ""))
+            for row in rows
+            if _text(_row_value(row, "session_id", ""))
+        ]
+        # _delete_session_rows 会一并清掉这些 session_id 的 session_index 行;
+        # 再按 conversation_id 兜底删一次,防止索引行的 session_id 与传入的
+        # identifier 不一致而漏删。
+        cleaned = _delete_session_rows(conn, session_ids or [identifier])
+        conn.execute(
+            "DELETE FROM session_index WHERE session_id = ? OR conversation_id = ?",
+            (identifier, identifier),
+        )
+        return cleaned
+
+    cleaned = db._execute_write(_do) or []
+    return {
+        "deleted": True,
+        "conversation_id": identifier if identifier.startswith("team-conversation") else "",
+        "stable_session_id": "",
+        "mission_ids": [],
+        "run_session_ids": [],
+        "deleted_session_ids": cleaned,
+        "orphan_index_cleaned": True,
+    }
+
+
 def delete_team_mission_conversation(db: Any, identifier: str) -> Dict[str, Any]:
     identifier = _text(identifier)
     if not identifier:
@@ -548,7 +601,8 @@ def delete_team_mission_conversation(db: Any, identifier: str) -> Dict[str, Any]
     conversation = resolved.get("conversation") if isinstance(resolved, dict) else {}
     conversation_id = _text((conversation or {}).get("conversation_id"))
     if not conversation_id:
-        return {}
+        # 正式会话已不存在,但去规范化索引可能仍残留 → 清掉幽灵,别直接放弃。
+        return _delete_orphan_team_conversation_index(db, identifier)
     stable_session_id = _text((conversation or {}).get("stable_session_id"))
     with db._lock:
         mission_ids = [

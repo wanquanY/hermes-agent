@@ -1044,6 +1044,8 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
     db = SessionDB(tmp_path / "state.db")
+    image_path = tmp_path / "screen.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.initialize_team_mission_from_strategy(
@@ -1091,6 +1093,14 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
                     "size": 1200,
                     "path": "/tmp/requirements.pdf",
                     "kind": "file",
+                },
+                {
+                    "id": "upload-2",
+                    "name": "screen.png",
+                    "mimeType": "image/png",
+                    "size": 8,
+                    "path": str(image_path),
+                    "kind": "image",
                 }
             ],
         },
@@ -1113,6 +1123,8 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
     assert submitted["doxie_product_context"]["team_mission"]["kind"] == "leader_conversation"
     assert submitted["doxie_product_context"]["team_mission"]["tool_policy"]["disabled_toolsets"] == ["delegation"]
     assert submitted["doxie_product_context"]["team_mission"]["tool_policy"]["toolset_scope"] == "exact"
+    assert submitted["attachments"][1]["path"] == str(image_path)
+    assert submitted["attachments"][1]["kind"] == "image"
     assert submitted["attachments"][0]["path"] == "/tmp/requirements.pdf"
     conversation = db.get_team_mission_conversation("mission-1")
     assert conversation["title"] == "你好，上一轮进度怎么样？"
