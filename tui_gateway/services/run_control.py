@@ -520,38 +520,7 @@ def _deliver_team_mission_events(mission_id: str, events: list[dict[str, Any]]) 
         if transport is None:
             continue
         delivered_seq = int(subscription.get("last_seq") or 0)
-        # In-order contiguous delivery. notify_team_mission_event_listeners fires
-        # OUTSIDE the seq-assignment lock (hermes_team_mission_event_log.append_team_
-        # mission_event), so concurrent appends from multiple worker nodes can notify
-        # out of seq order. If a live event jumps past delivered_seq+1, the bare
-        # high-water-mark below would advance past the un-notified lower seqs and the
-        # poller (which also reads only after last_seq) could never deliver them —
-        # leaving the subscriber a permanent gap that forces a slow client catch-up
-        # and makes node streaming choppy. So when a jump is seen, deliver the
-        # contiguous range from the canonical log (the ordered source of truth)
-        # instead. Already-delivered seqs are skipped by the per-seq reservation, so
-        # this never double-delivers; the out-of-order live copies arriving later are
-        # deduped the same way.
-        delivery_events = events
-        max_incoming_seq = 0
         for event in events:
-            if isinstance(event, dict):
-                max_incoming_seq = max(max_incoming_seq, int(event.get("seq") or 0))
-        if max_incoming_seq > delivered_seq + 1:
-            reader = _db_method(subscription.get("db"), "list_team_mission_events")
-            if reader is not None:
-                try:
-                    backfilled = reader(
-                        mission_id,
-                        after_seq=delivered_seq,
-                        limit=_MAX_EVENTS_PER_SESSION,
-                    )
-                except Exception:
-                    logger.debug("team mission live-push backfill read failed", exc_info=True)
-                    backfilled = None
-                if isinstance(backfilled, list) and backfilled:
-                    delivery_events = backfilled
-        for event in delivery_events:
             if not isinstance(event, dict):
                 continue
             seq = int(event.get("seq") or 0)
