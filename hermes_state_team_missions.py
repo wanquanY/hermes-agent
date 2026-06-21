@@ -3315,6 +3315,43 @@ class SessionDBTeamMissionMixin:
             )
         except Exception:
             pass
+        # Planning lifecycle backstop: a leader planning run that ends WITHOUT calling
+        # team_mission_plan_complete (e.g. the model wrote the clarification or the
+        # plan as prose and stopped instead of using the clarify/plan_complete tools)
+        # would otherwise leave the mission stuck in running/planning with nothing to
+        # approve or execute — the conversation list and input box stay "running"
+        # forever. If a leader planning node has just terminated and there are still
+        # no worker/verifier/synthesis/approval nodes, fail the mission so the UI
+        # unblocks. A live clarify keeps the run blocked waiting on the user, so the
+        # terminal event never fires and this branch does not run — clarify flows
+        # are safe.
+        try:
+            mission_id_for_check = str(binding.get("mission_id") or "")
+            if (
+                mission_id_for_check
+                and _normalize_node_kind(node.get("kind")) == "root"
+                and next_status in {"completed", "failed", "cancelled", "interrupted"}
+            ):
+                graph_for_check = self.get_team_mission_graph(mission_id_for_check)
+                mission_for_check = graph_for_check.get("mission") or {}
+                mission_status = _text(mission_for_check.get("status")).lower()
+                if mission_status not in _TERMINAL_MISSION_STATUSES and mission_status != "waiting_approval":
+                    has_real_node = any(
+                        _normalize_node_kind(_n.get("kind")) not in {"root", ""}
+                        for _n in (graph_for_check.get("nodes") or [])
+                        if isinstance(_n, dict)
+                    )
+                    if not has_real_node:
+                        self.upsert_team_mission(
+                            mission_id=mission_id_for_check,
+                            team_id=_text(mission_for_check.get("team_id")),
+                            title=_text(mission_for_check.get("title")),
+                            mode=_text(mission_for_check.get("mode")) or "supervised_mission",
+                            status="failed",
+                            leader_session_id=_text(mission_for_check.get("leader_session_id")),
+                        )
+        except Exception:
+            pass
         return updated
 
     def append_team_mission_run_event(

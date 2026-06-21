@@ -230,11 +230,13 @@ def test_team_mission_leader_node_toolsets_are_surface_scoped():
 
     team_mission = importlib.import_module("tui_gateway.methods.team_mission")
 
+    # Planning toolset is intentionally write-graph + ask-user + read-only-workspace.
+    # See _start_toolsets: clarify and file_readonly belong in the same exact set.
     assert team_mission._start_toolsets(
         {},
         {"mode": "supervised_mission"},
         {"kind": "root", "metadata": {"role": "leader", "phase": "planning"}},
-    ) == ["team_mission_planning"]
+    ) == ["team_mission_planning", "clarify", "file_readonly"]
     assert team_mission._start_toolsets(
         {},
         {"mode": "supervised_mission"},
@@ -445,7 +447,7 @@ def test_team_mission_gateway_methods_create_graph_and_replay_events(monkeypatch
     assert submitted["text"] != "规划审批后执行"
     assert "team_mission_node_create" in submitted["text"]
     assert "team_mission_plan_complete" in submitted["text"]
-    assert submitted["enabled_toolsets"] == ["team_mission_planning"]
+    assert submitted["enabled_toolsets"] == ["team_mission_planning", "clarify", "file_readonly"]
     assert "delegation" in submitted["disabled_toolsets"]
     assert submitted["toolset_scope"] == "exact"
     assert submitted["doxie_product_context"]["team_mission"]["node_role"] == "leader"
@@ -2250,7 +2252,7 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
     assert result["node"]["node_id"] == f"team-mission:{result['mission_id']}:root"
     assert submitted["record_user_task_message"] is False
     assert submitted["agent_profile_id"] == "profile-leader"
-    assert submitted["enabled_toolsets"] == ["team_mission_planning"]
+    assert submitted["enabled_toolsets"] == ["team_mission_planning", "clarify", "file_readonly"]
     assert "delegation" in submitted["disabled_toolsets"]
     assert submitted["toolset_scope"] == "exact"
     assert submitted["doxie_product_context"]["team_mission"]["node_phase"] == "planning"

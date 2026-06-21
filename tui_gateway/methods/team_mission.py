@@ -924,7 +924,16 @@ def _profile_current_toolsets(profile_params: dict) -> list[str]:
 def _start_toolsets(params: dict, mission: dict, node: dict, *, profile_params: dict | None = None, db=None) -> list[str]:
     if _is_team_leader_control_node(node):
         if _node_phase(node) in {"planning", "change_request"}:
-            return ["team_mission_planning"]
+            # Planning is "design the task graph", not "do the work". The leader is
+            # allowed to (a) WRITE the graph (team_mission_planning), (b) ASK the user
+            # for missing inputs (clarify) so it does not build the graph on guessed
+            # assumptions and waste an approval+execution round, and (c) READ the
+            # workspace (file_readonly) so the graph reflects what is actually there.
+            # It is NOT allowed to write files or run commands — that is a worker job
+            # behind the approval gate; giving leader write/exec here would bypass the
+            # whole supervised approval boundary. The toolset_scope is "exact", so
+            # everything must be listed explicitly.
+            return ["team_mission_planning", "clarify", "file_readonly"]
         return ["team_mission_read"]
     toolsets = _normalize_toolsets(params.get("enabled_toolsets") or params.get("enabledToolsets"))
     if not toolsets:

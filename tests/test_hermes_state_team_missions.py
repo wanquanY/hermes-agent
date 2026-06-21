@@ -3119,3 +3119,81 @@ def test_prune_team_mission_events_leaves_active_mission(tmp_path: Path):
     assert deleted == 0
     after_types = [e.get("payload", {}).get("source_event_type") for e in db.list_team_mission_events("mission-1")]
     assert "message.delta" in after_types
+
+
+def test_leader_planning_run_terminating_without_plan_complete_fails_mission(tmp_path: Path):
+    # Regression for "mission stuck running with 0 nodes": the leader wrote the
+    # clarification or the plan as prose and ended its run instead of calling
+    # the clarify or team_mission_plan_complete tools. The lifecycle backstop in
+    # reduce_team_mission_run_event must mark the mission failed so the
+    # conversation list and input box stop showing "running" forever.
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="m1",
+        team_id="t1",
+        title="Stuck planning",
+        mode="supervised_mission",
+        status="planning",
+        leader_session_id="team-session-1",
+    )
+    db.upsert_team_mission_node(
+        mission_id="m1",
+        node_id="m1::root",
+        kind="root",
+        title="Plan",
+        status="running",
+        assignee_profile_id="profile-leader",
+        metadata={"role": "leader", "phase": "planning"},
+    )
+    db.upsert_run(run_id="run-1", session_id="sess-1", status="running")
+    db.bind_team_mission_run(
+        mission_id="m1",
+        node_id="m1::root",
+        run_id="run-1",
+        session_id="sess-1",
+        runtime_session_id="rt-1",
+        runtime_scope_key="team:m1:leader",
+        role="leader",
+    )
+
+    db.reduce_team_mission_run_event(
+        run_id="run-1",
+        event={"type": "message.complete", "payload": {"status": "completed"}, "seq": 1},
+    )
+
+    mission = db.get_team_mission_graph("m1").get("mission") or {}
+    assert mission.get("status") == "failed"
+
+
+def test_leader_planning_run_terminating_after_plan_complete_does_not_fail_mission(tmp_path: Path):
+    # With worker nodes in place (plan_complete was called), the same terminal
+    # leader event must NOT downgrade the mission to failed.
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="m2",
+        team_id="t1",
+        title="Planned",
+        mode="supervised_mission",
+        status="waiting_approval",
+        leader_session_id="team-session-2",
+    )
+    db.upsert_team_mission_node(
+        mission_id="m2", node_id="m2::root", kind="root", title="Plan", status="running",
+        assignee_profile_id="profile-leader", metadata={"role": "leader", "phase": "planning"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="m2", node_id="m2::w1", kind="worker", title="Work", status="todo",
+    )
+    db.upsert_run(run_id="run-2", session_id="sess-2", status="running")
+    db.bind_team_mission_run(
+        mission_id="m2", node_id="m2::root", run_id="run-2", session_id="sess-2",
+        runtime_session_id="rt-2", runtime_scope_key="team:m2:leader", role="leader",
+    )
+
+    db.reduce_team_mission_run_event(
+        run_id="run-2",
+        event={"type": "message.complete", "payload": {"status": "completed"}, "seq": 1},
+    )
+
+    mission = db.get_team_mission_graph("m2").get("mission") or {}
+    assert mission.get("status") != "failed"

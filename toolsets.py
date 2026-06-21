@@ -252,6 +252,12 @@ TOOLSETS = {
         "tools": ["read_file", "parse_document", "write_file", "patch", "search_files"],
         "includes": []
     },
+
+    "file_readonly": {
+        "description": "Read-only subset of the file toolset: inspect workspace files (read, parse, search) without mutating anything. Used by the team Leader during planning to keep the design phase strictly non-executing.",
+        "tools": ["read_file", "parse_document", "search_files"],
+        "includes": []
+    },
     
     "tts": {
         "description": "Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI",
