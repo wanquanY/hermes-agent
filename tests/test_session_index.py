@@ -218,6 +218,45 @@ def test_reconcile_purges_previously_leaked_node_rows(tmp_path: Path):
     assert "team:mission-abc:node:synthesis" not in _ids(db.list_session_index())
 
 
+def test_reconcile_excludes_team_node_delegate_task_children(tmp_path: Path):
+    """delegate_task spawns a fresh tui session whose parent_session_id points at
+    the team node session. Such children must not surface in the sidebar — every
+    team task that runs delegate_task would otherwise leak worker chatter as
+    unattributed `tui` rows ('Get latest GitHub stats' / empty '新会话')."""
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("conv-1", source="cli")
+    db.create_session("team:mission-xyz:node:tech-research", source="cli")
+    db.create_session(
+        "20260621_195327_cc3473",
+        source="tui",
+        parent_session_id="team:mission-xyz:node:tech-research",
+    )
+    db.reconcile_session_index()
+    ids = _ids(db.list_session_index())
+    assert "conv-1" in ids
+    assert "team:mission-xyz:node:tech-research" not in ids
+    assert "20260621_195327_cc3473" not in ids
+
+
+def test_reconcile_purges_previously_leaked_delegate_task_children(tmp_path: Path):
+    """A prior reconcile that ran before the parent-filter fix could have inserted
+    delegate_task children into the index. Reconcile must clean them up too."""
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("team:mission-xyz:node:tech-research", source="cli")
+    db.create_session(
+        "20260621_195327_cc3473",
+        source="tui",
+        parent_session_id="team:mission-xyz:node:tech-research",
+    )
+    # simulate the leak from before the fix
+    db.upsert_session_index(
+        session_id="20260621_195327_cc3473", source="tui", started_at=1.0, updated_at=1.0,
+    )
+    assert "20260621_195327_cc3473" in _ids(db.list_session_index())
+    db.reconcile_session_index()
+    assert "20260621_195327_cc3473" not in _ids(db.list_session_index())
+
+
 def test_reconcile_heals_terminal_mission_conversation_stuck_running(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="m-x", team_id="t", title="T", mode="supervised_mission", status="cancelled")

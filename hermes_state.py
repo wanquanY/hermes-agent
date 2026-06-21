@@ -2452,8 +2452,17 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         placeholders = ", ".join("?" for _ in excluded) if excluded else ""
         # Team-mission member-node runtime sessions (id like "team:...:node:...")
         # are data plane, never user-facing — they must not surface in the sidebar.
-        # Mirrors the frontend isTeamMissionInternalRuntimeSessionId rule.
-        team_internal_clause = "NOT (id LIKE 'team:%' AND id LIKE '%:node:%')"
+        # Mirrors the frontend isTeamMissionInternalRuntimeSessionId rule. Their
+        # delegate_task / sub-agent children carry their OWN fresh id (the member
+        # node session is their parent_session_id) and must be excluded too, or
+        # every team task that runs delegate_task leaks worker chatter into the
+        # sidebar as unattributed `tui` sessions (parent's node session never
+        # surfaces, the child does — confusing the user with "Get latest GitHub
+        # stats" / empty "新会话" rows that don't belong to any conversation).
+        team_internal_clause = (
+            "NOT (id LIKE 'team:%' AND id LIKE '%:node:%') "
+            "AND NOT (COALESCE(parent_session_id,'') LIKE 'team:%:node:%')"
+        )
         where = [team_internal_clause]
         params: List[Any] = []
         if excluded:
@@ -2466,10 +2475,19 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         )
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
-            # Purge any team-internal node sessions that a prior reconcile leaked.
+            # Purge any team-internal node sessions that a prior reconcile leaked,
+            # plus their delegate_task / sub-agent children (id is a fresh tui id
+            # whose parent_session_id points at the team node session).
             conn.execute(
                 "DELETE FROM session_index "
                 "WHERE session_id LIKE 'team:%' AND session_id LIKE '%:node:%'"
+            )
+            conn.execute(
+                "DELETE FROM session_index "
+                "WHERE session_id IN ("
+                " SELECT id FROM sessions "
+                " WHERE COALESCE(parent_session_id,'') LIKE 'team:%:node:%'"
+                ")"
             )
             rows = conn.execute(select_sql, tuple(params)).fetchall()
             upserted = 0
