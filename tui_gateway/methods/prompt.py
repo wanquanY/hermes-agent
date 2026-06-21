@@ -1829,6 +1829,48 @@ def _(rid, params: dict) -> dict:
 # ── Methods: respond ─────────────────────────────────────────────────
 
 
+def has_pending_prompt(request_id: str) -> bool:
+    """Non-destructive check: is a prompt/sudo/secret/clarify request with this id
+    pending in THIS process? Used by the gateway runtime proxy to keep an interactive
+    *.respond local when the request was registered here (e.g. the in-process team
+    leader conversation run) rather than proxying it to a scoped worker."""
+    r = str(request_id or "").strip()
+    if not r:
+        return False
+    try:
+        with _prompt_lock:
+            return r in _pending
+    except Exception:
+        return False
+
+
+def resolve_approval_session_key(params: dict) -> str:
+    """Best-effort, non-raising variant of _approval_session_key for the runtime
+    proxy's local-pending check. Returns "" when it cannot resolve a session key."""
+    requested = str(
+        params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or params.get("session_id")
+        or params.get("sessionId")
+        or ""
+    ).strip()
+    if not requested:
+        return ""
+    session = _sessions.get(requested)
+    if session:
+        return str(session.get("session_key") or requested)
+    for runtime_sid, live_session in list(_sessions.items()):
+        if str((live_session or {}).get("session_key") or "") == requested:
+            return str((live_session or {}).get("session_key") or runtime_sid)
+    try:
+        db = _db_for_stable_session(requested)
+        if db is not None and db.get_session(requested):
+            return requested
+    except Exception:
+        return ""
+    return ""
+
+
 def _respond(rid, params, key):
     r = params.get("request_id", "")
     with _prompt_lock:

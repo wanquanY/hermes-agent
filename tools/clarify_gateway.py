@@ -162,6 +162,21 @@ def resolve_gateway_clarify(clarify_id: str, response: str) -> bool:
     return True
 
 
+def has_pending_clarify(clarify_id: str) -> bool:
+    """Non-destructive check: is a clarify with this id pending in THIS process?
+
+    Used by the gateway runtime proxy to decide whether a ``clarify.respond`` must
+    be handled locally (the request was registered here — e.g. the in-process team
+    leader conversation run) instead of being proxied to a scoped runtime worker
+    that never saw it.
+    """
+    cid = str(clarify_id or "").strip()
+    if not cid:
+        return False
+    with _lock:
+        return cid in _entries
+
+
 def get_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
     """Return the OLDEST pending clarify entry for a session, or None.
 

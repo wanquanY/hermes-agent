@@ -164,6 +164,46 @@ def test_team_mission_scoped_methods_are_proxied_to_runtime_worker(method):
     )
 
 
+def test_clarify_respond_with_local_pending_stays_on_control_plane():
+    # The team leader conversation runs IN the control-plane process (team_mission.
+    # message.submit calls run.submit in-process), so its clarify pending is registered
+    # locally. clarify.respond must be answered here — proxying it to the scoped worker
+    # for team:...:leader-conversation hits a process that never saw the request and
+    # returns "no pending answer request". Match is by request_id, so an unknown id
+    # (a member-node clarify living in a worker) still proxies correctly.
+    from tools import clarify_gateway
+
+    clarify_id = "test-clarify-local-1"
+    clarify_gateway.register(clarify_id, session_key="team-session-x", question="q?", choices=["a", "b"])
+    try:
+        assert not runtime_proxy.should_proxy_to_runtime(
+            {
+                "id": "1",
+                "method": "clarify.respond",
+                "params": {
+                    "request_id": clarify_id,
+                    "answer": "a",
+                    "runtime_scope_key": "team:conversation-1:leader-conversation",
+                },
+            }
+        )
+        assert runtime_proxy.should_proxy_to_runtime(
+            {
+                "id": "2",
+                "method": "clarify.respond",
+                "params": {
+                    "request_id": "not-registered-here",
+                    "answer": "a",
+                    "runtime_scope_key": "team:conversation-1:leader-conversation",
+                },
+            }
+        )
+    finally:
+        with clarify_gateway._lock:
+            clarify_gateway._entries.pop(clarify_id, None)
+            clarify_gateway._session_index.pop("team-session-x", None)
+
+
 @pytest.mark.parametrize(
     "method",
     [

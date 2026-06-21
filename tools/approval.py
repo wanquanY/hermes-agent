@@ -631,6 +631,20 @@ def submit_pending(session_key: str, approval: dict):
         _pending[session_key] = approval
 
 
+def has_pending_session(session_key: str) -> bool:
+    """Non-destructive check: is an approval pending for this session in THIS process?
+
+    Lets the gateway runtime proxy keep ``approval.respond`` local when the request
+    was registered here (e.g. the in-process team leader run) instead of proxying it
+    to a scoped worker that never saw it.
+    """
+    key = str(session_key or "").strip()
+    if not key:
+        return False
+    with _lock:
+        return key in _pending
+
+
 def approve_session(session_key: str, pattern_key: str):
     """Approve a pattern for this session only."""
     with _lock:

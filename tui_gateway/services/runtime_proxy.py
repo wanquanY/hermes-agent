@@ -131,6 +131,20 @@ _CRON_CONTROL_PLANE_READ_ACTIONS = frozenset({"", "list", "status", "runs"})
 # execution is isolated by the lower run.submit runtime lease, not by proxying
 # the enclosing conversation RPC into a scoped worker DB.
 _TEAM_LEADER_RUNTIME_METHODS = frozenset()
+# Interactive *.respond methods whose pending request may live in THIS (control-plane)
+# process rather than a scoped worker: the team leader conversation run executes
+# in-process (team_mission.message.submit calls run.submit directly), so its clarify/
+# sudo/secret/approval pending is registered here. Proxying the answer to a scoped
+# worker would hit a process that never saw the request → "no pending answer request".
+# Member nodes run in workers, so their pending is NOT local and still proxies.
+_INTERACTIVE_RESPOND_METHODS = frozenset(
+    {
+        "clarify.respond",
+        "sudo.respond",
+        "secret.respond",
+        "approval.respond",
+    }
+)
 
 
 class AsyncFrameTransport(Protocol):
@@ -452,9 +466,49 @@ def _cron_control_plane_read_requested(method: str, params: dict[str, Any]) -> b
     )
 
 
+def _interactive_respond_is_local(method: str, params: dict[str, Any]) -> bool:
+    """True when the pending request for an interactive *.respond lives in THIS
+    process, so the gateway must answer it locally instead of proxying it to a
+    runtime worker. Matching is by request_id (globally unique) / session_key, so
+    this never steals a worker's pending — it only catches the in-process team
+    leader run whose pending the control plane itself holds."""
+    request_id = str(params.get("request_id") or params.get("requestId") or "").strip()
+    if request_id:
+        try:
+            from tui_gateway.methods.prompt import has_pending_prompt
+
+            if has_pending_prompt(request_id):
+                return True
+        except Exception:
+            pass
+        if method == "clarify.respond":
+            try:
+                from tools.clarify_gateway import has_pending_clarify
+
+                if has_pending_clarify(request_id):
+                    return True
+            except Exception:
+                pass
+    if method == "approval.respond":
+        try:
+            from tui_gateway.methods.prompt import resolve_approval_session_key
+            from tools.approval import has_pending_session
+
+            session_key = resolve_approval_session_key(params)
+            if session_key and has_pending_session(session_key):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def should_proxy_to_runtime(req: Any, *, resolve_team_context: bool = True) -> bool:
     method = _request_method(req)
     if not method:
+        return False
+    if method in _INTERACTIVE_RESPOND_METHODS and _interactive_respond_is_local(
+        method, _request_params(req)
+    ):
         return False
     if resolve_team_context and method in _TEAM_LEADER_RUNTIME_METHODS:
         try:
