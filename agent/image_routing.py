@@ -200,7 +200,7 @@ def decide_image_input_mode(
       model:    active model slug as it would be sent to the provider.
       cfg:      loaded config.yaml dict, or None. When None, behaves as auto.
       supports_vision_override: optional per-turn capability from the runtime
-        model descriptor. Used by Doxie and other gateway clients when the
+        model descriptor. Used by Dovie and other gateway clients when the
         active model capability is known outside static models.dev metadata.
     """
     mode_cfg = "auto"

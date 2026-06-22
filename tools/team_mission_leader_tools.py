@@ -49,7 +49,7 @@ def _session_context() -> dict[str, Any]:
     try:
         from gateway.session_context import get_session_env
 
-        raw = get_session_env("HERMES_DOXIE_PRODUCT_CONTEXT", "")
+        raw = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
     except Exception:
         raw = ""
     if not raw:

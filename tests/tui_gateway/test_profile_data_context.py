@@ -43,9 +43,9 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
             "method": "session.messages",
             "params": {
                 "session_id": "stored-session",
-                "doxie_profile": {
+                "dovie_profile": {
                     "hermesHomePath": str(profile_home),
-                    "env": {"DOXIE_TEST_PROFILE_ENV": "must-not-leak"},
+                    "env": {"DOVIE_TEST_PROFILE_ENV": "must-not-leak"},
                 },
             },
         }
@@ -54,7 +54,7 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
     assert "error" not in resp
     assert resp["result"]["messages"] == [{"role": "user", "text": "hello"}]
     assert seen["home"] == str(profile_home.resolve())
-    assert os.environ.get("DOXIE_TEST_PROFILE_ENV") is None
+    assert os.environ.get("DOVIE_TEST_PROFILE_ENV") is None
 
 
 def test_profile_db_selection_uses_process_home_as_default(monkeypatch, tmp_path):
@@ -80,7 +80,7 @@ def test_profile_db_selection_uses_process_home_as_default(monkeypatch, tmp_path
 
     token = server._enter_profile_context(
         server._profile_context_for_params({
-            "doxie_profile": {
+            "dovie_profile": {
                 "id": "agent-default",
                 "hermesHomePath": str(profile_home),
             },

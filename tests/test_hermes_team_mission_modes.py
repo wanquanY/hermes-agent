@@ -35,14 +35,14 @@ MEMBERS = [
 ]
 
 
-DOXIE_MEMBERS = [
+DOVIE_MEMBERS = [
     {
         "memberId": "member-leader",
         "agentProfileId": "profile-leader",
         "agentProfileVersionId": "version-leader",
         "displayName": "Leader",
         "role": "lead",
-        "doxieProfile": {
+        "dovieProfile": {
             "id": "profile-leader",
             "agentProfileVersionId": "version-leader",
             "runtimeScopeKey": "profile:profile-leader:version:version-leader",
@@ -55,7 +55,7 @@ DOXIE_MEMBERS = [
         "agentProfileVersionId": "version-worker",
         "displayName": "Worker",
         "role": "worker",
-        "doxieProfile": {
+        "dovieProfile": {
             "id": "profile-worker",
             "agentProfileVersionId": "version-worker",
             "runtimeScopeKey": "profile:profile-worker:version:version-worker",
@@ -65,14 +65,14 @@ DOXIE_MEMBERS = [
 ]
 
 
-def test_supervised_strategy_preserves_doxie_member_profile_identity():
+def test_supervised_strategy_preserves_dovie_member_profile_identity():
     strategy = strategy_for_mode(MODE_SUPERVISED_MISSION)
 
     patch = strategy.initialize_graph(
-        mission_id="mission-doxie",
+        mission_id="mission-dovie",
         title="执行任务",
         objective="规划后审批再执行",
-        members=DOXIE_MEMBERS,
+        members=DOVIE_MEMBERS,
     )
 
     root = patch.nodes[0]
@@ -266,16 +266,16 @@ def test_session_db_initializes_team_mission_through_mode_strategy(tmp_path: Pat
     assert graph["nodes"][0]["runtime_scope_key"] == "team:mission-1:leader"
 
 
-def test_session_db_stores_doxie_member_runtime_profiles_for_team_mission(tmp_path: Path):
+def test_session_db_stores_dovie_member_runtime_profiles_for_team_mission(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
 
     graph = db.initialize_team_mission_from_strategy(
-        mission_id="mission-doxie",
+        mission_id="mission-dovie",
         team_id="team-1",
         title="监督执行",
         objective="规划审批后执行",
         mode=MODE_SUPERVISED_MISSION,
-        members=DOXIE_MEMBERS,
+        members=DOVIE_MEMBERS,
     )
 
     members = graph["mission"]["metadata"]["members"]

@@ -186,7 +186,7 @@ The resolver accepts both toolset names and exact tool names from the model-faci
 - blocked toolsets such as delegation, memory, clarify, and code execution are removed for ordinary leaf children;
 - orchestrator children are the only delegated children that regain `delegate_task`;
 - MCP toolsets can be inherited explicitly from the parent when configured;
-- semantic aliases such as `web`, `search`, `web_search`, and `web_extract` can map to Doxie-managed web tools, but only if those tools are already in the parent tool surface.
+- semantic aliases such as `web`, `search`, `web_search`, and `web_extract` can map to Dovie-managed web tools, but only if those tools are already in the parent tool surface.
 
 Child agents receive the final exact list through `AIAgent(enabled_tools=...)`, while `enabled_toolsets` remains a display and compatibility hint. Keep new delegation policy in `delegate_tool_access.py`; `delegate_tool.py` should stay focused on orchestration, lifecycle events, and child execution.
 

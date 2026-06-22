@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 
-from doxie_extension.display_transcript import sanitize_transcript_messages
+from dovie_extension.display_transcript import sanitize_transcript_messages
 from tui_gateway.methods.session import (
     _bind_session_workspace,
     _bounded_page_limit,

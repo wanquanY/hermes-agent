@@ -790,7 +790,7 @@ async def get_action_status(name: str, lines: int = 200):
 
 
 def _session_automation_counts() -> Dict[str, int]:
-    """Return session_id -> number of Doxie automation jobs associated with it."""
+    """Return session_id -> number of Dovie automation jobs associated with it."""
     try:
         from cron.jobs import list_jobs
     except Exception:
@@ -809,17 +809,17 @@ def _session_automation_counts() -> Dict[str, int]:
     for job in jobs:
         if not isinstance(job, dict):
             continue
-        doxie = job.get("doxie") if isinstance(job.get("doxie"), dict) else {}
-        owner = doxie.get("owner") if isinstance(doxie.get("owner"), dict) else {}
+        dovie = job.get("dovie") if isinstance(job.get("dovie"), dict) else {}
+        owner = dovie.get("owner") if isinstance(dovie.get("owner"), dict) else {}
         binding = (
-            doxie.get("result_binding")
-            if isinstance(doxie.get("result_binding"), dict)
+            dovie.get("result_binding")
+            if isinstance(dovie.get("result_binding"), dict)
             else {}
         )
         if not binding:
             binding = (
-                doxie.get("resultBinding")
-                if isinstance(doxie.get("resultBinding"), dict)
+                dovie.get("resultBinding")
+                if isinstance(dovie.get("resultBinding"), dict)
                 else {}
             )
 
@@ -830,7 +830,7 @@ def _session_automation_counts() -> Dict[str, int]:
                 owner.get("source_session_id"),
                 binding.get("sessionId"),
                 binding.get("session_id"),
-                doxie.get("session_id"),
+                dovie.get("session_id"),
             )
             if str(value or "").strip()
         }

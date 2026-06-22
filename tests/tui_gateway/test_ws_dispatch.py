@@ -122,11 +122,11 @@ def test_profile_scoped_runtime_read_methods_are_proxied_to_runtime_worker(metho
             "params": {
                 "stored_session_id": "stored-session-1",
                 "runtime_scope_key": "profile:agent-a:version:v1",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "runtimeScopeKey": "profile:agent-a:version:v1",
                     "agentProfileVersionId": "v1",
-                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.dovie/versions/v1",
                 },
             },
         }
@@ -153,11 +153,11 @@ def test_team_mission_scoped_methods_are_proxied_to_runtime_worker(method):
                 "conversation_id": "conversation-1",
                 "runtime_scope_key": "team:conversation-1:leader-conversation",
                 "profile_runtime_scope_key": "profile:agent-a:version:v1",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "runtimeScopeKey": "profile:agent-a:version:v1",
                     "agentProfileVersionId": "v1",
-                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.dovie/versions/v1",
                 },
             },
         }
@@ -257,7 +257,7 @@ def test_prompt_submit_with_profile_scope_is_proxied_to_runtime_worker():
             "method": "prompt.submit",
             "params": {
                 "runtime_scope_key": "profile:agent-a",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "hermesHomePath": "/tmp/hermes-agent-a",
                 },
@@ -279,7 +279,7 @@ def test_team_leader_runtime_methods_do_not_proxy_from_profile_or_member_payload
                 "profileRuntimeScopeKey": "profile:agent-leader:version:version-leader",
                 "agentProfileId": "agent-leader",
                 "agentProfileVersionId": "version-leader",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-leader",
                     "agentProfileVersionId": "version-leader",
                     "runtimeScopeKey": "profile:agent-leader:version:version-leader",
@@ -310,7 +310,7 @@ def test_team_conversation_canonical_write_methods_stay_on_control_plane_after_r
                 "conversation_session_id": "team-session-1",
                 "runtime_scope_key": "team:conversation-1:leader-conversation",
                 "agent_profile_id": "agent-leader",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-leader",
                     "runtimeScopeKey": "profile:agent-leader",
                     "hermesHomePath": "/tmp/hermes-agent-leader",
@@ -1187,7 +1187,7 @@ def test_control_plane_session_list_is_not_proxied_to_runtime_worker():
             "method": "session.list",
             "params": {
                 "runtime_scope_key": "profile:agent-a",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "hermesHomePath": "/tmp/hermes-agent-a",
                 },
@@ -1204,11 +1204,11 @@ def test_control_plane_session_title_is_not_proxied_to_runtime_worker():
             "params": {
                 "stored_session_id": "stored-session-1",
                 "runtime_scope_key": "profile:agent-a:version:v1",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "runtimeScopeKey": "profile:agent-a:version:v1",
                     "agentProfileVersionId": "v1",
-                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.dovie/versions/v1",
                 },
             },
         }
@@ -1224,11 +1224,11 @@ def test_control_plane_session_messages_are_not_proxied_to_runtime_worker():
                 "stored_session_id": "stored-session-1",
                 "runtime_scope_key": "team:conversation-1:leader-conversation",
                 "profile_runtime_scope_key": "profile:agent-a:version:v1",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "runtimeScopeKey": "profile:agent-a:version:v1",
                     "agentProfileVersionId": "v1",
-                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.dovie/versions/v1",
                 },
             },
         }
@@ -1245,11 +1245,11 @@ def test_control_plane_team_mission_node_history_is_not_proxied_to_runtime_worke
                 "node_id": "node-worker",
                 "runtime_scope_key": "team:conversation-1:leader-conversation",
                 "profile_runtime_scope_key": "profile:agent-a:version:v1",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "runtimeScopeKey": "profile:agent-a:version:v1",
                     "agentProfileVersionId": "v1",
-                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.dovie/versions/v1",
                 },
             },
         }
@@ -1263,7 +1263,7 @@ def test_profile_scoped_cron_manage_is_proxied_to_runtime_worker():
             "method": "cron.manage",
             "params": {
                 "action": "list",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "runtimeScopeKey": "profile:agent-a",
                     "hermesHomePath": "/tmp/hermes-agent-a",
@@ -1282,11 +1282,11 @@ def test_profile_scoped_cron_control_plane_reads_are_not_proxied_to_runtime_work
             "params": {
                 "action": action,
                 "controlPlaneOnly": True,
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "runtimeScopeKey": "profile:agent-a:version:v1",
                     "agentProfileVersionId": "v1",
-                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.dovie/versions/v1",
                 },
             },
         }
@@ -1303,11 +1303,11 @@ def test_profile_growth_summary_stays_on_control_plane_with_profile_scope():
                 "agentProfileVersionId": "v1",
                 "runtime_scope_key": "profile:agent-a:version:v1",
                 "controlPlaneOnly": True,
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "runtimeScopeKey": "profile:agent-a:version:v1",
                     "agentProfileVersionId": "v1",
-                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.dovie/versions/v1",
                 },
             },
         }
@@ -1323,11 +1323,11 @@ def test_profile_scoped_cron_control_plane_flag_does_not_bypass_runtime_mutation
             "params": {
                 "action": action,
                 "controlPlaneOnly": True,
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "runtimeScopeKey": "profile:agent-a:version:v1",
                     "agentProfileVersionId": "v1",
-                    "hermesHomePath": "/tmp/hermes-agent-a/.doxie/versions/v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.dovie/versions/v1",
                 },
             },
         }
@@ -1350,7 +1350,7 @@ def test_profile_scoped_approval_methods_are_proxied_to_runtime_worker(method):
             "method": method,
             "params": {
                 "session_id": "stored-session-1",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "runtimeScopeKey": "profile:agent-a",
                     "hermesHomePath": "/tmp/hermes-agent-a",
@@ -1375,7 +1375,7 @@ def test_profile_scoped_runtime_tool_methods_are_proxied_to_runtime_worker(metho
             "method": method,
             "params": {
                 "session_id": "stored-session-1",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "runtimeScopeKey": "profile:agent-a",
                     "hermesHomePath": "/tmp/hermes-agent-a",
@@ -1392,7 +1392,7 @@ def test_runtime_ensure_stays_on_control_plane():
             "method": "runtime.ensure",
             "params": {
                 "runtime_scope_key": "profile:agent-a",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "hermesHomePath": "/tmp/hermes-agent-a",
                 },
@@ -1401,44 +1401,44 @@ def test_runtime_ensure_stays_on_control_plane():
     )
 
 
-def test_doxie_sidecar_host_and_origin_policy():
-    from tui_gateway import doxie_sidecar
+def test_dovie_sidecar_host_and_origin_policy():
+    from tui_gateway import dovie_sidecar
 
-    assert doxie_sidecar.is_allowed_host("127.0.0.1:4567")
-    assert doxie_sidecar.is_allowed_host("localhost:4567")
-    assert doxie_sidecar.is_allowed_host("[::1]:4567")
-    assert not doxie_sidecar.is_allowed_host("evil.example")
+    assert dovie_sidecar.is_allowed_host("127.0.0.1:4567")
+    assert dovie_sidecar.is_allowed_host("localhost:4567")
+    assert dovie_sidecar.is_allowed_host("[::1]:4567")
+    assert not dovie_sidecar.is_allowed_host("evil.example")
 
-    assert doxie_sidecar.is_allowed_origin("")
-    assert doxie_sidecar.is_allowed_origin(None)
-    assert doxie_sidecar.is_allowed_origin("doxie://renderer")
-    assert doxie_sidecar.is_allowed_origin("doxie-hermes://gateway")
-    assert not doxie_sidecar.is_allowed_origin("null")
-    assert not doxie_sidecar.is_allowed_origin("http://127.0.0.1:3000")
-    assert not doxie_sidecar.is_allowed_origin("https://evil.example")
-
-
-def test_doxie_sidecar_parent_watchdog_keeps_live_reparented_process(monkeypatch):
-    from tui_gateway import doxie_sidecar
-
-    monkeypatch.setenv(doxie_sidecar.SIDECAR_PARENT_PID_ENV, "12345")
-    monkeypatch.setattr(doxie_sidecar.os, "getppid", lambda: 1)
-    monkeypatch.setattr(doxie_sidecar.os, "kill", lambda pid, signal: None)
-
-    assert doxie_sidecar.expected_parent_pid() == 12345
-    assert doxie_sidecar.parent_process_still_owns_sidecar(12345)
+    assert dovie_sidecar.is_allowed_origin("")
+    assert dovie_sidecar.is_allowed_origin(None)
+    assert dovie_sidecar.is_allowed_origin("dovie://renderer")
+    assert dovie_sidecar.is_allowed_origin("dovie-hermes://gateway")
+    assert not dovie_sidecar.is_allowed_origin("null")
+    assert not dovie_sidecar.is_allowed_origin("http://127.0.0.1:3000")
+    assert not dovie_sidecar.is_allowed_origin("https://evil.example")
 
 
-def test_doxie_sidecar_parent_watchdog_detects_missing_parent(monkeypatch):
-    from tui_gateway import doxie_sidecar
+def test_dovie_sidecar_parent_watchdog_keeps_live_reparented_process(monkeypatch):
+    from tui_gateway import dovie_sidecar
+
+    monkeypatch.setenv(dovie_sidecar.SIDECAR_PARENT_PID_ENV, "12345")
+    monkeypatch.setattr(dovie_sidecar.os, "getppid", lambda: 1)
+    monkeypatch.setattr(dovie_sidecar.os, "kill", lambda pid, signal: None)
+
+    assert dovie_sidecar.expected_parent_pid() == 12345
+    assert dovie_sidecar.parent_process_still_owns_sidecar(12345)
+
+
+def test_dovie_sidecar_parent_watchdog_detects_missing_parent(monkeypatch):
+    from tui_gateway import dovie_sidecar
 
     def raise_missing(pid, signal):
         raise ProcessLookupError()
 
-    monkeypatch.setattr(doxie_sidecar.os, "getppid", lambda: 1)
-    monkeypatch.setattr(doxie_sidecar.os, "kill", raise_missing)
+    monkeypatch.setattr(dovie_sidecar.os, "getppid", lambda: 1)
+    monkeypatch.setattr(dovie_sidecar.os, "kill", raise_missing)
 
-    assert not doxie_sidecar.parent_process_still_owns_sidecar(12345)
+    assert not dovie_sidecar.parent_process_still_owns_sidecar(12345)
 
 
 @pytest.mark.asyncio
@@ -1519,7 +1519,7 @@ async def test_runtime_proxy_keeps_bridge_open_for_streaming_events(monkeypatch)
         "method": "prompt.submit",
         "params": {
             "runtime_scope_key": "profile:agent-a",
-            "doxie_profile": {
+            "dovie_profile": {
                 "id": "agent-a",
                 "hermesHomePath": "/tmp/hermes-agent-a",
             },
@@ -1622,7 +1622,7 @@ async def test_runtime_proxy_retains_worker_before_bridge_creation(monkeypatch):
         "method": "prompt.submit",
         "params": {
             "runtime_scope_key": "profile:agent-a",
-            "doxie_profile": {
+            "dovie_profile": {
                 "id": "agent-a",
                 "hermesHomePath": "/tmp/hermes-agent-a",
             },
@@ -1783,7 +1783,7 @@ async def test_runtime_worker_pool_reuses_and_reclaims_idle_workers(monkeypatch)
     monkeypatch.setattr(runtime_proxy.time, "time", lambda: now)
     monkeypatch.setattr(runtime_proxy.subprocess, "Popen", FakeProcess)
     monkeypatch.setattr(runtime_proxy, "_reserve_loopback_port", lambda: 21000)
-    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_WORKER_IDLE_SECONDS", "10")
+    monkeypatch.setenv("DOVIE_HERMES_RUNTIME_WORKER_IDLE_SECONDS", "10")
 
     pool = runtime_proxy.RuntimeWorkerPool()
     scope = runtime_proxy.RuntimeScope(
@@ -1792,7 +1792,7 @@ async def test_runtime_worker_pool_reuses_and_reclaims_idle_workers(monkeypatch)
         hermes_home="/tmp/hermes-agent-a",
     )
     params = {
-        "doxie_profile": {
+        "dovie_profile": {
             "id": "agent-a",
             "hermesHomePath": "/tmp/hermes-agent-a",
             "env": {"FEISHU_APP_SECRET": "secret"},
@@ -1805,8 +1805,8 @@ async def test_runtime_worker_pool_reuses_and_reclaims_idle_workers(monkeypatch)
     assert first.process.kwargs["env"]["HERMES_HOME"] == "/tmp/hermes-agent-a"
     assert first.process.kwargs["env"]["FEISHU_APP_SECRET"] == "secret"
     assert "--token" not in first.process.args[0]
-    assert first.process.kwargs["env"]["DOXIE_SIDECAR_TOKEN"]
-    assert first.process.kwargs["env"]["DOXIE_SIDECAR_PARENT_PID"] == str(os.getpid())
+    assert first.process.kwargs["env"]["DOVIE_SIDECAR_TOKEN"]
+    assert first.process.kwargs["env"]["DOVIE_SIDECAR_PARENT_PID"] == str(os.getpid())
 
     now = 1012.0
     reclaimed = await pool.reclaim_idle()
@@ -1853,7 +1853,7 @@ async def test_runtime_worker_pool_restarts_when_profile_launch_env_changes(monk
     first = await pool.ensure_worker(
         scope,
         {
-            "doxie_profile": {
+            "dovie_profile": {
                 "id": "agent-a",
                 "hermesHomePath": "/tmp/hermes-agent-a",
                 "env": {},
@@ -1863,12 +1863,12 @@ async def test_runtime_worker_pool_restarts_when_profile_launch_env_changes(monk
     second = await pool.ensure_worker(
         scope,
         {
-            "doxie_profile": {
+            "dovie_profile": {
                 "id": "agent-a",
                 "hermesHomePath": "/tmp/hermes-agent-a",
                 "env": {
-                    "DOXIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/doxie/invoke",
-                    "DOXIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
+                    "DOVIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/dovie/invoke",
+                    "DOVIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
                 },
             }
         },
@@ -1876,8 +1876,8 @@ async def test_runtime_worker_pool_restarts_when_profile_launch_env_changes(monk
 
     assert second is not first
     assert first.process.terminated
-    assert second.process.kwargs["env"]["DOXIE_BACKEND_BRIDGE_URL"] == "http://127.0.0.1:4567/api/doxie/invoke"
-    assert second.process.kwargs["env"]["DOXIE_BACKEND_BRIDGE_TOKEN"] == "bridge-token"
+    assert second.process.kwargs["env"]["DOVIE_BACKEND_BRIDGE_URL"] == "http://127.0.0.1:4567/api/dovie/invoke"
+    assert second.process.kwargs["env"]["DOVIE_BACKEND_BRIDGE_TOKEN"] == "bridge-token"
     assert pool.snapshot()["runningWorkerCount"] == 1
 
 
@@ -1916,7 +1916,7 @@ async def test_runtime_worker_pool_keeps_active_bridge_when_launch_env_changes(m
         scope,
         {
             "runtime_scope_key": "team:conversation-a:leader-conversation",
-            "doxie_profile": {
+            "dovie_profile": {
                 "id": "agent-a",
                 "hermesHomePath": "/tmp/hermes-agent-a",
                 "env": {},
@@ -1929,11 +1929,11 @@ async def test_runtime_worker_pool_keeps_active_bridge_when_launch_env_changes(m
         scope,
         {
             "runtime_scope_key": "team:conversation-a:leader-conversation",
-            "doxie_profile": {
+            "dovie_profile": {
                 "id": "agent-a",
                 "hermesHomePath": "/tmp/hermes-agent-a",
                 "env": {
-                    "DOXIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/doxie/invoke",
+                    "DOVIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/dovie/invoke",
                 },
             },
         },
@@ -1942,7 +1942,7 @@ async def test_runtime_worker_pool_keeps_active_bridge_when_launch_env_changes(m
     assert second is first
     assert first.running()
     assert not first.process.terminated
-    assert "DOXIE_BACKEND_BRIDGE_URL" not in first.process.kwargs["env"]
+    assert "DOVIE_BACKEND_BRIDGE_URL" not in first.process.kwargs["env"]
     assert pool.snapshot()["runningWorkerCount"] == 1
 
 
@@ -1982,7 +1982,7 @@ async def test_runtime_worker_pool_keeps_active_run_when_launch_env_changes(monk
         scope,
         {
             "runtime_scope_key": "team:conversation-a:leader-conversation",
-            "doxie_profile": {
+            "dovie_profile": {
                 "id": "agent-a",
                 "hermesHomePath": "/tmp/hermes-agent-a",
                 "env": {},
@@ -1994,11 +1994,11 @@ async def test_runtime_worker_pool_keeps_active_run_when_launch_env_changes(monk
         scope,
         {
             "runtime_scope_key": "team:conversation-a:leader-conversation",
-            "doxie_profile": {
+            "dovie_profile": {
                 "id": "agent-a",
                 "hermesHomePath": "/tmp/hermes-agent-a",
                 "env": {
-                    "DOXIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
+                    "DOVIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
                 },
             },
         },
@@ -2007,7 +2007,7 @@ async def test_runtime_worker_pool_keeps_active_run_when_launch_env_changes(monk
     assert second is first
     assert first.running()
     assert not first.process.terminated
-    assert "DOXIE_BACKEND_BRIDGE_TOKEN" not in first.process.kwargs["env"]
+    assert "DOVIE_BACKEND_BRIDGE_TOKEN" not in first.process.kwargs["env"]
     assert pool.snapshot()["runningWorkerCount"] == 1
 
 
@@ -2048,7 +2048,7 @@ async def test_runtime_worker_pool_reuses_existing_worker_when_scoped_read_lacks
     )
     first = await pool.ensure_worker(
         launch_scope,
-        {"doxie_profile": {"id": "agent-a", "hermesHomePath": "/tmp/hermes-agent-a"}},
+        {"dovie_profile": {"id": "agent-a", "hermesHomePath": "/tmp/hermes-agent-a"}},
     )
     read_scope = runtime_proxy.RuntimeScope(
         agent_profile_id="agent-a",
@@ -2087,7 +2087,7 @@ async def test_runtime_worker_pool_does_not_reclaim_active_bridge(monkeypatch):
     monkeypatch.setattr(runtime_proxy.time, "time", lambda: now)
     monkeypatch.setattr(runtime_proxy.subprocess, "Popen", FakeProcess)
     monkeypatch.setattr(runtime_proxy, "_reserve_loopback_port", lambda: 22000)
-    monkeypatch.setenv("DOXIE_HERMES_RUNTIME_WORKER_IDLE_SECONDS", "10")
+    monkeypatch.setenv("DOVIE_HERMES_RUNTIME_WORKER_IDLE_SECONDS", "10")
 
     pool = runtime_proxy.RuntimeWorkerPool()
     scope = runtime_proxy.RuntimeScope(
@@ -2095,7 +2095,7 @@ async def test_runtime_worker_pool_does_not_reclaim_active_bridge(monkeypatch):
         runtime_scope_key="profile:agent-a",
         hermes_home="/tmp/hermes-agent-a",
     )
-    worker = await pool.ensure_worker(scope, {"doxie_profile": {"hermesHomePath": "/tmp/hermes-agent-a"}})
+    worker = await pool.ensure_worker(scope, {"dovie_profile": {"hermesHomePath": "/tmp/hermes-agent-a"}})
     await pool.retain_bridge(worker.scope_key)
 
     now = 2012.0

@@ -39,14 +39,14 @@ class TestParseEnvVar:
             config = _tt_mod._get_env_config()
             assert config["docker_forward_env"] == ["GITHUB_TOKEN", "NPM_TOKEN"]
 
-    def test_get_env_config_prefers_doxie_workspace_root_for_local_cwd(self, tmp_path, monkeypatch):
+    def test_get_env_config_prefers_dovie_workspace_root_for_local_cwd(self, tmp_path, monkeypatch):
         workspace = tmp_path / "workspace"
         hermes_source = tmp_path / "hermes-agent"
         workspace.mkdir()
         hermes_source.mkdir()
 
         monkeypatch.setenv("TERMINAL_ENV", "local")
-        monkeypatch.setenv("DOXIE_WORKSPACE_ROOT", str(workspace))
+        monkeypatch.setenv("DOVIE_WORKSPACE_ROOT", str(workspace))
         monkeypatch.delenv("TERMINAL_CWD", raising=False)
         monkeypatch.chdir(hermes_source)
 
@@ -54,14 +54,14 @@ class TestParseEnvVar:
 
         assert config["cwd"] == str(workspace)
 
-    def test_get_env_config_treats_empty_session_cwd_as_doxie_workspace(self, tmp_path, monkeypatch):
+    def test_get_env_config_treats_empty_session_cwd_as_dovie_workspace(self, tmp_path, monkeypatch):
         workspace = tmp_path / "workspace"
         hermes_source = tmp_path / "hermes-agent"
         workspace.mkdir()
         hermes_source.mkdir()
 
         monkeypatch.setenv("TERMINAL_ENV", "local")
-        monkeypatch.setenv("DOXIE_WORKSPACE_ROOT", str(workspace))
+        monkeypatch.setenv("DOVIE_WORKSPACE_ROOT", str(workspace))
         monkeypatch.chdir(hermes_source)
         monkeypatch.setattr(_tt_mod, "_session_env", lambda _name, _default="": "")
 

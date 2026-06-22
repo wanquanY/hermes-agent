@@ -86,32 +86,32 @@ tests/agent/                       2.3%
 
 这次上游更新不是单一功能迭代，而是一次横跨运行时、Dashboard、Docker、Gateway、Provider、Skills、安全加固和文档站的综合更新。
 
-对本地 Doxie 分支来说，最需要关注的不是普通文本冲突，而是这些架构边界是否会在合并时被上游新实现覆盖：
+对本地 Dovie 分支来说，最需要关注的不是普通文本冲突，而是这些架构边界是否会在合并时被上游新实现覆盖：
 
-- Dashboard 认证和 WebSocket ticket 机制会影响本地 Doxie dashboard / sidecar / PTY bridge 的认证假设。
+- Dashboard 认证和 WebSocket ticket 机制会影响本地 Dovie dashboard / sidecar / PTY bridge 的认证假设。
 - Docker 从 `tini` 切到 `s6-overlay`，会改变容器内主进程、profile gateway、dashboard 进程和 runtime lifecycle 的监督方式。
 - Codex Responses / streaming / reasoning replay 有大量修复，会影响 conversation loop、tool call continuation、内部 metadata 过滤和 partial stream 处理。
-- Gateway API server 新增 session control、media session chat、skills/toolsets API，会和本地 TUI Gateway / Doxie run control / session API 有重叠。
+- Gateway API server 新增 session control、media session chat、skills/toolsets API，会和本地 TUI Gateway / Dovie run control / session API 有重叠。
 - Skills Hub、MCP catalog、安全扫描、skill bundle symlink 防护持续增强，会影响本地 skill package lifecycle 和 profile-aware skills 初始化逻辑。
 - `tui_gateway/server.py` 上游虽然只在一个文件有变化，但本地分支已经把 TUI Gateway 模块化；合并时要避免把 extracted methods/services 的本地边界打回单文件结构。
 
 ## 面向客户端接入的合并判断
 
-如果只从当前 Doxie 客户端接入是否必须立刻合并来看，结论是：
+如果只从当前 Dovie 客户端接入是否必须立刻合并来看，结论是：
 
 ```text
 不建议为了客户端接入立刻全量合并本次 upstream/main。
 ```
 
-理由是本次上游没有直接提供能替代本地 Doxie 客户端接入的核心能力：
+理由是本次上游没有直接提供能替代本地 Dovie 客户端接入的核心能力：
 
-- 没有上游等价的 `doxie_extension` gateway method / tool registration 边界。
+- 没有上游等价的 `dovie_extension` gateway method / tool registration 边界。
 - 没有上游等价的 `runtime.ensure` profile-scoped worker proxy。
-- 没有上游等价的 Doxie run control / run event replay / client run state contract。
+- 没有上游等价的 Dovie run control / run event replay / client run state contract。
 - 没有上游等价的 workspace / artifact 一等客户端 API。
-- 没有上游等价的 Doxie document attachment + `parse_document` 集成。
-- 没有上游等价的 Doxie desktop visible browser bridge。
-- 没有上游等价的 Doxie automation current-session result binding。
+- 没有上游等价的 Dovie document attachment + `parse_document` 集成。
+- 没有上游等价的 Dovie desktop visible browser bridge。
+- 没有上游等价的 Dovie automation current-session result binding。
 
 所以，如果目标是让当前客户端稳定接入，本次上游更新不是“必须马上吃掉”的前置条件。反过来，全量合并会直接触碰本地接入的核心文件，短期风险高于收益。
 
@@ -119,24 +119,24 @@ tests/agent/                       2.3%
 
 ### 本地现状更新（2026-06-02）
 
-截至 2026-06-02，本地 Doxie 接入在选择性吸收 P0/P1 后又补齐了两项客户端稳定性行为：
+截至 2026-06-02，本地 Dovie 接入在选择性吸收 P0/P1 后又补齐了两项客户端稳定性行为：
 
-- Doxie automation create / update / remove 工具在返回结构化成功事件后，可以由 `agent/direct_tool_response.py` 直接生成最终 assistant 回复。这个路径只对单个白名单 Doxie automation tool call 生效，失败或非结构化结果仍回到普通模型 follow-up，避免为了确定性工具结果再次请求模型导致额外延迟或 running 状态卡住。
-- TUI Gateway 的会话列表把 `cron` 与 `tool` 一起作为内部 runtime source 排除。Doxie 自动化任务的用户可见结果通过当前会话或新会话 result binding 展示，raw cron execution session 不再污染客户端会话侧栏。
+- Dovie automation create / update / remove 工具在返回结构化成功事件后，可以由 `agent/direct_tool_response.py` 直接生成最终 assistant 回复。这个路径只对单个白名单 Dovie automation tool call 生效，失败或非结构化结果仍回到普通模型 follow-up，避免为了确定性工具结果再次请求模型导致额外延迟或 running 状态卡住。
+- TUI Gateway 的会话列表把 `cron` 与 `tool` 一起作为内部 runtime source 排除。Dovie 自动化任务的用户可见结果通过当前会话或新会话 result binding 展示，raw cron execution session 不再污染客户端会话侧栏。
 
-这两项进一步强化了原报告的判断：Doxie automation 和 session/run state 仍是本地客户端 contract，不应被 upstream API server session controls 或原生 cron 流程替代。后续吸收上游时，仍应优先保留本地 run/event binding、profile-scoped runtime worker 和 Doxie automation 工具边界。
+这两项进一步强化了原报告的判断：Dovie automation 和 session/run state 仍是本地客户端 contract，不应被 upstream API server session controls 或原生 cron 流程替代。后续吸收上游时，仍应优先保留本地 run/event binding、profile-scoped runtime worker 和 Dovie automation 工具边界。
 
 ### 本地现状更新（2026-06-04，prodv0.9.0）
 
-截至 2026-06-04，本地分支又补齐了面向 Doxie 生产客户端的运行态可观测性和子 agent 边界：
+截至 2026-06-04，本地分支又补齐了面向 Dovie 生产客户端的运行态可观测性和子 agent 边界：
 
-- 子 agent 工具面从“toolset 粗粒度继承”收敛为“父级已解析工具名 allowlist”。`enabled_tools` 贯穿 `AIAgent` 初始化、`model_tools.get_tool_definitions()` 和 `delegate_task` 子 agent 创建，`tools/delegate_tool_access.py` 负责精确求交、阻断危险/递归 toolset，并兼容 Doxie 托管 web 工具的语义别名。
-- 子 agent 生命周期事件现在带有稳定身份：`delegate_call_id`、`agent_name`、`role`、`context`、`dispatch_message`、tool running/completed 状态和 output delta。Doxie 客户端可以把右侧运行面板绑定到一次 delegate tool call，而不是从主 transcript 里猜测子任务状态。
+- 子 agent 工具面从“toolset 粗粒度继承”收敛为“父级已解析工具名 allowlist”。`enabled_tools` 贯穿 `AIAgent` 初始化、`model_tools.get_tool_definitions()` 和 `delegate_task` 子 agent 创建，`tools/delegate_tool_access.py` 负责精确求交、阻断危险/递归 toolset，并兼容 Dovie 托管 web 工具的语义别名。
+- 子 agent 生命周期事件现在带有稳定身份：`delegate_call_id`、`agent_name`、`role`、`context`、`dispatch_message`、tool running/completed 状态和 output delta。Dovie 客户端可以把右侧运行面板绑定到一次 delegate tool call，而不是从主 transcript 里猜测子任务状态。
 - `hermes_state_runs.py` 对高频 stream delta 做存储层合并，并提供 filtered list / compaction API；TUI Gateway 暴露 `subagent.runs.list`、`subagent.events.list`、`events.compact`，把历史 hydration 的成本限制在子 agent 相关事件内。
-- Doxie sidecar 增加父进程 watchdog，runtime proxy 传递 `DOXIE_SIDECAR_PARENT_PID`。这解决 native client / runtime worker 退出后 sidecar 孤儿进程继续占用本地端口的问题。
+- Dovie sidecar 增加父进程 watchdog，runtime proxy 传递 `DOVIE_SIDECAR_PARENT_PID`。这解决 native client / runtime worker 退出后 sidecar 孤儿进程继续占用本地端口的问题。
 - recall / interrupt 路径会按 `turn_id`、`run_id` 或 `client_message_id` 定位 turn，并为活跃子 agent 补发终止事件，防止客户端在取消或撤回后继续显示子任务 running。
 
-这批改动仍不是对上游 session orchestrator 或 API server session controls 的全量吸收，而是本地 Doxie engine contract 的生产化：Hermes 负责 agent loop、delegate 子任务、工具权限和 run event 持久化；Doxie 客户端通过 TUI Gateway / sidecar 查询稳定的 runtime-scoped 视图。后续如果继续同步上游，应把这些边界作为必须保留的本地能力，而不是用上游单文件 TUI gateway 或通用 session API 覆盖。
+这批改动仍不是对上游 session orchestrator 或 API server session controls 的全量吸收，而是本地 Dovie engine contract 的生产化：Hermes 负责 agent loop、delegate 子任务、工具权限和 run event 持久化；Dovie 客户端通过 TUI Gateway / sidecar 查询稳定的 runtime-scoped 视图。后续如果继续同步上游，应把这些边界作为必须保留的本地能力，而不是用上游单文件 TUI gateway 或通用 session API 覆盖。
 
 ### 对客户端接入有直接价值的上游更新
 
@@ -153,13 +153,13 @@ __Host-/__Secure- cookie handling
 
 价值：
 
-- 如果 Doxie 客户端要走 Hermes dashboard 的公网/反代/Portal 登录，这部分值得合并或借鉴。
-- 如果当前 Doxie 客户端只走本地 sidecar token 和 profile-scoped runtime proxy，这部分不是立即必要。
+- 如果 Dovie 客户端要走 Hermes dashboard 的公网/反代/Portal 登录，这部分值得合并或借鉴。
+- 如果当前 Dovie 客户端只走本地 sidecar token 和 profile-scoped runtime proxy，这部分不是立即必要。
 
 风险：
 
 - 可能和本地 sidecar token、PTY bridge、runtime worker WS bridge 的认证模型冲突。
-- 需要设计清楚 Doxie auth 与 upstream OAuth gate 的顺序，而不是机械套上。
+- 需要设计清楚 Dovie auth 与 upstream OAuth gate 的顺序，而不是机械套上。
 
 2. API Server session controls / media session chat：
 
@@ -175,11 +175,11 @@ skills_api capability
 
 - 上游开始给外部客户端暴露更明确的 API surface。
 - `skills/toolsets` API 对客户端动态展示可用能力有参考价值。
-- media session chat 和 Doxie document attachment 有模型重叠，后续可以统一附件 contract。
+- media session chat 和 Dovie document attachment 有模型重叠，后续可以统一附件 contract。
 
 风险：
 
-- 本地 Doxie 已有更强的 `prompt.submit`、`run.submit`、`run.events`、runtime scope 和 artifact/session contract。
+- 本地 Dovie 已有更强的 `prompt.submit`、`run.submit`、`run.events`、runtime scope 和 artifact/session contract。
 - 如果直接采用 upstream API server session controls，可能绕过本地 run control，导致客户端 running 状态、取消、事件 replay 不一致。
 
 3. TUI session orchestrator / active session switcher：
@@ -195,11 +195,11 @@ late thinking delta fixes
 价值：
 
 - 对 Hermes Ink TUI 客户端体验有价值。
-- 对 Doxie 如果嵌入真实 `hermes --tui` 或复用 TUI Gateway event model，有参考意义。
+- 对 Dovie 如果嵌入真实 `hermes --tui` 或复用 TUI Gateway event model，有参考意义。
 
 风险：
 
-- 当前 Doxie 客户端接入主要依赖 `tui_gateway` JSON-RPC、WebSocket bridge、run events，不是直接依赖 Ink UI。
+- 当前 Dovie 客户端接入主要依赖 `tui_gateway` JSON-RPC、WebSocket bridge、run events，不是直接依赖 Ink UI。
 - 上游 `tui_gateway/server.py` 仍是单文件演进，本地已经模块化；合并时容易把本地 method/service 边界打散。
 
 4. Streaming / Codex Responses / partial output 修复：
@@ -216,7 +216,7 @@ internal scaffolding key stripping
 价值：
 
 - 这部分对客户端最终体验有实际价值：减少挂起、空流、provider replay 异常、工具调用中断后的状态错误。
-- 对 Doxie run control 来说，尤其要吸收“空 stream / partial stream / length continuation”的正确性修复。
+- 对 Dovie run control 来说，尤其要吸收“空 stream / partial stream / length continuation”的正确性修复。
 
 风险：
 
@@ -234,7 +234,7 @@ path traversal / .env / plugin asset hardening
 
 价值：
 
-- 对 Doxie 客户端接入不是功能前置，但对生产稳定性和安全很重要。
+- 对 Dovie 客户端接入不是功能前置，但对生产稳定性和安全很重要。
 - 本地 skills 目录自愈和 skill package lifecycle 应该对齐这些安全语义。
 
 风险：
@@ -245,14 +245,14 @@ path traversal / .env / plugin asset hardening
 
 | 本地功能 | 上游这次有没有等价更新 | 合并必要性 | 风险 |
 |---|---:|---:|---|
-| Doxie gateway contract / capabilities | 没有 | 不必须 | 覆盖 method registration |
+| Dovie gateway contract / capabilities | 没有 | 不必须 | 覆盖 method registration |
 | `runtime.ensure` / runtime worker proxy | 没有 | 不必须 | scoped RPC 退回 control plane |
 | run control / run events / client running state | 部分相关：API session controls、streaming fix | 建议选择性吸收 | run state contract 被绕过 |
 | workspace / artifact API | 没有 | 不必须 | 只读查询创建空 DB |
 | prompt attachment / document parse | 部分相关：media session chat、安全解析 | 建议后续对齐 | 附件模型分叉 |
 | desktop visible browser bridge | 没有，只有 browser daemon cleanup | 不必须 | 回退到 headless/browser agent |
-| Doxie automation | 部分相关：cron provenance/output validation | 建议选择性吸收 | 原生 cronjob 暴露给模型 |
-| Dashboard session badge / web UI | 有大量 dashboard/web 更新 | 看 Doxie 是否复用 web dashboard | session badge 被 upstream SessionsPage 覆盖 |
+| Dovie automation | 部分相关：cron provenance/output validation | 建议选择性吸收 | 原生 cronjob 暴露给模型 |
+| Dashboard session badge / web UI | 有大量 dashboard/web 更新 | 看 Dovie 是否复用 web dashboard | session badge 被 upstream SessionsPage 覆盖 |
 | skills path 自愈 / package lifecycle | 有安全和 hub 更新 | 建议吸收安全部分 | 绕过 scan/quarantine |
 
 ### 建议决策
@@ -266,9 +266,9 @@ path traversal / .env / plugin asset hardening
 优先级：
 
 1. 优先吸收 streaming / Codex Responses / provider request filtering 修复，因为它们会直接影响客户端是否卡 running、是否丢 assistant partial、是否 replay 错 reasoning。
-2. 选择性吸收 API server 的 `GET /v1/skills`、`GET /v1/toolsets` 思路，但不要让它绕过 Doxie gateway contract。
-3. 选择性吸收 dashboard auth / WS ticket 设计，前提是先明确 Doxie sidecar token 与 upstream OAuth gate 的关系。
-4. 吸收 skills/security hardening，但保持本地 profile-aware skills 自愈和 Doxie skill lifecycle。
+2. 选择性吸收 API server 的 `GET /v1/skills`、`GET /v1/toolsets` 思路，但不要让它绕过 Dovie gateway contract。
+3. 选择性吸收 dashboard auth / WS ticket 设计，前提是先明确 Dovie sidecar token 与 upstream OAuth gate 的关系。
+4. 吸收 skills/security hardening，但保持本地 profile-aware skills 自愈和 Dovie skill lifecycle。
 5. 暂缓 Docker/s6、website/i18n、完整 dashboard 重构，除非当前客户端部署已经依赖这些场景。
 
 如果要做下一步技术动作，建议开一个“小同步分支”，只处理客户端接入相关修复，而不是直接把 `upstream/main` 全量 merge 到当前接入分支。
@@ -306,13 +306,13 @@ hermes_cli/config.py
 影响判断：
 
 - Dashboard 从简单 token/本地访问模型，推进到 OAuth provider、PKCE、cookie prefix、single-use WebSocket ticket、SPA re-auth envelope。
-- 这会影响本地 Doxie dashboard 嵌入、`/api/pty`、WebSocket bridge、sidecar 鉴权、public URL 和 reverse proxy prefix 处理。
-- 合并时不能只解决 `hermes_cli/web_server.py` 行冲突，还要重新核对 Doxie sidecar token 与 upstream dashboard auth 是否并行、互斥或需要桥接。
+- 这会影响本地 Dovie dashboard 嵌入、`/api/pty`、WebSocket bridge、sidecar 鉴权、public URL 和 reverse proxy prefix 处理。
+- 合并时不能只解决 `hermes_cli/web_server.py` 行冲突，还要重新核对 Dovie sidecar token 与 upstream dashboard auth 是否并行、互斥或需要桥接。
 
 本地核对点：
 
 ```sh
-rg "dashboard_auth|ws-ticket|X-Forwarded-Prefix|AuthWidget|api/status|api/pty" hermes_cli web tui_gateway doxie_extension
+rg "dashboard_auth|ws-ticket|X-Forwarded-Prefix|AuthWidget|api/status|api/pty" hermes_cli web tui_gateway dovie_extension
 ```
 
 ### 2. Docker 运行时切换到 s6-overlay
@@ -347,13 +347,13 @@ tests/docker/*
 
 - 容器内进程管理从单进程入口转为 s6 service tree。
 - 上游加入 per-profile s6 supervision 和 container restart reconciliation。
-- 本地如果依赖 Doxie runtime worker、sidecar gateway、dashboard 子进程，需要重新确认这些进程由谁拉起、谁监督、如何清理。
-- `HERMES_HOME` 创建/权限、profile home、container boot hook 会影响 Doxie profile-scoped runtime。
+- 本地如果依赖 Dovie runtime worker、sidecar gateway、dashboard 子进程，需要重新确认这些进程由谁拉起、谁监督、如何清理。
+- `HERMES_HOME` 创建/权限、profile home、container boot hook 会影响 Dovie profile-scoped runtime。
 
 本地核对点：
 
 ```sh
-rg "S6ServiceManager|container_boot|s6|HERMES_HOME|profile" Dockerfile docker hermes_cli tui_gateway doxie_extension
+rg "S6ServiceManager|container_boot|s6|HERMES_HOME|profile" Dockerfile docker hermes_cli tui_gateway dovie_extension
 ```
 
 ### 3. 安全加固和 Promptware 防御
@@ -397,13 +397,13 @@ tools/skills_hub.py
 影响判断：
 
 - 上游继续把不可信输入、防 symlink、防 path traversal、防 prompt injection 扩展到 memory、skills、profile distribution、backup、TTS、transcription、read_file、dashboard plugin assets。
-- 本地 Doxie 的文档解析、artifact registry、workspace 文件展示、skill package lifecycle、desktop browser bridge 都要继承这些安全语义。
+- 本地 Dovie 的文档解析、artifact registry、workspace 文件展示、skill package lifecycle、desktop browser bridge 都要继承这些安全语义。
 - 合并时不能用本地旧实现绕过上游的安全入口，尤其是 ZIP install、附件解析、workspace artifact path、profile-scoped HERMES_HOME。
 
 本地核对点：
 
 ```sh
-rg "symlink|path traversal|promptware|security|defusedxml|read_file|\\.env|artifact|parse_document" agent tools hermes_cli tui_gateway doxie_extension tests
+rg "symlink|path traversal|promptware|security|defusedxml|read_file|\\.env|artifact|parse_document" agent tools hermes_cli tui_gateway dovie_extension tests
 ```
 
 ### 4. Codex Responses、Streaming 和 Conversation Loop 修复
@@ -441,14 +441,14 @@ run_agent.py
 
 影响判断：
 
-- 这部分直接影响 Doxie run control、partial assistant persistence、tool events、conversation metadata、reasoning replay 和内部 scaffold 字段过滤。
+- 这部分直接影响 Dovie run control、partial assistant persistence、tool events、conversation metadata、reasoning replay 和内部 scaffold 字段过滤。
 - 本地 `turn_id` / `run_id` / `runtime_scope_key` / `client_message_id` 等 metadata 不能进入 provider 请求，但必须继续留在 DB、event stream 和 UI transcript 里。
 - 上游加入 null output stream、time-to-first-byte watchdog、invalid encrypted content recovery，合并后要确认本地结构化流不会重新吞掉 terminal events 或造成 UI running 卡住。
 
 本地核对点：
 
 ```sh
-rg "reasoning|rs_tmp|finish_reason|partial-stream|metadata|turn_id|run_id|runtime_scope_key|time-to-first-byte" agent run_agent.py tui_gateway hermes_state.py doxie_extension
+rg "reasoning|rs_tmp|finish_reason|partial-stream|metadata|turn_id|run_id|runtime_scope_key|time-to-first-byte" agent run_agent.py tui_gateway hermes_state.py dovie_extension
 ```
 
 ### 5. Gateway API、Messaging 平台和平台插件迁移
@@ -488,15 +488,15 @@ hermes_cli/plugins_cmd.py
 
 影响判断：
 
-- API server session controls 和 media chat API 与本地 Doxie session/run/attachment 语义有交集。
+- API server session controls 和 media chat API 与本地 Dovie session/run/attachment 语义有交集。
 - Discord、Mattermost 迁移到 bundled platform plugins，说明上游继续把平台能力从 core gateway 抽出去。
-- 本地若有 Doxie 平台或 gateway hook，不应重新塞进 core；应继续沿用 extension/plugin 边界。
-- `/reload-mcp` 工具缓存刷新会影响当前 agent tool schema 的动态更新，本地 Doxie extension tools 也应纳入核对。
+- 本地若有 Dovie 平台或 gateway hook，不应重新塞进 core；应继续沿用 extension/plugin 边界。
+- `/reload-mcp` 工具缓存刷新会影响当前 agent tool schema 的动态更新，本地 Dovie extension tools 也应纳入核对。
 
 本地核对点：
 
 ```sh
-rg "session controls|media|skills_api|toolsets|reload-mcp|platforms" gateway hermes_cli plugins tui_gateway doxie_extension model_tools.py
+rg "session controls|media|skills_api|toolsets|reload-mcp|platforms" gateway hermes_cli plugins tui_gateway dovie_extension model_tools.py
 ```
 
 ### 6. Skills Hub、MCP Catalog 和可选能力扩展
@@ -529,13 +529,13 @@ tools/skills_hub.py
 影响判断：
 
 - 上游 Skills Hub 不只是安装列表，已经包含健康检查、freshness badge、watchdog cron、catalog source 展示和 MCP picker。
-- 本地曾经补过 skills 目录初始化自愈、skill package lifecycle、Doxie profile-aware skills 行为；合并时要接入上游 canonical lifecycle，而不是保留一套平行安装语义。
+- 本地曾经补过 skills 目录初始化自愈、skill package lifecycle、Dovie profile-aware skills 行为；合并时要接入上游 canonical lifecycle，而不是保留一套平行安装语义。
 - 新 optional skills 和 MCP catalog 会增加 docs/website 生成内容，合并时要接受对应站点产物或重新生成。
 
 本地核对点：
 
 ```sh
-rg "skills_hub|SkillBundle|watchdog|freshness|optional-mcps|mcp_catalog|ensure_directory_path|skill package" hermes_cli tools tui_gateway doxie_extension tests
+rg "skills_hub|SkillBundle|watchdog|freshness|optional-mcps|mcp_catalog|ensure_directory_path|skill package" hermes_cli tools tui_gateway dovie_extension tests
 ```
 
 ### 7. Provider、Model Catalog、TTS/STT/Image Gen
@@ -568,7 +568,7 @@ agent/usage_pricing.py
 
 - 上游 provider surface 更插件化，OpenAI API provider 有 live model fetch。
 - Vercel AI Gateway / Sandbox 被删除，本地如果还有配置或文档引用需要清理。
-- 新 TTS/STT registry 说明多媒体 provider 开始走统一 provider 抽象；Doxie 如果有语音/转写/图片代理，后续应该对齐 registry，而不是绕开。
+- 新 TTS/STT registry 说明多媒体 provider 开始走统一 provider 抽象；Dovie 如果有语音/转写/图片代理，后续应该对齐 registry，而不是绕开。
 
 本地核对点：
 
@@ -603,7 +603,7 @@ web/src/pages/ChatPage.tsx
 本地核对点：
 
 ```sh
-rg "session orchestrator|active session|thinking|message.delta|approval|slash.exec|runtime.ensure|method_registration" ui-tui tui_gateway doxie_extension tests
+rg "session orchestrator|active session|thinking|message.delta|approval|slash.exec|runtime.ensure|method_registration" ui-tui tui_gateway dovie_extension tests
 ```
 
 ### 9. Website、Docs、i18n
@@ -625,12 +625,12 @@ rg "session orchestrator|active session|thinking|message.delta|approval|slash.ex
 影响判断：
 
 - 合并时文档产物体量很大，但大部分不是本地运行时冲突核心。
-- 如果本地 Doxie 文档也改动 website/docs，需避免被生成产物覆盖。
-- 若接受上游 docs 产物，建议后续单独补一份 Doxie fork 同步说明，而不要在大 merge 中混入产品文档重写。
+- 如果本地 Dovie 文档也改动 website/docs，需避免被生成产物覆盖。
+- 若接受上游 docs 产物，建议后续单独补一份 Dovie fork 同步说明，而不要在大 merge 中混入产品文档重写。
 
 ## 高风险文件清单
 
-下面这些文件在本地分支中通常承载 Doxie 关键行为，同时也在本次上游更新中发生变化。合并时应逐个核对，不能只按冲突标记机械解决。
+下面这些文件在本地分支中通常承载 Dovie 关键行为，同时也在本次上游更新中发生变化。合并时应逐个核对，不能只按冲突标记机械解决。
 
 ```text
 run_agent.py
@@ -667,19 +667,19 @@ ui-tui/src/*
 web/src/*
 ```
 
-## 对本地 Doxie 实现的合并风险
+## 对本地 Dovie 实现的合并风险
 
 ### 风险 A：Dashboard Auth 覆盖本地 sidecar / WebSocket 鉴权
 
-上游现在有 OAuth、PKCE、cookie prefix、WS ticket 和 SPA re-auth。Doxie 本地 sidecar 如果继续依赖自己的 token auth，需要明确两套机制的层级：
+上游现在有 OAuth、PKCE、cookie prefix、WS ticket 和 SPA re-auth。Dovie 本地 sidecar 如果继续依赖自己的 token auth，需要明确两套机制的层级：
 
-- Doxie desktop / sidecar 内部请求如何通过 upstream dashboard auth。
+- Dovie desktop / sidecar 内部请求如何通过 upstream dashboard auth。
 - `runtime.ensure`、profile-scoped worker bridge、approval / cron control RPC 是否应该走 WS ticket。
-- `/api/pty` 的 auth query 参数和 Doxie token 是否冲突。
+- `/api/pty` 的 auth query 参数和 Dovie token 是否冲突。
 
 ### 风险 B：s6 service manager 改变 runtime 生命周期
 
-上游新增 `S6ServiceManager` 和 per-profile supervision。Doxie runtime worker 不能继续假设所有长生命周期进程都由当前 Python process 直接拥有。
+上游新增 `S6ServiceManager` 和 per-profile supervision。Dovie runtime worker 不能继续假设所有长生命周期进程都由当前 Python process 直接拥有。
 
 需要重新核对：
 
@@ -687,23 +687,23 @@ web/src/*
 - control plane 与 runtime worker 的 WebSocket bridge 是否在 container restart 后恢复。
 - Docker 权限、`HERMES_HOME`、profile home、logs 目录是否仍 profile-aware。
 
-### 风险 C：Conversation Loop 修复覆盖 Doxie turn metadata
+### 风险 C：Conversation Loop 修复覆盖 Dovie turn metadata
 
 上游修复了 provider replay、stream continuation 和 internal scaffold filtering。本地需要保留：
 
-- provider 请求前剥离 Hermes/Doxie 内部字段。
+- provider 请求前剥离 Hermes/Dovie 内部字段。
 - DB/event/transcript 内保留 `turn_id`、`run_id`、`runtime_scope_key`、`client_message_id`。
 - partial assistant、terminal event、tool event 都能按 run/turn 关联。
 
-### 风险 D：API Server Session Controls 与 Doxie Run Control 重叠
+### 风险 D：API Server Session Controls 与 Dovie Run Control 重叠
 
-上游 API server 新增 session control 和 media session chat。本地 Doxie run control 已有更强的 run registry/event replay/interrupt/cancel 语义。
+上游 API server 新增 session control 和 media session chat。本地 Dovie run control 已有更强的 run registry/event replay/interrupt/cancel 语义。
 
 合并时要明确：
 
-- 上游 API server 的 session controls 是否应调用 Doxie run control。
-- media session chat 和 Doxie prompt attachments/document parse 如何共享附件模型。
-- `GET /v1/skills`、`GET /v1/toolsets` 是否应包含 Doxie extension tools/toolsets。
+- 上游 API server 的 session controls 是否应调用 Dovie run control。
+- media session chat 和 Dovie prompt attachments/document parse 如何共享附件模型。
+- `GET /v1/skills`、`GET /v1/toolsets` 是否应包含 Dovie extension tools/toolsets。
 
 ### 风险 E：Skills Hub 安全生命周期与本地 skill package lifecycle 重复
 
@@ -713,11 +713,11 @@ web/src/*
 
 - 直接移动 ZIP 解包结果绕过 scan/quarantine。
 - 遇到 `$HERMES_HOME/skills` 损坏成文件时直接删除用户数据。
-- Doxie profile skills 与默认 Hermes home 混写。
+- Dovie profile skills 与默认 Hermes home 混写。
 
 ### 风险 F：TUI Gateway 单文件上游更新覆盖本地模块化
 
-上游 `tui_gateway/server.py` 是本次唯一 TUI Gateway 文件变化，但本地能力散布在 `methods/`、`services/` 和 `doxie_extension`。
+上游 `tui_gateway/server.py` 是本次唯一 TUI Gateway 文件变化，但本地能力散布在 `methods/`、`services/` 和 `dovie_extension`。
 
 合并原则：
 
@@ -727,12 +727,12 @@ web/src/*
 
 ## 建议合并顺序
 
-1. 先只合并上游基础，不做 Doxie 新需求。
+1. 先只合并上游基础，不做 Dovie 新需求。
 2. 优先解决 `hermes_state.py`、`run_agent.py`、`agent/conversation_loop.py`、`tui_gateway/server.py`、`hermes_cli/web_server.py`、`toolsets.py`。
-3. Dashboard auth 和 Doxie sidecar 分开验证，避免一次性混合调试 OAuth、PTY、runtime worker。
+3. Dashboard auth 和 Dovie sidecar 分开验证，避免一次性混合调试 OAuth、PTY、runtime worker。
 4. Docker/s6 单独验证容器启动，不要和普通本地 venv 测试混在一起定位。
 5. Skills Hub/skill package lifecycle 单独核对安全路径，确保 symlink/path traversal 防护没有被本地 wrapper 绕开。
-6. Gateway API/session/media 与 Doxie run control 做契约对齐，再补测试。
+6. Gateway API/session/media 与 Dovie run control 做契约对齐，再补测试。
 
 ## 最小验证清单
 
@@ -740,10 +740,10 @@ web/src/*
 
 ```sh
 git diff --check
-python -m compileall agent hermes_cli gateway tools tui_gateway doxie_extension
+python -m compileall agent hermes_cli gateway tools tui_gateway dovie_extension
 ```
 
-TUI Gateway / Doxie runtime：
+TUI Gateway / Dovie runtime：
 
 ```sh
 scripts/run_tests.sh tests/test_tui_gateway_server.py tests/test_tui_gateway_ws.py tests/tui_gateway

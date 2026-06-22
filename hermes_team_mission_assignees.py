@@ -40,7 +40,7 @@ def normalized_member_dicts(members: Sequence[Mapping[str, Any] | TeamMissionMem
                 "profile_version_id": member.profile_version_id,
                 "runtime_scope_key": member.runtime_scope_key,
                 "hermes_home_path": member.hermes_home_path,
-                "doxie_profile": dict(member.doxie_profile or {}),
+                "dovie_profile": dict(member.dovie_profile or {}),
                 "display_name": member.display_name,
                 "role": member.role,
                 "status": member.status,

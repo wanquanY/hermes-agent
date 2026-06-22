@@ -55,9 +55,9 @@ _HERMES_CORE_TOOLS = [
     "clarify",
     # Code execution + delegation
     "execute_code", "delegate_task",
-    # Doxie automation task management
-    "doxie_automation_task_create", "doxie_automation_task_list",
-    "doxie_automation_task_update", "doxie_automation_task_remove",
+    # Dovie automation task management
+    "dovie_automation_task_create", "dovie_automation_task_list",
+    "dovie_automation_task_update", "dovie_automation_task_remove",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -85,21 +85,21 @@ TOOLSETS = {
         "includes": []  # No other toolsets included
     },
 
-    "doxie_web": {
-        "description": "Doxie-managed SERPER search and webpage parsing tools",
+    "dovie_web": {
+        "description": "Dovie-managed SERPER search and webpage parsing tools",
         "tools": ["serper_search_tool", "jina_web_parser_tool"],
         "includes": []
     },
 
-    "doxie_image": {
-        "description": "Doxie-managed image generation tools",
-        "tools": ["doxie_image_generate"],
+    "dovie_image": {
+        "description": "Dovie-managed image generation tools",
+        "tools": ["dovie_image_generate"],
         "includes": []
     },
 
-    "doxie_video": {
-        "description": "Doxie-managed video generation tools",
-        "tools": ["doxie_video_generate"],
+    "dovie_video": {
+        "description": "Dovie-managed video generation tools",
+        "tools": ["dovie_video_generate"],
         "includes": []
     },
     
@@ -138,8 +138,8 @@ TOOLSETS = {
         "includes": []
     },
 
-    "doxie": {
-        "description": "Doxie product tools for profile design, creation, and desktop-native workflows",
+    "dovie": {
+        "description": "Dovie product tools for profile design, creation, and desktop-native workflows",
         "tools": ["design_agent_profile", "test_agent_profile"],
         "includes": []
     },
@@ -230,12 +230,12 @@ TOOLSETS = {
     },
     
     "cronjob": {
-        "description": "Doxie automation task tools - create, list, update, and remove scheduled tasks bound to the active Doxie agent/session context",
+        "description": "Dovie automation task tools - create, list, update, and remove scheduled tasks bound to the active Dovie agent/session context",
         "tools": [
-            "doxie_automation_task_create",
-            "doxie_automation_task_list",
-            "doxie_automation_task_update",
-            "doxie_automation_task_remove",
+            "dovie_automation_task_create",
+            "dovie_automation_task_list",
+            "dovie_automation_task_update",
+            "dovie_automation_task_remove",
         ],
         "includes": []
     },
@@ -442,9 +442,9 @@ TOOLSETS = {
             "session_search",
             # Code execution + delegation
             "execute_code", "delegate_task",
-            # Doxie automation task management
-            "doxie_automation_task_create", "doxie_automation_task_list",
-            "doxie_automation_task_update", "doxie_automation_task_remove",
+            # Dovie automation task management
+            "dovie_automation_task_create", "dovie_automation_task_list",
+            "dovie_automation_task_update", "dovie_automation_task_remove",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
             "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
 
@@ -606,7 +606,7 @@ TOOLSETS = {
     }
 }
 
-INTERNAL_TOOLSETS = {"doxie", "team_mission_read", "team_mission_planning"}
+INTERNAL_TOOLSETS = {"dovie", "team_mission_read", "team_mission_planning"}
 
 
 def is_internal_toolset(name: str) -> bool:

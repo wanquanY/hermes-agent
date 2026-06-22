@@ -251,10 +251,10 @@ except Exception as e:
     logger.debug("Plugin discovery failed: %s", e)
 
 try:
-    from doxie_extension import load_extension
+    from dovie_extension import load_extension
     load_extension().register_tools()
 except Exception as e:
-    logger.debug("Doxie extension tool registration failed: %s", e)
+    logger.debug("Dovie extension tool registration failed: %s", e)
 
 
 # =============================================================================
@@ -288,10 +288,10 @@ _LEGACY_TOOLSET_MAP = {
         "browser_vision", "browser_console"
     ],
     "cronjob_tools": [
-        "doxie_automation_task_create",
-        "doxie_automation_task_list",
-        "doxie_automation_task_update",
-        "doxie_automation_task_remove",
+        "dovie_automation_task_create",
+        "dovie_automation_task_list",
+        "dovie_automation_task_update",
+        "dovie_automation_task_remove",
     ],
     "file_tools": ["read_file", "write_file", "patch", "search_files"],
     "tts_tools": ["text_to_speech"],

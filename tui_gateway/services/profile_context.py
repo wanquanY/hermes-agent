@@ -18,7 +18,7 @@ _active_profile_context: contextvars.ContextVar[dict | None] = contextvars.Conte
 
 def profile_context_for_params(params: dict | None = None) -> dict | None:
     params = params or {}
-    profile = params.get("doxie_profile") or params.get("doxieProfile") or params.get("profile")
+    profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
     if not isinstance(profile, dict):
         profile = {}
     profile_id = str(

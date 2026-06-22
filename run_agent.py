@@ -3371,7 +3371,7 @@ class AIAgent:
 
         Resolution order:
           1. Runtime ``model_descriptor.vision_enabled`` supplied by gateway
-             clients such as Doxie.
+             clients such as Dovie.
           2. ``model.supports_vision`` (top-level, single-model shortcut)
           3. ``providers.<provider>.models.<model>.supports_vision``
           4. models.dev capability lookup

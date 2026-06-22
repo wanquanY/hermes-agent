@@ -25,7 +25,7 @@ def _patch_job_io(monkeypatch, sched) -> None:
     monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: "/tmp/out")
     monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
     monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
-    monkeypatch.setattr(sched, "_deliver_doxie_bound_result", lambda *_a, **_kw: None)
+    monkeypatch.setattr(sched, "_deliver_dovie_bound_result", lambda *_a, **_kw: None)
 
 
 class TestPersistentPool:

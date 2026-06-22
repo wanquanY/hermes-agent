@@ -912,7 +912,7 @@ def _build_child_output_delta_callback(
     """Build a callback that relays child assistant text deltas to the parent.
 
     This is intentionally separate from ``_build_child_progress_callback``.
-    Gateway/Doxie sessions need live child answer streaming in the side panel,
+    Gateway/Dovie sessions need live child answer streaming in the side panel,
     while still keeping that text out of the parent's main assistant response.
     """
     if getattr(parent_agent, "_delegate_child_output_delta_enabled", True) is False:
@@ -1184,7 +1184,7 @@ def _build_child_agent(
     # max_iterations.  The user controls the per-subagent cap in config.yaml.
 
     # Quiet-mode thinking_callback is a local activity spinner, not provider
-    # reasoning. Routing it through child_progress_cb makes Doxie render
+    # reasoning. Routing it through child_progress_cb makes Dovie render
     # ordinary subagent runtime status as a model "thinking" block.
     child_thinking_cb = None
 

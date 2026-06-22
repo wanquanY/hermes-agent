@@ -127,9 +127,9 @@ _RUNTIME_SCOPED_CONTROL_METHODS = frozenset(
 _RUNTIME_CONNECT_ATTEMPTS = 40
 _RUNTIME_CONNECT_DELAY_S = 0.05
 _DEFAULT_IDLE_TIMEOUT_S = 30 * 60
-_SIDECAR_TOKEN_ENV = "DOXIE_SIDECAR_TOKEN"
-_SIDECAR_PARENT_PID_ENV = "DOXIE_SIDECAR_PARENT_PID"
-_CONTROL_HOME_ENV = "DOXIE_HERMES_CONTROL_HOME"
+_SIDECAR_TOKEN_ENV = "DOVIE_SIDECAR_TOKEN"
+_SIDECAR_PARENT_PID_ENV = "DOVIE_SIDECAR_PARENT_PID"
+_CONTROL_HOME_ENV = "DOVIE_HERMES_CONTROL_HOME"
 _CRON_CONTROL_PLANE_READ_ACTIONS = frozenset({"", "list", "status", "runs"})
 # Whole Team conversation writes are canonical control-plane methods. Leader
 # execution is isolated by the lower run.submit runtime lease, not by proxying
@@ -240,7 +240,7 @@ class RelayedRuntimeEventPersistence:
 
 
 def runtime_scope_from_params(params: dict[str, Any]) -> RuntimeScope:
-    profile = params.get("doxie_profile")
+    profile = params.get("dovie_profile")
     if not isinstance(profile, dict):
         profile = {}
     profile_id = str(
@@ -386,9 +386,9 @@ def _team_leader_profile_scope_from_params(params: dict[str, Any]) -> RuntimeSco
     ) or next((item for item in members if isinstance(item, dict)), None)
     if not isinstance(leader, dict):
         return RuntimeScope()
-    profile = leader.get("doxie_profile")
+    profile = leader.get("dovie_profile")
     if not isinstance(profile, dict):
-        profile = leader.get("doxieProfile")
+        profile = leader.get("dovieProfile")
     if not isinstance(profile, dict):
         profile = {}
     scoped_params = {
@@ -399,7 +399,7 @@ def _team_leader_profile_scope_from_params(params: dict[str, Any]) -> RuntimeSco
             or profile.get("runtimeScopeKey")
             or profile.get("runtime_scope_key")
         ),
-        "doxie_profile": {
+        "dovie_profile": {
             **profile,
             "id": leader.get("profile_id") or leader.get("agent_profile_id") or profile.get("id"),
             "hermesHomePath": (
@@ -536,7 +536,7 @@ def should_proxy_to_runtime(req: Any, *, resolve_team_context: bool = True) -> b
     scope = runtime_scope_from_request(req)
     if not scope.has_scope:
         return False
-    current_scope = str(os.environ.get("DOXIE_HERMES_RUNTIME_SCOPE_KEY") or "").strip()
+    current_scope = str(os.environ.get("DOVIE_HERMES_RUNTIME_SCOPE_KEY") or "").strip()
     if current_scope and current_scope == scope.runtime_scope_key:
         return False
     if _cron_control_plane_read_requested(method, params):
@@ -555,7 +555,7 @@ def _reserve_loopback_port() -> int:
 
 
 def _idle_timeout_seconds() -> float:
-    raw = os.environ.get("DOXIE_HERMES_RUNTIME_WORKER_IDLE_SECONDS", "").strip()
+    raw = os.environ.get("DOVIE_HERMES_RUNTIME_WORKER_IDLE_SECONDS", "").strip()
     if not raw:
         return _DEFAULT_IDLE_TIMEOUT_S
     try:
@@ -565,13 +565,13 @@ def _idle_timeout_seconds() -> float:
 
 
 def _profile_env_from_params(params: dict[str, Any]) -> dict[str, str]:
-    profile = params.get("doxie_profile") if isinstance(params.get("doxie_profile"), dict) else {}
+    profile = params.get("dovie_profile") if isinstance(params.get("dovie_profile"), dict) else {}
     profile_env = profile.get("env") if isinstance(profile.get("env"), dict) else {}
     return {str(k): str(v) for k, v in profile_env.items()}
 
 
 def _profile_config_fingerprint_from_params(params: dict[str, Any]) -> dict[str, Any]:
-    profile = params.get("doxie_profile") if isinstance(params.get("doxie_profile"), dict) else {}
+    profile = params.get("dovie_profile") if isinstance(params.get("dovie_profile"), dict) else {}
     raw_toolsets = profile.get("defaultToolsets") or profile.get("default_toolsets") or []
     if isinstance(raw_toolsets, str):
         toolsets = [item.strip() for item in raw_toolsets.replace("\n", ",").split(",") if item.strip()]
@@ -605,8 +605,8 @@ def _launch_fingerprint(scope: RuntimeScope, params: dict[str, Any]) -> str:
         "profile": _profile_config_fingerprint_from_params(params),
         "env": sorted(_profile_env_from_params(params).items()),
         "control_home": control_home,
-        "runtime_mode": str(os.environ.get("DOXIE_HERMES_RUNTIME_MODE") or ""),
-        "source_dir": str(os.environ.get("DOXIE_HERMES_SOURCE_DIR") or ""),
+        "runtime_mode": str(os.environ.get("DOVIE_HERMES_RUNTIME_MODE") or ""),
+        "source_dir": str(os.environ.get("DOVIE_HERMES_SOURCE_DIR") or ""),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
@@ -832,7 +832,7 @@ class RuntimeWorkerPool:
         workers = [worker.status() for worker in self._workers.values()]
         running = [item for item in workers if item["running"]]
         return {
-            "source": "doxie-control-plane-runtime-pool",
+            "source": "dovie-control-plane-runtime-pool",
             "workerCount": len(workers),
             "runningWorkerCount": len(running),
             "idleTimeoutSeconds": _idle_timeout_seconds(),
@@ -882,9 +882,9 @@ class RuntimeWorkerPool:
         except Exception:
             if os.environ.get("HERMES_HOME"):
                 env[_CONTROL_HOME_ENV] = os.environ["HERMES_HOME"]
-        env["DOXIE_HERMES_RUNTIME_SCOPE_KEY"] = scope.runtime_scope_key
+        env["DOVIE_HERMES_RUNTIME_SCOPE_KEY"] = scope.runtime_scope_key
         if scope.agent_profile_id:
-            env["DOXIE_AGENT_PROFILE_ID"] = scope.agent_profile_id
+            env["DOVIE_AGENT_PROFILE_ID"] = scope.agent_profile_id
         env[_SIDECAR_TOKEN_ENV] = token
         env[_SIDECAR_PARENT_PID_ENV] = str(os.getpid())
         log_handle = _open_worker_log(scope)
@@ -892,7 +892,7 @@ class RuntimeWorkerPool:
             [
                 sys.executable,
                 "-m",
-                "tui_gateway.doxie_sidecar",
+                "tui_gateway.dovie_sidecar",
                 "--host",
                 "127.0.0.1",
                 "--port",

@@ -254,7 +254,7 @@ def start_gateway_runtime(load_cfg: Callable[[], dict], *, force_restart: bool =
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["HERMES_HOME"] = str(hermes_home)
-    env["DOXIE_MANAGED_HERMES_GATEWAY"] = "1"
+    env["DOVIE_MANAGED_HERMES_GATEWAY"] = "1"
 
     with open(log_path, "a", encoding="utf-8") as log:
         log.write(f"\n[{time.strftime('%Y-%m-%dT%H:%M:%S%z')}] starting Hermes messaging gateway\n")
@@ -808,7 +808,7 @@ def _gateway_runtime_log_path() -> Path:
         home = Path(get_hermes_home())
     except Exception:
         home = Path(os.getenv("HERMES_HOME") or Path.home() / ".hermes")
-    return home / "logs" / "doxie-messaging-gateway.log"
+    return home / "logs" / "dovie-messaging-gateway.log"
 
 
 def _pairing_store():

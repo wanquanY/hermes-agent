@@ -11,21 +11,21 @@ def test_session_automation_counts_collects_owner_and_binding_sessions(monkeypat
     fake_jobs.list_jobs = lambda include_disabled=True: [
         {
             "id": "job-owner",
-            "doxie": {
+            "dovie": {
                 "owner": {"sourceSessionId": "session-a"},
                 "result_binding": {"mode": "new-session"},
             },
         },
         {
             "id": "job-binding",
-            "doxie": {
+            "dovie": {
                 "owner": {"sourceSessionId": "session-a"},
                 "result_binding": {"mode": "current-session", "sessionId": "session-b"},
             },
         },
         {
             "id": "job-legacy",
-            "doxie": {
+            "dovie": {
                 "session_id": "session-c",
                 "session_target": "main",
             },

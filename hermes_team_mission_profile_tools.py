@@ -134,7 +134,7 @@ def gateway_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def team_mission_control_home() -> str:
-    return text(os.getenv("DOXIE_HERMES_CONTROL_HOME") or os.getenv("HERMES_HOME"))
+    return text(os.getenv("DOVIE_HERMES_CONTROL_HOME") or os.getenv("HERMES_HOME"))
 
 
 def enter_team_mission_control_home() -> Any:
@@ -161,7 +161,7 @@ def leave_team_mission_control_home(token: Any) -> None:
 
 
 def team_mission_control_db(parent_agent: Any = None) -> Any:
-    explicit_control_home = text(os.getenv("DOXIE_HERMES_CONTROL_HOME"))
+    explicit_control_home = text(os.getenv("DOVIE_HERMES_CONTROL_HOME"))
     if explicit_control_home:
         try:
             from hermes_state import SessionDB

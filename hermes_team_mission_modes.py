@@ -47,7 +47,7 @@ class TeamMissionMember:
     profile_version_id: str = ""
     runtime_scope_key: str = ""
     hermes_home_path: str = ""
-    doxie_profile: dict[str, Any] = field(default_factory=dict)
+    dovie_profile: dict[str, Any] = field(default_factory=dict)
     display_name: str = ""
     role: str = "worker"
     status: str = "active"
@@ -66,7 +66,7 @@ class TeamMissionMember:
     def from_raw(cls, raw: Mapping[str, Any] | "TeamMissionMember") -> "TeamMissionMember":
         if isinstance(raw, TeamMissionMember):
             return raw
-        doxie_profile = dict(raw.get("doxie_profile") or raw.get("doxieProfile") or {})
+        dovie_profile = dict(raw.get("dovie_profile") or raw.get("dovieProfile") or {})
         member_id = str(
             raw.get("member_id")
             or raw.get("memberId")
@@ -75,8 +75,8 @@ class TeamMissionMember:
             or raw.get("profileId")
             or raw.get("agent_profile_id")
             or raw.get("agentProfileId")
-            or doxie_profile.get("memberId")
-            or doxie_profile.get("member_id")
+            or dovie_profile.get("memberId")
+            or dovie_profile.get("member_id")
             or ""
         ).strip()
         profile_id = str(
@@ -84,9 +84,9 @@ class TeamMissionMember:
             or raw.get("profileId")
             or raw.get("agent_profile_id")
             or raw.get("agentProfileId")
-            or doxie_profile.get("id")
-            or doxie_profile.get("agentProfileId")
-            or doxie_profile.get("agent_profile_id")
+            or dovie_profile.get("id")
+            or dovie_profile.get("agentProfileId")
+            or dovie_profile.get("agent_profile_id")
             or member_id
         ).strip()
         return cls(
@@ -101,28 +101,28 @@ class TeamMissionMember:
                 or raw.get("versionId")
                 or raw.get("current_version_id")
                 or raw.get("currentVersionId")
-                or doxie_profile.get("agentProfileVersionId")
-                or doxie_profile.get("agent_profile_version_id")
-                or doxie_profile.get("versionId")
-                or doxie_profile.get("version_id")
+                or dovie_profile.get("agentProfileVersionId")
+                or dovie_profile.get("agent_profile_version_id")
+                or dovie_profile.get("versionId")
+                or dovie_profile.get("version_id")
                 or ""
             ),
             runtime_scope_key=str(
                 raw.get("runtime_scope_key")
                 or raw.get("runtimeScopeKey")
-                or doxie_profile.get("runtimeScopeKey")
-                or doxie_profile.get("runtime_scope_key")
+                or dovie_profile.get("runtimeScopeKey")
+                or dovie_profile.get("runtime_scope_key")
                 or ""
             ),
             hermes_home_path=str(
                 raw.get("hermes_home_path")
                 or raw.get("hermesHomePath")
-                or doxie_profile.get("hermesHomePath")
-                or doxie_profile.get("hermes_home_path")
-                or doxie_profile.get("hermes_home")
+                or dovie_profile.get("hermesHomePath")
+                or dovie_profile.get("hermes_home_path")
+                or dovie_profile.get("hermes_home")
                 or ""
             ),
-            doxie_profile=doxie_profile,
+            dovie_profile=dovie_profile,
             display_name=str(raw.get("display_name") or raw.get("displayName") or raw.get("name") or member_id),
             role=str(raw.get("role") or "worker"),
             status=str(raw.get("status") or "active"),

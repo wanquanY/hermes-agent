@@ -15,7 +15,7 @@ def test_session_turn_merge_toolsets_are_persisted_for_runtime_rebuild(monkeypat
     toolset_scope.ensure_session_turn_toolsets(
         sid="sid-design",
         session=session,
-        requested_toolsets=["doxie"],
+        requested_toolsets=["dovie"],
         load_enabled_toolsets=lambda: ["memory"],
         emit_session_info=lambda *_args: None,
         persist_session_id="stored-design",
@@ -25,7 +25,7 @@ def test_session_turn_merge_toolsets_are_persisted_for_runtime_rebuild(monkeypat
         (
             "stored-design",
             {
-                "enabled_toolsets": ["memory", "doxie"],
+                "enabled_toolsets": ["memory", "dovie"],
                 "disabled_toolsets": None,
             },
         )
@@ -62,14 +62,14 @@ def test_gateway_state_store_round_trips_session_toolset_overrides(tmp_path):
 
     store.upsert_session_toolsets(
         session_id="stored-design",
-        enabled_toolsets=["memory", "doxie"],
+        enabled_toolsets=["memory", "dovie"],
         disabled_toolsets=["delegation"],
     )
 
     payload = store.get_session_toolsets("stored-design")
 
     assert payload["session_id"] == "stored-design"
-    assert payload["enabled_toolsets"] == ["memory", "doxie"]
+    assert payload["enabled_toolsets"] == ["memory", "dovie"]
     assert payload["disabled_toolsets"] == ["delegation"]
     assert isinstance(payload["created_at"], float)
     assert isinstance(payload["updated_at"], float)
@@ -122,7 +122,7 @@ def test_resolve_session_toolsets_uses_persisted_overrides(monkeypatch):
         toolset_scope,
         "load_session_toolset_overrides",
         lambda session_id: {
-            "enabled_toolsets": ["memory", "doxie"],
+            "enabled_toolsets": ["memory", "dovie"],
             "disabled_toolsets": ["delegation"],
         },
     )
@@ -134,5 +134,5 @@ def test_resolve_session_toolsets_uses_persisted_overrides(monkeypatch):
         load_disabled_toolsets=lambda: None,
     )
 
-    assert enabled == ["memory", "doxie"]
+    assert enabled == ["memory", "dovie"]
     assert disabled == ["delegation"]

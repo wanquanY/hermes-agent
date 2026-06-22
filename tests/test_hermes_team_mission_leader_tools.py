@@ -75,7 +75,7 @@ def test_start_task_does_not_inherit_non_planning_conversation_mode(monkeypatch,
 
     monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
     context_tokens = session_context.set_session_vars(
-        doxie_product_context=json.dumps({
+        dovie_product_context=json.dumps({
             "team_mission": {
                 "kind": "leader_conversation",
                 "conversation_id": "conversation-1",
@@ -108,7 +108,7 @@ def test_start_task_does_not_inherit_non_planning_conversation_mode(monkeypatch,
     assert result["success"] is True
     assert result["task_status"] == "planning"
     assert submitted["enabled_toolsets"] == ["team_mission_planning", "clarify", "file_readonly"]
-    assert submitted["doxie_product_context"]["team_mission"]["node_phase"] == "planning"
+    assert submitted["dovie_product_context"]["team_mission"]["node_phase"] == "planning"
     graph = db.get_team_mission_graph(result["mission_id"])
     assert graph["mission"]["mode"] == "supervised_mission"
     assert graph["mission"]["status"] == "planning"

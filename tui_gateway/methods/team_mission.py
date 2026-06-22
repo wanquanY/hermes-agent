@@ -119,7 +119,7 @@ def _conversation_title_from_submit(db, params: dict, text: str) -> str:
 
 def _ensure_team_mission_runtime_session_shell(stable_session_id: str) -> str:
     stable_session_id = str(stable_session_id or "").strip()
-    if not stable_session_id or not os.getenv("DOXIE_HERMES_CONTROL_HOME"):
+    if not stable_session_id or not os.getenv("DOVIE_HERMES_CONTROL_HOME"):
         return ""
     runtime_db = _get_runtime_db()
     if runtime_db is None:
@@ -563,7 +563,7 @@ def _team_capability_registry_payload(db, params: dict, *, team_id: str = "") ->
         if not isinstance(member, dict):
             continue
         profile = _profile_for_team_member(db, member)
-        doxie_profile = member.get("doxie_profile") if isinstance(member.get("doxie_profile"), dict) else {}
+        dovie_profile = member.get("dovie_profile") if isinstance(member.get("dovie_profile"), dict) else {}
         members.append({
             "memberId": str(member.get("member_id") or member.get("memberId") or member.get("id") or "").strip(),
             "agentProfileId": _profile_id_from_team_member(member),
@@ -578,12 +578,12 @@ def _team_capability_registry_payload(db, params: dict, *, team_id: str = "") ->
             ).strip(),
             "displayName": str(
                 profile.get("name")
-                or doxie_profile.get("name")
+                or dovie_profile.get("name")
                 or member.get("display_name")
                 or member.get("displayName")
                 or ""
             ).strip(),
-            "avatar": str(profile.get("avatar") or doxie_profile.get("avatar") or "").strip(),
+            "avatar": str(profile.get("avatar") or dovie_profile.get("avatar") or "").strip(),
             "role": str(member.get("role") or "member").strip(),
             "capabilityTags": _text_list(member.get("capability_tags") or member.get("capabilityTags")),
             "autoAssignable": member.get("auto_assignable", member.get("autoAssignable", True)) is not False,
@@ -881,10 +881,10 @@ def _member_default_toolsets(member: dict) -> list[str]:
     if not isinstance(member, dict):
         return []
     profile = (
-        member.get("doxie_profile")
-        if isinstance(member.get("doxie_profile"), dict)
-        else member.get("doxieProfile")
-        if isinstance(member.get("doxieProfile"), dict)
+        member.get("dovie_profile")
+        if isinstance(member.get("dovie_profile"), dict)
+        else member.get("dovieProfile")
+        if isinstance(member.get("dovieProfile"), dict)
         else {}
     )
     metadata = member.get("metadata") if isinstance(member.get("metadata"), dict) else {}
@@ -1301,7 +1301,7 @@ def _profile_params_from_payload(payload: dict) -> dict:
     if not isinstance(payload, dict):
         return {}
     profile_payload = dict(payload)
-    profile = profile_payload.get("doxie_profile") or profile_payload.get("doxieProfile") or profile_payload.get("profile")
+    profile = profile_payload.get("dovie_profile") or profile_payload.get("dovieProfile") or profile_payload.get("profile")
     profile = profile if isinstance(profile, dict) else {}
     requested_scope_key = str(
         profile_payload.get("runtime_scope_key")
@@ -1341,7 +1341,7 @@ def _profile_params_from_payload(payload: dict) -> dict:
         result["runtime_scope_key"] = runtime_scope_key
     if hermes_home:
         result["hermesHomePath"] = hermes_home
-        result["doxie_profile"] = {
+        result["dovie_profile"] = {
             "id": profile_id,
             "hermesHomePath": hermes_home,
             **({"agentProfileVersionId": version_id} if version_id else {}),
@@ -1355,10 +1355,10 @@ def _profile_params_from_member(member: dict) -> dict:
     if not isinstance(member, dict):
         return {}
     profile = (
-        member.get("doxie_profile")
-        if isinstance(member.get("doxie_profile"), dict)
-        else member.get("doxieProfile")
-        if isinstance(member.get("doxieProfile"), dict)
+        member.get("dovie_profile")
+        if isinstance(member.get("dovie_profile"), dict)
+        else member.get("dovieProfile")
+        if isinstance(member.get("dovieProfile"), dict)
         else {}
     )
     payload = {
@@ -1410,7 +1410,7 @@ def _profile_params_from_member(member: dict) -> dict:
         or ""
     ).strip()
     if hermes_home:
-        payload["doxie_profile"] = {
+        payload["dovie_profile"] = {
             **profile,
             "id": payload["agent_profile_id"] or str(profile.get("id") or "").strip(),
             "hermesHomePath": hermes_home,
@@ -1423,10 +1423,10 @@ def _profile_params_from_member(member: dict) -> dict:
 
 def _member_matches_node_profile(member: dict, node: dict) -> bool:
     profile = (
-        member.get("doxie_profile")
-        if isinstance(member.get("doxie_profile"), dict)
-        else member.get("doxieProfile")
-        if isinstance(member.get("doxieProfile"), dict)
+        member.get("dovie_profile")
+        if isinstance(member.get("dovie_profile"), dict)
+        else member.get("dovieProfile")
+        if isinstance(member.get("dovieProfile"), dict)
         else {}
     )
     member_profile_id = str(
@@ -1531,7 +1531,7 @@ def _profile_runtime_owned(profile_params: dict) -> bool:
     return bool(
         scope_key.startswith(("profile:", "draft:"))
         or profile_params.get("agent_profile_draft_id")
-        or profile_params.get("doxie_profile")
+        or profile_params.get("dovie_profile")
         or profile_params.get("hermesHomePath")
     )
 
@@ -1566,7 +1566,7 @@ def _leader_conversation_runtime_scope_contract_error(params: dict, expected_sco
     return (
         "team leader conversation must use the team conversation runtime scope as runtimeScopeKey; "
         f"received {requested}, expected {expected_scope_key}. "
-        "Pass the leader profile scope as profileRuntimeScopeKey or doxie_profile.runtimeScopeKey instead."
+        "Pass the leader profile scope as profileRuntimeScopeKey or dovie_profile.runtimeScopeKey instead."
     )
 
 
@@ -1577,7 +1577,7 @@ def _leader_runtime_owner_error(profile_params: dict, *, leader_runtime_scope_ke
     leader_expected = str(leader_runtime_scope_key or "").strip()
     if not expected and not leader_expected:
         return ""
-    current = str(os.environ.get("DOXIE_HERMES_RUNTIME_SCOPE_KEY") or "").strip()
+    current = str(os.environ.get("DOVIE_HERMES_RUNTIME_SCOPE_KEY") or "").strip()
     # The canonical conversation RPC runs on the control plane; only reject a
     # request that is already executing inside a conflicting scoped worker.
     if not current:
@@ -2716,8 +2716,8 @@ def _(rid, params: dict) -> dict:
         "enabled_toolsets": [] if direct_reply else _leader_message_toolsets(params),
         "disabled_toolsets": _leader_disabled_toolsets(params),
         "toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE,
-        "doxie_product_context": {
-            **(params.get("doxie_product_context") if isinstance(params.get("doxie_product_context"), dict) else {}),
+        "dovie_product_context": {
+            **(params.get("dovie_product_context") if isinstance(params.get("dovie_product_context"), dict) else {}),
             "team_mission": team_context,
         },
     }
@@ -3569,8 +3569,8 @@ def _(rid, params: dict) -> dict:
         "enabled_toolsets": enabled_toolsets,
         **({"disabled_toolsets": _leader_disabled_toolsets(params)} if leader_control_node else {}),
         **({"toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE} if leader_control_node or enabled_toolsets else {}),
-        "doxie_product_context": {
-            **(params.get("doxie_product_context") if isinstance(params.get("doxie_product_context"), dict) else {}),
+        "dovie_product_context": {
+            **(params.get("dovie_product_context") if isinstance(params.get("dovie_product_context"), dict) else {}),
             "team_mission": {
                 "kind": "leader_planning_node" if leader_control_node else "mission_node",
                 "surface": "mission_node",

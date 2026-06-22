@@ -12,16 +12,16 @@ from tui_gateway.services.transcript_messages import (
 )
 
 
-DOXIE_STRUCTURED_RESULT_TOOLS = {
+DOVIE_STRUCTURED_RESULT_TOOLS = {
     "design_agent_profile",
     "create_agent_profile_draft",
     "create_agent_profile_revision_draft",
-    "doxie_agent_profile_create_draft",
+    "dovie_agent_profile_create_draft",
     "test_agent_profile",
-    "doxie_automation_task_create",
-    "doxie_automation_task_list",
-    "doxie_automation_task_update",
-    "doxie_automation_task_remove",
+    "dovie_automation_task_create",
+    "dovie_automation_task_list",
+    "dovie_automation_task_update",
+    "dovie_automation_task_remove",
     "team_mission_start_task",
 }
 
@@ -73,8 +73,8 @@ def _tool_summary(name: str, result: str, duration_s: float | None) -> str | Non
     return f"{text}{suffix}" if text else None
 
 
-def _doxie_structured_tool_result(name: str, result: str) -> dict | None:
-    if name not in DOXIE_STRUCTURED_RESULT_TOOLS:
+def _dovie_structured_tool_result(name: str, result: str) -> dict | None:
+    if name not in DOVIE_STRUCTURED_RESULT_TOOLS:
         return None
     try:
         data = json.loads(result)
@@ -82,25 +82,25 @@ def _doxie_structured_tool_result(name: str, result: str) -> dict | None:
         return None
     if not isinstance(data, dict):
         return None
-    event_name = data.get("doxie_event")
+    event_name = data.get("dovie_event")
     if name == "test_agent_profile":
         if event_name != "agent_profile_test_completed":
             return None
         return data
-    if name == "doxie_automation_task_create":
+    if name == "dovie_automation_task_create":
         if event_name != "automation_job_created":
             return None
         job = data.get("job")
         return data if isinstance(job, dict) else None
-    if name == "doxie_automation_task_list":
+    if name == "dovie_automation_task_list":
         if event_name != "automation_job_listed":
             return None
         return data if isinstance(data.get("jobs"), list) else None
-    if name == "doxie_automation_task_update":
+    if name == "dovie_automation_task_update":
         if event_name != "automation_job_updated":
             return None
         return data if isinstance(data.get("job"), dict) else None
-    if name == "doxie_automation_task_remove":
+    if name == "dovie_automation_task_remove":
         if event_name != "automation_job_removed":
             return None
         return data if isinstance(data.get("job"), dict) else None
@@ -115,7 +115,7 @@ def _doxie_structured_tool_result(name: str, result: str) -> dict | None:
         if not mission_id or not conversation_id:
             return None
         return {
-            "doxie_event": "team_mission_started",
+            "dovie_event": "team_mission_started",
             "mission_id": mission_id,
             "conversation_id": conversation_id,
             "task_id": str(data.get("task_id") or "").strip(),
@@ -137,7 +137,7 @@ def _doxie_structured_tool_result(name: str, result: str) -> dict | None:
     if not isinstance(draft, dict):
         return None
     event = {
-        "doxie_event": event_name,
+        "dovie_event": event_name,
         "draft": draft,
     }
     operation = data.get("operation")
@@ -267,9 +267,9 @@ class GatewayToolEventBridge:
             result_text = self._tool_result_text(result)
             if result_text:
                 payload["result_text"] = result_text
-        doxie_result = _doxie_structured_tool_result(name, result)
-        if doxie_result:
-            payload["result"] = doxie_result
+        dovie_result = _dovie_structured_tool_result(name, result)
+        if dovie_result:
+            payload["result"] = dovie_result
         if name == "todo":
             try:
                 data = json.loads(result)
@@ -292,7 +292,7 @@ class GatewayToolEventBridge:
         except Exception:
             pass
         enabled = self._tool_progress_enabled(sid)
-        if enabled or payload.get("inline_diff") or doxie_result:
+        if enabled or payload.get("inline_diff") or dovie_result:
             self._emit("tool.complete", sid, payload)
             if name == "test_agent_profile":
                 self._emit("agent_profile_test.complete", sid, payload)
@@ -430,9 +430,9 @@ class GatewayToolEventBridge:
                 result_text = self._tool_result_text(result_str)
                 if result_text:
                     payload["result_text"] = result_text
-            doxie_result = _doxie_structured_tool_result(str(name or ""), result_str)
-            if doxie_result:
-                payload["result"] = doxie_result
+            dovie_result = _dovie_structured_tool_result(str(name or ""), result_str)
+            if dovie_result:
+                payload["result"] = dovie_result
             try:
                 from agent.display import render_edit_diff_with_delta
 

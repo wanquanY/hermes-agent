@@ -73,8 +73,8 @@ def _json_mapping(value: Any) -> Dict[str, Any]:
 def _team_mission_context_from_metadata(metadata: Any) -> Dict[str, Any]:
     metadata = _json_mapping(metadata)
     product_context = _json_mapping(
-        metadata.get("doxie_product_context")
-        or metadata.get("doxieProductContext")
+        metadata.get("dovie_product_context")
+        or metadata.get("dovieProductContext")
     )
     team_context = _json_mapping(
         product_context.get("team_mission")

@@ -6,7 +6,7 @@ import json
 import time
 from typing import Any
 
-from agent.doxie_diagnostics import emit_doxie_diagnostic
+from agent.dovie_diagnostics import emit_dovie_diagnostic
 from hermes_runtime_event_payloads import terminal_text_metadata
 from hermes_team_mission_conversation_state import normalize_team_mission_conversation_session
 from tui_gateway.methods._shared import bind_server_globals
@@ -43,7 +43,7 @@ def _log_prompt_stage(session: dict, sid: str, stage: str, **fields: Any) -> Non
         "runtime_scope_key": runtime_scope_key,
         **fields,
     }
-    emit_doxie_diagnostic("[doxie-prompt-stage]", pairs)
+    emit_dovie_diagnostic("[dovie-prompt-stage]", pairs)
 
 
 def _text_probe(value: Any) -> dict[str, Any]:
@@ -66,7 +66,7 @@ def _payload_text(payload: dict | None) -> str:
     return ""
 
 
-def _apply_doxie_product_runtime_policy(agent: Any, raw_context: Any) -> None:
+def _apply_dovie_product_runtime_policy(agent: Any, raw_context: Any) -> None:
     if agent is None or not isinstance(raw_context, dict):
         return
     team_mission = raw_context.get("team_mission") or raw_context.get("teamMission")
@@ -307,11 +307,11 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
         or params.get("transcriptText")
         or ""
     )
-    raw_doxie_context = params.get("doxie_product_context") or params.get("doxieProductContext") or ""
-    doxie_product_context = (
-        json.dumps(raw_doxie_context, ensure_ascii=False)
-        if isinstance(raw_doxie_context, (dict, list))
-        else str(raw_doxie_context or "").strip()
+    raw_dovie_context = params.get("dovie_product_context") or params.get("dovieProductContext") or ""
+    dovie_product_context = (
+        json.dumps(raw_dovie_context, ensure_ascii=False)
+        if isinstance(raw_dovie_context, (dict, list))
+        else str(raw_dovie_context or "").strip()
     )
     submitted_attachments = _submitted_attachments(params)
     submitted_images = _submitted_image_paths({"attachments": submitted_attachments})
@@ -392,7 +392,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             "persist_user_message": persist_user_message,
             "model": requested_model,
             "model_descriptor": model_descriptor,
-            "doxie_product_context": doxie_product_context,
+            "dovie_product_context": dovie_product_context,
         }
         session["run_started_at"] = time.time()
         session["run_updated_at"] = session["run_started_at"]
@@ -412,7 +412,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                     normalize_team_mission_conversation_session(
                         db,
                         session_id=stable_session_id,
-                        metadata={"doxie_product_context": doxie_product_context},
+                        metadata={"dovie_product_context": dovie_product_context},
                     )
                 except Exception as exc:
                     logger.warning(
@@ -542,7 +542,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                     message=f"runtime auth rebind failed: {e}",
                 )
                 return
-            _apply_doxie_product_runtime_policy(session.get("agent"), raw_doxie_context)
+            _apply_dovie_product_runtime_policy(session.get("agent"), raw_dovie_context)
             with session["history_lock"]:
                 if (
                     str(session.get("interrupted_run_id") or "") == run_id
@@ -561,7 +561,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 "model": requested_model,
                 "model_descriptor": model_descriptor,
                 "reasoning_config": _turn_reasoning_config(params),
-                "doxie_product_context": doxie_product_context,
+                "dovie_product_context": dovie_product_context,
             }
         finally:
             _leave_profile_context(profile_tokens)
@@ -707,7 +707,7 @@ def _run_prompt_submit(
             state = get_run(turn_run_id) if callable(get_run) else {}
         except Exception as exc:
             logger.warning(
-                "[doxie-prompt] terminal fallback state lookup failed sid=%s run_id=%s error=%s",
+                "[dovie-prompt] terminal fallback state lookup failed sid=%s run_id=%s error=%s",
                 sid,
                 turn_run_id,
                 exc,
@@ -717,7 +717,7 @@ def _run_prompt_submit(
         if status not in run_control.ACTIVE_RUN_STATUSES:
             return
         logger.warning(
-            "[doxie-prompt] terminal fallback for active run sid=%s stored_session_id=%s run_id=%s turn_id=%s status=%s reason=%s",
+            "[dovie-prompt] terminal fallback for active run sid=%s stored_session_id=%s run_id=%s turn_id=%s status=%s reason=%s",
             sid,
             stored_session_id,
             turn_run_id,
@@ -901,7 +901,7 @@ def _run_prompt_submit(
             session_tokens = _set_session_context(
                 session["session_key"],
                 terminal_cwd=session_cwd,
-                doxie_product_context=str((turn_metadata or {}).get("doxie_product_context") or ""),
+                dovie_product_context=str((turn_metadata or {}).get("dovie_product_context") or ""),
             )
             _log_prompt_stage(
                 session,
@@ -960,7 +960,7 @@ def _run_prompt_submit(
 
             try:
                 _log_prompt_stage(session, sid, "attachment-enrichment-start", run_id=turn_run_id, turn_id=turn_id)
-                from doxie_extension.prompt_attachments import enrich_prompt_with_document_attachments
+                from dovie_extension.prompt_attachments import enrich_prompt_with_document_attachments
 
                 prompt = enrich_prompt_with_document_attachments(
                     prompt,
@@ -1103,8 +1103,8 @@ def _run_prompt_submit(
                 run_message_type=type(run_message).__name__,
                 elapsed_ms=int((time.time() - worker_started_at) * 1000),
             )
-            emit_doxie_diagnostic(
-                "[doxie-prompt]",
+            emit_dovie_diagnostic(
+                "[dovie-prompt]",
                 {
                     "stage": "agent-run-start",
                     "sid": sid,
@@ -1192,8 +1192,8 @@ def _run_prompt_submit(
                     turn_id=turn_id,
                     result_type=type(result).__name__,
                 )
-                emit_doxie_diagnostic(
-                    "[doxie-prompt]",
+                emit_dovie_diagnostic(
+                    "[dovie-prompt]",
                     {
                         "stage": "agent-run-returned",
                         "sid": sid,
@@ -1227,8 +1227,8 @@ def _run_prompt_submit(
                     turn_id=turn_id,
                     result_type=type(result).__name__,
                 )
-                emit_doxie_diagnostic(
-                    "[doxie-prompt]",
+                emit_dovie_diagnostic(
+                    "[dovie-prompt]",
                     {
                         "stage": "agent-run-returned-compat",
                         "sid": sid,
@@ -1427,8 +1427,8 @@ def _run_prompt_submit(
             )
             if message_id:
                 payload["message_id"] = message_id
-            emit_doxie_diagnostic(
-                "[doxie-prompt]",
+            emit_dovie_diagnostic(
+                "[dovie-prompt]",
                 {
                     "stage": "message-complete-emit",
                     "sid": sid,

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from agent.doxie_diagnostics import emit_doxie_diagnostic
+from agent.dovie_diagnostics import emit_dovie_diagnostic
 
 DAY_SECONDS = 24 * 60 * 60
 DEFAULT_GROWTH_RANGE_DAYS = 30
@@ -23,7 +23,7 @@ def _text(value: Any) -> str:
 
 
 def _diagnose_growth(stage: str, **fields: Any) -> None:
-    emit_doxie_diagnostic("[profile-growth-summary]", {"stage": stage, **fields})
+    emit_dovie_diagnostic("[profile-growth-summary]", {"stage": stage, **fields})
 
 
 def _number(value: Any, default: float = 0.0) -> float:

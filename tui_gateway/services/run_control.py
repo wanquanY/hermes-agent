@@ -21,7 +21,7 @@ from collections.abc import Callable
 from typing import Any
 
 from hermes_runtime_event_payloads import primary_deliverable_text
-from agent.doxie_diagnostics import emit_doxie_diagnostic
+from agent.dovie_diagnostics import emit_dovie_diagnostic
 from tui_gateway.transport import Transport
 
 try:
@@ -104,7 +104,7 @@ def _stream_trace_summary(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _trace_stream_route(stage: str, **fields: Any) -> None:
-    emit_doxie_diagnostic("[doxie-stream-route]", {"stage": stage, **fields})
+    emit_dovie_diagnostic("[dovie-stream-route]", {"stage": stage, **fields})
 
 _lock = threading.RLock()
 _events_by_session: dict[str, deque[dict[str, Any]]] = defaultdict(
@@ -142,7 +142,7 @@ def _json_for_log(value: Any) -> str:
 
 
 def _diagnostic_warning(label: str, **fields: Any) -> None:
-    logger.warning("[doxie-run-control] %s %s", label, _json_for_log(fields))
+    logger.warning("[dovie-run-control] %s %s", label, _json_for_log(fields))
 
 
 def _run_summary(run: dict[str, Any] | None) -> dict[str, Any]:

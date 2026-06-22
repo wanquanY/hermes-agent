@@ -229,7 +229,7 @@ msg_id = db.append_message(
 
 ## Run Event Storage
 
-Gateway and Doxie clients use `run_events` as the durable event stream for
+Gateway and Dovie clients use `run_events` as the durable event stream for
 runtime-scoped UI state. Transcript messages answer "what did the conversation
 say?", while run events answer "what happened while the turn was running?".
 
@@ -249,7 +249,7 @@ Important APIs live in `hermes_state_runs.py`:
 
 `append_run_event(...)` coalesces adjacent token-level stream deltas before they
 hit storage. Coalesced event types include main assistant deltas, reasoning and
-thinking deltas, subagent output/reasoning/thinking deltas, and Doxie profile
+thinking deltas, subagent output/reasoning/thinking deltas, and Dovie profile
 test deltas. Coalescing only happens when the stream identity matches: event
 type, run id, turn id, runtime scope, mode, and identity payload fields such as
 `subagent_id`, `delegate_call_id`, and `tool_call_id`.

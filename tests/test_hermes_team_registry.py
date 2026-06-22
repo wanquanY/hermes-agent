@@ -148,7 +148,7 @@ def test_team_registry_gateway_crud(monkeypatch, tmp_path: Path):
                 "teamId": "team-1",
                 "agentProfileId": "profile-builder",
                 "name": "推进工程师",
-                "avatar": "doxie-avatar://builder",
+                "avatar": "dovie-avatar://builder",
                 "role": "builder",
             }
         },
@@ -206,7 +206,7 @@ def test_team_registry_gateway_crud(monkeypatch, tmp_path: Path):
     assert member_list_response["result"]["members"][0]["profile_avatar"] == "https://example.test/leader-v1.png"
     assert member_response["result"]["member"]["id"] == "member-builder"
     assert member_response["result"]["member"]["profileName"] == "推进工程师"
-    assert member_response["result"]["member"]["profileAvatar"] == "doxie-avatar://builder"
+    assert member_response["result"]["member"]["profileAvatar"] == "dovie-avatar://builder"
     assert removed_response["result"]["removed"]["id"] == "member-builder"
     assert archived_response["result"]["team"]["status"] == "archived"
     assert archived_team_upsert_response["error"]["code"] == 4006
@@ -281,9 +281,9 @@ def test_agent_team_member_display_columns_are_migrated_from_legacy_state(tmp_pa
         team_id="team-legacy",
         agent_profile_id="profile-legacy",
         profile_name="舱门质检官",
-        profile_avatar="doxie-avatar://qa",
+        profile_avatar="dovie-avatar://qa",
         role="qa",
     )
 
     assert member["profileName"] == "舱门质检官"
-    assert member["profileAvatar"] == "doxie-avatar://qa"
+    assert member["profileAvatar"] == "dovie-avatar://qa"

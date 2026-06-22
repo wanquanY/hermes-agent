@@ -836,7 +836,7 @@ def test_legacy_leader_prompt_session_reopens_as_team_conversation(tmp_path: Pat
         role="user",
         content="你好啊",
         metadata={
-            "doxie_product_context": json.dumps({
+            "dovie_product_context": json.dumps({
                 "team_mission": {
                     "kind": "leader_conversation",
                     "conversation_id": "conversation-1",

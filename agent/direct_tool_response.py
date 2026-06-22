@@ -1,7 +1,7 @@
 """Direct terminal responses for deterministic tool results.
 
 Most tools feed results back into the model because the next step requires
-language reasoning. A small class of Doxie action tools already returns a
+language reasoning. A small class of Dovie action tools already returns a
 complete, structured success event; asking the model for a follow-up sentence
 adds latency and can leave the turn running if the follow-up stream stalls.
 """
@@ -14,10 +14,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-_DIRECT_DOXIE_AUTOMATION_EVENTS = {
-    "doxie_automation_task_create": ("automation_job_created", "created"),
-    "doxie_automation_task_update": ("automation_job_updated", "updated"),
-    "doxie_automation_task_remove": ("automation_job_removed", "removed"),
+_DIRECT_DOVIE_AUTOMATION_EVENTS = {
+    "dovie_automation_task_create": ("automation_job_created", "created"),
+    "dovie_automation_task_update": ("automation_job_updated", "updated"),
+    "dovie_automation_task_remove": ("automation_job_removed", "removed"),
 }
 
 
@@ -27,7 +27,7 @@ def build_direct_tool_response(
 ) -> str | None:
     """Return a final assistant response when a tool result is terminal.
 
-    The guard is intentionally narrow: only a single supported Doxie action
+    The guard is intentionally narrow: only a single supported Dovie action
     tool with a matching structured success event can bypass the normal
     model-follow-up turn.
     """
@@ -36,7 +36,7 @@ def build_direct_tool_response(
 
     tool_call = tool_calls[0]
     tool_name = _tool_call_name(tool_call)
-    event_config = _DIRECT_DOXIE_AUTOMATION_EVENTS.get(tool_name)
+    event_config = _DIRECT_DOVIE_AUTOMATION_EVENTS.get(tool_name)
     if not event_config:
         return None
     expected_event, action = event_config
@@ -57,7 +57,7 @@ def build_direct_tool_response(
         payload = json.loads(content)
     except Exception:
         return None
-    if not isinstance(payload, dict) or payload.get("doxie_event") != expected_event:
+    if not isinstance(payload, dict) or payload.get("dovie_event") != expected_event:
         return None
 
     job = payload.get("job")

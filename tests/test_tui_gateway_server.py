@@ -59,18 +59,18 @@ def test_write_json_returns_false_on_broken_pipe(monkeypatch):
     assert server.write_json({"ok": True}) is False
 
 
-def test_set_session_context_scopes_doxie_browser_session(monkeypatch):
+def test_set_session_context_scopes_dovie_browser_session(monkeypatch):
     from gateway import session_context
 
     monkeypatch.setitem(
         server._sessions,
         "runtime-sid",
-        {"session_key": "session-1", "cwd": "/tmp/doxie"},
+        {"session_key": "session-1", "cwd": "/tmp/dovie"},
     )
     tokens = server._set_session_context("session-1")
     try:
-        assert session_context.get_session_env("DOXIE_BROWSER_SESSION_ID") == "browser:hermes:session-1"
-        assert session_context.get_session_env("TERMINAL_CWD") == "/tmp/doxie"
+        assert session_context.get_session_env("DOVIE_BROWSER_SESSION_ID") == "browser:hermes:session-1"
+        assert session_context.get_session_env("TERMINAL_CWD") == "/tmp/dovie"
     finally:
         server._clear_session_context(tokens)
         server._sessions.pop("runtime-sid", None)
@@ -3970,12 +3970,12 @@ def test_session_turn_toolsets_are_added_to_prewarmed_agent(monkeypatch):
     ensure_session_turn_toolsets(
         sid="sid-design",
         session=session,
-        requested_toolsets=["doxie", "skills"],
+        requested_toolsets=["dovie", "skills"],
         load_enabled_toolsets=lambda: ["memory"],
         emit_session_info=lambda sid, agent: emits.append((sid, sorted(agent.valid_tool_names))),
     )
 
-    assert "doxie" in agent.enabled_toolsets
+    assert "dovie" in agent.enabled_toolsets
     assert "skills" in agent.enabled_toolsets
     assert {"design_agent_profile", "test_agent_profile", "skills_list"} <= agent.valid_tool_names
     assert emits[-1][0] == "sid-design"
@@ -4048,26 +4048,26 @@ def test_session_turn_disabled_toolsets_are_applied_to_prewarmed_agent(monkeypat
         disabled_toolsets = None
 
         def __init__(self):
-            self.enabled_toolsets = ["doxie", "memory"]
+            self.enabled_toolsets = ["dovie", "memory"]
             self.tools = []
             self.valid_tool_names = set()
 
     emits = []
     agent = _FakeAgent()
-    session = {"agent": agent, "enabled_toolsets_override": ["doxie", "memory"]}
+    session = {"agent": agent, "enabled_toolsets_override": ["dovie", "memory"]}
 
     ensure_session_turn_toolsets(
         sid="sid-design",
         session=session,
         requested_toolsets=[],
-        requested_disabled_toolsets=["doxie"],
-        load_enabled_toolsets=lambda: ["doxie", "memory"],
+        requested_disabled_toolsets=["dovie"],
+        load_enabled_toolsets=lambda: ["dovie", "memory"],
         load_disabled_toolsets=lambda: None,
         emit_session_info=lambda sid, agent: emits.append((sid, sorted(agent.valid_tool_names))),
     )
 
-    assert agent.enabled_toolsets == ["doxie", "memory"]
-    assert agent.disabled_toolsets == ["doxie"]
+    assert agent.enabled_toolsets == ["dovie", "memory"]
+    assert agent.disabled_toolsets == ["dovie"]
     assert "design_agent_profile" not in agent.valid_tool_names
     assert "memory" in agent.valid_tool_names
     assert emits[-1][0] == "sid-design"
@@ -4081,12 +4081,12 @@ def test_session_turn_toolsets_are_used_when_agent_builds_after_submit(monkeypat
     ensure_session_turn_toolsets(
         sid="sid-design",
         session=session,
-        requested_toolsets=["doxie"],
+        requested_toolsets=["dovie"],
         load_enabled_toolsets=lambda: ["memory"],
         emit_session_info=lambda *_args: None,
     )
 
-    assert session["enabled_toolsets_override"] == ["memory", "doxie"]
+    assert session["enabled_toolsets_override"] == ["memory", "dovie"]
 
 
 def test_session_turn_exact_toolsets_are_used_when_agent_builds_after_submit(monkeypatch):
@@ -4852,7 +4852,7 @@ def test_prompt_submit_persists_interrupted_partial_after_tool_flush(monkeypatch
                 "model": "",
                 "model_descriptor": {},
                 "reasoning_config": None,
-                "doxie_product_context": "",
+                "dovie_product_context": "",
             },
         },
         {

@@ -11,7 +11,7 @@ _server = bind_server_globals(globals())
 
 @method("gateway.capabilities")
 def _(rid, params: dict) -> dict:
-    from doxie_extension.manifest import gateway_capabilities
+    from dovie_extension.manifest import gateway_capabilities
 
     return _ok(rid, gateway_capabilities())
 
@@ -62,9 +62,9 @@ def _profile_runtime_scope_from_params(params: dict) -> dict:
 
 @method("profile.prepare_runtime")
 def _(rid, params: dict) -> dict:
-    """Normalize the Doxie profile runtime scope before a worker is used.
+    """Normalize the Dovie profile runtime scope before a worker is used.
 
-    Doxie owns profile metadata and filesystem preparation. Hermes owns the
+    Dovie owns profile metadata and filesystem preparation. Hermes owns the
     stable Gateway ABI for profile-scoped runtime identity. This control-plane
     method gives clients a side-effect-light contract check that does not build
     an agent or touch model/tool state.
@@ -82,7 +82,7 @@ def _(rid, params: dict) -> dict:
 
 @method("runtime.ensure")
 def _(rid, params: dict) -> dict:
-    """Ensure the scoped Doxie runtime worker is spawned and websocket-ready."""
+    """Ensure the scoped Dovie runtime worker is spawned and websocket-ready."""
     scope = _profile_runtime_scope_from_params(params or {})
     try:
         from tui_gateway.services.runtime_proxy import ensure_runtime_ready_sync

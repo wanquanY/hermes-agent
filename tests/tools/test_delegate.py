@@ -1703,9 +1703,9 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
         self.assertEqual(enabled_tools, {"search_files", "skill_view"})
 
     @patch("tools.delegate_tool._load_config", return_value={})
-    def test_build_child_agent_maps_web_request_to_parent_doxie_web_tools(self, mock_cfg):
+    def test_build_child_agent_maps_web_request_to_parent_dovie_web_tools(self, mock_cfg):
         parent = _make_mock_parent()
-        parent.enabled_toolsets = ["doxie_web", "delegation"]
+        parent.enabled_toolsets = ["dovie_web", "delegation"]
         parent.valid_tool_names = {
             "serper_search_tool",
             "jina_web_parser_tool",
@@ -1729,12 +1729,12 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
 
         enabled_tools = set(MockAgent.call_args[1]["enabled_tools"])
         self.assertEqual(enabled_tools, {"serper_search_tool", "jina_web_parser_tool"})
-        self.assertEqual(MockAgent.call_args[1]["enabled_toolsets"], ["doxie_web"])
+        self.assertEqual(MockAgent.call_args[1]["enabled_toolsets"], ["dovie_web"])
 
     @patch("tools.delegate_tool._load_config", return_value={})
     def test_build_child_agent_maps_search_request_to_parent_serper_tool(self, mock_cfg):
         parent = _make_mock_parent()
-        parent.enabled_toolsets = ["doxie_web", "delegation"]
+        parent.enabled_toolsets = ["dovie_web", "delegation"]
         parent.valid_tool_names = {
             "serper_search_tool",
             "jina_web_parser_tool",
@@ -1760,9 +1760,9 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
         self.assertEqual(enabled_tools, {"serper_search_tool"})
 
     @patch("tools.delegate_tool._load_config", return_value={})
-    def test_build_child_agent_maps_native_web_tool_to_parent_doxie_tool(self, mock_cfg):
+    def test_build_child_agent_maps_native_web_tool_to_parent_dovie_tool(self, mock_cfg):
         parent = _make_mock_parent()
-        parent.enabled_toolsets = ["doxie_web", "delegation"]
+        parent.enabled_toolsets = ["dovie_web", "delegation"]
         parent.valid_tool_names = {
             "serper_search_tool",
             "jina_web_parser_tool",
@@ -1943,7 +1943,7 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
                 task_index=0,
                 goal="No tools",
                 context=None,
-                toolsets=["__doxie_no_tools__"],
+                toolsets=["__dovie_no_tools__"],
                 model=None,
                 max_iterations=10,
                 parent_agent=parent,

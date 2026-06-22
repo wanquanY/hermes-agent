@@ -17,7 +17,7 @@ upstream/main @ 1264fab15 fix(tui): surface verbose tool details (#30225)
 当前本地基线：
 
 ```text
-dev / origin/dev @ 6f1e6271f feat: add Doxie sidecar web tools
+dev / origin/dev @ 6f1e6271f feat: add Dovie sidecar web tools
 共同基点 @ d36413211 chore(release): bump ACP Registry assets in lockstep with pyproject
 ```
 
@@ -28,10 +28,10 @@ dev / origin/dev @ 6f1e6271f feat: add Doxie sidecar web tools
 本地 `dev` 相比 `upstream/main` 有 4 个独有提交：
 
 ```text
-55148290e feat: add Doxie gateway integrations
+55148290e feat: add Dovie gateway integrations
 05c1bb313 feat: add gateway run control
 7bcec8501 feat: add skill package lifecycle
-6f1e6271f feat: add Doxie sidecar web tools
+6f1e6271f feat: add Dovie sidecar web tools
 ```
 
 `upstream/main` 相比本地 `dev` 有 827 个新增提交。
@@ -67,58 +67,58 @@ uv.lock
 
 这次合并最关键的不是普通行级冲突，而是架构层面的冲突：
 
-- 本地 Doxie 集成把 `tui_gateway` 拆成了 `methods/` 和 `services/` 模块；
+- 本地 Dovie 集成把 `tui_gateway` 拆成了 `methods/` 和 `services/` 模块；
 - 上游继续以 `tui_gateway/server.py` 为主实现，并在这个文件上累积了大量新功能和修复；
 - 本地把 `hermes_state.py` 拆成了多个 mixin 文件；
 - 上游保留单文件 `hermes_state.py`，并加入了大量 SQLite/WAL/并发可靠性修复；
-- 本地新增 Doxie 专属工具和 toolset；
+- 本地新增 Dovie 专属工具和 toolset；
 - 上游新增了大量通用工具、Provider、安全、TUI、Gateway 能力，如果简单接受上游，会删除若干本地专属文件。
 
 ## 有被覆盖风险的本地实现
 
-### 1. Doxie 产品工具
+### 1. Dovie 产品工具
 
 本地相关文件：
 
 ```text
-tools/doxie_agent_profile_tool.py
-tools/doxie_web_tools.py
+tools/dovie_agent_profile_tool.py
+tools/dovie_web_tools.py
 toolsets.py
-tests/tools/test_doxie_agent_profile_tool.py
-tests/tools/test_doxie_web_tools.py
+tests/tools/test_dovie_agent_profile_tool.py
+tests/tools/test_dovie_web_tools.py
 ```
 
 本地实现内容：
 
-- `design_agent_profile` 和 `test_agent_profile` 把 Hermes 接到 Doxie 产品级“分身 / persona / profile 设计”流程。
-- 工具从 `gateway.session_context` 读取 Doxie 会话上下文。
-- 草稿持久化、预览、沙盒测试、验证、发布等产品行为交给 Doxie backend bridge。
-- `serper_search_tool` 和 `jina_web_parser_tool` 通过 Doxie 代理托管付费 SERPER/Jina 类凭证，使用 `DOXIE_LLM_RUNTIME_TOKEN`。
-- `toolsets.py` 增加了内部 toolset `doxie` 和普通 toolset `doxie_web`。
+- `design_agent_profile` 和 `test_agent_profile` 把 Hermes 接到 Dovie 产品级“分身 / persona / profile 设计”流程。
+- 工具从 `gateway.session_context` 读取 Dovie 会话上下文。
+- 草稿持久化、预览、沙盒测试、验证、发布等产品行为交给 Dovie backend bridge。
+- `serper_search_tool` 和 `jina_web_parser_tool` 通过 Dovie 代理托管付费 SERPER/Jina 类凭证，使用 `DOVIE_LLM_RUNTIME_TOKEN`。
+- `toolsets.py` 增加了内部 toolset `dovie` 和普通 toolset `dovie_web`。
 
 上游状态：
 
-- 上游没有等价的 Doxie 分身设计工具。
-- 上游新增了通用的 `x_search`、web provider plugin、browser provider plugin 和很多 web/tool 改进，但这些不能替代 Doxie 产品级工作流。
-- 如果冲突解决时完全接受上游删除，这些 Doxie 工具会消失。
+- 上游没有等价的 Dovie 分身设计工具。
+- 上游新增了通用的 `x_search`、web provider plugin、browser provider plugin 和很多 web/tool 改进，但这些不能替代 Dovie 产品级工作流。
+- 如果冲突解决时完全接受上游删除，这些 Dovie 工具会消失。
 
 取舍结论：
 
 ```text
-保留本地 Doxie 产品工具。
+保留本地 Dovie 产品工具。
 ```
 
 理由：
 
-这不是上游通用能力的重复实现，而是 Doxie 产品域专属集成。上游能力更新、更广，但没有实现 Doxie 分身设计桥接，也没有实现 Doxie 托管 SERPER/Jina 凭证代理。因此应该保留这些文件，并把它们重新挂到上游最新的 `toolsets.py`、`model_tools.py` 机制上。
+这不是上游通用能力的重复实现，而是 Dovie 产品域专属集成。上游能力更新、更广，但没有实现 Dovie 分身设计桥接，也没有实现 Dovie 托管 SERPER/Jina 凭证代理。因此应该保留这些文件，并把它们重新挂到上游最新的 `toolsets.py`、`model_tools.py` 机制上。
 
 合并做法：
 
-- 保留 `tools/doxie_agent_profile_tool.py`。
-- 保留 `tools/doxie_web_tools.py`。
-- 先接受上游新版 `toolsets.py`，再补回 `doxie`、`doxie_web` toolset。
-- 保留 `INTERNAL_TOOLSETS = {"doxie"}` 和相关 helper，除非上游已有更好的内部 toolset 机制。
-- 冲突解决后恢复并更新 Doxie 工具测试。
+- 保留 `tools/dovie_agent_profile_tool.py`。
+- 保留 `tools/dovie_web_tools.py`。
+- 先接受上游新版 `toolsets.py`，再补回 `dovie`、`dovie_web` toolset。
+- 保留 `INTERNAL_TOOLSETS = {"dovie"}` 和相关 helper，除非上游已有更好的内部 toolset 机制。
+- 冲突解决后恢复并更新 Dovie 工具测试。
 
 ### 2. Skill Package Lifecycle
 
@@ -163,12 +163,12 @@ tests/tools/test_skill_package_lifecycle.py
 - 保留 `tests/tools/test_skill_package_lifecycle.py`，但按上游当前 Skills Hub 结构更新预期。
 - 避免重新引入绕过上游 provenance/quarantine 的直接 `shutil.move` 安装路径。
 
-### 3. TUI Gateway 模块化、Doxie Sidecar、Run Control、Workspace、Artifact
+### 3. TUI Gateway 模块化、Dovie Sidecar、Run Control、Workspace、Artifact
 
 本地高风险文件：
 
 ```text
-tui_gateway/doxie_sidecar.py
+tui_gateway/dovie_sidecar.py
 tui_gateway/methods/*
 tui_gateway/services/*
 tui_gateway/server.py
@@ -182,42 +182,42 @@ docs/Hermes/workspace-artifacts-architecture.md
 本地实现内容：
 
 - 把 `tui_gateway/server.py` 拆分成 method 模块和 service 模块。
-- `doxie_sidecar.py` 用 token auth 通过 WebSocket 暴露 TUI gateway。
+- `dovie_sidecar.py` 用 token auth 通过 WebSocket 暴露 TUI gateway。
 - `services/run_control.py` 提供持久 run registry、事件日志、订阅过滤、active-run 跟踪、事件 replay。
-- workspace/artifact service 把工作区和产物作为 Doxie 客户端的一等概念。
-- `services/doxie_cron_jobs.py` 提供比上游简单 `cron.manage` 更丰富的 Doxie cron 管理接口。
-- `ws.py` 支持 Doxie/WebSocket 方法白名单，并在断连时解绑 run-control 订阅。
+- workspace/artifact service 把工作区和产物作为 Dovie 客户端的一等概念。
+- `services/dovie_cron_jobs.py` 提供比上游简单 `cron.manage` 更丰富的 Dovie cron 管理接口。
+- `ws.py` 支持 Dovie/WebSocket 方法白名单，并在断连时解绑 run-control 订阅。
 
 上游状态：
 
 - 上游 `tui_gateway/server.py` 现在是继续演进后的大型单文件实现。
 - 上游 `tui_gateway/ws.py` 比共同基点更完善，使用 `agent.async_utils.safe_schedule_threadsafe`，线程到事件循环的发送更安全。
-- 上游没有本地 Doxie sidecar、workspace/artifact 持久化、run-control service 模块，也没有 Doxie 版 cron 管理层。
+- 上游没有本地 Dovie sidecar、workspace/artifact 持久化、run-control service 模块，也没有 Dovie 版 cron 管理层。
 - 上游有大量不能丢的 TUI 修复：verbose tool details、Termux、scrollback、mouse tracking、session branch、clipboard、RPC/transport 修复等。
 
 取舍结论：
 
 ```text
-以上游 TUI gateway 为基础，把本地 Doxie gateway 能力移植进去。
+以上游 TUI gateway 为基础，把本地 Dovie gateway 能力移植进去。
 不要整套保留本地拆分版本。
 ```
 
 理由：
 
-本地拆分更符合职责分离，也更接近长期最佳实践；但上游在单文件结构上继续演进，包含大量用户可见修复。直接保留本地拆分会丢上游 TUI 修复，并扩大长期分叉。根本解法是先保证行为合并正确：以上游当前实现为底座，把 Doxie 必需能力移植进去。后续如果要重新模块化，应作为单独重构，在测试稳定后进行。
+本地拆分更符合职责分离，也更接近长期最佳实践；但上游在单文件结构上继续演进，包含大量用户可见修复。直接保留本地拆分会丢上游 TUI 修复，并扩大长期分叉。根本解法是先保证行为合并正确：以上游当前实现为底座，把 Dovie 必需能力移植进去。后续如果要重新模块化，应作为单独重构，在测试稳定后进行。
 
 合并做法：
 
 - `tui_gateway/server.py` 先以上游为主解决。
 - 再移植这些本地概念：
-  - Doxie sidecar 入口；
-  - `session.create` / resume 路径中的 Doxie auth/product context 字段；
+  - Dovie sidecar 入口；
+  - `session.create` / resume 路径中的 Dovie auth/product context 字段；
   - workspace 规范化与 session 绑定；
   - `workspace.current`、`workspace.list`、`artifacts.list`；
   - 从文件变更类 tool completion 中提取 artifact；
-  - 如果 Doxie UI 仍依赖，则补回持久 run/event API；
+  - 如果 Dovie UI 仍依赖，则补回持久 run/event API；
   - 如果桌面端仍依赖，则补回更丰富的 `cron.manage` 行为。
-- `tui_gateway/ws.py` 以上游为基础，只补必要的 Doxie detach / allow-list 行为。
+- `tui_gateway/ws.py` 以上游为基础，只补必要的 Dovie detach / allow-list 行为。
 - 保留 `docs/Hermes/workspace-artifacts-architecture.md` 作为设计依据。
 - 移植完成后逐步恢复测试。
 
@@ -249,13 +249,13 @@ tests/hermes_state_fixtures.py
 取舍结论：
 
 ```text
-接受上游 `hermes_state.py` 为基础。只在 Doxie run-control 仍需要时补回缺失的 run/event schema 和 API。
+接受上游 `hermes_state.py` 为基础。只在 Dovie run-control 仍需要时补回缺失的 run/event schema 和 API。
 不要在这次大合并里强行保留本地 mixin 拆分。
 ```
 
 理由：
 
-本地拆分方向是好的，也符合项目“单文件不要过大、职责分离”的原则；但上游单文件里有最新的数据库正确性修复。大合并时强推拆分会显著增加风险，容易丢掉 DB 可靠性修复。更稳的路线是先合行为：保留上游 DB 正确性，补 Doxie 缺口；等合并稳定后，再单独做 `hermes_state.py` 模块化重构。
+本地拆分方向是好的，也符合项目“单文件不要过大、职责分离”的原则；但上游单文件里有最新的数据库正确性修复。大合并时强推拆分会显著增加风险，容易丢掉 DB 可靠性修复。更稳的路线是先合行为：保留上游 DB 正确性，补 Dovie 缺口；等合并稳定后，再单独做 `hermes_state.py` 模块化重构。
 
 合并做法：
 
@@ -283,7 +283,7 @@ tests/tools/test_computer_use.py
 
 本地状态：
 
-- 本地改动包含和 Doxie/runtime 相关的 computer-use 接入变化。
+- 本地改动包含和 Dovie/runtime 相关的 computer-use 接入变化。
 
 上游状态：
 
@@ -299,18 +299,18 @@ tests/tools/test_computer_use.py
 取舍结论：
 
 ```text
-优先采用上游 computer-use 实现，只在确认缺失时补 Doxie 专属 hook。
+优先采用上游 computer-use 实现，只在确认缺失时补 Dovie 专属 hook。
 ```
 
 理由：
 
-上游实现更新、更完整，并解决了明确的正确性和性能问题。本地在这块的改动不像 Doxie tools 那样是完整产品域能力。直接保留本地版本大概率会回退上游修复。
+上游实现更新、更完整，并解决了明确的正确性和性能问题。本地在这块的改动不像 Dovie tools 那样是完整产品域能力。直接保留本地版本大概率会回退上游修复。
 
 合并做法：
 
 - `tools/computer_use/*` 以上游为主。
-- 审查本地 diff，只寻找 Doxie runtime/auth/context 的必要 hook。
-- 只有测试或 Doxie 入口证明需要时，才补最小集成代码。
+- 审查本地 diff，只寻找 Dovie runtime/auth/context 的必要 hook。
+- 只有测试或 Dovie 入口证明需要时，才补最小集成代码。
 
 ### 6. Runtime Provider / Hermes Home / Session Context
 
@@ -326,9 +326,9 @@ model_tools.py
 
 本地实现内容：
 
-- Doxie runtime auth 处理。
-- Doxie 产品上下文传播。
-- Doxie 工具进入 tool discovery / agent runtime。
+- Dovie runtime auth 处理。
+- Dovie 产品上下文传播。
+- Dovie 工具进入 tool discovery / agent runtime。
 
 上游状态：
 
@@ -343,19 +343,19 @@ model_tools.py
 取舍结论：
 
 ```text
-通用 runtime/provider 逻辑以上游为基础。Doxie auth/context/tool 注册作为窄补丁补回。
+通用 runtime/provider 逻辑以上游为基础。Dovie auth/context/tool 注册作为窄补丁补回。
 ```
 
 理由：
 
-Provider/runtime 是高影响面代码。上游这里包含很多正确性和安全修复，不能因为 Doxie 集成直接覆盖掉。Doxie 的改动应该保持小而明确，集中在 session context、auth failure 处理和 tool registration 边界。
+Provider/runtime 是高影响面代码。上游这里包含很多正确性和安全修复，不能因为 Dovie 集成直接覆盖掉。Dovie 的改动应该保持小而明确，集中在 session context、auth failure 处理和 tool registration 边界。
 
 合并做法：
 
 - provider 解析和 runtime 选择以上游为主。
-- 补回 Doxie runtime auth failure 检测和用户提示。
-- 只通过 gateway/session context 边界传播 Doxie 产品上下文。
-- 通过正常 registry/toolset 机制注册 Doxie 工具。
+- 补回 Dovie runtime auth failure 检测和用户提示。
+- 只通过 gateway/session context 边界传播 Dovie 产品上下文。
+- 通过正常 registry/toolset 机制注册 Dovie 工具。
 
 ### 7. Document Parse Tool 和 RL Tool
 
@@ -379,12 +379,12 @@ tools/rl_training_tool.py
 
 理由：
 
-这两块不是明显的 Doxie 产品专属能力。上游删除它们大概率是设计方向：core 更轻，重型/小众能力迁到 plugin 或 optional skill。合并时不应逆向把它们塞回 core。
+这两块不是明显的 Dovie 产品专属能力。上游删除它们大概率是设计方向：core 更轻，重型/小众能力迁到 plugin 或 optional skill。合并时不应逆向把它们塞回 core。
 
 合并做法：
 
 - 默认接受上游删除。
-- 如果后续 Doxie 测试或产品需求证明必须依赖，再以 plugin/optional skill 形式恢复，而不是直接恢复 core tool。
+- 如果后续 Dovie 测试或产品需求证明必须依赖，再以 plugin/optional skill 形式恢复，而不是直接恢复 core tool。
 
 ### 8. `uv.lock`
 
@@ -423,25 +423,25 @@ pyproject.toml
 uv.lock
 ```
 
-原因：这些区域上游改动多、修复多、影响面大，本地 Doxie 改动应该作为窄补丁重新接入，而不是覆盖上游。
+原因：这些区域上游改动多、修复多、影响面大，本地 Dovie 改动应该作为窄补丁重新接入，而不是覆盖上游。
 
-### 阶段 2：明确保留并移植 Doxie 产品能力
+### 阶段 2：明确保留并移植 Dovie 产品能力
 
 需要保留/移植：
 
 ```text
-tools/doxie_agent_profile_tool.py
-tools/doxie_web_tools.py
-Doxie toolsets
-Doxie runtime auth failure handling
-Doxie product context propagation
-Doxie sidecar WebSocket entry
+tools/dovie_agent_profile_tool.py
+tools/dovie_web_tools.py
+Dovie toolsets
+Dovie runtime auth failure handling
+Dovie product context propagation
+Dovie sidecar WebSocket entry
 workspace/artifact APIs
-run-control/event replay APIs（如 Doxie UI 仍依赖）
-增强版 Doxie cron 管理（如桌面端仍依赖）
+run-control/event replay APIs（如 Dovie UI 仍依赖）
+增强版 Dovie cron 管理（如桌面端仍依赖）
 ```
 
-原则：保留能力，不保留过时挂载方式。所有 Doxie 能力都要重新贴合上游最新结构。
+原则：保留能力，不保留过时挂载方式。所有 Dovie 能力都要重新贴合上游最新结构。
 
 ### 阶段 3：避免恢复非产品必要分叉
 
@@ -459,11 +459,11 @@ run-control/event replay APIs（如 Doxie UI 仍依赖）
 
 ### 阶段 4：测试验证
 
-优先跑 Doxie 和冲突区域测试：
+优先跑 Dovie 和冲突区域测试：
 
 ```bash
-scripts/run_tests.sh tests/tools/test_doxie_agent_profile_tool.py -q
-scripts/run_tests.sh tests/tools/test_doxie_web_tools.py -q
+scripts/run_tests.sh tests/tools/test_dovie_agent_profile_tool.py -q
+scripts/run_tests.sh tests/tools/test_dovie_web_tools.py -q
 scripts/run_tests.sh tests/tools/test_skill_package_lifecycle.py -q
 scripts/run_tests.sh tests/test_tui_gateway_server.py -q
 scripts/run_tests.sh tests/test_tui_gateway_ws.py -q
@@ -485,15 +485,15 @@ scripts/run_tests.sh tests/run_agent/test_run_agent.py -q
 
 | 区域 | 本地更优点 | 上游更优点 | 建议 |
 | --- | --- | --- | --- |
-| Doxie profile tools | 产品专属分身设计工作流 | 无等价实现 | 保留本地 |
-| Doxie managed web tools | Doxie 托管凭证代理 | 通用 web/x_search provider | 本地和上游并存 |
+| Dovie profile tools | 产品专属分身设计工作流 | 无等价实现 | 保留本地 |
+| Dovie managed web tools | Dovie 托管凭证代理 | 通用 web/x_search provider | 本地和上游并存 |
 | Skill package lifecycle | ZIP 导入、跨 home 复制 | Skills Hub 来源、quarantine、审计更完整 | 把本地能力接入上游生命周期 |
-| TUI gateway | 模块化、workspace/artifact、run-control | 新 TUI 修复和持续演进 | 上游为底座，移植 Doxie 能力 |
+| TUI gateway | 模块化、workspace/artifact、run-control | 新 TUI 修复和持续演进 | 上游为底座，移植 Dovie 能力 |
 | `hermes_state` | 职责拆分更好 | DB 并发和可靠性修复更多 | 上游为底座，只补必要 run/event API |
-| Computer use | 可能有 Doxie hook | 最新 bug/perf 修复更多 | 优先上游 |
+| Computer use | 可能有 Dovie hook | 最新 bug/perf 修复更多 | 优先上游 |
 | Browser providers | 本地路径较旧 | 上游已 plugin 化 | 优先上游 |
 | Document/RL core tools | 本地仍有实现 | 上游 core debloating | 默认不恢复 |
-| Runtime/provider | Doxie auth/context | OAuth/proxy/security/provider 修复 | 上游为底座，窄补 Doxie |
+| Runtime/provider | Dovie auth/context | OAuth/proxy/security/provider 修复 | 上游为底座，窄补 Dovie |
 
 ## 执行门禁
 
@@ -509,4 +509,4 @@ git merge upstream/main
 git merge upstream/main
 ```
 
-执行后按本文档顺序处理冲突：先用上游基础设施稳定主干，再逐项移植 Doxie 产品能力，最后补测试和 lockfile。
+执行后按本文档顺序处理冲突：先用上游基础设施稳定主干，再逐项移植 Dovie 产品能力，最后补测试和 lockfile。

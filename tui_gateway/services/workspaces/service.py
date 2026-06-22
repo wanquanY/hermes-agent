@@ -25,10 +25,10 @@ def _first_text(*values: Any) -> str:
 def normalize_session_cwd(value: Any = None) -> str:
     raw = str(value or "").strip()
     if not raw:
-        raw = os.getenv("DOXIE_WORKSPACE_ROOT", "") or os.getenv("TERMINAL_CWD", "")
+        raw = os.getenv("DOVIE_WORKSPACE_ROOT", "") or os.getenv("TERMINAL_CWD", "")
         if not raw:
-            if os.getenv("DOXIE_PROCESS_ROLE") == "hermes-worker":
-                raise ValueError("Doxie workspace root is not configured")
+            if os.getenv("DOVIE_PROCESS_ROLE") == "hermes-worker":
+                raise ValueError("Dovie workspace root is not configured")
             raw = os.getcwd()
     cwd = os.path.abspath(os.path.expanduser(raw))
     if not os.path.isdir(cwd):
@@ -91,9 +91,9 @@ def workspace_from_params(params: dict, cwd: str) -> dict:
     )
     payload = model.to_payload()
     # Hermes stores this only as a runtime/session cache for artifact lookup and
-    # session restoration. Doxie remains the authority for product workspace
+    # session restoration. Dovie remains the authority for product workspace
     # metadata such as default profile, last-used profile, and user-facing names.
-    payload["authority"] = "doxie" if explicit_id else "hermes_runtime_cache"
+    payload["authority"] = "dovie" if explicit_id else "hermes_runtime_cache"
     payload["runtime_cache"] = True
     return payload
 
@@ -117,7 +117,7 @@ def bind_session_workspace(
 
 
 def _workspace_payload_from_row(row: dict[str, Any]) -> dict[str, Any]:
-    authority = "hermes_runtime_cache" if str(row["id"]).startswith("local:") else "doxie"
+    authority = "hermes_runtime_cache" if str(row["id"]).startswith("local:") else "dovie"
     return {
         "id": row["id"],
         "name": row["name"],
@@ -208,7 +208,7 @@ def list_workspaces(limit: int = 200) -> list[dict[str, Any]]:
             **workspace,
             "authority": "hermes_runtime_cache"
             if str(workspace.get("id") or "").startswith("local:")
-            else "doxie",
+            else "dovie",
             "runtime_cache": True,
         }
         for workspace in store.list_workspaces(limit=limit)

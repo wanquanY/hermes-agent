@@ -5,7 +5,7 @@ import base64
 import json
 import queue
 
-from doxie_extension.display_transcript import (
+from dovie_extension.display_transcript import (
     sanitize_session_list_item,
     sanitize_transcript_messages,
 )
@@ -771,7 +771,7 @@ def _(rid, params: dict) -> dict:
 
     if not control_plane_only:
         # Legacy TUI compatibility: return the lightweight session first, then
-        # build the AIAgent shortly after response flush. Doxie/new run.*
+        # build the AIAgent shortly after response flush. Dovie/new run.*
         # callers should pass control_plane_only/defer_agent_build and let
         # run.submit lazily attach the runtime.
         def _deferred_build() -> None:
@@ -821,7 +821,7 @@ def _(rid, params: dict) -> dict:
         # their own source.
         #
         # ``tool`` rows are sub-agent runs. ``cron`` rows are scheduler
-        # execution contexts; Doxie current-session/new-session result
+        # execution contexts; Dovie current-session/new-session result
         # bindings project their user-visible output into the target
         # conversation, so surfacing the raw cron session creates duplicate
         # sidebar conversations that begin with the internal cron prompt.

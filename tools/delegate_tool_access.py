@@ -11,7 +11,7 @@ from typing import Any, List, Optional
 from toolsets import TOOLSETS, get_all_toolsets, resolve_toolset, validate_toolset
 
 
-EXPLICIT_NO_TOOLS_SENTINEL = "__doxie_no_tools__"
+EXPLICIT_NO_TOOLS_SENTINEL = "__dovie_no_tools__"
 DEFAULT_BLOCKED_TOOLSETS = {
     "delegation",
     "clarify",
@@ -19,14 +19,14 @@ DEFAULT_BLOCKED_TOOLSETS = {
     "code_execution",
 }
 
-# Doxie profiles expose managed web research through ``doxie_web`` while
+# Dovie profiles expose managed web research through ``dovie_web`` while
 # Hermes-native prompts and models naturally ask delegate_task for ``web`` /
 # ``search`` or the native ``web_search`` / ``web_extract`` tools.  Treat these
 # as semantic equivalents, but still intersect with parent.valid_tool_names so a
 # child never gains a tool the parent did not actually load.
 SEMANTIC_TOOLSET_EQUIVALENTS = {
-    "web": ["doxie_web"],
-    "doxie_web": ["web"],
+    "web": ["dovie_web"],
+    "dovie_web": ["web"],
 }
 
 SEMANTIC_TOOL_EQUIVALENTS = {

@@ -317,7 +317,7 @@ class TestStreamingCallbacks:
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
     def test_same_stream_callback_is_not_delivered_twice(self, mock_close, mock_create):
-        """Doxie gateway may bind the same callable through both stream paths."""
+        """Dovie gateway may bind the same callable through both stream paths."""
         from run_agent import AIAgent
 
         chunks = [

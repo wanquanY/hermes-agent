@@ -188,7 +188,7 @@ def test_profile_registry_gateway_crud_is_latest_only(monkeypatch, tmp_path: Pat
 def test_team_mission_control_home_falls_back_to_hermes_home(monkeypatch, tmp_path: Path):
     from hermes_team_mission_profile_tools import team_mission_control_home
 
-    monkeypatch.delenv("DOXIE_HERMES_CONTROL_HOME", raising=False)
+    monkeypatch.delenv("DOVIE_HERMES_CONTROL_HOME", raising=False)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "control-home"))
 
     assert team_mission_control_home() == str(tmp_path / "control-home")

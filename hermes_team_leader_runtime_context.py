@@ -1,6 +1,6 @@
 """Resolve team-owned leader runtime context from Hermes state.
 
-Team conversation submit must not depend on Doxie passing profile runtime
+Team conversation submit must not depend on Dovie passing profile runtime
 details.  This module is the single ingress normalizer for requests that need
 the team leader runtime worker.
 """
@@ -258,7 +258,7 @@ def _profile_runtime_scope_key(profile: dict[str, Any]) -> str:
     )
 
 
-def _doxie_profile_payload(profile: dict[str, Any], *, runtime_home: str, profile_scope_key: str) -> dict[str, Any]:
+def _dovie_profile_payload(profile: dict[str, Any], *, runtime_home: str, profile_scope_key: str) -> dict[str, Any]:
     profile_id = _text(profile.get("id"))
     version_id = _profile_version_id(profile)
     payload = {
@@ -320,7 +320,7 @@ def _runtime_member_roster_entry(db: Any, member: dict[str, Any]) -> dict[str, A
     profile_scope_key = _profile_runtime_scope_key(profile)
     if not profile_scope_key:
         raise ValueError(f"team member profile runtime scope required: {_text(profile.get('id'))}")
-    doxie_profile = _doxie_profile_payload(profile, runtime_home=runtime_home, profile_scope_key=profile_scope_key)
+    dovie_profile = _dovie_profile_payload(profile, runtime_home=runtime_home, profile_scope_key=profile_scope_key)
     default_toolsets = _string_list(profile.get("defaultToolsets") or profile.get("default_toolsets"))
     recommended_skills = _string_list(profile.get("recommendedSkills") or profile.get("recommended_skills"))
     enriched = {
@@ -331,8 +331,8 @@ def _runtime_member_roster_entry(db: Any, member: dict[str, Any]) -> dict[str, A
         "profileRuntimeScopeKey": profile_scope_key,
         "hermes_home_path": runtime_home,
         "hermesHomePath": runtime_home,
-        "doxie_profile": doxie_profile,
-        "doxieProfile": doxie_profile,
+        "dovie_profile": dovie_profile,
+        "dovieProfile": dovie_profile,
     }
     if default_toolsets:
         enriched["default_toolsets"] = default_toolsets
@@ -453,7 +453,7 @@ def resolve_team_leader_runtime_params(
     if not leader_runtime_scope_key:
         raise ValueError("conversation_id or mission_id required for team leader runtime context")
 
-    doxie_profile = _doxie_profile_payload(profile, runtime_home=runtime_home, profile_scope_key=profile_scope_key)
+    dovie_profile = _dovie_profile_payload(profile, runtime_home=runtime_home, profile_scope_key=profile_scope_key)
     roster = [_member_roster_entry(member) for member in _active_members(team)]
     leader_member_id = _text(leader_member.get("member_id") or leader_member.get("id"))
     for index, member in enumerate(roster):
@@ -467,8 +467,8 @@ def resolve_team_leader_runtime_params(
                 "profileRuntimeScopeKey": profile_scope_key,
                 "hermes_home_path": runtime_home,
                 "hermesHomePath": runtime_home,
-                "doxie_profile": doxie_profile,
-                "doxieProfile": doxie_profile,
+                "dovie_profile": dovie_profile,
+                "dovieProfile": dovie_profile,
             }
             break
     else:
@@ -483,8 +483,8 @@ def resolve_team_leader_runtime_params(
                 "profileRuntimeScopeKey": profile_scope_key,
                 "hermes_home_path": runtime_home,
                 "hermesHomePath": runtime_home,
-                "doxie_profile": doxie_profile,
-                "doxieProfile": doxie_profile,
+                "dovie_profile": dovie_profile,
+                "dovieProfile": dovie_profile,
             },
         )
 
@@ -499,8 +499,8 @@ def resolve_team_leader_runtime_params(
             "profileRuntimeScopeKey": profile_scope_key,
             "agent_profile_id": _text(profile.get("id")),
             "agentProfileId": _text(profile.get("id")),
-            "doxie_profile": doxie_profile,
-            "doxieProfile": doxie_profile,
+            "dovie_profile": dovie_profile,
+            "dovieProfile": dovie_profile,
             "members": roster,
         }
     )

@@ -94,9 +94,9 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
 
 
 def _resolve_tui_toolsets_env() -> tuple[bool, list[str] | None]:
-    """Resolve Doxie/TUI runtime toolsets for cron jobs in a sidecar process.
+    """Resolve Dovie/TUI runtime toolsets for cron jobs in a sidecar process.
 
-    Doxie profile runtimes launch the sidecar with HERMES_TUI_TOOLSETS, and
+    Dovie profile runtimes launch the sidecar with HERMES_TUI_TOOLSETS, and
     live chat agents use that surface. Scheduled jobs created from the same
     conversation should inherit it unless the job pins enabled_toolsets.
     """
@@ -889,31 +889,31 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     return None
 
 
-def _doxie_result_binding(job: dict[str, Any]) -> dict[str, Any]:
-    doxie = job.get("doxie") if isinstance(job.get("doxie"), dict) else {}
-    binding = doxie.get("result_binding") if isinstance(doxie.get("result_binding"), dict) else {}
+def _dovie_result_binding(job: dict[str, Any]) -> dict[str, Any]:
+    dovie = job.get("dovie") if isinstance(job.get("dovie"), dict) else {}
+    binding = dovie.get("result_binding") if isinstance(dovie.get("result_binding"), dict) else {}
     if not binding:
-        binding = doxie.get("resultBinding") if isinstance(doxie.get("resultBinding"), dict) else {}
+        binding = dovie.get("resultBinding") if isinstance(dovie.get("resultBinding"), dict) else {}
     if binding:
         return binding
-    if str(doxie.get("session_target") or "").strip() == "main":
+    if str(dovie.get("session_target") or "").strip() == "main":
         return {
             "mode": "current-session",
-            "sessionId": str(doxie.get("session_id") or "").strip(),
+            "sessionId": str(dovie.get("session_id") or "").strip(),
         }
     return {}
 
 
-def _doxie_trigger_content(job: dict[str, Any]) -> str:
+def _dovie_trigger_content(job: dict[str, Any]) -> str:
     prompt = str(job.get("prompt") or "").strip()
     if prompt:
         return prompt
-    doxie = job.get("doxie") if isinstance(job.get("doxie"), dict) else {}
-    payload = doxie.get("payload") if isinstance(doxie.get("payload"), dict) else {}
+    dovie = job.get("dovie") if isinstance(job.get("dovie"), dict) else {}
+    payload = dovie.get("payload") if isinstance(dovie.get("payload"), dict) else {}
     return str(payload.get("prompt") or payload.get("text") or "").strip()
 
 
-def _append_doxie_session_message(
+def _append_dovie_session_message(
     job: dict[str, Any],
     *,
     target_session_id: str,
@@ -938,14 +938,14 @@ def _append_doxie_session_message(
 
         db = SessionDB()
         db.ensure_session(target_session_id, source="tui", model=job.get("model"))
-        trigger_content = _doxie_trigger_content(job)
+        trigger_content = _dovie_trigger_content(job)
         if trigger_content:
             db.append_message(
                 target_session_id,
                 "user",
                 trigger_content,
                 metadata={
-                    "source": "doxie_automation_trigger",
+                    "source": "dovie_automation_trigger",
                     "job_id": job.get("id"),
                     "job_name": job.get("name"),
                     "runtime_session_id": job.get("_runtime_session_id"),
@@ -957,7 +957,7 @@ def _append_doxie_session_message(
             "assistant",
             content,
             metadata={
-                "source": "doxie_automation",
+                "source": "dovie_automation",
                 "job_id": job.get("id"),
                 "job_name": job.get("name"),
                 "runtime_session_id": job.get("_runtime_session_id"),
@@ -967,7 +967,7 @@ def _append_doxie_session_message(
         )
     except Exception as exc:
         logger.warning(
-            "Job '%s': failed to append Doxie current-session result to %s: %s",
+            "Job '%s': failed to append Dovie current-session result to %s: %s",
             job.get("id", "?"),
             target_session_id,
             exc,
@@ -976,14 +976,14 @@ def _append_doxie_session_message(
     return None
 
 
-def _deliver_doxie_bound_result(
+def _deliver_dovie_bound_result(
     job: dict[str, Any],
     *,
     success: bool,
     final_response: str,
     error: str | None,
 ) -> str | None:
-    binding = _doxie_result_binding(job)
+    binding = _dovie_result_binding(job)
     mode = str(binding.get("mode") or "").strip()
     if mode in {"", "run-log-only", "hermes-native"}:
         return None
@@ -993,7 +993,7 @@ def _deliver_doxie_bound_result(
         ).strip()
         if not target_session_id:
             return "current-session result binding is missing sessionId"
-        return _append_doxie_session_message(
+        return _append_dovie_session_message(
             job,
             target_session_id=target_session_id,
             mode=mode,
@@ -1006,7 +1006,7 @@ def _deliver_doxie_bound_result(
             job_id=str(job.get("id") or "job"),
             ts=_hermes_now().strftime("%Y%m%d_%H%M%S"),
         )
-        return _append_doxie_session_message(
+        return _append_dovie_session_message(
             job,
             target_session_id=target_session_id,
             mode=mode,
@@ -1014,10 +1014,10 @@ def _deliver_doxie_bound_result(
             final_response=final_response,
             error=error,
         )
-    return f"unsupported Doxie result binding mode: {mode}"
+    return f"unsupported Dovie result binding mode: {mode}"
 
 
-def _append_doxie_current_session_result(
+def _append_dovie_current_session_result(
     job: dict[str, Any],
     *,
     success: bool,
@@ -1025,7 +1025,7 @@ def _append_doxie_current_session_result(
     error: str | None,
 ) -> str | None:
     """Backward-compatible helper for tests and older monkeypatches."""
-    return _deliver_doxie_bound_result(
+    return _deliver_dovie_bound_result(
         job,
         success=success,
         final_response=final_response,
@@ -1607,8 +1607,8 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     _cron_approval_token = None
     try:
         from tools.approval import set_cron_approval_mode_override
-        doxie_meta = job.get("doxie") if isinstance(job.get("doxie"), dict) else {}
-        _cron_approval_token = set_cron_approval_mode_override(doxie_meta.get("approval_policy") or "")
+        dovie_meta = job.get("dovie") if isinstance(job.get("dovie"), dict) else {}
+        _cron_approval_token = set_cron_approval_mode_override(dovie_meta.get("approval_policy") or "")
     except Exception as exc:
         logger.debug("Job '%s': failed to bind cron approval override: %s", job_id, exc)
 
@@ -2178,18 +2178,18 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                         delivery_error = str(de)
                         logger.error("Delivery failed for job %s: %s", job["id"], de)
 
-                doxie_append_error = _deliver_doxie_bound_result(
+                dovie_append_error = _deliver_dovie_bound_result(
                     job,
                     success=success,
                     final_response=final_response,
                     error=error,
                 )
-                if doxie_append_error:
+                if dovie_append_error:
                     delivery_error = "; ".join(
                         part
                         for part in (
                             delivery_error,
-                            f"doxie current-session append failed: {doxie_append_error}",
+                            f"dovie current-session append failed: {dovie_append_error}",
                         )
                         if part
                     )

@@ -31,7 +31,7 @@ from agent.anthropic_adapter import _is_oauth_token
 from agent.auxiliary_client import set_runtime_main
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.direct_tool_response import build_direct_tool_response
-from agent.doxie_diagnostics import emit_doxie_diagnostic
+from agent.dovie_diagnostics import emit_dovie_diagnostic
 from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
@@ -76,7 +76,7 @@ from utils import base_url_host_matches, env_var_enabled
 logger = logging.getLogger(__name__)
 
 
-def _log_doxie_turn_stage(agent, stage: str, **fields: Any) -> None:
+def _log_dovie_turn_stage(agent, stage: str, **fields: Any) -> None:
     """Emit gateway turn diagnostics without depending on the gateway package."""
     agent_fields = vars(agent) if hasattr(agent, "__dict__") else {}
     run_id = str(agent_fields.get("_hermes_active_run_id") or "")
@@ -92,7 +92,7 @@ def _log_doxie_turn_stage(agent, stage: str, **fields: Any) -> None:
         "runtime_scope_key": runtime_scope_key,
         **fields,
     }
-    emit_doxie_diagnostic("[doxie-turn-stage]", pairs)
+    emit_dovie_diagnostic("[dovie-turn-stage]", pairs)
 
 
 def _ra():
@@ -131,7 +131,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     (which constructs a fresh ``AIAgent`` per turn and depends on this
     DB roundtrip).
     """
-    _log_doxie_turn_stage(
+    _log_dovie_turn_stage(
         agent,
         "system-prompt-restore-enter",
         history_count=len(conversation_history or []),
@@ -142,9 +142,9 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     stored_state = "missing"
     if conversation_history and agent._session_db:
         try:
-            _log_doxie_turn_stage(agent, "system-prompt-db-read-start")
+            _log_dovie_turn_stage(agent, "system-prompt-db-read-start")
             session_row = agent._session_db.get_session(agent.session_id)
-            _log_doxie_turn_stage(
+            _log_dovie_turn_stage(
                 agent,
                 "system-prompt-db-read-end",
                 has_session_row=session_row is not None,
@@ -159,7 +159,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
                     stored_prompt = raw_prompt
                     stored_state = "present"
         except Exception as exc:
-            _log_doxie_turn_stage(agent, "system-prompt-db-read-error", error=str(exc))
+            _log_dovie_turn_stage(agent, "system-prompt-db-read-error", error=str(exc))
             logger.warning(
                 "Session DB get_session failed for system-prompt restore "
                 "(session=%s): %s. Falling back to fresh build — prefix "
@@ -171,7 +171,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         # Continuing session — reuse the exact system prompt from the
         # previous turn so the Anthropic cache prefix matches.
         agent._cached_system_prompt = stored_prompt
-        _log_doxie_turn_stage(
+        _log_dovie_turn_stage(
             agent,
             "system-prompt-restored",
             prompt_chars=len(stored_prompt or ""),
@@ -193,13 +193,13 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
 
     # First turn of a new session (or recovering from a broken stored
     # prompt) — build from scratch.
-    _log_doxie_turn_stage(
+    _log_dovie_turn_stage(
         agent,
         "system-prompt-fresh-build-start",
         stored_state=stored_state,
     )
     agent._cached_system_prompt = agent._build_system_prompt(system_message)
-    _log_doxie_turn_stage(
+    _log_dovie_turn_stage(
         agent,
         "system-prompt-fresh-build-end",
         prompt_chars=len(agent._cached_system_prompt or ""),
@@ -209,7 +209,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # session is created (not on continuation).  Plugins can use this
     # to initialise session-scoped state (e.g. warm a memory cache).
     try:
-        _log_doxie_turn_stage(agent, "system-prompt-session-start-hook-start")
+        _log_dovie_turn_stage(agent, "system-prompt-session-start-hook-start")
         from hermes_cli.plugins import invoke_hook as _invoke_hook
         _invoke_hook(
             "on_session_start",
@@ -217,9 +217,9 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             model=agent.model,
             platform=getattr(agent, "platform", None) or "",
         )
-        _log_doxie_turn_stage(agent, "system-prompt-session-start-hook-end")
+        _log_dovie_turn_stage(agent, "system-prompt-session-start-hook-end")
     except Exception as exc:
-        _log_doxie_turn_stage(
+        _log_dovie_turn_stage(
             agent,
             "system-prompt-session-start-hook-error",
             error=str(exc),
@@ -232,11 +232,11 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # subsequent turn).
     if agent._session_db:
         try:
-            _log_doxie_turn_stage(agent, "system-prompt-db-write-start")
+            _log_dovie_turn_stage(agent, "system-prompt-db-write-start")
             agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
-            _log_doxie_turn_stage(agent, "system-prompt-db-write-end")
+            _log_dovie_turn_stage(agent, "system-prompt-db-write-end")
         except Exception as exc:
-            _log_doxie_turn_stage(agent, "system-prompt-db-write-error", error=str(exc))
+            _log_dovie_turn_stage(agent, "system-prompt-db-write-error", error=str(exc))
             logger.warning(
                 "Session DB update_system_prompt failed for session %s: "
                 "%s. Subsequent turns will rebuild the system prompt and "
@@ -423,7 +423,7 @@ def run_conversation(
         _msg_preview,
     )
     _turn_stage_start = time.time()
-    _log_doxie_turn_stage(
+    _log_dovie_turn_stage(
         agent,
         "conversation-turn-start",
         model=agent.model,
@@ -523,9 +523,9 @@ def run_conversation(
     # producing a different system prompt and breaking the Anthropic
     # prefix cache.
     if agent._cached_system_prompt is None:
-        _log_doxie_turn_stage(agent, "system-prompt-build-start")
+        _log_dovie_turn_stage(agent, "system-prompt-build-start")
         _restore_or_build_system_prompt(agent, system_message, conversation_history)
-        _log_doxie_turn_stage(
+        _log_dovie_turn_stage(
             agent,
             "system-prompt-build-end",
             prompt_chars=len(agent._cached_system_prompt or ""),
@@ -615,7 +615,7 @@ def run_conversation(
     # All injected context is ephemeral (not persisted to session DB).
     _plugin_user_context = ""
     try:
-        _log_doxie_turn_stage(agent, "pre-llm-hook-start")
+        _log_dovie_turn_stage(agent, "pre-llm-hook-start")
         from hermes_cli.plugins import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
             "pre_llm_call",
@@ -635,7 +635,7 @@ def run_conversation(
                 _ctx_parts.append(r)
         if _ctx_parts:
             _plugin_user_context = "\n\n".join(_ctx_parts)
-        _log_doxie_turn_stage(
+        _log_dovie_turn_stage(
             agent,
             "pre-llm-hook-end",
             result_count=len(_pre_results or []),
@@ -643,7 +643,7 @@ def run_conversation(
         )
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
-        _log_doxie_turn_stage(agent, "pre-llm-hook-error", error=str(exc))
+        _log_dovie_turn_stage(agent, "pre-llm-hook-error", error=str(exc))
 
     # Main conversation loop
     api_call_count = 0
@@ -686,11 +686,11 @@ def run_conversation(
     if agent._memory_manager:
         try:
             _turn_msg = original_user_message if isinstance(original_user_message, str) else ""
-            _log_doxie_turn_stage(agent, "memory-on-turn-start")
+            _log_dovie_turn_stage(agent, "memory-on-turn-start")
             agent._memory_manager.on_turn_start(agent._user_turn_count, _turn_msg)
-            _log_doxie_turn_stage(agent, "memory-on-turn-end")
+            _log_dovie_turn_stage(agent, "memory-on-turn-end")
         except Exception:
-            _log_doxie_turn_stage(agent, "memory-on-turn-error")
+            _log_dovie_turn_stage(agent, "memory-on-turn-error")
             pass
 
     # External memory provider: prefetch once before the tool loop.
@@ -702,15 +702,15 @@ def run_conversation(
     if agent._memory_manager:
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
-            _log_doxie_turn_stage(agent, "memory-prefetch-start", query_chars=len(_query))
+            _log_dovie_turn_stage(agent, "memory-prefetch-start", query_chars=len(_query))
             _ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
-            _log_doxie_turn_stage(
+            _log_dovie_turn_stage(
                 agent,
                 "memory-prefetch-end",
                 context_chars=len(_ext_prefetch_cache),
             )
         except Exception:
-            _log_doxie_turn_stage(agent, "memory-prefetch-error")
+            _log_dovie_turn_stage(agent, "memory-prefetch-error")
             pass
 
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
@@ -1116,7 +1116,7 @@ def run_conversation(
 
             try:
                 agent._reset_stream_delivery_tracking()
-                _log_doxie_turn_stage(
+                _log_dovie_turn_stage(
                     agent,
                     "api-kwargs-build-start",
                     api_message_count=len(api_messages),
@@ -1125,7 +1125,7 @@ def run_conversation(
                     elapsed_ms=int((time.time() - _turn_stage_start) * 1000),
                 )
                 api_kwargs = agent._build_api_kwargs(api_messages)
-                _log_doxie_turn_stage(
+                _log_dovie_turn_stage(
                     agent,
                     "api-kwargs-build-end",
                     key_count=len(api_kwargs or {}),
@@ -1136,7 +1136,7 @@ def run_conversation(
                     api_kwargs = agent._get_transport().preflight_kwargs(api_kwargs, allow_stream=False)
 
                 try:
-                    _log_doxie_turn_stage(agent, "pre-api-request-hook-start")
+                    _log_dovie_turn_stage(agent, "pre-api-request-hook-start")
                     from hermes_cli.plugins import invoke_hook as _invoke_hook
                     request_messages = api_kwargs.get("messages")
                     if not isinstance(request_messages, list):
@@ -1168,9 +1168,9 @@ def run_conversation(
                         request_char_count=total_chars,
                         max_tokens=agent.max_tokens,
                     )
-                    _log_doxie_turn_stage(agent, "pre-api-request-hook-end")
+                    _log_dovie_turn_stage(agent, "pre-api-request-hook-end")
                 except Exception:
-                    _log_doxie_turn_stage(agent, "pre-api-request-hook-error")
+                    _log_dovie_turn_stage(agent, "pre-api-request-hook-error")
                     pass
 
                 if env_var_enabled("HERMES_DUMP_REQUESTS"):
@@ -1220,15 +1220,15 @@ def run_conversation(
                         _use_streaming = False
 
                 if _use_streaming:
-                    _log_doxie_turn_stage(agent, "streaming-api-call-start")
+                    _log_dovie_turn_stage(agent, "streaming-api-call-start")
                     response = agent._interruptible_streaming_api_call(
                         api_kwargs, on_first_delta=_stop_spinner
                     )
-                    _log_doxie_turn_stage(agent, "streaming-api-call-end")
+                    _log_dovie_turn_stage(agent, "streaming-api-call-end")
                 else:
-                    _log_doxie_turn_stage(agent, "non-streaming-api-call-start")
+                    _log_dovie_turn_stage(agent, "non-streaming-api-call-start")
                     response = agent._interruptible_api_call(api_kwargs)
-                    _log_doxie_turn_stage(agent, "non-streaming-api-call-end")
+                    _log_dovie_turn_stage(agent, "non-streaming-api-call-end")
                 
                 api_duration = time.time() - api_start_time
                 

@@ -59,14 +59,14 @@ from agent.tool_guardrails import (
     append_toolguard_guidance,
     toolguard_synthetic_result,
 )
-from agent.doxie_diagnostics import emit_doxie_diagnostic
+from agent.dovie_diagnostics import emit_dovie_diagnostic
 from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname
 
 logger = logging.getLogger(__name__)
 
 
-def _log_doxie_stream_stage(agent, stage: str, **fields: Any) -> None:
+def _log_dovie_stream_stage(agent, stage: str, **fields: Any) -> None:
     run_id = str(getattr(agent, "_hermes_active_run_id", "") or "")
     turn_id = str(getattr(agent, "_hermes_active_turn_id", "") or "")
     runtime_scope_key = str(getattr(agent, "_hermes_active_runtime_scope_key", "") or "")
@@ -80,7 +80,7 @@ def _log_doxie_stream_stage(agent, stage: str, **fields: Any) -> None:
         "runtime_scope_key": runtime_scope_key,
         **fields,
     }
-    emit_doxie_diagnostic("[doxie-stream-stage]", pairs)
+    emit_dovie_diagnostic("[dovie-stream-stage]", pairs)
 
 
 def _text_probe(value: Any) -> dict[str, Any]:
@@ -1360,7 +1360,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     """
     if agent._interrupt_requested:
         raise InterruptedError("Agent interrupted before streaming API call")
-    _log_doxie_stream_stage(
+    _log_dovie_stream_stage(
         agent,
         "interruptible-stream-entry",
         api_mode=agent.api_mode,
@@ -1486,7 +1486,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     def _call_chat_completions():
         """Stream a chat completions response."""
         import httpx as _httpx
-        _log_doxie_stream_stage(agent, "chat-completions-thread-entry")
+        _log_dovie_stream_stage(agent, "chat-completions-thread-entry")
         # Per-provider / per-model request_timeout_seconds (from config.yaml)
         # wins over the HERMES_API_TIMEOUT env default if the user set it.
         _provider_timeout_cfg = get_provider_request_timeout(agent.provider, agent.model)
@@ -1525,7 +1525,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 pool=_conn_cap,
             ),
         }
-        _log_doxie_stream_stage(
+        _log_dovie_stream_stage(
             agent,
             "chat-completions-client-create-start",
             timeout_read=_stream_read_timeout,
@@ -1539,7 +1539,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 api_kwargs=stream_kwargs,
             )
         )
-        _log_doxie_stream_stage(agent, "chat-completions-client-create-end")
+        _log_dovie_stream_stage(agent, "chat-completions-client-create-end")
         # Reset stale-stream timer so the detector measures from this
         # attempt's start, not a previous attempt's last chunk.
         last_chunk_time["t"] = time.time()
@@ -1549,9 +1549,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # ``request_client_holder["diag"]`` for closure access.
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
-        _log_doxie_stream_stage(agent, "chat-completions-create-start")
+        _log_dovie_stream_stage(agent, "chat-completions-create-start")
         stream = request_client.chat.completions.create(**stream_kwargs)
-        _log_doxie_stream_stage(agent, "chat-completions-create-end")
+        _log_dovie_stream_stage(agent, "chat-completions-create-end")
 
         # Capture rate limit headers from the initial HTTP response.
         # The OpenAI SDK Stream object exposes the underlying httpx
@@ -1592,7 +1592,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             "empty_choices": 0,
         }
         if stream_probe_enabled:
-            _log_doxie_stream_stage(
+            _log_dovie_stream_stage(
                 agent,
                 "chat-stream-start",
                 scope=stream_probe_scope,
@@ -1650,7 +1650,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     stream_probe_counts["reasoning"] += 1
                     reasoning_probe = _text_probe(reasoning_text)
                     if stream_probe_counts["reasoning"] <= 3 or stream_probe_counts["reasoning"] % 20 == 0:
-                        _log_doxie_stream_stage(
+                        _log_dovie_stream_stage(
                             agent,
                             "reasoning-chunk",
                             chunk_index=stream_probe_counts["chunks"],
@@ -1675,7 +1675,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 if stream_probe_enabled:
                     stream_probe_counts["content"] += 1
                     content_probe = _text_probe(delta.content)
-                    _log_doxie_stream_stage(
+                    _log_dovie_stream_stage(
                         agent,
                         "content-chunk",
                         chunk_index=stream_probe_counts["chunks"],
@@ -1719,7 +1719,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             if delta and delta.tool_calls:
                 if stream_probe_enabled:
                     stream_probe_counts["tool"] += 1
-                    _log_doxie_stream_stage(
+                    _log_dovie_stream_stage(
                         agent,
                         "tool-call-chunk",
                         chunk_index=stream_probe_counts["chunks"],
@@ -1793,7 +1793,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             if chunk.choices[0].finish_reason:
                 finish_reason = chunk.choices[0].finish_reason
                 if stream_probe_enabled:
-                    _log_doxie_stream_stage(
+                    _log_dovie_stream_stage(
                         agent,
                         "finish-reason",
                         finish_reason=finish_reason,
@@ -1807,7 +1807,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # Build mock response matching non-streaming shape
         full_content = "".join(content_parts) or None
         if stream_probe_enabled:
-            _log_doxie_stream_stage(
+            _log_dovie_stream_stage(
                 agent,
                 "chat-stream-end",
                 finish_reason=finish_reason,

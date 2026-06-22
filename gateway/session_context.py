@@ -56,8 +56,8 @@ _SESSION_USER_ID: ContextVar = ContextVar("HERMES_SESSION_USER_ID", default=_UNS
 _SESSION_USER_NAME: ContextVar = ContextVar("HERMES_SESSION_USER_NAME", default=_UNSET)
 _SESSION_KEY: ContextVar = ContextVar("HERMES_SESSION_KEY", default=_UNSET)
 _SESSION_ID: ContextVar = ContextVar("HERMES_SESSION_ID", default=_UNSET)
-_DOXIE_PRODUCT_CONTEXT: ContextVar = ContextVar("HERMES_DOXIE_PRODUCT_CONTEXT", default=_UNSET)
-_DOXIE_BROWSER_SESSION_ID: ContextVar = ContextVar("DOXIE_BROWSER_SESSION_ID", default=_UNSET)
+_DOVIE_PRODUCT_CONTEXT: ContextVar = ContextVar("HERMES_DOVIE_PRODUCT_CONTEXT", default=_UNSET)
+_DOVIE_BROWSER_SESSION_ID: ContextVar = ContextVar("DOVIE_BROWSER_SESSION_ID", default=_UNSET)
 _TERMINAL_CWD: ContextVar = ContextVar("TERMINAL_CWD", default=_UNSET)
 # ID of the message that triggered the current turn. Used as a reply anchor
 # so background-process notifications stay inside the originating Telegram
@@ -79,8 +79,8 @@ _VAR_MAP = {
     "HERMES_SESSION_USER_NAME": _SESSION_USER_NAME,
     "HERMES_SESSION_KEY": _SESSION_KEY,
     "HERMES_SESSION_ID": _SESSION_ID,
-    "HERMES_DOXIE_PRODUCT_CONTEXT": _DOXIE_PRODUCT_CONTEXT,
-    "DOXIE_BROWSER_SESSION_ID": _DOXIE_BROWSER_SESSION_ID,
+    "HERMES_DOVIE_PRODUCT_CONTEXT": _DOVIE_PRODUCT_CONTEXT,
+    "DOVIE_BROWSER_SESSION_ID": _DOVIE_BROWSER_SESSION_ID,
     "TERMINAL_CWD": _TERMINAL_CWD,
     "HERMES_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
     "HERMES_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
@@ -98,8 +98,8 @@ def set_session_vars(
     user_name: str = "",
     session_key: str = "",
     terminal_cwd: str = "",
-    doxie_product_context: str = "",
-    doxie_browser_session_id: str = "",
+    dovie_product_context: str = "",
+    dovie_browser_session_id: str = "",
     message_id: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.
@@ -118,8 +118,8 @@ def set_session_vars(
         _SESSION_USER_ID.set(user_id),
         _SESSION_USER_NAME.set(user_name),
         _SESSION_KEY.set(session_key),
-        _DOXIE_PRODUCT_CONTEXT.set(doxie_product_context),
-        _DOXIE_BROWSER_SESSION_ID.set(doxie_browser_session_id),
+        _DOVIE_PRODUCT_CONTEXT.set(dovie_product_context),
+        _DOVIE_BROWSER_SESSION_ID.set(dovie_browser_session_id),
         _TERMINAL_CWD.set(terminal_cwd),
         _SESSION_MESSAGE_ID.set(message_id),
     ]
@@ -145,8 +145,8 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_USER_ID,
         _SESSION_USER_NAME,
         _SESSION_KEY,
-        _DOXIE_PRODUCT_CONTEXT,
-        _DOXIE_BROWSER_SESSION_ID,
+        _DOVIE_PRODUCT_CONTEXT,
+        _DOVIE_BROWSER_SESSION_ID,
         _TERMINAL_CWD,
         _SESSION_MESSAGE_ID,
     ):

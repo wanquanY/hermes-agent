@@ -2428,26 +2428,26 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
 # Browser Tool Functions
 # ============================================================================
 
-def _doxie_browser_bridge() -> Any:
+def _dovie_browser_bridge() -> Any:
     try:
-        from doxie_extension import browser_bridge as _doxie_browser
+        from dovie_extension import browser_bridge as _dovie_browser
 
-        if _doxie_browser.available():
-            return _doxie_browser
+        if _dovie_browser.available():
+            return _dovie_browser
     except Exception as exc:
-        logger.debug("Doxie desktop browser bridge unavailable: %s", exc)
+        logger.debug("Dovie desktop browser bridge unavailable: %s", exc)
     return None
 
 
-def _doxie_browser_error(action: str, exc: Exception) -> str:
+def _dovie_browser_error(action: str, exc: Exception) -> str:
     return json.dumps({
         "success": False,
-        "error": f"Doxie desktop browser {action} failed: {exc}",
-        "provider": "doxie_desktop",
+        "error": f"Dovie desktop browser {action} failed: {exc}",
+        "provider": "dovie_desktop",
     }, ensure_ascii=False)
 
 
-def _active_doxie_tab(session: Any) -> Dict[str, Any]:
+def _active_dovie_tab(session: Any) -> Dict[str, Any]:
     if not isinstance(session, dict):
         return {}
     tabs = session.get("tabs")
@@ -2463,12 +2463,12 @@ def _active_doxie_tab(session: Any) -> Dict[str, Any]:
     return tabs[0] if tabs and isinstance(tabs[0], dict) else {}
 
 
-def _active_tab_url_from_doxie_session(session: Any) -> str:
-    return str(_active_doxie_tab(session).get("url") or "")
+def _active_tab_url_from_dovie_session(session: Any) -> str:
+    return str(_active_dovie_tab(session).get("url") or "")
 
 
-def _active_tab_title_from_doxie_session(session: Any) -> str:
-    return str(_active_doxie_tab(session).get("title") or "")
+def _active_tab_title_from_dovie_session(session: Any) -> str:
+    return str(_active_dovie_tab(session).get("title") or "")
 
 
 def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
@@ -2540,27 +2540,27 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]},
         })
 
-    doxie_browser = _doxie_browser_bridge()
-    if doxie_browser is not None:
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
         try:
-            session = doxie_browser.navigate(url)
-            observation = doxie_browser.observe(max_nodes=200)
-            snapshot = doxie_browser.snapshot_payload_from_observation(observation)
+            session = dovie_browser.navigate(url)
+            observation = dovie_browser.observe(max_nodes=200)
+            snapshot = dovie_browser.snapshot_payload_from_observation(observation)
             snapshot_text = str(snapshot.get("snapshot") or "")
             if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
                 snapshot_text = _truncate_snapshot(snapshot_text)
-            _last_active_session_key[effective_task_id] = f"doxie:{doxie_browser.browser_session_id()}"
+            _last_active_session_key[effective_task_id] = f"dovie:{dovie_browser.browser_session_id()}"
             return json.dumps({
                 "success": True,
-                "url": snapshot.get("url") or _active_tab_url_from_doxie_session(session) or url,
-                "title": snapshot.get("title") or _active_tab_title_from_doxie_session(session),
+                "url": snapshot.get("url") or _active_tab_url_from_dovie_session(session) or url,
+                "title": snapshot.get("title") or _active_tab_title_from_dovie_session(session),
                 "snapshot": snapshot_text,
                 "element_count": snapshot.get("element_count", 0),
-                "provider": "doxie_desktop",
-                "browser_session_id": doxie_browser.browser_session_id(),
+                "provider": "dovie_desktop",
+                "browser_session_id": dovie_browser.browser_session_id(),
             }, ensure_ascii=False)
         except Exception as exc:
-            return _doxie_browser_error("navigate", exc)
+            return _dovie_browser_error("navigate", exc)
 
     # Camofox backend — delegate after safety checks pass
     if _is_camofox_mode():
@@ -2709,11 +2709,11 @@ def browser_snapshot(
     Returns:
         JSON string with page snapshot
     """
-    doxie_browser = _doxie_browser_bridge()
-    if doxie_browser is not None:
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
         try:
-            observation = doxie_browser.observe(max_nodes=1000 if full else 200)
-            response = doxie_browser.snapshot_payload_from_observation(observation)
+            observation = dovie_browser.observe(max_nodes=1000 if full else 200)
+            response = dovie_browser.snapshot_payload_from_observation(observation)
             snapshot_text = str(response.get("snapshot") or "")
             if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD and user_task:
                 snapshot_text = _extract_relevant_content(snapshot_text, user_task)
@@ -2722,7 +2722,7 @@ def browser_snapshot(
             response["snapshot"] = snapshot_text
             return json.dumps(response, ensure_ascii=False)
         except Exception as exc:
-            return _doxie_browser_error("snapshot", exc)
+            return _dovie_browser_error("snapshot", exc)
 
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_snapshot
@@ -2780,16 +2780,16 @@ def browser_snapshot(
 def browser_tabs(task_id: Optional[str] = None) -> str:
     """List tabs in the current browser session."""
     try:
-        from doxie_extension import browser_bridge as _doxie_browser
+        from dovie_extension import browser_bridge as _dovie_browser
 
-        if _doxie_browser.available():
-            session = _doxie_browser.session_from_value(
-                _doxie_browser.call("browser_use_list_sessions")
+        if _dovie_browser.available():
+            session = _dovie_browser.session_from_value(
+                _dovie_browser.call("browser_use_list_sessions")
             )
             if session:
-                return json.dumps(_doxie_browser.tab_payload_from_session(session), ensure_ascii=False)
+                return json.dumps(_dovie_browser.tab_payload_from_session(session), ensure_ascii=False)
     except Exception as exc:
-        logger.debug("Doxie desktop browser tab list failed; falling back to native CDP: %s", exc)
+        logger.debug("Dovie desktop browser tab list failed; falling back to native CDP: %s", exc)
 
     if _is_camofox_mode():
         return json.dumps({
@@ -2840,21 +2840,21 @@ def browser_new_tab(url: Optional[str] = None, task_id: Optional[str] = None) ->
     """Open a new tab and make it active."""
     requested_url = str(url or "").strip()
     try:
-        from doxie_extension import browser_bridge as _doxie_browser
+        from dovie_extension import browser_bridge as _dovie_browser
 
-        if _doxie_browser.available():
-            session = _doxie_browser.session_from_value(
-                _doxie_browser.call(
+        if _dovie_browser.available():
+            session = _dovie_browser.session_from_value(
+                _dovie_browser.call(
                     "browser_use_create_tab",
                     {
                         "request": {
-                            "browserSessionId": _doxie_browser.browser_session_id(),
+                            "browserSessionId": _dovie_browser.browser_session_id(),
                             "url": requested_url or "about:blank",
                         },
                     },
                 )
             )
-            payload = _doxie_browser.tab_payload_from_session(session)
+            payload = _dovie_browser.tab_payload_from_session(session)
             active_tab_id = str(payload.get("active_tab_id") or "")
             active_tab = next(
                 (tab for tab in payload.get("tabs", []) if isinstance(tab, dict) and tab.get("tab_id") == active_tab_id),
@@ -2868,7 +2868,7 @@ def browser_new_tab(url: Optional[str] = None, task_id: Optional[str] = None) ->
                 "title": str(active_tab.get("title") or ""),
             }, ensure_ascii=False)
     except Exception as exc:
-        logger.debug("Doxie desktop browser new tab failed; falling back to native CDP: %s", exc)
+        logger.debug("Dovie desktop browser new tab failed; falling back to native CDP: %s", exc)
 
     if _is_camofox_mode():
         return json.dumps({
@@ -2917,21 +2917,21 @@ def browser_select_tab(tab_id: str, task_id: Optional[str] = None) -> str:
     if not normalized:
         return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
     try:
-        from doxie_extension import browser_bridge as _doxie_browser
+        from dovie_extension import browser_bridge as _dovie_browser
 
-        if _doxie_browser.available():
-            session = _doxie_browser.session_from_value(
-                _doxie_browser.call(
+        if _dovie_browser.available():
+            session = _dovie_browser.session_from_value(
+                _dovie_browser.call(
                     "browser_use_activate_tab",
                     {
                         "request": {
-                            "browserSessionId": _doxie_browser.browser_session_id(),
+                            "browserSessionId": _dovie_browser.browser_session_id(),
                             "tabId": normalized,
                         },
                     },
                 )
             )
-            payload = _doxie_browser.tab_payload_from_session(session)
+            payload = _dovie_browser.tab_payload_from_session(session)
             active_tab = next(
                 (tab for tab in payload.get("tabs", []) if isinstance(tab, dict) and tab.get("tab_id") == normalized),
                 {},
@@ -2944,7 +2944,7 @@ def browser_select_tab(tab_id: str, task_id: Optional[str] = None) -> str:
                 "title": str(active_tab.get("title") or ""),
             }, ensure_ascii=False)
     except Exception as exc:
-        logger.debug("Doxie desktop browser tab select failed; falling back to native CDP: %s", exc)
+        logger.debug("Dovie desktop browser tab select failed; falling back to native CDP: %s", exc)
 
     if _is_camofox_mode():
         return json.dumps({
@@ -2994,29 +2994,29 @@ def browser_close_tab(tab_id: str, task_id: Optional[str] = None) -> str:
     if not normalized:
         return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
     try:
-        from doxie_extension import browser_bridge as _doxie_browser
+        from dovie_extension import browser_bridge as _dovie_browser
 
-        if _doxie_browser.available():
-            session = _doxie_browser.session_from_value(
-                _doxie_browser.call(
+        if _dovie_browser.available():
+            session = _dovie_browser.session_from_value(
+                _dovie_browser.call(
                     "browser_use_close_tab",
                     {
                         "request": {
-                            "browserSessionId": _doxie_browser.browser_session_id(),
+                            "browserSessionId": _dovie_browser.browser_session_id(),
                             "tabId": normalized,
                             "fallbackUrl": "about:blank",
                         },
                     },
                 )
             )
-            payload = _doxie_browser.tab_payload_from_session(session)
+            payload = _dovie_browser.tab_payload_from_session(session)
             return json.dumps({
                 **payload,
                 "closed_tab_id": normalized,
                 "closed": True,
             }, ensure_ascii=False)
     except Exception as exc:
-        logger.debug("Doxie desktop browser tab close failed; falling back to native CDP: %s", exc)
+        logger.debug("Dovie desktop browser tab close failed; falling back to native CDP: %s", exc)
 
     if _is_camofox_mode():
         return json.dumps({
@@ -3087,18 +3087,18 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with click result
     """
-    doxie_browser = _doxie_browser_bridge()
-    if doxie_browser is not None:
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
         try:
             normalized_ref = ref if ref.startswith("@") else f"@{ref}"
-            doxie_browser.action("click", ref=normalized_ref)
+            dovie_browser.action("click", ref=normalized_ref)
             return json.dumps({
                 "success": True,
                 "clicked": normalized_ref,
-                "provider": "doxie_desktop",
+                "provider": "dovie_desktop",
             }, ensure_ascii=False)
         except Exception as exc:
-            return _doxie_browser_error("click", exc)
+            return _dovie_browser_error("click", exc)
 
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_click
@@ -3138,19 +3138,19 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with type result
     """
-    doxie_browser = _doxie_browser_bridge()
-    if doxie_browser is not None:
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
         try:
             normalized_ref = ref if ref.startswith("@") else f"@{ref}"
-            doxie_browser.action("fill", ref=normalized_ref, text=text)
+            dovie_browser.action("fill", ref=normalized_ref, text=text)
             return json.dumps({
                 "success": True,
                 "typed": text,
                 "element": normalized_ref,
-                "provider": "doxie_desktop",
+                "provider": "dovie_desktop",
             }, ensure_ascii=False)
         except Exception as exc:
-            return _doxie_browser_error("type", exc)
+            return _dovie_browser_error("type", exc)
 
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_type
@@ -3203,20 +3203,20 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
     # ~500px is roughly half a viewport of travel.
     _SCROLL_PIXELS = 500
 
-    doxie_browser = _doxie_browser_bridge()
-    if doxie_browser is not None:
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
         try:
-            doxie_browser.action(
+            dovie_browser.action(
                 "scroll",
                 delta_y=_SCROLL_PIXELS if direction == "down" else -_SCROLL_PIXELS,
             )
             return json.dumps({
                 "success": True,
                 "scrolled": direction,
-                "provider": "doxie_desktop",
+                "provider": "dovie_desktop",
             }, ensure_ascii=False)
         except Exception as exc:
-            return _doxie_browser_error("scroll", exc)
+            return _dovie_browser_error("scroll", exc)
 
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_scroll
@@ -3254,17 +3254,17 @@ def browser_back(task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with navigation result
     """
-    doxie_browser = _doxie_browser_bridge()
-    if doxie_browser is not None:
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
         try:
-            session = doxie_browser.go_back()
+            session = dovie_browser.go_back()
             return json.dumps({
                 "success": True,
-                "url": _active_tab_url_from_doxie_session(session),
-                "provider": "doxie_desktop",
+                "url": _active_tab_url_from_dovie_session(session),
+                "provider": "dovie_desktop",
             }, ensure_ascii=False)
         except Exception as exc:
-            return _doxie_browser_error("back", exc)
+            return _dovie_browser_error("back", exc)
 
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_back
@@ -3299,17 +3299,17 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with key press result
     """
-    doxie_browser = _doxie_browser_bridge()
-    if doxie_browser is not None:
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
         try:
-            doxie_browser.action("press", key=key)
+            dovie_browser.action("press", key=key)
             return json.dumps({
                 "success": True,
                 "pressed": key,
-                "provider": "doxie_desktop",
+                "provider": "dovie_desktop",
             }, ensure_ascii=False)
         except Exception as exc:
-            return _doxie_browser_error("press", exc)
+            return _dovie_browser_error("press", exc)
 
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_press

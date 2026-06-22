@@ -31,8 +31,8 @@ class TestHermesApiServerToolset:
             "vision_analyze", "image_generate",
             "execute_code", "delegate_task",
             "todo", "memory", "session_search",
-            "doxie_automation_task_create", "doxie_automation_task_list",
-            "doxie_automation_task_update", "doxie_automation_task_remove",
+            "dovie_automation_task_create", "dovie_automation_task_list",
+            "dovie_automation_task_update", "dovie_automation_task_remove",
         ]
         for tool in expected:
             assert tool in tools, f"Missing expected tool: {tool}"

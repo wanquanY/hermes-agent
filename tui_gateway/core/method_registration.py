@@ -6,7 +6,7 @@ import importlib
 import sys
 from typing import Any
 
-from doxie_extension import load_extension
+from dovie_extension import load_extension
 
 METHOD_MODULES = (
     "session",

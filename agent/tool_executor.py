@@ -139,10 +139,10 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     cwd = (
                         function_args.get("workdir")
                         or getattr(agent, "session_cwd", "")
-                        or os.getenv("DOXIE_WORKSPACE_ROOT", "")
+                        or os.getenv("DOVIE_WORKSPACE_ROOT", "")
                         or os.getenv("TERMINAL_CWD", "")
                     )
-                    if not cwd and os.getenv("DOXIE_PROCESS_ROLE") != "hermes-worker":
+                    if not cwd and os.getenv("DOVIE_PROCESS_ROLE") != "hermes-worker":
                         cwd = os.getcwd()
                     agent._checkpoint_mgr.ensure_checkpoint(
                         cwd, f"before terminal: {cmd[:60]}"
@@ -612,10 +612,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     cwd = (
                         function_args.get("workdir")
                         or getattr(agent, "session_cwd", "")
-                        or os.getenv("DOXIE_WORKSPACE_ROOT", "")
+                        or os.getenv("DOVIE_WORKSPACE_ROOT", "")
                         or os.getenv("TERMINAL_CWD", "")
                     )
-                    if not cwd and os.getenv("DOXIE_PROCESS_ROLE") != "hermes-worker":
+                    if not cwd and os.getenv("DOVIE_PROCESS_ROLE") != "hermes-worker":
                         cwd = os.getcwd()
                     agent._checkpoint_mgr.ensure_checkpoint(
                         cwd, f"before terminal: {cmd[:60]}"

@@ -381,12 +381,12 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     if err:
         return {"success": False, "error": err}
     try:
-        from tools.doxie_skill_categories import validate_doxie_skill_category
-        err = validate_doxie_skill_category(category)
+        from tools.dovie_skill_categories import validate_dovie_skill_category
+        err = validate_dovie_skill_category(category)
         if err:
             return {"success": False, "error": err}
     except Exception as exc:
-        return {"success": False, "error": f"Doxie skill category validation failed: {exc}"}
+        return {"success": False, "error": f"Dovie skill category validation failed: {exc}"}
 
     # Validate content
     err = _validate_frontmatter(content)
@@ -880,8 +880,8 @@ SKILL_MANAGE_SCHEMA = {
                 "description": (
                     "Optional category/domain for organizing the skill (e.g., 'devops', "
                     "'data-science', 'mlops'). Creates a subdirectory grouping. "
-                    "Only used with 'create'. In Doxie runtimes this is required "
-                    "and must be one of the Doxie skill category slugs returned "
+                    "Only used with 'create'. In Dovie runtimes this is required "
+                    "and must be one of the Dovie skill category slugs returned "
                     "by design_agent_profile(inspect_context)."
                 )
             },

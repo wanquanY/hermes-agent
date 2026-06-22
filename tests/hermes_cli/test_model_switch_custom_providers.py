@@ -123,12 +123,12 @@ def test_same_custom_provider_switch_preserves_current_api_key(monkeypatch):
         current_provider="custom",
         current_model="gpt-5.5",
         current_base_url="http://127.0.0.1:8011/api/v1/llm-proxy/v1",
-        current_api_key="doxie-access-token",
+        current_api_key="dovie-access-token",
         user_providers={
-            "doxie-cloud": {
-                "name": "Doxie Cloud",
+            "dovie-cloud": {
+                "name": "Dovie Cloud",
                 "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
-                "key_env": "DOXIE_CLOUD_ACCESS_TOKEN",
+                "key_env": "DOVIE_CLOUD_ACCESS_TOKEN",
                 "default_model": "gpt-5.5",
             }
         },
@@ -137,7 +137,7 @@ def test_same_custom_provider_switch_preserves_current_api_key(monkeypatch):
     assert result.success is True
     assert result.target_provider == "custom"
     assert result.new_model == "gpt-5.5"
-    assert result.api_key == "doxie-access-token"
+    assert result.api_key == "dovie-access-token"
 
 
 def test_list_groups_same_name_custom_providers_into_one_row(monkeypatch):

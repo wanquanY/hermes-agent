@@ -437,7 +437,7 @@ def projection_event(
     # Keep exactly one copy of each field. The previous projection duplicated
     # source_event 4x (source_event/sourceEvent/runtime_event/runtimeEvent),
     # source_payload 2x and text_stream 2x, bloating every streamed delta to
-    # ~12-15KB. All Doxie/reconcile consumers read the snake_case primary first
+    # ~12-15KB. All Dovie/reconcile consumers read the snake_case primary first
     # (with camelCase only as a historical fallback), and derive source_payload
     # from source_event, so the duplicates are pure transport overhead that made
     # live streaming chunky. source_event is retained for diagnostics per the

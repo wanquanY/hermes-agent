@@ -1186,7 +1186,7 @@ def test_run_submit_extracts_image_paths_from_prompt_attachments(server, monkeyp
     monkeypatch.setattr(prompt_methods, "_wait_agent", MagicMock(return_value=None))
     monkeypatch.setattr(prompt_methods, "_run_prompt_submit", fake_run_prompt_submit)
     monkeypatch.setattr(prompt_methods, "ensure_agent_runtime_current", MagicMock())
-    monkeypatch.setattr(prompt_methods, "_apply_doxie_product_runtime_policy", MagicMock())
+    monkeypatch.setattr(prompt_methods, "_apply_dovie_product_runtime_policy", MagicMock())
 
     resp = server.handle_request(
         {
@@ -1661,7 +1661,7 @@ def test_skills_list_returns_structured_items_without_market_router(server):
     assert resp["result"]["items"][0]["source_type"] == "builtin"
 
 
-def test_skills_list_realigns_cached_skill_modules_to_doxie_profile_home(server, tmp_path):
+def test_skills_list_realigns_cached_skill_modules_to_dovie_profile_home(server, tmp_path):
     profile_home = tmp_path / "draft-home"
     stale_home = tmp_path / "stale-home"
     skill_dir = profile_home / "skills" / "productivity" / "draft-skill"
@@ -1713,7 +1713,7 @@ def test_skills_list_realigns_cached_skill_modules_to_doxie_profile_home(server,
             "id": "skills-list-scoped",
             "method": "skills.list",
             "params": {
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "draft:one",
                     "runtimeScopeKey": "draft:one",
                     "hermesHomePath": str(profile_home),

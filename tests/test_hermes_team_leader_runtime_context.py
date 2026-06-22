@@ -83,9 +83,9 @@ def test_team_leader_runtime_context_resolves_from_team_registry(tmp_path: Path)
     assert params["profile_runtime_scope_key"] == "profile:profile-leader"
     assert params["agent_profile_id"] == "profile-leader"
     assert params["agent_profile_version_id"] == "snapshot-leader"
-    assert params["doxie_profile"]["hermesHomePath"].endswith("/profiles/leader")
+    assert params["dovie_profile"]["hermesHomePath"].endswith("/profiles/leader")
     assert params["members"][0]["profile_id"] == "profile-leader"
-    assert params["members"][0]["doxie_profile"]["runtimeScopeKey"] == "profile:profile-leader"
+    assert params["members"][0]["dovie_profile"]["runtimeScopeKey"] == "profile:profile-leader"
     assert resolution.leader_runtime_context["runtimeScopeKey"] == "team:conversation-1:leader-conversation"
 
 
@@ -98,7 +98,7 @@ def test_team_leader_runtime_context_rejects_profile_only_payload(tmp_path: Path
                 "conversation_id": "conversation-1",
                 "agentProfileId": "profile-leader",
                 "agentProfileVersionId": "version-leader",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "profile-leader",
                     "agentProfileVersionId": "snapshot-leader",
                     "runtimeScopeKey": "profile:profile-leader",
@@ -122,7 +122,7 @@ def test_team_runtime_members_resolve_all_member_profiles_on_demand(tmp_path: Pa
 
     by_profile = {member["profile_id"]: member for member in members}
     assert by_profile["profile-leader"]["runtime_scope_key"] == "profile:profile-leader"
-    assert by_profile["profile-leader"]["doxie_profile"]["hermesHomePath"].endswith("/profiles/leader")
+    assert by_profile["profile-leader"]["dovie_profile"]["hermesHomePath"].endswith("/profiles/leader")
     assert by_profile["profile-worker"]["runtime_scope_key"] == "profile:profile-worker"
-    assert by_profile["profile-worker"]["doxie_profile"]["hermesHomePath"].endswith("/profiles/worker")
+    assert by_profile["profile-worker"]["dovie_profile"]["hermesHomePath"].endswith("/profiles/worker")
     assert by_profile["profile-worker"]["default_toolsets"] == ["terminal"]

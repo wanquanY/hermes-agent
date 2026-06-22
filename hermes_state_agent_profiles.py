@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
-from agent.doxie_diagnostics import emit_doxie_diagnostic
+from agent.dovie_diagnostics import emit_dovie_diagnostic
 from hermes_agent_profile_growth import summarize_agent_profile_growth
 
 
@@ -112,7 +112,7 @@ class SessionDBAgentProfileMixin:
     The registry owns product agent profile identity, latest published profile
     metadata, and editable draft metadata. Profile runtime assets such as
     SOUL.md, skill directories, and package staging remain filesystem assets
-    referenced by the registry rather than being duplicated into Doxie state.
+    referenced by the registry rather than being duplicated into Dovie state.
     """
 
     def _agent_profile_from_row(self, row: sqlite3.Row | None) -> Dict[str, Any]:
@@ -475,7 +475,7 @@ class SessionDBAgentProfileMixin:
     ) -> Dict[str, Any]:
         profile = self.get_agent_profile(agent_profile_id)
         if not profile:
-            emit_doxie_diagnostic(
+            emit_dovie_diagnostic(
                 "[profile-growth-summary]",
                 {
                     "stage": "registry_profile_missing",
@@ -484,7 +484,7 @@ class SessionDBAgentProfileMixin:
                 },
             )
             return {}
-        emit_doxie_diagnostic(
+        emit_dovie_diagnostic(
             "[profile-growth-summary]",
             {
                 "stage": "registry_lookup_finished",

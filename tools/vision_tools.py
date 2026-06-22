@@ -499,11 +499,11 @@ def _supports_media_in_tool_results(provider: str, model: str) -> bool:
     if p in {"anthropic", "claude", "anthropic-direct"}:
         return True
 
-    # OpenAI Chat Completions and Responses. Doxie Cloud exposes an
+    # OpenAI Chat Completions and Responses. Dovie Cloud exposes an
     # OpenAI-compatible chat-completions proxy and carries image_url parts
     # through tool-result content when the runtime model descriptor marks
     # the selected model as vision-capable.
-    if p in {"openai", "openai-chat", "openai-codex", "azure-openai", "doxie-cloud"}:
+    if p in {"openai", "openai-chat", "openai-codex", "azure-openai", "dovie-cloud"}:
         return True
 
     # Gemini — gate on model name; older Gemini variants did not support

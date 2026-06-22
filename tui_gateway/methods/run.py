@@ -152,7 +152,7 @@ def _(rid, params: dict) -> dict:
         if isinstance(conflict, dict) and conflict:
             metadata = conflict.get("metadata") if isinstance(conflict.get("metadata"), dict) else {}
             logger.warning(
-                "[doxie-run-submit] session busy stored_session_id=%s requested_run_id=%s active_run_id=%s active_status=%s runtime_scope_key=%s runtime_session_id=%s gateway_pid=%s gateway_instance_id=%s",
+                "[dovie-run-submit] session busy stored_session_id=%s requested_run_id=%s active_run_id=%s active_status=%s runtime_scope_key=%s runtime_session_id=%s gateway_pid=%s gateway_instance_id=%s",
                 target,
                 requested_run_id,
                 conflict.get("run_id") or "",
@@ -290,7 +290,7 @@ def _(rid, params: dict) -> dict:
     if isinstance(conflict, dict) and conflict:
         metadata = conflict.get("metadata") if isinstance(conflict.get("metadata"), dict) else {}
         logger.warning(
-            "[doxie-run-reserve] session busy stored_session_id=%s requested_run_id=%s active_run_id=%s active_status=%s runtime_scope_key=%s runtime_session_id=%s gateway_pid=%s gateway_instance_id=%s",
+            "[dovie-run-reserve] session busy stored_session_id=%s requested_run_id=%s active_run_id=%s active_status=%s runtime_scope_key=%s runtime_session_id=%s gateway_pid=%s gateway_instance_id=%s",
             target,
             requested_run_id,
             conflict.get("run_id") or "",

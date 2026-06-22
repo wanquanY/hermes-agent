@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from agent.doxie_diagnostics import emit_doxie_diagnostic
+from agent.dovie_diagnostics import emit_dovie_diagnostic
 
 
 def _text(value: Any) -> str:
@@ -59,7 +59,7 @@ def _row_value(row: Any, key: str, fallback: Any = "") -> Any:
 
 
 def _trace_history(stage: str, **fields: Any) -> None:
-    emit_doxie_diagnostic("[team-mission-node-history]", {"stage": stage, **fields})
+    emit_dovie_diagnostic("[team-mission-node-history]", {"stage": stage, **fields})
 
 
 def _binding_matches(binding: dict[str, Any], *, node_id: str, session_id: str) -> bool:

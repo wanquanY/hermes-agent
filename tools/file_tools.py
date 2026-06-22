@@ -31,11 +31,11 @@ def _session_env(name: str, default: str = "") -> str:
 
 
 def _default_workspace_cwd() -> str:
-    cwd = os.getenv("DOXIE_WORKSPACE_ROOT", "").strip()
+    cwd = os.getenv("DOVIE_WORKSPACE_ROOT", "").strip()
     if cwd:
         return cwd
-    if os.getenv("DOXIE_PROCESS_ROLE") == "hermes-worker":
-        raise RuntimeError("Doxie workspace root is not configured")
+    if os.getenv("DOVIE_PROCESS_ROLE") == "hermes-worker":
+        raise RuntimeError("Dovie workspace root is not configured")
     return os.getcwd()
 
 

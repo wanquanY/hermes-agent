@@ -72,18 +72,18 @@ def test_get_platform_tools_uses_default_when_platform_not_configured():
 
     assert enabled
     assert enabled.isdisjoint(_DEFAULT_OFF_TOOLSETS)
-    assert "doxie" not in enabled
+    assert "dovie" not in enabled
 
 
 def test_get_platform_tools_strips_internal_toolset_from_explicit_config():
     enabled = _get_platform_tools(
-        {"platform_toolsets": {"cli": ["web", "doxie"]}},
+        {"platform_toolsets": {"cli": ["web", "dovie"]}},
         "cli",
         include_default_mcp_servers=False,
     )
 
     assert "web" in enabled
-    assert "doxie" not in enabled
+    assert "dovie" not in enabled
 
 
 def test_configurable_toolsets_include_messaging():
@@ -512,17 +512,17 @@ def test_save_platform_tools_does_not_preserve_platform_default_toolsets():
 def test_save_platform_tools_does_not_preserve_internal_toolsets():
     config = {
         "platform_toolsets": {
-            "cli": ["web", "doxie", "custom-mcp"],
+            "cli": ["web", "dovie", "custom-mcp"],
         }
     }
 
     with patch("hermes_cli.tools_config.save_config"):
-        _save_platform_tools(config, "cli", {"web", "doxie"})
+        _save_platform_tools(config, "cli", {"web", "dovie"})
 
     saved = set(config["platform_toolsets"]["cli"])
     assert "web" in saved
     assert "custom-mcp" in saved
-    assert "doxie" not in saved
+    assert "dovie" not in saved
 
 
 def test_save_platform_tools_does_not_preserve_hermes_telegram():

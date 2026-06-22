@@ -1040,7 +1040,7 @@ def _(rid, params: dict) -> dict:
 @method("cron.manage")
 def _(rid, params: dict) -> dict:
     try:
-        from tui_gateway.services.doxie_cron_jobs import manage_cron
+        from tui_gateway.services.dovie_cron_jobs import manage_cron
 
         return _ok(rid, manage_cron(params))
     except Exception as e:
@@ -1093,9 +1093,9 @@ def _invalidate_live_agent_skill_prompts() -> int:
 
 
 def _sync_skill_module_paths_to_active_home() -> None:
-    """Keep legacy skill modules aligned with the active Doxie profile home.
+    """Keep legacy skill modules aligned with the active Dovie profile home.
 
-    The gateway can serve many Doxie profile/draft scopes in one process. Some
+    The gateway can serve many Dovie profile/draft scopes in one process. Some
     older skill modules cache paths such as SKILLS_DIR at import time, so an
     already-imported module must be realigned after server.py enters the
     request profile context.

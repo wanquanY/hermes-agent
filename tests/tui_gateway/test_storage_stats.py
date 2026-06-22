@@ -10,7 +10,7 @@ def test_collect_storage_stats_reports_runtime_tables_artifacts_and_logs(tmp_pat
     hermes_home.mkdir()
     db = SessionDB(hermes_home / "state.db")
     try:
-        db.create_session("session-1", "doxie")
+        db.create_session("session-1", "dovie")
         db.append_message(
             "session-1",
             "user",

@@ -1617,7 +1617,7 @@ class SessionDBRunMixin:
                 log_active_scan = logger.warning if failed else logger.debug
                 try:
                     log_active_scan(
-                        "[doxie-run-recovery] active-run-scan %s",
+                        "[dovie-run-recovery] active-run-scan %s",
                         json.dumps(
                             {
                                 "db": str(getattr(self, "db_path", "") or ""),
@@ -1635,7 +1635,7 @@ class SessionDBRunMixin:
                     )
                 except Exception:
                     log_active_scan(
-                        "[doxie-run-recovery] active-run-scan active=%s failed=%s",
+                        "[dovie-run-recovery] active-run-scan active=%s failed=%s",
                         len(diagnostics),
                         failed,
                     )

@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from agent.doxie_diagnostics import emit_doxie_diagnostic
+from agent.dovie_diagnostics import emit_dovie_diagnostic
 from hermes_constants import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
@@ -68,12 +68,12 @@ from tui_gateway.services.transcript_messages import (
     history_to_messages as _history_to_messages,
     tool_context as _tool_ctx,
 )
-from doxie_extension import load_extension
+from dovie_extension import load_extension
 
 logger = logging.getLogger(__name__)
 
 
-_DOXIE_STREAM_TRACE_EVENTS = {
+_DOVIE_STREAM_TRACE_EVENTS = {
     "message.start",
     "message.delta",
     "message.complete",
@@ -110,7 +110,7 @@ def _transport_debug_id(transport: Any) -> str:
 
 
 def _trace_stream_route(stage: str, **fields: Any) -> None:
-    emit_doxie_diagnostic("[doxie-stream-route]", {"stage": stage, **fields})
+    emit_dovie_diagnostic("[dovie-stream-route]", {"stage": stage, **fields})
 
 
 def _diagnostic_param_summary(params: dict | None) -> dict[str, Any]:
@@ -278,7 +278,7 @@ def _log_agent_build_stage(sid: str, session: dict | None, stage: str, **fields:
         "runtime_scope_key": runtime_scope_key,
         **fields,
     }
-    emit_doxie_diagnostic("[doxie-agent-build-stage]", pairs)
+    emit_dovie_diagnostic("[dovie-agent-build-stage]", pairs)
 _current_method: contextvars.ContextVar[str] = contextvars.ContextVar(
     "tui_gateway_current_method",
     default="",
@@ -328,8 +328,8 @@ sys.stdout = sys.stderr
 # patches of `_real_stdout` (used extensively in tests) still land correctly.
 _stdio_transport = StdioTransport(lambda: _real_stdout, _stdout_lock)
 
-_DOXIE_EXTENSION = load_extension()
-_EXTRACTED_METHOD_OVERRIDES = _DOXIE_EXTENSION.gateway_method_overrides()
+_DOVIE_EXTENSION = load_extension()
+_EXTRACTED_METHOD_OVERRIDES = _DOVIE_EXTENSION.gateway_method_overrides()
 
 
 def _load_busy_input_mode() -> str:
@@ -439,7 +439,7 @@ def _terminalize_active_run_for_shutdown(
             ).strip()
         except Exception:
             logger.warning(
-                "[doxie-gateway] shutdown active-run lookup failed session_id=%s",
+                "[dovie-gateway] shutdown active-run lookup failed session_id=%s",
                 stable_session_id,
                 exc_info=True,
             )
@@ -448,7 +448,7 @@ def _terminalize_active_run_for_shutdown(
         return
     message = f"gateway {end_reason} before run reached terminal state"
     logger.warning(
-        "[doxie-gateway] terminalizing active run during shutdown session_id=%s run_id=%s turn_id=%s reason=%s",
+        "[dovie-gateway] terminalizing active run during shutdown session_id=%s run_id=%s turn_id=%s reason=%s",
         stable_session_id,
         run_id,
         turn_id,
@@ -641,7 +641,7 @@ def _emit(event: str, sid: str, payload: dict | None = None):
                 if terminal_event
                 else None,
             )
-            if event in _DOXIE_STREAM_TRACE_EVENTS:
+            if event in _DOVIE_STREAM_TRACE_EVENTS:
                 _trace_stream_route(
                     "record-publish",
                     event_type=event,
@@ -659,7 +659,7 @@ def _emit(event: str, sid: str, payload: dict | None = None):
                 )
     except Exception:
         logger.warning(
-            "[doxie-gateway] emit record failed event=%s session_id=%s stored_session_id=%s run_id=%s turn_id=%s runtime_scope_key=%s",
+            "[dovie-gateway] emit record failed event=%s session_id=%s stored_session_id=%s run_id=%s turn_id=%s runtime_scope_key=%s",
             event,
             sid,
             stable_session_id,
@@ -671,7 +671,7 @@ def _emit(event: str, sid: str, payload: dict | None = None):
     if payload is not None:
         params["payload"] = payload
     direct_delivered = write_json({"jsonrpc": "2.0", "method": "event", "params": params})
-    if event in _DOXIE_STREAM_TRACE_EVENTS:
+    if event in _DOVIE_STREAM_TRACE_EVENTS:
         _trace_stream_route(
             "direct-write",
             event_type=event,
@@ -839,7 +839,7 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
                     "error": str(exc),
                     **_diagnostic_param_summary(params),
                 }
-                emit_doxie_diagnostic("[tui-gateway-handler-error]", diagnostic)
+                emit_dovie_diagnostic("[tui-gateway-handler-error]", diagnostic)
                 logger.exception("[tui-gateway] handler error method=%s diagnostic=%s", method, diagnostic)
                 return _err(rid, -32000, f"handler error: {exc}")
 
@@ -1089,7 +1089,7 @@ def _set_session_context(
     session_key: str,
     *,
     terminal_cwd: str | None = None,
-    doxie_product_context: str | None = None,
+    dovie_product_context: str | None = None,
 ) -> list:
     try:
         from gateway.session_context import set_session_vars
@@ -1102,19 +1102,19 @@ def _set_session_context(
         return set_session_vars(
             session_key=session_key,
             terminal_cwd=str(terminal_cwd if terminal_cwd is not None else session.get("cwd") or ""),
-            doxie_product_context=str(
-                doxie_product_context
-                if doxie_product_context is not None
-                else session.get("doxie_product_context") or ""
+            dovie_product_context=str(
+                dovie_product_context
+                if dovie_product_context is not None
+                else session.get("dovie_product_context") or ""
             ),
-            doxie_browser_session_id=_doxie_browser_session_id(session_key),
+            dovie_browser_session_id=_dovie_browser_session_id(session_key),
         )
     except Exception:
         return []
 
 
-def _doxie_browser_session_id(session_key: str) -> str:
-    from doxie_extension.browser_bridge import browser_session_id_for_gateway_session
+def _dovie_browser_session_id(session_key: str) -> str:
+    from dovie_extension.browser_bridge import browser_session_id_for_gateway_session
 
     return browser_session_id_for_gateway_session(session_key)
 
@@ -2291,10 +2291,10 @@ def _with_checkpoints(session, fn):
     cwd = (
         session.get("cwd")
         or getattr(session.get("agent"), "session_cwd", "")
-        or os.getenv("DOXIE_WORKSPACE_ROOT", "")
+        or os.getenv("DOVIE_WORKSPACE_ROOT", "")
         or os.getenv("TERMINAL_CWD", "")
     )
-    if not cwd and os.getenv("DOXIE_PROCESS_ROLE") != "hermes-worker":
+    if not cwd and os.getenv("DOVIE_PROCESS_ROLE") != "hermes-worker":
         cwd = os.getcwd()
     return fn(session["agent"]._checkpoint_mgr, cwd)
 
@@ -2588,7 +2588,7 @@ def _register_extracted_method_modules() -> None:
     from tui_gateway.core.method_registration import register_method_modules
 
     register_method_modules(globals())
-    _DOXIE_EXTENSION.register_gateway_methods(_methods)
+    _DOVIE_EXTENSION.register_gateway_methods(_methods)
     integrations = sys.modules.get("tui_gateway.methods.integrations")
     if integrations is not None:
         for name, value in injected_integrations.items():

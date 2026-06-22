@@ -744,6 +744,6 @@ from tools.registry import tool_error
 
 # The native cronjob Python API remains importable for scheduler internals and
 # legacy direct tests, but it is intentionally not registered as a model tool.
-# Doxie sessions expose only doxie_automation_task_* through the "cronjob"
-# toolset so native cronjob semantics cannot compete with Doxie's
+# Dovie sessions expose only dovie_automation_task_* through the "cronjob"
+# toolset so native cronjob semantics cannot compete with Dovie's
 # agent/session-bound automation contract.

@@ -30,7 +30,7 @@ Behaviour (mirrors ``vision_analyze`` for consistency)
   pay for a dedicated vision model usually want it used.
 * If the active runtime supplied an authoritative model descriptor
   (``vision_enabled``), use that before static config heuristics. This is
-  how Doxie passes model catalog capabilities for managed proxy models.
+  how Dovie passes model catalog capabilities for managed proxy models.
 * Otherwise, if the active main model+provider can carry an image inside
   a tool-result message AND the model reports ``supports_vision=True``
   in models.dev metadata, return ``False`` (use the multimodal path).
@@ -134,7 +134,7 @@ def should_route_capture_to_aux_vision(
       cfg:      loaded ``config.yaml`` dict (or None).
       supports_vision_override: per-turn capability from the runtime model
         descriptor. When present, it is more authoritative than static
-        models.dev metadata and Doxie-managed auxiliary config.
+        models.dev metadata and Dovie-managed auxiliary config.
 
     Returns:
       ``True`` when the caller should hand the screenshot to the aux vision

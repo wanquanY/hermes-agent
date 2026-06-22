@@ -1314,14 +1314,14 @@ def _normalize_empty_agent_response(
     Fix for #18765.
     """
     if response:
-        if _is_doxie_runtime_auth_failure(response):
-            return _DOXIE_RUNTIME_AUTH_FAILURE_MESSAGE
+        if _is_dovie_runtime_auth_failure(response):
+            return _DOVIE_RUNTIME_AUTH_FAILURE_MESSAGE
         return response
 
     if agent_result.get("failed"):
         error_detail = agent_result.get("error", "unknown error")
-        if _is_doxie_runtime_auth_failure(error_detail):
-            return _DOXIE_RUNTIME_AUTH_FAILURE_MESSAGE
+        if _is_dovie_runtime_auth_failure(error_detail):
+            return _DOVIE_RUNTIME_AUTH_FAILURE_MESSAGE
         error_str = str(error_detail).lower()
         is_context_failure = any(
             p in error_str
@@ -1351,17 +1351,17 @@ def _normalize_empty_agent_response(
     return response
 
 
-_DOXIE_RUNTIME_AUTH_FAILURE_MESSAGE = (
-    "⚠️ Doxie runtime 登录凭证已过期，正在刷新本地运行时。请稍后再试一次。"
+_DOVIE_RUNTIME_AUTH_FAILURE_MESSAGE = (
+    "⚠️ Dovie runtime 登录凭证已过期，正在刷新本地运行时。请稍后再试一次。"
 )
 
 
-def _is_doxie_runtime_auth_failure(value: object) -> bool:
+def _is_dovie_runtime_auth_failure(value: object) -> bool:
     text = str(value or "").lower()
     return (
         "runtime token has expired or was revoked" in text
         or "runtime_token_error" in text
-        or "doxie_auth_required" in text
+        or "dovie_auth_required" in text
         or "runtime_scope_forbidden" in text
     )
 

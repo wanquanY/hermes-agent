@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 import sqlite3
 
-from agent.doxie_diagnostics import emit_doxie_diagnostic
+from agent.dovie_diagnostics import emit_dovie_diagnostic
 from hermes_team_mission_profile_tools import team_mission_control_db as _profile_registry_control_db
 from tui_gateway.methods._shared import bind_server_globals
 
@@ -176,7 +176,7 @@ def _version_id_from_params(params: dict | None) -> str:
 
 
 def _growth_diagnostic(stage: str, **fields) -> None:
-    emit_doxie_diagnostic("[profile-growth-summary]", {"stage": stage, **fields})
+    emit_dovie_diagnostic("[profile-growth-summary]", {"stage": stage, **fields})
 
 
 def _draft_payload(params: dict) -> dict:

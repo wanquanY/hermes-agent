@@ -4730,7 +4730,7 @@ class TestSessionIdSearch:
         assert matches[0]["_lineage_root_id"] == root
 
 
-class TestDoxieLineageBranchListing:
+class TestDovieLineageBranchListing:
     def test_session_lineage_branch_stays_visible_after_parent_reopen(self, db):
         db.create_session("source-reopen", "tui")
         db.set_session_title("source-reopen", "Source")

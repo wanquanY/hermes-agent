@@ -9,31 +9,31 @@ def test_normalize_session_cwd_rejects_missing_path(tmp_path):
         normalize_session_cwd(tmp_path / "missing")
 
 
-def test_normalize_session_cwd_prefers_doxie_workspace_root(tmp_path, monkeypatch):
-    workspace_root = tmp_path / "doxie-workspace"
+def test_normalize_session_cwd_prefers_dovie_workspace_root(tmp_path, monkeypatch):
+    workspace_root = tmp_path / "dovie-workspace"
     terminal_cwd = tmp_path / "terminal-cwd"
     process_cwd = tmp_path / "hermes-agent"
     workspace_root.mkdir()
     terminal_cwd.mkdir()
     process_cwd.mkdir()
 
-    monkeypatch.setenv("DOXIE_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("DOVIE_WORKSPACE_ROOT", str(workspace_root))
     monkeypatch.setenv("TERMINAL_CWD", str(terminal_cwd))
     monkeypatch.chdir(process_cwd)
 
     assert normalize_session_cwd() == str(workspace_root)
 
 
-def test_normalize_session_cwd_rejects_missing_doxie_workspace_root(tmp_path, monkeypatch):
+def test_normalize_session_cwd_rejects_missing_dovie_workspace_root(tmp_path, monkeypatch):
     process_cwd = tmp_path / "hermes-agent"
     process_cwd.mkdir()
 
-    monkeypatch.delenv("DOXIE_WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("DOVIE_WORKSPACE_ROOT", raising=False)
     monkeypatch.delenv("TERMINAL_CWD", raising=False)
-    monkeypatch.setenv("DOXIE_PROCESS_ROLE", "hermes-worker")
+    monkeypatch.setenv("DOVIE_PROCESS_ROLE", "hermes-worker")
     monkeypatch.chdir(process_cwd)
 
-    with pytest.raises(ValueError, match="Doxie workspace root is not configured"):
+    with pytest.raises(ValueError, match="Dovie workspace root is not configured"):
         normalize_session_cwd()
 
 
@@ -46,7 +46,7 @@ def test_workspace_from_params_defaults_to_session_cwd(tmp_path):
     assert workspace["kind"] == "local"
 
 
-def test_workspace_from_params_preserves_doxie_metadata(tmp_path):
+def test_workspace_from_params_preserves_dovie_metadata(tmp_path):
     workspace = workspace_from_params(
         {
             "workspace": {
@@ -65,7 +65,7 @@ def test_workspace_from_params_preserves_doxie_metadata(tmp_path):
     assert workspace["kind"] == "local"
 
 
-def test_workspace_from_params_accepts_doxie_workspace_aliases(tmp_path):
+def test_workspace_from_params_accepts_dovie_workspace_aliases(tmp_path):
     workspace = workspace_from_params(
         {
             "workspace": {

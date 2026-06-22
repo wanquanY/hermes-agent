@@ -66,13 +66,13 @@ def test_make_agent_remembers_requested_runtime_provider():
         "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
         "api_key": "token-a",
         "api_mode": "chat_completions",
-        "requested_provider": "doxie-cloud",
+        "requested_provider": "dovie-cloud",
         "command": None,
         "args": None,
         "credential_pool": None,
     }
     fake_cfg = {
-        "model": {"default": "gpt-5.5", "provider": "doxie-cloud"},
+        "model": {"default": "gpt-5.5", "provider": "dovie-cloud"},
         "agent": {"system_prompt": ""},
     }
     fake_agent = MagicMock()
@@ -89,9 +89,9 @@ def test_make_agent_remembers_requested_runtime_provider():
     ):
         from tui_gateway.server import _make_agent
 
-        agent = _make_agent("sid-doxie", "key-doxie")
+        agent = _make_agent("sid-dovie", "key-dovie")
 
-    assert agent._gateway_runtime_requested_provider == "doxie-cloud"
+    assert agent._gateway_runtime_requested_provider == "dovie-cloud"
 
 
 def test_make_agent_restores_persisted_session_toolsets():
@@ -117,7 +117,7 @@ def test_make_agent_restores_persisted_session_toolsets():
         patch(
             "tui_gateway.services.toolset_scope.load_session_toolset_overrides",
             return_value={
-                "enabled_toolsets": ["memory", "doxie"],
+                "enabled_toolsets": ["memory", "dovie"],
                 "disabled_toolsets": ["delegation"],
             },
         ),
@@ -128,7 +128,7 @@ def test_make_agent_restores_persisted_session_toolsets():
 
         _make_agent("sid-restored", "stored-design", session_id="stored-design")
 
-    assert mock_agent.call_args.kwargs["enabled_toolsets"] == ["memory", "doxie"]
+    assert mock_agent.call_args.kwargs["enabled_toolsets"] == ["memory", "dovie"]
     assert mock_agent.call_args.kwargs["disabled_toolsets"] == ["delegation"]
 
 
@@ -141,21 +141,21 @@ def test_ensure_agent_runtime_current_rebinds_stale_session_credentials():
     agent.base_url = "http://127.0.0.1:8011/api/v1/llm-proxy/v1"
     agent.api_key = "token-a"
     agent.api_mode = "chat_completions"
-    agent._gateway_runtime_requested_provider = "doxie-cloud"
+    agent._gateway_runtime_requested_provider = "dovie-cloud"
     session = {"agent": agent}
     fake_runtime = {
         "provider": "custom",
         "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
         "api_key": "token-b",
         "api_mode": "chat_completions",
-        "requested_provider": "doxie-cloud",
+        "requested_provider": "dovie-cloud",
     }
 
     with (
         patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime) as mock_resolve,
     ):
         changed = ensure_agent_runtime_current(
-            sid="sid-doxie",
+            sid="sid-dovie",
             session=session,
             resolve_model=lambda: "gpt-5.5",
             emit_session_info=lambda *_args: None,
@@ -163,7 +163,7 @@ def test_ensure_agent_runtime_current_rebinds_stale_session_credentials():
 
     assert changed is True
     mock_resolve.assert_called_once_with(
-        requested="doxie-cloud",
+        requested="dovie-cloud",
         target_model="gpt-5.5",
     )
     agent.switch_model.assert_called_once_with(
@@ -184,19 +184,19 @@ def test_ensure_agent_runtime_current_keeps_current_session_credentials():
     agent.base_url = "http://127.0.0.1:8011/api/v1/llm-proxy/v1"
     agent.api_key = "token-a"
     agent.api_mode = "chat_completions"
-    agent._gateway_runtime_requested_provider = "doxie-cloud"
+    agent._gateway_runtime_requested_provider = "dovie-cloud"
     session = {"agent": agent}
     fake_runtime = {
         "provider": "custom",
         "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
         "api_key": "token-a",
         "api_mode": "chat_completions",
-        "requested_provider": "doxie-cloud",
+        "requested_provider": "dovie-cloud",
     }
 
     with patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime):
         changed = ensure_agent_runtime_current(
-            sid="sid-doxie",
+            sid="sid-dovie",
             session=session,
             resolve_model=lambda: "gpt-5.5",
             emit_session_info=lambda *_args: None,

@@ -23,14 +23,14 @@ from tools.computer_use.backend import CaptureResult
 from tools.computer_use.tool import _capture_response
 
 
-def _doxie_managed_vision_config() -> dict:
+def _dovie_managed_vision_config() -> dict:
     return {
         "auxiliary": {
             "vision": {
-                "provider": "doxie-cloud",
+                "provider": "dovie-cloud",
                 "model": "gpt-5.5",
                 "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
-                "key_env": "DOXIE_LLM_RUNTIME_TOKEN",
+                "key_env": "DOVIE_LLM_RUNTIME_TOKEN",
                 "api_mode": "chat_completions",
             },
         },
@@ -141,17 +141,17 @@ class TestRouteDecision:
                 "anthropic", "claude-opus-4-5", cfg
             ) is True
 
-    def test_runtime_vision_descriptor_overrides_doxie_managed_auxiliary_config(self):
-        """Doxie-managed aux config is not a user preference for screenshots."""
+    def test_runtime_vision_descriptor_overrides_dovie_managed_auxiliary_config(self):
+        """Dovie-managed aux config is not a user preference for screenshots."""
         from tools.computer_use import vision_routing
 
         with patch.object(vision_routing,
                           "_provider_accepts_multimodal_tool_result",
                           return_value=True):
             assert vision_routing.should_route_capture_to_aux_vision(
-                "doxie-cloud",
+                "dovie-cloud",
                 "gpt-5.5",
-                _doxie_managed_vision_config(),
+                _dovie_managed_vision_config(),
                 supports_vision_override=True,
             ) is False
 
@@ -162,7 +162,7 @@ class TestRouteDecision:
                           "_provider_accepts_multimodal_tool_result",
                           return_value=True):
             assert vision_routing.should_route_capture_to_aux_vision(
-                "doxie-cloud",
+                "dovie-cloud",
                 "text-only",
                 {},
                 supports_vision_override=False,
@@ -256,9 +256,9 @@ def test_capture_response_uses_parent_agent_model_descriptor_for_native_screensh
     )
 
     with (
-        patch("agent.auxiliary_client._read_main_provider", return_value="doxie-cloud"),
+        patch("agent.auxiliary_client._read_main_provider", return_value="dovie-cloud"),
         patch("agent.auxiliary_client._read_main_model", return_value="gpt-5.5"),
-        patch("hermes_cli.config.load_config", return_value=_doxie_managed_vision_config()),
+        patch("hermes_cli.config.load_config", return_value=_dovie_managed_vision_config()),
         patch(
             "tools.computer_use.vision_routing._provider_accepts_multimodal_tool_result",
             return_value=True,

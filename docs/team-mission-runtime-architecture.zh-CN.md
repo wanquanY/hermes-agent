@@ -146,7 +146,7 @@ Control-plane 边界：
 1. `team_mission.conversation.ensure` 和 `team_mission.message.submit` 是 canonical conversation 写入口，必须在 Hermes control-plane 执行，不能按 Leader `runtime_scope_key` 整个代理到 scoped runtime worker。
 2. Leader 对话的实际模型执行隔离发生在下层 `run.submit`/`session.resume` runtime lease：`message.submit` 先在 control-plane 建立 conversation、workspace binding、run registry，再把 Leader 执行容器按 `team:*:leader-conversation` scope 恢复或复用。
 3. 所有以 team stable session 写入的 transcript、run event、terminal state 和 conversation status projection 必须按 stable session 选择 control-plane DB；当前线程处于 Leader profile context 时也不能写入 profile DB。
-4. Leader owner runtime 校验只用于拒绝已经处在冲突 scoped worker 内的请求；control-plane 入口没有 `DOXIE_HERMES_RUNTIME_SCOPE_KEY` 是合法状态，不能被解释为未进入 owner scope。owner scope 必须作为下层 `run.submit.runtime_scope_key` 传递并由 runtime lease 执行。
+4. Leader owner runtime 校验只用于拒绝已经处在冲突 scoped worker 内的请求；control-plane 入口没有 `DOVIE_HERMES_RUNTIME_SCOPE_KEY` 是合法状态，不能被解释为未进入 owner scope。owner scope 必须作为下层 `run.submit.runtime_scope_key` 传递并由 runtime lease 执行。
 
 未发布阶段不做团队会话历史数据兼容。`team_mission.conversation.ensure` 只负责 canonical conversation 的创建/更新，不扫描旧 mission run events、不回填旧最终交付消息，也不返回 backfill 结果。缺失的历史团队会话数据应删除后重新测试。
 
@@ -1347,9 +1347,9 @@ DoXie 不应该：
    - `team_mission_planning` toolset 是 internal toolset，只在允许规划/改图的 Leader run 上叠加使用。
    - 普通 worker 和 DoXie 对话不会获得 planner graph mutation tools。
 5. DoXie contract：
-   - `doxie_extension/manifest.py` contract/version 更新到 `2026-06-10`。
-   - Doxie gateway manifest 暴露 Team Mission、Team Capability、message metadata merge 等 required methods。
-   - `team_mission` methods 作为 Doxie extension override 注册，仍保持 Doxie client -> Hermes Gateway 的单一事实源。
+   - `dovie_extension/manifest.py` contract/version 更新到 `2026-06-10`。
+   - Dovie gateway manifest 暴露 Team Mission、Team Capability、message metadata merge 等 required methods。
+   - `team_mission` methods 作为 Dovie extension override 注册，仍保持 Dovie client -> Hermes Gateway 的单一事实源。
 
 ### 2026-06-11 prodv0.9.3 当前落地快照
 
@@ -1359,7 +1359,7 @@ DoXie 不应该：
    - 新增 `tui_gateway/methods/team_mission_history.py`。
    - 新增 `tui_gateway/services/team_mission_runtime_history.py`。
    - `team_mission.node.history` 按 mission/node/session 解析 run binding，返回节点关联的 transcript messages、runtime events、tool events、artifacts 和 run binding 摘要。
-   - 该方法加入 Doxie extension required methods 和 runtime proxy control allowlist，Doxie 右侧节点详情不需要扫描普通 session 或 Kanban SQLite。
+   - 该方法加入 Dovie extension required methods 和 runtime proxy control allowlist，Dovie 右侧节点详情不需要扫描普通 session 或 Kanban SQLite。
 2. Node kind 和 assignee 规范：
    - 新增 `hermes_team_mission_node_kinds.py`，将 `research`、`analysis`、`implementation`、`testing`、`verification` 等专业分工统一归一化为 `worker`，并把原始语义保存到 metadata。
    - `synthesizer` / `summary` 等旧别名统一归一化为 `synthesis`。
@@ -1383,22 +1383,22 @@ DoXie 不应该：
 
 ### 2026-06-13 当前落地快照
 
-本批 staged 代码继续补齐 Doxie 侧真实运行问题的可诊断性、终止一致性和 Team Mission Leader 会话归一化：
+本批 staged 代码继续补齐 Dovie 侧真实运行问题的可诊断性、终止一致性和 Team Mission Leader 会话归一化：
 
-1. Doxie runtime diagnostics：
-   - 新增 `agent/doxie_diagnostics.py`，使用 `os.write(2, ...)` 输出诊断，避免依赖 Python logging 锁。
-   - conversation loop、system prompt restore/build、pre-LLM hook、memory prefetch、API kwargs build、streaming API call、chat-completions client/create 等关键阶段会输出 `[doxie-turn-stage]` / `[doxie-stream-stage]`。
-   - TUI gateway agent build 会输出 `[doxie-agent-build-stage]`，便于定位 Doxie runtime 卡在 profile context、system prompt、client create 还是 provider request。
+1. Dovie runtime diagnostics：
+   - 新增 `agent/dovie_diagnostics.py`，使用 `os.write(2, ...)` 输出诊断，避免依赖 Python logging 锁。
+   - conversation loop、system prompt restore/build、pre-LLM hook、memory prefetch、API kwargs build、streaming API call、chat-completions client/create 等关键阶段会输出 `[dovie-turn-stage]` / `[dovie-stream-stage]`。
+   - TUI gateway agent build 会输出 `[dovie-agent-build-stage]`，便于定位 Dovie runtime 卡在 profile context、system prompt、client create 还是 provider request。
 2. Active run terminalization：
    - gateway `_emit()` 在 terminal event 写入 run event 前释放对应 runtime session active run。
    - sidecar parent watchdog 在父进程消失前调用 `_shutdown_sessions()`，尽力给 active run 写入 interrupted terminal event。
-   - `_finalize_session()` 会进入对应 profile context，terminalize active run，再提交 memory / end session，避免 Doxie 侧刷新后看到长期 running。
+   - `_finalize_session()` 会进入对应 profile context，terminalize active run，再提交 memory / end session，避免 Dovie 侧刷新后看到长期 running。
 3. Team Mission Leader conversation context：
    - `_agent_context_options_for_session()` 为 `team_leader` runtime 禁用 context files、memory 和 soul identity，避免普通 profile 规则污染 Leader 路由判断。
    - `team_mission.message.submit` / Leader run 创建路径写入稳定 Team Mission product context，工具读取上下文不再依赖前端临时 prompt 拼接。
    - stable Leader conversation 的 `team_mission_leader` 工具面由 session/toolset scope 恢复，不因 runtime rebuild 丢失。
 4. Team Mission conversation normalization：
-   - `normalize_team_mission_conversation_session()` 会从 session metadata / Doxie product context 识别 Leader conversation，自动确保 `team_mission_conversations` 记录并把 session source 归一化为 `team_mission`。
+   - `normalize_team_mission_conversation_session()` 会从 session metadata / Dovie product context 识别 Leader conversation，自动确保 `team_mission_conversations` 记录并把 session source 归一化为 `team_mission`。
    - `team_mission_conversation_history_sql()` 只把有 active mission、历史消息或 active run 的 conversation 视为可路由历史，避免空 Leader 容器污染 session list。
    - `is_team_mission_run_session()` 和 `team_mission_run_session_ids()` 用 run bindings 标记内部 mission node runtime sessions，session list 默认隐藏这些内部执行 session。
 5. Tool handoff：
@@ -1406,7 +1406,7 @@ DoXie 不应该：
    - Team Mission Leader tools 可以把任务启动、状态查询等确定性结果以 handoff 形式返回，减少二次模型 follow-up 造成的延迟和卡 running 风险。
 6. Runtime proxy / pool 稳定性：
    - runtime proxy 只透传真正属于 runtime worker 的 Team Mission live control 方法；canonical conversation 写入口必须留在 control-plane。
-   - runtime pool 相关测试覆盖 Doxie session / runtime lifecycle，防止 worker 进程和 active run 残留。
+   - runtime pool 相关测试覆盖 Dovie session / runtime lifecycle，防止 worker 进程和 active run 残留。
 
 ## 17. 验收标准
 

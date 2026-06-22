@@ -139,17 +139,17 @@ class TestHandleFunctionCall:
 # Agent loop tools
 # =========================================================================
 
-def test_default_tool_definitions_exclude_internal_doxie_tools():
+def test_default_tool_definitions_exclude_internal_dovie_tools():
     names = {tool["function"]["name"] for tool in get_tool_definitions(quiet_mode=True)}
 
     assert "design_agent_profile" not in names
     assert "test_agent_profile" not in names
 
 
-def test_explicit_doxie_toolset_exposes_design_tools():
+def test_explicit_dovie_toolset_exposes_design_tools():
     names = {
         tool["function"]["name"]
-        for tool in get_tool_definitions(enabled_toolsets=["doxie"], quiet_mode=True)
+        for tool in get_tool_definitions(enabled_toolsets=["dovie"], quiet_mode=True)
     }
 
     assert {
@@ -166,28 +166,28 @@ def test_explicit_doxie_toolset_exposes_design_tools():
     } <= names
 
 
-def test_default_tool_definitions_expose_doxie_automation_tools_without_turn_context():
+def test_default_tool_definitions_expose_dovie_automation_tools_without_turn_context():
     names = {
         tool["function"]["name"]
         for tool in get_tool_definitions(quiet_mode=True)
     }
 
     assert "cronjob" not in names
-    assert "doxie_automation_task_create" in names
-    assert "doxie_automation_task_update" in names
+    assert "dovie_automation_task_create" in names
+    assert "dovie_automation_task_update" in names
 
 
-def test_cronjob_toolset_exposes_only_doxie_automation_tools():
+def test_cronjob_toolset_exposes_only_dovie_automation_tools():
     names = {
         tool["function"]["name"]
         for tool in get_tool_definitions(enabled_toolsets=["cronjob"], quiet_mode=True)
     }
 
     assert names == {
-        "doxie_automation_task_create",
-        "doxie_automation_task_list",
-        "doxie_automation_task_update",
-        "doxie_automation_task_remove",
+        "dovie_automation_task_create",
+        "dovie_automation_task_list",
+        "dovie_automation_task_update",
+        "dovie_automation_task_remove",
     }
 
 

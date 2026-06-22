@@ -1026,9 +1026,9 @@ def _get_env_config() -> Dict[str, Any]:
     # Default cwd: local uses the host's current directory, ssh uses the
     # remote home, Vercel uses its documented workspace root, and everything
     # else starts in the backend's default root-like cwd.
-    doxie_workspace_root = os.getenv("DOXIE_WORKSPACE_ROOT", "").strip()
+    dovie_workspace_root = os.getenv("DOVIE_WORKSPACE_ROOT", "").strip()
     if env_type == "local":
-        default_cwd = doxie_workspace_root or os.getcwd()
+        default_cwd = dovie_workspace_root or os.getcwd()
     elif env_type == "ssh":
         default_cwd = "~"
     elif env_type == "vercel_sandbox":

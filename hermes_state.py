@@ -1907,7 +1907,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
 
         ``title`` remains the legacy unique Hermes title used by CLI resume and
         platform integrations. ``display_title`` is the non-unique product title
-        Doxie shows in history. Auto-generated summary titles are no longer a
+        Dovie shows in history. Auto-generated summary titles are no longer a
         valid write source; ``title_source="auto"`` is ignored so canonical
         titles cannot regress behind first-user-message display titles.
         """

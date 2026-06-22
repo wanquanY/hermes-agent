@@ -73,7 +73,7 @@ def test_agent_profile_test_uses_dedicated_stream_events():
         {"draftId": "draft-1", "message": "hello"},
         json.dumps(
             {
-                "doxie_event": "agent_profile_test_completed",
+                "dovie_event": "agent_profile_test_completed",
                 "draftId": "draft-1",
                 "response": "final answer",
                 "status": "completed",
@@ -96,7 +96,7 @@ def test_agent_profile_test_uses_dedicated_stream_events():
     assert events[3]["payload"]["text"] == "preparing draft runtime"
     assert events[4]["payload"]["tool_preview"] == "read draft memory"
     assert events[5]["payload"]["text"] == "thinking"
-    assert events[7]["payload"]["result"]["doxie_event"] == "agent_profile_test_completed"
+    assert events[7]["payload"]["result"]["dovie_event"] == "agent_profile_test_completed"
 
 
 def test_team_mission_start_task_emits_structured_complete_when_tool_progress_disabled():
@@ -131,7 +131,7 @@ def test_team_mission_start_task_emits_structured_complete_when_tool_progress_di
 
     assert [event["type"] for event in events] == ["tool.complete"]
     result = events[0]["payload"]["result"]
-    assert result["doxie_event"] == "team_mission_started"
+    assert result["dovie_event"] == "team_mission_started"
     assert result["mission_id"] == "mission-1"
     assert result["conversation_id"] == "conversation-1"
     assert result["node"] == {"node_id": "node-1"}

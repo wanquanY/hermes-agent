@@ -117,7 +117,7 @@ def test_session_list_surfaces_team_conversation_route_metadata(tmp_path, monkey
             "id": "1",
             "method": "session.list",
             "params": {
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "agentProfileVersionId": "version-1",
                     "runtimeScopeKey": "profile:agent-a:version:version-1",
@@ -196,7 +196,7 @@ def test_session_list_hides_team_mission_node_run_sessions(tmp_path, monkeypatch
             "id": "1",
             "method": "session.list",
             "params": {
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "agentProfileVersionId": "version-1",
                     "runtimeScopeKey": "profile:agent-a:version:version-1",
@@ -329,7 +329,7 @@ def test_session_list_preserves_ordering_after_filter(monkeypatch):
     assert ids == ["newest", "middle", "also-visible", "oldest"]
 
 
-def test_session_list_reads_requested_doxie_profile_home(tmp_path, monkeypatch):
+def test_session_list_reads_requested_dovie_profile_home(tmp_path, monkeypatch):
     """Control-plane session.list must read the requested profile/version DB."""
     profile_home = tmp_path / "profile-home"
     seed_db = SessionDB(profile_home / "state.db")
@@ -349,7 +349,7 @@ def test_session_list_reads_requested_doxie_profile_home(tmp_path, monkeypatch):
                 "agentProfileId": "agent-a",
                 "agentProfileVersionId": "version-1",
                 "runtimeScopeKey": "profile:agent-a:version:version-1",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "agentProfileVersionId": "version-1",
                     "runtimeScopeKey": "profile:agent-a:version:version-1",
@@ -364,7 +364,7 @@ def test_session_list_reads_requested_doxie_profile_home(tmp_path, monkeypatch):
             db.close()
 
 
-def test_team_conversation_list_reads_requested_doxie_profile_home(tmp_path, monkeypatch):
+def test_team_conversation_list_reads_requested_dovie_profile_home(tmp_path, monkeypatch):
     """Team conversation history must use the same profile-home routing as session.list."""
     profile_home = tmp_path / "profile-home"
     seed_db = SessionDB(profile_home / "state.db")
@@ -393,7 +393,7 @@ def test_team_conversation_list_reads_requested_doxie_profile_home(tmp_path, mon
                 "agentProfileId": "agent-a",
                 "agentProfileVersionId": "version-1",
                 "runtimeScopeKey": "profile:agent-a:version:version-1",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "agentProfileVersionId": "version-1",
                     "runtimeScopeKey": "profile:agent-a:version:version-1",
@@ -422,7 +422,7 @@ def test_team_conversation_list_returns_empty_for_profile_home_without_state_db(
                 "agentProfileId": "agent-a",
                 "agentProfileVersionId": "version-empty",
                 "runtimeScopeKey": "profile:agent-a:version:version-empty",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "agentProfileVersionId": "version-empty",
                     "runtimeScopeKey": "profile:agent-a:version:version-empty",
@@ -445,7 +445,7 @@ def test_team_conversation_list_is_control_plane_read_for_profile_scope():
         "params": {
             "agentProfileId": "agent-a",
             "runtimeScopeKey": "profile:agent-a",
-            "doxie_profile": {
+            "dovie_profile": {
                 "id": "agent-a",
                 "hermesHomePath": "/tmp/hermes-agent-a",
             },
@@ -503,7 +503,7 @@ def test_team_conversation_list_projects_active_mission_runtime_state(tmp_path, 
             "id": "1",
             "method": "team_mission.conversation.list",
             "params": {
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "agentProfileVersionId": "version-1",
                     "runtimeScopeKey": "profile:agent-a:version:version-1",
@@ -589,7 +589,7 @@ def test_team_conversation_list_uses_active_member_run_bindings_when_mission_sta
             "id": "1",
             "method": "team_mission.conversation.list",
             "params": {
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "agentProfileVersionId": "version-1",
                     "runtimeScopeKey": "profile:agent-a:version:version-1",
@@ -677,7 +677,7 @@ def test_team_conversation_list_projects_final_deliverable_and_artifacts(tmp_pat
             "id": "1",
             "method": "team_mission.conversation.list",
             "params": {
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "agentProfileVersionId": "version-1",
                     "runtimeScopeKey": "profile:agent-a:version:version-1",
@@ -738,7 +738,7 @@ def test_team_conversation_list_prioritizes_approval_gate_state(tmp_path, monkey
             "id": "1",
             "method": "team_mission.conversation.list",
             "params": {
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "agentProfileVersionId": "version-1",
                     "runtimeScopeKey": "profile:agent-a:version:version-1",
@@ -857,7 +857,7 @@ def test_conversation_activity_list_is_control_plane_read_for_profile_scope():
         "params": {
             "agentProfileId": "agent-a",
             "runtimeScopeKey": "profile:agent-a",
-            "doxie_profile": {
+            "dovie_profile": {
                 "id": "agent-a",
                 "hermesHomePath": "/tmp/hermes-agent-a",
             },
@@ -899,7 +899,7 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
                     "seq": 4,
                     "payload": {
                         "name": "create_agent_profile_draft",
-                        "result": {"doxie_event": "agent_profile_draft_saved", "draft": {"id": "draft-1"}},
+                        "result": {"dovie_event": "agent_profile_draft_saved", "draft": {"id": "draft-1"}},
                     },
                 },
             ]
@@ -942,7 +942,7 @@ def test_session_status_reads_stored_profile_session_without_runtime(monkeypatch
             "method": "session.status",
             "params": {
                 "session_id": "stored-1",
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "agent-a",
                     "agentProfileVersionId": "version-1",
                     "runtimeScopeKey": "profile:agent-a:version:version-1",

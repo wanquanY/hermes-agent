@@ -52,9 +52,9 @@ from hermes_cli.cli_output import (  # noqa: E402 — late import block
 # Each entry: (toolset_name, label, description)
 # These map to keys in toolsets.py TOOLSETS dict.
 CONFIGURABLE_TOOLSETS = [
-    ("doxie_web",       "🔎 Doxie Web Search & Parse", "serper_search_tool, jina_web_parser_tool"),
-    ("doxie_image",     "🎨 Doxie Image Generation",   "doxie_image_generate"),
-    ("doxie_video",     "🎬 Doxie Video Generation",   "doxie_video_generate"),
+    ("dovie_web",       "🔎 Dovie Web Search & Parse", "serper_search_tool, jina_web_parser_tool"),
+    ("dovie_image",     "🎨 Dovie Image Generation",   "dovie_image_generate"),
+    ("dovie_video",     "🎬 Dovie Video Generation",   "dovie_video_generate"),
     ("web",             "🔍 Web Search & Scraping",    "web_search, web_extract"),
     ("browser",         "🌐 Browser Automation",       "navigate, click, type, scroll"),
     ("terminal",        "💻 Terminal & Processes",      "terminal, process"),
