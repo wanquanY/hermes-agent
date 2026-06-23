@@ -641,7 +641,7 @@ class SessionDBRunMixin:
         is_active = str(status or "") not in TERMINAL_RUN_STATUSES
         try:
             if is_active:
-                conn.execute(
+                cur = conn.execute(
                     """
                     UPDATE session_index
                        SET running = 1, status = 'running',
@@ -651,10 +651,14 @@ class SessionDBRunMixin:
                     """,
                     (run_id, str(runtime_session_id or ""), float(updated_at or 0), sid),
                 )
+                logger.info(
+                    "[doxie-session-index] project_run set_running session_id=%s run_id=%s status=%s rows=%s",
+                    sid, run_id, status, cur.rowcount,
+                )
             else:
                 # Only clear when this run was the active one (don't clobber a
                 # different concurrently-active run for the same session).
-                conn.execute(
+                cur = conn.execute(
                     """
                     UPDATE session_index
                        SET running = 0, status = 'idle',
@@ -663,6 +667,10 @@ class SessionDBRunMixin:
                      WHERE session_id = ? AND (active_run_id = ? OR active_run_id = '')
                     """,
                     (float(updated_at or 0), sid, run_id),
+                )
+                logger.info(
+                    "[doxie-session-index] project_run clear session_id=%s run_id=%s status=%s rows=%s",
+                    sid, run_id, status, cur.rowcount,
                 )
         except sqlite3.OperationalError:
             # session_index table absent (legacy worker db) — nothing to project.

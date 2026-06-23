@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
+
+_log = logging.getLogger(__name__)
 from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
@@ -1036,9 +1039,18 @@ class SessionDBTeamMissionMixin:
             ).rowcount or 0)
 
         try:
-            return self._execute_write(_do)
-        except Exception:
+            rows = self._execute_write(_do)
+        except Exception as exc:
+            _log.warning(
+                "[doxie-session-index] update_for_mission FAILED mission_id=%s status=%s running=%s waiting=%s error=%s",
+                mid, status, running, waiting_approval, exc,
+            )
             return 0
+        _log.info(
+            "[doxie-session-index] update_for_mission mission_id=%s status=%s running=%s waiting=%s rows=%s",
+            mid, status, running, waiting_approval, rows,
+        )
+        return rows
 
     def ensure_team_mission_conversation(
         self,
@@ -2197,6 +2209,10 @@ class SessionDBTeamMissionMixin:
             idx_status, idx_running, idx_waiting = "running", True, False
         else:
             idx_status, idx_running, idx_waiting = "", False, False
+        _log.info(
+            "[doxie-session-index] initialize_mission mission_id=%s patch_status=%s idx_status=%s idx_running=%s",
+            mission_id, ms, idx_status, idx_running,
+        )
         if idx_status:
             try:
                 self.update_session_index_for_mission(
@@ -2205,8 +2221,11 @@ class SessionDBTeamMissionMixin:
                     running=idx_running,
                     waiting_approval=idx_waiting,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.warning(
+                    "[doxie-session-index] initialize_mission projection FAILED mission_id=%s error=%s",
+                    mission_id, exc,
+                )
         return self.get_team_mission_graph(mission_id)
 
     def upsert_team_mission_node(
