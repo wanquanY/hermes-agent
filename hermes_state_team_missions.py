@@ -1046,7 +1046,7 @@ class SessionDBTeamMissionMixin:
                 mid, status, running, waiting_approval, exc,
             )
             return 0
-        _log.info(
+        _log.warning(
             "[doxie-session-index] update_for_mission mission_id=%s status=%s running=%s waiting=%s rows=%s",
             mid, status, running, waiting_approval, rows,
         )
@@ -2209,7 +2209,7 @@ class SessionDBTeamMissionMixin:
             idx_status, idx_running, idx_waiting = "running", True, False
         else:
             idx_status, idx_running, idx_waiting = "", False, False
-        _log.info(
+        _log.warning(
             "[doxie-session-index] initialize_mission mission_id=%s patch_status=%s idx_status=%s idx_running=%s",
             mission_id, ms, idx_status, idx_running,
         )

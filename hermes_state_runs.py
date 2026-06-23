@@ -651,7 +651,7 @@ class SessionDBRunMixin:
                     """,
                     (run_id, str(runtime_session_id or ""), float(updated_at or 0), sid),
                 )
-                logger.info(
+                logger.warning(
                     "[doxie-session-index] project_run set_running session_id=%s run_id=%s status=%s rows=%s",
                     sid, run_id, status, cur.rowcount,
                 )
@@ -668,7 +668,7 @@ class SessionDBRunMixin:
                     """,
                     (float(updated_at or 0), sid, run_id),
                 )
-                logger.info(
+                logger.warning(
                     "[doxie-session-index] project_run clear session_id=%s run_id=%s status=%s rows=%s",
                     sid, run_id, status, cur.rowcount,
                 )
