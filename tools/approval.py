@@ -671,16 +671,6 @@ def submit_pending(session_key: str, approval: dict):
     """Store a pending approval request for a session."""
     with _lock:
         _pending[session_key] = approval
-    try:
-        import sys as _sys
-        print(
-            f"[doxie-approval-submit] session_key={session_key} "
-            f"observers={len(_state_change_observers)}",
-            file=_sys.stderr,
-            flush=True,
-        )
-    except Exception:
-        pass
     _notify_state_change(session_key, True)
 
 

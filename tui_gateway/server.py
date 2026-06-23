@@ -1152,69 +1152,7 @@ def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
     with _prompt_lock:
         _pending[rid] = (sid, ev)
         payload["request_id"] = rid
-    # Capture WS frame delivery results so we can tell — without a packet
-    # capture — whether the event physically reached the FE or got
-    # filtered upstream of the renderer. The two _emit delivery paths are:
-    #   1. publish_recorded_event(frame): records to DB + fans out to live
-    #      session subscribers (FE's events.subscribe). Subject to
-    #      subscription scope filtering.
-    #   2. write_json({...}): direct write to the current transport
-    #      (usually the FE connection that's currently driving the agent).
-    # We monkey-patch _emit's two callees for this single call so we can
-    # log their actual return values. Best-effort; rolls back even on
-    # exception.
-    _delivery_state: dict[str, Any] = {
-        "direct_delivered": None,
-        "subscriber_delivery_count": None,
-    }
-    import sys as _sys
-    from tui_gateway.services import run_control as _run_control_mod
-    _original_publish = _run_control_mod.publish_recorded_event
-    def _wrapped_publish(*args, **kwargs):
-        result = _original_publish(*args, **kwargs)
-        try:
-            _delivery_state["subscriber_delivery_count"] = len(result or [])
-        except Exception:
-            pass
-        return result
-    _run_control_mod.publish_recorded_event = _wrapped_publish
-    try:
-        # Pre-emit diagnostic — session context that drives event scope
-        # resolution. If active_runtime_scope_key is empty here, the event
-        # falls back to stored_session_id and downstream scope-keyed
-        # subscriptions won't match. With Dovie team leader the scope key
-        # is `team:<conv_id>:leader-conversation`.
-        try:
-            with _sessions_lock:
-                _sess = dict(_sessions.get(sid) or {})
-        except Exception:
-            _sess = {}
-        _choices_n = len((payload or {}).get("choices") or []) if isinstance(payload, dict) else 0
-        _line = (
-            f"[doxie-block-enter] event={event} sid={sid} rid={rid} "
-            f"choices={_choices_n} timeout={timeout} "
-            f"session_key={_sess.get('session_key') or ''!r} "
-            f"active_runtime_scope_key={_sess.get('active_runtime_scope_key') or ''!r} "
-            f"runtime_scope_key={_sess.get('runtime_scope_key') or ''!r} "
-            f"active_run_id={_sess.get('active_run_id') or ''!r}"
-        )
-        print(_line, file=_sys.stderr, flush=True)
-        logger.warning(_line)
-    except Exception:
-        pass
-    try:
-        _emit(event, sid, payload)
-    finally:
-        _run_control_mod.publish_recorded_event = _original_publish
-    try:
-        _post = (
-            f"[doxie-block-emit-done] event={event} rid={rid} "
-            f"subscriber_delivery_count={_delivery_state['subscriber_delivery_count']!r}"
-        )
-        print(_post, file=_sys.stderr, flush=True)
-        logger.warning(_post)
-    except Exception:
-        pass
+    _emit(event, sid, payload)
     # Project pending state AFTER emit so the FE receives the event before
     # the sidebar flips — preserves the "popup shows, then spinner becomes
     # waiting badge" intuition for users watching both views.

@@ -125,16 +125,6 @@ def register(
         _session_index.setdefault(session_key, []).append(clarify_id)
     # Surface to observers (e.g. team mission conversation status projection →
     # sidebar indicator). Best-effort, never blocks/disrupts the clarify flow.
-    try:
-        import sys as _sys
-        print(
-            f"[doxie-clarify-register] clarify_id={clarify_id} session_key={session_key} "
-            f"observers={len(_state_change_observers)}",
-            file=_sys.stderr,
-            flush=True,
-        )
-    except Exception:
-        pass
     _notify_state_change(session_key, True)
     return entry
 
