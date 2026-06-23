@@ -493,7 +493,7 @@ dovie customize 边界 verify:
 | `7726ce304` MCP 0day (3-way merge) | ✅ **吸收** | web_server.py 1 hunk 取 upstream;mcp_security.py/dashboard.py/test 新创建;dovie should_require_auth + _session_automation_counts 保留 |
 | `40722058e` + `5affecb44` MCP keepalive + capability gate | ✅ **吸收** | mcp_tool.py 3+3 hunks 取 upstream(dovie 无业务冲突);dovie NonMcpEndpointError 保留 |
 | `99f3072aa` model swap no-op | ✅ **吸收** | tui_gateway/server.py 1 hunk 取 upstream(70 vs 8 行 fail-safe 加固) |
-| `ae94ed172` tui slash_worker reap | ⏸️ **跳过** | tui_gateway/server.py 10 hunks,其中 Hunk 9 加 1005 行新 @method 装饰器方法,跟 dovie tui_gateway/methods/ 模块化结构双重定义;Hunk 3 是 dovie `_db_for_stable_session()` customize 不能丢。建议手工把 disconnect reap + active_list liveness 关键逻辑(C1/C2 + RLock + grace-reap)迁到 dovie 自己的模块 |
+| `ae94ed172` tui slash_worker reap | ✅ **手工 port**(commit f986d535a)| 4 个核心 stability fix 移植到 dovie 模块化结构:RLock 升级 / `_attach_worker` C2 race fix / `_close_sessions_for_transport` 接 ws.py 走 asyncio.to_thread / `SlashWorker._closed` 防 double-close / `_live_sessions_by_stored_key` 跳过 `_finalized`。**故意不移植**:1097 行 method 体(dovie 已 modularized)/ grace-windowed orphan reaper(dovie 不暴露 CLI detach)/ uvicorn ws_ping(dovie 不用 uvicorn 启动 sidecar)。10 hunks,其中 Hunk 9 加 1005 行新 @method 装饰器方法,跟 dovie tui_gateway/methods/ 模块化结构双重定义;Hunk 3 是 dovie `_db_for_stable_session()` customize 不能丢。建议手工把 disconnect reap + active_list liveness 关键逻辑(C1/C2 + RLock + grace-reap)迁到 dovie 自己的模块 |
 | `8f2931e3e` file_tools.py block ~/.hermes/config write | ✅ **已含**(老 sync b725c1494) | dovie HEAD 已含 `_get_hermes_config_resolved()` + `_check_sensitive_path` hermes_config 守护 |
 | `8fcb8136b` smart approval guard | ✅ **已含**(Phase 2) | |
 | `9f67ba1b0` finalize_turn cleanup | ✅ **已含**(Phase 3) | |
