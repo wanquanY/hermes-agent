@@ -506,3 +506,117 @@ dovie customize 边界 verify:
 - **9 条高优先 P0 中 8 条已吸收**,1 条(ae94ed172)跳过等手工迁移
 - **900 关键测试通过**,9 个 mcp_security dashboard endpoint 测试 fail(dovie web_server.py 不一定暴露这些 POST endpoint,功能 import 都正常,记入已知问题)
 
+
+---
+
+## 最终吸收状态清单(2026-06-23 末次更新)
+
+> 状态:
+> - ✅ 已吸收(cherry-pick 或 hand-port)
+> - ⏸ 未吸收(等手工 3-way merge)
+> - 🚫 不打算吸收(P2 可选 / P3 不推荐)
+
+### P0 必吸收 — 25/45 完成(55.6%)
+
+**真 SKIP** 20 条,等手工 3-way merge:
+
+- ⏸ `16642e276` fix(mcp): revert ACP rebuild to original; harden generation guard
+- ⏸ `2b3a4f0af` fix(agent): strip stale reasoning_content when falling back to a strict provider
+- ⏸ `371348387` fix(mcp): refresh agent tool snapshot between turns (cache-safe late-binding)
+- ⏸ `472c06815` fix(mcp): detect 'unknown method' phrasing in ping keepalive fallback
+- ⏸ `621bf3a87` fix(security): strip shell escapes in denylist normalizer; fail-closed on missin
+- ⏸ `71274f264` fix(file): reject read_file line-numbered writeback
+- ⏸ `73dd58499` fix(mcp): propagate HERMES_HOME override onto the MCP event loop (#44220)
+- ⏸ `86e10dd87` fix(agent): route 'thinking blocks cannot be modified' 400 to recovery
+- ⏸ `89d380261` fix(approval): resolve Hermes home at detection time, not import time
+- ⏸ `93d6e7302` fix(mcp): expose late-connecting MCP tools to the agent (TUI/CLI/gateway)
+- ⏸ `9f95f72b9` fix(agent): strip api_messages in thinking-signature recovery so the retry actua
+- ⏸ `a9c802598` fix(approval): honor interrupt in blocking gateway approval wait (#8697)
+- ⏸ `b6e2a54a9` fix(mcp): address adversarial review round 1 (cache parity, gates, races)
+- ⏸ `b892ee2bc` fix(agent): summarize non-retryable API errors so raw HTML never leaks
+- ⏸ `c253b0738` fix(model): clear stale endpoint credentials across switches
+- ⏸ `c884ff64e` fix(agent): keep system-prompt model identity in sync across provider failover
+- ⏸ `c9094f5e5` fix(stream): don't report dropped mid-tool-call streams as output truncation (#4
+- ⏸ `dd0d1222a` fix(agent): don't retry interrupt-induced transport errors (cascading-interrupt 
+- ⏸ `def3f6388` fix(file): anchor device symlink guard to task cwd
+- ⏸ `f45ace931` feat(security): startup security posture audit (warn-on-load)
+
+### P1 强推荐 — 48/83 完成(57.8%)
+
+**真 SKIP** 35 条,等手工 3-way merge:
+
+- ⏸ `085fc5d00` feat(skills): find & diff user-modified bundled skills
+- ⏸ `105625d65` fix(skills): honour overall_timeout and bound ClawHub catalog walk
+- ⏸ `1593ca540` feat(cron): Cron Recipes — parameterized automation templates across every surfa
+- ⏸ `239740a19` feat(tools): MCP elicitation handler with gateway-aware approval routing
+- ⏸ `243cada15` fix(model): cover typed gateway /model path + async-safe pricing lookups
+- ⏸ `25c590ccd` fix(skills): refuse SKILLS_DIR root in rmtree guard, not just outside-tree
+- ⏸ `3714caa1b` fix(session): follow compression continuations for transcript reads
+- ⏸ `38c8a9c10` feat(memory): batch operations for single-turn memory updates (#48507)
+- ⏸ `3b56d3a29` fix(security): redact secrets in kanban tool payloads before persistence
+- ⏸ `3e74f75e4` feat(agent): coding-context posture across CLI/TUI/desktop/ACP (#43316)
+- ⏸ `3ead2bdd0` feat(prompt): configurable per-platform system-prompt hint overrides
+- ⏸ `47fadc24d` feat(compression): in-place compaction option that keeps one session id (#38763)
+- ⏸ `49596b70c` fix(gateway): resume follows the compression tip so post-compression replies ren
+- ⏸ `4b09903de` fix Nous auth refresh for idle agents
+- ⏸ `4d39a603d` fix(codex): restore session_id/x-client-request-id HTTP headers for cache routin
+- ⏸ `51a338a1b` feat(gateway): track active_agents in runtime status on turn boundaries
+- ⏸ `7a131f7f4` fix(api-server): stop silently promising async delivery on stateless HTTP path (
+- ⏸ `8ac5e90ec` fix(gateway): dedup image_generate media across the compression boundary
+- ⏸ `9351cbafa` fix(gateway): auto-deliver image_generate output as native media (#42616)
+- ⏸ `93ea9b04a` fix(gateway): cap inbound media download size to prevent memory exhaustion
+- ⏸ `990273d90` fix(agent): accept pixel-correct image downscale when bytes grow (#48013)
+- ⏸ `a2d7f538d` fix(delegate): stop subagent tool completion lines leaking into parent CLI displ
+- ⏸ `af978ecb1` fix(model): require confirmation for expensive model selections
+- ⏸ `b17180d95` fix(session): finalize owned SQLite session rows on AIAgent.close()
+- ⏸ `b23184cad` fix(api-server): bind request session context for tools
+- ⏸ `c66ecf0bc` feat(delegation): async background subagents via delegate_task(background=true) 
+- ⏸ `cca3b77a4` fix(compression): clear _previous_summary on session end (defense-in-depth)
+- ⏸ `e499d69e3` feat(api-server): configurable concurrent-run cap to prevent DoS (#50007)
+- ⏸ `ea8a8b4af` feat(delegation): background fan-out — parallel subagents, one consolidated retu
+- ⏸ `eee1da45f` fix(skills): bound ClawHub catalog walk to requested page on cold start (#43395)
+- ⏸ `f1254c8ea` fix(skills): rmtree scope guard + default pre_update_backup to true (#48200)
+- ⏸ `f6a42b1ac` feat(prompt): make context-file truncation limit configurable
+- ⏸ `f80381c45` feat(prompt): scale context-file cap to model window + point agent at truncated 
+- ⏸ `f8a241e10` fix(delegate): flatten content blocks in live overlay tail + AUTHOR_MAP
+- ⏸ `fad4b40d9` fix(model): persist /model switch by default across sessions
+
+### P2 可选 — 0/20(从未在吸收清单)
+
+原文档判定 P2 全部"可选"。本次**未吸收任何 P2**(gateway multiplex / relay / Chronos NAS cron / hindsight / opt-in 时间戳 / OpenViking memory / cron recipes 等)。
+
+### P3 不推荐 — 0 / 从未在清单
+
+telegram/slack/signal/discord/whatsapp/feishu/wecom/qqbot/teams/openviking/photon adapter (~60) + UI fix(desktop/tui) (~95) + kanban + dashboard chat session titles 等。
+
+---
+
+### 综合统计
+
+| 优先级 | 计划 | ✅ 已吸收 | ⏸ 等手工 | 🚫 不做 |
+|---|---|---|---|---|
+| P0 必吸收 | 45 | 25 (55.6%) | 20 | 0 |
+| P1 强推荐 | 83 | 48 (57.8%) | 35 | 0 |
+| P2 可选 | 20 | 0 | 0 | 20 |
+| P3 不推荐 | (大量) | 0 | 0 | 全部 |
+
+**absorb-upstream-20260623 分支共 77 commit**(65 cherry-pick + 4 backfill + 1 hand-port `f986d535a` ae94ed172 + 7 docs/revert)。
+
+### 等手工的项处理建议
+
+剩余 P0+P1 共 **55** 条,都涉及 dovie customize 的同文件:
+- `tools/approval.py` — smart approval / interrupt honoring
+- `agent/conversation_compression.py` — compression in-place / lock-check
+- `tui_gateway/server.py` — 老 sync 后又有上游 MCP / session 改动
+- `agent/agent_runtime_helpers.py` — thinking-signature / fallback 路径
+- `hermes_cli/web_server.py` — MCP 多个修复 + security audit
+- `tools/file_tools.py` — 几个 read_file 守护可能 functional 已含但脚本误判
+
+**建议时机**:dovie team-mission 路径稳定 1-2 周后做。期间累积的 dovie 改动越少,3-way merge 越简单。
+
+### 已知问题(absorb-upstream-20260623 上)
+
+1. **2 个 `test_compression_concurrent_fork.py` 失败**:`1fbf48d4a` lock-check SKIP。compression-lock 方法已 backfill 让 import 不崩,但 lock-check 在 `_compress_context` 里需要 3-way merge 才能 wire。单进程桌面端不实际并发。
+2. **13 个 tui_gateway 测试失败**:dovie fork 预先存在(verified at 400d0fc51 也 fail),非本次吸收引入。
+3. **9 个 `test_mcp_security.py` 失败**:POST `/api/mcp/servers` dashboard endpoint dovie 不暴露(走 IPC sidecar)→ 405 Method Not Allowed。功能 import OK。
+4. **`file_state_registry` 2 个失败**:`/var/folders` 误判 sensitive,dovie fork 老 bug。
