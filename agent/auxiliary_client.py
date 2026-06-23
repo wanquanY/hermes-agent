@@ -40,6 +40,7 @@ Payment / credit exhaustion fallback:
   their OpenRouter balance but has Codex OAuth or another provider available.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -131,6 +132,37 @@ def _responses_backfilled_response(output_items: List[Any], text_parts: List[str
             model=model,
         )
     return None
+
+
+# --- aux_interrupt_protection backfill ---
+# Backfilled from upstream `2f3177adf fix(compression): protect the summary
+# call from mid-flight interrupts` because the dovie fork SKIP'd that
+# commit (it touched dovie-customized files) but absorbed
+# `321521c59 fix(compression): auto-compression triggers at minimum context
+# length` which imports `aux_interrupt_protection` from this module.
+# Without this stub the entire compression / context_compressor stack
+# fails at import time.
+_aux_interrupt_protection = threading.local()
+
+
+def _aux_interrupt_protected() -> bool:
+    return bool(getattr(_aux_interrupt_protection, "active", False))
+
+
+@contextlib.contextmanager
+def aux_interrupt_protection(active: bool = True):
+    """Mark the current thread's auxiliary LLM call as interrupt-protected.
+
+    Used by atomic aux tasks (compression) so a mid-flight gateway interrupt
+    doesn't abort the call and trigger a degraded fallback. Re-entrant-safe:
+    restores the previous value on exit.
+    """
+    prev = getattr(_aux_interrupt_protection, "active", False)
+    _aux_interrupt_protection.active = active
+    try:
+        yield
+    finally:
+        _aux_interrupt_protection.active = prev
 
 
 def _safe_isinstance(obj: Any, maybe_type: Any) -> bool:

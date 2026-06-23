@@ -1204,3 +1204,19 @@ def rewrite_skill_refs(
             "jobs_updated": len(rewrites),
             "jobs_scanned": len(jobs),
         }
+
+
+# --- claim_job_for_fire backfill (single-machine no-op) ---
+# Backfilled because the dovie fork hasn't absorbed upstream `b01eee0c7
+# feat(cron): store-level CAS claim for multi-machine at-most-once fire`
+# (a multi-machine concern dovie's single-host desktop runtime doesn't have)
+# but DID absorb `bba6718b5 fix(cron): execute job immediately on
+# action='run'`, which imports claim_job_for_fire as its at-most-once gate.
+# On a single host the CAS is trivially satisfied — we always win.
+def claim_job_for_fire(job_id: str, *, claim_ttl_seconds: int = 300) -> bool:
+    """Single-machine no-op CAS claim. Always wins.
+
+    Multi-machine gateways need the real upstream implementation; absorb
+    `b01eee0c7` if/when dovie deploys hermes across multiple replicas.
+    """
+    return True
