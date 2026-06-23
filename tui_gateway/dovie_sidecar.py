@@ -183,6 +183,22 @@ async def main_async(args: argparse.Namespace) -> None:
     from tui_gateway import server as tui_gateway_server  # noqa: F401 - registers gateway methods
     from tui_gateway import ws as tui_gateway_ws
     from tui_gateway.services.dovie_cron_runtime import start_cron_ticker, stop_cron_ticker
+    from tui_gateway.services.team_mission_approval_observer import install as _install_team_mission_approval_observer
+
+    # Bridge in-process approval/clarify state changes to team_mission.
+    # conversation.status events so the sidebar reflects waiting_approval
+    # immediately when a member-node tool approval / clarify fires (not only
+    # when an approval_gate node sits at status='waiting_approval').
+    try:
+        _install_team_mission_approval_observer()
+    except Exception as exc:
+        # Sidebar indicators are best-effort; never block startup on them.
+        # Surface the failure to logs so it doesn't fail silently.
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "[doxie-approval-observer] sidecar install raised: %s",
+            exc,
+        )
 
     handle_ws = tui_gateway_ws.handle_ws
     expected_token = resolve_token(args)

@@ -238,43 +238,54 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
             metadata=dict(mission.get("metadata") or {}),
         )
         updated_graph = db.get_team_mission_graph(mission_id)
-        # Project the mission's live state onto its conversation's session_index
-        # row so the sidebar's running/approval indicator stays correct from the
-        # single-query read (no read-time mission-graph walk). Only on status
-        # change, so this is low frequency.
-        index_updater = getattr(db, "update_session_index_for_mission", None)
-        if callable(index_updater):
-            ms = mission_status.lower()
-            if ms in _TERMINAL_MISSION_STATUSES:
-                idx_status, idx_running, idx_waiting = "idle", False, False
-            elif ms == "waiting_approval":
-                idx_status, idx_running, idx_waiting = "waiting_approval", False, True
-            else:
-                idx_status, idx_running, idx_waiting = "running", True, False
+    # Project the mission's live state onto its conversation's session_index row
+    # so the sidebar's running/approval indicator stays correct from the
+    # single-query read (no read-time mission-graph walk).
+    #
+    # MUST run on EVERY reduce, not only when prior!=new mission_status above.
+    # Strategy actions (e.g. complete_team_mission_plan) upsert the new mission
+    # status BEFORE calling reduce, so by the time reduce reads `mission` from
+    # the graph the prior_mission_status already equals the freshly-computed
+    # mission_status — the change-guarded path skips, and session_index keeps
+    # the stale projection from whatever leader-running phase wrote last.
+    # That's exactly the bug where session_index.waiting_approval never flips
+    # to 1 while the plan-approval gate is open, so the sidebar shows running
+    # spinner instead of the approval indicator. Projecting on every reduce is
+    # an idempotent single-row UPDATE, well below reduce's overall cost.
+    index_updater = getattr(db, "update_session_index_for_mission", None)
+    if callable(index_updater):
+        ms = mission_status.lower()
+        if ms in _TERMINAL_MISSION_STATUSES:
+            idx_status, idx_running, idx_waiting = "idle", False, False
+        elif ms == "waiting_approval":
+            idx_status, idx_running, idx_waiting = "waiting_approval", False, True
+        else:
+            idx_status, idx_running, idx_waiting = "running", True, False
+        try:
+            index_updater(
+                mission_id,
+                status=idx_status,
+                running=idx_running,
+                waiting_approval=idx_waiting,
+            )
+        except Exception:
+            pass
+    # Cap canonical-log growth at the source: the instant a mission first
+    # reaches a terminal state, prune its high-volume stream deltas. This
+    # runs once per mission at completion regardless of whether the
+    # conversation is ever reopened, so team_mission_events cannot
+    # accumulate unbounded across never-revisited missions. Gated on the
+    # actual prior!=new transition so it still fires once per mission.
+    if (
+        mission_status.lower() in _TERMINAL_MISSION_STATUSES
+        and prior_mission_status.lower() not in _TERMINAL_MISSION_STATUSES
+    ):
+        pruner = getattr(db, "prune_team_mission_events", None)
+        if callable(pruner):
             try:
-                index_updater(
-                    mission_id,
-                    status=idx_status,
-                    running=idx_running,
-                    waiting_approval=idx_waiting,
-                )
+                pruner(mission_id)
             except Exception:
                 pass
-        # Cap canonical-log growth at the source: the instant a mission first
-        # reaches a terminal state, prune its high-volume stream deltas. This
-        # runs once per mission at completion regardless of whether the
-        # conversation is ever reopened, so team_mission_events cannot
-        # accumulate unbounded across never-revisited missions.
-        if (
-            mission_status.lower() in _TERMINAL_MISSION_STATUSES
-            and prior_mission_status.lower() not in _TERMINAL_MISSION_STATUSES
-        ):
-            pruner = getattr(db, "prune_team_mission_events", None)
-            if callable(pruner):
-                try:
-                    pruner(mission_id)
-                except Exception:
-                    pass
     return {
         "mission_id": mission_id,
         "graph": updated_graph,

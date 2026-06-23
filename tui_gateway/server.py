@@ -1152,11 +1152,198 @@ def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
     with _prompt_lock:
         _pending[rid] = (sid, ev)
         payload["request_id"] = rid
-    _emit(event, sid, payload)
-    ev.wait(timeout=timeout)
+    # Capture WS frame delivery results so we can tell — without a packet
+    # capture — whether the event physically reached the FE or got
+    # filtered upstream of the renderer. The two _emit delivery paths are:
+    #   1. publish_recorded_event(frame): records to DB + fans out to live
+    #      session subscribers (FE's events.subscribe). Subject to
+    #      subscription scope filtering.
+    #   2. write_json({...}): direct write to the current transport
+    #      (usually the FE connection that's currently driving the agent).
+    # We monkey-patch _emit's two callees for this single call so we can
+    # log their actual return values. Best-effort; rolls back even on
+    # exception.
+    _delivery_state: dict[str, Any] = {
+        "direct_delivered": None,
+        "subscriber_delivery_count": None,
+    }
+    import sys as _sys
+    from tui_gateway.services import run_control as _run_control_mod
+    _original_publish = _run_control_mod.publish_recorded_event
+    def _wrapped_publish(*args, **kwargs):
+        result = _original_publish(*args, **kwargs)
+        try:
+            _delivery_state["subscriber_delivery_count"] = len(result or [])
+        except Exception:
+            pass
+        return result
+    _run_control_mod.publish_recorded_event = _wrapped_publish
+    try:
+        # Pre-emit diagnostic — session context that drives event scope
+        # resolution. If active_runtime_scope_key is empty here, the event
+        # falls back to stored_session_id and downstream scope-keyed
+        # subscriptions won't match. With Dovie team leader the scope key
+        # is `team:<conv_id>:leader-conversation`.
+        try:
+            with _sessions_lock:
+                _sess = dict(_sessions.get(sid) or {})
+        except Exception:
+            _sess = {}
+        _choices_n = len((payload or {}).get("choices") or []) if isinstance(payload, dict) else 0
+        _line = (
+            f"[doxie-block-enter] event={event} sid={sid} rid={rid} "
+            f"choices={_choices_n} timeout={timeout} "
+            f"session_key={_sess.get('session_key') or ''!r} "
+            f"active_runtime_scope_key={_sess.get('active_runtime_scope_key') or ''!r} "
+            f"runtime_scope_key={_sess.get('runtime_scope_key') or ''!r} "
+            f"active_run_id={_sess.get('active_run_id') or ''!r}"
+        )
+        print(_line, file=_sys.stderr, flush=True)
+        logger.warning(_line)
+    except Exception:
+        pass
+    try:
+        _emit(event, sid, payload)
+    finally:
+        _run_control_mod.publish_recorded_event = _original_publish
+    try:
+        _post = (
+            f"[doxie-block-emit-done] event={event} rid={rid} "
+            f"subscriber_delivery_count={_delivery_state['subscriber_delivery_count']!r}"
+        )
+        print(_post, file=_sys.stderr, flush=True)
+        logger.warning(_post)
+    except Exception:
+        pass
+    # Project pending state AFTER emit so the FE receives the event before
+    # the sidebar flips — preserves the "popup shows, then spinner becomes
+    # waiting badge" intuition for users watching both views.
+    _project_block_state(sid, present=True)
+    try:
+        ev.wait(timeout=timeout)
+    finally:
+        _project_block_state(sid, present=False)
     with _prompt_lock:
         _pending.pop(rid, None)
         return _answers.pop(rid, "")
+    try:
+        # Diagnostic — short-lived. Captures every event type that flows
+        # through _block so we can tell at a glance whether a missing
+        # popup is a backend (event not emitted) or frontend (event
+        # arrived but no handler) issue. We also dump the session keys
+        # that _emit will derive runtime_scope_key / stored_session_id
+        # from, because subscription filtering downstream rejects events
+        # whose runtime_scope_key doesn't match the FE-side scope key,
+        # and that mismatch is invisible from the event_type alone.
+        import sys as _sys
+        _choices_n = len((payload or {}).get("choices") or []) if isinstance(payload, dict) else 0
+        try:
+            with _sessions_lock:
+                _sess = dict(_sessions.get(sid) or {})
+        except Exception:
+            _sess = {}
+        _line = (
+            f"[doxie-block-enter] event={event} sid={sid} rid={rid} "
+            f"choices={_choices_n} timeout={timeout} "
+            f"session_key={_sess.get('session_key') or ''!r} "
+            f"active_runtime_scope_key={_sess.get('active_runtime_scope_key') or ''!r} "
+            f"runtime_scope_key={_sess.get('runtime_scope_key') or ''!r} "
+            f"active_run_id={_sess.get('active_run_id') or ''!r}"
+        )
+        print(_line, file=_sys.stderr, flush=True)
+        logger.warning(_line)
+    except Exception:
+        pass
+    # Project pending-input state to the canonical sidebar truth.
+    #
+    # This is THE choke point for every blocking user-input prompt in Dovie:
+    # clarify.request, sudo.request, secret.request, approval.request etc.
+    # Dovie's tool callbacks (see tui_gateway/services/tool_events.py) wire
+    # the agent's clarify_callback to ``_block(...)`` instead of the legacy
+    # ``tools.clarify_gateway.register`` — so the previous observer that
+    # listened on ``clarify_gateway._notify_state_change`` never saw a
+    # Dovie clarify and the sidebar stayed on running spinner the whole
+    # time the composer was actually blocking.
+    #
+    # Projecting from here covers every Dovie blocking prompt with one
+    # write. Best-effort: any DB issue must NOT alter the block timing.
+    _project_block_state(sid, present=True)
+    try:
+        ev.wait(timeout=timeout)
+    finally:
+        _project_block_state(sid, present=False)
+    with _prompt_lock:
+        _pending.pop(rid, None)
+        return _answers.pop(rid, "")
+
+
+def _project_block_state(sid: str, *, present: bool) -> None:
+    """Write ``waiting_approval`` to every session_index row the agent's
+    blocking-prompt ``sid`` resolves to. Mirrors what
+    ``team_mission_approval_observer`` does for the legacy
+    ``tools.clarify_gateway`` / ``tools.approval`` paths — but for the
+    Dovie-native ``_block`` mechanism.
+
+    The agent's ``sid`` here is the gateway's INTERNAL 8-char hex id
+    (e.g. ``1cf7689d``), NOT the conversation's stored_session_id
+    (e.g. ``team-session-team-conversation-d254d3d0-…``). The
+    session_index table is keyed by stored_session_id, so feeding the
+    short sid straight into the resolver matches zero rows. We resolve
+    via the gateway's ``_sessions[sid]["session_key"]`` (the stored
+    session id) and fall back to the short sid if the lookup fails.
+
+    All resolution paths live in the DB layer
+    (``update_session_index_pending_state_for_session_key``) so the same
+    five matches (direct session_id, runtime_scope_key, member-node
+    bindings, team-conv stable id, leader scope parse) cover every
+    conversation type uniformly.
+    """
+    if not sid:
+        return
+    try:
+        db = _get_db()
+    except Exception:
+        return
+    if db is None:
+        return
+    updater = getattr(db, "update_session_index_pending_state_for_session_key", None)
+    if not callable(updater):
+        return
+
+    candidate_keys: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: object) -> None:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            candidate_keys.append(text)
+
+    try:
+        session = _sessions.get(sid)
+    except Exception:
+        session = None
+    if isinstance(session, dict):
+        _add(session.get("session_key"))
+        _add(session.get("stored_session_id"))
+        _add(session.get("runtime_scope_key"))
+    # Always include the raw sid as the last resort — it might be the
+    # stored id itself in non-Dovie code paths, and the resolver is
+    # tolerant of unknown keys (returns 0).
+    _add(sid)
+
+    for key in candidate_keys:
+        try:
+            rows = updater(key, waiting_approval=present)
+        except Exception:
+            # Sidebar projection is best-effort. A schema mismatch or
+            # lock contention must never disturb the clarify/approval
+            # timing.
+            continue
+        if rows and rows > 0:
+            # First candidate that resolved is the right one; stop so we
+            # don't double-write across overlapping rows.
+            return
 
 
 def _clear_pending(sid: str | None = None) -> None:
@@ -1168,11 +1355,20 @@ def _clear_pending(sid: str | None = None) -> None:
     sessions sharing the same tui_gateway process.  When *sid* is
     None, every pending prompt is released (used during shutdown).
     """
+    cleared_sids: set[str] = set()
     with _prompt_lock:
         for rid, (owner_sid, ev) in list(_pending.items()):
             if sid is None or owner_sid == sid:
                 _answers[rid] = ""
                 ev.set()
+                if owner_sid:
+                    cleared_sids.add(owner_sid)
+    # Mirror the unblock into session_index so the sidebar doesn't keep
+    # waiting_approval=1 after a session.interrupt cleared every pending
+    # prompt under us. The _block(...) finally-clause covers the normal
+    # path; this covers external unblock (interrupt, shutdown).
+    for owner_sid in cleared_sids:
+        _project_block_state(owner_sid, present=False)
 
 
 # ── Agent factory ────────────────────────────────────────────────────

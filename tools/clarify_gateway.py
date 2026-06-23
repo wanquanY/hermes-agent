@@ -70,6 +70,32 @@ _entries: Dict[str, _ClarifyEntry] = {}
 # session_key → list[clarify_id]  (FIFO; for text-fallback intercept and session cleanup)
 _session_index: Dict[str, List[str]] = {}
 
+# Optional state-change observers (session_key:str, present:bool) -> None
+# Populated by tui_gateway at startup so the team mission conversation status
+# projection can refresh when a clarify shows up or clears. Mirrors the
+# approval.py registry. Best-effort: a raising observer must never break the
+# clarify flow.
+_state_change_observers: List = []
+
+
+def register_state_change_observer(callback) -> None:
+    if callback is None:
+        return
+    with _lock:
+        if callback not in _state_change_observers:
+            _state_change_observers.append(callback)
+
+
+def _notify_state_change(session_key: str, present: bool) -> None:
+    if not session_key:
+        return
+    observers = list(_state_change_observers)
+    for cb in observers:
+        try:
+            cb(session_key, present)
+        except Exception:
+            pass
+
 
 # =========================================================================
 # Public API — agent-thread side
@@ -97,6 +123,19 @@ def register(
     with _lock:
         _entries[clarify_id] = entry
         _session_index.setdefault(session_key, []).append(clarify_id)
+    # Surface to observers (e.g. team mission conversation status projection →
+    # sidebar indicator). Best-effort, never blocks/disrupts the clarify flow.
+    try:
+        import sys as _sys
+        print(
+            f"[doxie-clarify-register] clarify_id={clarify_id} session_key={session_key} "
+            f"observers={len(_state_change_observers)}",
+            file=_sys.stderr,
+            flush=True,
+        )
+    except Exception:
+        pass
+    _notify_state_change(session_key, True)
     return entry
 
 
@@ -139,6 +178,9 @@ def wait_for_response(clarify_id: str, timeout: float) -> Optional[str]:
             ids.remove(clarify_id)
             if not ids:
                 _session_index.pop(entry.session_key, None)
+        session_has_more = bool(_session_index.get(entry.session_key))
+    if not session_has_more:
+        _notify_state_change(entry.session_key, False)
 
     return entry.response
 
@@ -236,6 +278,8 @@ def clear_session(session_key: str) -> int:
         entry.response = ""
         entry.event.set()
         cancelled += 1
+    if cancelled:
+        _notify_state_change(session_key, False)
     return cancelled
 
 

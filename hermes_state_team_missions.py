@@ -999,6 +999,184 @@ class SessionDBTeamMissionMixin:
         except Exception:
             pass
 
+    def update_session_index_pending_state_for_session_key(
+        self,
+        session_key: str,
+        *,
+        waiting_approval: bool,
+    ) -> int:
+        """Project an in-process tool-approval / clarify state-change onto
+        every session_index row that this ``session_key`` belongs to.
+
+        The single resolver that lets ``waiting_approval`` cover all
+        conversation types — normal, team-leader, team-member-node — using
+        five complementary match paths (any/all may hit at once; we de-dupe
+        target rows by session_id):
+
+        1. Direct ``session_id == session_key`` (normal conversations whose
+           agent session key IS the conversation's session id).
+        2. ``runtime_scope_key == session_key`` (any agent that stamped its
+           scope into the index row).
+        3. ``team_mission_run_bindings.session_id / runtime_session_id``
+           JOIN onto the row matching the binding's ``mission_id`` (member
+           node runtime scopes).
+        4. ``team_mission_conversations.stable_session_id`` JOIN onto the
+           row matching the conversation's stable session id (team conv
+           via stable id).
+        5. Parse the ``team:<conv_id>:leader-conversation`` scope-key
+           pattern and match by ``session_index.conversation_id`` (team
+           leader's conversation-scoped scope key).
+
+        UPDATE policy:
+        - ``waiting_approval=True``  → ``waiting_approval=1, running=0``
+          (mutually exclusive; waiting wins over running).
+        - ``waiting_approval=False`` → ``waiting_approval=0``. We do NOT
+          force ``running=0`` because the run may legitimately still be
+          executing — let the next ``project_run`` event re-establish the
+          true ``running`` flag. If a non-empty ``active_run_id`` is still
+          on the row, we flip ``running=1`` directly so the sidebar
+          spinner is restored immediately without waiting for the next
+          run-state event.
+
+        Returns total rows affected.
+        """
+        sk = _text(session_key)
+        if not sk:
+            return 0
+
+        def _do(conn: sqlite3.Connection) -> int:
+            target_session_ids: set[str] = set()
+
+            def _add_session_id(value: Any) -> None:
+                sid = _text(value)
+                if sid:
+                    target_session_ids.add(sid)
+
+            try:
+                row = conn.execute(
+                    "SELECT session_id FROM session_index WHERE session_id = ?",
+                    (sk,),
+                ).fetchone()
+                if row:
+                    _add_session_id(_row_value(row, "session_id", ""))
+            except Exception:
+                pass
+
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT session_id FROM session_index
+                     WHERE runtime_scope_key = ? AND runtime_scope_key <> ''
+                    """,
+                    (sk,),
+                ).fetchall()
+                for row in rows or []:
+                    _add_session_id(_row_value(row, "session_id", ""))
+            except Exception:
+                pass
+
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT si.session_id
+                      FROM team_mission_run_bindings tb
+                      JOIN session_index si ON si.mission_id = tb.mission_id
+                     WHERE tb.session_id = ?
+                        OR tb.runtime_session_id = ?
+                        OR tb.runtime_scope_key = ?
+                    """,
+                    (sk, sk, sk),
+                ).fetchall()
+                for row in rows or []:
+                    _add_session_id(_row_value(row, "session_id", ""))
+            except Exception:
+                pass
+
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT si.session_id
+                      FROM team_mission_conversations tmc
+                      JOIN session_index si
+                        ON si.conversation_id = tmc.conversation_id
+                     WHERE tmc.stable_session_id = ?
+                    """,
+                    (sk,),
+                ).fetchall()
+                for row in rows or []:
+                    _add_session_id(_row_value(row, "session_id", ""))
+            except Exception:
+                pass
+
+            # Path 5: team leader runtime-scope-key parse.
+            # Pattern: ``team:<conv_id>:leader-conversation``. We extract
+            # the conv_id slice between the literal head and tail and look
+            # it up against the conversation_id column.
+            _head = "team:"
+            _tail = ":leader-conversation"
+            if sk.startswith(_head) and sk.endswith(_tail):
+                conv_id = sk[len(_head):-len(_tail)]
+                if conv_id:
+                    try:
+                        rows = conn.execute(
+                            """
+                            SELECT session_id FROM session_index
+                             WHERE conversation_id = ?
+                            """,
+                            (conv_id,),
+                        ).fetchall()
+                        for row in rows or []:
+                            _add_session_id(_row_value(row, "session_id", ""))
+                    except Exception:
+                        pass
+
+            if not target_session_ids:
+                return 0
+
+            total = 0
+            for sid in target_session_ids:
+                try:
+                    if waiting_approval:
+                        rc = conn.execute(
+                            """
+                            UPDATE session_index
+                               SET waiting_approval = 1, running = 0
+                             WHERE session_id = ?
+                            """,
+                            (sid,),
+                        ).rowcount or 0
+                    else:
+                        rc = conn.execute(
+                            """
+                            UPDATE session_index
+                               SET waiting_approval = 0,
+                                   running = CASE
+                                     WHEN active_run_id <> '' THEN 1
+                                     ELSE running
+                                   END
+                             WHERE session_id = ?
+                            """,
+                            (sid,),
+                        ).rowcount or 0
+                    total += int(rc)
+                except Exception:
+                    continue
+            return total
+
+        try:
+            rows = self._execute_write(_do)
+        except Exception as exc:
+            _log.warning(
+                "[doxie-session-index] update_pending_for_session_key FAILED session_key=%s waiting=%s error=%s",
+                sk, waiting_approval, exc,
+            )
+            return 0
+        _log.warning(
+            "[doxie-session-index] update_pending_for_session_key session_key=%s waiting=%s rows=%s",
+            sk, waiting_approval, rows,
+        )
+        return rows
+
     def update_session_index_for_mission(
         self,
         mission_id: str,
@@ -1748,6 +1926,72 @@ class SessionDBTeamMissionMixin:
             task_frames[-1] if task_frames else {},
         )
         mission_status = _text(active_mission.get("status")) or _text(conversation.get("status"))
+        # Surface in-process member-node approvals (sudo / command) and clarify
+        # requests in pending_approvals too. Those live in process memory
+        # (tools.approval._pending, tools.clarify_gateway._entries) — they are
+        # NOT in the DB, so a sidebar that only reads team_mission_nodes never
+        # learns about them. Without this, mid-mission worker tool approvals and
+        # clarify requests left the sidebar showing plain "running" while the
+        # composer displayed an approval card the user had to act on. Walk every
+        # session key tied to this conversation (leader + every node binding's
+        # session_id / runtime_session_id) and add a pending entry per pending
+        # in-process request.
+        runtime_session_keys: List[str] = []
+        seen_runtime_session_keys: set[str] = set()
+        leader_stable = _text(conversation.get("stable_session_id"))
+        for candidate in (
+            leader_stable,
+            *(value for binding in bindings for value in (
+                _text(binding.get("session_id")),
+                _text(binding.get("runtime_session_id")),
+            )),
+        ):
+            if candidate and candidate not in seen_runtime_session_keys:
+                seen_runtime_session_keys.add(candidate)
+                runtime_session_keys.append(candidate)
+        try:
+            from tools import approval as _approval_module  # noqa: WPS433
+        except Exception:
+            _approval_module = None
+        try:
+            from tools import clarify_gateway as _clarify_module  # noqa: WPS433
+        except Exception:
+            _clarify_module = None
+        for session_key in runtime_session_keys:
+            if (
+                _approval_module is not None
+                and getattr(_approval_module, "has_pending_session", None)
+            ):
+                try:
+                    if _approval_module.has_pending_session(session_key):
+                        pending_approvals.append({
+                            "kind": "tool_approval",
+                            "mission_id": active_mission_id,
+                            "missionId": active_mission_id,
+                            "session_key": session_key,
+                            "sessionKey": session_key,
+                            "title": "等待工具审批",
+                            "source": "tools.approval._pending",
+                        })
+                except Exception:
+                    pass
+            if (
+                _clarify_module is not None
+                and getattr(_clarify_module, "has_pending", None)
+            ):
+                try:
+                    if _clarify_module.has_pending(session_key):
+                        pending_approvals.append({
+                            "kind": "clarify",
+                            "mission_id": active_mission_id,
+                            "missionId": active_mission_id,
+                            "session_key": session_key,
+                            "sessionKey": session_key,
+                            "title": "等待澄清回答",
+                            "source": "tools.clarify_gateway._entries",
+                        })
+                except Exception:
+                    pass
         return {
             "conversation": conversation,
             "mission": active_mission,
@@ -2887,11 +3131,17 @@ class SessionDBTeamMissionMixin:
     ) -> Dict[str, Any]:
         mission_id = str(mission_id or "").strip()
         if not mission_id:
+            _log.warning("[doxie-cancel] cancel_team_mission ENTRY empty_mission_id")
             return {}
         graph = self.get_team_mission_graph(mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) else None
         if not isinstance(mission, dict):
+            _log.warning("[doxie-cancel] cancel_team_mission ABORT mission_id=%s mission_not_dict", mission_id)
             return {}
+        _log.warning(
+            "[doxie-cancel] cancel_team_mission ENTRY mission_id=%s current_status=%s node_count=%s",
+            mission_id, _text(mission.get("status")), len(graph.get("nodes", []) or []),
+        )
         mission_status = _text(mission.get("status")).lower()
         nodes = [node for node in graph.get("nodes", []) if isinstance(node, dict)]
         bindings = [binding for binding in graph.get("run_bindings", []) if isinstance(binding, dict)]
@@ -3026,6 +3276,11 @@ class SessionDBTeamMissionMixin:
         # sidebar keeps showing the cancelled mission as "running" after restart.
         self.update_session_index_for_mission(
             mission_id, status="idle", running=False, waiting_approval=False,
+        )
+        _log.warning(
+            "[doxie-cancel] cancel_team_mission DONE mission_id=%s canceled_node_count=%s canceled_run_count=%s "
+            "event_emit=NO (does not call append_team_mission_event for node/mission cancellation)",
+            mission_id, len(canceled_nodes), len(cancel_run_bindings),
         )
         return {
             "mission_id": mission_id,

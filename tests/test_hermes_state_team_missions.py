@@ -3197,3 +3197,375 @@ def test_leader_planning_run_terminating_after_plan_complete_does_not_fail_missi
 
     mission = db.get_team_mission_graph("m2").get("mission") or {}
     assert mission.get("status") != "failed"
+
+
+def test_conversation_runtime_summary_includes_in_process_tool_approval(tmp_path: Path):
+    """Member-node command/sudo approvals live in tools.approval._gateway_queues
+    in process memory — they are NOT modeled in the DB. Before this fix the
+    conversation status projection only counted approval_gate nodes, so the
+    sidebar showed "running" the whole time the composer was actually blocked
+    on a tool-approval prompt. The projection must surface those pendings too."""
+    from tools import approval as _approval_module
+
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-tool",
+        team_id="team-x",
+        stable_session_id="team-session-tool",
+        title="工具审批",
+        active_mission_id="mission-tool",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-tool",
+        conversation_id="conv-tool",
+        team_id="team-x",
+        title="工具审批任务",
+        mode="supervised_mission",
+        status="running",
+        leader_session_id="team-session-tool",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-tool",
+        node_id="worker",
+        kind="worker",
+        title="risky worker",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-tool",
+        node_id="worker",
+        run_id="run-tool",
+        session_id="team:mission-tool:node:worker",
+        runtime_session_id="rt-worker",
+        role="member",
+    )
+
+    # Simulate a member-node command approval sitting in the gateway queue.
+    fake_session_key = "team:mission-tool:node:worker"
+    with _approval_module._lock:
+        _approval_module._gateway_queues.setdefault(fake_session_key, []).append(
+            _approval_module._ApprovalEntry({"command": "rm -rf /", "pattern_key": "fs.rm.recursive"})
+        )
+    try:
+        summary = db.get_team_mission_conversation_runtime_summary("conv-tool")
+        kinds = [entry.get("kind") for entry in summary["pending_approvals"]]
+        assert "tool_approval" in kinds, summary["pending_approvals"]
+        assert summary["pending_approval_count"] >= 1
+
+        projection = db.get_team_mission_conversation_status_projection("conv-tool")
+        assert projection["waiting_approval"] is True
+        assert projection["pending_approval_count"] >= 1
+    finally:
+        with _approval_module._lock:
+            _approval_module._gateway_queues.pop(fake_session_key, None)
+
+
+def test_conversation_runtime_summary_includes_in_process_clarify(tmp_path: Path):
+    """Same for clarify requests (tools.clarify_gateway._entries). Without
+    this, a leader-level clarify popping in the composer would not flip the
+    sidebar indicator to approval/waiting."""
+    from tools import clarify_gateway as _clarify_module
+
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-clarify",
+        team_id="team-y",
+        stable_session_id="team-session-clarify",
+        title="澄清请求",
+        active_mission_id="mission-clarify",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-clarify",
+        conversation_id="conv-clarify",
+        team_id="team-y",
+        title="澄清任务",
+        mode="supervised_mission",
+        status="running",
+        leader_session_id="team-session-clarify",
+    )
+
+    leader_session_key = "team-session-clarify"
+    entry = _clarify_module.register(
+        clarify_id="cid-1",
+        session_key=leader_session_key,
+        question="选哪个?",
+        choices=["A", "B"],
+    )
+    try:
+        summary = db.get_team_mission_conversation_runtime_summary("conv-clarify")
+        kinds = [item.get("kind") for item in summary["pending_approvals"]]
+        assert "clarify" in kinds, summary["pending_approvals"]
+        assert summary["pending_approval_count"] >= 1
+
+        projection = db.get_team_mission_conversation_status_projection("conv-clarify")
+        assert projection["waiting_approval"] is True
+        assert projection["pending_approval_count"] >= 1
+    finally:
+        _clarify_module.clear_session(leader_session_key)
+
+
+def test_approval_state_change_observer_fires_on_submit_and_clear():
+    """The observer registry must call back when a pending approval shows up
+    or clears. The team_mission_approval_observer relies on this to know
+    when to emit a fresh conversation.status event."""
+    from tools import approval as _approval_module
+
+    events: list[tuple[str, bool]] = []
+
+    def observer(session_key: str, present: bool) -> None:
+        events.append((session_key, present))
+
+    _approval_module.register_state_change_observer(observer)
+    try:
+        _approval_module.submit_pending("sess-A", {"command": "test"})
+        _approval_module.clear_session("sess-A")
+        assert ("sess-A", True) in events
+        assert ("sess-A", False) in events
+    finally:
+        with _approval_module._lock:
+            if observer in _approval_module._state_change_observers:
+                _approval_module._state_change_observers.remove(observer)
+
+
+def test_clarify_state_change_observer_fires_on_register_and_clear():
+    from tools import clarify_gateway as _clarify_module
+
+    events: list[tuple[str, bool]] = []
+
+    def observer(session_key: str, present: bool) -> None:
+        events.append((session_key, present))
+
+    _clarify_module.register_state_change_observer(observer)
+    try:
+        _clarify_module.register(
+            clarify_id="cid-x",
+            session_key="sess-B",
+            question="q?",
+            choices=["1", "2"],
+        )
+        _clarify_module.clear_session("sess-B")
+        assert ("sess-B", True) in events
+        assert ("sess-B", False) in events
+    finally:
+        with _clarify_module._lock:
+            if observer in _clarify_module._state_change_observers:
+                _clarify_module._state_change_observers.remove(observer)
+
+
+# -- update_session_index_pending_state_for_session_key --------------------
+# Five resolver paths cover every conversation type. Each test seeds the
+# specific rows that should let a single session_key flip waiting_approval
+# on the right session_index row, and asserts the projection lands.
+
+
+def _read_session_index_flags(db: SessionDB, session_id: str) -> dict:
+    conn = db._conn
+    row = conn.execute(
+        "SELECT running, waiting_approval, active_run_id FROM session_index WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    assert row is not None, f"session_index row missing for {session_id}"
+    return {
+        "running": int(row[0]),
+        "waiting_approval": int(row[1]),
+        "active_run_id": str(row[2] or ""),
+    }
+
+
+def test_pending_state_resolves_direct_session_id_match(tmp_path: Path):
+    """Path 1: normal conversation — session_key IS the session_index row id."""
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_session_index(
+        session_id="sess-normal-1",
+        title="普通会话",
+        session_kind="hermes_session",
+        running=True,
+    )
+
+    rows = db.update_session_index_pending_state_for_session_key(
+        "sess-normal-1", waiting_approval=True,
+    )
+    assert rows == 1
+    flags = _read_session_index_flags(db, "sess-normal-1")
+    assert flags["waiting_approval"] == 1
+    assert flags["running"] == 0  # mutually exclusive
+
+
+def test_pending_state_resolves_runtime_scope_key_match(tmp_path: Path):
+    """Path 2: any agent whose runtime_scope_key was stamped on the row."""
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_session_index(
+        session_id="sess-scope-1",
+        runtime_scope_key="profile:agent-default",
+        title="按 scope 匹配",
+    )
+
+    rows = db.update_session_index_pending_state_for_session_key(
+        "profile:agent-default", waiting_approval=True,
+    )
+    assert rows == 1
+    assert _read_session_index_flags(db, "sess-scope-1")["waiting_approval"] == 1
+
+
+def test_pending_state_resolves_member_node_via_bindings(tmp_path: Path):
+    """Path 3: member node — session_key matches team_mission_run_bindings, the
+    update lands on the session_index row keyed by the binding's mission_id."""
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-member",
+        team_id="team-z",
+        stable_session_id="team-session-member",
+        title="成员节点会话",
+        active_mission_id="mission-member",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-member",
+        conversation_id="conv-member",
+        team_id="team-z",
+        title="成员任务",
+        mode="supervised_mission",
+        status="running",
+    )
+    db.upsert_session_index(
+        session_id="team-session-member",
+        session_kind="team_mission",
+        mission_id="mission-member",
+        conversation_id="conv-member",
+        running=True,
+    )
+    node_scope = "team:mission-member:node:worker-1"
+    db._conn.execute(
+        """
+        INSERT INTO team_mission_run_bindings (
+            run_id, mission_id, node_id, session_id, runtime_session_id,
+            runtime_scope_key, role, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("run-x", "mission-member", "worker-1", "worker-sess", "worker-runtime",
+         node_scope, "member", 0.0, 0.0),
+    )
+    db._conn.commit()
+
+    rows = db.update_session_index_pending_state_for_session_key(
+        node_scope, waiting_approval=True,
+    )
+    # The mission's session_index row(s) keyed by mission_id flip — there can
+    # be more than one (e.g. a per-conversation row + a team-level aggregate
+    # row that share the same mission_id), all legitimate targets.
+    assert rows >= 1
+    assert _read_session_index_flags(db, "team-session-member")["waiting_approval"] == 1
+
+
+def test_pending_state_resolves_team_conv_via_stable_session_id(tmp_path: Path):
+    """Path 4: leader-level session_key == stable_session_id on the team conv."""
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-stable",
+        team_id="team-z",
+        stable_session_id="team-session-stable",
+        title="团队会话",
+        active_mission_id="mission-stable",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-stable",
+        conversation_id="conv-stable",
+        team_id="team-z",
+        title="任务",
+        mode="supervised_mission",
+        status="running",
+    )
+    db.upsert_session_index(
+        session_id="team-session-stable",
+        session_kind="team_mission",
+        mission_id="mission-stable",
+        conversation_id="conv-stable",
+        running=True,
+    )
+
+    rows = db.update_session_index_pending_state_for_session_key(
+        "team-session-stable", waiting_approval=True,
+    )
+    assert rows >= 1
+    flags = _read_session_index_flags(db, "team-session-stable")
+    assert flags["waiting_approval"] == 1
+    assert flags["running"] == 0
+
+
+def test_pending_state_resolves_leader_runtime_scope_key_pattern(tmp_path: Path):
+    """Path 5: leader runtime scope ``team:<conv_id>:leader-conversation`` is
+    parsed and matched by session_index.conversation_id. This is the path
+    that was missing — leader clarify never reached the sidebar."""
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-leader",
+        team_id="team-z",
+        stable_session_id="team-session-leader",
+        title="leader scope 会话",
+        active_mission_id="mission-leader",
+    )
+    db.upsert_session_index(
+        session_id="team-session-leader",
+        session_kind="team_mission",
+        conversation_id="conv-leader",
+        running=True,
+    )
+
+    rows = db.update_session_index_pending_state_for_session_key(
+        "team:conv-leader:leader-conversation", waiting_approval=True,
+    )
+    assert rows == 1
+    flags = _read_session_index_flags(db, "team-session-leader")
+    assert flags["waiting_approval"] == 1
+    assert flags["running"] == 0
+
+
+def test_pending_state_clear_restores_running_when_active_run_id_present(tmp_path: Path):
+    """When the in-process clarify/approval resolves, waiting_approval clears
+    to 0. If the row still has an active_run_id (the run kept executing
+    while the user was answering), running must flip back to 1 immediately
+    so the sidebar spinner reappears without waiting for the next run-state
+    projection."""
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_session_index(
+        session_id="sess-clear-1",
+        active_run_id="run-still-running",
+        waiting_approval=True,
+        running=False,
+    )
+
+    rows = db.update_session_index_pending_state_for_session_key(
+        "sess-clear-1", waiting_approval=False,
+    )
+    assert rows == 1
+    flags = _read_session_index_flags(db, "sess-clear-1")
+    assert flags["waiting_approval"] == 0
+    assert flags["running"] == 1  # restored from active_run_id
+
+
+def test_pending_state_clear_leaves_running_zero_without_active_run_id(tmp_path: Path):
+    """And the symmetric case: clear with no active_run_id leaves running=0
+    (idle conversation that the user cancelled mid-clarify)."""
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_session_index(
+        session_id="sess-clear-2",
+        active_run_id="",
+        waiting_approval=True,
+        running=False,
+    )
+
+    db.update_session_index_pending_state_for_session_key(
+        "sess-clear-2", waiting_approval=False,
+    )
+    flags = _read_session_index_flags(db, "sess-clear-2")
+    assert flags["waiting_approval"] == 0
+    assert flags["running"] == 0
+
+
+def test_pending_state_unknown_session_key_returns_zero(tmp_path: Path):
+    """A session_key that does not resolve to any row must be a no-op (no
+    spurious INSERT, no exception, return 0)."""
+    db = SessionDB(tmp_path / "state.db")
+    rows = db.update_session_index_pending_state_for_session_key(
+        "nothing-anywhere", waiting_approval=True,
+    )
+    assert rows == 0

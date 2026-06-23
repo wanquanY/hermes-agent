@@ -639,32 +639,86 @@ class SessionDBRunMixin:
         if not sid:
             return
         is_active = str(status or "") not in TERMINAL_RUN_STATUSES
+        # Resolve the bound team-mission conversation row, if this run belongs to
+        # a team mission. A node run uses session_id = "team:mission-X:node:Y"
+        # which is NOT the conversation row the sidebar reads, so without this
+        # extra hop a worker/verifier/synthesis run never reaches the sidebar.
+        conv_sid = ""
+        try:
+            row = conn.execute(
+                """
+                SELECT tmc.stable_session_id
+                  FROM team_mission_run_bindings tmrb
+                  JOIN team_missions tm
+                    ON tm.mission_id = tmrb.mission_id
+                  JOIN team_mission_conversations tmc
+                    ON tmc.conversation_id = tm.conversation_id
+                 WHERE tmrb.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if row:
+                conv_sid = str(row[0] or "").strip()
+        except sqlite3.OperationalError:
+            conv_sid = ""
         try:
             if is_active:
-                cur = conn.execute(
-                    """
-                    UPDATE session_index
-                       SET running = 1, status = 'running',
-                           active_run_id = ?, active_runtime_session_id = ?,
-                           updated_at = MAX(updated_at, ?)
-                     WHERE session_id = ?
-                    """,
-                    (run_id, str(runtime_session_id or ""), float(updated_at or 0), sid),
-                )
-                logger.warning(
-                    "[doxie-session-index] project_run set_running session_id=%s run_id=%s status=%s rows=%s",
-                    sid, run_id, status, cur.rowcount,
-                )
+                # Asymmetric design: this hook is the "lit" signal — set running
+                # whenever any relevant run is active. It updates BOTH the run's
+                # own session row AND, if the run is bound to a team mission, the
+                # conversation's session row. The "unlit" signal (clear) is
+                # owned exclusively by mission lifecycle for team_mission rows
+                # below, so we never need to worry about flicker between sibling
+                # runs in a mission.
+                if conv_sid and conv_sid != sid:
+                    cur = conn.execute(
+                        """
+                        UPDATE session_index
+                           SET running = 1, status = 'running',
+                               active_run_id = ?, active_runtime_session_id = ?,
+                               updated_at = MAX(updated_at, ?)
+                         WHERE session_id IN (?, ?)
+                        """,
+                        (run_id, str(runtime_session_id or ""), float(updated_at or 0), sid, conv_sid),
+                    )
+                    logger.warning(
+                        "[doxie-session-index] project_run set_running session_id=%s conv_session_id=%s run_id=%s status=%s rows=%s",
+                        sid, conv_sid, run_id, status, cur.rowcount,
+                    )
+                else:
+                    cur = conn.execute(
+                        """
+                        UPDATE session_index
+                           SET running = 1, status = 'running',
+                               active_run_id = ?, active_runtime_session_id = ?,
+                               updated_at = MAX(updated_at, ?)
+                         WHERE session_id = ?
+                        """,
+                        (run_id, str(runtime_session_id or ""), float(updated_at or 0), sid),
+                    )
+                    logger.warning(
+                        "[doxie-session-index] project_run set_running session_id=%s run_id=%s status=%s rows=%s",
+                        sid, run_id, status, cur.rowcount,
+                    )
             else:
-                # Only clear when this run was the active one (don't clobber a
-                # different concurrently-active run for the same session).
+                # Clear path for non-team-mission rows works as before. For
+                # team_mission rows, the clear MUST come from mission lifecycle
+                # (reduce_team_mission_graph → update_session_index_for_mission
+                # when mission status becomes terminal, or cancel_team_mission).
+                # A single run terminating mid-mission must not blank the sidebar:
+                # member-node runs come and go all the time, the leader's start_
+                # task tool turn ends right after starting a mission, and synthesis
+                # cycles through more runs — clearing on any of these caused the
+                # exact "canvas executing but sidebar idle" symptom.
                 cur = conn.execute(
                     """
                     UPDATE session_index
                        SET running = 0, status = 'idle',
                            active_run_id = '', active_runtime_session_id = '',
                            updated_at = MAX(updated_at, ?)
-                     WHERE session_id = ? AND (active_run_id = ? OR active_run_id = '')
+                     WHERE session_id = ?
+                       AND session_kind != 'team_mission'
+                       AND (active_run_id = ? OR active_run_id = '')
                     """,
                     (float(updated_at or 0), sid, run_id),
                 )
