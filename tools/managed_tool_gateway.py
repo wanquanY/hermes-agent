@@ -165,3 +165,33 @@ def is_managed_tool_gateway_ready(
         gateway_builder=gateway_builder,
         token_reader=token_reader,
     ) is not None
+
+
+# --- peek_nous_access_token backfill ---
+# Backfilled because absorbed cherry-pick `09cfdcd31 fix(tools):
+# percent-encode non-ascii URL components` (originally upstream
+# 333f01bc7) imports peek_nous_access_token. The upstream commit that
+# DEFINED it (an earlier refactor) wasn't on the absorption list because
+# it didn't fall under any P0/P1 category. Adding the verbatim upstream
+# implementation here so the import resolves.
+def peek_nous_access_token():
+    """Cheap probe for a Nous gateway token without triggering refresh.
+
+    Availability scans (`hermes tools`, banner/status paint, provider
+    `is_available()` checks) must stay off the synchronous OAuth refresh
+    path. This helper only inspects the explicit env override and the
+    cached auth-store token; expiry checks and refreshes belong to the
+    request/session paths that call :func:`read_nous_access_token`.
+    """
+    import os as _os
+    explicit = _os.getenv("TOOL_GATEWAY_USER_TOKEN")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    try:
+        nous_provider = _read_nous_provider_state() or {}
+    except Exception:
+        return None
+    access_token = nous_provider.get("access_token")
+    if isinstance(access_token, str) and access_token.strip():
+        return access_token.strip()
+    return None
