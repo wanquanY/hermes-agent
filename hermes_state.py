@@ -5347,3 +5347,52 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 (error[:500], session_id),
             )
         self._execute_write(_do)
+
+
+# --- compression-lock backfill (in-process implementation) ---
+# Upstream `try_acquire_compression_lock` / `release_compression_lock`
+# live in commits that 3-way-merge poorly against dovie's session_index
+# work on hermes_state.py, so we SKIP'd them. But other absorbed
+# compression commits (notably 1fbf48d4a, 466345699, a77bc2c08) reference
+# these methods and tests/agent/test_compression_concurrent_fork.py
+# asserts that a held lock makes _compress_context skip.
+#
+# A SQLite-backed `compression_locks` table is overkill for dovie's
+# single-process desktop runtime — concurrent compaction on the same
+# session only happens when two threads inside the SAME process race,
+# never across processes. A thread-safe in-memory dict has identical
+# semantics for that case. If/when dovie deploys multi-process gateways,
+# absorb the upstream SQL-backed version.
+import threading as _compression_lock_threading
+_compression_locks: dict = {}
+_compression_locks_lock = _compression_lock_threading.Lock()
+
+
+def _backfilled_try_acquire_compression_lock(
+    self, session_id: str, holder: str, ttl_seconds: float = 300.0
+) -> bool:
+    if not session_id:
+        return False
+    now = time.time()
+    with _compression_locks_lock:
+        existing = _compression_locks.get(session_id)
+        if existing and existing["expires_at"] > now:
+            return existing["holder"] == holder
+        _compression_locks[session_id] = {
+            "holder": holder,
+            "expires_at": now + ttl_seconds,
+        }
+        return True
+
+
+def _backfilled_release_compression_lock(self, session_id: str, holder: str) -> None:
+    if not session_id:
+        return
+    with _compression_locks_lock:
+        existing = _compression_locks.get(session_id)
+        if existing and existing["holder"] == holder:
+            del _compression_locks[session_id]
+
+
+SessionDB.try_acquire_compression_lock = _backfilled_try_acquire_compression_lock
+SessionDB.release_compression_lock = _backfilled_release_compression_lock
