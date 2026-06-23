@@ -259,6 +259,29 @@ _THINKING_SIG_PATTERNS = [
     "signature",  # Combined with "thinking" check
 ]
 
+# Deterministic request-validation errors that 5xx-gateway servers sometimes
+# wrap (codex.nekos.me returns 502 for unknown/unsupported parameters).
+# Backfilled from upstream 6212e9ade/2ce3ae3d1 (not on the absorption list but
+# referenced by code that did absorb).
+_REQUEST_VALIDATION_PATTERNS = [
+    "unknown parameter",
+    "unsupported parameter",
+    "unrecognized request argument",
+    "invalid_request_error",
+    "unknown_parameter",
+    "unsupported_parameter",
+]
+
+# Provider safety-filter / content-policy refusals. Determinate per-prompt —
+# retrying unchanged just reproduces the refusal. Backfilled placeholder so
+# refs from absorbed commits do not NameError.
+_CONTENT_POLICY_BLOCKED_PATTERNS = [
+    "content policy",
+    "content_policy",
+    "safety filter",
+    "content_filter",
+]
+
 # Message-string patterns that indicate a provider-side timeout even when
 # the exception type is generic (e.g. RuntimeError from a local shim that
 # wraps a subprocess timeout).  Checked before the type-based transport
