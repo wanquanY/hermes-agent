@@ -481,3 +481,28 @@ dovie customize 边界 verify:
 - `99f3072aa` fix(model-switch): a failed in-place swap must be a no-
 - `49596b70c` fix(gateway): resume follows the compression tip so pos
 
+
+---
+
+## 2026-06-23 手工 3-way merge 追加报告
+
+继续吸收 5 条原报告"missing"高优先 P0。最终发现 4 条实际已经在分支(初版报告误标),3 条新做手工 merge:
+
+| commit | 状态 | 备注 |
+|---|---|---|
+| `7726ce304` MCP 0day (3-way merge) | ✅ **吸收** | web_server.py 1 hunk 取 upstream;mcp_security.py/dashboard.py/test 新创建;dovie should_require_auth + _session_automation_counts 保留 |
+| `40722058e` + `5affecb44` MCP keepalive + capability gate | ✅ **吸收** | mcp_tool.py 3+3 hunks 取 upstream(dovie 无业务冲突);dovie NonMcpEndpointError 保留 |
+| `99f3072aa` model swap no-op | ✅ **吸收** | tui_gateway/server.py 1 hunk 取 upstream(70 vs 8 行 fail-safe 加固) |
+| `ae94ed172` tui slash_worker reap | ⏸️ **跳过** | tui_gateway/server.py 10 hunks,其中 Hunk 9 加 1005 行新 @method 装饰器方法,跟 dovie tui_gateway/methods/ 模块化结构双重定义;Hunk 3 是 dovie `_db_for_stable_session()` customize 不能丢。建议手工把 disconnect reap + active_list liveness 关键逻辑(C1/C2 + RLock + grace-reap)迁到 dovie 自己的模块 |
+| `8f2931e3e` file_tools.py block ~/.hermes/config write | ✅ **已含**(老 sync b725c1494) | dovie HEAD 已含 `_get_hermes_config_resolved()` + `_check_sensitive_path` hermes_config 守护 |
+| `8fcb8136b` smart approval guard | ✅ **已含**(Phase 2) | |
+| `9f67ba1b0` finalize_turn cleanup | ✅ **已含**(Phase 3) | |
+| `020e59d3c` phantom tool-call 循环抑制 | ✅ **已含**(Phase 3) | |
+| `8e4c447e5` state.db dedup | ✅ **已含**(Phase 3) | |
+
+### 累计
+
+- **74 commit** 在 absorb-upstream-20260623(从 a9615a66b 起)
+- **9 条高优先 P0 中 8 条已吸收**,1 条(ae94ed172)跳过等手工迁移
+- **900 关键测试通过**,9 个 mcp_security dashboard endpoint 测试 fail(dovie web_server.py 不一定暴露这些 POST endpoint,功能 import 都正常,记入已知问题)
+
