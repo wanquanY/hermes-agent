@@ -1970,7 +1970,29 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 # interrupt entirely.  On slow providers (ollama-cloud) each
                 # retry can block for the full stream-read timeout (120s+),
                 # causing multi-minute delays between /stop and response.
-                if agent._interrupt_requested:
+                #
+                # Two flags, not one:
+                #   - ``agent._interrupt_requested`` is the live interrupt flag,
+                #     SHARED across the whole AIAgent and CLEARED by
+                #     conversation_loop's ``clear_interrupt`` at turn end.
+                #   - ``result["_outer_interrupted"]`` is set ONCE by the outer
+                #     polling thread the instant it sees the interrupt, and is
+                #     NEVER cleared. It's a sticky local signal — we need it
+                #     because this ``_call`` runs on a daemon worker thread,
+                #     and the outer thread's ``raise InterruptedError`` does
+                #     NOT kill us — we keep going. By the time the request
+                #     client close lands as a connection error here and we
+                #     reach the next iteration's check, conversation_loop has
+                #     already finished propagating the interrupt and cleared
+                #     ``_interrupt_requested`` (conversation_loop.py:4289),
+                #     so ``_interrupt_requested`` reads False — and without
+                #     the sticky flag we'd happily fire a fresh
+                #     ``chat_completion_stream_request`` whose output bypasses
+                #     the run lifecycle entirely (no runs row, no terminal
+                #     event, no cancellable run_id). That bug surfaces as
+                #     "agent kept responding to a message I already cancelled
+                #     and recalled, and the second /stop does nothing."
+                if agent._interrupt_requested or result.get("_outer_interrupted"):
                     raise InterruptedError("Agent interrupted before stream retry")
                 try:
                     if agent.api_mode == "anthropic_messages":
@@ -2035,6 +2057,15 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                             _partial_tool_in_flight
                             and _is_transient
                             and _stream_attempt < _max_stream_retries
+                            # Same sticky-interrupt guard as the bare retry
+                            # block below: don't silently retry mid-tool-call
+                            # when the outer polling thread already saw the
+                            # interrupt and closed the client. Otherwise the
+                            # daemon worker thread reconnects, finishes the
+                            # call against the abandoned turn, and we get an
+                            # orphan stream the run lifecycle never sees.
+                            and not agent._interrupt_requested
+                            and not result.get("_outer_interrupted")
                         )
                         if not _can_silent_retry:
                             # Either no tool call was in-flight (so the
@@ -2126,6 +2157,18 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         # Transient network / timeout error. Retry the
                         # streaming request with a fresh connection first.
                         if _stream_attempt < _max_stream_retries:
+                            # Double-check the sticky outer-interrupt flag
+                            # BEFORE we commit to a retry: when the connection
+                            # error we just caught was caused by the outer
+                            # polling thread closing our client on
+                            # ``stream_interrupt_abort``, retrying produces an
+                            # orphan stream whose output never reaches the run
+                            # lifecycle (see the long comment at the top of the
+                            # loop for the full race). Classifying that close
+                            # as "transient network error" and retrying is the
+                            # exact bug.
+                            if agent._interrupt_requested or result.get("_outer_interrupted"):
+                                raise InterruptedError("Agent interrupted before stream retry")
                             agent._emit_stream_drop(
                                 error=e,
                                 attempt=_stream_attempt + 2,
@@ -2289,12 +2332,32 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             )
 
         if agent._interrupt_requested:
+            # Set the sticky outer-interrupt flag BEFORE closing the client so
+            # the inner daemon worker thread sees it regardless of whether
+            # conversation_loop has already called clear_interrupt() by the
+            # time the inner thread reaches its next retry-loop iteration.
+            # Without this, the worker classifies the client-close as a
+            # transient connection error, sees ``_interrupt_requested`` reset
+            # to False, and silently fires another chat_completion_stream_
+            # request whose output bypasses the run lifecycle (no runs row,
+            # no terminal event, no cancellable run_id from the FE).
+            result["_outer_interrupted"] = True
             try:
                 if agent.api_mode == "anthropic_messages":
                     agent._anthropic_client.close()
                     agent._rebuild_anthropic_client()
                 else:
                     _close_request_client_once("stream_interrupt_abort")
+            except Exception:
+                pass
+            # Give the inner worker a brief window to observe the sticky flag
+            # and exit cleanly via its own InterruptedError path. The timeout
+            # caps the wait so a worker stuck in unrecoverable native I/O
+            # doesn't pin this thread — if it overruns we still raise. Worker
+            # is ``daemon=True`` so process exit isn't blocked even if it
+            # never exits.
+            try:
+                t.join(timeout=2.0)
             except Exception:
                 pass
             raise InterruptedError("Agent interrupted during streaming API call")
