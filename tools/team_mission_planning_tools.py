@@ -332,6 +332,7 @@ def _handle_node_create(args: dict[str, Any], parent_agent=None, **_kwargs) -> s
     reduced = db.reduce_team_mission_graph(mission_id)
     graph = reduced.get("graph") if isinstance(reduced, dict) and reduced.get("graph") else db.get_team_mission_graph(mission_id)
     return tool_result(
+        dovie_event="team_mission_node_created",
         success=True,
         mission_id=mission_id,
         node=node,
@@ -383,6 +384,7 @@ def _handle_edge_create(args: dict[str, Any], parent_agent=None, **_kwargs) -> s
     reduced = db.reduce_team_mission_graph(mission_id)
     graph = reduced.get("graph") if isinstance(reduced, dict) and reduced.get("graph") else db.get_team_mission_graph(mission_id)
     return tool_result(
+        dovie_event="team_mission_edge_created",
         success=True,
         mission_id=mission_id,
         edge=edge,
@@ -407,6 +409,7 @@ def _handle_plan_complete(args: dict[str, Any], parent_agent=None, **_kwargs) ->
         return tool_error("Team Mission plan completion failed.")
     graph = result.get("graph") if isinstance(result.get("graph"), dict) else db.get_team_mission_graph(mission_id)
     return tool_result(
+        dovie_event="team_mission_plan_completed",
         success=True,
         mission_id=mission_id,
         mission_status=_text(result.get("mission_status")),

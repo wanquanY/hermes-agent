@@ -143,12 +143,15 @@ def test_team_mission_planning_tools_mutate_graph_from_bound_leader_run(tmp_path
         )
     )
 
+    assert created["dovie_event"] == "team_mission_node_created"
     assert created["node"]["node_id"] == "node-worker"
     assert created["node"]["assignee_member_id"] == "builder"
     assert created["node"]["assignee_profile_id"] == "profile-builder"
+    assert edge["dovie_event"] == "team_mission_edge_created"
     assert synthesis["node"]["assignee_member_id"] == "leader"
     assert synthesis["node"]["assignee_profile_id"] == "profile-leader"
     assert edge["edge"]["to_node_id"] == "node-worker"
+    assert completed["dovie_event"] == "team_mission_plan_completed"
     assert completed["mission_status"] == "waiting_approval"
     assert completed["approval_requests"][0]["scope"] == "whole_graph"
 

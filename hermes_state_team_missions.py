@@ -2179,6 +2179,34 @@ class SessionDBTeamMissionMixin:
                 kind=edge.kind,
                 metadata=edge.metadata,
             )
+        # Light up the sidebar immediately when a team task starts. Without this
+        # the conversation's session_index row stays running=0 until something
+        # else triggers a status projection — and nothing does for the initial
+        # planning state (reduce_team_mission_graph only projects on a status
+        # CHANGE, and the leader's root planning run uses a node session id
+        # team:mission-X:node:root that does NOT match the conversation's
+        # session_index row, so the run-write projection updates a different
+        # row). Result: starting a new team task left the sidebar idle until
+        # synthesis finally landed.
+        ms = str(patch.mission_status or "").lower()
+        if ms in _TERMINAL_MISSION_STATUSES:
+            idx_status, idx_running, idx_waiting = "idle", False, False
+        elif ms == "waiting_approval":
+            idx_status, idx_running, idx_waiting = "waiting_approval", False, True
+        elif ms:
+            idx_status, idx_running, idx_waiting = "running", True, False
+        else:
+            idx_status, idx_running, idx_waiting = "", False, False
+        if idx_status:
+            try:
+                self.update_session_index_for_mission(
+                    mission_id,
+                    status=idx_status,
+                    running=idx_running,
+                    waiting_approval=idx_waiting,
+                )
+            except Exception:
+                pass
         return self.get_team_mission_graph(mission_id)
 
     def upsert_team_mission_node(

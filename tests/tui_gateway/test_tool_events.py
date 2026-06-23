@@ -99,6 +99,30 @@ def test_agent_profile_test_uses_dedicated_stream_events():
     assert events[7]["payload"]["result"]["dovie_event"] == "agent_profile_test_completed"
 
 
+def test_agent_profile_design_context_emits_structured_complete_when_tool_progress_disabled():
+    events = []
+    bridge = _bridge(events, tool_progress_enabled=False)
+
+    bridge.on_tool_complete(
+        "sid",
+        "tool-1",
+        "design_agent_profile",
+        {"operation": "inspect_context"},
+        json.dumps(
+            {
+                "dovie_event": "agent_profile_design_context",
+                "catalogKind": "overview",
+                "catalogQueries": {"toolsets": "inspect toolsets"},
+                "rules": {"allowedCategories": ["工作"]},
+            }
+        ),
+    )
+
+    assert [event["type"] for event in events] == ["tool.complete"]
+    assert events[0]["payload"]["result"]["dovie_event"] == "agent_profile_design_context"
+    assert events[0]["payload"]["result"]["catalogKind"] == "overview"
+
+
 def test_team_mission_start_task_emits_structured_complete_when_tool_progress_disabled():
     events = []
     bridge = _bridge(events, tool_progress_enabled=False)
@@ -136,6 +160,73 @@ def test_team_mission_start_task_emits_structured_complete_when_tool_progress_di
     assert result["conversation_id"] == "conversation-1"
     assert result["node"] == {"node_id": "node-1"}
     assert result["run"] == {"run_id": "run-node-1"}
+
+
+def test_team_mission_planning_tools_emit_structured_complete_when_tool_progress_disabled():
+    events = []
+    bridge = _bridge(events, tool_progress_enabled=False)
+
+    bridge.on_tool_complete(
+        "sid",
+        "tool-1",
+        "team_mission_node_create",
+        {"node_id": "node-1"},
+        json.dumps(
+            {
+                "dovie_event": "team_mission_node_created",
+                "success": True,
+                "mission_id": "mission-1",
+                "node": {"node_id": "node-1", "title": "Plan node"},
+                "graph_summary": {"node_count": 2},
+                "graph": {"large": "raw graph should not be forwarded"},
+            }
+        ),
+    )
+    bridge.on_tool_complete(
+        "sid",
+        "tool-2",
+        "team_mission_edge_create",
+        {"from_node_id": "node-1", "to_node_id": "node-2"},
+        json.dumps(
+            {
+                "dovie_event": "team_mission_edge_created",
+                "success": True,
+                "mission_id": "mission-1",
+                "edge": {"edge_id": "edge-1", "from_node_id": "node-1", "to_node_id": "node-2"},
+                "graph_summary": {"edge_count": 1},
+            }
+        ),
+    )
+    bridge.on_tool_complete(
+        "sid",
+        "tool-3",
+        "team_mission_plan_complete",
+        {},
+        json.dumps(
+            {
+                "dovie_event": "team_mission_plan_completed",
+                "success": True,
+                "mission_id": "mission-1",
+                "mission_status": "waiting_approval",
+                "approval_requests": [{"scope": "whole_graph"}],
+                "auto_start_ready_nodes": False,
+                "graph_summary": {"node_count": 3},
+                "graph": {"large": "raw graph should not be forwarded"},
+            }
+        ),
+    )
+
+    assert [event["type"] for event in events] == ["tool.complete", "tool.complete", "tool.complete"]
+    assert events[0]["payload"]["result"] == {
+        "dovie_event": "team_mission_node_created",
+        "success": True,
+        "mission_id": "mission-1",
+        "node": {"node_id": "node-1", "title": "Plan node"},
+        "graph_summary": {"node_count": 2},
+    }
+    assert events[1]["payload"]["result"]["dovie_event"] == "team_mission_edge_created"
+    assert events[2]["payload"]["result"]["dovie_event"] == "team_mission_plan_completed"
+    assert "graph" not in events[2]["payload"]["result"]
 
 
 def test_tool_boundary_hook_runs_even_when_progress_events_are_disabled():

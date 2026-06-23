@@ -407,3 +407,84 @@ def test_reconcile_clears_stale_active_run_on_already_idle_terminal_mission(tmp_
     item = db.list_session_index()["sessions"][0]
     assert item["active_run_id"] == ""
     assert item["active_runtime_session_id"] == ""
+
+
+def test_initialize_team_mission_lights_up_sidebar_immediately(tmp_path: Path):
+    """Symptom A: starting a new team task left the sidebar idle the whole time
+    the task was executing — running came back only at the synthesis stage.
+
+    Root cause: initialize_team_mission_from_strategy creates the mission and
+    nodes, but no projection sets session_index.running=1 for the *initial*
+    planning state. The reducer only projects on a status CHANGE, and the
+    leader root planning run uses a team:mission:node:root session id that does
+    not match the conversation's session_index row, so the run-write projection
+    updates a different row. The conversation's row therefore stays running=0.
+
+    Fix: initialize_team_mission_from_strategy now explicitly projects the
+    patch's mission_status onto the conversation's session_index row at the end
+    of mission init."""
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-a", team_id="t", stable_session_id="team-session-a",
+        title="t",
+    )
+    # Conversation row exists, running=0 by default.
+    sessions = db.list_session_index()["sessions"]
+    row = next(s for s in sessions if s["session_id"] == "team-session-a")
+    assert row["running"] is False
+
+    db.initialize_team_mission_from_strategy(
+        mission_id="m-a",
+        conversation_id="conv-a",
+        team_id="t",
+        title="Test",
+        objective="o",
+        mode="supervised_mission",
+        leader_session_id="team-session-a",
+        members=[],
+    )
+
+    sessions = db.list_session_index()["sessions"]
+    row = next(s for s in sessions if s["session_id"] == "team-session-a")
+    assert row["running"] is True, "sidebar must light up immediately when a team task starts"
+    assert row["mission_id"] == "m-a"
+
+
+def test_reconcile_clears_team_mission_row_with_terminal_active_run(tmp_path: Path):
+    """Symptom B: a team conversation whose leader run had completed cleanly
+    still showed running=1 because the run-write projection was missed under
+    some path (observed in the production DB for a draft mission that never
+    transitioned out of draft, so the mission-status heal also did not fire).
+
+    The reconcile heal previously only covered non-team_mission sessions and
+    team_mission sessions whose mission was already terminal. A team_mission
+    session whose mission was 'draft' but whose active_run was 'completed' fell
+    through both cleaners and stayed stuck. Fix: extend the active-run heal to
+    cover team_mission rows too."""
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("team-session-stuck", source="team_mission")
+    # The run terminated cleanly in the runs table…
+    db.upsert_run(run_id="run-completed", session_id="team-session-stuck", status="completed")
+    # …but the session_index row never got cleared (production reproduces this
+    # when the run-write projection is bypassed on the leader's conversation
+    # run ending — observed in the live DB). Re-set the stuck state AFTER the
+    # run is terminal so the heal has real work to do.
+    db.upsert_session_index(
+        session_id="team-session-stuck",
+        session_kind="team_mission",
+        status="running",
+        running=True,
+        active_run_id="run-completed",
+        active_runtime_session_id="rt-x",
+        mission_id="m-draft",
+        conversation_id="conv-stuck",
+        started_at=1.0,
+        updated_at=1.0,
+    )
+
+    db.reconcile_session_index()
+
+    row = next(s for s in db.list_session_index()["sessions"] if s["session_id"] == "team-session-stuck")
+    assert row["running"] is False
+    assert row["active_run_id"] == ""
+    assert row["status"] == "idle"

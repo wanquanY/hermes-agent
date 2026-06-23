@@ -23,6 +23,9 @@ DOVIE_STRUCTURED_RESULT_TOOLS = {
     "dovie_automation_task_update",
     "dovie_automation_task_remove",
     "team_mission_start_task",
+    "team_mission_node_create",
+    "team_mission_edge_create",
+    "team_mission_plan_complete",
 }
 
 
@@ -126,6 +129,42 @@ def _dovie_structured_tool_result(name: str, result: str) -> dict | None:
             "task_status": str(data.get("task_status") or control.get("mission_status") or "").strip(),
             "await_final_deliverable": bool(data.get("await_final_deliverable") or control.get("await_final_deliverable")),
         }
+    if name == "team_mission_node_create":
+        node = data.get("node")
+        if not isinstance(node, dict):
+            return None
+        return {
+            "dovie_event": "team_mission_node_created",
+            "success": bool(data.get("success")),
+            "mission_id": str(data.get("mission_id") or "").strip(),
+            "node": node,
+            "graph_summary": data.get("graph_summary") if isinstance(data.get("graph_summary"), dict) else {},
+        }
+    if name == "team_mission_edge_create":
+        edge = data.get("edge")
+        if not isinstance(edge, dict):
+            return None
+        return {
+            "dovie_event": "team_mission_edge_created",
+            "success": bool(data.get("success")),
+            "mission_id": str(data.get("mission_id") or "").strip(),
+            "edge": edge,
+            "graph_summary": data.get("graph_summary") if isinstance(data.get("graph_summary"), dict) else {},
+        }
+    if name == "team_mission_plan_complete":
+        if not data.get("mission_id"):
+            return None
+        return {
+            "dovie_event": "team_mission_plan_completed",
+            "success": bool(data.get("success")),
+            "mission_id": str(data.get("mission_id") or "").strip(),
+            "mission_status": str(data.get("mission_status") or "").strip(),
+            "approval_requests": data.get("approval_requests") if isinstance(data.get("approval_requests"), list) else [],
+            "auto_start_ready_nodes": bool(data.get("auto_start_ready_nodes")),
+            "graph_summary": data.get("graph_summary") if isinstance(data.get("graph_summary"), dict) else {},
+        }
+    if name == "design_agent_profile" and event_name == "agent_profile_design_context":
+        return data
     if event_name not in {
         "agent_profile_draft_requested",
         "agent_profile_design_draft_requested",
