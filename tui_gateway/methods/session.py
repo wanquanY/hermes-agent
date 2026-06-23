@@ -179,6 +179,15 @@ def _live_sessions_by_stored_key() -> dict[str, tuple[str, dict]]:
         snapshot = list(_sessions.items())
     live: dict[str, tuple[str, dict]] = {}
     for sid, session in snapshot:
+        # Skip sessions whose teardown chokepoint has already run. Otherwise
+        # the active-list count would monotonically grow until gateway
+        # restart, as zombie rows accumulate between _finalize_session
+        # marking them and the next idle-reap actually popping them.
+        # Ported from upstream ae94ed172 review-driven fix; keys on
+        # _finalized only (NOT on a stdio sentinel) so a standalone
+        # `hermes --tui` session stays visible.
+        if (session or {}).get("_finalized"):
+            continue
         key = str((session or {}).get("session_key") or "")
         if not key:
             continue

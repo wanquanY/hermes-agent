@@ -22,6 +22,12 @@ class SlashWorker:
     def __init__(self, session_key: str, model: str):
         self._lock = threading.Lock()
         self._seq = 0
+        # _closed makes close() idempotent: every teardown path (session.close,
+        # WS disconnect, idle reaper, shutdown, WS-orphan grace-reap) can call
+        # close() without a concurrent caller already having walked the
+        # terminate->wait->kill sequence stalling on a zombie. Ported from
+        # upstream ae94ed172 (tui-gateway: reap leaked slash_worker sessions).
+        self._closed = False
         self.stderr_tail: list[str] = []
         self.stdout_queue: queue.Queue[dict | None] = queue.Queue()
 
@@ -89,6 +95,13 @@ class SlashWorker:
             )
 
     def close(self):
+        # Idempotent: any teardown path can call close() at any time. Without
+        # this guard a second close() racing the first would block in
+        # proc.wait() on a process the first call has already reaped, or
+        # double-signal a process whose pid has been recycled.
+        if self._closed:
+            return
+        self._closed = True
         try:
             if self.proc.poll() is None:
                 self.proc.terminate()

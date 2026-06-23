@@ -509,11 +509,36 @@ async def handle_ws(ws: Any) -> None:
         await transport.aclose()
         _log.info("gateway ws closed %s", transport._diagnostics())
 
-        # Detach the transport from any sessions it owned so later emits
-        # fall back to stdio instead of crashing into a closed socket.
-        for _, sess in list(server._sessions.items()):
-            if sess.get("transport") is transport:
-                sess["transport"] = server._stdio_transport
+        # C1 disconnect reap (ported from upstream ae94ed172): hand off to
+        # server._close_sessions_for_transport, which (a) tears down sessions
+        # that opted in via close_on_disconnect (dovie sidecar / dashboard
+        # embed) immediately via the unified _close_session_by_id path, and
+        # (b) detaches the rest by re-pointing their transport at stdio so
+        # later emits don't hit a dead socket. The teardown is offloaded to a
+        # thread because worker.close() + DB write inside _finalize_session
+        # can take 50-200ms; running it inline would stall the uvicorn event
+        # loop for any other concurrent socket.
+        try:
+            reaped, detached = await asyncio.to_thread(
+                server._close_sessions_for_transport,
+                transport,
+                end_reason="ws_disconnect",
+            )
+            if reaped or detached:
+                _log.info(
+                    "gateway ws disconnect reap: reaped=%d detached=%d %s",
+                    reaped, detached, transport._diagnostics(),
+                )
+        except Exception:
+            _log.exception(
+                "gateway ws disconnect reap failed %s",
+                transport._diagnostics(),
+            )
+            # Fallback: the legacy in-place detach so a half-open transport
+            # never lingers as a write target even if the reap path raised.
+            for _, sess in list(server._sessions.items()):
+                if sess.get("transport") is transport:
+                    sess["transport"] = server._stdio_transport
 
         try:
             await ws.close()

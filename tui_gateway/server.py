@@ -182,7 +182,11 @@ _db_error_by_home: dict[str, str] = {}
 _GATEWAY_INSTANCE_ID = uuid.uuid4().hex
 _stdout_lock = threading.Lock()
 _cfg_lock = threading.Lock()
-_sessions_lock = threading.Lock()
+# RLock so the helpers below (_attach_worker, _close_session_by_id) can be
+# called from inside an outer `with _sessions_lock` block without
+# self-deadlocking. Ported from upstream ae94ed172 (fix(tui-gateway): reap
+# leaked slash_worker sessions on disconnect).
+_sessions_lock = threading.RLock()
 _prompt_lock = threading.Lock()
 _session_resume_lock = threading.Lock()
 _profile_env_lock = threading.RLock()
@@ -553,6 +557,140 @@ def _db_unavailable_error(rid, *, code: int):
         db_error_by_home=_db_error_by_home,
     )
     return _err(rid, code, f"state.db unavailable: {detail}")
+
+
+# --- session lifecycle helpers (ported from upstream ae94ed172) ---
+#
+# These close two long-standing leak / race classes in the tui-gateway:
+#
+# C1 (disconnect reap): when a websocket transport dies (uvicorn drops the
+#     socket on a half-open peer, reverse-proxy returns 524, the renderer
+#     hard-quits), every session attached to that transport must reach a
+#     single, idempotent teardown chokepoint — otherwise the
+#     `session.active_list` count grows monotonically until the gateway is
+#     restarted, slash_worker subprocesses leak, and tools/approval keeps
+#     dispatching to a dead WS notify hook. See _close_sessions_for_transport
+#     and _close_session_by_id below.
+#
+# C2 (create/close race): the slash_worker spawn path is *not* under the
+#     sessions lock (subprocess start is slow; we don't want to block
+#     anything else taking the lock). Between "spawn worker" and "attach
+#     worker to session dict", a concurrent teardown can pop the session,
+#     in which case the freshly-spawned worker would be orphaned forever
+#     (no one holds a reference, but the subprocess is still running and
+#     holding its PTY). _attach_worker re-checks under the lock and closes
+#     the worker if the session is gone.
+#
+# Idempotency: every teardown path (session.close, ws disconnect, idle
+# reaper, shutdown, ws-orphan-reap) reaches _close_session_by_id ->
+# _finalize_session, and _finalize_session is guarded by the `_finalized`
+# flag (already present), so concurrent / repeat calls are no-ops.
+
+
+def _attach_worker(sid: str, session: dict, worker) -> None:
+    """Store ``worker`` on ``session`` iff ``sid`` still maps to it.
+
+    Closes the create/close race (C2): between spawning the slash_worker
+    subprocess and adding it to ``session["slash_worker"]``, a concurrent
+    teardown can pop ``_sessions[sid]``. Without this re-check we'd leak
+    the worker subprocess (and its PTY). Caller must already have spawned
+    the worker; this function decides whether to keep or close it.
+
+    Call sites: every place that calls ``_SlashWorker(...)`` then assigns
+    it to a session dict — line ~945, ~1661 (_restart_slash_worker),
+    ~2376 (session.create dovie path).
+    """
+    with _sessions_lock:
+        if _sessions.get(sid) is session:
+            session["slash_worker"] = worker
+            return
+    # Session was popped concurrently — worker is now an orphan. Close it
+    # outside the lock since worker.close() can block on subprocess wait.
+    try:
+        worker.close()
+    except Exception:
+        pass
+
+
+def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
+    """Single idempotent teardown for one session.
+
+    Pops the session under ``_sessions_lock`` (RLock — safe to re-enter via
+    _finalize_session, which itself doesn't take this lock but is sometimes
+    called from inside `with _sessions_lock` blocks elsewhere). The
+    ``_finalized`` guard inside _finalize_session makes concurrent or
+    repeat calls (session.close racing the WS-orphan reaper) harmless.
+
+    Returns True iff this call popped a live session — useful when callers
+    want to log "closed by reaper" vs "already gone".
+    """
+    with _sessions_lock:
+        session = _sessions.pop(sid, None)
+    if session is None:
+        return False
+    runtime_sid = session.get("runtime_session_id") or ""
+    _finalize_session(session, end_reason=end_reason, runtime_sid=runtime_sid)
+    # tools.approval can hold a notify callback bound to this session_key
+    try:
+        from tools.approval import unregister_gateway_notify
+
+        key = session.get("session_key")
+        if key:
+            unregister_gateway_notify(key)
+    except Exception:
+        pass
+    # Close agent + slash worker. Best effort: failures are logged, not
+    # raised, so a partial teardown still progresses through the rest.
+    try:
+        agent = session.get("agent")
+        if agent is not None and hasattr(agent, "close"):
+            agent.close()
+    except Exception:
+        pass
+    # Slash worker close is *also* done inside _finalize_session via the
+    # _finalized chokepoint; this is a belt-and-suspenders for the rare
+    # path where finalize raised before reaching that step.
+    try:
+        worker = session.get("slash_worker")
+        if worker is not None and hasattr(worker, "close"):
+            worker.close()
+    except Exception:
+        pass
+    return True
+
+
+def _close_sessions_for_transport(
+    transport, *, end_reason: str = "ws_disconnect"
+) -> tuple[int, int]:
+    """C1 disconnect reap: when a transport dies, reap sessions attached to it.
+
+    Sessions that opted in (via ``close_on_disconnect=True`` — set by the
+    dovie sidecar and the dashboard embed) are torn down immediately. The
+    rest are merely *detached* from the dead transport (their next emit
+    would otherwise hit a closed socket); a higher-level orphan-reaper
+    sweeps them on a grace window.
+
+    Returns (reaped, detached) for caller logging.
+
+    The actual teardown is offloaded to ``asyncio.to_thread`` by the caller
+    in ws.py because worker.close() + DB write inside _finalize_session can
+    take 50-200ms; running it inline would stall the uvicorn event loop.
+    """
+    reaped: list[str] = []
+    detached: list[str] = []
+    with _sessions_lock:
+        # snapshot under lock, mutate after
+        for sid, session in list(_sessions.items()):
+            if session.get("transport") is not transport:
+                continue
+            if session.get("close_on_disconnect"):
+                reaped.append(sid)
+            else:
+                session["transport"] = None
+                detached.append(sid)
+    for sid in reaped:
+        _close_session_by_id(sid, end_reason=end_reason)
+    return len(reaped), len(detached)
 
 
 def write_json(obj: dict) -> bool:
@@ -939,7 +1077,10 @@ def _start_agent_build(sid: str, session: dict) -> None:
             try:
                 _log_agent_build_stage(sid, current, "slash-worker-start")
                 worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
-                current["slash_worker"] = worker
+                # C2: re-check sid -> current under the lock before storing
+                # the worker; a concurrent teardown could have popped this
+                # session between agent build and now.
+                _attach_worker(sid, current, worker)
                 _log_agent_build_stage(sid, current, "slash-worker-end")
             except Exception:
                 _log_agent_build_stage(sid, current, "slash-worker-error")
@@ -1653,13 +1794,33 @@ def _restart_slash_worker(session: dict):
             worker.close()
         except Exception:
             pass
+    # C2: spawn outside the lock (subprocess start is slow), then re-check
+    # via _attach_worker. If the session was torn down between the spawn and
+    # attach, _attach_worker closes the orphan worker for us.
     try:
-        session["slash_worker"] = _SlashWorker(
+        new_worker = _SlashWorker(
             session["session_key"],
             getattr(session.get("agent"), "model", _resolve_model()),
         )
     except Exception:
         session["slash_worker"] = None
+        return
+    # session here is a dict reference; look up its sid in _sessions so
+    # _attach_worker can verify identity. If we can't find it, the session
+    # was already popped and we close the worker directly.
+    sid = None
+    with _sessions_lock:
+        for candidate_sid, candidate in _sessions.items():
+            if candidate is session:
+                sid = candidate_sid
+                break
+    if sid is None:
+        try:
+            new_worker.close()
+        except Exception:
+            pass
+        return
+    _attach_worker(sid, session, new_worker)
 
 
 def _persist_model_switch(result) -> None:
@@ -2372,14 +2533,15 @@ def _init_session(
         slash_worker = _SlashWorker(
             key, getattr(agent, "model", _resolve_model())
         )
-        with _sessions_lock:
-            if sid in _sessions:
-                _sessions[sid]["slash_worker"] = slash_worker
+        # C2: stricter than the previous `sid in _sessions` check — uses
+        # identity comparison so a same-sid replacement (close+recreate
+        # under the same sid) doesn't accidentally inherit this worker.
+        _attach_worker(sid, session_record, slash_worker)
     except Exception:
         # Defer hard-failure to slash.exec; chat still works without slash worker.
         with _sessions_lock:
-            if sid in _sessions:
-                _sessions[sid]["slash_worker"] = None
+            if _sessions.get(sid) is session_record:
+                session_record["slash_worker"] = None
     try:
         from tools.approval import register_gateway_notify, load_permanent_allowlist
 
