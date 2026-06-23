@@ -2,8 +2,33 @@
 
 > 范围:codex 上次 review 终点 (`96cd37e21`, 2026-06-04) → upstream/main (`5ff11a689`)
 > 总 commit:1855(全范围),作用域内 ~637(只算 gateway/agent/tools/tui_gateway/plugins/memory/mcp/optional-skills)
-> 评估日期:2026-06-23
+> 评估日期:2026-06-23(2026-06-23 下午追加 5 个 hermes-agent 本地 commit 后重新校准)
 > 评估范围限定:用户明确不要 desktop UI / dashboard UI / kanban UI / TUI / 各类 messaging adapter(dovie 自有 UI 和通道)
+> 执行分支:`absorb-upstream-20260623`(基于 `a9615a66b`)
+
+---
+
+## 执行 Phase 划分(2026-06-23 下午追加)
+
+`2fb895be1` 之后 hermes-agent 又叠加了 5 个 commit
+(`fc7427c5c` 团队任务 sidebar 指示器 → `27ebefa04` `4c9a1c42e`
+session_index 诊断日志 → `fa714c26d` pending-input 投影 → `e4d038b53`
+撤诊断 → `a9615a66b` sticky outer-interrupt)。这些动了
+`hermes_state.py` (21 条 upstream commit 也动过) / `tools/approval.py` (12 条)
+/ `tui_gateway/server.py` (66 条),所以原清单里几条"中冲突"升到"高冲突"。
+
+按"是否动了 dovie 仍在迭代的文件"重新分 Phase:
+
+| Phase | 范围 | 条数 | 风险 | 何时做 |
+|---|---|---|---|---|
+| **Phase 1** | 零冲突,直接 cherry-pick(quick wins + MCP + 单文件安全) | ~14 | 极低 | **立刻** |
+| **Phase 2** | 中等手工融合(approval / gateway 进程内存 / 部分 streaming) | ~10 | 中 | Phase 1 验过测试再做 |
+| **Phase 3** | 高冲突(conversation_loop / tui_gateway server / hermes_state.py) | ~12 | 高 | dovie team-mission 收敛后做 |
+| **Phase 4** | P1 全部 50+ 条,按子分类(compression / delegate / memory / cron / skills / tool 体验) | ~50 | 中 | Phase 1+2 通过后逐子分类做 |
+
+下面 P0/P1 章节里每条都加了 `[Phase N]` 前缀方便检索。
+
+---
 
 ## codex 文档 critique (200 字内)
 
