@@ -294,3 +294,190 @@ dovie customize 边界 verify:
 - `agent/conversation_loop.py`:dovie 已 patch (81af17d49 + 10bd4b0b5 + 2fb895be1),所有 P0.3 涉及此文件的需手工 ✓
 - `agent/redact.py`:**dovie 未改**,quick-win #1 可直接 cherry-pick ✓
 - `tools/process_registry.py`:**dovie 未改**,quick-win #2 可直接 cherry-pick ✓
+
+---
+
+## 2026-06-23 吸收执行报告(absorb-upstream-20260623 分支)
+
+### 累计
+
+| 类型 | 数 |
+|---|---|
+| 成功 cherry-pick | **65** |
+| 需手工融合(SKIP) | **62** |
+| 缺失依赖回填 commit | **4** ── threat_patterns / aux_interrupt_protection / claim_job_for_fire / peek_nous_access_token / compression-lock |
+| 总分支 commit(从 a9615a66b) | **70+** |
+
+### 验收
+
+- 关键模块 import 全通过(dovie_extension / agent / tools / state / mcp / tui_gateway)
+- dovie customize 完好(should_require_auth + `[doxie-session-index]` + dovie_extension 全在)
+- dovie 关键测试 **1194 通过**(redact / process / approval / skills / memory / state / session_index / team_missions)
+- 2 个测试已知失败(`test_compression_concurrent_fork.py`)── 单进程 dovie 桌面端不实际发生
+
+### 已知问题清单
+
+1. **concurrent compression 测试 2 fail**:`test_concurrent_compression_does_not_fork_session` + `test_skipped_compression_returns_messages_unchanged`。原因:`agent/conversation_compression.py` 是 dovie customize 文件,SKIP 了上游 lock-check 集成。单进程下不发生。修法:等 team-mission 收敛后手工 3-way merge upstream `1fbf48d4a` 把 lock-check 集成到 `_compress_context`。
+2. **24 个 collection error(主要 telegram)**:dovie 不用 telegram,可忽略。
+3. **dovie fork file_state_registry 老 bug**:`/var/folders` 被误判为 sensitive path。a9615a66b 状态也有这 bug,非本次吸收引入。建议另行排查。
+
+### Skip 清单(等手工 3-way merge)── 按文件聚类
+
+每条都因 dovie 已在同文件 customize,需 review 上游改动是 dovie 加新代码区域还是同区域改:
+
+
+#### `acp_adapter/server.py(1 commit)` (1 条)
+
+- `16642e276` fix(mcp): revert ACP rebuild to original; harden generation 
+
+#### `agent/agent_init.py(6)` (1 条)
+
+- `3ead2bdd0` feat(prompt): configurable per-platform system-prompt h
+
+#### `agent/agent_runtime_helpers.py(2)` (3 条)
+
+- `2b3a4f0af` fix(agent): strip stale reasoning_content when falling 
+- `c884ff64e` fix(agent): keep system-prompt model identity in sync a
+- `38c8a9c10` feat(memory): batch operations for single-turn memory u
+
+#### `agent/auxiliary_client.py(3)` (1 条)
+
+- `2f3177adf` fix(compression): protect the summary call from mid-fli
+
+#### `agent/chat_completion_helpers.py(5)` (2 条)
+
+- `dd0d1222a` fix(agent): don't retry interrupt-induced transport err
+- `c9094f5e5` fix(stream): don't report dropped mid-tool-call streams
+
+#### `agent/conversation_compression.py(2)` (4 条)
+
+- `466345699` fix(compression): in-place compaction is non-destructiv
+- `1fbf48d4a` fix(compression): make in-place compaction durable + ro
+- `47fadc24d` feat(compression): in-place compaction option that keep
+- `990273d90` fix(agent): accept pixel-correct image downscale when b
+
+#### `agent/conversation_loop.py(5)` (2 条)
+
+- `b892ee2bc` fix(agent): summarize non-retryable API errors so raw H
+- `9f95f72b9` fix(agent): strip api_messages in thinking-signature re
+
+#### `agent/error_classifier.py(2)` (1 条)
+
+- `86e10dd87` fix(agent): route 'thinking blocks cannot be modified' 
+
+#### `agent/prompt_builder.py(8)` (1 条)
+
+- `f80381c45` feat(prompt): scale context-file cap to model window + 
+
+#### `agent/system_prompt.py(3)` (2 条)
+
+- `3e74f75e4` feat(agent): coding-context posture across CLI/TUI/desk
+- `f6a42b1ac` feat(prompt): make context-file truncation limit config
+
+#### `agent/tool_executor.py(4)` (1 条)
+
+- `a2d7f538d` fix(delegate): stop subagent tool completion lines leak
+
+#### `agent/transports/codex.py(1)` (1 条)
+
+- `4d39a603d` fix(codex): restore session_id/x-client-request-id HTTP
+
+#### `cli.py(2)` (1 条)
+
+- `fad4b40d9` fix(model): persist /model switch by default across ses
+
+#### `gateway/platforms/api_server.py(1)` (2 条)
+
+- `3714caa1b` fix(session): follow compression continuations for tran
+- `7a131f7f4` fix(api-server): stop silently promising async delivery
+
+#### `gateway/run.py(7 commit)` (1 条)
+
+- `93d6e7302` fix(mcp): expose late-connecting MCP tools to the agent (TUI
+
+#### `gateway/run.py(7)` (5 条)
+
+- `1593ca540` feat(cron): Cron Recipes — parameterized automation t
+- `4b09903de` fix Nous auth refresh for idle agents
+- `9351cbafa` fix(gateway): auto-deliver image_generate output as nat
+- `8ac5e90ec` fix(gateway): dedup image_generate media across the com
+- `51a338a1b` feat(gateway): track active_agents in runtime status on
+
+#### `gateway/session_context.py(5)` (1 条)
+
+- `b23184cad` fix(api-server): bind request session context for tools
+
+#### `hermes_cli/config.py(5 commit)` (1 条)
+
+- `b6e2a54a9` fix(mcp): address adversarial review round 1 (cache parity, 
+
+#### `hermes_cli/config.py(5)` (2 条)
+
+- `93ea9b04a` fix(gateway): cap inbound media download size to preven
+- `e499d69e3` feat(api-server): configurable concurrent-run cap to pr
+
+#### `hermes_cli/skills_hub.py(3)` (1 条)
+
+- `085fc5d00` feat(skills): find & diff user-modified bundled skills
+
+#### `hermes_cli/web_server.py(5 commit)` (2 条)
+
+- `7726ce304` fix(security): close hermes-0day MCP-persistence attack surf
+- `73dd58499` fix(mcp): propagate HERMES_HOME override onto the MCP event 
+
+#### `hermes_cli/web_server.py(5)` (3 条)
+
+- `c253b0738` fix(model): clear stale endpoint credentials across swi
+- `243cada15` fix(model): cover typed gateway /model path + async-saf
+- `af978ecb1` fix(model): require confirmation for expensive model se
+
+#### `run_agent.py(7)` (2 条)
+
+- `b17180d95` fix(session): finalize owned SQLite session rows on AIA
+- `ea8a8b4af` feat(delegation): background fan-out — parallel subag
+
+#### `scripts/release.py(1)` (2 条)
+
+- `f8a241e10` fix(delegate): flatten content blocks in live overlay t
+- `3b56d3a29` fix(security): redact secrets in kanban tool payloads b
+
+#### `tools/approval.py(6)` (3 条)
+
+- `a9c802598` fix(approval): honor interrupt in blocking gateway appr
+- `89d380261` fix(approval): resolve Hermes home at detection time, n
+- `239740a19` feat(tools): MCP elicitation handler with gateway-aware
+
+#### `tools/delegate_tool.py(7)` (1 条)
+
+- `c66ecf0bc` feat(delegation): async background subagents via delega
+
+#### `tools/file_tools.py(4 commit)` (4 条)
+
+- `71274f264` fix(file): reject read_file line-numbered writeback
+- `9078b4bbd` fix(file): harden read_file device alias blocking
+- `def3f6388` fix(file): anchor device symlink guard to task cwd
+- `8f2931e3e` fix(file_tools): block agent writes to ~/.hermes/config.yaml
+
+#### `tools/mcp_tool.py(1 commit)` (3 条)
+
+- `40722058e` fix(mcp): keep short-TTL HTTP sessions alive with configurab
+- `472c06815` fix(mcp): detect 'unknown method' phrasing in ping keepalive
+- `371348387` fix(mcp): refresh agent tool snapshot between turns (cache-s
+
+#### `tools/skills_hub.py(4)` (2 条)
+
+- `105625d65` fix(skills): honour overall_timeout and bound ClawHub c
+- `eee1da45f` fix(skills): bound ClawHub catalog walk to requested pa
+
+#### `tools/skills_sync.py(1)` (2 条)
+
+- `25c590ccd` fix(skills): refuse SKILLS_DIR root in rmtree guard, no
+- `f1254c8ea` fix(skills): rmtree scope guard + default pre_update_ba
+
+#### `tui_gateway/server.py(18)` (4 条)
+
+- `621bf3a87` fix(security): strip shell escapes in denylist normaliz
+- `ae94ed172` fix(tui-gateway): reap leaked slash_worker sessions on 
+- `99f3072aa` fix(model-switch): a failed in-place swap must be a no-
+- `49596b70c` fix(gateway): resume follows the compression tip so pos
+
