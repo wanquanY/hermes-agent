@@ -25,6 +25,15 @@ from utils import env_var_enabled, is_truthy_value
 
 logger = logging.getLogger(__name__)
 
+# Freeze YOLO mode at module import time. Reading os.environ on every call
+# would allow any skill running inside the process to set this variable and
+# instantly bypass all approval checks — a prompt-injection escalation path.
+# Backfilled from upstream tools/approval.py; the absorbed 621bf3a87 (strip
+# shell escapes / fail-closed) added a third call site that reads this
+# constant without bringing the definition along, so without this backfill
+# `approval check raises NameError at runtime on the gateway approval path.
+_YOLO_MODE_FROZEN: bool = is_truthy_value(os.getenv("HERMES_YOLO_MODE", ""))
+
 # Per-thread/per-task gateway session identity.
 # Gateway runs agent turns concurrently in executor threads, so reading a
 # process-global env var for session identity is racy. Keep env fallback for

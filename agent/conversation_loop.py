@@ -1121,6 +1121,12 @@ def run_conversation(
         oauth_1m_beta_retry_attempted = False
         llama_cpp_grammar_retry_attempted = False
         has_retried_429 = False
+        # Escalate-to-fallback-chain guard for persistent 401/403 (set once
+        # we've fired the per-provider credential refresh and it didn't
+        # clear). Was upstream `auth_failover_attempted` on a
+        # TurnRetryState dataclass introduced by 524453dab; dovie keeps the
+        # one-shot guards as bare locals to match the surrounding style.
+        auth_failover_attempted = False
         restart_with_compressed_messages = False
         restart_with_length_continuation = False
 
@@ -1629,7 +1635,7 @@ def run_conversation(
                             agent, api_messages, active_system_prompt)
                         retry_count = 0
                         compression_attempts = 0
-                        _retry.primary_recovery_attempted = False
+                        primary_recovery_attempted = False
                         continue
 
                     agent._flush_status_buffer()
@@ -2786,10 +2792,10 @@ def run_conversation(
                 # + provider-specific troubleshooting guidance unchanged.
                 if (
                     classified.is_auth
-                    and not _retry.auth_failover_attempted
+                    and not auth_failover_attempted
                     and agent._fallback_index < len(agent._fallback_chain)
                 ):
-                    _retry.auth_failover_attempted = True
+                    auth_failover_attempted = True
                     agent._buffer_status(
                         "🔐 Authentication failed and could not be refreshed — "
                         "switching to fallback provider..."
@@ -2799,7 +2805,7 @@ def run_conversation(
                             agent, api_messages, active_system_prompt)
                         retry_count = 0
                         compression_attempts = 0
-                        _retry.primary_recovery_attempted = False
+                        primary_recovery_attempted = False
                         continue
 
                 # ── Nous Portal: record rate limit & skip retries ─────
