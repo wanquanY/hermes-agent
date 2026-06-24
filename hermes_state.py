@@ -2498,7 +2498,27 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             "NOT (id LIKE 'team:%' AND id LIKE '%:node:%') "
             "AND NOT (COALESCE(parent_session_id,'') LIKE 'team:%:node:%')"
         )
-        where = [team_internal_clause]
+        # Suppress regular delegate_task / sub-agent children too — they have a
+        # non-empty parent_session_id pointing at the user-visible conversation
+        # that spawned them, but no row in session_lineage (only user-issued
+        # /branch writes that). Compression-continuation children DO have a
+        # non-empty parent, but the parent always has `end_reason = 'compression'`
+        # by the time the child takes over the chat. So: hide anything with a
+        # parent whose parent isn't a compression handoff and isn't in the
+        # lineage table.  Mirrors the user's mental model — they never asked for
+        # the subagent's chat to be its own sidebar row.
+        subagent_clause = (
+            "NOT ("
+            "  COALESCE(parent_session_id,'') != ''"
+            "  AND NOT EXISTS (SELECT 1 FROM session_lineage l WHERE l.session_id = sessions.id)"
+            "  AND EXISTS ("
+            "    SELECT 1 FROM sessions p"
+            "    WHERE p.id = sessions.parent_session_id"
+            "    AND COALESCE(p.end_reason,'') NOT IN ('compression', 'compression_split')"
+            "  )"
+            ")"
+        )
+        where = [team_internal_clause, subagent_clause]
         params: List[Any] = []
         if excluded:
             where.append(f"COALESCE(source,'') NOT IN ({placeholders})")
@@ -2522,6 +2542,22 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 "WHERE session_id IN ("
                 " SELECT id FROM sessions "
                 " WHERE COALESCE(parent_session_id,'') LIKE 'team:%:node:%'"
+                ")"
+            )
+            # Purge non-team delegate_task subagent children — same predicate
+            # as the SELECT subagent_clause above. A previous reconcile may have
+            # projected them before this filter existed.
+            conn.execute(
+                "DELETE FROM session_index "
+                "WHERE session_id IN ("
+                " SELECT s.id FROM sessions s"
+                " WHERE COALESCE(s.parent_session_id,'') != ''"
+                " AND NOT EXISTS (SELECT 1 FROM session_lineage l WHERE l.session_id = s.id)"
+                " AND EXISTS ("
+                "   SELECT 1 FROM sessions p"
+                "   WHERE p.id = s.parent_session_id"
+                "   AND COALESCE(p.end_reason,'') NOT IN ('compression', 'compression_split')"
+                " )"
                 ")"
             )
             rows = conn.execute(select_sql, tuple(params)).fetchall()
