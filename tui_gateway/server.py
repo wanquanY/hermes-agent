@@ -1522,6 +1522,142 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
     return model, None
 
 
+# Backfilled from upstream 6de3963e3 (#43702) + 7d938cc5c — referenced by the
+# absorbed bc4dbce858 model-switch no-op fix, but the underlying helpers landed
+# in those two non-P0 commits. Without them /model raises NameError after a
+# successful in-place agent swap.
+
+def _runtime_model_config(agent, existing: dict | None = None) -> dict:
+    config = dict(existing or {})
+    model = str(getattr(agent, "model", "") or "").strip()
+    provider = str(getattr(agent, "provider", "") or "").strip()
+    base_url = str(getattr(agent, "base_url", "") or "").strip()
+    api_mode = str(getattr(agent, "api_mode", "") or "").strip()
+    reasoning_config = getattr(agent, "reasoning_config", None)
+    service_tier = getattr(agent, "service_tier", None)
+
+    if model:
+        config["model"] = model
+    if provider:
+        config["provider"] = provider
+    if base_url:
+        config["base_url"] = base_url
+    else:
+        config.pop("base_url", None)
+    if api_mode:
+        config["api_mode"] = api_mode
+    else:
+        config.pop("api_mode", None)
+    if isinstance(reasoning_config, dict):
+        config["reasoning_config"] = reasoning_config
+    else:
+        config.pop("reasoning_config", None)
+    if service_tier:
+        config["service_tier"] = service_tier
+    else:
+        config.pop("service_tier", None)
+
+    return config
+
+
+def _persist_live_session_runtime(session: dict | None) -> None:
+    """Persist active session runtime so future resumes restore the same footer."""
+    if not session:
+        return
+    agent = session.get("agent")
+    session_key = str(session.get("session_key") or "").strip()
+    if agent is None or not session_key:
+        return
+
+    db = getattr(agent, "_session_db", None) or _get_db()
+    if db is None:
+        return
+
+    try:
+        row = db.get_session(session_key) or {}
+        raw_config = row.get("model_config")
+        existing_config = {}
+        if isinstance(raw_config, dict):
+            existing_config = raw_config
+        elif isinstance(raw_config, str) and raw_config.strip():
+            parsed = json.loads(raw_config)
+            if isinstance(parsed, dict):
+                existing_config = parsed
+        model_config = _runtime_model_config(agent, existing_config)
+        model = str(getattr(agent, "model", "") or "").strip()
+        if hasattr(db, "update_session_meta"):
+            db.update_session_meta(session_key, json.dumps(model_config), model or None)
+        elif model and hasattr(db, "update_session_model"):
+            db.update_session_model(session_key, model)
+    except Exception:
+        logger.debug("failed to persist live session runtime", exc_info=True)
+
+
+def _persist_live_session_system_prompt(session: dict | None) -> None:
+    """Refresh the stored system prompt after a live runtime identity change."""
+    if not session:
+        return
+    agent = session.get("agent")
+    session_key = str(session.get("session_key") or "").strip()
+    if agent is None or not session_key or not hasattr(agent, "_build_system_prompt"):
+        return
+
+    db = getattr(agent, "_session_db", None) or _get_db()
+    if db is None or not hasattr(db, "update_system_prompt"):
+        return
+
+    try:
+        prompt = agent._build_system_prompt(None)
+        agent._cached_system_prompt = prompt
+        db.update_system_prompt(getattr(agent, "session_id", None) or session_key, prompt)
+    except Exception:
+        logger.debug("failed to persist live session system prompt", exc_info=True)
+
+
+def _append_model_switch_marker(session: dict | None, *, model: str, provider: str) -> None:
+    """Record a real system-history pivot after a live model switch."""
+    if not session:
+        return
+    session_key = str(session.get("session_key") or "").strip()
+    if not session_key:
+        return
+
+    provider_part = f" via provider {provider}" if provider else ""
+    marker = (
+        "[System: The active model for this chat has changed to "
+        f"{model}{provider_part}. From this point forward, use this runtime "
+        "metadata when answering questions about what model/provider is active.]"
+    )
+    entry = {"role": "system", "content": marker}
+
+    lock = session.get("history_lock")
+    if lock is not None:
+        with lock:
+            session.setdefault("history", []).append(entry)
+            session["history_version"] = int(session.get("history_version", 0)) + 1
+    else:
+        session.setdefault("history", []).append(entry)
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+
+    try:
+        agent = session.get("agent")
+        db = getattr(agent, "_session_db", None) if agent is not None else None
+        if db is not None:
+            db.append_message(session_id=session_key, role="system", content=marker)
+            return
+
+        if "_ensure_session_db_row" in globals():
+            _ensure_session_db_row(session)
+        if "_session_db" in globals():
+            with _session_db(session) as scoped_db:
+                if scoped_db is not None:
+                    scoped_db.append_message(
+                        session_id=session_key, role="system", content=marker
+                    )
+    except Exception:
+        logger.debug("failed to persist model switch marker", exc_info=True)
+
+
 def _write_config_key(key_path: str, value):
     cfg = _load_cfg()
     current = cfg
