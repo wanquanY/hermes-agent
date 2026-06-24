@@ -2525,6 +2525,264 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, result)
 
 
+# ── Group-chat: direct-to-member (decoupled from team missions) ──────
+# A user can @-mention a worker member in the team conversation to talk to it
+# directly (bypassing the leader). This is its OWN mechanism, independent of the
+# team-mission/task machinery: no mission, no graph node, no run-binding, no
+# terminal-mission reaper. The member runs as a turn that (a) is fed the full
+# shared conversation transcript as context, and (b) relays its reply back into
+# the conversation session tagged with the member's identity — so everything
+# (leader chats, member @-chats, task outputs) shares one conversation log that
+# the leader and members all read. Implementation in progress.
+
+_MEMBER_CHAT_RUN_PREFIX = "member-chat"
+
+
+def _target_member_id_from_params(params: dict) -> str:
+    return str(params.get("target_member_id") or params.get("targetMemberId") or "").strip()
+
+
+def _member_chat_session_id(conversation_id: str, member_id: str) -> str:
+    # Deliberately NOT prefixed with "team:" / "team-conversation-" — those
+    # patterns get mis-resolved to the leader-conversation runtime scope and get
+    # picked up as team conversations by the sidebar. This is a plain member-chat
+    # session id; the runtime scope is the member's profile scope, set separately.
+    conv = str(conversation_id or "").strip()
+    for prefix in ("team-session-team-conversation-", "team-conversation-", "team-"):
+        if conv.startswith(prefix):
+            conv = conv[len(prefix):]
+            break
+    return f"memberchat:{conv}:{str(member_id or '').strip()}"
+
+
+def _find_team_member_by_id(members: list[dict], member_id: str) -> dict:
+    member_id = str(member_id or "").strip()
+    for member in members or []:
+        if not isinstance(member, dict):
+            continue
+        mid = str(member.get("member_id") or member.get("memberId") or member.get("id") or "").strip()
+        if mid and mid == member_id:
+            return member
+    return {}
+
+
+def _build_conversation_transcript(db, conversation_session_id: str, *, limit: int = 40) -> str:
+    """The shared conversation transcript fed to the member as context so it
+    'sees the whole conversation' (leader chats, other members, task outputs)."""
+    try:
+        messages = db.get_messages(conversation_session_id)
+    except Exception:
+        messages = []
+    lines: list[str] = []
+    for message in (messages or [])[-limit:]:
+        if not isinstance(message, dict):
+            continue
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        role = str(message.get("role") or "").strip().lower()
+        if role == "tool":
+            continue
+        meta = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        team_meta = meta.get("team_mission") if isinstance(meta.get("team_mission"), dict) else {}
+        if role == "user":
+            speaker = "用户"
+        else:
+            speaker = str(team_meta.get("display_name") or "").strip() or "助手"
+        lines.append(f"{speaker}：{content}")
+    return "\n".join(lines)
+
+
+def _member_chat_prompt(*, member_display_name: str, transcript: str, user_text: str) -> str:
+    return "\n\n".join([
+        f"你是团队会话中的成员「{member_display_name or '成员'}」。用户在群聊里 @ 你单独对话。",
+        "下面是这条团队会话到目前为止的完整记录（含 leader、其他成员的发言，以及团队任务的产出），供你了解全部上下文：",
+        "----- 会话记录 -----",
+        transcript or "（暂无更早记录）",
+        "----- 记录结束 -----",
+        "请以你自己的身份，直接回应用户最新的这条消息：",
+        user_text,
+    ])
+
+
+def _clear_stuck_member_session_run(db, stored_session_id: str) -> None:
+    """Release any non-terminal run left on the member session by a prior turn
+    that did not close cleanly (no reaper guards a member-chat session). Keeps
+    multi-turn from hitting 'session busy'."""
+    import time as _time
+    terminal = {"completed", "succeeded", "failed", "cancelled", "canceled", "interrupted"}
+    try:
+        with db._lock:
+            rows = db._conn.execute(
+                "SELECT run_id, status, runtime_scope_key, turn_id FROM runs WHERE session_id = ? ORDER BY rowid DESC LIMIT 5",
+                (stored_session_id,),
+            ).fetchall()
+    except Exception:
+        return
+    for row in rows or []:
+        run_id = str((row["run_id"] if hasattr(row, "keys") else row[0]) or "").strip()
+        status = str((row["status"] if hasattr(row, "keys") else row[1]) or "").lower()
+        if not run_id or status in terminal:
+            continue
+        try:
+            db.upsert_run(
+                run_id=run_id,
+                session_id=stored_session_id,
+                runtime_scope_key=str((row["runtime_scope_key"] if hasattr(row, "keys") else row[2]) or ""),
+                turn_id=str((row["turn_id"] if hasattr(row, "keys") else row[3]) or ""),
+                status="interrupted",
+                completed_at=_time.time(),
+                error="member chat run released before new turn",
+            )
+        except Exception:
+            pass
+
+
+def _submit_message_to_member(
+    rid,
+    params: dict,
+    *,
+    db,
+    target_member_id: str,
+    conversation_id: str,
+    conversation_session_id: str,
+    mission: dict,
+    text: str,
+) -> dict:
+    """Group-chat: run the @-mentioned worker member as a PLAIN worker run with a
+    clean member profile context (no team mission / node / binding / canvas), and
+    relay its reply into the conversation session with member identity. The key
+    correctness requirement is to pass the MEMBER's dovie_profile (with
+    hermesHomePath) + member scope and to NOT inherit the frontend's leader scope
+    — otherwise the worker spawns against the leader scope with no home and the
+    agent never starts ('prompt worker terminal event did not close active run')."""
+    if not conversation_session_id:
+        return _err(rid, 4006, "conversation_session_id required")
+    members = _leader_members_from_params(params, mission if isinstance(mission, dict) else {}, db=db)
+    member = _find_team_member_by_id(members, target_member_id)
+    if not member:
+        return _err(rid, 4040, "team member not found")
+    if str(member.get("role") or "").strip().lower() in {"lead", "leader"}:
+        return _err(rid, 4006, "target member must be a worker, not the leader")
+    profile_params = _profile_params_from_member(member)
+    agent_profile_id = str(profile_params.get("agent_profile_id") or "").strip()
+    dovie_profile = profile_params.get("dovie_profile") if isinstance(profile_params.get("dovie_profile"), dict) else {}
+    hermes_home = str(dovie_profile.get("hermesHomePath") or dovie_profile.get("hermes_home_path") or "").strip()
+    if not agent_profile_id or not hermes_home:
+        return _err(rid, 4006, "target member profile is not runnable (missing profile home)")
+    member_scope = str(profile_params.get("runtime_scope_key") or f"profile:{agent_profile_id}").strip()
+    display_name = str(
+        member.get("display_name")
+        or member.get("displayName")
+        or member.get("profile_name")
+        or member.get("profileName")
+        or member.get("name")
+        or ""
+    ).strip()
+
+    # 1. Record the user's @-message into the shared conversation transcript.
+    try:
+        db.append_message(
+            conversation_session_id,
+            role="user",
+            content=text,
+            metadata={"team_mission": {
+                "kind": "member_chat_user",
+                "target_member_id": target_member_id,
+                "conversation_session_id": conversation_session_id,
+            }},
+        )
+    except Exception:
+        pass
+
+    # 2. Build the shared transcript (now includes the user's message) + prompt.
+    transcript = _build_conversation_transcript(db, conversation_session_id)
+    prompt = _member_chat_prompt(member_display_name=display_name, transcript=transcript, user_text=text)
+
+    # 3. The member's runtime session (plain; never projected to session_index →
+    #    never in the sidebar; never a team conversation).
+    stored_session_id = _member_chat_session_id(conversation_id, target_member_id)
+    if not db.get_session(stored_session_id):
+        db.create_session(stored_session_id, source="team_mission_member_chat", transient=False)
+    try:
+        workspace_context = resolve_team_mission_workspace_context(
+            params,
+            mission=mission if isinstance(mission, dict) else {},
+            session_id=stored_session_id,
+            require=True,
+        )
+    except ValueError as exc:
+        return _err(rid, 4004, str(exc))
+    runtime_session_error = _ensure_team_mission_runtime_session_shell(stored_session_id)
+    if runtime_session_error:
+        return _err(rid, 5008, runtime_session_error)
+
+    # 4. Self-heal stuck runs, then register the run for relay.
+    _clear_stuck_member_session_run(db, stored_session_id)
+    run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
+    turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
+    db.register_member_chat_run(
+        run_id=run_id,
+        conversation_session_id=conversation_session_id,
+        member_id=target_member_id,
+        agent_profile_id=agent_profile_id,
+        display_name=display_name,
+    )
+
+    # 5. run.submit with CLEAN member params only — NOT {**params} (which carries
+    #    the frontend's leader scope/profile and breaks the worker spawn).
+    submit_params = {
+        "stored_session_id": stored_session_id,
+        "session_id": stored_session_id,
+        "client_run_id": run_id,
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "agent_profile_id": agent_profile_id,
+        "agent_profile_version_id": str(profile_params.get("agent_profile_version_id") or ""),
+        "runtime_scope_key": member_scope,
+        "dovie_profile": dovie_profile,
+        "cwd": workspace_context["cwd"],
+        "workspace": workspace_context["workspace"],
+        "text": prompt,
+        "persist_user_message": "",
+        "tool_progress_mode": "all",
+        "cols": 120,
+        "dovie_product_context": {
+            "team_mission": {
+                "kind": "member_chat",
+                "surface": "member_chat",
+                "conversation_id": conversation_id,
+                "conversation_session_id": conversation_session_id,
+                "member_id": target_member_id,
+            },
+        },
+    }
+    response = _methods["run.submit"](rid, submit_params)
+    if isinstance(response, dict) and response.get("error"):
+        return response
+    result = response.get("result") if isinstance(response, dict) else {}
+    result_run_id = str((result or {}).get("run_id") or run_id).strip()
+    if result_run_id and result_run_id != run_id:
+        db.register_member_chat_run(
+            run_id=result_run_id,
+            conversation_session_id=conversation_session_id,
+            member_id=target_member_id,
+            agent_profile_id=agent_profile_id,
+            display_name=display_name,
+        )
+    resolved = db.resolve_team_mission_conversation(conversation_id) if conversation_id else {}
+    resolved = resolved if isinstance(resolved, dict) else {}
+    return _ok(rid, {
+        "conversation_id": conversation_id,
+        "conversation_session_id": conversation_session_id,
+        "conversation": resolved.get("conversation") or {},
+        "graph": resolved.get("graph") or {},
+        "leader_turn": result or {},
+        "member_turn": result or {},
+        "target_member_id": target_member_id,
+    })
+
+
 @method("team_mission.message.submit")
 def _(rid, params: dict) -> dict:
     db = _get_db()
@@ -2596,6 +2854,19 @@ def _(rid, params: dict) -> dict:
     )
     if archived_team_error:
         return _err(rid, 4023, archived_team_error)
+    # Group-chat: route directly to a worker member, bypassing the leader.
+    target_member_id = _target_member_id_from_params(params)
+    if target_member_id:
+        return _submit_message_to_member(
+            rid,
+            params,
+            db=db,
+            target_member_id=target_member_id,
+            conversation_id=conversation_id,
+            conversation_session_id=conversation_session_id,
+            mission=identity_mission if isinstance(identity_mission, dict) else {},
+            text=text,
+        )
     try:
         params, leader_runtime_context = _resolve_team_leader_runtime_params_for_request(
             params,

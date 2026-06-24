@@ -50,6 +50,16 @@ COMPACTION_STATUS = (
     f"🗜️ {COMPACTION_STATUS_MARKER} — summarizing earlier conversation so I can continue..."
 )
 
+# Durable transcript marker appended to the conversation after a successful
+# compaction (vs the transient COMPACTION_STATUS indicator above). The desktop
+# matches the stable phrase "Context compacted" to render a styled notice in the
+# timeline. Keep the phrase intact if you reword the sentence.
+COMPACTION_TRANSCRIPT_MARKER = (
+    "[System: 🗜️ Context compacted — the earlier part of this conversation was "
+    "summarized to stay within the model's context window. Continue from the "
+    "summary above.]"
+)
+
 
 def _compression_lock_holder(agent: Any) -> str:
     """Build a unique holder id for the lock: pid:tid:agent-instance:uuid.
@@ -678,6 +688,16 @@ def compress_context(
         agent.session_id or "none", _pre_msg_count, len(compressed),
         f"{_compressed_est:,}",
     )
+    # Append a durable, user-visible compaction marker so compression is never
+    # silent — the desktop renders a styled "context compacted" notice from this
+    # system message (parallel to the model-switch marker) instead of the
+    # transcript appearing to reset. This fires for EVERY trigger (preflight,
+    # in-loop mid-turn, reactive context-limit) because they all land here, so a
+    # compaction that happens while a long task is running is visible too. Kept
+    # as a system message (the LLM tolerates it like the model-switch marker)
+    # and flushed to the new continuation session with the rest of `compressed`.
+    if isinstance(compressed, list):
+        compressed.append({"role": "system", "content": COMPACTION_TRANSCRIPT_MARKER})
     # Release the lock on the OLD session_id only AFTER rotation completed
     # and all post-rotation bookkeeping (memory manager, context engine,
     # file dedup) ran. A concurrent path that wakes up the moment we

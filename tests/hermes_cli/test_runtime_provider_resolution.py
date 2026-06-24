@@ -773,6 +773,45 @@ def test_named_custom_provider_uses_saved_credentials(monkeypatch):
     assert resolved["source"] == "custom_provider:Local"
 
 
+def test_custom_label_recovers_named_provider_by_base_url(monkeypatch):
+    """Regression: a persisted /model switch can collapse config.model.provider
+    down to the bare "custom" runtime label while leaving model.base_url pointed
+    at a named provider's endpoint. Resolution must recover that named provider
+    by base_url so its key_env token is still reached — otherwise it falls
+    through to the keyless openrouter path and returns "no-key-required",
+    which the dovie-cloud proxy rejects with DOVIE_AUTH_REQUIRED (401)."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("DOVIE_LLM_RUNTIME_TOKEN", "runtime-token-xyz")
+    config = {
+        # provider poisoned to the bare "custom" label, base_url still points
+        # at the named dovie-cloud endpoint.
+        "model": {
+            "default": "deepseek-v4-pro",
+            "provider": "custom",
+            "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+        },
+        "providers": {
+            "dovie-cloud": {
+                "name": "Dovie Cloud",
+                "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+                "key_env": "DOVIE_LLM_RUNTIME_TOKEN",
+                "default_model": "gpt-5.5",
+            }
+        },
+    }
+    monkeypatch.setattr(rp, "load_config", lambda: config)
+    monkeypatch.setattr(rp, "_get_model_config", lambda: config["model"])
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["base_url"] == "http://127.0.0.1:8011/api/v1/llm-proxy/v1"
+    # The named provider's key_env token must be recovered, NOT no-key-required.
+    assert resolved["api_key"] == "runtime-token-xyz"
+    assert resolved["source"] == "custom_provider:Dovie Cloud"
+
+
 def test_named_custom_provider_uses_providers_dict_when_list_missing(monkeypatch):
     """After v11→v12 migration deletes custom_providers, resolution should
     still find entries in the providers dict via get_compatible_custom_providers."""

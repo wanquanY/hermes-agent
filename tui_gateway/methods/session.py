@@ -693,6 +693,32 @@ def _(rid, params: dict) -> dict:
     tool_progress_mode = _requested_tool_progress_mode(params)
     runtime_scope_key = _requested_runtime_scope_key(params)
     agent_context_mode = _agent_context_mode_from_params(params)
+    # Seed history + create-time title: a client may open a session pre-populated
+    # with a transcript and/or a title (classic TUI restore, dashboard import).
+    seed_history = _coerce_seed_history(params.get("messages"))
+    create_title = str(params.get("title") or "").strip()
+    # Per-session model/effort/fast override shipped by the desktop composer on
+    # session.create. Built INTO the agent (see _make_agent honoring
+    # session["model_override"]) so the session starts on its own model without
+    # a post-build /model switch. Never a global config write.
+    create_model = str(params.get("model") or "").strip()
+    session_model_override = (
+        {"model": create_model, "provider": str(params.get("provider") or "").strip() or None}
+        if create_model
+        else None
+    )
+    create_reasoning_override = None
+    if _effort := str(params.get("reasoning_effort") or "").strip():
+        try:
+            from hermes_constants import parse_reasoning_effort
+
+            create_reasoning_override = parse_reasoning_effort(_effort)
+        except Exception:
+            create_reasoning_override = None
+    create_service_tier_override = "priority" if params.get("fast") else None
+    # Opt-in eager teardown on transport disconnect (dovie sidecar / dashboard
+    # embed). Consumed by _close_sessions_for_transport on the reaper path.
+    close_on_disconnect = is_truthy_value(params.get("close_on_disconnect", False))
     try:
         cwd = _normalize_session_cwd(params.get("cwd"))
         workspace = _workspace_from_params(params, cwd)
@@ -709,7 +735,13 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None and control_plane_only:
         return _db_unavailable_error(rid, code=5000)
-    model = _resolve_model()
+    # Honor the desktop composer's per-session model pick for the projected row
+    # + control-plane response, instead of the global config default. The
+    # control-plane session.create paints the conversation before any runtime
+    # agent exists, so without this the row/sidebar/return briefly show the
+    # global model until the first turn's switch lands. Falls back to the
+    # global model when the client made no pick.
+    model = create_model or _resolve_model()
     if db is not None:
         try:
             db.create_session(key, source="tui", model=model, transient=transient)
@@ -747,11 +779,15 @@ def _(rid, params: dict) -> dict:
         "cols": cols,
         "cwd": cwd,
         "edit_snapshots": {},
-        "history": [],
+        "history": seed_history,
         "history_lock": threading.Lock(),
         "history_version": 0,
         "image_counter": 0,
-        "pending_title": None,
+        "pending_title": create_title or None,
+        "model_override": session_model_override,
+        "create_reasoning_override": create_reasoning_override,
+        "create_service_tier_override": create_service_tier_override,
+        "close_on_disconnect": close_on_disconnect,
         "profile_context": _profile_context_for_params(params),
         "agent_context_mode": agent_context_mode,
         "runtime_scope_key": runtime_scope_key,
@@ -800,8 +836,22 @@ def _(rid, params: dict) -> dict:
         {
             "session_id": sid,
             "stored_session_id": key,
+            "message_count": len(seed_history),
+            "messages": _history_to_messages(seed_history),
             "info": {
-                "model": _resolve_model(),
+                # Reflect the per-session model override (desktop composer pick)
+                # immediately so the client doesn't briefly clobber its sticky
+                # pick with the global default before the build's session.info.
+                "model": (
+                    session_model_override.get("model")
+                    if session_model_override
+                    else _resolve_model()
+                ),
+                **(
+                    {"provider": session_model_override["provider"]}
+                    if session_model_override and session_model_override.get("provider")
+                    else {}
+                ),
                 "tools": {},
                 "skills": {},
                 "cwd": cwd,
@@ -914,6 +964,30 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5006, str(e))
 
 
+def _is_hidden_empty_index_draft(row: dict) -> bool:
+    """A composer-paint placeholder the sidebar must NOT show.
+
+    Control-plane ``session.create`` projects a session_index row for every new
+    chat the moment the composer opens — before the user has typed anything — so
+    the row appears with an empty title (rendered as "新会话"), zero messages,
+    and no preview. These accumulate and re-appear on every launch (deleting them
+    is futile; the next new-chat route re-creates one). ``session.list`` already
+    hides such rows via ``_is_empty_stored_conversation``; mirror that here so the
+    single-query ``session.index.list`` sidebar read is consistent. Keep the row
+    when it is live (running / has an active run or runtime session) — that is a
+    brand-new chat mid-first-turn whose content has not been persisted yet.
+    """
+    if not _is_empty_stored_conversation(row):
+        return False
+    if (
+        row.get("running")
+        or str(row.get("active_run_id") or "").strip()
+        or str(row.get("active_runtime_session_id") or "").strip()
+    ):
+        return False
+    return True
+
+
 def _session_index_list_item(row: dict) -> dict:
     """Map a control-plane session_index row to the desktop session list shape."""
     return {
@@ -995,6 +1069,7 @@ def _(rid, params: dict) -> dict:
         items = [
             sanitize_session_list_item(_session_index_list_item(row))
             for row in (result.get("sessions") or [])
+            if not _is_hidden_empty_index_draft(row)
         ]
         page = result.get("pageInfo") or {}
         next_cursor = _encode_page_cursor(page.get("nextCursor")) if page.get("nextCursor") else ""
@@ -1073,6 +1148,22 @@ def _(rid, params: dict) -> dict:
             target = found["id"]
         else:
             return _err(rid, 4007, "session not found")
+    # Context compression ends the current SessionDB session and forks a
+    # continuation child that holds the post-compression turns (agent.session_id
+    # rotates — see _sync_session_key_after_compress). Resuming the parent id
+    # would reload the stale pre-compression transcript AND miss the live
+    # session, which is keyed on the continuation tip. Re-anchor to the tip so
+    # history loading, the live-session lookup, and the rebuilt agent all target
+    # the session that actually holds the messages (#15000). Skipped for lazy
+    # watch windows, which attach to the exact branch they were opened on.
+    if found and not is_truthy_value(params.get("lazy", False)):
+        try:
+            tip = db.resolve_resume_session_id(target)
+        except Exception:
+            tip = target
+        if tip and tip != target:
+            target = tip
+            found = db.get_session(target) or found
     existing_workspace = _stored_workspace(target)
     raw_cwd = params.get("cwd") or (existing_workspace or {}).get("cwd")
     workspace_params = params
@@ -2064,23 +2155,52 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
-    import time as _time
 
-    filename = os.path.abspath(
-        f"hermes_conversation_{_time.strftime('%Y%m%d_%H%M%S')}.json"
-    )
+    agent = session["agent"]
+    # Mirror the classic CLI /save: snapshot under the Hermes profile home
+    # (~/.hermes/sessions/saved/) rather than the project/workspace CWD, and
+    # include the system prompt so the export matches the dashboard save.
+    saved_dir = get_hermes_home() / "sessions" / "saved"
     try:
-        with open(filename, "w", encoding="utf-8") as f:
+        saved_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return _err(rid, 5011, f"failed to create save directory {saved_dir}: {e}")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = saved_dir / f"hermes_conversation_{timestamp}.json"
+
+    with session["history_lock"]:
+        messages = list(session.get("history", []))
+
+    session_id = getattr(agent, "session_id", None) or session.get("session_key") or ""
+    # Prefer the agent's session_start datetime (matches the classic CLI export);
+    # fall back to the gateway session's created_at timestamp.
+    agent_start = getattr(agent, "session_start", None)
+    if isinstance(agent_start, datetime):
+        session_start = agent_start.isoformat()
+    else:
+        created_at = session.get("created_at")
+        session_start = (
+            datetime.fromtimestamp(created_at).isoformat()
+            if isinstance(created_at, (int, float))
+            else ""
+        )
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(
                 {
-                    "model": getattr(session["agent"], "model", ""),
-                    "messages": session.get("history", []),
+                    "model": getattr(agent, "model", ""),
+                    "session_id": session_id,
+                    "session_start": session_start,
+                    "system_prompt": getattr(agent, "_cached_system_prompt", "") or "",
+                    "messages": messages,
                 },
                 f,
                 indent=2,
                 ensure_ascii=False,
             )
-        return _ok(rid, {"file": filename})
+        return _ok(rid, {"file": str(path)})
     except Exception as e:
         return _err(rid, 5011, str(e))
 

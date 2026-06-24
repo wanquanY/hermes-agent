@@ -33,8 +33,37 @@ def _(rid, params: dict) -> dict:
                         4009,
                         "session busy — /interrupt the current turn before switching models",
                     )
+                # A lazy session paints the composer before its AIAgent is
+                # built. A /model switch must apply to the REAL agent (not just
+                # process env), so build it first and wait for it — otherwise
+                # _apply_model_switch runs against agent=None and the switch is
+                # silently dropped on the next prompt. Skip the build when an
+                # explicit provider was given: that resolves a fresh runtime
+                # without needing the live agent.
+                from hermes_cli.model_switch import parse_model_flags
+
+                (
+                    _model_input,
+                    explicit_provider,
+                    _persist_global,
+                    _force_refresh,
+                    _is_session,
+                ) = parse_model_flags(value)
+                if session.get("agent") is None and not explicit_provider.strip():
+                    session_id = params.get("session_id", "")
+                    _start_agent_build(session_id, session)
+                    init_err = _wait_agent(session, rid)
+                    if init_err:
+                        return init_err
+                    if session.get("agent") is None:
+                        return _err(rid, 5032, "agent initialization failed")
                 result = _apply_model_switch(
-                    params.get("session_id", ""), session, value
+                    params.get("session_id", ""),
+                    session,
+                    value,
+                    confirm_expensive_model=bool(
+                        params.get("confirm_expensive_model", False)
+                    ),
                 )
                 _set_session_model_descriptor(
                     session,
@@ -42,10 +71,23 @@ def _(rid, params: dict) -> dict:
                     clear_if_empty=True,
                 )
             else:
-                result = _apply_model_switch("", {"agent": None}, value)
+                result = _apply_model_switch(
+                    "",
+                    {"agent": None},
+                    value,
+                    confirm_expensive_model=bool(
+                        params.get("confirm_expensive_model", False)
+                    ),
+                )
             return _ok(
                 rid,
-                {"key": key, "value": result["value"], "warning": result["warning"]},
+                {
+                    "key": key,
+                    "value": result["value"],
+                    "warning": result["warning"],
+                    "confirm_required": result.get("confirm_required", False),
+                    "confirm_message": result.get("confirm_message", ""),
+                },
             )
         except Exception as e:
             return _err(rid, 5001, str(e))
@@ -411,6 +453,11 @@ def _(rid, params: dict) -> dict:
         from hermes_constants import display_hermes_home
 
         return _ok(rid, {"home": str(_active_hermes_home()), "display": display_hermes_home()})
+    if key == "project":
+        cfg_terminal = _load_cfg().get("terminal") or {}
+        raw = str(params.get("cwd", "") or cfg_terminal.get("cwd", "") or "").strip()
+        cwd = _completion_cwd({"cwd": raw} if raw else {})
+        return _ok(rid, {"cwd": cwd, "branch": _git_branch_for_cwd(cwd)})
     if key == "full":
         return _ok(rid, {"config": _load_cfg()})
     if key == "prompt":

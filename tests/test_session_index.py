@@ -171,6 +171,54 @@ def test_append_run_event_terminal_clears_session_index_running(tmp_path: Path):
     assert item["active_run_id"] == ""
 
 
+def test_append_run_event_terminal_prunes_message_delta_rows(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.append_run_event(
+        "s-live",
+        {
+            "type": "message.delta",
+            "run_id": "run-A",
+            "turn_id": "turn-A",
+            "seq": 1,
+            "payload": {"mode": "append", "delta": "hel"},
+        },
+    )
+    db.append_run_event(
+        "s-live",
+        {
+            "type": "message.delta",
+            "run_id": "run-A",
+            "turn_id": "turn-A",
+            "seq": 2,
+            "payload": {"mode": "append", "delta": "lo"},
+        },
+    )
+    assert [event["type"] for event in db.list_run_events("s-live")] == [
+        "message.delta",
+        "message.delta",
+    ]
+
+    db.append_run_event(
+        "s-live",
+        {
+            "type": "message.complete",
+            "run_id": "run-A",
+            "turn_id": "turn-A",
+            "seq": 3,
+            "payload": {"status": "completed", "text": "hello"},
+        },
+    )
+
+    assert [event["type"] for event in db.list_run_events("s-live")] == ["message.complete"]
+    archive = db._conn.execute(  # noqa: SLF001 - storage contract assertion.
+        "SELECT reason, event_count, first_seq, last_seq FROM run_event_archives"
+    ).fetchone()
+    assert archive["reason"] == "terminal_run_stream_events"
+    assert archive["event_count"] == 2
+    assert archive["first_seq"] == 1
+    assert archive["last_seq"] == 2
+
+
 def test_reconcile_heals_stuck_running_regular_session_with_terminal_run(tmp_path: Path):
     """Pre-fix builds left regular sessions stuck at `running=1` after the
     streaming append_run_event projection gap. The boot-time reconcile sweeps
@@ -202,8 +250,12 @@ def test_reconcile_heals_stuck_running_regular_session_with_terminal_run(tmp_pat
         started_at=1.0,
         updated_at=1.0,
     )
-    item = db.list_session_index()["sessions"][0]
-    assert item["running"] is True
+    row = db._conn.execute(  # noqa: SLF001 - storage contract assertion.
+        "SELECT running, active_run_id FROM session_index WHERE session_id = ?",
+        ("s-stuck",),
+    ).fetchone()
+    assert int(row["running"]) == 1
+    assert row["active_run_id"] == "run-done"
 
     db.reconcile_session_index()
 
@@ -222,6 +274,86 @@ def test_run_terminal_does_not_clobber_other_active_run(tmp_path: Path):
     item = db.list_session_index()["sessions"][0]
     assert item["running"] is True
     assert item["active_run_id"] == "run-A"
+
+
+def test_team_conversation_leader_terminal_clears_index_when_no_mission_is_active(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-chat",
+        team_id="team-1",
+        stable_session_id="team-session-chat",
+        title="团队会话",
+    )
+    db.upsert_run(run_id="team-leader-run-1", session_id="team-session-chat", status="running")
+    row = db._conn.execute(  # noqa: SLF001 - storage contract assertion.
+        "SELECT running, active_run_id FROM session_index WHERE session_id = ?",
+        ("team-session-chat",),
+    ).fetchone()
+    assert int(row["running"]) == 1
+    assert row["active_run_id"] == "team-leader-run-1"
+
+    db.append_run_event(
+        "team-session-chat",
+        {
+            "type": "message.complete",
+            "run_id": "team-leader-run-1",
+            "turn_id": "team-leader-turn-1",
+            "seq": 2,
+            "payload": {"status": "completed", "text": "done"},
+        },
+    )
+
+    row = db._conn.execute(  # noqa: SLF001 - verifies write-time projection.
+        "SELECT running, status, active_run_id FROM session_index WHERE session_id = ?",
+        ("team-session-chat",),
+    ).fetchone()
+    assert int(row["running"]) == 0
+    assert row["status"] == "idle"
+    assert row["active_run_id"] == ""
+
+
+def test_team_mission_active_run_terminal_does_not_clear_active_mission_index(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-live",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="running",
+    )
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-mission",
+        team_id="team-1",
+        stable_session_id="team-session-mission",
+        title="团队任务",
+        active_mission_id="mission-live",
+    )
+    db.upsert_run(run_id="team-leader-run-2", session_id="team-session-mission", status="running")
+
+    db.append_run_event(
+        "team-session-mission",
+        {
+            "type": "message.complete",
+            "run_id": "team-leader-run-2",
+            "turn_id": "team-leader-turn-2",
+            "seq": 2,
+            "payload": {"status": "completed", "text": "task started"},
+        },
+    )
+
+    row = db._conn.execute(  # noqa: SLF001 - verifies active mission is not clobbered.
+        "SELECT running, status, active_run_id FROM session_index WHERE session_id = ?",
+        ("team-session-mission",),
+    ).fetchone()
+    assert int(row["running"]) == 1
+    assert row["status"] == "running"
+    assert row["active_run_id"] == "team-leader-run-2"
+    item = next(
+        s for s in db.list_session_index()["sessions"]
+        if s["session_id"] == "team-session-mission"
+    )
+    assert item["running"] is True
+    assert item["active_run_id"] == "team-leader-run-2"
 
 
 def test_team_conversation_projects_into_session_index(tmp_path: Path):
@@ -450,17 +582,14 @@ def test_initialize_team_mission_lights_up_sidebar_immediately(tmp_path: Path):
     assert row["mission_id"] == "m-a"
 
 
-def test_reconcile_clears_team_mission_row_with_terminal_active_run(tmp_path: Path):
+def test_list_session_index_repairs_team_conversation_row_with_terminal_active_run(tmp_path: Path):
     """Symptom B: a team conversation whose leader run had completed cleanly
     still showed running=1 because the run-write projection was missed under
-    some path (observed in the production DB for a draft mission that never
-    transitioned out of draft, so the mission-status heal also did not fire).
+    some path.
 
-    The reconcile heal previously only covered non-team_mission sessions and
-    team_mission sessions whose mission was already terminal. A team_mission
-    session whose mission was 'draft' but whose active_run was 'completed' fell
-    through both cleaners and stayed stuck. Fix: extend the active-run heal to
-    cover team_mission rows too."""
+    Team conversations use session_kind='team_mission' even when no active
+    mission is bound. The list read path must repair old rows whose active run
+    is already terminal so the sidebar does not keep spinning until restart."""
     db = SessionDB(tmp_path / "state.db")
     db.create_session("team-session-stuck", source="team_mission")
     # The run terminated cleanly in the runs table…
@@ -476,13 +605,18 @@ def test_reconcile_clears_team_mission_row_with_terminal_active_run(tmp_path: Pa
         running=True,
         active_run_id="run-completed",
         active_runtime_session_id="rt-x",
-        mission_id="m-draft",
+        mission_id="",
         conversation_id="conv-stuck",
         started_at=1.0,
         updated_at=1.0,
     )
 
-    db.reconcile_session_index()
+    row = db._conn.execute(  # noqa: SLF001 - verify the legacy stuck state.
+        "SELECT running, active_run_id FROM session_index WHERE session_id = ?",
+        ("team-session-stuck",),
+    ).fetchone()
+    assert int(row["running"]) == 1
+    assert row["active_run_id"] == "run-completed"
 
     row = next(s for s in db.list_session_index()["sessions"] if s["session_id"] == "team-session-stuck")
     assert row["running"] is False

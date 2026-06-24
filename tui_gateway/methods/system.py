@@ -215,8 +215,25 @@ def _(rid, params: dict) -> dict:
         discover_mcp_tools()
         if session:
             agent = session["agent"]
-            if hasattr(agent, "refresh_tools"):
-                agent.refresh_tools()
+            # Rebuild the cached agent's tool snapshot so the current session
+            # picks up added/removed MCP tools without `/new`. The agent
+            # snapshots tools once at build and never re-reads the registry, so
+            # an explicit rebuild — re-resolving enabled toolsets so a server
+            # the user just enabled this session is actually picked up — is
+            # required. Mirrors gateway/run.py::_execute_mcp_reload.
+            try:
+                from tools.mcp_tool import refresh_agent_mcp_tools
+
+                refresh_agent_mcp_tools(
+                    agent,
+                    enabled_override=_load_enabled_toolsets(),
+                    quiet_mode=True,
+                )
+            except Exception as _exc:
+                logger.warning(
+                    "Failed to refresh cached agent tools after /reload-mcp: %s",
+                    _exc,
+                )
             _emit("session.info", params.get("session_id", ""), _session_info(agent, session))
 
         # Honor `always=true` by persisting the opt-out to config.

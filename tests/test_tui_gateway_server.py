@@ -916,6 +916,65 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
     assert ("tip", True) in captured["history_calls"]
 
 
+def test_session_resume_reanchors_to_compression_tip(monkeypatch):
+    """Regression: context compression ends the current session and forks a
+    continuation child holding the post-compression turns. Resuming the parent
+    id must re-anchor to the tip (via db.resolve_resume_session_id) so history
+    loading and the rebuilt agent target the session that actually holds the
+    messages — otherwise the resume reloads the stale pre-compression transcript
+    and misses the live session keyed on the tip. This guards the LIVE
+    methods/session.py handler against losing the re-anchor again."""
+    captured = {}
+
+    class FakeDB:
+        def get_session(self, target):
+            return {"id": target}
+
+        def get_session_by_title(self, target):
+            return None
+
+        def resolve_resume_session_id(self, session_id):
+            # Parent rotated into "tip" by compression.
+            return "tip" if session_id == "rotated_parent" else session_id
+
+        def reopen_session(self, target):
+            captured["reopened"] = target
+
+        def get_messages_as_conversation(self, target, include_ancestors=False):
+            captured.setdefault("history_targets", []).append(target)
+            return [{"role": "user", "content": "x"}]
+
+    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_set_session_context", lambda *args, **kwargs: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
+
+    def _capture_agent(sid, target, **kwargs):
+        captured["agent_target"] = target
+        return types.SimpleNamespace(model="test")
+
+    monkeypatch.setattr(server, "_make_agent", _capture_agent)
+    monkeypatch.setattr(
+        server,
+        "_session_info",
+        lambda agent, _session=None: {"model": "test", "tools": {}, "skills": {}},
+    )
+    monkeypatch.setattr(
+        server, "_init_session", lambda sid, key, agent, history, cols=80: None
+    )
+
+    resp = server.handle_request(
+        {"id": "1", "method": "session.resume", "params": {"session_id": "rotated_parent"}}
+    )
+
+    assert resp.get("result"), f"got error: {resp.get('error')}"
+    # Everything downstream must target the compression tip, not the parent.
+    assert captured.get("reopened") == "tip"
+    assert captured.get("agent_target") == "tip"
+    assert "rotated_parent" not in captured.get("history_targets", [])
+    assert "tip" in captured.get("history_targets", [])
+
+
 def test_session_resume_reuses_existing_live_session_concurrently(monkeypatch):
     target = "20260409_010101_abc123"
     created_sids: list[str] = []
@@ -2360,14 +2419,14 @@ def test_config_set_model_global_persists(monkeypatch):
 
 
 def test_config_set_model_syncs_inference_provider_env(monkeypatch):
-    """After an explicit provider switch, HERMES_INFERENCE_PROVIDER must
-    reflect the user's choice so ambient re-resolution (credential pool
-    refresh, aux clients) picks up the new provider instead of the original
-    one persisted in config or shell env.
+    """After an explicit provider switch, the user's choice must be recorded as
+    a PER-SESSION override (session["model_override"]) — NOT written to a
+    process-global env var, which the single-process desktop backend shares
+    across every live session (cross-session contamination). _make_agent reads
+    the override on the next rebuild, so /new keeps the session on its provider.
 
     Regression: a TUI user switched openrouter → anthropic and the TUI kept
-    trying openrouter because the env-var-backed resolvers still saw the old
-    provider.
+    trying openrouter because resolution still saw the old provider.
     """
 
     class _Agent:
@@ -2397,27 +2456,32 @@ def test_config_set_model_syncs_inference_provider_env(monkeypatch):
     monkeypatch.setattr(server, "_restart_slash_worker", lambda _sid, session: None)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
 
-    server.handle_request(
-        {
-            "id": "1",
-            "method": "config.set",
-            "params": {
-                "session_id": "sid",
-                "key": "model",
-                "value": "claude-sonnet-4.6 --provider anthropic",
-            },
-        }
-    )
+    try:
+        server.handle_request(
+            {
+                "id": "1",
+                "method": "config.set",
+                "params": {
+                    "session_id": "sid",
+                    "key": "model",
+                    "value": "claude-sonnet-4.6 --provider anthropic",
+                },
+            }
+        )
 
-    assert os.environ["HERMES_INFERENCE_PROVIDER"] == "anthropic"
+        # Recorded per-session, NOT leaked to process env.
+        assert server._sessions["sid"]["model_override"]["provider"] == "anthropic"
+        assert os.environ.get("HERMES_INFERENCE_PROVIDER") == "openrouter"
+    finally:
+        server._sessions.pop("sid", None)
 
 
 def test_config_set_model_syncs_tui_provider_unconditionally(monkeypatch):
-    """Regression for #16857: /model must set HERMES_TUI_PROVIDER even when
-    it wasn't pre-set on launch, so a later /new (which re-runs
-    _resolve_startup_runtime) honours the user's explicit provider choice
-    instead of falling through to static-catalog detection and picking a
-    coincidentally-matching native provider.
+    """Regression for #16857, adapted to the dovie per-session model: /model must
+    record the explicit provider on session["model_override"] so a later /new
+    (which rebuilds the agent via _make_agent honouring the override) keeps the
+    user's provider — without leaking it to the process-global env shared by
+    every other live session.
     """
 
     class _Agent:
@@ -2448,23 +2512,27 @@ def test_config_set_model_syncs_tui_provider_unconditionally(monkeypatch):
     monkeypatch.setattr(server, "_restart_slash_worker", lambda _sid, session: None)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
 
-    server.handle_request(
-        {
-            "id": "1",
-            "method": "config.set",
-            "params": {
-                "session_id": "sid",
-                "key": "model",
-                "value": "deepseek-v4-pro --provider custom:xuanji",
-            },
-        }
-    )
+    try:
+        server.handle_request(
+            {
+                "id": "1",
+                "method": "config.set",
+                "params": {
+                    "session_id": "sid",
+                    "key": "model",
+                    "value": "deepseek-v4-pro --provider custom:xuanji",
+                },
+            }
+        )
 
-    # Both env vars must reflect the user's choice. HERMES_TUI_PROVIDER is
-    # the canonical explicit-this-process carrier consumed by
-    # _resolve_startup_runtime() on /new.
-    assert os.environ["HERMES_TUI_PROVIDER"] == "custom:xuanji"
-    assert os.environ["HERMES_INFERENCE_PROVIDER"] == "custom:xuanji"
+        # Recorded on the session, NOT written to the shared process env.
+        override = server._sessions["sid"]["model_override"]
+        assert override["provider"] == "custom:xuanji"
+        assert override["model"] == "deepseek-v4-pro"
+        assert os.environ.get("HERMES_TUI_PROVIDER") is None
+        assert os.environ.get("HERMES_INFERENCE_PROVIDER") is None
+    finally:
+        server._sessions.pop("sid", None)
 
 
 def test_config_set_model_syncs_tui_provider_env(monkeypatch):
@@ -2497,6 +2565,7 @@ def test_config_set_model_syncs_tui_provider_env(monkeypatch):
 
     monkeypatch.setattr("hermes_cli.model_switch.switch_model", fake_switch_model)
 
+    _model_env_before = os.environ.get("HERMES_MODEL")
     try:
         resp = server.handle_request(
             {
@@ -2511,9 +2580,14 @@ def test_config_set_model_syncs_tui_provider_env(monkeypatch):
         )
 
         assert resp["result"]["value"] == "anthropic/claude-sonnet-4.6"
-        assert os.environ["HERMES_TUI_PROVIDER"] == "anthropic"
-        assert os.environ["HERMES_MODEL"] == "anthropic/claude-sonnet-4.6"
-        assert os.environ["HERMES_INFERENCE_MODEL"] == "anthropic/claude-sonnet-4.6"
+        # The choice is recorded per-session; the shared process env is NOT
+        # mutated (HERMES_TUI_PROVIDER keeps its pre-switch value, HERMES_MODEL
+        # is left exactly as it was — the switch must not leak it).
+        override = server._sessions["sid"]["model_override"]
+        assert override["provider"] == "anthropic"
+        assert override["model"] == "anthropic/claude-sonnet-4.6"
+        assert os.environ["HERMES_TUI_PROVIDER"] == "openai-codex"
+        assert os.environ.get("HERMES_MODEL") == _model_env_before
     finally:
         server._sessions.clear()
 
@@ -6189,6 +6263,56 @@ def test_make_agent_handles_null_agent_config(monkeypatch):
         server._make_agent("sid1", "key1")
 
     assert mock_agent.call_args.kwargs["max_iterations"] == 80
+
+
+def test_make_agent_uses_persisted_session_model(monkeypatch):
+    """A resumed / runtime-worker-built agent (no live composer override) builds
+    on the session's PERSISTED DB-row model + provider, not the global default —
+    closing the control-plane→runtime-worker gap so the per-turn /model switch is
+    a same-model no-op (no marker, no slash-worker churn)."""
+    _setup_make_agent_mocks(monkeypatch, {})
+
+    class FakeDB:
+        def get_session(self, key):
+            return {
+                "id": key,
+                "model": "deepseek-v4-pro",
+                "model_config": '{"provider": "dovie-cloud"}',
+            }
+
+    monkeypatch.setattr(server, "_db_for_stable_session", lambda key: FakeDB())
+    captured = {}
+
+    def _fake_resolve(requested=None, target_model=None):
+        captured["requested"] = requested
+        captured["target_model"] = target_model
+        return {
+            "provider": None, "base_url": None, "api_key": None, "api_mode": None,
+            "command": None, "args": None, "credential_pool": None,
+        }
+
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider", _fake_resolve
+    )
+
+    with patch("run_agent.AIAgent") as mock_agent:
+        server._make_agent("sid1", "key1", session_id="key1")
+
+    assert mock_agent.call_args.kwargs["model"] == "deepseek-v4-pro"
+    assert captured["requested"] == "dovie-cloud"
+    assert captured["target_model"] == "deepseek-v4-pro"
+
+
+def test_make_agent_falls_back_to_global_without_persisted_model(monkeypatch):
+    """No model_override and no usable row model → global startup runtime."""
+    _setup_make_agent_mocks(monkeypatch, {})
+    monkeypatch.setattr(server, "_db_for_stable_session", lambda key: None)
+
+    with patch("run_agent.AIAgent") as mock_agent:
+        server._make_agent("sid1", "key1", session_id="key1")
+
+    # _setup_make_agent_mocks stubs _resolve_startup_runtime() -> ("test-model", None)
+    assert mock_agent.call_args.kwargs["model"] == "test-model"
 
 
 class _FakeAgentForBackground:

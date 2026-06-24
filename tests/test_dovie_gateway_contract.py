@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -440,7 +441,7 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
         db.close()
 
 
-def test_conversation_render_snapshot_returns_active_team_runtime_events(tmp_path, monkeypatch):
+def test_conversation_render_snapshot_returns_active_team_structural_runtime_events(tmp_path, monkeypatch):
     import importlib
 
     from hermes_state import SessionDB
@@ -490,6 +491,18 @@ def test_conversation_render_snapshot_returns_active_team_runtime_events(tmp_pat
                 "payload": {"text": "active"},
             },
         )
+        db.append_run_event(
+            "team-session-1",
+            {
+                "type": "tool.start",
+                "session_id": "runtime-team-active",
+                "stored_session_id": "team-session-1",
+                "run_id": "active-team-run-1",
+                "turn_id": "active-team-turn-1",
+                "runtime_scope_key": "team:conversation-1:leader",
+                "payload": {"tool_id": "tool-1", "name": "web_search"},
+            },
+        )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
             stable_session_id="team-session-1",
@@ -513,9 +526,34 @@ def test_conversation_render_snapshot_returns_active_team_runtime_events(tmp_pat
         assert response["result"]["conversation"]["running"] is True
         assert response["result"]["conversation"]["active_run_id"] == "active-team-run-1"
         assert [event["run_id"] for event in response["result"]["runEvents"]] == ["active-team-run-1"]
-        assert response["result"]["runEvents"][0]["payload"]["text"] == "active"
+        assert [event["type"] for event in response["result"]["runEvents"]] == ["tool.start"]
+        assert response["result"]["runEvents"][0]["payload"]["tool_id"] == "tool-1"
     finally:
         db.close()
+
+
+def test_conversation_render_snapshot_cap_drops_oversized_single_items():
+    import importlib
+
+    conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
+    result = {
+        "kind": "ordinary",
+        "schemaVersion": "test",
+        "renderReady": True,
+        "messages": [{"id": "huge-message", "text": "m" * 20_000}],
+        "runEvents": [{"type": "tool.complete", "payload": {"result": "r" * 20_000}}],
+        "pageInfo": {},
+        "projection": {"source": "conversation.render_snapshot"},
+    }
+
+    capped = conversation_render_snapshot._cap_render_result(result, max_bytes=2_048)  # noqa: SLF001
+
+    assert len(json.dumps(capped, ensure_ascii=False).encode("utf-8")) <= 2_048
+    assert capped["transportTruncated"] is True
+    assert capped["pageInfo"]["hasMore"] is True
+    assert capped["projection"]["transportTruncated"] is True
+    assert capped["messages"] == []
+    assert capped["runEvents"] == []
 
 
 def test_conversation_render_snapshot_normalizes_duplicate_team_assistant_run_ids(tmp_path, monkeypatch):

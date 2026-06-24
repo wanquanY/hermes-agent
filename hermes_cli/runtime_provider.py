@@ -691,6 +691,38 @@ def _resolve_named_custom_runtime(
             ):
                 custom_provider = configured_custom
 
+    # Recover the named-provider binding when config.model.provider has been
+    # collapsed to the generic "custom" label (or left empty). A persisted
+    # `/model` switch writes the runtime label `result.target_provider`, which
+    # for a named custom endpoint is the bare "custom" — and that bare label
+    # would otherwise make the block above skip the named-provider lookup,
+    # dropping the provider's key_env and falling through to the keyless
+    # openrouter path (→ "no-key-required" → 401). The endpoint URL is the
+    # provider's true identity, so match config.model.base_url (or the explicit
+    # base_url) against the configured `providers:` entries and adopt the one
+    # whose endpoint matches. Gated on an exact base_url match, so it never
+    # hijacks a genuine bare-custom endpoint that isn't a declared provider.
+    if custom_provider is None and requested_norm == "custom":
+        _mc = _get_model_config()
+        _target_base = (
+            (explicit_base_url or "").strip()
+            or str(_mc.get("base_url", "") or "").strip()
+        ).rstrip("/")
+        if _target_base:
+            _providers = load_config().get("providers")
+            if isinstance(_providers, dict):
+                for _ep_name, _entry in _providers.items():
+                    if not isinstance(_entry, dict):
+                        continue
+                    _ep_base = str(
+                        _entry.get("base_url") or _entry.get("api") or _entry.get("url") or ""
+                    ).strip().rstrip("/")
+                    if _ep_base and _ep_base == _target_base:
+                        _recovered = _get_named_custom_provider(_ep_name)
+                        if _recovered:
+                            custom_provider = _recovered
+                        break
+
     if custom_provider is None and requested_norm == "custom" and explicit_base_url:
         base_url = explicit_base_url.strip().rstrip("/")
         # Check credential pool first — mirrors the named-custom-provider path

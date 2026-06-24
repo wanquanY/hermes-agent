@@ -605,7 +605,6 @@ def append_team_mission_event(
         ).fetchone()
         seq = int((row["next_seq"] if row is not None else 1) or 1)
         stored = _with_mission_seq(event, seq)
-        payload = event_payload(stored)
         try:
             db._conn.execute(
                 """
@@ -625,8 +624,8 @@ def append_team_mission_event(
                     source_seq,
                     dedupe_key,
                     float(stored.get("timestamp") or now),
-                    json_dumps(payload),
-                    json_dumps(source_event) if source_event else "",
+                    "",
+                    "",
                     json_dumps(stored),
                     now,
                 ),

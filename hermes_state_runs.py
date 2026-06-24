@@ -31,6 +31,9 @@ DEFAULT_RUN_EVENT_MAX_PER_SESSION = 5000
 RUN_EVENT_PRUNE_INTERVAL_EVENTS = 500
 CONTROL_ONLY_ACTIVE_RUN_REPAIR_STALE_SECONDS = 60.0
 CONTROL_ONLY_ACTIVE_RUN_REPAIR_OWNER_DEAD_GRACE_SECONDS = 10.0
+TERMINAL_RUN_PRUNABLE_EVENT_TYPES = {
+    "message.delta",
+}
 COALESCIBLE_STREAM_EVENT_TYPES = {
     "reasoning.delta",
     "thinking.delta",
@@ -701,30 +704,45 @@ class SessionDBRunMixin:
                         sid, run_id, status, cur.rowcount,
                     )
             else:
-                # Clear path for non-team-mission rows works as before. For
-                # team_mission rows, the clear MUST come from mission lifecycle
-                # (reduce_team_mission_graph → update_session_index_for_mission
-                # when mission status becomes terminal, or cancel_team_mission).
-                # A single run terminating mid-mission must not blank the sidebar:
-                # member-node runs come and go all the time, the leader's start_
-                # task tool turn ends right after starting a mission, and synthesis
-                # cycles through more runs — clearing on any of these caused the
-                # exact "canvas executing but sidebar idle" symptom.
+                # Clear BOTH the run's own session row AND the bound team-mission
+                # conversation row (conv_sid) — symmetric with the set path above,
+                # which lights up both. A first/leader-only team turn runs under a
+                # session id (leader or team:mission-X:node:root) that differs from
+                # the conversation's session_index row, so clearing only `sid` left
+                # the sidebar spinner stuck until a list read's repair pass healed
+                # it (the "first message status doesn't auto-update, refresh fixes
+                # it" bug). The two guards below keep multi-node missions flicker-
+                # free: a sibling run terminating mid-mission is blocked by the
+                # active_run_id match AND the mission-terminal check, so the
+                # conversation row only clears when its run is the active one and
+                # its mission (if any) has actually finished.
+                clear_ids = [sid]
+                if conv_sid and conv_sid != sid:
+                    clear_ids.append(conv_sid)
+                id_placeholders = ",".join("?" for _ in clear_ids)
                 cur = conn.execute(
-                    """
+                    f"""
                     UPDATE session_index
                        SET running = 0, status = 'idle',
                            active_run_id = '', active_runtime_session_id = '',
                            updated_at = MAX(updated_at, ?)
-                     WHERE session_id = ?
-                       AND session_kind != 'team_mission'
+                     WHERE session_id IN ({id_placeholders})
                        AND (active_run_id = ? OR active_run_id = '')
+                       AND (
+                           session_kind != 'team_mission'
+                           OR COALESCE(mission_id, '') = ''
+                           OR mission_id IN (
+                               SELECT mission_id FROM team_missions
+                                WHERE LOWER(COALESCE(status,'')) IN
+                                      ('completed','failed','cancelled','canceled','interrupted')
+                           )
+                       )
                     """,
-                    (float(updated_at or 0), sid, run_id),
+                    (float(updated_at or 0), *clear_ids, run_id),
                 )
                 logger.warning(
-                    "[doxie-session-index] project_run clear session_id=%s run_id=%s status=%s rows=%s",
-                    sid, run_id, status, cur.rowcount,
+                    "[doxie-session-index] project_run clear session_id=%s conv_session_id=%s run_id=%s status=%s rows=%s",
+                    sid, conv_sid, run_id, status, cur.rowcount,
                 )
         except sqlite3.OperationalError:
             # session_index table absent (legacy worker db) — nothing to project.
@@ -1209,20 +1227,10 @@ class SessionDBRunMixin:
             return inserted_event
 
         saved = self._execute_write(_do)
-        should_prune = (
-            (seq > 0 and seq % RUN_EVENT_PRUNE_INTERVAL_EVENTS == 0)
-            or terminal_status in TERMINAL_RUN_STATUSES
+        defer_terminal_maintenance = (
+            terminal_status in TERMINAL_RUN_STATUSES
+            and bool(getattr(self, "_team_mission_projecting", False))
         )
-        if should_prune:
-            if terminal_status in TERMINAL_RUN_STATUSES:
-                try:
-                    self.compact_run_events(session_id=stable)
-                except Exception as exc:
-                    logger.debug("run event compaction skipped for %s: %s", stable, exc)
-            try:
-                self.prune_run_events(session_id=stable)
-            except Exception as exc:
-                logger.debug("run event retention skipped for %s: %s", stable, exc)
         # Write-time canonical projection for team-mission-bound runs. Runtime
         # events recorded straight onto a node's session (the streaming path
         # that bypasses append_team_mission_run_event) are projected into the
@@ -1234,10 +1242,52 @@ class SessionDBRunMixin:
         if (
             run_id
             and not getattr(self, "_team_mission_projecting", False)
-            and hasattr(self, "_project_team_mission_run_event")
+            and not getattr(self, "_member_chat_projecting", False)
         ):
-            self._project_team_mission_run_event(run_id=run_id, saved=saved)
+            if hasattr(self, "_project_team_mission_run_event"):
+                self._project_team_mission_run_event(run_id=run_id, saved=saved)
+            # Decoupled group-chat: relay a member's direct-chat reply into the
+            # conversation session (no mission involved). See SessionDBMemberChatMixin.
+            if hasattr(self, "_project_member_chat_run_event"):
+                self._project_member_chat_run_event(run_id=run_id, saved=saved)
+        if not defer_terminal_maintenance:
+            self._maintain_run_events_after_append(
+                session_id=stable,
+                run_id=run_id,
+                seq=seq,
+                terminal_status=terminal_status,
+            )
         return saved
+
+    def _maintain_run_events_after_append(
+        self,
+        *,
+        session_id: str,
+        run_id: str = "",
+        seq: int = 0,
+        terminal_status: str | None = None,
+        prune_terminal_stream_events: bool = True,
+    ) -> None:
+        should_prune = (
+            (seq > 0 and seq % RUN_EVENT_PRUNE_INTERVAL_EVENTS == 0)
+            or terminal_status in TERMINAL_RUN_STATUSES
+        )
+        if not should_prune:
+            return
+        if terminal_status in TERMINAL_RUN_STATUSES:
+            if prune_terminal_stream_events and run_id:
+                try:
+                    self.prune_terminal_run_stream_events(session_id=session_id, run_id=run_id)
+                except Exception as exc:
+                    logger.debug("terminal run stream pruning skipped for %s/%s: %s", session_id, run_id, exc)
+            try:
+                self.compact_run_events(session_id=session_id)
+            except Exception as exc:
+                logger.debug("run event compaction skipped for %s: %s", session_id, exc)
+        try:
+            self.prune_run_events(session_id=session_id)
+        except Exception as exc:
+            logger.debug("run event retention skipped for %s: %s", session_id, exc)
 
     def list_run_events(
         self,
@@ -1822,6 +1872,66 @@ class SessionDBRunMixin:
                 "retention_days": int(retention_days or DEFAULT_RUN_EVENT_RETENTION_DAYS),
                 "max_events_per_session": max_per_session,
             }
+
+        return self._execute_write(_do)
+
+    def prune_terminal_run_stream_events(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        event_types: set[str] | tuple[str, ...] | list[str] = tuple(sorted(TERMINAL_RUN_PRUNABLE_EVENT_TYPES)),
+    ) -> Dict[str, Any]:
+        """Delete replay-redundant stream deltas once a run is terminal.
+
+        Live delivery keeps ``message.delta`` rows untouched while a run is
+        active.  After a terminal event has persisted, the final assistant text
+        is represented by ``message.complete`` and/or the messages table, so the
+        token-sized delta rows are no longer part of the durable contract.
+        """
+        stable = str(session_id or "").strip()
+        normalized_run_id = str(run_id or "").strip()
+        normalized_types = tuple(sorted({str(item or "").strip() for item in event_types if str(item or "").strip()}))
+        if not stable or not normalized_run_id or not normalized_types:
+            return {"deleted_events": 0, "event_types": list(normalized_types)}
+
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            terminal_statuses = _sql_status_literals(TERMINAL_RUN_STATUSES)
+            placeholders = ",".join("?" for _ in normalized_types)
+            rows = conn.execute(
+                f"""
+                SELECT e.*
+                FROM run_events e
+                LEFT JOIN runs r ON r.run_id = e.run_id
+                WHERE e.session_id = ?
+                  AND e.run_id = ?
+                  AND e.event_type IN ({placeholders})
+                  AND COALESCE(r.status, '') IN ({terminal_statuses})
+                ORDER BY e.seq ASC, e.id ASC
+                """,
+                (stable, normalized_run_id, *normalized_types),
+            ).fetchall()
+            if not rows:
+                return {"deleted_events": 0, "event_types": list(normalized_types)}
+            self._archive_run_event_rows(conn, rows, reason="terminal_run_stream_events")
+            ids = [int(row["id"]) for row in rows]
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                id_placeholders = ",".join("?" for _ in chunk)
+                conn.execute(f"DELETE FROM run_events WHERE id IN ({id_placeholders})", tuple(chunk))
+            conn.execute(
+                """
+                UPDATE runs
+                SET last_seq = (
+                    SELECT COALESCE(MAX(seq), 0)
+                    FROM run_events
+                    WHERE run_id = ?
+                )
+                WHERE run_id = ?
+                """,
+                (normalized_run_id, normalized_run_id),
+            )
+            return {"deleted_events": len(rows), "event_types": list(normalized_types)}
 
         return self._execute_write(_do)
 

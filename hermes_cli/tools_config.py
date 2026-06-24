@@ -604,23 +604,23 @@ def _check_cua_driver_asset_for_arch() -> bool:
 def install_cua_driver(upgrade: bool = False) -> bool:
     """Install or refresh the cua-driver binary used by Computer Use.
 
-    The upstream installer always pulls the latest release tag, so re-running
-    it is the canonical way to upgrade. We expose two modes:
+    The canonical path is Hermes-owned: resolve the latest compatible CUA
+    release asset, download the signed binary archive, and place ``cua-driver``
+    in a writable local command path. We expose two modes:
 
     * ``upgrade=False`` — original post-setup behaviour: skip if already
       installed, install otherwise. Used by the toolset enable flow where
       we don't want to surprise the user with a network fetch.
-    * ``upgrade=True`` — always re-run the installer (or call ``cua-driver
-      update`` if the binary supports it). Used by ``hermes update`` and
-      by ``hermes computer-use install --upgrade``.
+    * ``upgrade=True`` — always refresh the binary from the latest compatible
+      upstream release. Used by ``hermes update`` and by
+      ``hermes computer-use install --upgrade``.
 
     Returns True iff cua-driver is installed (or successfully refreshed)
     when the function returns. macOS-only — silently returns False on
     other platforms.
     """
-    import platform as _plat
-    import shutil
     import subprocess
+    import platform as _plat
 
     if _plat.system() != "Darwin":
         if upgrade:
@@ -634,13 +634,7 @@ def install_cua_driver(upgrade: bool = False) -> bool:
 
     # Not installed → fresh install path (only when caller asked for it).
     if not binary and not upgrade:
-        if not shutil.which("curl"):
-            _print_warning("    curl not found — install manually:")
-            _print_info("      https://github.com/trycua/cua/blob/main/libs/cua-driver/README.md")
-            return False
-        if not _check_cua_driver_asset_for_arch():
-            return False
-        return _run_cua_driver_installer(label="Installing")
+        return _install_cua_driver_release_asset(label="Installing", verbose=True)
 
     # Already installed and caller didn't ask to upgrade → just confirm.
     if binary and not upgrade:
@@ -658,13 +652,6 @@ def install_cua_driver(upgrade: bool = False) -> bool:
         return True
 
     # upgrade=True path — refresh to the latest upstream release.
-    if not shutil.which("curl"):
-        _print_warning("    curl not found — cannot refresh cua-driver.")
-        return bool(binary)
-
-    if not _check_cua_driver_asset_for_arch():
-        return bool(binary)
-
     if binary:
         # Show before/after version when we have a baseline. Best-effort.
         try:
@@ -677,7 +664,7 @@ def install_cua_driver(upgrade: bool = False) -> bool:
     else:
         before = ""
 
-    ok = _run_cua_driver_installer(label="Refreshing", verbose=False)
+    ok = _install_cua_driver_release_asset(label="Refreshing", verbose=False)
     if ok and before:
         try:
             after = subprocess.run(
@@ -691,6 +678,108 @@ def install_cua_driver(upgrade: bool = False) -> bool:
         except Exception:
             pass
     return ok
+
+
+def _default_cua_driver_install_path() -> Path:
+    return Path.home() / ".local" / "bin" / "cua-driver"
+
+
+def _cua_driver_install_target(binary: Optional[str] = None) -> Path:
+    if binary:
+        return Path(binary)
+    return _default_cua_driver_install_path()
+
+
+def _copy_cua_driver_binary(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        target.unlink()
+    shutil.copy2(source, target)
+    target.chmod(0o755)
+
+
+def _download_cua_driver_asset(asset_url: str, destination: Path) -> None:
+    import urllib.request
+
+    request = urllib.request.Request(
+        asset_url,
+        headers={
+            "Accept": "application/octet-stream",
+            "User-Agent": "Hermes Agent",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=120) as response:
+        with destination.open("wb") as handle:
+            shutil.copyfileobj(response, handle)
+
+
+def _extract_cua_driver_binary(archive_path: Path, destination: Path) -> Path:
+    import tarfile
+
+    with tarfile.open(archive_path, "r:gz") as archive:
+        member = next(
+            (
+                item
+                for item in archive.getmembers()
+                if item.isfile() and Path(item.name).name == "cua-driver"
+            ),
+            None,
+        )
+        if member is None:
+            raise RuntimeError("cua-driver binary not found in release archive")
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            raise RuntimeError("failed to extract cua-driver binary from release archive")
+        target = destination / "cua-driver"
+        with target.open("wb") as handle:
+            shutil.copyfileobj(extracted, handle)
+        target.chmod(0o755)
+        return target
+
+
+def _install_cua_driver_release_asset(label: str = "Installing", verbose: bool = True) -> bool:
+    """Install the latest compatible cua-driver release asset directly.
+
+    This avoids depending on GitHub raw install scripts and handles the common
+    macOS case where ``~/.local/bin/cua-driver`` is a symlink into a protected
+    ``/Applications/CuaDriver.app`` bundle: Hermes replaces the symlink itself
+    with a signed local binary rather than trying to mutate the app bundle.
+    """
+    import tempfile
+
+    try:
+        from hermes_cli.computer_use_status import fetch_latest_cua_driver_release
+
+        release = fetch_latest_cua_driver_release()
+        asset_url = str(release.get("asset_url") or "")
+        asset_name = str(release.get("asset_name") or "")
+        if not asset_url:
+            _print_warning("    No compatible cua-driver release asset found.")
+            if release.get("asset_compatible") is False:
+                return bool(shutil.which("cua-driver"))
+            return False
+        if verbose:
+            _print_info(f"    {label} cua-driver from {release.get('tag') or 'latest release'}...")
+        else:
+            _print_info(f"    {label} cua-driver...")
+        binary = shutil.which("cua-driver")
+        target = _cua_driver_install_target(binary)
+        with tempfile.TemporaryDirectory(prefix="hermes-cua-driver-") as tmp:
+            tmp_path = Path(tmp)
+            archive_path = tmp_path / (asset_name or "cua-driver.tar.gz")
+            _download_cua_driver_asset(asset_url, archive_path)
+            extracted_binary = _extract_cua_driver_binary(archive_path, tmp_path)
+            _copy_cua_driver_binary(extracted_binary, target)
+        if verbose:
+            _print_success("    cua-driver installed.")
+            _print_info("    IMPORTANT — grant macOS permissions now:")
+            _print_info("      System Settings > Privacy & Security > Accessibility")
+            _print_info("      System Settings > Privacy & Security > Screen Recording")
+            _print_info("    Both must allow the terminal / Hermes process.")
+        return True
+    except Exception as exc:
+        _print_warning(f"    cua-driver {label.lower()} failed: {exc}")
+        return False
 
 
 def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True) -> bool:

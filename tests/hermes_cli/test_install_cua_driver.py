@@ -1,16 +1,16 @@
 """Tests for ``install_cua_driver`` upgrade semantics and architecture pre-check.
 
-The cua-driver upstream installer always pulls the latest release tag, so
-re-running it is the canonical upgrade path. ``install_cua_driver(upgrade=True)``
-must:
+Hermes owns the cua-driver install/upgrade path by selecting the latest
+compatible upstream release asset and copying the signed binary into a writable
+local command path. ``install_cua_driver(upgrade=True)`` must:
 
 * Be macOS-only — no-op silently on Linux/Windows so ``hermes update`` can
   call it unconditionally without warning every non-macOS user.
-* Re-run the installer even when the binary is already on PATH (this is the
-  fix for the "we only pulled cua-driver once on enable" complaint).
+* Refresh the release asset even when the binary is already on PATH (this is
+  the fix for the "we only pulled cua-driver once on enable" complaint).
 * Preserve original ``upgrade=False`` behaviour for the toolset-enable flow:
   skip if installed, install otherwise, warn on non-macOS.
-* Pre-check architecture compatibility before downloading to avoid raw 404
+* Select an architecture-compatible asset before downloading to avoid raw 404
   errors on Intel macOS when the upstream release lacks x86_64 assets.
 """
 
@@ -37,35 +37,30 @@ class TestInstallCuaDriverUpgrade:
             assert tools_config.install_cua_driver(upgrade=False) is False
             warn.assert_called()
 
-    def test_upgrade_on_macos_with_binary_runs_installer(self):
+    def test_upgrade_on_macos_with_binary_refreshes_release_asset(self):
         from hermes_cli import tools_config
 
         with patch("platform.system", return_value="Darwin"), \
              patch.object(tools_config.shutil, "which",
                           side_effect=lambda n: "/usr/local/bin/" + n
-                                                 if n in {"cua-driver", "curl"} else None), \
-             patch.object(tools_config, "_check_cua_driver_asset_for_arch",
-                          return_value=True), \
-             patch.object(tools_config, "_run_cua_driver_installer",
-                          return_value=True) as runner, \
+                                                 if n == "cua-driver" else None), \
+             patch.object(tools_config, "_install_cua_driver_release_asset",
+                          return_value=True) as installer, \
              patch("subprocess.run"):
             assert tools_config.install_cua_driver(upgrade=True) is True
-            runner.assert_called_once()
-            kwargs = runner.call_args.kwargs
+            installer.assert_called_once()
+            kwargs = installer.call_args.kwargs
             assert kwargs.get("verbose") is False
 
-    def test_upgrade_on_macos_without_binary_runs_installer(self):
+    def test_upgrade_on_macos_without_binary_refreshes_release_asset(self):
         from hermes_cli import tools_config
 
         with patch("platform.system", return_value="Darwin"), \
-             patch.object(tools_config.shutil, "which",
-                          side_effect=lambda n: "/usr/bin/curl" if n == "curl" else None), \
-             patch.object(tools_config, "_check_cua_driver_asset_for_arch",
-                          return_value=True), \
-             patch.object(tools_config, "_run_cua_driver_installer",
-                          return_value=True) as runner:
+             patch.object(tools_config.shutil, "which", return_value=None), \
+             patch.object(tools_config, "_install_cua_driver_release_asset",
+                          return_value=True) as installer:
             assert tools_config.install_cua_driver(upgrade=True) is True
-            runner.assert_called_once()
+            installer.assert_called_once()
 
     def test_non_upgrade_on_macos_with_binary_skips_install(self):
         from hermes_cli import tools_config
@@ -73,23 +68,43 @@ class TestInstallCuaDriverUpgrade:
         with patch("platform.system", return_value="Darwin"), \
              patch.object(tools_config.shutil, "which",
                           side_effect=lambda n: "/usr/local/bin/" + n
-                                                 if n in {"cua-driver", "curl"} else None), \
-             patch.object(tools_config, "_run_cua_driver_installer") as runner, \
+                                                 if n == "cua-driver" else None), \
+             patch.object(tools_config, "_install_cua_driver_release_asset") as installer, \
              patch("subprocess.run"):
             assert tools_config.install_cua_driver(upgrade=False) is True
-            runner.assert_not_called()
+            installer.assert_not_called()
 
-    def test_non_upgrade_on_macos_without_binary_runs_installer(self):
+    def test_non_upgrade_on_macos_without_binary_installs_release_asset(self):
         from hermes_cli import tools_config
 
         with patch("platform.system", return_value="Darwin"), \
-             patch.object(tools_config.shutil, "which",
-                          side_effect=lambda n: "/usr/bin/curl" if n == "curl" else None), \
-             patch.object(tools_config, "_check_cua_driver_asset_for_arch",
-                          return_value=True), \
-             patch.object(tools_config, "_run_cua_driver_installer",
-                          return_value=True) as runner:
+             patch.object(tools_config.shutil, "which", return_value=None), \
+             patch.object(tools_config, "_install_cua_driver_release_asset",
+                          return_value=True) as installer:
             assert tools_config.install_cua_driver(upgrade=False) is True
+            installer.assert_called_once()
+            kwargs = installer.call_args.kwargs
+            assert kwargs.get("verbose") is True
+
+
+class TestInstallCuaDriverReleaseAsset:
+    def test_copy_replaces_local_symlink_without_following_app_bundle_target(self, tmp_path):
+        from hermes_cli import tools_config
+
+        source = tmp_path / "new-cua-driver"
+        source.write_text("new binary", encoding="utf-8")
+        app_bundle_binary = tmp_path / "CuaDriver.app" / "Contents" / "MacOS" / "cua-driver"
+        app_bundle_binary.parent.mkdir(parents=True)
+        app_bundle_binary.write_text("old app bundle binary", encoding="utf-8")
+        link = tmp_path / ".local" / "bin" / "cua-driver"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(app_bundle_binary)
+
+        tools_config._copy_cua_driver_binary(source, link)
+
+        assert not link.is_symlink()
+        assert link.read_text(encoding="utf-8") == "new binary"
+        assert app_bundle_binary.read_text(encoding="utf-8") == "old app bundle binary"
 
 
 class TestCheckCuaDriverAssetForArch:

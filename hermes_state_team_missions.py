@@ -109,6 +109,17 @@ _TEAM_MISSION_PRUNABLE_SOURCE_TYPES = (
     "thinking.delta",
     "tool.progress",
     "tool.generating",
+    # Subagent streaming deltas are the dominant canonical-log growth (a worker
+    # node streams tens of thousands of these per mission) yet carry no durable
+    # info once terminal — the final text is in the kept subagent.complete /
+    # message.complete events. They were MISSING from this list, so the prune
+    # ran, matched ~nothing, and team_mission_events grew into the GBs (the 2GB
+    # DB). Keep structural/milestone events (subagent.start/complete/tool, node.*,
+    # message.complete) — only drop the per-token deltas + progress.
+    "subagent.output_delta",
+    "subagent.reasoning_delta",
+    "subagent.thinking",
+    "subagent.progress",
 )
 _TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 _EXECUTION_MODES_REQUIRE_FINALIZERS = {"supervised_mission", "autonomous_mission", "manual_graph"}
@@ -180,6 +191,23 @@ def _event_has_deliverable_text(event_type: str, payload: Dict[str, Any] | None)
     if event_type == "message.complete" and _text(payload.get("status")).lower() in {"error", "failed"}:
         return bool(primary_deliverable_text(payload))
     return bool(_payload_text_value(payload))
+
+
+def _terminal_run_status_for_event(event_type: str, payload: Dict[str, Any] | None) -> str | None:
+    event_type = _text(event_type)
+    payload = payload if isinstance(payload, dict) else {}
+    if event_type == "error":
+        return "failed"
+    if event_type != "message.complete":
+        return None
+    status = _text(payload.get("status")).lower()
+    if status == "interrupted":
+        return "interrupted"
+    if status in {"cancelled", "canceled"}:
+        return "cancelled"
+    if status in {"error", "failed"}:
+        return "failed"
+    return "completed"
 
 
 def _prefer_terminal_node_status(existing_status: str, next_status: str) -> str:
@@ -1352,10 +1380,17 @@ class SessionDBTeamMissionMixin:
                 conversation = self.ensure_team_mission_conversation(mission=mission)
         if not conversation:
             with self._lock:
-                mission = self._team_mission_from_row(self._conn.execute(
-                    "SELECT * FROM team_missions WHERE conversation_id = ? ORDER BY updated_at DESC LIMIT 1",
+                _rows = self._conn.execute(
+                    "SELECT * FROM team_missions WHERE conversation_id = ? ORDER BY updated_at DESC",
                     (identifier,),
-                ).fetchone())
+                ).fetchall()
+            mission = None
+            for _row in _rows:
+                _m = self._team_mission_from_row(_row)
+                # Skip the hidden member-chat container — never resolve to it.
+                if _m and not bool((_m.get("metadata") or {}).get("member_chat_only")):
+                    mission = _m
+                    break
             if mission:
                 conversation = self.ensure_team_mission_conversation(
                     conversation_id=identifier,
@@ -1747,6 +1782,9 @@ class SessionDBTeamMissionMixin:
                         (conversation_id,),
                     ).fetchall()
                 ) if mission is not None
+                # Hide the member-chat container: it is an internal runtime vehicle,
+                # never a task the user should see on the canvas.
+                and not bool((mission.get("metadata") or {}).get("member_chat_only"))
             ]
             mission_ids = [_text(mission.get("mission_id")) for mission in missions if _text(mission.get("mission_id"))]
             placeholders = ",".join("?" for _ in mission_ids)
@@ -3726,6 +3764,20 @@ class SessionDBTeamMissionMixin:
                 identity=identity,
                 source_event=source_event,
             )
+            terminal_status = _terminal_run_status_for_event(
+                _text(source_event.get("type")),
+                source_event.get("payload") if isinstance(source_event.get("payload"), dict) else {},
+            )
+            if terminal_status and hasattr(self, "_maintain_run_events_after_append"):
+                try:
+                    self._maintain_run_events_after_append(
+                        session_id=str(binding["session_id"] or ""),
+                        run_id=run_id,
+                        seq=_event_seq(source_event),
+                        terminal_status=terminal_status,
+                    )
+                except Exception:
+                    pass
             return saved
         finally:
             self._team_mission_projecting = prev_projecting
@@ -3911,6 +3963,9 @@ class SessionDBTeamMissionMixin:
                         (conversation_id,),
                     ).fetchall()
                 ) if mission is not None
+                # Hide the member-chat container: it is an internal runtime vehicle,
+                # never a task the user should see on the canvas.
+                and not bool((mission.get("metadata") or {}).get("member_chat_only"))
             ]
         message_page = _conversation_message_page(self, conversation, limit=100)
         if not missions:

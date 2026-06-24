@@ -12655,38 +12655,52 @@ Examples:
             "so this performs an in-place upgrade."
         ),
     )
-    computer_use_sub.add_parser(
+    computer_use_install.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable status JSON after the install attempt",
+    )
+    computer_use_status = computer_use_sub.add_parser(
         "status",
         help="Print whether cua-driver is installed and on PATH",
+    )
+    computer_use_status.add_argument(
+        "--check",
+        action="store_true",
+        help="Check the latest upstream CUA release and report update availability",
+    )
+    computer_use_status.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable status JSON",
     )
 
     def cmd_computer_use(args):
         action = getattr(args, "computer_use_action", None)
         if action == "install":
             from hermes_cli.tools_config import install_cua_driver
-            install_cua_driver(upgrade=bool(getattr(args, "upgrade", False)))
+            ok = install_cua_driver(upgrade=bool(getattr(args, "upgrade", False)))
+            if getattr(args, "json", False):
+                from hermes_cli.computer_use_status import (
+                    get_cua_driver_status,
+                    print_cua_driver_status,
+                )
+                status = get_cua_driver_status(check_latest=True)
+                status.update({
+                    "operation": "upgrade" if getattr(args, "upgrade", False) else "install",
+                    "operation_ok": bool(ok),
+                })
+                if not ok and not status.get("error"):
+                    status["error"] = "cua-driver install failed"
+                print_cua_driver_status(status, as_json=True)
             return
         if action == "status":
-            import shutil
-            import subprocess
-            path = shutil.which("cua-driver")
-            if path:
-                version = ""
-                try:
-                    version = subprocess.run(
-                        ["cua-driver", "--version"],
-                        capture_output=True, text=True, timeout=5,
-                    ).stdout.strip()
-                except Exception:
-                    pass
-                if version:
-                    print(f"cua-driver: installed at {path} ({version})")
-                else:
-                    print(f"cua-driver: installed at {path}")
-                print("  Refresh to latest: hermes computer-use install --upgrade")
-                return
-            print("cua-driver: not installed")
-            print("  Run: hermes computer-use install")
+            from hermes_cli.computer_use_status import (
+                get_cua_driver_status,
+                print_cua_driver_status,
+            )
+            status = get_cua_driver_status(check_latest=bool(getattr(args, "check", False)))
+            print_cua_driver_status(status, as_json=bool(getattr(args, "json", False)))
             return
         # No subcommand → show help
         computer_use_parser.print_help()

@@ -27,6 +27,7 @@ from agent.memory_manager import sanitize_context
 from hermes_constants import get_hermes_home
 from hermes_state_agent_profiles import SessionDBAgentProfileMixin
 from hermes_state_branch import SessionDBBranchMixin
+from hermes_state_member_chat import SessionDBMemberChatMixin
 from hermes_state_runs import SessionDBRunMixin
 from hermes_state_team_capabilities import SessionDBTeamCapabilityMixin
 from hermes_state_team_missions import SessionDBTeamMissionMixin
@@ -42,7 +43,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -264,6 +265,16 @@ CREATE TABLE IF NOT EXISTS session_index (
     started_at REAL NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL DEFAULT 0,
     last_activity REAL
+);
+
+CREATE TABLE IF NOT EXISTS member_chat_runs (
+    run_id TEXT PRIMARY KEY,
+    conversation_session_id TEXT NOT NULL DEFAULT '',
+    member_id TEXT NOT NULL DEFAULT '',
+    agent_profile_id TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    relayed INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -778,7 +789,7 @@ END;
 """
 
 
-class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBRunMixin, SessionDBBranchMixin):
+class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBMemberChatMixin, SessionDBRunMixin, SessionDBBranchMixin):
     """
     SQLite-backed session storage with FTS5 search.
 
@@ -1339,6 +1350,27 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             )
         cursor.execute("DROP TABLE IF EXISTS agent_profile_versions")
 
+    def _compact_team_mission_event_json_storage(self, cursor: sqlite3.Cursor) -> None:
+        """Clear duplicate JSON copies from team_mission_events.
+
+        ``event_json`` is the canonical replay payload.  ``payload_json`` and
+        ``source_event_json`` are legacy denormalized copies that multiplied
+        every streamed Team Mission delta.  Scalar query columns remain intact,
+        so clearing those duplicate JSON columns preserves replay semantics.
+        """
+        try:
+            cursor.execute(
+                """
+                UPDATE team_mission_events
+                SET payload_json = '',
+                    source_event_json = ''
+                WHERE COALESCE(payload_json, '') != ''
+                   OR COALESCE(source_event_json, '') != ''
+                """
+            )
+        except sqlite3.OperationalError as exc:
+            logger.debug("team_mission_events JSON storage compaction skipped: %s", exc)
+
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -1469,6 +1501,8 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 self._backfill_session_list_summaries(cursor)
             if current_version < 20:
                 self._migrate_agent_profile_versions_to_latest_profiles(cursor)
+            if current_version < 24:
+                self._compact_team_mission_event_json_storage(cursor)
             if current_version < SCHEMA_VERSION:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
@@ -2427,6 +2461,48 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
 
         return self._execute_write(_do)
 
+    def _repair_session_index_terminal_active_runs_locked(self, conn: sqlite3.Connection) -> int:
+        """Clear stale sidebar state whose recorded active run is already terminal.
+
+        Team mission rows need a narrower rule than regular chat rows: worker
+        and leader runs can finish while the mission is still active.  Only clear
+        a team row from terminal run state when it has no active mission binding
+        or the bound mission itself is terminal.
+        """
+        try:
+            return int(conn.execute(
+                """
+                UPDATE session_index
+                   SET running = 0, status = 'idle', waiting_approval = 0,
+                       active_run_id = '', active_runtime_session_id = '',
+                       pending_approval_count = 0
+                 WHERE active_run_id != ''
+                   AND active_run_id IN (
+                       SELECT run_id FROM runs
+                        WHERE LOWER(COALESCE(status,'')) IN
+                              ('completed','failed','cancelled','canceled','interrupted')
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM runs active_runs
+                        WHERE active_runs.session_id = session_index.session_id
+                          AND active_runs.run_id != session_index.active_run_id
+                          AND LOWER(COALESCE(active_runs.status,'')) IN
+                              ('queued','starting','running','waiting_approval','cancelling','finalizing')
+                   )
+                   AND (
+                       session_kind != 'team_mission'
+                       OR COALESCE(mission_id, '') = ''
+                       OR mission_id IN (
+                           SELECT mission_id FROM team_missions
+                            WHERE LOWER(COALESCE(status,'')) IN
+                                  ('completed','failed','cancelled','canceled','interrupted')
+                       )
+                   )
+                """
+            ).rowcount or 0)
+        except sqlite3.OperationalError:
+            return 0
+
     def list_session_index(
         self,
         *,
@@ -2461,6 +2537,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         )
         params.append(capped + 1)
         with self._lock:
+            self._repair_session_index_terminal_active_runs_locked(self._conn)
             rows = self._conn.execute(sql, tuple(params)).fetchall()
         has_more = len(rows) > capped
         page = rows[:capped]
@@ -2614,30 +2691,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                    )
                 """
             )
-            # Heal sessions (regular OR team_mission) whose active_run_id points
-            # at a run that is already terminal in the runs table but whose
-            # session_index row still says running=1. Pre-existing fix only
-            # targeted non-team_mission rows; observed DB had a team_mission row
-            # stuck running=1 + active_run_id=<completed-run> because the
-            # mission was still in 'draft' (so the mission-status heal above did
-            # not match) and some path skipped the run-write projection on the
-            # leader's conversation run ending. Resolving this here is safe and
-            # idempotent: it only touches rows whose active_run_id is verifiably
-            # terminal in the runs table.
-            conn.execute(
-                """
-                UPDATE session_index
-                   SET running = 0, status = 'idle',
-                       active_run_id = '', active_runtime_session_id = ''
-                 WHERE running = 1
-                   AND active_run_id != ''
-                   AND active_run_id IN (
-                       SELECT run_id FROM runs
-                        WHERE LOWER(COALESCE(status,'')) IN
-                              ('completed','failed','cancelled','canceled','interrupted')
-                   )
-                """
-            )
+            self._repair_session_index_terminal_active_runs_locked(conn)
             return {"reconciled": upserted}
 
         return self._execute_write(_do)

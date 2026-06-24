@@ -2240,6 +2240,11 @@ def test_team_mission_terminal_run_event_compiles_structured_memory(tmp_path: Pa
     assert "Japan" in items[0]["content"]
     assert items[0]["source_node_ids"] == ["node-worker"]
     assert items[0]["source_run_ids"] == ["run-worker"]
+    stored_run_events = db.list_run_events("session-worker", run_id="run-worker")
+    stored_run_event_types = [event["type"] for event in stored_run_events]
+    assert "message.complete" in stored_run_event_types
+    assert "mission.memory.compiled" in stored_run_event_types
+    assert "message.delta" not in stored_run_event_types
 
     events = db.list_team_mission_run_events("mission-1")
     memory_event = next(
@@ -3089,6 +3094,158 @@ def test_prune_team_mission_events_drops_terminal_deltas_keeps_completes(tmp_pat
     assert deleted >= 3
     assert "message.delta" not in after_types
     assert "message.complete" in after_types
+
+
+def test_team_mission_events_store_only_canonical_event_json(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="n1",
+        kind="worker",
+        title="Worker",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="n1",
+        run_id="r1",
+        session_id="team:mission-1:node:n1",
+        runtime_scope_key="team:mission-1:node:n1",
+    )
+
+    stored = db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="r1",
+        event={
+            "type": "message.delta",
+            "seq": 1,
+            "payload": {"delta": "stream", "mode": "append"},
+        },
+    )
+
+    row = db._conn.execute(  # noqa: SLF001 - storage contract assertion.
+        """
+        SELECT payload_json, source_event_json, event_json
+        FROM team_mission_events
+        WHERE mission_id = ? AND seq = ?
+        """,
+        ("mission-1", stored["seq"]),
+    ).fetchone()
+    assert row["payload_json"] in ("", None)
+    assert row["source_event_json"] in ("", None)
+    event_json = json.loads(row["event_json"])
+    assert event_json["payload"]["source_event"]["payload"]["delta"] == "stream"
+
+
+def test_team_mission_event_storage_migration_clears_legacy_duplicate_json(tmp_path: Path):
+    from hermes_state import SCHEMA_VERSION
+
+    db_path = tmp_path / "state.db"
+    db = SessionDB(db_path)
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="n1",
+        kind="worker",
+        title="Worker",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="n1",
+        run_id="r1",
+        session_id="team:mission-1:node:n1",
+        runtime_scope_key="team:mission-1:node:n1",
+    )
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="r1",
+        event={
+            "type": "message.delta",
+            "seq": 1,
+            "payload": {"delta": "stream", "mode": "append"},
+        },
+    )
+    db._conn.execute(  # noqa: SLF001 - simulate a pre-migration row.
+        """
+        UPDATE team_mission_events
+        SET payload_json = ?,
+            source_event_json = ?
+        WHERE mission_id = ?
+        """,
+        (json.dumps({"duplicated": "payload"}), json.dumps({"duplicated": "source"}), "mission-1"),
+    )
+    db._conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION - 1,))  # noqa: SLF001
+    db._conn.commit()  # noqa: SLF001
+    db.close()
+
+    migrated = SessionDB(db_path)
+    try:
+        row = migrated._conn.execute(  # noqa: SLF001 - migration contract assertion.
+            "SELECT payload_json, source_event_json FROM team_mission_events WHERE mission_id = ?",
+            ("mission-1",),
+        ).fetchone()
+        assert row["payload_json"] in ("", None)
+        assert row["source_event_json"] in ("", None)
+        version = migrated._conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0]  # noqa: SLF001
+        assert version == SCHEMA_VERSION
+    finally:
+        migrated.close()
+
+
+def test_prune_team_mission_events_drops_subagent_streaming_deltas(tmp_path: Path):
+    """Regression: subagent.output_delta / subagent.reasoning_delta are the
+    dominant canonical-log growth (a worker node streams tens of thousands per
+    mission) but were MISSING from the prunable set, so prune deleted ~nothing
+    and team_mission_events grew into the GBs. They must be pruned for a terminal
+    mission while subagent.complete / message.complete milestones are kept."""
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1", team_id="team-1", title="Mission",
+        mode="supervised_mission", status="completed",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1", node_id="n1", kind="worker", title="N", status="done",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1", node_id="n1", run_id="r1",
+        session_id="team:mission-1:node:n1", runtime_scope_key="team:mission-1:node:n1",
+    )
+    seq = 0
+    for _ in range(5):
+        seq += 1
+        db.append_team_mission_run_event(
+            mission_id="mission-1", run_id="r1",
+            event={"type": "subagent.output_delta", "seq": seq, "payload": {"delta": "x", "mode": "append"}},
+        )
+        seq += 1
+        db.append_team_mission_run_event(
+            mission_id="mission-1", run_id="r1",
+            event={"type": "subagent.reasoning_delta", "seq": seq, "payload": {"delta": "y", "mode": "append"}},
+        )
+    seq += 1
+    db.append_team_mission_run_event(
+        mission_id="mission-1", run_id="r1",
+        event={"type": "subagent.complete", "seq": seq, "payload": {"text": "done"}},
+    )
+
+    deleted = db.prune_team_mission_events("mission-1")
+    after_types = [e.get("payload", {}).get("source_event_type") for e in db.list_team_mission_events("mission-1")]
+    assert deleted >= 10
+    assert "subagent.output_delta" not in after_types
+    assert "subagent.reasoning_delta" not in after_types
+    assert "subagent.complete" in after_types
 
 
 def test_prune_team_mission_events_leaves_active_mission(tmp_path: Path):

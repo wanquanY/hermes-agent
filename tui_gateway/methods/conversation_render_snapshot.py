@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from tui_gateway.methods._shared import bind_server_globals
@@ -27,6 +28,131 @@ def _bounded_limit(value: Any, *, default: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return max(1, min(parsed, maximum))
+
+
+# The desktop WebSocket client rejects a single frame larger than ~4 MiB with
+# close code 1009 ("message too big"), which aborts the render request AND
+# tears down the gateway connection. The render bundles messages + runEvents +
+# graph into ONE frame, so a long-running conversation can blow past the limit.
+# Keep the serialized result safely under it (headroom for the JSON-RPC
+# envelope + WS framing).
+_RENDER_MAX_BYTES = 3_500_000
+_RENDER_NON_STRUCTURAL_RUN_EVENT_TYPES = {
+    "message.delta",
+    "reasoning.delta",
+    "thinking.delta",
+    "tool.progress",
+    "tool.generating",
+    "subagent.output_delta",
+    "subagent.reasoning_delta",
+    "subagent.thinking",
+    "subagent.progress",
+    "agent_profile_test.output_delta",
+    "agent_profile_test.thinking",
+}
+
+
+def _payload_byte_size(obj: Any) -> int:
+    try:
+        return len(json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8"))
+    except Exception:
+        return 0
+
+
+def _is_structural_run_event(event: Any) -> bool:
+    if not isinstance(event, dict):
+        return False
+    return _text(event.get("type")) not in _RENDER_NON_STRUCTURAL_RUN_EVENT_TYPES
+
+
+def _structural_run_events(events: list[Any]) -> list[dict[str, Any]]:
+    return [dict(event) for event in events if _is_structural_run_event(event)]
+
+
+def _mark_transport_truncated(result: dict[str, Any]) -> None:
+    result["transportTruncated"] = True
+    page_info = result.get("pageInfo")
+    if isinstance(page_info, dict):
+        page_info["hasMore"] = True
+    projection = result.get("projection")
+    if isinstance(projection, dict):
+        projection["transportTruncated"] = True
+
+
+def _cap_list_tail(
+    result: dict[str, Any],
+    container: dict[str, Any],
+    key: str,
+    *,
+    max_bytes: int,
+) -> bool:
+    items = container.get(key)
+    if not isinstance(items, list) or not items:
+        return False
+    if _payload_byte_size(result) <= max_bytes:
+        return False
+
+    original_count = len(items)
+    container[key] = []
+    base_size = _payload_byte_size(result)
+    budget = max(0, max_bytes - base_size)
+    kept: list[Any] = []
+    used = 0
+    for item in reversed(items):
+        item_size = _payload_byte_size(item) + 8  # JSON array comma/bracket headroom.
+        if item_size > budget - used:
+            continue
+        kept.append(item)
+        used += item_size
+    kept.reverse()
+    container[key] = kept
+    while container[key] and _payload_byte_size(result) > max_bytes:
+        container[key] = container[key][1:]
+    return len(container[key]) < original_count
+
+
+def _cap_render_result(result: dict[str, Any], *, max_bytes: int = _RENDER_MAX_BYTES) -> dict[str, Any]:
+    """Trim a render result so its WS frame can't trip close code 1009.
+
+    Drops the recoverable collections newest-kept: oldest ``runEvents`` first
+    (live deltas re-arrive via the events subscription; finished-run text already
+    lives in ``messages``), then oldest ``messages`` (paginated + re-fetchable),
+    until the serialized result fits. Flags ``transportTruncated`` + pageInfo
+    hasMore so the client lazy-loads the remainder instead of assuming it has the
+    whole history.
+    """
+    if _payload_byte_size(result) <= max_bytes:
+        return result
+    truncated = False
+    for key in ("runEvents", "messages"):
+        truncated = _cap_list_tail(result, result, key, max_bytes=max_bytes) or truncated
+        if _payload_byte_size(result) <= max_bytes:
+            break
+    graph = result.get("graph")
+    if isinstance(graph, dict):
+        for key in ("recent_messages", "recentMessages", "task_frames", "taskFrames"):
+            truncated = _cap_list_tail(result, graph, key, max_bytes=max_bytes) or truncated
+            if _payload_byte_size(result) <= max_bytes:
+                break
+    if truncated:
+        _mark_transport_truncated(result)
+        # The truncation marker itself adds bytes. If the payload was exactly at
+        # the cap, trim one more recoverable item deterministically.
+        while _payload_byte_size(result) > max_bytes:
+            changed = False
+            for container, key in (
+                (result, "runEvents"),
+                (result, "messages"),
+                (graph, "recent_messages") if isinstance(graph, dict) else ({}, ""),
+                (graph, "task_frames") if isinstance(graph, dict) else ({}, ""),
+            ):
+                if isinstance(container, dict) and isinstance(container.get(key), list) and container[key]:
+                    container[key] = container[key][1:]
+                    changed = True
+                    break
+            if not changed:
+                break
+    return result
 
 
 def _conversation_identifier(params: dict[str, Any]) -> str:
@@ -293,7 +419,7 @@ def _filter_team_render_run_events(
     mission: dict[str, Any],
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    normalized_events = [dict(event) for event in run_events if isinstance(event, dict)]
+    normalized_events = _structural_run_events(run_events)
     active_run_ids = _team_snapshot_active_run_ids(conversation, mission)
     running = bool(conversation.get("running") or conversation.get("active_run_id") or conversation.get("activeRunId"))
     if not running and not active_run_ids:
@@ -367,7 +493,7 @@ def _team_conversation_snapshot(
     branch_info = page.get("branchInfo") if isinstance(page, dict) else None
     return _ok(
         rid,
-        {
+        _cap_render_result({
             "kind": "team_mission",
             "schemaVersion": _SNAPSHOT_SCHEMA_VERSION,
             "renderReady": True,
@@ -391,7 +517,7 @@ def _team_conversation_snapshot(
                     "limit": _bounded_limit(params.get("limit"), default=50, maximum=200),
                 },
             },
-        },
+        }),
     )
 
 
@@ -403,7 +529,7 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
     page = page or {}
     return _ok(
         rid,
-        {
+        _cap_render_result({
             "kind": "ordinary",
             "schemaVersion": _SNAPSHOT_SCHEMA_VERSION,
             "renderReady": True,
@@ -411,7 +537,7 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
             "stored_session_id": session_id,
             "session_id": session_id,
             "messages": list(page.get("messages") or []),
-            "runEvents": list(page.get("runEvents") or []),
+            "runEvents": _structural_run_events(list(page.get("runEvents") or [])),
             "pageInfo": page.get("pageInfo") if isinstance(page.get("pageInfo"), dict) else {},
             "branchInfo": page.get("branchInfo") if isinstance(page.get("branchInfo"), dict) else None,
             "projection": {
@@ -423,7 +549,7 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
                     "limit": _bounded_limit(params.get("limit"), default=50, maximum=200),
                 },
             },
-        },
+        }),
     )
 
 

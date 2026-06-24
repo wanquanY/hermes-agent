@@ -588,7 +588,7 @@ def _db_unavailable_error(rid, *, code: int):
 # flag (already present), so concurrent / repeat calls are no-ops.
 
 
-def _attach_worker(sid: str, session: dict, worker) -> None:
+def _attach_worker(sid: str, session: dict, worker) -> bool:
     """Store ``worker`` on ``session`` iff ``sid`` still maps to it.
 
     Closes the create/close race (C2): between spawning the slash_worker
@@ -597,6 +597,11 @@ def _attach_worker(sid: str, session: dict, worker) -> None:
     the worker subprocess (and its PTY). Caller must already have spawned
     the worker; this function decides whether to keep or close it.
 
+    Returns ``True`` when the worker was attached to the session, ``False``
+    when the session was already gone and the worker was closed here as an
+    orphan. Callers that own a cleanup path (e.g. ``_build``'s finally) must
+    drop their handle on ``False`` so they don't close the same worker twice.
+
     Call sites: every place that calls ``_SlashWorker(...)`` then assigns
     it to a session dict — line ~945, ~1661 (_restart_slash_worker),
     ~2376 (session.create dovie path).
@@ -604,13 +609,14 @@ def _attach_worker(sid: str, session: dict, worker) -> None:
     with _sessions_lock:
         if _sessions.get(sid) is session:
             session["slash_worker"] = worker
-            return
+            return True
     # Session was popped concurrently — worker is now an orphan. Close it
     # outside the lock since worker.close() can block on subprocess wait.
     try:
         worker.close()
     except Exception:
         pass
+    return False
 
 
 def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
@@ -1080,8 +1086,11 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
                 # C2: re-check sid -> current under the lock before storing
                 # the worker; a concurrent teardown could have popped this
-                # session between agent build and now.
-                _attach_worker(sid, current, worker)
+                # session between agent build and now. When _attach_worker
+                # already closed the worker as an orphan, drop our handle so
+                # the finally below doesn't close the same worker a second time.
+                if not _attach_worker(sid, current, worker):
+                    worker = None
                 _log_agent_build_stage(sid, current, "slash-worker-end")
             except Exception:
                 _log_agent_build_stage(sid, current, "slash-worker-error")
@@ -1521,6 +1530,45 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
     except Exception:
         pass
     return model, None
+
+
+def _persisted_session_runtime(session_key: str) -> tuple[str, str | None]:
+    """Read a session's persisted model + provider from its DB row.
+
+    The control-plane session.create records the composer's per-session model on
+    the row, and every /model switch keeps it current (see
+    _persist_live_session_runtime / _runtime_model_config). Returning it lets
+    _make_agent build a RESUMED or runtime-worker-built agent on the session's
+    own model instead of the global config default — so the per-turn /model
+    switch becomes a same-model no-op and the model-change marker / slash-worker
+    churn never fire. Returns ("", None) when no usable row model is found, so
+    callers fall back to the global startup runtime.
+    """
+    key = str(session_key or "").strip()
+    if not key:
+        return "", None
+    try:
+        db = _db_for_stable_session(key)
+        row = db.get_session(key) if db is not None else None
+    except Exception:
+        return "", None
+    if not isinstance(row, dict):
+        return "", None
+    model = str(row.get("model") or "").strip()
+    if not model:
+        return "", None
+    provider = None
+    raw_cfg = row.get("model_config")
+    cfg = raw_cfg if isinstance(raw_cfg, dict) else None
+    if cfg is None and isinstance(raw_cfg, str) and raw_cfg.strip():
+        try:
+            parsed = json.loads(raw_cfg)
+            cfg = parsed if isinstance(parsed, dict) else None
+        except Exception:
+            cfg = None
+    if cfg:
+        provider = str(cfg.get("provider") or "").strip() or None
+    return model, provider
 
 
 # Backfilled from upstream 6de3963e3 (#43702) + 7d938cc5c — referenced by the
@@ -2477,7 +2525,19 @@ def _persist_model_switch(result) -> None:
         cfg["model"] = model_cfg
 
     model_cfg["default"] = result.new_model
-    model_cfg["provider"] = result.target_provider
+    # Don't collapse a named custom provider (e.g. dovie-cloud) down to the
+    # bare "custom" runtime label. `result.target_provider` is the label the
+    # runtime exposes the named endpoint to the Agent as; persisting it would
+    # destroy the named-provider binding in config.model.provider and make the
+    # next agent build unable to reach the provider's key_env (→ the
+    # DOVIE_AUTH_REQUIRED 401). Preserve the existing named provider when the
+    # switch stays on the generic "custom" label.
+    new_provider = result.target_provider
+    if str(new_provider or "").strip().lower() == "custom":
+        existing_provider = str(model_cfg.get("provider") or "").strip()
+        if existing_provider and existing_provider.lower() not in {"auto", "custom"}:
+            new_provider = existing_provider
+    model_cfg["provider"] = new_provider
     if result.base_url:
         model_cfg["base_url"] = result.base_url
     else:
@@ -2678,21 +2738,23 @@ def _apply_model_switch(
             )
             _emit("session.info", sid, _session_info(agent, session))
 
-    os.environ["HERMES_MODEL"] = result.new_model
-    os.environ["HERMES_INFERENCE_MODEL"] = result.new_model
-    # Keep the process-level provider env vars in sync with the user's
-    # explicit choice so any ambient re-resolution (credential pool refresh,
-    # compressor rebuild, aux clients) and startup re-resolution on /new
-    # both pick up the new provider instead of the original one persisted
-    # in config or env.
-    #
-    # HERMES_TUI_PROVIDER is the canonical "explicit-this-process" carrier
-    # consumed by _resolve_startup_runtime() — set it unconditionally on
-    # /model so /new can't fall through to static-catalog detection and
-    # pick a coincidentally-matching native provider (fixes #16857).
-    if result.target_provider:
-        os.environ["HERMES_INFERENCE_PROVIDER"] = result.target_provider
-        os.environ["HERMES_TUI_PROVIDER"] = result.target_provider
+    # Record the choice as a PER-SESSION override — never as process-global env.
+    # The single-process desktop backend shares os.environ across every live
+    # session, so writing HERMES_MODEL / HERMES_TUI_PROVIDER here leaks one
+    # session's /model switch into every other session's next agent build (the
+    # cross-session contamination this path used to cause). _make_agent reads
+    # session["model_override"] on the next rebuild (/new keeps the session on
+    # its own model), so the env writes are both unnecessary and harmful.
+    # api_key is intentionally NOT recorded: the dovie-cloud runtime token
+    # rotates, so the rebuild must re-resolve a fresh credential rather than
+    # reuse a stale one captured here.
+    if session is not None:
+        session["model_override"] = {
+            "model": result.new_model,
+            "provider": (result.target_provider or None),
+            "base_url": (result.base_url or None),
+            "api_mode": (result.api_mode or None),
+        }
     if persist_global:
         _persist_model_switch(result)
     return {
@@ -3208,6 +3270,7 @@ def _make_agent(
     session_id: str | None = None,
     cwd: str | None = None,
     agent_context_mode: str | None = None,
+    model_override: dict | None = None,
 ):
     from run_agent import AIAgent
     from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -3231,11 +3294,52 @@ def _make_agent(
             system_prompt = "\n\n".join(
                 part for part in (system_prompt, skills_prompt) if part
             ).strip()
-    model, requested_provider = _resolve_startup_runtime()
+    # Build the agent DIRECTLY on this session's own model when the client
+    # shipped one. The desktop composer owns its model as plain UI state and
+    # sends it on session.create (stored as session["model_override"]); a
+    # resumed chat restores its persisted pick the same way. Honoring it here
+    # means each per-profile session starts on its own model with NO post-build
+    # /model switch — the switch is what emitted the model-change marker,
+    # churned the slash worker, and (via the global config persist) poisoned
+    # config.model.provider. Falls back to the global startup runtime when this
+    # session made no explicit pick (classic TUI, team/subagent workers).
+    # Explicit param (an in-session /model switch hands the completed override
+    # straight to the rebuild) wins; otherwise read the live session's stored
+    # override (composer pick shipped on session.create).
+    _override = model_override if isinstance(model_override, dict) else (_sessions.get(sid) or {}).get("model_override")
+    _override = _override if isinstance(_override, dict) else None
+    _override_model = str((_override or {}).get("model") or "").strip()
+    if _override_model:
+        model = _override_model
+        requested_provider = str((_override or {}).get("provider") or "").strip() or None
+    else:
+        # No live composer override (e.g. a resumed conversation or a runtime
+        # worker rebuilding an agent for a control-plane session) — build on the
+        # session's PERSISTED model so it starts on its own model, not the
+        # global default. This is what closes the control-plane → runtime-worker
+        # gap: the desktop's model, recorded on the row at session.create, now
+        # reaches _make_agent here so the per-turn /model switch is a no-op.
+        _persisted_model, _persisted_provider = _persisted_session_runtime(session_id or key)
+        if _persisted_model:
+            model = _persisted_model
+            requested_provider = _persisted_provider
+        else:
+            model, requested_provider = _resolve_startup_runtime()
     runtime = resolve_runtime_provider(
         requested=requested_provider,
         target_model=model or None,
     )
+    # Concrete credentials from a completed in-session /model switch survive the
+    # rebuild: when the override carries an explicit base_url / api_key / api_mode
+    # (the switch already resolved them), use them verbatim instead of letting
+    # resolve_runtime_provider re-derive — re-resolution can return the global
+    # endpoint and silently route the session to the wrong provider.
+    _ov_base_url = str((_override or {}).get("base_url") or "").strip()
+    _ov_api_key = (_override or {}).get("api_key")
+    _ov_api_mode = str((_override or {}).get("api_mode") or "").strip()
+    _runtime_base_url = _ov_base_url or runtime.get("base_url")
+    _runtime_api_key = _ov_api_key if (isinstance(_ov_api_key, str) and _ov_api_key.strip()) else runtime.get("api_key")
+    _runtime_api_mode = _ov_api_mode or runtime.get("api_mode")
     enabled_toolsets, disabled_toolsets = resolve_session_toolsets(
         session=_sessions.get(sid),
         session_id=session_id or key,
@@ -3250,9 +3354,9 @@ def _make_agent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
         provider=runtime.get("provider"),
-        base_url=runtime.get("base_url"),
-        api_key=runtime.get("api_key"),
-        api_mode=runtime.get("api_mode"),
+        base_url=_runtime_base_url,
+        api_key=_runtime_api_key,
+        api_mode=_runtime_api_mode,
         acp_command=runtime.get("command"),
         acp_args=runtime.get("args"),
         credential_pool=runtime.get("credential_pool"),
@@ -3456,548 +3560,12 @@ def _resolve_checkpoint_hash(mgr, cwd: str, ref: str) -> str:
 # ── Methods: session ─────────────────────────────────────────────────
 
 
-@method("session.create")
-def _(rid, params: dict) -> dict:
-    sid = uuid.uuid4().hex[:8]
-    key = _new_session_key()
-    cols = int(params.get("cols", 80))
-    history = _coerce_seed_history(params.get("messages"))
-    title = str(params.get("title") or "").strip()
-    # Did the client pick a workspace, or are we falling back to the gateway's
-    # launch directory? Only an explicit choice is persisted as the session's
-    # workspace (see _ensure_session_db_row); otherwise it lands in "No
-    # workspace" instead of whatever folder the desktop launched in.
-    raw_cwd = str(params.get("cwd") or "").strip()
-    try:
-        explicit_cwd = bool(raw_cwd) and os.path.isdir(os.path.abspath(os.path.expanduser(raw_cwd)))
-    except Exception:
-        explicit_cwd = False
-    resolved_cwd = _completion_cwd(params)
-    _enable_gateway_prompts()
-
-    # ``profile`` (app-global remote mode): a new chat started under a non-launch
-    # profile must build its agent + persist against THAT profile's home/state.db,
-    # not the dashboard's launch profile. Stored on the session so _start_agent_build
-    # and each turn re-bind HERMES_HOME. None/own profile → launch (unchanged).
-    profile = (params.get("profile") or "").strip() or None
-    profile_home = _profile_home(profile)
-
-    # The desktop composer owns its model/effort/fast as plain UI state and ships
-    # it on every session.create. Honor each as a PER-SESSION override (built into
-    # the agent below) — never a global config write, so picking a model/effort
-    # for a new chat can't mutate the profile default. provider is optional
-    # (resolved at build).
-    create_model = str(params.get("model") or "").strip()
-    session_model_override = (
-        {"model": create_model, "provider": str(params.get("provider") or "").strip() or None}
-        if create_model
-        else None
-    )
-    create_reasoning_override = None
-    if effort := str(params.get("reasoning_effort") or "").strip():
-        try:
-            from hermes_constants import parse_reasoning_effort
-
-            create_reasoning_override = parse_reasoning_effort(effort)
-        except Exception:
-            create_reasoning_override = None
-    # Only pin "fast" when explicitly requested; leaving it None lets the build
-    # fall back to the profile default service tier rather than forcing normal.
-    create_service_tier_override = "priority" if params.get("fast") else None
-
-    ready = threading.Event()
-    now = time.time()
-    lease, limit_message = _claim_active_session_slot(key, live_session_id=sid)
-    if limit_message is not None:
-        return _err(rid, 4090, limit_message)
-
-    with _sessions_lock:
-        _sessions[sid] = {
-            "agent": None,
-            "agent_error": None,
-            "agent_ready": ready,
-            "attached_images": [],
-            "close_on_disconnect": is_truthy_value(params.get("close_on_disconnect", False)),
-            "active_session_lease": lease,
-            "cols": cols,
-            "created_at": now,
-            "edit_snapshots": {},
-            "explicit_cwd": explicit_cwd,
-            "history": history,
-            "history_lock": threading.Lock(),
-            "history_version": 0,
-            "image_counter": 0,
-            "cwd": resolved_cwd,
-            "inflight_turn": None,
-            "last_active": now,
-            "model_override": session_model_override,
-            "create_reasoning_override": create_reasoning_override,
-            "create_service_tier_override": create_service_tier_override,
-            "pending_title": title or None,
-            "profile_home": str(profile_home) if profile_home is not None else None,
-            "running": False,
-            "session_key": key,
-            "show_reasoning": _load_show_reasoning(),
-            "slash_worker": None,
-            "tool_progress_mode": _load_tool_progress_mode(),
-            "tool_started_at": {},
-            "transport": current_transport() or _stdio_transport,
-        }
-        _register_session_cwd(_sessions[sid])
-    # NOTE: we intentionally do NOT persist a DB row here. Every TUI/desktop
-    # launch (and every "New agent" / draft) opens a session here just to paint
-    # the composer, so eagerly creating a row left an "Untitled" empty session
-    # behind for every launch the user never typed into. The row is now created
-    # lazily on the first prompt (see _ensure_session_db_row + prompt.submit),
-    # and the AIAgent's own INSERT-OR-IGNORE persists it on the first turn too.
-
-    # Return the lightweight session immediately so Ink can paint the composer
-    # + skeleton panel, then build the real AIAgent just after this response is
-    # flushed.  This keeps startup responsive while still hydrating tools/skills
-    # without requiring the user to submit a first prompt.
-    def _deferred_build() -> None:
-        session = _sessions.get(sid)
-        if session is not None:
-            _start_agent_build(sid, session)
-
-    build_timer = threading.Timer(0.05, _deferred_build)
-    build_timer.daemon = True
-    build_timer.start()
-
-    return _ok(
-        rid,
-        {
-            "session_id": sid,
-            "stored_session_id": key,
-            "message_count": len(history),
-            "messages": _history_to_messages(history),
-            "info": {
-                # Reflect the per-session model override (desktop composer pick)
-                # in the immediate response so the client doesn't briefly clobber
-                # its sticky pick with the global default before the deferred
-                # build's session.info lands.
-                "model": (
-                    session_model_override.get("model")
-                    if session_model_override
-                    else _resolve_model()
-                ),
-                **(
-                    {"provider": session_model_override["provider"]}
-                    if session_model_override and session_model_override.get("provider")
-                    else {}
-                ),
-                "tools": {},
-                "skills": {},
-                "cwd": _sessions[sid]["cwd"],
-                "branch": _git_branch_for_cwd(_sessions[sid]["cwd"]),
-                "lazy": True,
-                "desktop_contract": DESKTOP_BACKEND_CONTRACT,
-                "profile_name": _current_profile_name(),
-            },
-        },
-    )
 
 
-@method("session.list")
-def _(rid, params: dict) -> dict:
-    db = _get_db()
-    if db is None:
-        return _db_unavailable_error(rid, code=5006)
-    try:
-        # Resume picker should surface human conversation sessions from every
-        # user-facing surface — CLI, TUI, all gateway platforms (including new
-        # ones not enumerated here), ACP adapter clients, webhook sessions,
-        # custom `HERMES_SESSION_SOURCE` values, and older installs with
-        # different source labels. We deny-list only the noisy internal
-        # sources (``tool`` sub-agent runs) rather than allow-listing a
-        # fixed set of platform names that goes stale whenever a new
-        # platform is added or a user names their own source.
-        deny = frozenset({"tool"})
-
-        limit = int(params.get("limit", 200) or 200)
-        # Over-fetch modestly so per-source filtering doesn't leave us
-        # short; the compression-tip projection in ``list_sessions_rich``
-        # can also merge rows.
-        fetch_limit = max(limit * 2, 200)
-        rows = [
-            s
-            for s in db.list_sessions_rich(source=None, limit=fetch_limit)
-            if (s.get("source") or "").strip().lower() not in deny
-        ][:limit]
-        return _ok(
-            rid,
-            {
-                "sessions": [
-                    {
-                        "id": s["id"],
-                        "title": s.get("title") or "",
-                        "preview": s.get("preview") or "",
-                        "started_at": s.get("started_at") or 0,
-                        "message_count": s.get("message_count") or 0,
-                        "source": s.get("source") or "",
-                    }
-                    for s in rows
-                ]
-            },
-        )
-    except Exception as e:
-        return _err(rid, 5006, str(e))
 
 
-@method("session.most_recent")
-def _(rid, params: dict) -> dict:
-    """Return the most recent human-facing session id, or ``None``.
-
-    Mirrors ``session.list``'s deny-list behaviour (drops ``tool``
-    sub-agent rows).  Used by TUI auto-resume when
-    ``display.tui_auto_resume_recent`` is on; the field is also handy
-    for any CLI tooling that wants "latest session" without paginating
-    the full list.
-
-    Contract: a ``{"session_id": null}`` result means "no eligible
-    session found right now".  Errors are also folded into that
-    null-result shape (and logged) so callers don't have to special-
-    case JSON-RPC error envelopes for what is a normal "no answer".
-    """
-    db = _get_db()
-    if db is None:
-        return _ok(rid, {"session_id": None})
-    try:
-        deny = frozenset({"tool"})
-        # Over-fetch by a generous bounded amount so heavy sub-agent
-        # users (lots of recent ``tool`` rows) don't get a false
-        # "no eligible session" answer.  ``session.list`` uses a
-        # similar over-fetch strategy.
-        rows = db.list_sessions_rich(source=None, limit=200)
-        for row in rows:
-            src = (row.get("source") or "").strip().lower()
-            if src in deny:
-                continue
-            return _ok(
-                rid,
-                {
-                    "session_id": row.get("id"),
-                    "title": row.get("title") or "",
-                    "started_at": row.get("started_at") or 0,
-                    "source": row.get("source") or "",
-                },
-            )
-        return _ok(rid, {"session_id": None})
-    except Exception:
-        logger.exception("session.most_recent failed")
-        return _ok(rid, {"session_id": None})
 
 
-@method("session.resume")
-def _(rid, params: dict) -> dict:
-    target = params.get("session_id", "")
-    if not target:
-        return _err(rid, 4006, "session_id required")
-    try:
-        cols = int(params.get("cols", 80))
-    except (TypeError, ValueError):
-        cols = 80
-    # ``profile`` (app-global remote mode): resume a session that lives in another
-    # local profile's state.db. None/own profile → the launch profile (unchanged).
-    profile = (params.get("profile") or "").strip() or None
-    profile_home = _profile_home(profile)
-
-    # In a profile scope, the agent OWNS a long-lived db handle bound to that
-    # profile (do NOT auto-close it here). Otherwise reuse the shared launch db.
-    if profile_home is not None:
-        from hermes_state import SessionDB
-
-        db = SessionDB(db_path=profile_home / "state.db")
-    else:
-        db = _get_db()
-    if db is None:
-        return _db_unavailable_error(rid, code=5000)
-
-    found = db.get_session(target)
-    if not found:
-        found = db.get_session_by_title(target)
-        if found:
-            target = found["id"]
-        elif is_truthy_value(params.get("lazy", False)) and _child_run_active(target):
-            # Race: a watch window opened on a freshly-spawned subagent. The
-            # child relays `subagent.start` (which carries child_session_id and
-            # triggers the window) BEFORE its first run_conversation() flushes
-            # the DB row via _ensure_db_session, so db.get_session(target) is
-            # momentarily empty. On slower hosts (notably WSL2, where SQLite +
-            # process scheduling widen the gap) the window's resume consistently
-            # lands inside this window and used to hard-fail "session not found"
-            # — the frontend then 404'd on the REST messages fallback and the
-            # window spun forever. The child is provably live (_child_run_active),
-            # so proceed into the lazy branch with empty history; the live mirror
-            # streams the whole turn anyway and the row exists by upgrade time.
-            found = {}
-        else:
-            return _err(rid, 4007, "session not found")
-
-    # Follow the compression-continuation chain to the live tip so a resume on
-    # a rotated-out parent id binds to the descendant that actually holds the
-    # post-compression turns. Auto-compression ends the session and forks a
-    # continuation child; without this, resuming the original id (the desktop's
-    # routed id when the chat was opened before it rotated) reloads the parent
-    # transcript and the response generated after compression is missing — the
-    # "I came back and the reply isn't there" bug on large sessions. Resolving
-    # here also re-anchors the fast path below so a still-live rotated session
-    # is reused (by its new key) instead of rebuilding a duplicate agent on the
-    # stale parent. Skipped for lazy watch windows, which intentionally attach
-    # to the exact child branch they were opened on.
-    if found and not is_truthy_value(params.get("lazy", False)):
-        try:
-            tip = db.resolve_resume_session_id(target)
-        except Exception:
-            tip = target
-        if tip and tip != target:
-            target = tip
-            found = db.get_session(target) or found
-
-    profile_resume_cwd = str(found.get("cwd") or "").strip() or _profile_configured_cwd(
-        profile_home
-    )
-
-    def _reuse_live_payload(sid: str, session: dict) -> dict:
-        payload = _live_session_payload(
-            sid,
-            session,
-            cols=cols,
-            touch=True,
-            transport=current_transport() or _stdio_transport,
-        )
-        payload["resumed"] = target
-        # A lazy watch session never owns a run loop, so its payload's running
-        # flag is always False — overlay the child-run registry so a reconnecting
-        # watch window keeps its busy indicator while the child is still mid-run.
-        if session.get("agent") is None and _child_run_active(target):
-            payload["running"] = True
-            payload["status"] = "streaming"
-        return payload
-
-    # Fast path: if the session is already live, reuse it under the lock.
-    with _session_resume_lock:
-        live = _find_live_session_by_key(target)
-        if live is not None:
-            return _ok(rid, _reuse_live_payload(*live))
-
-    # Lazy/watch resume: register the live session WITHOUT building an agent.
-    # Used by the desktop's subagent windows — the child runs inside the
-    # parent's turn, so its window only needs the stored history plus a
-    # transport for the child-mirror's live events. Skipping _make_agent here
-    # is what keeps the window cheap while the backend is busy running the
-    # delegation. A later prompt.submit upgrades it via _start_agent_build
-    # (resume_session_id keeps the upgrade on the stored conversation).
-    if is_truthy_value(params.get("lazy", False)):
-        sid = uuid.uuid4().hex[:8]
-        lease, limit_message = _claim_active_session_slot(target, live_session_id=sid)
-        if limit_message is not None:
-            return _err(rid, 4090, limit_message)
-        try:
-            db.reopen_session(target)
-            # The child's OWN conversation only. Delegation children are
-            # parent-linked rows, so include_ancestors would prepend the
-            # parent's entire transcript — a watch window opened on a subagent
-            # must show the subagent's branch, not the parent's prompt.
-            history = db.get_messages_as_conversation(target)
-        except Exception as e:
-            if lease is not None:
-                lease.release()
-            return _err(rid, 5000, f"resume failed: {e}")
-        messages = _history_to_messages(history)
-        cwd = profile_resume_cwd or os.getenv("TERMINAL_CWD", os.getcwd())
-        now = time.time()
-        # A delegated child mid-run emits no native session events of its own —
-        # report its liveness from the relay registry so the window paints a
-        # busy indicator instead of a dead idle transcript.
-        child_running = _child_run_active(target)
-        with _session_resume_lock:
-            live = _find_live_session_by_key(target)
-            if live is not None:
-                if lease is not None:
-                    lease.release()
-                return _ok(rid, _reuse_live_payload(*live))
-            with _sessions_lock:
-                _sessions[sid] = {
-                    "agent": None,
-                    "agent_error": None,
-                    "agent_ready": threading.Event(),
-                    "attached_images": [],
-                    "close_on_disconnect": is_truthy_value(
-                        params.get("close_on_disconnect", False)
-                    ),
-                    "active_session_lease": lease,
-                    "cols": cols,
-                    "created_at": now,
-                    "display_history_prefix": [],
-                    "edit_snapshots": {},
-                    "explicit_cwd": False,
-                    "history": history,
-                    "history_lock": threading.Lock(),
-                    "history_version": 0,
-                    "image_counter": 0,
-                    "cwd": cwd,
-                    "inflight_turn": None,
-                    "last_active": now,
-                    "lazy": True,
-                    "pending_title": None,
-                    "profile_home": str(profile_home) if profile_home is not None else None,
-                    "resume_session_id": target,
-                    "running": False,
-                    "session_key": target,
-                    "show_reasoning": _load_show_reasoning(),
-                    "slash_worker": None,
-                    "tool_progress_mode": _load_tool_progress_mode(),
-                    "tool_started_at": {},
-                    "transport": current_transport() or _stdio_transport,
-                }
-                _register_session_cwd(_sessions[sid])
-        return _ok(
-            rid,
-            {
-                "session_id": sid,
-                "resumed": target,
-                "message_count": len(messages),
-                "messages": messages,
-                "info": {
-                    "cwd": cwd,
-                    "branch": _git_branch_for_cwd(cwd),
-                    "model": _resolve_model(),
-                    "tools": {},
-                    "skills": {},
-                    "lazy": True,
-                    "desktop_contract": DESKTOP_BACKEND_CONTRACT,
-                    "profile_name": _current_profile_name(),
-                },
-                "inflight": None,
-                "running": child_running,
-                "session_key": target,
-                "started_at": now,
-                "status": "streaming" if child_running else "idle",
-            },
-        )
-
-    # Build the agent OUTSIDE the lock — _make_agent can block for seconds
-    # (MCP discovery, prompt/skill build, AIAgent construction). Holding
-    # _session_resume_lock across it would stall session.close on the main
-    # dispatch thread (it's not a _LONG_HANDLER), blocking fast-path RPCs.
-    sid = uuid.uuid4().hex[:8]
-    lease, limit_message = _claim_active_session_slot(target, live_session_id=sid)
-    if limit_message is not None:
-        return _err(rid, 4090, limit_message)
-    _enable_gateway_prompts()
-    home_token = (
-        set_hermes_home_override(str(profile_home)) if profile_home is not None else None
-    )
-    try:
-        db.reopen_session(target)
-        history = db.get_messages_as_conversation(target)
-        display_history = db.get_messages_as_conversation(
-            target, include_ancestors=True
-        )
-        display_history_prefix = display_history[
-            : max(0, len(display_history) - len(history))
-        ]
-        messages = _history_to_messages(display_history)
-        tokens = _set_session_context(target)
-        try:
-            # Pass the profile's db so the agent persists turns to the right
-            # state.db; home override is active here so config/skills/model
-            # resolve to the profile too. Runtime identity is restored from the
-            # stored session row so switching chats does not inherit whatever
-            # global model another chat last selected.
-            stored_runtime_overrides = _stored_session_runtime_overrides(found)
-            agent = _make_agent(
-                sid,
-                target,
-                session_id=target,
-                session_db=db,
-                **stored_runtime_overrides,
-            )
-        finally:
-            _clear_session_context(tokens)
-    except Exception as e:
-        if lease is not None:
-            lease.release()
-        return _err(rid, 5000, f"resume failed: {e}")
-    finally:
-        if home_token is not None:
-            reset_hermes_home_override(home_token)
-
-    # Double-checked locking: another concurrent resume may have created the
-    # live session while we were building. Re-check under the lock; if it won,
-    # discard our just-built agent and reuse theirs (no worker/poller wired yet).
-    with _session_resume_lock:
-        live = _find_live_session_by_key(target)
-        if live is not None:
-            try:
-                if hasattr(agent, "close"):
-                    agent.close()
-            except Exception:
-                pass
-            if lease is not None:
-                lease.release()
-            other_sid, other_session = live
-            payload = _live_session_payload(
-                other_sid,
-                other_session,
-                cols=cols,
-                touch=True,
-                transport=current_transport() or _stdio_transport,
-            )
-            payload["resumed"] = target
-            return _ok(rid, payload)
-        try:
-            init_home_token = (
-                set_hermes_home_override(str(profile_home))
-                if profile_home is not None
-                else None
-            )
-            try:
-                _init_session(
-                    sid,
-                    target,
-                    agent,
-                    history,
-                    cols=cols,
-                    cwd=profile_resume_cwd,
-                    session_db=db,
-                )
-            finally:
-                if init_home_token is not None:
-                    reset_hermes_home_override(init_home_token)
-            if sid in _sessions:
-                if stored_runtime_overrides.get("model_override") is not None:
-                    _sessions[sid]["model_override"] = stored_runtime_overrides[
-                        "model_override"
-                    ]
-                _sessions[sid]["display_history_prefix"] = display_history_prefix
-                # Remember the profile home so each turn re-binds HERMES_HOME (the
-                # agent persists to its own db, but mid-turn home reads — memory,
-                # skills — must resolve to the resumed profile too).
-                if profile_home is not None:
-                    _sessions[sid]["profile_home"] = str(profile_home)
-                _sessions[sid]["active_session_lease"] = lease
-        except Exception as e:
-            if lease is not None:
-                lease.release()
-            return _err(rid, 5000, f"resume failed: {e}")
-        session = _sessions.get(sid) or {}
-    return _ok(
-        rid,
-        {
-            "session_id": sid,
-            "resumed": target,
-            "message_count": len(messages),
-            "messages": messages,
-            "info": _session_info(agent, session),
-            "inflight": None,
-            "running": False,
-            "session_key": target,
-            "started_at": float(session.get("created_at") or time.time()),
-            "status": "idle",
-        },
-    )
 
 
 @method("session.cwd.set")
@@ -4209,147 +3777,8 @@ def _(rid, params: dict) -> dict:
     )
 
 
-@method("session.delete")
-def _(rid, params: dict) -> dict:
-    """Delete a stored session and its on-disk transcript files.
-
-    Used by the TUI resume picker (``d`` key) so users can prune old
-    sessions without dropping to the CLI.  Refuses to delete a session
-    that is currently active in this gateway process — those rows are
-    still being written to and removing them out from under the live
-    agent corrupts message ordering and trips FK constraints when the
-    next message append flushes.
-    """
-    target = params.get("session_id", "")
-    if not target:
-        return _err(rid, 4006, "session_id required")
-    db = _get_db()
-    if db is None:
-        return _db_unavailable_error(rid, code=5036)
-    # Block deletion of any session currently bound to a live TUI session
-    # in this process.  The picker hides the active session anyway, but a
-    # racing caller could still target it.  Snapshot via ``list(...)``
-    # because ``_sessions`` is mutated by concurrent RPCs on the thread
-    # pool — iterating the dict directly can raise ``RuntimeError:
-    # dictionary changed size during iteration``.  If even the snapshot
-    # raises, fail closed (refuse the delete) rather than fail open.
-    try:
-        with _sessions_lock:
-            snapshot = list(_sessions.values())
-    except Exception as e:
-        return _err(rid, 5036, f"could not enumerate active sessions: {e}")
-    active = {s.get("session_key") for s in snapshot if s.get("session_key")}
-    if target in active:
-        return _err(rid, 4023, "cannot delete an active session")
-    sessions_dir = get_hermes_home() / "sessions"
-    try:
-        deleted = db.delete_session(target, sessions_dir=sessions_dir)
-    except Exception as e:
-        return _err(rid, 5036, f"delete failed: {e}")
-    if not deleted:
-        # Mirror the methods/session.py orphan-cleanup path: if the
-        # sessions row is gone but session_index still carries an entry
-        # (e.g. a session created via session_index projection whose
-        # creation flow failed before any sessions-table insert), sweep
-        # the index row so the sidebar stops resurfacing the ghost.
-        index_removed = 0
-        if hasattr(db, "delete_session_index"):
-            try:
-                index_removed = int(db.delete_session_index(target) or 0)
-            except Exception:
-                logger.debug(
-                    "session.delete: session_index cleanup failed", exc_info=True
-                )
-        if index_removed > 0:
-            return _ok(rid, {"deleted": target, "via": "session_index_cleanup"})
-        return _err(rid, 4007, "session not found")
-    if hasattr(db, "delete_session_index"):
-        try:
-            db.delete_session_index(target)
-        except Exception:
-            logger.debug(
-                "session.delete: session_index post-sweep failed", exc_info=True
-            )
-    return _ok(rid, {"deleted": target})
 
 
-@method("session.title")
-def _(rid, params: dict) -> dict:
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
-    db = _get_db()
-    if db is None:
-        return _db_unavailable_error(rid, code=5007)
-    key = session["session_key"]
-    if "title" not in params:
-        fallback = session.get("pending_title") or ""
-        try:
-            resolved_title = db.get_session_title(key) or ""
-            if fallback:
-                if db.set_session_title(key, fallback):
-                    session["pending_title"] = None
-                    resolved_title = fallback
-                else:
-                    existing_row = db.get_session(key)
-                    existing_title = ((existing_row or {}).get("title") or "").strip()
-                    if existing_title == fallback:
-                        session["pending_title"] = None
-                        resolved_title = fallback
-                    elif not resolved_title:
-                        resolved_title = fallback
-            elif resolved_title:
-                session["pending_title"] = None
-        except Exception:
-            resolved_title = fallback
-        return _ok(
-            rid,
-            {
-                "title": resolved_title,
-                "session_key": key,
-            },
-        )
-    title = (params.get("title", "") or "").strip()
-    if not title:
-        return _err(rid, 4021, "title required")
-    try:
-        if db.set_session_title(key, title):
-            session["pending_title"] = None
-            return _ok(rid, {"pending": False, "title": title})
-        # rowcount == 0 can mean "same value" as well as "missing row".
-        existing_row = db.get_session(key)
-        if existing_row:
-            session["pending_title"] = None
-            return _ok(
-                rid,
-                {
-                    "pending": False,
-                    "title": (existing_row.get("title") or title),
-                },
-            )
-        # No row yet (the DB write is deferred to the first prompt so empty
-        # drafts don't litter the sidebar). An explicit /title is clear user
-        # intent, not an abandoned draft — so persist the row NOW and set the
-        # title, mirroring the messaging gateway's _handle_title_command. The
-        # old behavior only queued pending_title and relied on the post-turn
-        # apply block; if that turn never landed under this session_key the
-        # title was silently lost and the sidebar fell back to the message
-        # preview. Creating the row up front removes that race entirely. The
-        # min-messages sidebar filter keeps a titled 0-message row hidden, so
-        # a /title'd-but-never-used draft still doesn't clutter the list.
-        _ensure_session_db_row(session)
-        with _session_db(session) as scoped_db:
-            if scoped_db is not None and scoped_db.set_session_title(key, title):
-                session["pending_title"] = None
-                return _ok(rid, {"pending": False, "title": title})
-        # Row creation didn't take (DB unavailable, or a concurrent writer) —
-        # fall back to queuing so the post-turn apply block can still recover.
-        session["pending_title"] = title
-        return _ok(rid, {"pending": True, "title": title})
-    except ValueError as e:
-        return _err(rid, 4022, str(e))
-    except Exception as e:
-        return _err(rid, 5007, str(e))
 
 
 @method("handoff.request")
@@ -4491,30 +3920,6 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"failed": False, "state": state})
 
 
-@method("session.usage")
-def _(rid, params: dict) -> dict:
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
-    agent = session.get("agent")
-    usage: dict = (
-        _get_usage(agent)
-        if agent is not None
-        else {"calls": 0, "input": 0, "output": 0, "total": 0}
-    )
-    # Nous credits block — agent-independent (a portal fetch), so it shows even
-    # with zero API calls or on a resumed session. The TUI /usage panel renders
-    # these lines regardless of `calls`. Fail-open: [] when not logged into Nous
-    # or on any portal hiccup.
-    try:
-        from agent.account_usage import nous_credits_lines
-
-        credits = nous_credits_lines()
-        if credits:
-            usage["credits_lines"] = credits
-    except Exception:
-        pass
-    return _ok(rid, usage)
 
 
 @method("credits.view")
@@ -4763,367 +4168,20 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"ok": False, "error": "error", "message": str(exc), "granted": False})
 
 
-@method("session.status")
-def _(rid, params: dict) -> dict:
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
-
-    from hermes_constants import display_hermes_home
-
-    key = session.get("session_key") or params.get("session_id") or ""
-    agent = session.get("agent")
-    meta = {}
-    db = _get_db()
-    if db and key:
-        try:
-            meta = db.get_session(key) or {}
-        except Exception:
-            meta = {}
-
-    def _dt(value, fallback: datetime | None = None) -> datetime:
-        if value:
-            try:
-                return datetime.fromtimestamp(float(value))
-            except Exception:
-                pass
-        return fallback or datetime.now()
-
-    created = _dt(meta.get("started_at"))
-    updated = created
-    for field in ("updated_at", "last_updated_at", "last_activity_at"):
-        if meta.get(field):
-            updated = _dt(meta.get(field), created)
-            break
-
-    usage = _get_usage(agent) if agent is not None else {}
-    provider = getattr(agent, "provider", None) or "unknown"
-    model = getattr(agent, "model", None) or "(unknown)"
-    lines = [
-        "Hermes TUI Status",
-        "",
-        f"Session ID: {key}",
-        f"Path: {display_hermes_home()}",
-    ]
-    title = (meta.get("title") or "").strip()
-    if title:
-        lines.append(f"Title: {title}")
-    lines.extend(
-        [
-            f"Model: {model} ({provider})",
-            f"Created: {created.strftime('%Y-%m-%d %H:%M')}",
-            f"Last Activity: {updated.strftime('%Y-%m-%d %H:%M')}",
-            f"Tokens: {int(usage.get('total') or 0):,}",
-            f"Agent Running: {'Yes' if session.get('running') else 'No'}",
-        ]
-    )
-    return _ok(rid, {"output": "\n".join(lines)})
 
 
-@method("session.history")
-def _(rid, params: dict) -> dict:
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
-    history = list(session.get("history", []))
-    db = _get_db()
-    if db is not None and session.get("session_key"):
-        try:
-            history = db.get_messages_as_conversation(
-                session["session_key"], include_ancestors=True
-            )
-        except Exception:
-            pass
-    return _ok(
-        rid,
-        {
-            "count": len(history),
-            "messages": _history_to_messages(history),
-        },
-    )
 
 
-@method("session.undo")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    # Reject during an in-flight turn.  If we mutated history while
-    # the agent thread is running, prompt.submit's post-run history
-    # write would either clobber the undo (version matches) or
-    # silently drop the agent's output (version mismatch, see below).
-    # Neither is what the user wants — make them /interrupt first.
-    if session.get("running"):
-        return _err(
-            rid, 4009, "session busy — /interrupt the current turn before /undo"
-        )
-    removed = 0
-    with session["history_lock"]:
-        history = session.get("history", [])
-        while history and history[-1].get("role") in {"assistant", "tool"}:
-            history.pop()
-            removed += 1
-        if history and history[-1].get("role") == "user":
-            history.pop()
-            removed += 1
-        if removed:
-            session["history_version"] = int(session.get("history_version", 0)) + 1
-    return _ok(rid, {"removed": removed})
 
 
-@method("session.compress")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    if session.get("running"):
-        return _err(
-            rid, 4009, "session busy — /interrupt the current turn before /compress"
-        )
-    sid = params.get("session_id", "")
-    focus_topic = str(params.get("focus_topic", "") or "").strip()
-    try:
-        from agent.manual_compression_feedback import summarize_manual_compression
-        from agent.model_metadata import estimate_request_tokens_rough
-
-        with session["history_lock"]:
-            before_messages = list(session.get("history", []))
-            history_version = int(session.get("history_version", 0))
-        before_count = len(before_messages)
-        _agent = session["agent"]
-        _sys_prompt = getattr(_agent, "_cached_system_prompt", "") or ""
-        _tools = getattr(_agent, "tools", None) or None
-        before_tokens = (
-            estimate_request_tokens_rough(
-                before_messages, system_prompt=_sys_prompt, tools=_tools
-            )
-            if before_count
-            else 0
-        )
-
-        if before_count >= 4:
-            focus_suffix = f', focus: "{focus_topic}"' if focus_topic else ""
-            _status_update(
-                sid,
-                "compressing",
-                f"⠋ compressing {before_count} messages "
-                f"(~{before_tokens:,} tok){focus_suffix}…",
-            )
-
-        try:
-            removed, usage = _compress_session_history(
-                session,
-                focus_topic,
-                approx_tokens=before_tokens,
-                before_messages=before_messages,
-                history_version=history_version,
-            )
-            with session["history_lock"]:
-                messages = list(session.get("history", []))
-            after_count = len(messages)
-            # Re-read system prompt + tools after compression — _compress_context
-            # may have rebuilt the system prompt (_cached_system_prompt=None).
-            _sys_prompt_after = (
-                getattr(_agent, "_cached_system_prompt", "") or _sys_prompt
-            )
-            _tools_after = getattr(_agent, "tools", None) or _tools
-            after_tokens = (
-                estimate_request_tokens_rough(
-                    messages,
-                    system_prompt=_sys_prompt_after,
-                    tools=_tools_after,
-                )
-                if after_count
-                else 0
-            )
-            agent = session["agent"]
-            _sync_session_key_after_compress(sid, session)
-            summary = summarize_manual_compression(
-                before_messages, messages, before_tokens, after_tokens
-            )
-            info = _session_info(agent, session)
-            _emit("session.info", sid, info)
-            return _ok(
-                rid,
-                {
-                    "status": "compressed",
-                    "removed": removed,
-                    "before_messages": before_count,
-                    "after_messages": after_count,
-                    "before_tokens": before_tokens,
-                    "after_tokens": after_tokens,
-                    "summary": summary,
-                    "usage": usage,
-                    "info": info,
-                    "messages": messages,
-                },
-            )
-        finally:
-            # Always clear the pinned compressing status so the bar
-            # reverts to neutral whether compaction succeeded, was a
-            # no-op, or raised.
-            _status_update(sid, "ready")
-    except Exception as e:
-        return _err(rid, 5005, str(e))
 
 
-@method("session.save")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-
-    agent = session["agent"]
-    # Mirror the classic CLI /save: snapshot under the Hermes profile home
-    # (~/.hermes/sessions/saved/) rather than the project/workspace CWD, and
-    # include the system prompt so the export matches the dashboard save.
-    saved_dir = get_hermes_home() / "sessions" / "saved"
-    try:
-        saved_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        return _err(rid, 5011, f"failed to create save directory {saved_dir}: {e}")
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = saved_dir / f"hermes_conversation_{timestamp}.json"
-
-    with session["history_lock"]:
-        messages = list(session.get("history", []))
-
-    session_id = getattr(agent, "session_id", None) or session.get("session_key") or ""
-    # Prefer the agent's session_start datetime (matches the classic CLI export);
-    # fall back to the gateway session's created_at timestamp.
-    agent_start = getattr(agent, "session_start", None)
-    if isinstance(agent_start, datetime):
-        session_start = agent_start.isoformat()
-    else:
-        created_at = session.get("created_at")
-        session_start = (
-            datetime.fromtimestamp(created_at).isoformat()
-            if isinstance(created_at, (int, float))
-            else ""
-        )
-
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "model": getattr(agent, "model", ""),
-                    "session_id": session_id,
-                    "session_start": session_start,
-                    "system_prompt": getattr(agent, "_cached_system_prompt", "") or "",
-                    "messages": messages,
-                },
-                f,
-                indent=2,
-                ensure_ascii=False,
-            )
-        return _ok(rid, {"file": str(path)})
-    except Exception as e:
-        return _err(rid, 5011, str(e))
 
 
-@method("session.close")
-def _(rid, params: dict) -> dict:
-    sid = params.get("session_id", "")
-    # Serialize against the WS-orphan reaper (which also pops under
-    # _session_resume_lock) so a disconnect-reap and an explicit close can't
-    # both tear the same session down. _close_session_by_id is the single
-    # idempotent teardown path (pop + _teardown_session) and returns False
-    # when the session is already gone.
-    with _session_resume_lock:
-        return _ok(rid, {"closed": _close_session_by_id(sid, end_reason="tui_close")})
 
 
-@method("session.branch")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    db = _get_db()
-    if db is None:
-        return _db_unavailable_error(rid, code=5008)
-    old_key = session["session_key"]
-    with session["history_lock"]:
-        history = [dict(msg) for msg in session.get("history", [])]
-    if not history:
-        return _err(rid, 4008, "nothing to branch — send a message first")
-    new_key = _new_session_key()
-    new_sid = uuid.uuid4().hex[:8]
-    lease, limit_message = _claim_active_session_slot(new_key, live_session_id=new_sid)
-    if limit_message is not None:
-        return _err(rid, 4090, limit_message)
-    branch_name = params.get("name", "")
-    try:
-        if branch_name:
-            title = branch_name
-        else:
-            current = db.get_session_title(old_key) or "branch"
-            title = (
-                db.get_next_title_in_lineage(current)
-                if hasattr(db, "get_next_title_in_lineage")
-                else f"{current} (branch)"
-            )
-        db.create_session(
-            new_key,
-            source="tui",
-            model=_resolve_model(),
-            # Stable _branched_from marker so list_sessions_rich() keeps the
-            # branch visible in /resume and /sessions. The TUI branch leaves
-            # the parent live (no end_reason='branched'), so the legacy
-            # end_reason heuristic never matches it — the marker is the only
-            # thing that surfaces TUI branches. See issue #20856.
-            model_config={"_branched_from": old_key},
-            parent_session_id=old_key,
-            cwd=_session_cwd(session),
-        )
-        for msg in history:
-            db.append_message(
-                session_id=new_key,
-                role=msg.get("role", "user"),
-                content=msg.get("content"),
-            )
-        db.set_session_title(new_key, title)
-    except Exception as e:
-        if lease is not None:
-            lease.release()
-        return _err(rid, 5008, f"branch failed: {e}")
-    try:
-        tokens = _set_session_context(new_key)
-        try:
-            agent = _make_agent(new_sid, new_key, session_id=new_key)
-        finally:
-            _clear_session_context(tokens)
-        _init_session(
-            new_sid, new_key, agent, list(history), cols=session.get("cols", 80)
-        )
-        if new_sid in _sessions:
-            _sessions[new_sid]["active_session_lease"] = lease
-    except Exception as e:
-        if lease is not None:
-            lease.release()
-        return _err(rid, 5000, f"agent init failed on branch: {e}")
-    return _ok(rid, {"session_id": new_sid, "title": title, "parent": old_key})
 
 
-@method("session.interrupt")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    if hasattr(session["agent"], "interrupt"):
-        session["agent"].interrupt()
-    # Scope the pending-prompt release to THIS session.  A global
-    # _clear_pending() would collaterally cancel clarify/sudo/secret
-    # prompts on unrelated sessions sharing the same tui_gateway
-    # process, silently resolving them to empty strings.
-    _clear_pending(params.get("session_id", ""))
-    try:
-        from tools.approval import resolve_gateway_approval
-
-        resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
-    except Exception:
-        pass
-    return _ok(rid, {"status": "interrupted"})
 
 
 # ── Delegation: subagent tree observability + controls ───────────────
@@ -5275,621 +4333,10 @@ def _notification_poller_loop(
 # ── Methods: config ──────────────────────────────────────────────────
 
 
-@method("config.set")
-def _(rid, params: dict) -> dict:
-    key, value = params.get("key", ""), params.get("value", "")
-    session = _sessions.get(params.get("session_id", ""))
-
-    if key == "model":
-        try:
-            if not value:
-                return _err(rid, 4002, "model value required")
-            if session:
-                # Reject during an in-flight turn.  agent.switch_model()
-                # mutates self.model / self.provider / self.base_url /
-                # self.client in place; the worker thread running
-                # agent.run_conversation is reading those on every
-                # iteration.  A mid-turn swap can send an HTTP request
-                # with the new base_url but old model (or vice versa),
-                # producing 400/404s the user never asked for.  Parity
-                # with the gateway's running-agent /model guard.
-                if session.get("running"):
-                    return _err(
-                        rid,
-                        4009,
-                        "session busy — /interrupt the current turn before switching models",
-                    )
-                from hermes_cli.model_switch import parse_model_flags
-
-                parsed_flags = parse_model_flags(value)
-                _model_input, explicit_provider, _persist_global, _force_refresh, _is_session = parsed_flags
-                if session.get("agent") is None and not explicit_provider.strip():
-                    session_id = params.get("session_id", "")
-                    _start_agent_build(session_id, session)
-                    init_err = _wait_agent(session, rid)
-                    if init_err:
-                        return init_err
-                    if session.get("agent") is None:
-                        return _err(rid, 5032, "agent initialization failed")
-                result = _apply_model_switch(
-                    params.get("session_id", ""),
-                    session,
-                    value,
-                    confirm_expensive_model=bool(
-                        params.get("confirm_expensive_model", False)
-                    ),
-                )
-            else:
-                result = _apply_model_switch(
-                    "",
-                    {"agent": None},
-                    value,
-                    confirm_expensive_model=bool(
-                        params.get("confirm_expensive_model", False)
-                    ),
-                )
-            return _ok(
-                rid,
-                {
-                    "key": key,
-                    "value": result["value"],
-                    "warning": result["warning"],
-                    "confirm_required": result.get("confirm_required", False),
-                    "confirm_message": result.get("confirm_message", ""),
-                },
-            )
-        except Exception as e:
-            return _err(rid, 5001, str(e))
-
-    if key == "fast":
-        raw = str(value or "").strip().lower()
-        agent = session.get("agent") if session else None
-        if agent is not None:
-            current_fast = getattr(agent, "service_tier", None) == "priority"
-        else:
-            current_fast = _load_service_tier() == "priority"
-
-        if raw in {"status"}:
-            return _ok(
-                rid,
-                {"key": key, "value": "fast" if current_fast else "normal"},
-            )
-
-        if raw in {"", "toggle"}:
-            nv = "normal" if current_fast else "fast"
-        elif raw in {"fast", "on"}:
-            nv = "fast"
-        elif raw in {"normal", "off"}:
-            nv = "normal"
-        else:
-            return _err(rid, 4002, f"unknown fast mode: {value}")
-
-        overrides = None
-        if nv == "fast":
-            from hermes_cli.models import resolve_fast_mode_overrides
-
-            target_model = (
-                getattr(agent, "model", None) if agent is not None else _resolve_model()
-            )
-            if not target_model:
-                return _err(
-                    rid,
-                    4002,
-                    "fast mode is not available without a selected model",
-                )
-            overrides = resolve_fast_mode_overrides(target_model)
-            if overrides is None:
-                return _err(
-                    rid,
-                    4002,
-                    "fast mode is not available for this model",
-                )
-
-        _write_config_key("agent.service_tier", nv)
-        if agent is not None:
-            agent.service_tier = "priority" if nv == "fast" else None
-            current_overrides = dict(getattr(agent, "request_overrides", {}) or {})
-            current_overrides.pop("service_tier", None)
-            current_overrides.pop("speed", None)
-            if nv == "fast":
-                current_overrides.update(overrides)
-            agent.request_overrides = current_overrides
-            _emit(
-                "session.info",
-                params.get("session_id", ""),
-                _session_info(agent, session),
-            )
-        return _ok(rid, {"key": key, "value": nv})
-
-    if key == "busy":
-        raw = str(value or "").strip().lower()
-        if raw in {"", "status"}:
-            return _ok(rid, {"key": key, "value": _load_busy_input_mode()})
-        if raw not in {"queue", "steer", "interrupt"}:
-            return _err(rid, 4002, f"unknown busy mode: {value}")
-        _write_config_key("display.busy_input_mode", raw)
-        return _ok(rid, {"key": key, "value": raw})
-
-    if key == "verbose":
-        cycle = ["off", "new", "all", "verbose"]
-        cur = (
-            session.get("tool_progress_mode", _load_tool_progress_mode())
-            if session
-            else _load_tool_progress_mode()
-        )
-        if value and value != "cycle":
-            nv = str(value).strip().lower()
-            if nv not in cycle:
-                return _err(rid, 4002, f"unknown verbose mode: {value}")
-        else:
-            try:
-                idx = cycle.index(cur)
-            except ValueError:
-                idx = 2
-            nv = cycle[(idx + 1) % len(cycle)]
-        _write_config_key("display.tool_progress", nv)
-        if session:
-            session["tool_progress_mode"] = nv
-            agent = session.get("agent")
-            if agent is not None:
-                agent.verbose_logging = nv == "verbose"
-        return _ok(rid, {"key": key, "value": nv})
-
-    if key == "yolo":
-        # Approval bypass. Two scopes:
-        #   scope="session" (default) — same as the TUI's Shift+Tab. Toggles
-        #     ONLY this session's _session_yolo flag; never touches global
-        #     config, so CLI / TUI / cron behavior is unaffected.
-        #   scope="global" (Shift+click the zap) — flips the persistent global
-        #     approvals.mode in config.yaml between "off" (bypass on) and
-        #     "manual" (bypass off). This DOES affect every session, the CLI,
-        #     the TUI, and cron, and survives restarts.
-        scope = str(params.get("scope") or "session").strip().lower()
-        try:
-            from tools.approval import (
-                disable_session_yolo,
-                enable_session_yolo,
-                is_session_yolo_enabled,
-            )
-
-            raw = str(value or "").strip().lower()
-
-            def _resolve_toggle(current: bool) -> bool:
-                if raw in {"1", "on", "true", "yes"}:
-                    return True
-                if raw in {"0", "off", "false", "no"}:
-                    return False
-                return not current
-
-            if scope == "global":
-                from tools.approval import _normalize_approval_mode
-
-                cfg = _load_cfg()
-                appr = cfg.get("approvals") if isinstance(cfg, dict) else None
-                if not isinstance(appr, dict):
-                    appr = {}
-                current = _normalize_approval_mode(appr.get("mode", "manual")) == "off"
-                enable = _resolve_toggle(current)
-                # Toggle between full bypass and the default manual gate. We do
-                # not try to restore a prior "smart"/custom mode — the zap is a
-                # binary on/off affordance; users with bespoke modes set them in
-                # config.yaml.
-                _write_config_key("approvals.mode", "off" if enable else "manual")
-                nv = "1" if enable else "0"
-                # Reflect the global flip in every live session's indicator.
-                for sid, sess in list(_sessions.items()):
-                    agent = sess.get("agent")
-                    if agent is not None:
-                        _emit("session.info", sid, _session_info(agent, sess))
-                return _ok(rid, {"key": key, "value": nv, "scope": "global"})
-
-            if session:
-                current = is_session_yolo_enabled(session["session_key"])
-                enable = _resolve_toggle(current)
-                if enable:
-                    enable_session_yolo(session["session_key"])
-                    nv = "1"
-                else:
-                    disable_session_yolo(session["session_key"])
-                    nv = "0"
-                agent = session.get("agent")
-                if agent is not None:
-                    _emit(
-                        "session.info",
-                        params.get("session_id", ""),
-                        _session_info(agent, session),
-                    )
-            else:
-                current = is_truthy_value(os.environ.get("HERMES_YOLO_MODE"))
-                enable = _resolve_toggle(current)
-                if enable:
-                    os.environ["HERMES_YOLO_MODE"] = "1"
-                    nv = "1"
-                else:
-                    os.environ.pop("HERMES_YOLO_MODE", None)
-                    nv = "0"
-            return _ok(rid, {"key": key, "value": nv, "scope": "session"})
-        except Exception as e:
-            return _err(rid, 5001, str(e))
-
-    if key == "reasoning":
-        try:
-            from hermes_constants import parse_reasoning_effort
-
-            arg = str(value or "").strip().lower()
-            if arg in {"show", "on"}:
-                cfg = _load_cfg()
-                display = (
-                    cfg.get("display") if isinstance(cfg.get("display"), dict) else {}
-                )
-                sections = (
-                    display.get("sections")
-                    if isinstance(display.get("sections"), dict)
-                    else {}
-                )
-                display["show_reasoning"] = True
-                sections["thinking"] = "expanded"
-                display["sections"] = sections
-                cfg["display"] = display
-                _save_cfg(cfg)
-                if session:
-                    session["show_reasoning"] = True
-                return _ok(rid, {"key": key, "value": "show"})
-            if arg in {"hide", "off"}:
-                cfg = _load_cfg()
-                display = (
-                    cfg.get("display") if isinstance(cfg.get("display"), dict) else {}
-                )
-                sections = (
-                    display.get("sections")
-                    if isinstance(display.get("sections"), dict)
-                    else {}
-                )
-                display["show_reasoning"] = False
-                sections["thinking"] = "hidden"
-                display["sections"] = sections
-                cfg["display"] = display
-                _save_cfg(cfg)
-                if session:
-                    session["show_reasoning"] = False
-                return _ok(rid, {"key": key, "value": "hide"})
-
-            parsed = parse_reasoning_effort(arg)
-            if parsed is None:
-                return _err(rid, 4002, f"unknown reasoning value: {value}")
-            _write_config_key("agent.reasoning_effort", arg)
-            if session and session.get("agent") is not None:
-                session["agent"].reasoning_config = parsed
-            return _ok(rid, {"key": key, "value": arg})
-        except Exception as e:
-            return _err(rid, 5001, str(e))
-
-    if key == "details_mode":
-        nv = str(value or "").strip().lower()
-        if nv not in _DETAIL_MODES:
-            return _err(rid, 4002, f"unknown details_mode: {value}")
-        cfg = _load_cfg()
-        display = cfg.get("display") if isinstance(cfg.get("display"), dict) else {}
-        sections = (
-            display.get("sections") if isinstance(display.get("sections"), dict) else {}
-        )
-        display["details_mode"] = nv
-        for section in _DETAIL_SECTION_NAMES:
-            sections[section] = nv
-        display["sections"] = sections
-        cfg["display"] = display
-        _save_cfg(cfg)
-        return _ok(rid, {"key": key, "value": nv})
-
-    if key.startswith("details_mode."):
-        # Per-section override: `details_mode.<section>` writes to
-        # `display.sections.<section>`. Empty value clears the explicit
-        # override and lets frontend resolution apply built-in section defaults
-        # before the global details_mode.
-        section = key.split(".", 1)[1]
-        if section not in _DETAIL_SECTION_NAMES:
-            return _err(rid, 4002, f"unknown section: {section}")
-
-        cfg = _load_cfg()
-        display = cfg.get("display") if isinstance(cfg.get("display"), dict) else {}
-        sections_cfg = (
-            display.get("sections") if isinstance(display.get("sections"), dict) else {}
-        )
-
-        nv = str(value or "").strip().lower()
-        if not nv:
-            sections_cfg.pop(section, None)
-            display["sections"] = sections_cfg
-            cfg["display"] = display
-            _save_cfg(cfg)
-            return _ok(rid, {"key": key, "value": ""})
-
-        if nv not in _DETAIL_MODES:
-            return _err(rid, 4002, f"unknown details_mode: {value}")
-
-        sections_cfg[section] = nv
-        display["sections"] = sections_cfg
-        cfg["display"] = display
-        _save_cfg(cfg)
-        return _ok(rid, {"key": key, "value": nv})
-
-    if key == "thinking_mode":
-        nv = str(value or "").strip().lower()
-        allowed_tm = frozenset({"collapsed", "truncated", "full"})
-        if nv not in allowed_tm:
-            return _err(rid, 4002, f"unknown thinking_mode: {value}")
-        _write_config_key("display.thinking_mode", nv)
-        # Backward compatibility bridge: keep details_mode aligned.
-        _write_config_key(
-            "display.details_mode", "expanded" if nv == "full" else "collapsed"
-        )
-        return _ok(rid, {"key": key, "value": nv})
-
-    if key == "compact":
-        raw = str(value or "").strip().lower()
-        cfg0 = _load_cfg()
-        d0 = cfg0.get("display") if isinstance(cfg0.get("display"), dict) else {}
-        cur_b = bool(d0.get("tui_compact", False))
-        if raw in {"", "toggle"}:
-            nv_b = not cur_b
-        elif raw == "on":
-            nv_b = True
-        elif raw == "off":
-            nv_b = False
-        else:
-            return _err(rid, 4002, f"unknown compact value: {value}")
-        _write_config_key("display.tui_compact", nv_b)
-        return _ok(rid, {"key": key, "value": "on" if nv_b else "off"})
-
-    if key == "statusbar":
-        raw = str(value or "").strip().lower()
-        display = _load_cfg().get("display")
-        d0 = display if isinstance(display, dict) else {}
-        current = _coerce_statusbar(d0.get("tui_statusbar", "top"))
-
-        if raw in {"", "toggle"}:
-            nv = "top" if current == "off" else "off"
-        elif raw == "on":
-            nv = "top"
-        elif raw in _STATUSBAR_MODES:
-            nv = raw
-        else:
-            return _err(rid, 4002, f"unknown statusbar value: {value}")
-
-        _write_config_key("display.tui_statusbar", nv)
-        return _ok(rid, {"key": key, "value": nv})
-
-    if key == "mouse":
-        # Explicit None check rather than `value or ""` so falsy non-string
-        # inputs (0, False) reach the alias map as themselves — both map to
-        # 'off' via _MOUSE_TRACKING_ALIASES — instead of being collapsed to
-        # '' and triggering the toggle path. The slash command always passes
-        # a string, but programmatic JSON-RPC callers may send booleans.
-        raw = ("" if value is None else str(value)).strip().lower()
-        cfg = _load_cfg()
-        display = cfg.get("display") if isinstance(cfg.get("display"), dict) else {}
-        current = _display_mouse_tracking(display)
-
-        if raw in {"", "toggle"}:
-            nv = "all" if current == "off" else "off"
-        elif raw in _MOUSE_TRACKING_ALIASES:
-            nv = _MOUSE_TRACKING_ALIASES[raw]
-        else:
-            return _err(rid, 4002, f"unknown mouse value: {value}")
-
-        _write_config_key("display.mouse_tracking", nv)
-        return _ok(rid, {"key": key, "value": nv})
-
-    if key == "indicator":
-        # Use an explicit None check rather than `value or ""` so falsy
-        # non-string inputs (0, False, []) still surface as themselves
-        # in the error message instead of looking like a blank value.
-        raw = ("" if value is None else str(value)).strip().lower()
-        if raw not in _INDICATOR_STYLES:
-            return _err(
-                rid,
-                4002,
-                f"unknown indicator: {raw!r}; pick one of {'|'.join(_INDICATOR_STYLES)}",
-            )
-        _write_config_key("display.tui_status_indicator", raw)
-        return _ok(rid, {"key": key, "value": raw})
-
-    if key in {"cwd", "terminal.cwd", "workdir"}:
-        raw = str(value or "").strip()
-        if not raw:
-            return _err(rid, 4002, "cwd required")
-        cwd = os.path.abspath(os.path.expanduser(raw))
-        if not os.path.isdir(cwd):
-            return _err(rid, 4002, f"working directory does not exist: {raw}")
-        _write_config_key("terminal.cwd", cwd)
-        os.environ["TERMINAL_CWD"] = cwd
-        return _ok(
-            rid,
-            {"key": "terminal.cwd", "value": cwd, "cwd": cwd, "branch": _git_branch_for_cwd(cwd)},
-        )
-
-    if key in {"prompt", "personality", "skin"}:
-        try:
-            cfg = _load_cfg()
-            if key == "prompt":
-                if value == "clear":
-                    cfg.pop("custom_prompt", None)
-                    nv = ""
-                else:
-                    cfg["custom_prompt"] = value
-                    nv = value
-                _save_cfg(cfg)
-            elif key == "personality":
-                sid_key = params.get("session_id", "")
-                pname, new_prompt = _validate_personality(str(value or ""), cfg)
-                _write_config_key("display.personality", pname)
-                _write_config_key("agent.system_prompt", new_prompt)
-                nv = str(value or "none")
-                history_reset, info = _apply_personality_to_session(
-                    sid_key, session, new_prompt, pname
-                )
-            else:
-                _write_config_key(f"display.{key}", value)
-                nv = value
-                if key == "skin":
-                    _emit("skin.changed", "", resolve_skin())
-            resp = {"key": key, "value": nv}
-            if key == "personality":
-                resp["history_reset"] = history_reset
-                if info is not None:
-                    resp["info"] = info
-            return _ok(rid, resp)
-        except Exception as e:
-            return _err(rid, 5001, str(e))
-
-    return _err(rid, 4002, f"unknown config key: {key}")
 
 
-@method("config.get")
-def _(rid, params: dict) -> dict:
-    key = params.get("key", "")
-    if key == "provider":
-        try:
-            from hermes_cli.models import list_available_providers, normalize_provider
-
-            model = _resolve_model()
-            parts = model.split("/", 1)
-            return _ok(
-                rid,
-                {
-                    "model": model,
-                    "provider": (
-                        normalize_provider(parts[0]) if len(parts) > 1 else "unknown"
-                    ),
-                    "providers": list_available_providers(),
-                },
-            )
-        except Exception as e:
-            return _err(rid, 5013, str(e))
-    if key == "profile":
-        from hermes_constants import display_hermes_home
-
-        return _ok(rid, {"home": str(_hermes_home), "display": display_hermes_home()})
-    if key == "project":
-        cfg_terminal = _load_cfg().get("terminal") or {}
-        raw = str(params.get("cwd", "") or cfg_terminal.get("cwd", "") or "").strip()
-        cwd = _completion_cwd({"cwd": raw} if raw else {})
-        return _ok(rid, {"cwd": cwd, "branch": _git_branch_for_cwd(cwd)})
-    if key == "full":
-        return _ok(rid, {"config": _load_cfg()})
-    if key == "prompt":
-        return _ok(rid, {"prompt": _load_cfg().get("custom_prompt", "")})
-    if key == "skin":
-        return _ok(
-            rid, {"value": (_load_cfg().get("display") or {}).get("skin", "default")}
-        )
-    if key == "indicator":
-        # Normalize so a hand-edited config.yaml with stray casing or
-        # an unknown value reads back the SAME value the TUI actually
-        # rendered (frontend's `normalizeIndicatorStyle` falls back to
-        # `_INDICATOR_DEFAULT` for the same inputs).  Otherwise
-        # `/indicator` would print one thing while the UI shows another.
-        raw = (_load_cfg().get("display") or {}).get("tui_status_indicator", "")
-        norm = str(raw).strip().lower()
-        return _ok(
-            rid,
-            {"value": norm if norm in _INDICATOR_STYLES else _INDICATOR_DEFAULT},
-        )
-    if key == "personality":
-        return _ok(
-            rid,
-            {"value": (_load_cfg().get("display") or {}).get("personality") or "none"},
-        )
-    if key == "reasoning":
-        cfg = _load_cfg()
-        effort = str(
-            (cfg.get("agent") or {}).get("reasoning_effort", "medium") or "medium"
-        )
-        display = (
-            "show"
-            if bool((cfg.get("display") or {}).get("show_reasoning", False))
-            else "hide"
-        )
-        return _ok(rid, {"value": effort, "display": display})
-    if key == "fast":
-        return _ok(
-            rid,
-            {
-                "value": (
-                    "fast"
-                    if (session := _sessions.get(params.get("session_id", "")))
-                    and getattr(session.get("agent"), "service_tier", None)
-                    == "priority"
-                    else ("fast" if _load_service_tier() == "priority" else "normal")
-                ),
-            },
-        )
-    if key == "busy":
-        return _ok(rid, {"value": _load_busy_input_mode()})
-    if key == "details_mode":
-        allowed_dm = frozenset({"hidden", "collapsed", "expanded"})
-        raw = (
-            str(
-                (_load_cfg().get("display") or {}).get("details_mode", "collapsed")
-                or "collapsed"
-            )
-            .strip()
-            .lower()
-        )
-        nv = raw if raw in allowed_dm else "collapsed"
-        return _ok(rid, {"value": nv})
-    if key == "thinking_mode":
-        allowed_tm = frozenset({"collapsed", "truncated", "full"})
-        cfg = _load_cfg()
-        raw = (
-            str((cfg.get("display") or {}).get("thinking_mode", "") or "")
-            .strip()
-            .lower()
-        )
-        if raw in allowed_tm:
-            nv = raw
-        else:
-            dm = (
-                str(
-                    (cfg.get("display") or {}).get("details_mode", "collapsed")
-                    or "collapsed"
-                )
-                .strip()
-                .lower()
-            )
-            nv = "full" if dm == "expanded" else "collapsed"
-        return _ok(rid, {"value": nv})
-    if key == "compact":
-        on = bool((_load_cfg().get("display") or {}).get("tui_compact", False))
-        return _ok(rid, {"value": "on" if on else "off"})
-    if key == "statusbar":
-        display = _load_cfg().get("display")
-        raw = (
-            display.get("tui_statusbar", "top") if isinstance(display, dict) else "top"
-        )
-        return _ok(rid, {"value": _coerce_statusbar(raw)})
-    if key == "mouse":
-        display = _load_cfg().get("display")
-        return _ok(rid, {"value": _display_mouse_tracking(display)})
-    if key == "mtime":
-        cfg_path = _hermes_home / "config.yaml"
-        try:
-            return _ok(
-                rid, {"mtime": cfg_path.stat().st_mtime if cfg_path.exists() else 0}
-            )
-        except Exception:
-            return _ok(rid, {"mtime": 0})
-    return _err(rid, 4002, f"unknown config key: {key}")
 
 
-@method("setup.status")
-def _(rid, params: dict) -> dict:
-    try:
-        from hermes_cli.main import _has_any_provider_configured
-
-        return _ok(rid, {"provider_configured": bool(_has_any_provider_configured())})
-    except Exception as e:
-        return _err(rid, 5016, str(e))
 
 
 @method("setup.runtime_check")
@@ -5964,14 +4411,6 @@ def _(rid, params: dict) -> dict:
 # ── Methods: tools & system ──────────────────────────────────────────
 
 
-@method("process.stop")
-def _(rid, params: dict) -> dict:
-    try:
-        from tools.process_registry import process_registry
-
-        return _ok(rid, {"killed": process_registry.kill_all()})
-    except Exception as e:
-        return _err(rid, 5010, str(e))
 
 
 def _session_processes(session: dict) -> list:
@@ -6026,114 +4465,8 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5010, str(e))
 
 
-@method("reload.mcp")
-def _(rid, params: dict) -> dict:
-    session = _sessions.get(params.get("session_id", ""))
-    try:
-        # Gate: /reload-mcp invalidates the prompt cache for this session.
-        # Respect the ``approvals.mcp_reload_confirm`` config toggle — if
-        # set (default true) AND the caller did not pass ``confirm=true``
-        # in params, surface a warning to the transcript instead of just
-        # reloading silently.  Users pass confirm=true either by
-        # re-invoking after reading the warning, or by setting the
-        # config key to false permanently.
-        user_confirm = bool(params.get("confirm", False))
-        if not user_confirm:
-            try:
-                from hermes_cli.config import load_config as _load_config
-
-                _cfg = _load_config()
-                _approvals = _cfg.get("approvals") if isinstance(_cfg, dict) else None
-                _confirm_required = True
-                if isinstance(_approvals, dict):
-                    _confirm_required = bool(_approvals.get("mcp_reload_confirm", True))
-            except Exception:
-                _confirm_required = True
-            if _confirm_required:
-                # Return a structured response the Ink client can surface
-                # as a warning/confirmation without actually reloading yet.
-                # Ink's ops.ts reads ``status`` and prints ``message`` to
-                # the transcript; a follow-up invocation with confirm=true
-                # (or an `always` choice that flips the config) proceeds.
-                return _ok(
-                    rid,
-                    {
-                        "status": "confirm_required",
-                        "message": (
-                            "⚠️  /reload-mcp invalidates the prompt cache (next "
-                            "message re-sends full input tokens). Reply `/reload-mcp "
-                            "now` to proceed, or `/reload-mcp always` to proceed and "
-                            "silence this prompt permanently."
-                        ),
-                    },
-                )
-
-        from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools
-
-        shutdown_mcp_servers()
-        discover_mcp_tools()
-        if session:
-            agent = session["agent"]
-            # Rebuild the cached agent's tool snapshot so the current session
-            # picks up added/removed MCP tools without `/new` (which discards
-            # history).  The agent snapshots tools once at build and never
-            # re-reads the registry, so an explicit rebuild is required here.
-            # The user already consented to the prompt-cache invalidation via
-            # the confirm gate above.  Mirrors gateway/run.py::_execute_mcp_reload.
-            try:
-                from tools.mcp_tool import refresh_agent_mcp_tools
-
-                # Explicit reload: re-resolve enabled toolsets so a server the
-                # user just enabled in config this session is picked up.
-                refresh_agent_mcp_tools(
-                    agent,
-                    enabled_override=_load_enabled_toolsets(),
-                    quiet_mode=True,
-                )
-            except Exception as _exc:
-                logger.warning(
-                    "Failed to refresh cached agent tools after /reload-mcp: %s",
-                    _exc,
-                )
-            _emit(
-                "session.info",
-                params.get("session_id", ""),
-                _session_info(agent, session),
-            )
-
-        # Honor `always=true` by persisting the opt-out to config.
-        if bool(params.get("always", False)):
-            try:
-                from cli import save_config_value as _save_cfg
-
-                _save_cfg("approvals.mcp_reload_confirm", False)
-            except Exception as _exc:
-                logger.warning("Failed to persist mcp_reload_confirm=false: %s", _exc)
-
-        return _ok(rid, {"status": "reloaded"})
-    except Exception as e:
-        return _err(rid, 5015, str(e))
 
 
-@method("reload.env")
-def _(rid, params: dict) -> dict:
-    """Re-read ``~/.hermes/.env`` into the gateway process via
-    ``hermes_cli.config.reload_env``, matching classic CLI's ``/reload``
-    handler.  Newly added API keys take effect on the next agent call
-    without restarting the TUI.
-
-    The credential pool / provider routing for any *already-constructed*
-    agent does not auto-rebuild — that's the same behaviour as classic
-    CLI's ``/reload``.  Users who want a brand-new credential resolution
-    should follow with ``/new``.
-    """
-    try:
-        from hermes_cli.config import reload_env
-
-        count = reload_env()
-        return _ok(rid, {"updated": int(count)})
-    except Exception as e:
-        return _err(rid, 5015, str(e))
 
 
 _TUI_HIDDEN: frozenset[str] = frozenset(
