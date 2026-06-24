@@ -1276,7 +1276,38 @@ def _(rid, params: dict) -> dict:
     except Exception as e:
         return _err(rid, 5036, f"delete failed: {e}")
     if not deleted:
+        # The sessions row is gone but session_index may still carry an
+        # orphan — typical for a session whose creation flow failed mid-way
+        # (e.g. a model-switch error terminates the run before any message
+        # is persisted; session_index already saw the session create event,
+        # the sessions table never received any inserts). The sidebar reads
+        # session_index, so the orphan reappears on every refresh and the
+        # user can never delete it. Same pattern as the team-conversation
+        # orphan case fixed earlier. Sweep the index row too and report
+        # success so the client treats it as deleted (it IS deleted — the
+        # only state that survived was the index row).
+        index_removed = 0
+        if hasattr(db, "delete_session_index"):
+            try:
+                index_removed = int(db.delete_session_index(target) or 0)
+            except Exception:
+                logger.debug(
+                    "session.delete: session_index cleanup failed", exc_info=True
+                )
+        if index_removed > 0:
+            return _ok(rid, {"deleted": target, "via": "session_index_cleanup"})
         return _err(rid, 4007, "session not found")
+    # Also sweep session_index whenever the sessions row was removed — the
+    # write path normally keeps them in sync, but a crashed projector / older
+    # row created before session_index existed would otherwise leave a stale
+    # index entry pointing at the now-missing session.
+    if hasattr(db, "delete_session_index"):
+        try:
+            db.delete_session_index(target)
+        except Exception:
+            logger.debug(
+                "session.delete: session_index post-sweep failed", exc_info=True
+            )
     return _ok(rid, {"deleted": target})
 
 

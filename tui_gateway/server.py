@@ -3727,7 +3727,29 @@ def _(rid, params: dict) -> dict:
     except Exception as e:
         return _err(rid, 5036, f"delete failed: {e}")
     if not deleted:
+        # Mirror the methods/session.py orphan-cleanup path: if the
+        # sessions row is gone but session_index still carries an entry
+        # (e.g. a session created via session_index projection whose
+        # creation flow failed before any sessions-table insert), sweep
+        # the index row so the sidebar stops resurfacing the ghost.
+        index_removed = 0
+        if hasattr(db, "delete_session_index"):
+            try:
+                index_removed = int(db.delete_session_index(target) or 0)
+            except Exception:
+                logger.debug(
+                    "session.delete: session_index cleanup failed", exc_info=True
+                )
+        if index_removed > 0:
+            return _ok(rid, {"deleted": target, "via": "session_index_cleanup"})
         return _err(rid, 4007, "session not found")
+    if hasattr(db, "delete_session_index"):
+        try:
+            db.delete_session_index(target)
+        except Exception:
+            logger.debug(
+                "session.delete: session_index post-sweep failed", exc_info=True
+            )
     return _ok(rid, {"deleted": target})
 
 
