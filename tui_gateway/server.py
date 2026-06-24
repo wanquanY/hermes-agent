@@ -1803,7 +1803,15 @@ def _tool_progress_enabled(sid: str) -> bool:
     return _session_tool_progress_mode(sid) != "off"
 
 
-def _restart_slash_worker(session: dict):
+def _restart_slash_worker(sid: str, session: dict):
+    # sid is REQUIRED — callers already have it in scope; avoids an O(N)
+    # reverse-lookup over _sessions and lets _attach_worker verify identity
+    # against the canonical mapping. Signature matches upstream
+    # tui_gateway/server.py::_restart_slash_worker(sid, session) after
+    # absorption of bc4dbce858 (#50375 model-switch no-op fix), which started
+    # passing sid through but left the dovie fork's older 1-arg signature in
+    # place — surface error on /model: "takes 1 positional argument but 2
+    # were given".
     worker = session.get("slash_worker")
     if worker:
         try:
@@ -1820,21 +1828,6 @@ def _restart_slash_worker(session: dict):
         )
     except Exception:
         session["slash_worker"] = None
-        return
-    # session here is a dict reference; look up its sid in _sessions so
-    # _attach_worker can verify identity. If we can't find it, the session
-    # was already popped and we close the worker directly.
-    sid = None
-    with _sessions_lock:
-        for candidate_sid, candidate in _sessions.items():
-            if candidate is session:
-                sid = candidate_sid
-                break
-    if sid is None:
-        try:
-            new_worker.close()
-        except Exception:
-            pass
         return
     _attach_worker(sid, session, new_worker)
 
@@ -2177,7 +2170,7 @@ def _sync_session_key_after_compress(
         session["pending_title"] = None
     if restart_slash_worker:
         try:
-            _restart_slash_worker(session)
+            _restart_slash_worker(sid, session)
         except Exception:
             pass
 
@@ -2475,7 +2468,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
         session["history_version"] = int(session.get("history_version", 0)) + 1
     info = _session_info(new_agent)
     _emit("session.info", sid, info)
-    _restart_slash_worker(session)
+    _restart_slash_worker(sid, session)
     return info
 
 
