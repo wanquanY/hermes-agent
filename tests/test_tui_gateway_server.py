@@ -3833,6 +3833,52 @@ def test_apply_model_switch_real_switch_still_appends_marker(monkeypatch):
     assert marker_calls[0][1] == {"model": "claude-opus-4-7", "provider": "anthropic"}
 
 
+def test_append_model_switch_marker_skips_empty_conversation():
+    """The marker must NOT be injected when no user/assistant turn exists yet —
+    the desktop applies the profile model (deepseek-v4-pro) on top of the
+    config default (gpt-5.5) before the first message, which is a real switch
+    but happens in an empty conversation. Injecting the marker there is noise.
+    """
+    appended = []
+
+    class _DB:
+        def append_message(self, **kwargs):
+            appended.append(kwargs)
+
+    agent = types.SimpleNamespace(_session_db=_DB(), session_id="session-key")
+    session = _session(agent=agent)  # history=[] by default
+    server._append_model_switch_marker(session, model="deepseek-v4-pro", provider="custom")
+
+    assert appended == [], "no marker should be persisted for an empty conversation"
+    history = [e for e in session.get("history", []) if e.get("role") == "system"]
+    assert history == [], "no marker should be appended to in-memory history"
+
+
+def test_append_model_switch_marker_fires_mid_conversation():
+    """Once the conversation has a real turn, a switch DOES emit the marker."""
+    appended = []
+
+    class _DB:
+        def append_message(self, **kwargs):
+            appended.append(kwargs)
+
+    agent = types.SimpleNamespace(_session_db=_DB(), session_id="session-key")
+    session = _session(
+        agent=agent,
+        history=[
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ],
+    )
+    server._append_model_switch_marker(session, model="claude-opus-4-7", provider="anthropic")
+
+    assert len(appended) == 1
+    assert "claude-opus-4-7" in appended[0]["content"]
+    assert "anthropic" in appended[0]["content"]
+    system_entries = [e for e in session["history"] if e.get("role") == "system"]
+    assert len(system_entries) == 1
+
+
 def test_mirror_slash_side_effects_rejects_mutating_commands_while_running(monkeypatch):
     """Slash worker passthrough (e.g. /model, /personality, /prompt,
     /compress) must reject during an in-flight turn.  Same race as

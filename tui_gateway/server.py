@@ -1623,6 +1623,24 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
     if not session_key:
         return
 
+    # Only emit the marker for a MID-conversation switch. The desktop builds the
+    # agent with config.yaml's model.default (e.g. gpt-5.5) then applies the
+    # agent profile's real model (e.g. deepseek-v4-pro) on every route into a
+    # chat — a genuine gpt-5.5 → deepseek-v4-pro change, but it happens BEFORE
+    # the user has sent anything. "[System: The active model for this chat has
+    # changed to …]" injected into an empty conversation is pure noise (and
+    # confuses the model about a change that never affected any turn). Skip the
+    # marker when the conversation has no real user/assistant turn yet; the
+    # switch side-effects (worker restart, runtime/system-prompt persist) still
+    # ran above, so the model takes effect for the first message regardless.
+    history = session.get("history") or []
+    has_conversation_turn = any(
+        isinstance(entry, dict) and entry.get("role") in ("user", "assistant")
+        for entry in history
+    )
+    if not has_conversation_turn:
+        return
+
     provider_part = f" via provider {provider}" if provider else ""
     marker = (
         "[System: The active model for this chat has changed to "
