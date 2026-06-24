@@ -28,6 +28,7 @@ from hermes_constants import get_hermes_home
 from hermes_state_agent_profiles import SessionDBAgentProfileMixin
 from hermes_state_branch import SessionDBBranchMixin
 from hermes_state_member_chat import SessionDBMemberChatMixin
+from hermes_state_participants import SessionDBParticipantMixin
 from hermes_state_runs import SessionDBRunMixin
 from hermes_state_team_capabilities import SessionDBTeamCapabilityMixin
 from hermes_state_team_missions import SessionDBTeamMissionMixin
@@ -43,7 +44,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -275,6 +276,22 @@ CREATE TABLE IF NOT EXISTS member_chat_runs (
     display_name TEXT NOT NULL DEFAULT '',
     relayed INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS conversation_participants (
+    conversation_session_id TEXT NOT NULL,
+    participant_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    member_id TEXT NOT NULL DEFAULT '',
+    agent_profile_id TEXT NOT NULL DEFAULT '',
+    agent_profile_version_id TEXT NOT NULL DEFAULT '',
+    runtime_scope_key TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    avatar TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (conversation_session_id, participant_id)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -789,7 +806,7 @@ END;
 """
 
 
-class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBMemberChatMixin, SessionDBRunMixin, SessionDBBranchMixin):
+class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBMemberChatMixin, SessionDBParticipantMixin, SessionDBRunMixin, SessionDBBranchMixin):
     """
     SQLite-backed session storage with FTS5 search.
 
