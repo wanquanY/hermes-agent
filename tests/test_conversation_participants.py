@@ -96,6 +96,49 @@ def test_resolve_participant_for_run_priority(tmp_path: Path):
     assert db.resolve_participant_id_for_run("other", member_id="m1") == ""
 
 
+# ── P1: auto-population from team membership ─────────────────────────
+def test_team_conversation_populates_participants_from_team_membership(tmp_path: Path):
+    """ensure_team_mission_conversation upserts user/leader/members into the
+    participant table so the publish path has stable identities to stamp."""
+    db = SessionDB(tmp_path / "state.db")
+    # Build a team with one leader + one worker member.
+    db.upsert_agent_team(team_id="team-1", name="Team", description="")
+    db.upsert_agent_team_member(
+        member_id="m-lead", team_id="team-1", agent_profile_id="p-lead",
+        role="lead", profile_name="Lead",
+    )
+    db.upsert_agent_team_member(
+        member_id="m-alice", team_id="team-1", agent_profile_id="p-alice",
+        role="member", profile_name="Alice",
+    )
+
+    db.ensure_team_mission_conversation(
+        conversation_id="conv-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        title="Team Conversation",
+    )
+
+    participants = db.list_conversation_participants("team-session-1")
+    by_id = {p["participant_id"]: p for p in participants}
+    assert set(by_id.keys()) == {"user", "leader", "m-alice"}
+    assert by_id["leader"]["role"] == "leader"
+    assert by_id["leader"]["runtime_scope_key"] == "team:conv-1:leader-conversation"
+    assert by_id["leader"]["display_name"] == "Lead"
+    assert by_id["m-alice"]["role"] == "member"
+    assert by_id["m-alice"]["agent_profile_id"] == "p-alice"
+    assert by_id["m-alice"]["runtime_scope_key"] == "profile:p-alice"
+    assert by_id["m-alice"]["display_name"] == "Alice"
+
+    # Resolver: leader scope key → leader; alice's profile id → m-alice.
+    assert db.resolve_participant_id_for_run(
+        "team-session-1", runtime_scope_key="team:conv-1:leader-conversation"
+    ) == "leader"
+    assert db.resolve_participant_id_for_run(
+        "team-session-1", agent_profile_id="p-alice"
+    ) == "m-alice"
+
+
 # ── P0: routing invariant ────────────────────────────────────────────
 def test_run_event_routes_by_stored_session_id_without_mission(tmp_path: Path):
     """A run event reaches a conversation by stored_session_id alone.

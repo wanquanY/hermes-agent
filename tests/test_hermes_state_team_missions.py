@@ -3186,7 +3186,9 @@ def test_team_mission_event_storage_migration_clears_legacy_duplicate_json(tmp_p
         """,
         (json.dumps({"duplicated": "payload"}), json.dumps({"duplicated": "source"}), "mission-1"),
     )
-    db._conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION - 1,))  # noqa: SLF001
+    # Anchor to the pre-compaction schema (23). Using SCHEMA_VERSION - 1
+    # silently skips the migration whenever SCHEMA_VERSION advances past 24.
+    db._conn.execute("UPDATE schema_version SET version = ?", (23,))  # noqa: SLF001
     db._conn.commit()  # noqa: SLF001
     db.close()
 
