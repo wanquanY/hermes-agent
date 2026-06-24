@@ -3701,6 +3701,138 @@ def test_config_set_model_allowed_when_idle(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_apply_model_switch_same_model_skips_marker_and_worker_restart(monkeypatch):
+    """Same-model short-circuit: applyAgentProfileDefaultModel re-applies the
+    profile's default model on every route into a chat (force=True), so
+    _apply_model_switch is fired even when the agent is already on that
+    model. Without a short-circuit it appends a "[System: The active model
+    for this chat has changed ...]" marker on every routing event,
+    poisoning the conversation history.
+    """
+    import types
+
+    class _Agent:
+        provider = "custom"
+        model = "deepseek-v4-pro"
+        base_url = "https://api.example/v1"
+        api_key = "sk-x"
+        api_mode = "chat_completions"
+        switched = False
+
+        def switch_model(self, **_kwargs):
+            self.switched = True
+
+    agent = _Agent()
+    fake_result = types.SimpleNamespace(
+        success=True,
+        new_model="deepseek-v4-pro",
+        target_provider="custom",
+        api_key="sk-x",
+        base_url="https://api.example/v1",
+        api_mode="chat_completions",
+        provider_label="Custom",
+        model_info=None,
+        warning_message="",
+    )
+    monkeypatch.setattr("hermes_cli.model_switch.switch_model", lambda **_: fake_result)
+    monkeypatch.setattr("hermes_cli.model_switch.resolve_persist_behavior", lambda *_a, **_kw: False)
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.parse_model_flags",
+        lambda _raw: ("deepseek-v4-pro", "", False, False, False),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.model_cost_guard.expensive_model_warning",
+        lambda *_a, **_kw: None,
+    )
+    monkeypatch.setattr(server, "_persist_model_switch", lambda *_a, **_kw: None)
+
+    restart_calls = []
+    persist_runtime_calls = []
+    persist_prompt_calls = []
+    marker_calls = []
+    monkeypatch.setattr(server, "_restart_slash_worker", lambda *a: restart_calls.append(a))
+    monkeypatch.setattr(server, "_persist_live_session_runtime", lambda *a: persist_runtime_calls.append(a))
+    monkeypatch.setattr(server, "_persist_live_session_system_prompt", lambda *a: persist_prompt_calls.append(a))
+    monkeypatch.setattr(
+        server, "_append_model_switch_marker",
+        lambda *_a, **_kw: marker_calls.append((_a, _kw)),
+    )
+    monkeypatch.setattr(server, "_session_info", lambda *_a, **_kw: {"model": "deepseek-v4-pro"})
+
+    session = _session(agent=agent)
+    result = server._apply_model_switch("sidA", session, "deepseek-v4-pro")
+
+    # The reapply still succeeds — the caller's "ensure profile model is
+    # pinned for this session" intent is satisfied.
+    assert result["value"] == "deepseek-v4-pro"
+    # But no side effects fire when nothing actually changed.
+    assert not agent.switched, "agent.switch_model should not run on same-model reapply"
+    assert restart_calls == [], "slash worker must not restart on same-model reapply"
+    assert persist_runtime_calls == [], "runtime persist must not run on same-model reapply"
+    assert persist_prompt_calls == [], "system prompt rebuild must not run on same-model reapply"
+    assert marker_calls == [], "no model-switch marker should be appended on same-model reapply"
+
+
+def test_apply_model_switch_real_switch_still_appends_marker(monkeypatch):
+    """Inverse guard: when the resolved model OR provider actually differs,
+    the side effects (worker restart, persist, marker) DO fire."""
+    import types
+
+    class _Agent:
+        provider = "custom"
+        model = "deepseek-v4-pro"
+        base_url = "https://api.example/v1"
+        api_key = "sk-x"
+        api_mode = "chat_completions"
+        switched = False
+
+        def switch_model(self, **_kwargs):
+            self.switched = True
+
+    agent = _Agent()
+    fake_result = types.SimpleNamespace(
+        success=True,
+        new_model="claude-opus-4-7",
+        target_provider="anthropic",
+        api_key="sk-ant",
+        base_url="https://api.anthropic.com/v1",
+        api_mode="anthropic_messages",
+        provider_label="Anthropic",
+        model_info=None,
+        warning_message="",
+    )
+    monkeypatch.setattr("hermes_cli.model_switch.switch_model", lambda **_: fake_result)
+    monkeypatch.setattr("hermes_cli.model_switch.resolve_persist_behavior", lambda *_a, **_kw: False)
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.parse_model_flags",
+        lambda _raw: ("claude-opus-4-7", "anthropic", False, False, False),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.model_cost_guard.expensive_model_warning",
+        lambda *_a, **_kw: None,
+    )
+    monkeypatch.setattr(server, "_persist_model_switch", lambda *_a, **_kw: None)
+
+    restart_calls = []
+    marker_calls = []
+    monkeypatch.setattr(server, "_restart_slash_worker", lambda *a: restart_calls.append(a))
+    monkeypatch.setattr(server, "_persist_live_session_runtime", lambda *a: None)
+    monkeypatch.setattr(server, "_persist_live_session_system_prompt", lambda *a: None)
+    monkeypatch.setattr(
+        server, "_append_model_switch_marker",
+        lambda *_a, **kw: marker_calls.append((_a, kw)),
+    )
+    monkeypatch.setattr(server, "_session_info", lambda *_a, **_kw: {"model": "claude-opus-4-7"})
+
+    session = _session(agent=agent)
+    result = server._apply_model_switch("sidA", session, "claude-opus-4-7 --provider anthropic")
+    assert result["value"] == "claude-opus-4-7"
+    assert agent.switched
+    assert len(restart_calls) == 1
+    assert len(marker_calls) == 1
+    assert marker_calls[0][1] == {"model": "claude-opus-4-7", "provider": "anthropic"}
+
+
 def test_mirror_slash_side_effects_rejects_mutating_commands_while_running(monkeypatch):
     """Slash worker passthrough (e.g. /model, /personality, /prompt,
     /compress) must reject during an in-flight turn.  Same race as
