@@ -11,6 +11,7 @@ Two locks:
 from pathlib import Path
 
 from hermes_state import SessionDB
+from tui_gateway.services.run_control import record_event
 
 
 # ── P1: participant data layer ───────────────────────────────────────
@@ -171,3 +172,108 @@ def test_run_event_routes_by_stored_session_id_without_mission(tmp_path: Path):
     by_run = db.list_run_events("plain-conv", run_id="run-x")
     assert len(by_run) >= 1
     assert all(e.get("run_id") == "run-x" for e in by_run)
+
+
+# ── P1: publish-time participant_id stamping ─────────────────────────
+def test_record_event_stamps_participant_id_for_leader(tmp_path: Path):
+    """record_event resolves participant_id from runtime_scope_key/profile and
+    stamps it onto both the persisted frame and the payload. The frontend
+    speaker resolver will read this directly."""
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_agent_team(team_id="team-1", name="Team")
+    db.upsert_agent_team_member(
+        member_id="m-lead", team_id="team-1", agent_profile_id="p-lead",
+        role="lead", profile_name="Lead",
+    )
+    db.upsert_agent_team_member(
+        member_id="m-alice", team_id="team-1", agent_profile_id="p-alice",
+        role="member", profile_name="Alice",
+    )
+    db.ensure_team_mission_conversation(
+        conversation_id="conv-1", stable_session_id="team-session-1",
+        team_id="team-1", title="T",
+    )
+    db.upsert_run(run_id="run-leader", session_id="team-session-1", status="running")
+
+    record_event(
+        {
+            "type": "message.delta",
+            "session_id": "team-session-1",
+            "stored_session_id": "team-session-1",
+            "run_id": "run-leader",
+            "turn_id": "t1",
+            "seq": 1,
+            "payload": {
+                "text": "hi",
+                "runtime_scope_key": "team:conv-1:leader-conversation",
+            },
+        },
+        db=db,
+    )
+
+    events = db.list_run_events("team-session-1", run_id="run-leader")
+    assert events, "event was not persisted"
+    stored = events[0]
+    assert stored.get("participant_id") == "leader"
+    assert (stored.get("payload") or {}).get("participant_id") == "leader"
+
+
+def test_record_event_stamps_participant_id_for_member_by_profile(tmp_path: Path):
+    """A member run identifies its speaker through agent_profile_id alone
+    (member_chat runs publish under the member's profile-default scope)."""
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_agent_team(team_id="team-1", name="Team")
+    db.upsert_agent_team_member(
+        member_id="m-alice", team_id="team-1", agent_profile_id="p-alice",
+        role="member", profile_name="Alice",
+    )
+    db.ensure_team_mission_conversation(
+        conversation_id="conv-1", stable_session_id="team-session-1",
+        team_id="team-1", title="T",
+    )
+    db.upsert_run(run_id="run-alice", session_id="team-session-1", status="running")
+
+    record_event(
+        {
+            "type": "message.delta",
+            "session_id": "team-session-1",
+            "stored_session_id": "team-session-1",
+            "run_id": "run-alice",
+            "turn_id": "t1",
+            "seq": 1,
+            "payload": {
+                "text": "hello from alice",
+                "agent_profile_id": "p-alice",
+            },
+        },
+        db=db,
+    )
+
+    events = db.list_run_events("team-session-1", run_id="run-alice")
+    assert events
+    assert events[0].get("participant_id") == "m-alice"
+
+
+def test_record_event_with_no_hints_does_not_stamp(tmp_path: Path):
+    """No identity hints in the frame → no stamping, defensive fallback path
+    stays open. Lookup misses must never block event delivery."""
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("plain-conv", source="chat", transient=False)
+    db.upsert_run(run_id="run-y", session_id="plain-conv", status="running")
+
+    record_event(
+        {
+            "type": "message.delta",
+            "session_id": "plain-conv",
+            "stored_session_id": "plain-conv",
+            "run_id": "run-y",
+            "turn_id": "t1",
+            "seq": 1,
+            "payload": {"text": "x"},
+        },
+        db=db,
+    )
+
+    events = db.list_run_events("plain-conv", run_id="run-y")
+    assert events
+    assert not events[0].get("participant_id")

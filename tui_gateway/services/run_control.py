@@ -1135,6 +1135,40 @@ def record_event(
     owner_metadata = owner_metadata if isinstance(owner_metadata, dict) else {}
     now = time.time()
     frame["timestamp"] = now
+    # Conversation-architecture refactor (P1): stamp participant_id at publish
+    # so persisted events carry their speaker identity. Frontend speaker
+    # resolution will prefer this over the legacy nodeId->node->member->profile
+    # walk. Defensive: a missing resolver / lookup miss must NEVER block the
+    # event — the worst case is a fallback to the old four-path lookup.
+    if stable and not frame.get("participant_id"):
+        if resolver := _db_method(db, "resolve_participant_id_for_run"):
+            try:
+                scope_hint = (
+                    str((payload or {}).get("runtime_scope_key") or "").strip()
+                    or str(frame.get("runtime_scope_key") or "").strip()
+                )
+                member_hint = (
+                    str((payload or {}).get("member_id") or "").strip()
+                    or str(frame.get("member_id") or "").strip()
+                )
+                profile_hint = (
+                    str((payload or {}).get("agent_profile_id") or "").strip()
+                    or str(frame.get("agent_profile_id") or "").strip()
+                )
+                if scope_hint or member_hint or profile_hint:
+                    resolved_participant = resolver(
+                        stable,
+                        runtime_scope_key=scope_hint,
+                        member_id=member_hint,
+                        agent_profile_id=profile_hint,
+                    )
+                    if resolved_participant:
+                        frame["participant_id"] = resolved_participant
+                        if isinstance(frame.get("payload"), dict):
+                            frame["payload"]["participant_id"] = resolved_participant
+                            payload = frame["payload"]
+            except Exception:
+                pass
     terminal_event = _terminal_status(event_type, payload)
     scheduler_mission_id = ""
     mission_events_for_fanout: list[dict[str, Any]] = []
