@@ -5246,6 +5246,123 @@ def test_prompt_submit_persists_interrupted_partial_after_tool_flush(monkeypatch
     assert server._sessions["sid"]["history"] == agent.persisted_messages
 
 
+def test_prompt_submit_persists_interrupted_turn_when_delta_already_flushed(monkeypatch):
+    """Regression repro for the "what was my last message?" bug.
+
+    Sequence:
+      1. user submits message
+      2. agent streams a clean text segment (e.g. "好的, 我来搜索...")
+         which fires _emit_text_message_complete and resets
+         delta_normalizer.text to ''
+      3. agent transitions into a tool call (no further text deltas)
+      4. user terminates mid-tool-call
+
+    At step 4 ``delta_normalizer.text`` is empty (it was reset at the
+    end of the segment in step 2), but ``run_conversation`` returns
+    ``messages`` that include the user turn + the completed assistant
+    text + the in-flight tool call. The old persist short-circuit
+    ``if not partial: return`` discarded that whole snapshot — the
+    next turn would see the conversation as if step 1 never happened
+    and the agent would answer "what was my last message?" with the
+    message BEFORE the cancelled one.
+
+    The fix is to keep persisting when base_messages carries new rows
+    beyond the prior session history, even if the in-flight partial
+    text is empty. This test simulates exactly that: the mock agent
+    returns interrupted messages but never calls stream_callback, so
+    the delta normalizer stays empty.
+    """
+
+    class _Agent:
+        session_id = "session-key"
+
+        def __init__(self):
+            self.persisted_messages = None
+
+        def run_conversation(
+            self,
+            prompt,
+            conversation_history=None,
+            stream_callback=None,
+            turn_metadata=None,
+            **_kwargs,
+        ):
+            # Note: do NOT call stream_callback. The bug is exactly
+            # when the in-flight partial buffer is empty at interrupt
+            # time even though real content sits in ``messages``.
+            session = server._sessions["sid"]
+            with session["history_lock"]:
+                session["interrupted_run_id"] = str(turn_metadata.get("run_id"))
+                session["interrupted_turn_id"] = str(turn_metadata.get("turn_id"))
+            return {
+                "final_response": "Operation interrupted: waiting for model response.",
+                "interrupted": True,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "调研和整理一下最近的AI资讯",
+                        "metadata": dict(turn_metadata),
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "好的, 我来帮你搜索和整理最近的AI资讯!",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-search-1",
+                                "type": "function",
+                                "function": {"name": "web_search", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                ],
+            }
+
+        def _persist_session(self, messages, conversation_history=None):
+            self.persisted_messages = list(messages)
+
+    agent = _Agent()
+    server._sessions["sid"] = _session(agent=agent)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    server.handle_request(
+        {
+            "id": "1",
+            "method": "prompt.submit",
+            "params": {
+                "_run_registry_reserved": True,
+                "session_id": "sid",
+                "text": "调研和整理一下最近的AI资讯",
+                "client_run_id": "run-cancel-mid-tool",
+                "turn_id": "turn-cancel-mid-tool",
+            },
+        }
+    )
+
+    # The whole base_messages snapshot must survive — user turn,
+    # completed assistant text, and the in-flight tool call row. The
+    # tail must NOT have an extra empty-content partial assistant
+    # appended (delta normalizer was empty, so nothing to attach).
+    assert agent.persisted_messages is not None, (
+        "interrupted turn was not persisted at all — the bug regressed"
+    )
+    persisted_roles = [m.get("role") for m in agent.persisted_messages]
+    assert persisted_roles[0] == "user"
+    assert agent.persisted_messages[0]["content"] == "调研和整理一下最近的AI资讯"
+    assert any(
+        m.get("role") == "assistant" and m.get("content") == "好的, 我来帮你搜索和整理最近的AI资讯!"
+        for m in agent.persisted_messages
+    )
+    assert server._sessions["sid"]["history"] == agent.persisted_messages
+
+
 def test_prompt_submit_skips_auto_title_when_response_empty(monkeypatch):
     """Auto-title stays disabled when the agent returns an empty reply."""
 

@@ -805,15 +805,28 @@ def _run_prompt_submit(
         delta_normalizer.reset()
 
     def persist_interrupted_partial(base_messages: list[dict] | None = None) -> None:
+        # Captures the in-flight stream segment's accumulated text so an
+        # interrupt can still anchor a partial assistant reply against the
+        # user turn that triggered it. ``delta_normalizer.text`` is reset
+        # to '' every time a text segment completes (see _emit_text_
+        # message_complete around line 805), so for a turn that already
+        # streamed a clean text segment and then moved on to a tool call
+        # before the user cancelled, ``partial`` is empty even though
+        # there IS real assistant content to preserve — that content is
+        # in ``base_messages`` (the agent's full run_conversation
+        # return). The earlier ``if not partial: return`` short-circuit
+        # threw away the user's turn AND the streamed assistant text in
+        # that case, so the next turn loaded session messages that
+        # didn't include the cancelled turn at all — agent answered
+        # "what was my last message?" with the message BEFORE the
+        # cancelled one. Bug repro pattern:
+        #   1. user submits message
+        #   2. agent streams a text segment ("好的, 我来搜索...")
+        #   3. agent moves to a tool call (delta_normalizer.reset())
+        #   4. user terminates
+        #   5. next turn: agent has no record of (1)+(2)
         partial = delta_normalizer.text.strip()
-        if not partial:
-            return
-        assistant_message = {"role": "assistant", "content": partial}
-        if turn_metadata:
-            assistant_message["metadata"] = {
-                "turn_id": turn_metadata.get("turn_id"),
-                "run_id": turn_metadata.get("run_id"),
-            }
+
         next_history = [
             dict(message)
             for message in (base_messages or [])
@@ -821,6 +834,14 @@ def _run_prompt_submit(
         ]
         if not next_history:
             next_history = list(history)
+
+        # Nothing meaningful to write — neither a partial mid-segment
+        # text nor a passed-in base_messages snapshot exceeds the
+        # session's existing history. Skip without disturbing the
+        # session's history_version.
+        if not partial and len(next_history) <= len(history):
+            return
+
         current_turn_id = str((turn_metadata or {}).get("turn_id") or "")
         current_run_id = str((turn_metadata or {}).get("run_id") or "")
 
@@ -840,17 +861,28 @@ def _run_prompt_submit(
                 user_message["metadata"] = turn_metadata
             next_history.append(user_message)
 
-        last_message = next_history[-1] if next_history else {}
-        if (
-            isinstance(last_message, dict)
-            and last_message.get("role") == "assistant"
-            and not last_message.get("tool_calls")
-            and str(last_message.get("content") or "").strip() == partial
-        ):
-            if assistant_message.get("metadata") and not isinstance(last_message.get("metadata"), dict):
-                last_message["metadata"] = assistant_message["metadata"]
-        else:
-            next_history.append(assistant_message)
+        # Append the still-streaming partial assistant text only when
+        # there IS one. base_messages may already carry a finalized
+        # assistant message for the same content — skip the dup append
+        # in that case.
+        if partial:
+            assistant_message = {"role": "assistant", "content": partial}
+            if turn_metadata:
+                assistant_message["metadata"] = {
+                    "turn_id": turn_metadata.get("turn_id"),
+                    "run_id": turn_metadata.get("run_id"),
+                }
+            last_message = next_history[-1] if next_history else {}
+            if (
+                isinstance(last_message, dict)
+                and last_message.get("role") == "assistant"
+                and not last_message.get("tool_calls")
+                and str(last_message.get("content") or "").strip() == partial
+            ):
+                if assistant_message.get("metadata") and not isinstance(last_message.get("metadata"), dict):
+                    last_message["metadata"] = assistant_message["metadata"]
+            else:
+                next_history.append(assistant_message)
         with session["history_lock"]:
             if int(session.get("history_version", 0)) != history_version:
                 return
