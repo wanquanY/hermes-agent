@@ -213,6 +213,8 @@ async def primary_dispatch(req: Any, transport: Any) -> bool:
     params = req.get("params") if isinstance(req.get("params"), dict) else {}
     if method == "run.cancel":
         return await _dispatch_run_cancel(req, transport, params)
+    if method in _INTERACTIVE_RESPONSE_METHODS:
+        return await _dispatch_interactive_response(req, transport, method, params)
     if method not in ("run.submit", "prompt.submit"):
         return False
     scope = runtime_scope_from_request(req)
@@ -221,6 +223,71 @@ async def primary_dispatch(req: Any, transport: Any) -> bool:
         # route through worker.
         return False
     return await _dispatch_prompt_submit(req, transport, scope, params)
+
+
+# Interactive-response RPCs the agent's tools block on. The agent runs
+# in a worker subprocess (Phase 6+) so the cooperative wait happens
+# inside that process — the answer must reach the worker's
+# ``WorkerInteractiveResponder``, not the main sidecar's in-process
+# ``_pending`` dict (which is empty in this architecture). Each method
+# maps to the JSON-RPC param field carrying the user's answer.
+_INTERACTIVE_RESPONSE_METHODS: dict[str, tuple[str, str]] = {
+    # method: (interactive_kind, answer_param_name)
+    "clarify.respond": ("clarify", "answer"),
+    "approval.respond": ("approval", "choice"),
+    "secret.respond": ("secret", "value"),
+    "sudo.respond": ("sudo", "password"),
+}
+
+
+async def _dispatch_interactive_response(
+    req: dict, transport: Any, method: str, params: dict,
+) -> bool:
+    """Route ``*.respond`` RPCs to the worker that owns the pending
+    interactive request.
+
+    Without this, the frontend's answer never reaches the agent: the
+    in-process @method handler in prompt.py looks for the entry in
+    the MAIN sidecar's ``_pending`` dict, but the agent's
+    ``clarify_gateway.register`` / ``tools/approval.submit_pending``
+    runs in the WORKER process — its in-process ``_pending`` lives
+    there. The MAIN side only knows ``request_id → scope_key``
+    (recorded via ``WorkerFrameRouter.on_interactive_request`` from
+    the ``InteractiveRequestFrame`` the worker emitted on stdout).
+    ``WorkerFrameRouter.respond`` does the cross-process handoff:
+    sends an ``InteractiveResponseFrame`` to the right worker, whose
+    ``WorkerInteractiveResponder.resolve`` then unblocks the agent
+    thread's ``threading.Event`` waiter.
+
+    Falls through to the in-process handler when the router has no
+    record of the request_id — covers (a) default-scope sessions
+    that never spawned a worker, and (b) the duplicate-respond case
+    (the entry was already popped by the first call).
+    """
+    rid = req.get("id")
+    request_id = str(params.get("request_id") or "").strip()
+    if not request_id:
+        return False
+    router = worker_frame_router()
+    if not router.has_pending_request(request_id):
+        return False
+    interactive_kind, answer_field = _INTERACTIVE_RESPONSE_METHODS[method]
+    answer = params.get(answer_field, "")
+    # ``approval.respond``'s ``choice`` field tends to come back as a
+    # plain string; pass through verbatim. ``clarify.respond`` /
+    # ``secret.respond`` / ``sudo.respond`` likewise — the worker
+    # responder forwards the answer untouched to whichever resolver
+    # the kind dictates.
+    ok = await router.respond(request_id, answer, expected_kind=interactive_kind)
+    if not ok:
+        # Race: router said pending → respond saw it gone. Either a
+        # parallel respond won, or the worker already terminalised
+        # the run (on_run_terminal cleans pending). Either way, the
+        # in-process fallback will return the canonical "no pending"
+        # error to the caller.
+        return False
+    await _ack_success(transport, rid, {"status": "ok", "source": "primary-run-worker"})
+    return True
 
 
 async def _dispatch_run_cancel(req: dict, transport: Any, params: dict) -> bool:
