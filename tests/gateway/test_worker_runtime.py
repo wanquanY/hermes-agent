@@ -1,8 +1,6 @@
-"""Unit tests for ``tui_gateway.services.worker_runtime`` — Phase 5a.
+"""Unit tests for ``tui_gateway.services.worker_runtime``.
 
 Covers:
-- ``is_primary_run_worker_mode`` env-flag matrix (primary / legacy /
-  default / unknown one-time-warning)
 - ``worker_supervisor`` / ``worker_frame_router`` singleton identity
 - supervisor callbacks are bound to the router
 - ``shutdown_run_worker_runtime`` is no-op when nothing spawned
@@ -14,7 +12,6 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import logging
 from unittest.mock import AsyncMock
 
 import pytest
@@ -29,46 +26,6 @@ def _reset_singletons():
     worker_runtime._reset_for_tests()
     yield
     worker_runtime._reset_for_tests()
-
-
-@pytest.mark.parametrize(
-    "value, expected",
-    [
-        # Default (unset / empty) and any positive value → primary (True).
-        ("", True),
-        ("primary", True),
-        ("PRIMARY", True),
-        ("on", True),
-        ("1", True),
-        ("true", True),
-        ("yes", True),
-        # Explicit opt-out → legacy escape hatch (False).
-        ("legacy", False),
-        ("off", False),
-        ("0", False),
-        ("false", False),
-        ("no", False),
-    ],
-)
-def test_is_primary_run_worker_mode(monkeypatch, value, expected) -> None:
-    monkeypatch.setenv("DOVIE_RUN_WORKER_MODE", value)
-    assert worker_runtime.is_primary_run_worker_mode() is expected
-
-
-def test_is_primary_default_unset(monkeypatch) -> None:
-    """Phase 6: primary mode is the default."""
-    monkeypatch.delenv("DOVIE_RUN_WORKER_MODE", raising=False)
-    assert worker_runtime.is_primary_run_worker_mode() is True
-
-
-def test_unknown_value_warns_once_and_treats_as_primary(monkeypatch, caplog) -> None:
-    monkeypatch.setenv("DOVIE_RUN_WORKER_MODE", "weird-value")
-    with caplog.at_level(logging.WARNING, logger="tui_gateway.services.worker_runtime"):
-        assert worker_runtime.is_primary_run_worker_mode() is True
-        assert worker_runtime.is_primary_run_worker_mode() is True
-    # Warning emitted exactly once.
-    warnings = [r for r in caplog.records if "weird-value" in r.getMessage()]
-    assert len(warnings) == 1
 
 
 def test_singleton_identity() -> None:

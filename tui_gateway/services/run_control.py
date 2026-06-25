@@ -1261,34 +1261,16 @@ def record_event(
 
         subscribers = set()
         if stable:
-            phase6_sub_diag = []
             for subscription_id in list(_subscription_ids_by_session.get(stable, set())):
                 subscription = _subscriptions_by_id.get(subscription_id)
                 transport = subscription.get("transport") if isinstance(subscription, dict) else None
-                matches = (
+                if (
                     transport is not None
                     and isinstance(subscription, dict)
                     and _session_subscription_matches_event(subscription, frame)
-                )
-                if event_type == "message.complete":
-                    phase6_sub_diag.append({
-                        "sub_id": subscription_id[:8],
-                        "transport_none": transport is None,
-                        "sub_scope": str((subscription or {}).get("runtime_scope_key") or ""),
-                        "event_scope": str(frame.get("runtime_scope_key") or ""),
-                        "matches": matches,
-                    })
-                if matches:
+                ):
                     _remember_subscription_run(subscription, frame)
                     subscribers.add(transport)
-            if event_type == "message.complete":
-                logger.warning(
-                    "[PHASE6_REC] record_event terminal stable=%s sub_ids=%s matches=%s direct_subscribers=%d",
-                    stable,
-                    list(_subscription_ids_by_session.get(stable, set())),
-                    phase6_sub_diag,
-                    len(_subscribers_by_session.get(stable, set())),
-                )
             subscribers.update(_subscribers_by_session.get(stable, set()))
         if skip_owner_transport and owner_transport is not None:
             subscribers.discard(owner_transport)
@@ -1599,14 +1581,6 @@ def _mirror_member_chat_frame_if_registered(
                 logger.warning("failed to persist member-chat assistant message", exc_info=True)
 
 
-def _phase6_diag_log(msg: str, **kwargs) -> None:
-    """TEMP Phase 6.3 diagnostic — WARNING level so it surfaces."""
-    try:
-        logger.warning("[PHASE6_PUB] " + msg + " " + " ".join(f"{k}={v!r}" for k, v in kwargs.items()))
-    except Exception:
-        pass
-
-
 def publish_recorded_event(
     params: dict[str, Any],
     owner_transport: Transport | None = None,
@@ -1634,42 +1608,15 @@ def publish_recorded_event(
         db=db,
         persist=persist,
     )
-    event_type_for_diag = str(params.get("type") or "")
-    is_terminal_diag = event_type_for_diag == "message.complete"
-    if is_terminal_diag:
-        _phase6_diag_log(
-            "publish enter",
-            type=event_type_for_diag,
-            stored=params.get("stored_session_id"),
-            run=params.get("run_id"),
-            seq=params.get("seq"),
-            n_subs=len(subscribers),
-        )
     if before_deliver is not None:
         before_deliver()
     delivered: list[Transport] = []
     for transport in subscribers:
         event_for_transport = _event_for_live_subscription_delivery(transport, params)
         if event_for_transport is None:
-            if is_terminal_diag:
-                _phase6_diag_log(
-                    "publish skip (projection returned None)",
-                    type=event_type_for_diag,
-                    seq=params.get("seq"),
-                    tr_closed=getattr(transport, "_closed", "?"),
-                )
             delivered.append(transport)
             continue
-        wrote = _write_event(transport, event_for_transport)
-        if is_terminal_diag:
-            _phase6_diag_log(
-                "publish write_event",
-                type=event_type_for_diag,
-                seq=params.get("seq"),
-                wrote=wrote,
-                tr_closed=getattr(transport, "_closed", "?"),
-            )
-        if wrote:
+        if _write_event(transport, event_for_transport):
             remember_transport_delivery(transport, event_for_transport, direct=False)
             delivered.append(transport)
     return delivered

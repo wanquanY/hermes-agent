@@ -47,43 +47,9 @@ from tui_gateway.services.worker_supervisor import WorkerSupervisor
 _log = logging.getLogger(__name__)
 
 
-# Env flag values that route ``prompt.submit`` through the new stack
-# instead of ``RuntimeWorkerPool``. ``legacy`` and ``""`` keep the old
-# behavior; ``primary`` opts into the new path. Anything else is treated
-# as ``legacy`` and a warning is logged once.
-_ENV_KEY = "DOVIE_RUN_WORKER_MODE"
-_LEGACY_VALUES = frozenset({"", "legacy", "off", "0", "false", "no"})
-_PRIMARY_VALUES = frozenset({"primary", "on", "1", "true", "yes"})
-
-
 _singleton_lock = threading.RLock()
 _supervisor_singleton: Optional[WorkerSupervisor] = None
 _router_singleton: Optional[WorkerFrameRouter] = None
-_unknown_value_logged = False
-
-
-def is_primary_run_worker_mode() -> bool:
-    """Phase 6: primary mode is unconditional.
-
-    The legacy ``RuntimeWorkerPool`` proxy was deleted in this phase, so
-    there is no fallback path to gate. The env flag is preserved as an
-    explicit escape hatch (``DOVIE_RUN_WORKER_MODE=legacy``) but defaults
-    to True. A future cleanup can drop the flag entirely once we're
-    confident no caller relies on it.
-    """
-    global _unknown_value_logged
-    raw = str(os.environ.get(_ENV_KEY, "") or "").strip().lower()
-    if raw in _LEGACY_VALUES and raw != "":
-        return False
-    if raw and raw not in _PRIMARY_VALUES and raw not in _LEGACY_VALUES:
-        if not _unknown_value_logged:
-            _log.warning(
-                "[worker-runtime] %s=%r is not a recognized value; "
-                "treating as primary (default).",
-                _ENV_KEY, raw,
-            )
-            _unknown_value_logged = True
-    return True
 
 
 def worker_supervisor() -> WorkerSupervisor:

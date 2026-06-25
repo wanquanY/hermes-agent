@@ -34,10 +34,7 @@ from typing import Any
 
 from tui_gateway import server
 from tui_gateway.services.runtime_proxy import runtime_scope_from_request
-from tui_gateway.services.worker_runtime import (
-    is_primary_run_worker_mode,
-    primary_dispatch,
-)
+from tui_gateway.services.worker_runtime import primary_dispatch
 
 _log = logging.getLogger(__name__)
 
@@ -443,14 +440,8 @@ async def handle_ws(ws: Any) -> None:
                 transport.remember_request(req, line_meta)
 
             try:
-                # Phase 6: ``primary_dispatch`` is the sole worker-spawning
-                # entry. Legacy ``proxy_to_runtime`` was deleted —
-                # everything else flows into the main sidecar's
-                # @method registry directly. The env flag is preserved
-                # as an opt-out only.
-                if is_primary_run_worker_mode():
-                    if await primary_dispatch(req, transport):
-                        continue
+                if await primary_dispatch(req, transport):
+                    continue
             except Exception as exc:
                 rid = _request_id(req)
                 method = _request_method(req)

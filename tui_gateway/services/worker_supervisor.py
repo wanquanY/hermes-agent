@@ -13,10 +13,10 @@ Phase 4b (this file) implements:
   stdout read loop never blocks on DB writes done by the callbacks
   (handoff invariant #8)
 
-Phase 4c wires the dispatch callbacks into ``run_control``,
-``tools/approval``, ``tools/clarify_gateway``. Phase 5 flips
-``prompt.submit`` over via the ``DOVIE_RUN_WORKER_MODE=primary`` env
-flag.
+Phase 4c wired the dispatch callbacks into ``run_control``,
+``tools/approval``, ``tools/clarify_gateway``. Phase 5+ made this the
+sole worker-spawning path; the legacy ``RuntimeWorkerPool`` proxy was
+deleted in Phase 6.
 """
 
 from __future__ import annotations

@@ -22,10 +22,10 @@ Protocol (one JSON object per line, UTF-8, ``\\n``-terminated):
       {"op":"run.terminal", "run_id", "status"}
       {"op":"log", "level", "text"}
 
-Phase 4a (this file) implements **only** the codec + a stub run loop
-suitable for unit tests. Phase 4c wires the run handler into the real
-agent library. Phase 5 flips ``prompt.submit`` over via the
-``DOVIE_RUN_WORKER_MODE=primary`` env flag.
+Phase 4a (this file) implemented the codec + a stub run loop suitable
+for unit tests. Phase 4c wired the run handler into the real agent
+library. Phase 5+ made this the sole worker-spawning path; the legacy
+``RuntimeWorkerPool`` proxy was deleted in Phase 6.
 """
 
 from __future__ import annotations
