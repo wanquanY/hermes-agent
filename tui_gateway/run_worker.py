@@ -358,25 +358,50 @@ class WorkerProtocol:
         a ``log`` frame if no handler is supplied) and the loop
         continues. Handler exceptions propagate out — the caller logs
         and terminates the process.
+
+        Run-start frames are dispatched on a **background task** so the
+        run loop stays free to read further frames (notably
+        ``RunCancelFrame``) while the agent is executing — otherwise
+        stdin reads stall until the agent thread joins, the cancel
+        sits buffered in the pipe, and ``backend.cancel`` only sees
+        the request AFTER the run already terminated.
         """
+        background_tasks: set[asyncio.Task[Any]] = set()
+        try:
+            async for line in self._lines_in:
+                if self._shutdown.is_set():
+                    return
+                try:
+                    frame = decode_incoming(line)
+                except FrameDecodeError as exc:
+                    if self._on_decode_error is not None:
+                        await self._on_decode_error(exc, line)
+                    else:
+                        await self.emit_log("error", f"decode error: {exc}")
+                    continue
 
-        async for line in self._lines_in:
-            if self._shutdown.is_set():
-                return
-            try:
-                frame = decode_incoming(line)
-            except FrameDecodeError as exc:
-                if self._on_decode_error is not None:
-                    await self._on_decode_error(exc, line)
+                if isinstance(frame, ShutdownFrame):
+                    self.request_shutdown()
+                    return
+
+                if isinstance(frame, RunStartFrame):
+                    task = asyncio.create_task(self._handler(self, frame))
+                    background_tasks.add(task)
+                    task.add_done_callback(background_tasks.discard)
                 else:
-                    await self.emit_log("error", f"decode error: {exc}")
-                continue
-
-            if isinstance(frame, ShutdownFrame):
-                self.request_shutdown()
-                return
-
-            await self._handler(self, frame)
+                    # RunCancelFrame / InteractiveResponseFrame complete fast;
+                    # awaiting inline keeps ordering deterministic (a cancel
+                    # that lands right after a response is processed in
+                    # arrival order, not racing with whatever the response
+                    # unblocked).
+                    await self._handler(self, frame)
+        finally:
+            # Drain any in-flight run starts before returning. Tests and
+            # callers depend on emit completing before ``run()`` exits;
+            # leaving background tasks pending would also drop the
+            # terminal RunTerminalFrame the backend emits at run end.
+            if background_tasks:
+                await asyncio.gather(*background_tasks, return_exceptions=True)
 
 
 async def _stdin_lines() -> AsyncIterator[str]:

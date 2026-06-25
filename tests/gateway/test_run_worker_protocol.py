@@ -292,7 +292,12 @@ async def test_run_dispatches_each_frame_and_stops_on_shutdown() -> None:
         handler=handler,
     )
     await proto.run()
-    assert seen == [RunStartFrame, RunCancelFrame]  # shutdown stops loop pre-handler
+    # ``RunStartFrame`` now dispatches as a background task so the run
+    # loop stays free to read further frames while the agent runs —
+    # ordering between the start handler completion and the cancel
+    # handler is no longer guaranteed. Both must be dispatched; the
+    # shutdown frame stops the loop before its handler runs.
+    assert set(seen) == {RunStartFrame, RunCancelFrame}
     # Emitted terminal frame for the run.start
     terminals = [f for f in sink.decoded() if f.get("op") == "run.terminal"]
     assert terminals == [{"op": "run.terminal", "run_id": "r1", "status": "ok"}]

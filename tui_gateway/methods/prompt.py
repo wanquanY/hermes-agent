@@ -716,13 +716,24 @@ def _run_prompt_submit(
         status = str(state.get("status") or "").strip()
         if status not in run_control.ACTIVE_RUN_STATUSES:
             return
+        # If the user (or main-side ``run.cancel``) interrupted this turn,
+        # the legacy interrupt path marked ``session["interrupted_run_id"]``
+        # to ``turn_run_id``. Surface the terminal as ``cancelled`` so the
+        # UI shows "已中断" instead of "运行失败" — the in-flight stream
+        # didn't fail; it was deliberately stopped.
+        with session["history_lock"]:
+            interrupted_run_id = str(session.get("interrupted_run_id") or "")
+        was_cancelled = bool(turn_run_id and interrupted_run_id == turn_run_id)
+        fallback_status = "cancelled" if was_cancelled else "failed"
         logger.warning(
-            "[dovie-prompt] terminal fallback for active run sid=%s stored_session_id=%s run_id=%s turn_id=%s status=%s reason=%s",
+            "[dovie-prompt] terminal fallback for active run sid=%s stored_session_id=%s "
+            "run_id=%s turn_id=%s status=%s fallback=%s reason=%s",
             sid,
             stored_session_id,
             turn_run_id,
             turn_id,
             status,
+            fallback_status,
             reason,
         )
         run_control.publish_run_terminal_event(
@@ -736,7 +747,7 @@ def _run_prompt_submit(
                 or sid
             ),
             runtime_session_id=sid,
-            status="failed",
+            status=fallback_status,
             message=reason,
             db=db,
             owner_transport=current_transport(),
@@ -1314,6 +1325,33 @@ def _run_prompt_submit(
                     else None
                 )
                 persist_interrupted_partial(result_messages)
+                # Emit a real ``message.complete`` for the cancelled turn
+                # so (a) the frontend sees a terminal status of
+                # ``cancelled`` immediately (not "失败" via the
+                # ``terminalize_if_still_active`` fallback), and (b) the
+                # partial assistant text persists into the messages table
+                # via record_event's normal reduction path — without
+                # this, the next turn loads the conversation with NO
+                # assistant message for the cancelled run and the agent
+                # answers as if the cancelled question was never asked.
+                partial_text = str(delta_normalizer.text or "")
+                interrupt_payload: dict[str, Any] = {
+                    "usage": _get_usage(agent),
+                    "status": "cancelled",
+                    "streamed": True,
+                    "text": partial_text,
+                    "client_message_id": current_client_message_id(),
+                    "clientMessageId": current_client_message_id(),
+                    **terminal_text_metadata(partial_text, prefix="text"),
+                }
+                interrupt_message_id = _latest_assistant_message_id_for_turn(
+                    str(session.get("session_key") or sid),
+                    turn_metadata,
+                )
+                if interrupt_message_id:
+                    interrupt_payload["message_id"] = interrupt_message_id
+                _emit("message.complete", sid, interrupt_payload)
+                terminal_attempted = True
                 return
 
             last_reasoning = None
