@@ -183,8 +183,28 @@ class AgentRunBackend(WorkerRunBackend):
 def _classify_outcome(
     exc: Optional[BaseException], cancel_event: threading.Event,
 ) -> tuple[str, str]:
+    """Decide the worker→main ``RunTerminalFrame`` status from the
+    agent thread's exit shape.
+
+    Order matters: ``cancel_event`` is checked FIRST. The legacy
+    ``InterruptedError`` path inside ``conversation_loop`` catches its
+    own exception and returns a normal result dict with
+    ``"interrupted": True`` — the thread exits cleanly (``exc is None``).
+    If we ran the ``exc is None → completed`` check first, every
+    user-cancelled run would be classified as ``completed`` and the
+    main side's Phase 4c terminal gate (which intentionally skips
+    publish for ``completed``, trusting the worker's own
+    ``message.complete``) would mask the cancel — only the prompt
+    layer's own ``message.complete(status="cancelled")`` emit (added
+    in Phase 11) carries the truth. That ordering bug doesn't surface
+    today because the gate's skip is correct for completed, but a
+    future change to the gate would expose it. Cancel first keeps the
+    classification honest regardless of how downstream layers handle
+    each status."""
+    if cancel_event.is_set():
+        if exc is None or isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            return "cancelled", ""
+        return "cancelled", str(exc)
     if exc is None:
         return "completed", ""
-    if cancel_event.is_set():
-        return "cancelled", str(exc) if not isinstance(exc, (KeyboardInterrupt, SystemExit)) else ""
     return "failed", str(exc)

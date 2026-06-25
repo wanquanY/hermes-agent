@@ -189,9 +189,15 @@ async def test_shutdown_signals_cancel_and_joins() -> None:
     await backend.shutdown()
     await task
     assert cancel_seen.is_set()
-    # No exception in runner → completed status.
+    # cancel_event was set (by shutdown) — ``_classify_outcome`` now
+    # checks cancel BEFORE the exc-is-None branch, so the runner's
+    # clean exit still classifies as cancelled. This is the correct
+    # contract: any run that completed because cancel was signaled is
+    # ``cancelled``, not ``completed``, regardless of whether the
+    # cooperative interrupt surfaced as an exception or as a clean
+    # return.
     terms = [f for f in sink.frames if isinstance(f, RunTerminalFrame)]
-    assert terms[0].status == "completed"
+    assert terms[0].status == "cancelled"
 
 
 @pytest.mark.asyncio

@@ -877,12 +877,30 @@ def _run_prompt_submit(
         # assistant message for the same content — skip the dup append
         # in that case.
         if partial:
-            assistant_message = {"role": "assistant", "content": partial}
+            # Mark this row as interrupted on TWO sides:
+            #   - ``finish_reason="interrupted"`` reaches the messages
+            #     table via append_message and surfaces to providers
+            #     that look at the previous assistant's finish_reason
+            #     when deciding whether the turn is still in flight.
+            #   - ``metadata.interrupted = True`` is the canonical
+            #     in-band marker the agent's own history-validation
+            #     paths check (see ``repair_message_sequence`` /
+            #     resume heuristics).
+            # Together they prevent the next turn's agent from treating
+            # the truncated row as a still-pending continuation and
+            # hammering memory_search to "find the rest" — the symptom
+            # reported as "after cancel, next message hangs in memory
+            # retrieval loops".
+            assistant_message = {
+                "role": "assistant",
+                "content": partial,
+                "finish_reason": "interrupted",
+            }
+            interrupt_metadata: dict[str, Any] = {"interrupted": True}
             if turn_metadata:
-                assistant_message["metadata"] = {
-                    "turn_id": turn_metadata.get("turn_id"),
-                    "run_id": turn_metadata.get("run_id"),
-                }
+                interrupt_metadata["turn_id"] = turn_metadata.get("turn_id")
+                interrupt_metadata["run_id"] = turn_metadata.get("run_id")
+            assistant_message["metadata"] = interrupt_metadata
             last_message = next_history[-1] if next_history else {}
             if (
                 isinstance(last_message, dict)
@@ -890,8 +908,14 @@ def _run_prompt_submit(
                 and not last_message.get("tool_calls")
                 and str(last_message.get("content") or "").strip() == partial
             ):
-                if assistant_message.get("metadata") and not isinstance(last_message.get("metadata"), dict):
-                    last_message["metadata"] = assistant_message["metadata"]
+                # Already in history (agent's own loop persisted the
+                # partial as the turn closed) — make sure the marker
+                # propagates onto that existing row too.
+                last_message.setdefault("metadata", {})
+                if isinstance(last_message["metadata"], dict):
+                    last_message["metadata"].update(interrupt_metadata)
+                if not last_message.get("finish_reason"):
+                    last_message["finish_reason"] = "interrupted"
             else:
                 next_history.append(assistant_message)
         with session["history_lock"]:
@@ -1342,6 +1366,14 @@ def _run_prompt_submit(
                     "text": partial_text,
                     "client_message_id": current_client_message_id(),
                     "clientMessageId": current_client_message_id(),
+                    # ``interrupted`` flags this row as a terminal-by-cancel
+                    # so the next turn's hydrate + provider-side message-
+                    # validation see a closed assistant turn, not a
+                    # half-streamed pending one (matches the
+                    # ``finish_reason="interrupted"`` + metadata flag
+                    # written into the messages table by
+                    # ``persist_interrupted_partial``).
+                    "interrupted": True,
                     **terminal_text_metadata(partial_text, prefix="text"),
                 }
                 interrupt_message_id = _latest_assistant_message_id_for_turn(
