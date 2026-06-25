@@ -135,6 +135,18 @@ def worker_frame_router() -> WorkerFrameRouter:
                     return await worker_supervisor().send(scope_key, frame)
 
             def _publish_event_with_db(params: dict):
+                # CRITICAL Phase 6: the worker process already persisted
+                # this event to the per-profile state.db before
+                # forwarding the EventFrame to the main side. Passing
+                # ``persist=False`` here tells ``record_event`` to skip
+                # the second ``append_run_event`` call — which would
+                # have detected the duplicate seq, returned a
+                # ``_persistence_disposition`` of ``duplicate_terminal``,
+                # and (under legacy semantics that assumed a bridge
+                # direct-relay backup path) caused ``record_event`` to
+                # return [] subscribers. Bug surface: every terminal
+                # ``message.complete`` event silently failed live
+                # delivery, leaving the frontend spinner stuck.
                 stable = ""
                 if isinstance(params, dict):
                     stable = str(
@@ -148,7 +160,9 @@ def worker_frame_router() -> WorkerFrameRouter:
                         db = _server._db_for_stable_session(stable)
                     except Exception:
                         db = None
-                return run_control.publish_recorded_event(params, db=db)
+                return run_control.publish_recorded_event(
+                    params, db=db, persist=False,
+                )
 
             def _publish_run_terminal_with_db(**kwargs):
                 stable = str(
@@ -164,6 +178,15 @@ def worker_frame_router() -> WorkerFrameRouter:
                         db = None
                 if db is not None:
                     kwargs["db"] = db
+                # publish_run_terminal_event internally calls
+                # publish_recorded_event without exposing a persist
+                # flag; that call DOES persist on the main side, but
+                # this method is only invoked from on_run_terminal
+                # which Phase 4c already gates to abnormal exits
+                # (cancelled/failed) only — those have not been
+                # persisted by the worker (worker may have died before
+                # its own publish), so the main-side persist is the
+                # canonical source there.
                 return run_control.publish_run_terminal_event(**kwargs)
 
             _router_singleton = WorkerFrameRouter(

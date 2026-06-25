@@ -134,6 +134,17 @@ class WorkerFrameRouter:
         + persist it. ``params`` is the same dict the legacy ws bridge
         used to put on the wire."""
         params = frame.params if isinstance(frame.params, dict) else {}
+        # TEMP diagnostic: WARNING-level confirmation that the
+        # worker→main event pipe is receiving frames. Demote back to
+        # INFO once dev streaming is verified working end-to-end.
+        _log.warning(
+            "[worker-router] event scope=%s type=%s stored=%s run=%s seq=%s",
+            scope_key,
+            str(params.get("type") or ""),
+            str(params.get("stored_session_id") or ""),
+            str(params.get("run_id") or ""),
+            params.get("seq"),
+        )
         try:
             self._publish_event(params)
         except Exception:

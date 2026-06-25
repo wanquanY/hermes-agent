@@ -264,7 +264,7 @@ class WorkerSupervisor:
             self._dispatch_loop(worker),
             name=f"run-worker-dispatch[{scope.runtime_scope_key}]",
         )
-        _log.info(
+        _log.warning(
             "[worker-supervisor] spawned run_worker pid=%s scope=%s",
             process.pid, scope.runtime_scope_key,
         )

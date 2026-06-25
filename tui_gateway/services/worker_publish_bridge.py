@@ -92,6 +92,14 @@ class WorkerPublishBridge:
             self._install_clarify_hook()
             self._install_approval_hooks()
             self._installed = True
+            # TEMP diagnostic: confirm we installed at least the publish
+            # hook (the critical one). Demote to INFO once dev streaming
+            # is verified.
+            handles = [(h.module.__name__, h.attr_name) for h in self._handles]
+            _log.warning(
+                "[worker-publish-bridge] installed stored=%s hooks=%s",
+                stored_session_id, handles,
+            )
 
     def uninstall(self) -> None:
         with self._lock:
