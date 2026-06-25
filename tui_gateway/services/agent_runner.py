@@ -178,6 +178,39 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         "transient": transient,
         "workspace": workspace,
     }
+    # Hydrate conversation history from the canonical control_home DB
+    # so the agent's ``run_conversation(conversation_history=...)`` call
+    # — fed from this ``session_record["history"]`` — sees every prior
+    # turn on this stable session. Without this every worker turn
+    # starts from an empty history: the agent has no memory of earlier
+    # messages, can't answer "what did I just ask?", and a cancelled
+    # turn's partial assistant text never returns to context even
+    # though it lives in the messages table.
+    #
+    # Architectural note: per-turn ``_ensure_worker_session`` creates a
+    # fresh ``runtime_sid`` so two turns of the same stored_session never
+    # share an in-memory session_record. The DB hydration here is what
+    # bridges them — control_home/state.db is the single source of
+    # truth (Phase 8b), so the read sees every persist + every
+    # ``persist_interrupted_partial`` from prior turns including
+    # cross-restart history. Failures here degrade gracefully to
+    # empty history rather than crashing the turn — a turn with no
+    # context is still better than a refused submit.
+    try:
+        db = _server._db_for_stable_session(frame.stored_session_id)
+    except Exception:
+        db = None
+    if db is not None and hasattr(db, "get_messages_as_conversation"):
+        try:
+            session_record["history"] = list(
+                db.get_messages_as_conversation(frame.stored_session_id)
+            )
+        except Exception:
+            _log.warning(
+                "[agent-runner] history hydration failed stored_session=%s",
+                frame.stored_session_id, exc_info=True,
+            )
+
     with _server._sessions_lock:
         _server._sessions[runtime_sid] = session_record
 
