@@ -63,22 +63,27 @@ _unknown_value_logged = False
 
 
 def is_primary_run_worker_mode() -> bool:
-    """Return True iff the env flag opts this process into the new
-    run-worker stack. Default (unset) → False."""
+    """Phase 6: primary mode is unconditional.
+
+    The legacy ``RuntimeWorkerPool`` proxy was deleted in this phase, so
+    there is no fallback path to gate. The env flag is preserved as an
+    explicit escape hatch (``DOVIE_RUN_WORKER_MODE=legacy``) but defaults
+    to True. A future cleanup can drop the flag entirely once we're
+    confident no caller relies on it.
+    """
     global _unknown_value_logged
     raw = str(os.environ.get(_ENV_KEY, "") or "").strip().lower()
-    if raw in _PRIMARY_VALUES:
-        return True
-    if raw in _LEGACY_VALUES:
+    if raw in _LEGACY_VALUES and raw != "":
         return False
-    if not _unknown_value_logged:
-        _log.warning(
-            "[worker-runtime] %s=%r is not a recognized value; "
-            "treating as legacy. Use 'primary' to opt into the new path.",
-            _ENV_KEY, raw,
-        )
-        _unknown_value_logged = True
-    return False
+    if raw and raw not in _PRIMARY_VALUES and raw not in _LEGACY_VALUES:
+        if not _unknown_value_logged:
+            _log.warning(
+                "[worker-runtime] %s=%r is not a recognized value; "
+                "treating as primary (default).",
+                _ENV_KEY, raw,
+            )
+            _unknown_value_logged = True
+    return True
 
 
 def worker_supervisor() -> WorkerSupervisor:

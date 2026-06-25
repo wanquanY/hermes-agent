@@ -135,59 +135,12 @@ class WorkerFrameRouter:
         used to put on the wire."""
         params = frame.params if isinstance(frame.params, dict) else {}
         try:
-            delivered = self._publish_event(params)
+            self._publish_event(params)
         except Exception:
             _log.exception(
                 "[worker-router] publish_event failed scope=%s type=%s",
                 scope_key, params.get("type"),
             )
-            return
-        # Diagnostic so we can verify fanout reached the frontend ws.
-        # Dump subscriber state alongside delivered count to see
-        # whether the "delivered" transport is the live frontend ws
-        # or a stale subscription that's silently dropping writes.
-        try:
-            count = len(delivered) if delivered is not None else 0
-            stable = str(params.get("stored_session_id") or "")
-            sub_info = []
-            try:
-                from tui_gateway.services import run_control as _rc
-                with _rc._lock:
-                    sub_ids = list(_rc._subscription_ids_by_session.get(stable, set()))
-                    direct_subs = list(_rc._subscribers_by_session.get(stable, set()))
-                for sub_id in sub_ids:
-                    sub = _rc._subscriptions_by_id.get(sub_id) or {}
-                    transport = sub.get("transport")
-                    sub_info.append(
-                        f"sub_id={sub_id[:8]}/tr={id(transport)%10000}/closed={getattr(transport, '_closed', '?')}"
-                    )
-                sub_info.append(f"direct_tr_count={len(direct_subs)}")
-            except Exception as exc:
-                sub_info = [f"diag_err={exc}"]
-            delivered_ids = []
-            try:
-                delivered_ids = [
-                    f"tr={id(t)%10000}/closed={getattr(t, '_closed', '?')}"
-                    for t in (delivered or [])
-                ]
-            except Exception:
-                pass
-        except Exception:
-            count = -1
-            sub_info = ["?"]
-            delivered_ids = []
-        _log.warning(
-            "[worker-router] event scope=%s type=%s stored=%s run=%s seq=%s delivered=%s "
-            "delivered_to=[%s] subs=[%s]",
-            scope_key,
-            str(params.get("type") or ""),
-            str(params.get("stored_session_id") or ""),
-            str(params.get("run_id") or ""),
-            params.get("seq"),
-            count,
-            ", ".join(delivered_ids),
-            ", ".join(sub_info),
-        )
 
     async def on_interactive_request(
         self, scope_key: str, frame: InteractiveRequestFrame,

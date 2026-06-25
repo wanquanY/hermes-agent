@@ -82,21 +82,21 @@ def _(rid, params: dict) -> dict:
 
 @method("runtime.ensure")
 def _(rid, params: dict) -> dict:
-    """Ensure the scoped Dovie runtime worker is spawned and websocket-ready."""
-    scope = _profile_runtime_scope_from_params(params or {})
-    try:
-        from tui_gateway.services.runtime_proxy import ensure_runtime_ready_sync
+    """Phase 6 stub: kept for frontend compatibility.
 
-        worker = ensure_runtime_ready_sync(params or {})
-    except Exception as exc:
-        return _err(rid, 5020, f"runtime ensure failed: {exc}")
+    The legacy worker pre-warm path (spawning a sub-sidecar) is gone.
+    The new ``WorkerSupervisor`` spawns workers lazily on the first
+    ``run.submit`` for a scope, so ``runtime.ensure`` has no real work
+    to do — just acknowledge the scope and return ready=True. Frontend
+    runtime readiness machinery (``DesktopSessionRuntime`` etc.) still
+    calls this method on session attach as a liveness check."""
+    scope = _profile_runtime_scope_from_params(params or {})
     return _ok(
         rid,
         {
             "status": "ready",
             "ready": True,
             **scope,
-            "worker": worker,
         },
     )
 
@@ -116,9 +116,9 @@ def _(rid, params: dict) -> dict:
     else:
         error = ""
     try:
-        from tui_gateway.services.runtime_proxy import runtime_proxy_pool
+        from tui_gateway.services.worker_runtime import worker_supervisor
 
-        runtime_proxy = runtime_proxy_pool().snapshot()
+        runtime_proxy = worker_supervisor().snapshot()
     except Exception as exc:
         runtime_proxy = {"error": str(exc)}
     return _ok(

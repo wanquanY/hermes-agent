@@ -27,6 +27,21 @@ def _workspace_kwargs(tmp_path: Path, workspace_id: str = "workspace-1") -> dict
     return {"workspace_id": workspace["workspace_id"], "workspace_path": workspace["workspace_path"]}
 
 
+def _team_task_brief(label: str = "deliverable") -> dict:
+    return {
+        "background": f"用户请求团队协作完成 {label}，需要成员基于任务图上下文执行。",
+        "execution": [
+            f"梳理 {label} 的输入和限制。",
+            f"完成分配给本节点的 {label} 工作。",
+        ],
+        "goal": f"交付可被 Leader 验收和汇总的 {label}。",
+        "acceptance_criteria": [
+            "结果直接覆盖本节点目标。",
+            "说明关键假设、验证方式和未解决问题。",
+        ],
+    }
+
+
 def test_team_mission_conversation_runtime_session_ids_gateway_is_lightweight(monkeypatch, tmp_path: Path):
     import importlib
 
@@ -277,7 +292,7 @@ def test_team_mission_worker_toolsets_follow_current_member_profile(monkeypatch)
         {"mode": "supervised_mission"},
         node,
         profile_params=profile_params,
-    ) == ["hermes-cli"]
+    ) == ["hermes-cli", "clarify"]
 
 
 def test_team_mission_node_profile_params_accept_dovie_member_fields():
@@ -2286,6 +2301,7 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
                 "node_id": "worker-second-task",
                 "title": "执行第二个任务",
                 "objective": "完成第二个任务的执行交付",
+                "task_brief": _team_task_brief("第二个任务交付物"),
             },
             parent_agent=planning_agent,
         )
@@ -3487,6 +3503,7 @@ def test_event_bus_delivers_explicit_subscription_on_owner_transport(tmp_path: P
     assert streamed[0]["payload"]["delta"] == "实时"
 
 
+@pytest.mark.skip(reason="Phase 6: legacy bridge relay (_record_relayed_runtime_event) deleted; events flow through WorkerSupervisor → WorkerFrameRouter.on_event now")
 def test_runtime_proxy_relay_uses_persisted_event_bus_for_owner_subscription(monkeypatch, tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway import server
@@ -3536,6 +3553,7 @@ def test_runtime_proxy_relay_uses_persisted_event_bus_for_owner_subscription(mon
     assert streamed[0]["payload"]["delta"] == "同步"
 
 
+@pytest.mark.skip(reason="Phase 6: legacy bridge relay deleted")
 def test_runtime_proxy_drops_already_relayed_runtime_event(monkeypatch, tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway import server
@@ -3572,6 +3590,7 @@ def test_runtime_proxy_drops_already_relayed_runtime_event(monkeypatch, tmp_path
     db.close()
 
 
+@pytest.mark.skip(reason="Phase 6: legacy bridge relay deleted")
 def test_runtime_proxy_disables_direct_relay_for_duplicate_source_seq(monkeypatch, tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway import server
@@ -3606,6 +3625,7 @@ def test_runtime_proxy_disables_direct_relay_for_duplicate_source_seq(monkeypatc
     db.close()
 
 
+@pytest.mark.skip(reason="Phase 6: legacy bridge relay deleted")
 def test_runtime_proxy_does_not_duplicate_runtime_frame_already_in_state(monkeypatch, tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway import server
@@ -4748,7 +4768,11 @@ def test_team_mission_node_start_reuses_run_submit_and_binds_worker_run(monkeypa
     assert started["result"]["stored_session_id"] == "team:mission-1:node:node-worker"
     assert submitted["stored_session_id"] == "team:mission-1:node:node-worker"
     assert submitted["runtime_scope_key"] == "profile:worker-a"
-    assert submitted["text"] == "完成交付"
+    assert "You are executing one assigned node in a DoXie team task." in submitted["text"]
+    assert "完成交付" in submitted["text"]
+    assert "Acceptance criteria:" in submitted["text"]
+    assert "clarify tool" in submitted["text"]
+    assert "clarify" in submitted["enabled_toolsets"]
     assert submitted["dovie_product_context"]["team_mission"]["node_id"] == "node-worker"
 
     graph = db.get_team_mission_graph("mission-1")
@@ -5442,7 +5466,9 @@ def test_team_mission_terminal_event_auto_starts_unblocked_child_node(monkeypatc
     assert db.get_team_mission_node("mission-1", "node-a")["status"] == "completed"
     assert db.get_team_mission_node("mission-1", "node-b")["status"] == "running"
     assert submitted[0]["dovie_product_context"]["team_mission"]["node_id"] == "node-b"
-    assert submitted[0]["text"].startswith("Run B after A")
+    assert "Run B after A" in submitted[0]["text"]
+    assert "Acceptance criteria:" in submitted[0]["text"]
+    assert "clarify tool" in submitted[0]["text"]
     assert "Team Conversation Memory Slice" in submitted[0]["text"]
     assert submitted[0]["dovie_product_context"]["team_mission"]["memory"]["kind"] == "worker_memory_slice"
 
@@ -5646,3 +5672,205 @@ def test_team_mission_terminal_event_auto_starts_verifier_finalizer(monkeypatch,
     verifier_id = "team-mission:mission-1:verifier"
     assert db.get_team_mission_node("mission-1", verifier_id)["status"] == "running"
     assert submitted[0]["dovie_product_context"]["team_mission"]["node_id"] == verifier_id
+
+
+# ── team conversation recall_turn ────────────────────────────────────
+def _recall_setup_team_conversation(monkeypatch, tmp_path: Path):
+    """Common scaffold: a team conv session with a worker member registered,
+    and stubbed run.cancel / team_mission.cancel / session.recall_turn so we
+    can observe what the recall method routes to (and skip the heavy real
+    cancellation paths)."""
+    import importlib
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+
+    db.create_session("team-session-1", source="team_mission", transient=False)
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-1",
+        team_id="team-1",
+        workspace_id="workspace-1",
+        stable_session_id="team-session-1",
+        title="团队会话",
+    )
+    # Worker member registered (for the C path test)
+    db.register_member_chat_run(
+        run_id="worker-run-1",
+        conversation_session_id="team-session-1",
+        member_id="member-bob",
+        agent_profile_id="profile-bob",
+        display_name="Bob",
+        optimistic_run_id="team-member-run-A",
+    )
+
+    calls = {"team_mission_cancel": [], "run_cancel": [], "session_recall": []}
+
+    def _stub_recall(rid, params):
+        calls["session_recall"].append(dict(params))
+        return {"jsonrpc": "2.0", "id": rid, "result": {
+            "status": "recalled",
+            "removed_messages": 2,
+            "draft": {"text": "你好", "attachments": []},
+            "interrupted": True,
+        }}
+
+    def _stub_run_cancel(rid, params):
+        calls["run_cancel"].append(dict(params))
+        return {"jsonrpc": "2.0", "id": rid, "result": {
+            "status": "cancelled",
+            "run_id": params.get("run_id"),
+        }}
+
+    def _stub_team_mission_cancel(rid, params):
+        calls["team_mission_cancel"].append(dict(params))
+        return {"jsonrpc": "2.0", "id": rid, "result": {
+            "status": "cancelled",
+            "mission_id": params.get("mission_id"),
+            "canceled_runs": [{"run_id": "worker-mission-run", "status": "cancelled"}],
+            "cancel_errors": [],
+        }}
+
+    monkeypatch.setitem(server._methods, "session.recall_turn", _stub_recall)
+    monkeypatch.setitem(server._methods, "run.cancel", _stub_run_cancel)
+    monkeypatch.setitem(server._methods, "team_mission.cancel", _stub_team_mission_cancel)
+    return db, calls, server
+
+
+def test_recall_turn_path_C_group_chat_cancels_worker_and_syncs_view(monkeypatch, tmp_path: Path):
+    """C path: @-member turn. Recall must (a) cancel the worker run on its
+    memberchat: session, (b) defer to session.recall_turn for the conv, and
+    (c) sync the deactivation into the member-chat view session."""
+    db, calls, server = _recall_setup_team_conversation(monkeypatch, tmp_path)
+
+    # Seed conv messages: a user @-request + a mirrored member reply.
+    user_msg_id = db.append_message(
+        "team-session-1", role="user", content="@Bob 帮个忙",
+        metadata={"turn_id": "team-member-turn-A", "team_mission": {
+            "kind": "member_chat_user", "target_member_id": "member-bob",
+        }},
+    )
+    reply_msg_id = db.append_message(
+        "team-session-1", role="assistant", content="Bob 的回复",
+        metadata={"team_mission": {
+            "kind": "member_chat", "member_id": "member-bob", "display_name": "Bob",
+        }},
+    )
+    # Member-chat view session with the materialized view rows.
+    db.create_session("memberchat:conv-1:member-bob", source="team_mission_member_chat", transient=False)
+    db.append_message(
+        "memberchat:conv-1:member-bob", role="user", content="@Bob 帮个忙",
+        metadata={"member_chat_view": {"source_message_id": str(user_msg_id)}},
+    )
+    db.append_message(
+        "memberchat:conv-1:member-bob", role="assistant", content="Bob 的回复",
+        metadata={"member_chat_view": {"source_message_id": str(reply_msg_id)}},
+    )
+
+    resp = server._methods["team_mission.conversation.recall_turn"](1, {
+        "conversation_id": "conv-1",
+        "conversation_session_id": "team-session-1",
+        "turn_id": "team-member-turn-A",
+        "run_id": "team-member-run-A",
+    })
+
+    assert "error" not in resp, resp
+    result = resp["result"]
+    assert result["cascade_type"] == "C"
+    # Worker run cancelled on its memberchat: session, NOT on the conv session.
+    assert calls["run_cancel"] == [{
+        "run_id": "worker-run-1",
+        "stored_session_id": "memberchat:conv-1:member-bob",
+        "reason": "Recalled by user.",
+    }]
+    assert calls["team_mission_cancel"] == []
+    # Conv recall was deferred to session.recall_turn.
+    assert len(calls["session_recall"]) == 1
+    assert calls["session_recall"][0]["session_id"] == "team-session-1"
+    assert calls["session_recall"][0]["turn_id"] == "team-member-turn-A"
+    # The view rows pointing at the recalled conv messages got deactivated.
+    assert result["recalled"]["view_retracted_total"] == 2
+    assert result["recalled"]["view_retracted_by_session"] == {
+        "memberchat:conv-1:member-bob": 2,
+    }
+    # The view session messages are now inactive (worker won't re-hydrate them).
+    rows = db._conn.execute(  # noqa: SLF001
+        "SELECT active FROM messages WHERE session_id = ?",
+        ("memberchat:conv-1:member-bob",),
+    ).fetchall()
+    assert all(int(r["active"]) == 0 for r in rows)
+
+
+def test_recall_turn_path_B_leader_mission_cancels_mission(monkeypatch, tmp_path: Path):
+    """B path: a leader turn that spawned a mission. Recall must call
+    team_mission.cancel (which internally cancels every node + binding), NOT
+    issue separate run.cancel calls — we delegate cascade to the established
+    code path."""
+    db, calls, server = _recall_setup_team_conversation(monkeypatch, tmp_path)
+    # Mission row so resolve picks it up.
+    db.upsert_team_mission(
+        mission_id="mission-X",
+        conversation_id="conv-1",
+        team_id="team-1",
+        title="x",
+        objective="x",
+        mode="supervised_mission",
+        status="running",
+        leader_session_id="team-session-1",
+    )
+    db.append_message(
+        "team-session-1", role="user", content="启动任务",
+        metadata={"turn_id": "team-leader-turn-B"},
+    )
+
+    resp = server._methods["team_mission.conversation.recall_turn"](1, {
+        "conversation_id": "conv-1",
+        "conversation_session_id": "team-session-1",
+        "turn_id": "team-leader-turn-B",
+        "run_id": "team-leader-run-B",  # NOT in member_chat_runs
+        "mission_id": "mission-X",
+    })
+
+    assert "error" not in resp, resp
+    result = resp["result"]
+    assert result["cascade_type"] == "B"
+    assert result["cancelled"]["mission_ids"] == ["mission-X"]
+    assert calls["team_mission_cancel"] == [{
+        "mission_id": "mission-X",
+        "canceled_by": "user",
+        "reason": "Recalled by user.",
+    }]
+    # B path doesn't double-cancel via run.cancel — team_mission.cancel covers it.
+    assert calls["run_cancel"] == []
+
+
+def test_recall_turn_path_A_leader_direct_cancels_leader_run(monkeypatch, tmp_path: Path):
+    """A path: a plain leader reply with no mission and no member chat.
+    Recall should run.cancel the leader's run on the conv session and
+    nothing else."""
+    db, calls, server = _recall_setup_team_conversation(monkeypatch, tmp_path)
+    db.append_message(
+        "team-session-1", role="user", content="你好",
+        metadata={"turn_id": "team-leader-turn-A"},
+    )
+
+    resp = server._methods["team_mission.conversation.recall_turn"](1, {
+        "conversation_id": "conv-1",
+        "conversation_session_id": "team-session-1",
+        "turn_id": "team-leader-turn-A",
+        "run_id": "team-leader-run-plain",  # not in member_chat_runs, no mission
+    })
+
+    assert "error" not in resp, resp
+    result = resp["result"]
+    assert result["cascade_type"] == "A"
+    assert result["cancelled"]["mission_ids"] == []
+    assert calls["team_mission_cancel"] == []
+    assert calls["run_cancel"] == [{
+        "run_id": "team-leader-run-plain",
+        "stored_session_id": "team-session-1",
+        "reason": "Recalled by user.",
+    }]
+

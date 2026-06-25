@@ -816,23 +816,13 @@ def test_profile_prepare_runtime_preserves_draft_scope():
     assert response["result"]["transient"] is True
 
 
-def test_runtime_ensure_starts_scoped_runtime_worker(monkeypatch):
+def test_runtime_ensure_is_no_op_after_phase6():
+    """Phase 6: runtime.ensure no longer pre-warms a sub-sidecar
+    (``WorkerSupervisor`` spawns workers lazily on the first
+    ``run.submit``). It's kept as a frontend-compat stub that just
+    echoes the scope + reports ready."""
     from tui_gateway import server
-    from tui_gateway.services import runtime_proxy
 
-    calls = []
-
-    def fake_ensure(params):
-        calls.append(params)
-        return {
-            "scopeKey": "profile:agent-a",
-            "running": True,
-            "healthy": True,
-            "pid": 1234,
-            "port": 5678,
-        }
-
-    monkeypatch.setattr(runtime_proxy, "ensure_runtime_ready_sync", fake_ensure)
     response = server._methods["runtime.ensure"](
         1,
         {
@@ -849,8 +839,9 @@ def test_runtime_ensure_starts_scoped_runtime_worker(monkeypatch):
     assert response["result"]["ready"] is True
     assert response["result"]["status"] == "ready"
     assert response["result"]["runtime_scope_key"] == "profile:agent-a"
-    assert response["result"]["worker"]["running"] is True
-    assert calls[0]["dovie_profile"]["hermesHomePath"] == "/tmp/hermes-agent-a"
+    # No worker spawned in-band — the supervisor-spawn happens on
+    # run.submit, not here.
+    assert "worker" not in response["result"]
 
 
 def test_runtime_status_returns_lightweight_diagnostics(monkeypatch):

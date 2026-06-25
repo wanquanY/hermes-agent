@@ -33,12 +33,7 @@ from collections import deque
 from typing import Any
 
 from tui_gateway import server
-from tui_gateway.services.runtime_proxy import (
-    RuntimeProxyBridge,
-    RuntimeWorker,
-    proxy_to_runtime,
-    runtime_scope_from_request,
-)
+from tui_gateway.services.runtime_proxy import runtime_scope_from_request
 from tui_gateway.services.worker_runtime import (
     is_primary_run_worker_mode,
     primary_dispatch,
@@ -223,7 +218,6 @@ class WSTransport:
         self._pending_requests: dict[str, dict[str, Any]] = {}
         self._send_queue: deque[tuple[bool, str, asyncio.Future | None]] = deque()
         self._send_worker: asyncio.Task | None = None
-        self._runtime_bridges: dict[str, RuntimeProxyBridge] = {}
 
     def _diagnostics(self) -> dict[str, Any]:
         return {
@@ -381,29 +375,11 @@ class WSTransport:
             _log.info("gateway ws transport closing %s", self._diagnostics())
         self._closed = True
 
-    async def runtime_bridge(self, worker: RuntimeWorker) -> RuntimeProxyBridge:
-        scope_key = worker.scope_key
-        bridge = self._runtime_bridges.get(scope_key)
-        if bridge is not None and (bridge.closed or bridge.worker is not worker or not bridge.worker.running()):
-            await bridge.close()
-            self._runtime_bridges.pop(scope_key, None)
-            bridge = None
-        if bridge is None:
-            from tui_gateway.services.runtime_proxy import runtime_proxy_pool
-
-            bridge = RuntimeProxyBridge(
-                worker=worker,
-                transport=self,
-                pool=runtime_proxy_pool(),
-            )
-            self._runtime_bridges[scope_key] = bridge
-        return bridge
-
     async def aclose(self) -> None:
+        # Phase 6: legacy ``_runtime_bridges`` map deleted; the new
+        # worker stack is owned by the process-wide ``WorkerSupervisor``,
+        # not per-ws.
         self.close()
-        bridges = list(self._runtime_bridges.values())
-        self._runtime_bridges.clear()
-        await asyncio.gather(*(bridge.close() for bridge in bridges), return_exceptions=True)
 
 
 async def handle_ws(ws: Any) -> None:
@@ -467,17 +443,14 @@ async def handle_ws(ws: Any) -> None:
                 transport.remember_request(req, line_meta)
 
             try:
-                # Phase 5c: primary-mode dispatch routes scoped
-                # prompt.submit through the new run_worker stack
-                # BEFORE the legacy ws-bridge proxy. Returns False for
-                # anything it doesn't own; legacy proxy then runs as
-                # before. Env-flag default is False → 100% no-op on
-                # untouched dev machines.
+                # Phase 6: ``primary_dispatch`` is the sole worker-spawning
+                # entry. Legacy ``proxy_to_runtime`` was deleted —
+                # everything else flows into the main sidecar's
+                # @method registry directly. The env flag is preserved
+                # as an opt-out only.
                 if is_primary_run_worker_mode():
                     if await primary_dispatch(req, transport):
                         continue
-                if await proxy_to_runtime(req, transport):
-                    continue
             except Exception as exc:
                 rid = _request_id(req)
                 method = _request_method(req)

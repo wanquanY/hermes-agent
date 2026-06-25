@@ -34,13 +34,15 @@ def _reset_singletons():
 @pytest.mark.parametrize(
     "value, expected",
     [
+        # Default (unset / empty) and any positive value → primary (True).
+        ("", True),
         ("primary", True),
         ("PRIMARY", True),
         ("on", True),
         ("1", True),
         ("true", True),
         ("yes", True),
-        ("", False),
+        # Explicit opt-out → legacy escape hatch (False).
         ("legacy", False),
         ("off", False),
         ("0", False),
@@ -54,15 +56,16 @@ def test_is_primary_run_worker_mode(monkeypatch, value, expected) -> None:
 
 
 def test_is_primary_default_unset(monkeypatch) -> None:
+    """Phase 6: primary mode is the default."""
     monkeypatch.delenv("DOVIE_RUN_WORKER_MODE", raising=False)
-    assert worker_runtime.is_primary_run_worker_mode() is False
+    assert worker_runtime.is_primary_run_worker_mode() is True
 
 
-def test_unknown_value_warns_once_and_treats_as_legacy(monkeypatch, caplog) -> None:
+def test_unknown_value_warns_once_and_treats_as_primary(monkeypatch, caplog) -> None:
     monkeypatch.setenv("DOVIE_RUN_WORKER_MODE", "weird-value")
     with caplog.at_level(logging.WARNING, logger="tui_gateway.services.worker_runtime"):
-        assert worker_runtime.is_primary_run_worker_mode() is False
-        assert worker_runtime.is_primary_run_worker_mode() is False
+        assert worker_runtime.is_primary_run_worker_mode() is True
+        assert worker_runtime.is_primary_run_worker_mode() is True
     # Warning emitted exactly once.
     warnings = [r for r in caplog.records if "weird-value" in r.getMessage()]
     assert len(warnings) == 1

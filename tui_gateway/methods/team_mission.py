@@ -860,6 +860,99 @@ def _should_use_strategy_start_text(params: dict, mission: dict, node: dict) -> 
     return is_strategy_node
 
 
+def _node_task_brief(node: dict) -> dict:
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+    raw = metadata.get("task_brief") or metadata.get("taskBrief") or {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _as_text_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = value.replace("\r", "\n").split("\n")
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = (value,)
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        item_text = str(item or "").strip()
+        if item_text and item_text not in seen:
+            seen.add(item_text)
+            result.append(item_text)
+    return result
+
+
+def _append_brief_list(lines: list[str], label: str, items) -> None:
+    values = _as_text_list(items)
+    if not values:
+        return
+    lines.append(f"{label}:")
+    for item in values:
+        lines.append(f"- {item}")
+
+
+def _worker_execution_start_text(mission: dict, node: dict) -> str:
+    mission = mission if isinstance(mission, dict) else {}
+    node = node if isinstance(node, dict) else {}
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+    output_contract = node.get("output_contract") if isinstance(node.get("output_contract"), dict) else {}
+    brief = _node_task_brief(node)
+    mission_title = str(mission.get("title") or metadata.get("task_title") or "").strip()
+    mission_objective = str(mission.get("objective") or metadata.get("task_objective") or "").strip()
+    node_title = str(node.get("title") or "").strip()
+    node_objective = str(node.get("objective") or mission_objective or node_title).strip()
+    background = str(
+        brief.get("background")
+        or f"This node is part of the team task '{mission_title or mission_objective or node_title}'."
+    ).strip()
+    execution = _as_text_list(brief.get("execution"))
+    if not execution:
+        execution = [node_objective or "Complete the assigned node work."]
+    goal = str(brief.get("goal") or output_contract.get("goal") or node_objective).strip()
+    acceptance = _as_text_list(brief.get("acceptance_criteria") or output_contract.get("acceptance_criteria"))
+    if not acceptance:
+        acceptance = [
+            "The result directly satisfies the assigned node objective.",
+            "The response names any assumptions, unresolved questions, and verification performed.",
+        ]
+    lines = [
+        "You are executing one assigned node in a DoXie team task.",
+        "Stay inside this node's scope. Produce a concrete result the Team Leader can verify and synthesize.",
+        "If required input is missing, the scope is ambiguous, or an acceptance criterion cannot be verified, call the clarify tool with the specific question before proceeding. Do not execute on guessed assumptions.",
+        "",
+        "Mission:",
+        f"- Title: {mission_title or '(not specified)'}",
+        f"- Objective: {mission_objective or '(not specified)'}",
+        "",
+        "Assigned node:",
+        f"- Title: {node_title or '(not specified)'}",
+        f"- Kind: {str(node.get('kind') or 'worker').strip()}",
+        f"- Objective: {node_objective or '(not specified)'}",
+        "",
+        "Background:",
+        background,
+        "",
+    ]
+    _append_brief_list(lines, "Execution", execution)
+    lines.extend(["", "Goal:", goal or node_objective])
+    _append_brief_list(lines, "Inputs", brief.get("inputs"))
+    _append_brief_list(lines, "Deliverables", brief.get("deliverables") or output_contract.get("deliverables"))
+    _append_brief_list(lines, "Constraints", brief.get("constraints"))
+    lines.append("Acceptance criteria:")
+    for item in acceptance:
+        lines.append(f"- {item}")
+    if output_contract:
+        lines.extend([
+            "",
+            "Output contract:",
+            json.dumps(output_contract, ensure_ascii=False, indent=2),
+        ])
+    return "\n".join(lines).strip()
+
+
 def _strategy_start_text(params: dict, mission: dict, node: dict) -> str:
     explicit_text = str(params.get("text") or params.get("prompt") or "").strip()
     if explicit_text and not _should_use_strategy_start_text(params, mission, node):
@@ -874,7 +967,7 @@ def _strategy_start_text(params: dict, mission: dict, node: dict) -> str:
             objective=objective,
             members=(mission.get("metadata") or {}).get("members") or (),
         )
-    return str(explicit_text or node.get("objective") or node.get("title") or "").strip()
+    return _worker_execution_start_text(mission, node)
 
 
 def _member_default_toolsets(member: dict) -> list[str]:
@@ -943,6 +1036,8 @@ def _start_toolsets(params: dict, mission: dict, node: dict, *, profile_params: 
     if _should_use_strategy_start_text(params, mission, node) and _node_phase(node) in {"planning", "change_request"}:
         if "team_mission_planning" not in toolsets:
             toolsets.append("team_mission_planning")
+    if not _is_team_leader_control_node(node) and "clarify" not in toolsets:
+        toolsets.append("clarify")
     return toolsets
 
 
@@ -1200,6 +1295,11 @@ def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
     mission_status = str(mission.get("status") or conversation.get("status") or "").strip()
     if isinstance(runtime_summary, dict) and runtime_summary.get("mission_status"):
         mission_status = str(runtime_summary.get("mission_status") or "").strip()
+    def _timestamp(value) -> float:
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
     nodes = [node for node in (graph.get("nodes") if isinstance(graph, dict) else []) or [] if isinstance(node, dict)]
     active_nodes = [
         node for node in nodes
@@ -1257,6 +1357,9 @@ def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
         float(run_state.get("run_updated_at") or 0),
         float(active_node_run.get("updated_at") or 0),
     )
+    mission_started_at = _timestamp(mission.get("created_at"))
+    mission_updated_at = _timestamp(mission.get("updated_at"))
+    mission_completed_at = _timestamp(mission.get("completed_at"))
     projected_state = "waiting_approval" if waiting_approval else "running" if running else (
         "completed" if mission_status == "completed"
         else "failed" if mission_status == "failed"
@@ -1280,6 +1383,9 @@ def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
         "runtime_scope_key": active_runtime_scope_key if running else "",
         "run_started_at": run_started_at if running else 0,
         "run_updated_at": run_updated_at,
+        "mission_started_at": mission_started_at,
+        "mission_updated_at": mission_updated_at,
+        "mission_completed_at": mission_completed_at,
         "active_node_count": active_node_count,
     }
     if isinstance(runtime_summary, dict):
@@ -2566,43 +2672,49 @@ def _find_team_member_by_id(members: list[dict], member_id: str) -> dict:
     return {}
 
 
-def _build_conversation_transcript(db, conversation_session_id: str, *, limit: int = 40) -> str:
-    """The shared conversation transcript fed to the member as context so it
-    'sees the whole conversation' (leader chats, other members, task outputs)."""
+def _proxy_run_submit_via_worker(submit_params: dict) -> dict:
+    """Send a run.submit through the new ``WorkerSupervisor`` so the
+    worker spawns on the member's profile scope and executes the prompt
+    with that scope's HERMES_HOME (not the main gateway's).
+
+    Phase 6: the previous implementation used the deleted
+    ``proxy_to_runtime`` legacy ws-bridge. The current
+    ``primary_dispatch`` is the new equivalent — it handles the same
+    JSON-RPC request shape, intercepts run.submit / prompt.submit
+    when a scope is set, and routes through ``WorkerSupervisor``.
+    Worker events still flow back through ``record_event`` and the
+    member-chat mirror block surfaces them on the conversation session.
+
+    Returns:
+      {"ok": True}              — primary_dispatch claimed the request
+      {"ok": False, "reason"}   — no transport / loop unavailable / no
+                                  scope, caller falls back to the
+                                  in-process dispatch
+      {"error": "..."}          — dispatch raised; surface upward
+    """
+    import asyncio
+    import uuid as _uuid
+    from tui_gateway.server import current_transport
+    from tui_gateway.services.worker_runtime import primary_dispatch
+
+    transport = current_transport()
+    if transport is None:
+        return {"ok": False, "reason": "no_transport"}
+    loop = getattr(transport, "_loop", None)
+    if loop is None or not loop.is_running():
+        return {"ok": False, "reason": "loop_not_running"}
+    req = {
+        "jsonrpc": "2.0",
+        "id": f"member-chat:{_uuid.uuid4().hex}",
+        "method": "run.submit",
+        "params": dict(submit_params),
+    }
+    fut = asyncio.run_coroutine_threadsafe(primary_dispatch(req, transport), loop)
     try:
-        messages = db.get_messages(conversation_session_id)
-    except Exception:
-        messages = []
-    lines: list[str] = []
-    for message in (messages or [])[-limit:]:
-        if not isinstance(message, dict):
-            continue
-        content = str(message.get("content") or "").strip()
-        if not content:
-            continue
-        role = str(message.get("role") or "").strip().lower()
-        if role == "tool":
-            continue
-        meta = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        team_meta = meta.get("team_mission") if isinstance(meta.get("team_mission"), dict) else {}
-        if role == "user":
-            speaker = "用户"
-        else:
-            speaker = str(team_meta.get("display_name") or "").strip() or "助手"
-        lines.append(f"{speaker}：{content}")
-    return "\n".join(lines)
-
-
-def _member_chat_prompt(*, member_display_name: str, transcript: str, user_text: str) -> str:
-    return "\n\n".join([
-        f"你是团队会话中的成员「{member_display_name or '成员'}」。用户在群聊里 @ 你单独对话。",
-        "下面是这条团队会话到目前为止的完整记录（含 leader、其他成员的发言，以及团队任务的产出），供你了解全部上下文：",
-        "----- 会话记录 -----",
-        transcript or "（暂无更早记录）",
-        "----- 记录结束 -----",
-        "请以你自己的身份，直接回应用户最新的这条消息：",
-        user_text,
-    ])
+        ok = fut.result(timeout=30.0)
+    except Exception as exc:
+        return {"error": f"member-chat dispatch failed: {exc}"}
+    return {"ok": bool(ok)}
 
 
 def _clear_stuck_member_session_run(db, stored_session_id: str) -> None:
@@ -2670,7 +2782,45 @@ def _submit_message_to_member(
     hermes_home = str(dovie_profile.get("hermesHomePath") or dovie_profile.get("hermes_home_path") or "").strip()
     if not agent_profile_id or not hermes_home:
         return _err(rid, 4006, "target member profile is not runnable (missing profile home)")
-    member_scope = str(profile_params.get("runtime_scope_key") or f"profile:{agent_profile_id}").strip()
+    # Group-chat scope key is per-(conversation, member), NOT the member's
+    # profile-default scope. Reason: in a team where multiple members share an
+    # underlying agent profile (very common — e.g. all members on
+    # `profile:agent-default`), a profile-scoped key reuses the SAME worker
+    # process across members. When one member's run finishes, a subsequent
+    # member's run preempts it on the same worker; the first run's terminal
+    # frame can race in late and is rejected ("prompt worker terminal event
+    # did not close active run"). A per-(conversation, member) scope key gives
+    # each chat partner its own worker, like a real group chat.
+    member_scope = f"member-chat:{conversation_id}:{target_member_id}"
+    # Keep the member profile's runtime context in the dovie_profile payload so
+    # the spawned worker still uses the member's hermes_home / model / toolsets
+    # — only the routing key is fresh. CRITICAL: overwrite BOTH the camelCase
+    # AND snake_case keys, because runtime_proxy._scope_from_params prefers
+    # snake_case `runtime_scope_key` and otherwise inherits the member's
+    # default profile scope (e.g. `profile:<id>`) — spawning a generic worker
+    # against the wrong HERMES_HOME (the main dovie home, with its default
+    # "Hermes Agent" SOUL), so the member's identity / memories / skills
+    # never load.
+    dovie_profile = {
+        **dovie_profile,
+        "runtimeScopeKey": member_scope,
+        "runtime_scope_key": member_scope,
+    }
+    try:
+        run_control._diagnostic_warning(  # noqa: SLF001 — same diagnostic channel record_event uses
+            "member-chat-submit",
+            conversation_id=conversation_id,
+            conversation_session_id=conversation_session_id,
+            target_member_id=target_member_id,
+            agent_profile_id=agent_profile_id,
+            member_scope=member_scope,
+            hermes_home=hermes_home,
+            dovie_profile_scope=str(dovie_profile.get("runtimeScopeKey") or ""),
+            dovie_profile_scope_snake=str(dovie_profile.get("runtime_scope_key") or ""),
+            dovie_profile_home=str(dovie_profile.get("hermesHomePath") or ""),
+        )
+    except Exception:
+        pass
     display_name = str(
         member.get("display_name")
         or member.get("displayName")
@@ -2690,20 +2840,35 @@ def _submit_message_to_member(
                 "kind": "member_chat_user",
                 "target_member_id": target_member_id,
                 "conversation_session_id": conversation_session_id,
+                "display_name": display_name,
             }},
         )
     except Exception:
         pass
 
-    # 2. Build the shared transcript (now includes the user's message) + prompt.
-    transcript = _build_conversation_transcript(db, conversation_session_id)
-    prompt = _member_chat_prompt(member_display_name=display_name, transcript=transcript, user_text=text)
-
-    # 3. The member's runtime session (plain; never projected to session_index →
+    # 2. The member's runtime session (plain; never projected to session_index →
     #    never in the sidebar; never a team conversation).
     stored_session_id = _member_chat_session_id(conversation_id, target_member_id)
     if not db.get_session(stored_session_id):
         db.create_session(stored_session_id, source="team_mission_member_chat", transient=False)
+
+    # 3. Materialize the team conversation as STRUCTURED chat history on the
+    #    member's session — not as a text transcript inlined into the prompt.
+    #    The worker hydrates this session's messages as its conversation
+    #    context; other participants' turns are tagged as observed user-side
+    #    speech ("[<speaker>] ..."), and the member's own past replies stay
+    #    as assistant turns. This way the LLM answers with its OWN SOUL.md
+    #    persona instead of mimicking the wording of past assistant turns
+    #    it sees in the transcript (which is what made every member answer
+    #    "I am Hermes Agent" when the prompt was stringly-injected).
+    try:
+        db.sync_member_chat_conversation_view(
+            conversation_session_id=conversation_session_id,
+            member_chat_session_id=stored_session_id,
+            member_id=target_member_id,
+        )
+    except Exception:
+        pass
     try:
         workspace_context = resolve_team_mission_workspace_context(
             params,
@@ -2717,9 +2882,50 @@ def _submit_message_to_member(
     if runtime_session_error:
         return _err(rid, 5008, runtime_session_error)
 
+    # 3b. Ensure the team conversation row exists (mirrors leader path). The
+    # frontend's view-model insists on canonical {conversation_id,
+    # stable_session_id, team_id, title} in the response; on a brand-new
+    # conv whose FIRST message goes to a @-member, the row hasn't been
+    # created yet (only leader path used to do this), resolve returns {},
+    # and the electron adapter's canonicalConversationPayload throws "did
+    # not return canonical conversation id".
+    conversation_title = _conversation_title_from_submit(db, params, text)
+    team_id_for_ensure = str(
+        params.get("team_id") or params.get("teamId")
+        or (mission or {}).get("team_id") or (mission or {}).get("teamId")
+        or ""
+    ).strip()
+    try:
+        ensured_conversation = db.ensure_team_mission_conversation(
+            conversation_id=conversation_id,
+            stable_session_id=conversation_session_id,
+            mission=mission if isinstance(mission, dict) and mission else {},
+            mission_id=str((mission or {}).get("mission_id") or "") if isinstance(mission, dict) and mission else "",
+            team_id=team_id_for_ensure,
+            title=conversation_title,
+            objective=text,
+            workspace_id=workspace_context.get("workspace_id") if isinstance(workspace_context, dict) else "",
+            workspace_path=workspace_context.get("workspace_path") if isinstance(workspace_context, dict) else "",
+            created_by_user_id=str(params.get("created_by_user_id") or params.get("createdByUserId") or "").strip(),
+            metadata={"display_title_source": "first_user_message"} if conversation_title else None,
+        )
+    except Exception as exc:
+        return _err(rid, 5008, f"team conversation session unavailable: {exc}")
+    if not isinstance(ensured_conversation, dict):
+        ensured_conversation = {}
+
     # 4. Self-heal stuck runs, then register the run for relay.
     _clear_stuck_member_session_run(db, stored_session_id)
-    run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
+    # The frontend pre-reserved an optimistic run_id on the CONVERSATION
+    # session before submitting (so its sidebar / composer show "运行中"
+    # immediately). We give the WORKER a fresh run_id — sharing the
+    # optimistic id with the worker would collide on runs.PRIMARY KEY across
+    # two sessions — and stash the optimistic id alongside the registry so
+    # the mirror block can re-stamp it onto the conversation-side frames.
+    # Result: when the worker's terminal frame mirrors over, it lands on the
+    # exact run_id the frontend is waiting on, and "运行中" settles cleanly.
+    optimistic_run_id = str(params.get("client_run_id") or params.get("run_id") or "").strip()
+    run_id = uuid.uuid4().hex
     turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
     db.register_member_chat_run(
         run_id=run_id,
@@ -2727,6 +2933,7 @@ def _submit_message_to_member(
         member_id=target_member_id,
         agent_profile_id=agent_profile_id,
         display_name=display_name,
+        optimistic_run_id=optimistic_run_id,
     )
 
     # 5. run.submit with CLEAN member params only — NOT {**params} (which carries
@@ -2743,7 +2950,10 @@ def _submit_message_to_member(
         "dovie_profile": dovie_profile,
         "cwd": workspace_context["cwd"],
         "workspace": workspace_context["workspace"],
-        "text": prompt,
+        # Plain user text — the worker appends it as a real user turn on its
+        # hydrated session history (which already mirrors the team conv via
+        # sync_member_chat_conversation_view). No prompt stringification.
+        "text": text,
         "persist_user_message": "",
         "tool_progress_mode": "all",
         "cols": 120,
@@ -2757,28 +2967,54 @@ def _submit_message_to_member(
             },
         },
     }
-    response = _methods["run.submit"](rid, submit_params)
-    if isinstance(response, dict) and response.get("error"):
-        return response
-    result = response.get("result") if isinstance(response, dict) else {}
-    result_run_id = str((result or {}).get("run_id") or run_id).strip()
-    if result_run_id and result_run_id != run_id:
-        db.register_member_chat_run(
-            run_id=result_run_id,
-            conversation_session_id=conversation_session_id,
-            member_id=target_member_id,
-            agent_profile_id=agent_profile_id,
-            display_name=display_name,
+    # Dispatch run.submit through the runtime-proxy path so the worker spawns
+    # on the member-chat scope and runs inside the member's profile home
+    # (HERMES_HOME=profiles/<member>). The in-process `_methods["run.submit"]`
+    # path skips dispatch_method's `should_proxy_to_runtime` check, which is
+    # why earlier attempts ran the prompt against the MAIN gateway's home —
+    # the member's SOUL.md / memories / skills never loaded and every member
+    # answered with the default "Hermes Agent" persona.
+    proxied = _proxy_run_submit_via_worker(submit_params)
+    if proxied.get("error"):
+        return _err(rid, 5020, proxied["error"])
+    if not proxied.get("ok"):
+        # No transport available (e.g. stdio gateway path) — fall back to the
+        # in-process path. Members will still answer, but with the main
+        # gateway's default identity instead of their own. Surfaced loudly so
+        # we can catch any caller still on the old path.
+        run_control._diagnostic_warning(  # noqa: SLF001
+            "member-chat-proxy-fallback-in-process",
+            stored_session_id=stored_session_id,
+            member_scope=member_scope,
+            reason=proxied.get("reason") or "",
         )
+        response = _methods["run.submit"](rid, submit_params)
+        if isinstance(response, dict) and response.get("error"):
+            return response
+    # Dispatched async via the proxy path — synthesize a turn descriptor that
+    # matches what the in-process path used to return (run_id, turn_id, etc.)
+    # so the frontend's optimistic UI has the same payload shape.
+    member_turn = {
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "stored_session_id": stored_session_id,
+        "runtime_scope_key": member_scope,
+        "status": "streaming",
+    }
+    # Use the conversation we just ensured (guaranteed to carry canonical
+    # fields). For graph, fall back to the read model — it may be empty for
+    # a brand-new conv with no mission, but that's fine: the frontend
+    # accepts an empty graph here, only the conversation payload is
+    # canonical-checked.
     resolved = db.resolve_team_mission_conversation(conversation_id) if conversation_id else {}
     resolved = resolved if isinstance(resolved, dict) else {}
     return _ok(rid, {
         "conversation_id": conversation_id,
         "conversation_session_id": conversation_session_id,
-        "conversation": resolved.get("conversation") or {},
+        "conversation": ensured_conversation or resolved.get("conversation") or {},
         "graph": resolved.get("graph") or {},
-        "leader_turn": result or {},
-        "member_turn": result or {},
+        "leader_turn": member_turn,
+        "member_turn": member_turn,
         "target_member_id": target_member_id,
     })
 
@@ -3545,6 +3781,328 @@ def _(rid, params: dict) -> dict:
     )
 
 
+def _recall_collect_conv_message_ids(db, *, conversation_session_id: str, turn_id: str) -> list[int]:
+    """Find the conv messages that ``session.recall_turn`` is about to
+    deactivate for ``turn_id`` — the user message stamped with the turn id,
+    plus every subsequent active assistant / mirror row up to (but not
+    including) the next user message. We snapshot these BEFORE the recall so
+    we can mirror the deactivation into every member-chat view session that
+    has materialized rows pointing back at them.
+    """
+    try:
+        msgs = db.get_messages(conversation_session_id) or []
+    except Exception:
+        return []
+    turn_id = str(turn_id or "").strip()
+    if not turn_id:
+        return []
+    found_target = False
+    collected: list[int] = []
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        if not found_target:
+            meta = m.get("metadata") if isinstance(m.get("metadata"), dict) else {}
+            if isinstance(m.get("metadata"), str):
+                try:
+                    meta = json.loads(m.get("metadata") or "{}")
+                    if not isinstance(meta, dict):
+                        meta = {}
+                except Exception:
+                    meta = {}
+            mt_meta = meta.get("team_mission") if isinstance(meta.get("team_mission"), dict) else {}
+            if str(m.get("role") or "").lower() == "user" and (
+                str(meta.get("turn_id") or "") == turn_id
+                or str(mt_meta.get("turn_id") or "") == turn_id
+            ):
+                found_target = True
+                mid = m.get("id")
+                if mid is not None:
+                    try:
+                        collected.append(int(mid))
+                    except (TypeError, ValueError):
+                        pass
+            continue
+        # After the target user message — collect until the next user message.
+        if str(m.get("role") or "").lower() == "user":
+            break
+        mid = m.get("id")
+        if mid is not None:
+            try:
+                collected.append(int(mid))
+            except (TypeError, ValueError):
+                pass
+    return collected
+
+
+def _recall_mission_id_from_run(db, *, run_id: str, params: dict, mission: dict | None) -> str:
+    """Resolve the mission id (if any) this recall should cascade-cancel.
+
+    Order: explicit param > leader run's persisted state (db.runs metadata) >
+    the resolved mission context. Returns ``""`` for non-mission turns (A/C
+    paths), in which case the caller skips ``team_mission.cancel`` and only
+    runs ``run.cancel``.
+    """
+    explicit = str(params.get("mission_id") or params.get("missionId") or "").strip()
+    if explicit:
+        return explicit
+    if mission and isinstance(mission, dict):
+        mid = str(mission.get("mission_id") or "").strip()
+        if mid:
+            return mid
+    if run_id:
+        try:
+            run = run_control.get_run(run_id, db=db) or {}
+        except Exception:
+            run = {}
+        metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        mid = str(
+            metadata.get("mission_id")
+            or metadata.get("missionId")
+            or run.get("mission_id")
+            or run.get("missionId")
+            or ""
+        ).strip()
+        if mid:
+            return mid
+    return ""
+
+
+@method("team_mission.conversation.recall_turn")
+def _(rid, params: dict) -> dict:
+    """Recall a single user turn in a team conversation — the cross-participant
+    counterpart of ``session.recall_turn``. Cascades cancellation for any
+    derived execution the turn triggered:
+
+      A) leader direct reply           → run.cancel(leader run)
+      B) leader-triggered team mission → team_mission.cancel(mission_id)
+                                         (this internally cancels every
+                                         worker run + binding) + run.cancel
+                                         on the optimistic leader run
+      C) @-member group chat           → run.cancel on the worker run found
+                                         via member_chat_runs
+
+    Then defers to ``session.recall_turn`` on the conversation session to
+    soft-delete (active=0) the user message and every subsequent assistant
+    row up to the next user message — that's how mirrored member replies
+    get retracted from the shared transcript (they live between two user
+    turns; the by-position recall sweeps them up).
+
+    Finally, mirrors the deactivation into every member-chat view session
+    so a worker that ran (or will run) for this conversation no longer sees
+    the retracted turn in its hydrated history.
+    """
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    conversation_session_id = _conversation_session_id_from_params(params, {})
+    conversation_id = _conversation_id_from_params(params, {})
+    turn_id = str(params.get("turn_id") or params.get("turnId") or "").strip()
+    if not conversation_session_id:
+        return _err(rid, 4006, "conversation_session_id required")
+    if not turn_id:
+        return _err(rid, 4006, "turn_id required")
+
+    optimistic_run_id = str(
+        params.get("run_id") or params.get("runId") or params.get("client_run_id") or ""
+    ).strip()
+    reason = str(params.get("reason") or "").strip() or "Recalled by user."
+
+    # Identify the cascade type. Try member-chat first because the optimistic
+    # run id was stamped onto a worker run by _submit_message_to_member.
+    member_chat_run = (
+        db.find_member_chat_run_by_optimistic_run_id(optimistic_run_id)
+        if optimistic_run_id else {}
+    )
+    is_group_chat = bool(member_chat_run)
+
+    # Mission identity (only meaningful for B; ignored for A/C).
+    resolved_mission = {}
+    try:
+        resolved = db.resolve_team_mission_conversation(conversation_id) if conversation_id else {}
+        if isinstance(resolved, dict):
+            resolved_mission = resolved.get("mission") if isinstance(resolved.get("mission"), dict) else {}
+    except Exception:
+        resolved_mission = {}
+    mission_id = _recall_mission_id_from_run(
+        db,
+        run_id=optimistic_run_id,
+        params=params,
+        mission=resolved_mission if not is_group_chat else {},
+    )
+
+    cancelled_mission_ids: list[str] = []
+    cancelled_run_ids: list[dict] = []
+    cancel_errors: list[dict] = []
+
+    # Step 1 — cascade cancel BEFORE we soft-delete messages, so any in-flight
+    # event the worker is about to emit gets its terminal frame first.
+    if mission_id and not is_group_chat:
+        # B: leader-triggered mission. team_mission.cancel takes care of every
+        # node + binding + worker run cascade — we don't reimplement that.
+        try:
+            response = _methods["team_mission.cancel"](rid, {
+                "mission_id": mission_id,
+                "canceled_by": "user",
+                "reason": reason,
+            })
+        except Exception as exc:
+            response = {"error": {"code": 5000, "message": str(exc)}}
+        if isinstance(response, dict) and not response.get("error"):
+            cancelled_mission_ids.append(mission_id)
+            result_payload = response.get("result") if isinstance(response.get("result"), dict) else {}
+            for run_info in (result_payload.get("canceled_runs") or []):
+                if isinstance(run_info, dict):
+                    cancelled_run_ids.append(run_info)
+            for err in (result_payload.get("cancel_errors") or []):
+                if isinstance(err, dict):
+                    cancel_errors.append(err)
+        elif isinstance(response, dict) and response.get("error"):
+            cancel_errors.append({
+                "mission_id": mission_id,
+                "message": str(response.get("error", {}).get("message") or "team_mission.cancel failed"),
+            })
+    if is_group_chat:
+        # C: @-member group chat. Cancel the worker run on its memberchat
+        # session; the mirror block will relay a cancelled terminal frame
+        # into the conv session so the optimistic run on conv settles too.
+        worker_run_id = str(member_chat_run.get("run_id") or "").strip()
+        worker_stored_session_id = str(member_chat_run.get("conversation_session_id") or "").strip()
+        # The worker actually runs against `memberchat:<conv>:<member>`, not the
+        # team conv session. Derive it from member_id and conversation_id.
+        member_id = str(member_chat_run.get("member_id") or "").strip()
+        if conversation_id and member_id:
+            worker_session_id = _member_chat_session_id(conversation_id, member_id)
+        else:
+            worker_session_id = worker_stored_session_id
+        if worker_run_id and worker_session_id:
+            try:
+                cancel_resp = _methods["run.cancel"](rid, {
+                    "run_id": worker_run_id,
+                    "stored_session_id": worker_session_id,
+                    "reason": reason,
+                })
+            except Exception as exc:
+                cancel_resp = {"error": {"code": 5000, "message": str(exc)}}
+            if isinstance(cancel_resp, dict) and not cancel_resp.get("error"):
+                cancelled_run_ids.append({
+                    "run_id": worker_run_id,
+                    "stored_session_id": worker_session_id,
+                    "status": "cancelled",
+                })
+            else:
+                cancel_errors.append({
+                    "run_id": worker_run_id,
+                    "message": str((cancel_resp or {}).get("error", {}).get("message") or "worker run.cancel failed"),
+                })
+    if not mission_id and not is_group_chat and optimistic_run_id:
+        # A: leader direct reply. Cancel the leader run on the conv session.
+        try:
+            cancel_resp = _methods["run.cancel"](rid, {
+                "run_id": optimistic_run_id,
+                "stored_session_id": conversation_session_id,
+                "reason": reason,
+            })
+        except Exception as exc:
+            cancel_resp = {"error": {"code": 5000, "message": str(exc)}}
+        if isinstance(cancel_resp, dict) and not cancel_resp.get("error"):
+            cancelled_run_ids.append({
+                "run_id": optimistic_run_id,
+                "stored_session_id": conversation_session_id,
+                "status": "cancelled",
+            })
+        else:
+            cancel_errors.append({
+                "run_id": optimistic_run_id,
+                "message": str((cancel_resp or {}).get("error", {}).get("message") or "leader run.cancel failed"),
+            })
+
+    # Step 2 — snapshot the message ids we're about to retract, BEFORE
+    # session.recall_turn flips active=0, so we can mirror the retraction
+    # into the member-chat view sessions.
+    affected_source_ids = _recall_collect_conv_message_ids(
+        db,
+        conversation_session_id=conversation_session_id,
+        turn_id=turn_id,
+    )
+
+    # Step 3 — actually retract on the conv session. session.recall_turn
+    # handles soft-delete + interrupt + composer draft restoration; we just
+    # pass-through its result and add our cascade summary on top.
+    recall_params = {
+        "session_id": conversation_session_id,
+        "turn_id": turn_id,
+        "mode": str(params.get("mode") or "restore_to_composer"),
+    }
+    client_message_id = str(params.get("client_message_id") or params.get("clientMessageId") or "").strip()
+    if client_message_id:
+        recall_params["client_message_id"] = client_message_id
+    if optimistic_run_id:
+        recall_params["run_id"] = optimistic_run_id
+    try:
+        recall_resp = _methods["session.recall_turn"](rid, recall_params)
+    except Exception as exc:
+        return _err(rid, 5000, f"conversation recall failed: {exc}")
+    if isinstance(recall_resp, dict) and recall_resp.get("error"):
+        return recall_resp
+    recall_result = recall_resp.get("result") if isinstance(recall_resp, dict) else {}
+    recall_result = recall_result if isinstance(recall_result, dict) else {}
+
+    # Step 4 — sync member-chat view sessions: any worker that already
+    # materialized rows pointing at the recalled conv messages must drop
+    # those rows from its hydration view so its NEXT turn doesn't keep
+    # seeing retracted speech.
+    view_retracted_total = 0
+    view_retracted_by_session: dict[str, int] = {}
+    if affected_source_ids:
+        try:
+            mc_runs = db.list_member_chat_runs_for_conversation(conversation_session_id) or []
+        except Exception:
+            mc_runs = []
+        seen_view_sessions: set[str] = set()
+        for run in mc_runs:
+            if not isinstance(run, dict):
+                continue
+            mc_member_id = str(run.get("member_id") or "").strip()
+            if not mc_member_id or not conversation_id:
+                continue
+            view_session_id = _member_chat_session_id(conversation_id, mc_member_id)
+            if view_session_id in seen_view_sessions:
+                continue
+            seen_view_sessions.add(view_session_id)
+            try:
+                count = db.recall_member_chat_view_messages(
+                    member_chat_session_id=view_session_id,
+                    source_message_ids=affected_source_ids,
+                )
+            except Exception:
+                count = 0
+            if count:
+                view_retracted_by_session[view_session_id] = int(count)
+                view_retracted_total += int(count)
+
+    return _ok(rid, {
+        "status": "recalled",
+        "conversation_id": conversation_id,
+        "conversation_session_id": conversation_session_id,
+        "turn_id": turn_id,
+        "recalled": {
+            "removed_messages": int(recall_result.get("removed_messages") or 0),
+            "source_message_ids": affected_source_ids,
+            "view_retracted_total": view_retracted_total,
+            "view_retracted_by_session": view_retracted_by_session,
+            "interrupted": bool(recall_result.get("interrupted")),
+            "draft": recall_result.get("draft") or {},
+        },
+        "cancelled": {
+            "mission_ids": cancelled_mission_ids,
+            "runs": cancelled_run_ids,
+            "errors": cancel_errors,
+        },
+        "cascade_type": "B" if cancelled_mission_ids else ("C" if is_group_chat else "A"),
+    })
+
+
 @method("team_mission.cancel")
 def _(rid, params: dict) -> dict:
     db = _get_db()
@@ -3857,6 +4415,7 @@ def _(rid, params: dict) -> dict:
                 "node_role": _node_role(node),
                 "node_phase": _node_phase(node),
                 "active_task": active_task,
+                "task_brief": _node_task_brief(node),
                 "output_contract": node.get("output_contract") or {},
                 "memory": memory_context,
                 "delegate_inherits_parent_tools": not leader_control_node,
