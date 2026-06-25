@@ -118,6 +118,12 @@ def _project_session_index_on_create(
     upsert = getattr(db, "upsert_session_index", None)
     if not callable(upsert):
         return
+    # Group-chat member-chat worker sessions are data plane — the worker runs
+    # in its own session and its reply is relayed into the team conversation
+    # by hermes_state_member_chat. The worker session must NEVER appear as a
+    # sidebar row, even before reconcile_session_index has a chance to purge.
+    if str(session_id or "").startswith("memberchat:"):
+        return
     profile_id = _requested_agent_profile_id(params)
     scope = str(runtime_scope_key or "")
     if not profile_id and scope.startswith("profile:"):
@@ -989,8 +995,22 @@ def _is_hidden_empty_index_draft(row: dict) -> bool:
 
 
 def _session_index_list_item(row: dict) -> dict:
-    """Map a control-plane session_index row to the desktop session list shape."""
-    return {
+    """Map a control-plane session_index row to the desktop session list shape.
+
+    Field emission is scoped to ``session_kind``: only team mission rows
+    ship the mission-lifecycle fields (``conversation_id`` / ``team_id``
+    / ``mission_id`` / ``active_mission_id``). Plain chat sessions used
+    to receive these as empty strings — frontend then had to coerce
+    them, normalizers fell through and started reading
+    ``session.status`` into ``missionStatus``, and the running-indicator
+    OR'd six fields across kinds. Emitting nothing means downstream
+    can rely on field presence to distinguish a "no mission" plain
+    chat from a "mission cleared" team conversation. The desktop has
+    been updated to treat absent fields the same as empty.
+    """
+    session_kind = row.get("session_kind") or "hermes_session"
+    is_team_mission_row = session_kind == "team_mission" or bool(row.get("team_id"))
+    item = {
         "id": row.get("session_id") or "",
         "title": row.get("title") or "",
         "display_title": row.get("title") or "",
@@ -1001,16 +1021,12 @@ def _session_index_list_item(row: dict) -> dict:
         "message_count": row.get("message_count") or 0,
         "source": row.get("source") or "",
         "transient": bool(row.get("transient")),
-        "session_kind": row.get("session_kind") or "hermes_session",
+        "session_kind": session_kind,
         "agentProfileId": row.get("owner_agent_profile_id") or "",
         "agent_profile_id": row.get("owner_agent_profile_id") or "",
         "agentProfileVersionId": row.get("owner_profile_version_id") or "",
         "runtimeScopeKey": row.get("runtime_scope_key") or "",
         "runtime_scope_key": row.get("runtime_scope_key") or "",
-        "conversation_id": row.get("conversation_id") or "",
-        "team_id": row.get("team_id") or "",
-        "mission_id": row.get("mission_id") or "",
-        "active_mission_id": row.get("mission_id") or "",
         "status": row.get("status") or "",
         "running": bool(row.get("running")),
         "waiting_approval": bool(row.get("waiting_approval")),
@@ -1018,6 +1034,66 @@ def _session_index_list_item(row: dict) -> dict:
         "active_run_id": row.get("active_run_id") or "",
         "active_runtime_session_id": row.get("active_runtime_session_id") or "",
     }
+    if is_team_mission_row:
+        item["conversation_id"] = row.get("conversation_id") or ""
+        item["team_id"] = row.get("team_id") or ""
+        item["mission_id"] = row.get("mission_id") or ""
+        item["active_mission_id"] = row.get("mission_id") or ""
+    # Conversation-architecture refactor (P2): team display context joined in
+    # at read time. Only emit when present so plain-chat rows stay clean.
+    if row.get("team_id"):
+        team_name = row.get("team_name") or ""
+        team_avatar = _safe_json_decode(row.get("team_avatar_json"))
+        lead_profile_id = row.get("team_lead_profile_id") or ""
+        lead_profile_name = row.get("team_lead_profile_name") or ""
+        lead_profile_avatar = row.get("team_lead_profile_avatar") or ""
+        team_block = {
+            "id": row.get("team_id") or "",
+            "name": team_name,
+        }
+        if team_avatar is not None:
+            team_block["avatar"] = team_avatar
+        if lead_profile_id:
+            team_block["lead_agent_profile_id"] = lead_profile_id
+            team_block["leadAgentProfileId"] = lead_profile_id
+        item["team"] = team_block
+        if team_name:
+            item["team_name"] = team_name
+            item["teamName"] = team_name
+        if lead_profile_name:
+            item["lead_profile_name"] = lead_profile_name
+            item["leadProfileName"] = lead_profile_name
+        if lead_profile_avatar:
+            item["lead_profile_avatar"] = lead_profile_avatar
+            item["leadProfileAvatar"] = lead_profile_avatar
+    if row.get("conversation_id"):
+        objective = row.get("team_conversation_objective") or ""
+        workspace_id = row.get("team_conversation_workspace_id") or ""
+        workspace_path = row.get("team_conversation_workspace_path") or ""
+        active_mission_id = row.get("team_conversation_active_mission_id") or ""
+        if objective:
+            item["objective"] = objective
+        if workspace_id:
+            item["workspace_id"] = workspace_id
+            item["workspaceId"] = workspace_id
+        if workspace_path:
+            item["workspace_path"] = workspace_path
+            item["workspacePath"] = workspace_path
+        if active_mission_id and not item.get("active_mission_id"):
+            item["active_mission_id"] = active_mission_id
+    return item
+
+
+def _safe_json_decode(value):
+    if not value:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        import json
+        return json.loads(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 _SESSION_INDEX_RECONCILED = False
@@ -1133,6 +1209,41 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"session_id": None})
 
 
+def _participant_view_for_resume(
+    *,
+    stored_session_id: str,
+    agent_context_mode: str,
+    params: dict | None = None,
+) -> str:
+    """Return the participant_id the resuming runtime should hydrate its
+    conversation history under.
+
+    - team-leader runtime over a team conversation session → ``"leader"``
+      (so leader sees its own assistant turns vs. other members' as
+      observed user-side speech)
+    - member-chat worker session → its ``member_id`` (member-chat sessions
+      also materialize this view at write-time via
+      sync_member_chat_conversation_view, so this lookup is mostly a
+      belt-and-braces for any re-hydration paths)
+    - all other sessions (plain chat, single-participant) → ``""`` and no
+      projection is applied
+
+    Caller passes the resolved agent_context_mode so we don't re-derive.
+    """
+    target = str(stored_session_id or "").strip()
+    mode = str(agent_context_mode or "").strip().lower()
+    if mode == "team_leader":
+        return "leader"
+    if target.startswith("memberchat:"):
+        # memberchat:<conv>:<member_id>
+        rest = target[len("memberchat:"):]
+        # split off conv prefix (which itself may contain ':' segments)
+        # — the member id is the last colon-delimited segment.
+        if ":" in rest:
+            return rest.rsplit(":", 1)[-1].strip()
+    return ""
+
+
 @method("session.resume")
 def _(rid, params: dict) -> dict:
     target = params.get("session_id", "")
@@ -1219,13 +1330,28 @@ def _(rid, params: dict) -> dict:
     try:
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
+        # P1 participant-view projection: when this runtime is hydrating a
+        # MULTI-PARTICIPANT conversation (the team leader reading a team
+        # conversation that also contains member-chat mirrored replies, or
+        # any other participant view), project the shared message log into
+        # first-person view so the LLM doesn't conflate other participants'
+        # assistant turns with its own. Single-participant chats pass
+        # `viewer=""` and the projection is a no-op.
+        agent_context_mode = _agent_context_mode_from_params(params)
+        viewer_participant_id = _participant_view_for_resume(
+            stored_session_id=target,
+            agent_context_mode=agent_context_mode,
+            params=params,
+        )
+        if viewer_participant_id:
+            from hermes_state_member_chat import project_messages_for_viewer
+            history = project_messages_for_viewer(history, viewer_participant_id)
         display_history = _display_history_conversation(db, target)
         display_history_prefix = display_history[
             : max(0, len(display_history) - len(history))
         ]
         messages, message_page_info = _display_history_page(db, target, hydrate, message_limit)
         profile_context = _profile_context_for_params(params)
-        agent_context_mode = _agent_context_mode_from_params(params)
         profile_tokens = _enter_profile_context(profile_context)
         tokens = _set_session_context(target, terminal_cwd=cwd)
         try:
