@@ -39,6 +39,10 @@ from tui_gateway.services.runtime_proxy import (
     proxy_to_runtime,
     runtime_scope_from_request,
 )
+from tui_gateway.services.worker_runtime import (
+    is_primary_run_worker_mode,
+    primary_dispatch,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -425,9 +429,11 @@ async def handle_ws(ws: Any) -> None:
             try:
                 raw = await ws.receive_text()
             except _WebSocketDisconnect as exc:
-                _log.warning(
+                code = getattr(exc, "code", "")
+                log_disconnect = _log.info if code == 1000 else _log.warning
+                log_disconnect(
                     "gateway ws client disconnected: code=%s %s",
-                    getattr(exc, "code", ""),
+                    code,
                     transport._diagnostics(),
                 )
                 break
@@ -461,6 +467,15 @@ async def handle_ws(ws: Any) -> None:
                 transport.remember_request(req, line_meta)
 
             try:
+                # Phase 5c: primary-mode dispatch routes scoped
+                # prompt.submit through the new run_worker stack
+                # BEFORE the legacy ws-bridge proxy. Returns False for
+                # anything it doesn't own; legacy proxy then runs as
+                # before. Env-flag default is False → 100% no-op on
+                # untouched dev machines.
+                if is_primary_run_worker_mode():
+                    if await primary_dispatch(req, transport):
+                        continue
                 if await proxy_to_runtime(req, transport):
                     continue
             except Exception as exc:

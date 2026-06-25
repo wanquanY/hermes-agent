@@ -222,10 +222,18 @@ class WorkerSupervisor:
         # stderr inherits the main sidecar's stderr so tracebacks land
         # in the same agent.log as the legacy worker. Phase 5 may rewire
         # this to a per-scope file once we have the file-rotation policy.
+        # Use ``-c "from ... import main; main()"`` instead of ``-m
+        # tui_gateway.run_worker`` to avoid Python's double-import
+        # trap: ``python -m foo.bar`` loads ``foo/bar.py`` AS ``__main__``,
+        # and any later ``from foo.bar import X`` in lazily-imported
+        # modules loads a SECOND copy of ``foo.bar`` — so ``isinstance``
+        # checks across the boundary fail (class identity differs).
+        # The ``-c`` bootstrap loads the module exactly once under its
+        # canonical name.
         process = await asyncio.create_subprocess_exec(
             self._python,
-            "-m",
-            "tui_gateway.run_worker",
+            "-c",
+            "from tui_gateway.run_worker import main; main()",
             cwd=os.getcwd(),
             env=env,
             stdin=asyncio.subprocess.PIPE,

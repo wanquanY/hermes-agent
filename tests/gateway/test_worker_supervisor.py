@@ -75,6 +75,13 @@ def _scope(tmp_path) -> RuntimeScope:
 
 @pytest.mark.asyncio
 async def test_spawn_send_run_start_receive_terminal(tmp_path) -> None:
+    """End-to-end: spawn a real worker, send run.start, receive
+    run.terminal. Phase 5c switched the default backend from the
+    stub to ``AgentRunBackend`` with a placeholder runner — the
+    placeholder is a no-op that returns cleanly, so status is
+    ``completed`` (not ``stubbed``). The status flips back to
+    something LLM-meaningful in Phase 5c.2 when the placeholder is
+    replaced by the real agent runner."""
     collector = _Collector()
     sup = _make_supervisor(collector)
     try:
@@ -94,17 +101,17 @@ async def test_spawn_send_run_start_receive_terminal(tmp_path) -> None:
         )
         assert ok
 
-        # Stub handler emits a log + run.terminal status=stubbed.
         await asyncio.wait_for(collector.terminal_received.wait(), timeout=10.0)
         assert len(collector.terminal) == 1
         scope, terminal = collector.terminal[0]
         assert scope == worker.scope_key
         assert terminal.run_id == "run-e2e-1"
-        assert terminal.status == "stubbed"
-        # The stub also emits a startup log + run.start log.
+        assert terminal.status == "completed"
+        assert terminal.stored_session_id == "sess-1"
+        assert terminal.turn_id == "turn-1"
+        # The backend also emits a startup log.
         log_texts = [f.text for _, f in collector.logs]
         assert any("run_worker: started" in t for t in log_texts)
-        assert any("run.start" in t for t in log_texts)
     finally:
         await sup.shutdown_all()
 

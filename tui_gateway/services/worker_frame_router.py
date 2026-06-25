@@ -209,6 +209,17 @@ class WorkerFrameRouter:
                 scope_key, frame.run_id, frame.status,
             )
             return
+        # NORMAL COMPLETION: the worker's agent code already published a
+        # ``message.complete`` event through the monkey-patched publish
+        # path (which arrived on the main side via ``on_event`` → re-
+        # published 1:1). Re-publishing here would duplicate the terminal
+        # frame on every chat turn. Only synthesize a terminal event for
+        # ABNORMAL exits (cancel / failure / worker crash) — those don't
+        # always reach the publish path because the agent thread may
+        # have died before its own terminal emit.
+        normalized_status = (frame.status or "").strip().lower()
+        if normalized_status in ("", "completed", "success", "ok"):
+            return
         try:
             self._publish_run_terminal(
                 stored_session_id=stored,

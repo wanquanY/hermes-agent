@@ -150,7 +150,10 @@ async def test_on_interactive_request_drops_unknown_kind() -> None:
 
 
 @pytest.mark.asyncio
-async def test_on_run_terminal_uses_frame_fields() -> None:
+async def test_on_run_terminal_skips_publish_on_completed() -> None:
+    """For a normal completion the worker's agent already published a
+    ``message.complete`` event via the publish hook; the router must
+    NOT re-publish here."""
     router, _sup, _events, terminals = _make_router()
     await router.on_run_terminal(
         "profile:x",
@@ -162,6 +165,25 @@ async def test_on_run_terminal_uses_frame_fields() -> None:
             message="",
         ),
     )
+    assert terminals == []  # NOT published
+
+
+@pytest.mark.asyncio
+async def test_on_run_terminal_publishes_on_failed() -> None:
+    """A failed/cancelled exit must synthesize a terminal event — the
+    agent may have died before its own terminal publish reached the
+    pipe."""
+    router, _sup, _events, terminals = _make_router()
+    await router.on_run_terminal(
+        "profile:x",
+        RunTerminalFrame(
+            run_id="run-1",
+            status="failed",
+            stored_session_id="sess-1",
+            turn_id="turn-1",
+            message="kaboom",
+        ),
+    )
     assert terminals == [
         {
             "stored_session_id": "sess-1",
@@ -169,10 +191,27 @@ async def test_on_run_terminal_uses_frame_fields() -> None:
             "turn_id": "turn-1",
             "runtime_scope_key": "profile:x",
             "runtime_session_id": "sess-1",
-            "status": "completed",
-            "message": "",
+            "status": "failed",
+            "message": "kaboom",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_on_run_terminal_publishes_on_cancelled() -> None:
+    router, _sup, _events, terminals = _make_router()
+    await router.on_run_terminal(
+        "profile:x",
+        RunTerminalFrame(
+            run_id="run-1",
+            status="cancelled",
+            stored_session_id="sess-1",
+            turn_id="turn-1",
+            message="user cancelled",
+        ),
+    )
+    assert len(terminals) == 1
+    assert terminals[0]["status"] == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -184,6 +223,7 @@ async def test_on_run_terminal_cross_fills_from_record_run_start() -> None:
         stored_session_id="sess-A",
         turn_id="turn-A",
     )
+    # Use failed so the publish path actually fires (completed skips publish).
     await router.on_run_terminal(
         "profile:x",
         RunTerminalFrame(run_id="run-1", status="failed"),

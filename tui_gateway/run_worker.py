@@ -547,8 +547,40 @@ def _build_default_handler(
     return handler
 
 
+def _build_default_backend() -> WorkerRunBackend:
+    """Production backend factory. Imports ``AgentRunBackend`` lazily so
+    a unit-test launch of ``run_worker`` (no Hermes agent stack
+    installed) still works with the stub.
+
+    Phase 5c.2 will replace the placeholder ``_runner`` with a real
+    binding to ``tui_gateway.methods.prompt._execute_prompt_submit``.
+    For now the runner does nothing — primary-mode prompt.submit
+    still flows through every routing seam (record_run_start →
+    supervisor.send → worker → bridge install → terminal frame),
+    just without firing an LLM. This makes Phase 5c testable in
+    dev app without committing to a real agent run yet.
+    """
+    try:
+        from tui_gateway.services.agent_run_backend import AgentRunBackend
+    except Exception:
+        return _StubBackend()
+
+    import threading as _threading
+
+    def _placeholder_runner(
+        frame: RunStartFrame, cancel_event: _threading.Event,
+    ) -> None:
+        # Phase 5c.2 fills this in. For now: brief noop so the run
+        # has positive duration and bridge install/uninstall both
+        # exercise. The publish hook is in place; the agent code
+        # just hasn't been invoked yet.
+        cancel_event.wait(timeout=0.05)
+
+    return AgentRunBackend(runner=_placeholder_runner)
+
+
 async def _main_async() -> int:
-    backend: WorkerRunBackend = _StubBackend()
+    backend: WorkerRunBackend = _build_default_backend()
     responder: WorkerInteractiveResponder = RealInteractiveResponder()
     active_runs: set[str] = set()
     proto = WorkerProtocol(

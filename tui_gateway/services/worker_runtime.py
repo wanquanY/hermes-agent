@@ -1,5 +1,5 @@
 """Singleton holder + lifecycle for the new ``WorkerSupervisor`` +
-``WorkerFrameRouter``.
+``WorkerFrameRouter``, plus the primary-mode dispatch entrypoint.
 
 The legacy ``RuntimeWorkerPool`` exposes a module-level singleton via
 ``runtime_proxy_pool()``. This module mirrors that pattern for the
@@ -33,6 +33,14 @@ import os
 import threading
 from typing import Optional
 
+import uuid
+from typing import Any
+
+from tui_gateway.run_worker import RunStartFrame
+from tui_gateway.services.runtime_proxy import (
+    RuntimeScope,
+    runtime_scope_from_request,
+)
 from tui_gateway.services.worker_frame_router import WorkerFrameRouter
 from tui_gateway.services.worker_supervisor import WorkerSupervisor
 
@@ -137,6 +145,141 @@ async def shutdown_run_worker_runtime() -> None:
             await supervisor.shutdown_all()
         except Exception:
             _log.exception("[worker-runtime] shutdown_all raised")
+
+
+async def primary_dispatch(req: Any, transport: Any) -> bool:
+    """Phase 5c entry point: handle requests via the new run_worker
+    stack instead of the legacy ``RuntimeWorkerPool`` proxy.
+
+    Returns True if the request was handled (the caller must NOT also
+    call ``proxy_to_runtime`` / dispatch locally). False = caller falls
+    back to legacy handling.
+
+    Scope:
+    - ``prompt.submit`` on a scoped (non-default) profile → route to
+      ``WorkerSupervisor`` + ``WorkerFrameRouter``
+    - Anything else → False (unchanged)
+
+    The env flag check is the caller's responsibility — this function
+    assumes it's only called when primary mode is on. Centralizing the
+    flag check here would require parsing every request twice."""
+    if not isinstance(req, dict):
+        return False
+    method = str(req.get("method") or "").strip()
+    # ``run.submit`` is the canonical entry the frontend sends (see
+    # apps/desktop/src/services/hermes/gateway/runtime.ts). The
+    # ``prompt.submit`` @method handler internally forwards to
+    # ``run.submit`` after registry-reservation bookkeeping, so we
+    # intercept both — the prompt.submit one catches any caller that
+    # bypasses the desktop runtime client (CLI tools, tests).
+    if method not in ("run.submit", "prompt.submit"):
+        return False
+    params = req.get("params") if isinstance(req.get("params"), dict) else {}
+    scope = runtime_scope_from_request(req)
+    if not scope.has_scope:
+        # Default profile / no scope → in-process path; nothing to
+        # route through worker.
+        return False
+    return await _dispatch_prompt_submit(req, transport, scope, params)
+
+
+async def _dispatch_prompt_submit(
+    req: dict, transport: Any, scope: RuntimeScope, params: dict,
+) -> bool:
+    rid = req.get("id")
+    run_id = str(
+        params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex
+    ).strip()
+    turn_id = str(params.get("turn_id") or uuid.uuid4().hex).strip()
+    stored_session_id = str(
+        params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or params.get("session_id")
+        or ""
+    ).strip()
+    if not stored_session_id:
+        await _ack_error(
+            transport, rid, code=4006,
+            message="stored_session_id or session_id required",
+        )
+        return True
+
+    prompt_text = str(params.get("text") or "")
+
+    supervisor = worker_supervisor()
+    router = worker_frame_router()
+
+    try:
+        await supervisor.ensure(scope)
+    except Exception as exc:
+        _log.exception(
+            "[worker-runtime] supervisor.ensure failed scope=%s",
+            scope.runtime_scope_key,
+        )
+        await _ack_error(
+            transport, rid, code=5021,
+            message=f"primary worker spawn failed: {exc}",
+        )
+        return True
+
+    router.record_run_start(
+        scope_key=scope.runtime_scope_key,
+        run_id=run_id,
+        stored_session_id=stored_session_id,
+        turn_id=turn_id,
+    )
+
+    ok = await supervisor.send(
+        scope.runtime_scope_key,
+        RunStartFrame(
+            run_id=run_id,
+            turn_id=turn_id,
+            stored_session_id=stored_session_id,
+            prompt=prompt_text,
+            # Strip params we either already lifted or that are too
+            # large to send over the JSON-line pipe. The worker re-
+            # resolves anything it needs from its own session state.
+            params={
+                k: v for k, v in params.items()
+                if k not in {
+                    "text", "stored_session_id", "storedSessionId",
+                    "session_id", "client_run_id", "run_id", "turn_id",
+                }
+            },
+        ),
+    )
+    if not ok:
+        router.forget_run(run_id)
+        await _ack_error(
+            transport, rid, code=5022,
+            message="primary worker stdin write failed",
+        )
+        return True
+
+    await _ack_ok(
+        transport, rid,
+        result={
+            "status": "queued",
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "stored_session_id": stored_session_id,
+            "runtime_scope_key": scope.runtime_scope_key,
+            "source": "primary-run-worker",
+        },
+    )
+    return True
+
+
+async def _ack_ok(transport: Any, rid: Any, *, result: dict) -> None:
+    await transport.write_async(
+        {"jsonrpc": "2.0", "id": rid, "result": result}
+    )
+
+
+async def _ack_error(transport: Any, rid: Any, *, code: int, message: str) -> None:
+    await transport.write_async(
+        {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
+    )
 
 
 def _reset_for_tests() -> None:
