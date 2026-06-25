@@ -127,6 +127,24 @@ class WorkerFrameRouter:
         with self._lock:
             self._runs.pop(run_id, None)
 
+    def lookup_run(self, run_id: str) -> Optional[RunInfo]:
+        """Resolve a ``run_id`` to its ``RunInfo`` (scope / stored_sid /
+        turn) recorded at ``record_run_start`` time. Returns ``None``
+        if the run has terminated and been ``forget_run``'d, or was
+        never recorded. Used by ``primary_dispatch`` for ``run.cancel``
+        routing — needs the scope to know WHICH worker subprocess to
+        send the cancel frame to."""
+        run_id = str(run_id or "").strip()
+        if not run_id:
+            return None
+        with self._lock:
+            info = self._runs.get(run_id)
+            return RunInfo(
+                scope_key=info.scope_key,
+                stored_session_id=info.stored_session_id,
+                turn_id=info.turn_id,
+            ) if info is not None else None
+
     # ── WorkerSupervisor callbacks ──────────────────────────────────
 
     async def on_event(self, scope_key: str, frame: EventFrame) -> None:

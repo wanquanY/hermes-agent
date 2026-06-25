@@ -36,7 +36,7 @@ from typing import Optional
 import uuid
 from typing import Any
 
-from tui_gateway.run_worker import RunStartFrame
+from tui_gateway.run_worker import RunCancelFrame, RunStartFrame
 from tui_gateway.services.runtime_proxy import (
     RuntimeScope,
     runtime_scope_from_request,
@@ -210,15 +210,80 @@ async def primary_dispatch(req: Any, transport: Any) -> bool:
     # ``run.submit`` after registry-reservation bookkeeping, so we
     # intercept both — the prompt.submit one catches any caller that
     # bypasses the desktop runtime client (CLI tools, tests).
+    params = req.get("params") if isinstance(req.get("params"), dict) else {}
+    if method == "run.cancel":
+        return await _dispatch_run_cancel(req, transport, params)
     if method not in ("run.submit", "prompt.submit"):
         return False
-    params = req.get("params") if isinstance(req.get("params"), dict) else {}
     scope = runtime_scope_from_request(req)
     if not scope.has_scope:
         # Default profile / no scope → in-process path; nothing to
         # route through worker.
         return False
     return await _dispatch_prompt_submit(req, transport, scope, params)
+
+
+async def _dispatch_run_cancel(req: dict, transport: Any, params: dict) -> bool:
+    """Route ``run.cancel`` to the worker subprocess that owns the run.
+
+    Without this, ``run.cancel`` falls through to the in-process
+    ``@method`` handler in ``methods/run.py`` which:
+      1. Tries ``session.interrupt`` against the MAIN sidecar's
+         in-process session map. The worker is in a separate process,
+         so the session row never appears there — interrupt fails.
+      2. Falls back to ``publish_run_terminal_event`` with
+         ``message="cancelled without live runtime"``. This publishes
+         a synthetic ``message.complete(cancelled)`` to the FRONTEND
+         (UI shows cancelled state) but never touches the worker.
+      3. The worker keeps running. When its actual run finishes, it
+         publishes its own real terminal event, which races with the
+         synthetic one — usually the synthetic wins because it
+         already persisted the cancelled status, but the worker has
+         silently kept executing tools / consuming tokens.
+
+    The fix: look up the scope_key the run was started on (router
+    recorded it at ``record_run_start``), send a ``RunCancelFrame``
+    to that worker. The worker's ``AgentRunBackend.cancel`` sets the
+    cancel_event, ``_watch_for_cancel`` in agent_runner translates
+    that into ``session.interrupted_run_id`` + the legacy interrupt
+    RPC — same path the in-process gateway used before Phase 5.
+
+    Returns False (fall through to in-process handler) if the run isn't
+    known to the router. That handles two cases legitimately:
+      * The run never started under the worker (in-process default-
+        scope sessions, leader/node runs that were submitted before
+        Phase 7 — unlikely in practice but defensive).
+      * The run already completed and was ``forget_run``'d. There's
+        nothing left to cancel; the in-process handler's fallback
+        terminal-publish is a no-op when the DB already has the
+        terminal row.
+    """
+    rid = req.get("id")
+    run_id = str(params.get("run_id") or params.get("runId") or "").strip()
+    if not run_id:
+        return False
+    router = worker_frame_router()
+    info = router.lookup_run(run_id)
+    if info is None or not info.scope_key:
+        return False
+    supervisor = worker_supervisor()
+    ok = await supervisor.send(info.scope_key, RunCancelFrame(run_id=run_id))
+    if not ok:
+        # Worker stdin closed (subprocess died?) — fall through so the
+        # in-process handler can synthesize a terminal event and
+        # frontend sees something instead of nothing.
+        return False
+    # Ack frontend immediately. The actual cancelled terminal event
+    # will flow back through the normal worker→main event pipe once
+    # the agent unwinds its interrupt.
+    await _ack_success(transport, rid, {
+        "status": "cancelled",
+        "run_id": run_id,
+        "stored_session_id": info.stored_session_id,
+        "turn_id": info.turn_id,
+        "source": "primary-run-worker",
+    })
+    return True
 
 
 async def _dispatch_prompt_submit(
@@ -320,13 +385,18 @@ async def _ack_error(transport: Any, rid: Any, *, code: int, message: str) -> No
     )
 
 
+async def _ack_success(transport: Any, rid: Any, result: dict) -> None:
+    await transport.write_async(
+        {"jsonrpc": "2.0", "id": rid, "result": result}
+    )
+
+
 def _reset_for_tests() -> None:
     """Test-only helper. Drops the singletons WITHOUT terminating any
     running subprocesses (use ``shutdown_run_worker_runtime`` for that).
     Use sparingly — only when a test needs a fresh router/supervisor
     pair AND has already torn down any spawned workers itself."""
-    global _supervisor_singleton, _router_singleton, _unknown_value_logged
+    global _supervisor_singleton, _router_singleton
     with _singleton_lock:
         _supervisor_singleton = None
         _router_singleton = None
-        _unknown_value_logged = False
