@@ -492,23 +492,31 @@ atexit.register(_shutdown_sessions)
 
 
 def _get_db():
-    global _db, _db_error
-    active_home = _resolve_home_path(_active_hermes_home, fallback=_hermes_home)
-    default_home = _resolve_home_path(_hermes_home, fallback=_hermes_home)
-    create_if_missing = _current_method.get("") not in _READ_ONLY_DB_METHODS
-    result = _get_session_db_for_home(
-        active_home=active_home,
-        default_home=default_home,
-        default_db=_db,
-        default_error=_db_error,
-        db_by_home=_db_by_home,
-        db_error_by_home=_db_error_by_home,
-        logger=logger,
-        create_if_missing=create_if_missing,
-    )
-    _db = result.default_db
-    _db_error = result.default_error
-    return result.db
+    """Phase 8b: single source of truth = control_home state.db.
+
+    Previously this returned a SessionDB rooted at the active
+    ``_active_hermes_home`` ContextVar — which made worker processes
+    write to their per-profile ``profiles/<id>/state.db`` while the
+    main sidecar wrote to ``control_home/state.db``. Two databases
+    with divergent state required a boot-time merge migration
+    (``mergeProfileRuntimeStateDatabase``) and silently produced
+    user-visible bugs:
+
+      * Sessions deleted via the sidebar (control_home delete) came
+        back on the next boot because the per-profile copy still
+        existed and the migration re-imported it.
+      * Migrated sessions reconciled into ``session_index`` without
+        their ``owner_agent_profile_id`` (it was never carried in
+        the ``sessions`` table) → sidebar fell back to the default
+        Agent avatar.
+
+    Now ``_get_db()`` always routes through ``_get_control_plane_db()``
+    so worker + main + sidebar all read/write the SAME db file. The
+    per-profile ``HERMES_HOME`` is still used for file resources
+    (SOUL.md / skills / .env / memories) — those stay per-profile
+    on disk. DB is the only thing centralized.
+    """
+    return _get_control_plane_db()
 
 
 def _is_control_plane_stable_session_id(stable_session_id: str) -> bool:
@@ -518,27 +526,83 @@ def _is_control_plane_stable_session_id(stable_session_id: str) -> bool:
             "team:mission-",
             "team-session-team-conversation-",
             "team-conversation-",
+            # Group-chat member-chat worker session: the worker runs in its own
+            # profile process, but its run-registry / event-stream MUST live in
+            # the same control-plane db as the team conversation it mirrors
+            # into. Without this, run reservations / terminal events / status
+            # lookups split across two databases (control-plane vs profile),
+            # and prompt.py's terminalize_if_still_active sees a stale
+            # status="running" in one db while the worker already terminalized
+            # in the other ("prompt worker terminal event did not close active
+            # run"). Routing to the control-plane db keeps both halves in sync.
+            "memberchat:",
         )
     )
 
 
 def _get_control_plane_db():
     global _db, _db_error
-    default_home = _resolve_home_path(_hermes_home, fallback=_hermes_home)
+    # Worker processes set DOVIE_HERMES_CONTROL_HOME at spawn so they can route
+    # control-plane reads/writes (run registry, session_index, member_chat_runs,
+    # team_mission_conversations) back to the SAME db the main gateway owns.
+    # Without this, a worker spawned on a member-chat scope looks up its
+    # stored_session_id in its OWN profile db, misses the row that the main
+    # gateway created (db.create_session in _submit_message_to_member), and the
+    # eventual run.submit fails with 4007 "session not found".
+    control_home_env = str(os.environ.get("DOVIE_HERMES_CONTROL_HOME") or "").strip()
+    process_home = _resolve_home_path(_hermes_home, fallback=_hermes_home)
+    if control_home_env:
+        control_home = _resolve_home_path(control_home_env, fallback=control_home_env)
+    else:
+        control_home = process_home
+
+    if control_home == process_home:
+        # Main gateway path: continue using the process-level `_db` slot via
+        # the shared session_store helper (its `active_home == default_home`
+        # fast path is correct here — the implicit SessionDB() also routes to
+        # process_home, matching active_home).
+        create_if_missing = _current_method.get("") not in _READ_ONLY_DB_METHODS
+        result = _get_session_db_for_home(
+            active_home=control_home,
+            default_home=control_home,
+            default_db=_db,
+            default_error=_db_error,
+            db_by_home=_db_by_home,
+            db_error_by_home=_db_error_by_home,
+            logger=logger,
+            create_if_missing=create_if_missing,
+        )
+        _db = result.default_db
+        _db_error = result.default_error
+        return result.db
+
+    # Worker path: control-plane lookups must go to the MAIN gateway's db, not
+    # this worker's own profile db. The shared session_store helper would still
+    # land on the wrong db here — its `active_home == default_home` branch
+    # calls SessionDB() with NO db_path, and SessionDB defaults db_path off the
+    # process's get_hermes_home() (= the worker's profile home). Cache + open
+    # the control-plane SessionDB explicitly so the path is correct.
+    home_key = str(control_home)
+    cached = _db_by_home.get(home_key)
+    if cached is not None:
+        return cached
     create_if_missing = _current_method.get("") not in _READ_ONLY_DB_METHODS
-    result = _get_session_db_for_home(
-        active_home=default_home,
-        default_home=default_home,
-        default_db=_db,
-        default_error=_db_error,
-        db_by_home=_db_by_home,
-        db_error_by_home=_db_error_by_home,
-        logger=logger,
-        create_if_missing=create_if_missing,
-    )
-    _db = result.default_db
-    _db_error = result.default_error
-    return result.db
+    db_path = control_home / "state.db"
+    if not create_if_missing and not db_path.exists():
+        return None
+    try:
+        from hermes_state import SessionDB
+
+        ctrl_db = SessionDB(db_path=db_path)
+        _db_by_home[home_key] = ctrl_db
+        _db_error_by_home.pop(home_key, None)
+        return ctrl_db
+    except Exception as exc:
+        _db_error_by_home[home_key] = str(exc)
+        logger.warning(
+            "control-plane SessionDB unavailable at %s: %s", db_path, exc,
+        )
+        return None
 
 
 def _db_for_stable_session(stable_session_id: str):
@@ -952,6 +1016,69 @@ def handle_request(req: dict) -> dict | None:
         _leave_profile_context(profile_token)
 
 
+def _push_profile_context_for_request(req: dict) -> Any:
+    """Phase 2 of sub-sidecar removal: resolve the request's profile
+    scope and push it onto the ``current_profile`` ContextVar.
+
+    Returns a token that ``dispatch`` resets in its ``finally`` block,
+    or ``None`` when no profile context could be resolved (handlers
+    fall back to module-level state, matching today's behavior).
+
+    Resolution order:
+      1. ``runtime_scope_key`` / ``runtimeScopeKey`` directly on the
+         request params (or inside ``dovie_profile``).
+      2. ``agent_profile_id`` → synthesize ``profile:<id>`` (matches
+         ``runtime_scope_from_params`` semantics).
+      3. ``stored_session_id`` / ``session_id`` → look up cached
+         scope mapping; on miss leave the ContextVar unset (rather
+         than blocking the dispatch on a DB query).
+
+    Failures here are swallowed — profile context is an OPTIMIZATION
+    (Phase 2-3 callers benefit, Phase 1 fallback path still works).
+    Never throwing also means tests / CLI tools that don't carry
+    profile metadata aren't broken by the new resolver.
+    """
+    try:
+        from tui_gateway.services.runtime_proxy import runtime_scope_from_request
+        from tui_gateway.services.profile_context import (
+            current_profile,
+            profile_registry,
+            lookup_stable_session_scope,
+        )
+    except Exception:
+        return None
+    try:
+        scope = runtime_scope_from_request(req)
+        scope_key = str(scope.runtime_scope_key or "").strip()
+        agent_profile_id = str(scope.agent_profile_id or "").strip()
+        if not scope_key and isinstance(req, dict):
+            params = req.get("params") if isinstance(req.get("params"), dict) else {}
+            stable = str(
+                params.get("stored_session_id")
+                or params.get("storedSessionId")
+                or params.get("session_id")
+                or ""
+            ).strip()
+            if stable:
+                scope_key = lookup_stable_session_scope(stable) or ""
+        if not scope_key:
+            return None
+        ctx = profile_registry.get_or_create(scope_key, agent_profile_id=agent_profile_id)
+        return current_profile.set(ctx)
+    except Exception:
+        return None
+
+
+def _reset_profile_context(token: Any) -> None:
+    if token is None:
+        return
+    try:
+        from tui_gateway.services.profile_context import current_profile
+        current_profile.reset(token)
+    except Exception:
+        pass
+
+
 def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
     """Route inbound RPCs — long handlers to the pool, everything else inline.
 
@@ -966,6 +1093,11 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
     """
     t = transport or _stdio_transport
     token = bind_transport(t)
+    # Phase 2 — push current_profile ContextVar so per-profile state in
+    # tools/approval.py, tools/clarify_gateway.py, etc. routes to the
+    # right bucket. Pool handlers (_LONG_HANDLERS path below) propagate
+    # the ContextVar automatically via ``contextvars.copy_context()``.
+    profile_token = _push_profile_context_for_request(req)
     try:
         normalized = _normalize_request(req)
         if isinstance(normalized, dict):
@@ -1003,6 +1135,7 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
 
         return None
     finally:
+        _reset_profile_context(profile_token)
         reset_transport(token)
 
 
