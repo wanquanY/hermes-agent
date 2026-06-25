@@ -101,18 +101,40 @@ def worker_frame_router() -> WorkerFrameRouter:
                     return await worker_supervisor().send(scope_key, frame)
 
             def _publish_event_with_db(params: dict):
-                # CRITICAL Phase 6: the worker process already persisted
-                # this event to the per-profile state.db before
-                # forwarding the EventFrame to the main side. Passing
-                # ``persist=False`` here tells ``record_event`` to skip
-                # the second ``append_run_event`` call — which would
-                # have detected the duplicate seq, returned a
-                # ``_persistence_disposition`` of ``duplicate_terminal``,
-                # and (under legacy semantics that assumed a bridge
-                # direct-relay backup path) caused ``record_event`` to
-                # return [] subscribers. Bug surface: every terminal
-                # ``message.complete`` event silently failed live
-                # delivery, leaving the frontend spinner stuck.
+                # The MAIN side is the canonical persistence point for
+                # worker-relayed events. The worker's wrapped
+                # ``publish_recorded_event`` (see
+                # ``worker_publish_bridge._install_publish_hook``) is
+                # only invoked from the agent thread with NO ``db``
+                # argument, so its inner ``record_event`` falls into
+                # the ``elif terminal_event`` no-db branch and skips
+                # ``append_run_event`` entirely — the worker has NOT
+                # already persisted the row. Sub-Phase 6b earlier
+                # assumed it had, set ``persist=False`` here, and the
+                # net result was that NO side wrote ``runs.status``
+                # for any worker turn:
+                #
+                # - ``runs.status`` stayed "running" forever even after
+                #   ``message.complete`` reached the frontend.
+                # - ``prompt._run_prompt_submit`` reads ``runs.status``
+                #   in ``terminalize_if_still_active`` after the agent
+                #   thread joined; with stale "running" it
+                #   re-published a synthetic terminal event with
+                #   ``status="failed"`` (or "cancelled" post Phase 11)
+                #   which then overwrote the frontend's correct
+                #   terminal state and left the session_index spinner
+                #   stuck.
+                # - Refreshing the sidebar healed it because
+                #   ``reconcile_session_index``'s
+                #   ``_repair_session_index_terminal_active_runs_locked``
+                #   cleared the projection from the runs table.
+                #
+                # Persist=True with a control_home DB. Duplicate
+                # protection is already inside ``append_run_event``
+                # (``_persistence_disposition='duplicate_terminal'``)
+                # in case anything DOES write twice — and it returns
+                # the canonical event in that case rather than
+                # dropping subscribers, so live delivery is safe.
                 stable = ""
                 if isinstance(params, dict):
                     stable = str(
@@ -127,7 +149,7 @@ def worker_frame_router() -> WorkerFrameRouter:
                     except Exception:
                         db = None
                 return run_control.publish_recorded_event(
-                    params, db=db, persist=False,
+                    params, db=db, persist=True,
                 )
 
             def _publish_run_terminal_with_db(**kwargs):
