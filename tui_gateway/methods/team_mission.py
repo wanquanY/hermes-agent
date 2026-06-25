@@ -2672,6 +2672,64 @@ def _find_team_member_by_id(members: list[dict], member_id: str) -> dict:
     return {}
 
 
+def _submit_run_via_worker_with_response(rid, submit_params: dict) -> dict:
+    """Route a ``run.submit`` for team mission (leader / node / member-
+    chat) through the same ``primary_dispatch`` path that single-chat
+    uses. Returns a JSON-RPC-shaped response so callers can keep
+    their existing ``response = _methods["run.submit"](rid, params)``
+    handling unchanged.
+
+    Phase 7: unifies team mission run dispatch with single-chat
+    architecture. The previous in-process ``_methods["run.submit"]``
+    direct call ran the agent in the main sidecar process with the
+    main gateway's HERMES_HOME — so member nodes loaded the main
+    gateway's SOUL.md / skills / memories instead of their own. The
+    legacy fix was to route through ``proxy_to_runtime`` (Phase 6
+    deleted that). The new fix is to route through
+    ``primary_dispatch`` which spawns the worker on the member's
+    profile scope.
+
+    Fallback: if no transport / loop is available (background mission
+    scheduler etc.), fall through to ``_methods["run.submit"]`` —
+    the in-process path WILL load the wrong identity but that's
+    less broken than failing the run entirely. The diagnostic
+    ``member-chat-proxy-fallback-in-process`` warning surfaces the
+    fallback so we can spot any caller that should be routed."""
+    proxied = _proxy_run_submit_via_worker(submit_params)
+    if proxied.get("error"):
+        return _err(rid, 5020, proxied["error"])
+    if proxied.get("ok"):
+        # primary_dispatch already acknowledged the request on the
+        # transport with its own synthetic rid. Construct the
+        # JSON-RPC envelope the original caller (with its own rid)
+        # expects.
+        return _ok(rid, {
+            "status": "queued",
+            "run_id": str(
+                submit_params.get("run_id")
+                or submit_params.get("client_run_id")
+                or ""
+            ),
+            "turn_id": str(submit_params.get("turn_id") or ""),
+            "stored_session_id": str(
+                submit_params.get("stored_session_id")
+                or submit_params.get("session_id")
+                or ""
+            ),
+            "runtime_scope_key": str(submit_params.get("runtime_scope_key") or ""),
+            "source": "primary-run-worker",
+        })
+    # Fallback: no transport (background) → in-process. Wrong env
+    # but better than dropping the run.
+    run_control._diagnostic_warning(  # noqa: SLF001
+        "team-mission-run-proxy-fallback-in-process",
+        stored_session_id=str(submit_params.get("stored_session_id") or ""),
+        runtime_scope_key=str(submit_params.get("runtime_scope_key") or ""),
+        reason=proxied.get("reason") or "",
+    )
+    return _methods["run.submit"](rid, submit_params)
+
+
 def _proxy_run_submit_via_worker(submit_params: dict) -> dict:
     """Send a run.submit through the new ``WorkerSupervisor`` so the
     worker spawns on the member's profile scope and executes the prompt
@@ -3233,7 +3291,7 @@ def _(rid, params: dict) -> dict:
     runtime_session_error = _ensure_team_mission_runtime_session_shell(conversation_session_id)
     if runtime_session_error:
         return _err(rid, 5008, runtime_session_error)
-    response = _methods["run.submit"](rid, submit_params)
+    response = _submit_run_via_worker_with_response(rid, submit_params)
     if isinstance(response, dict) and response.get("error"):
         return response
     result = response.get("result") if isinstance(response, dict) else {}
@@ -4423,7 +4481,7 @@ def _(rid, params: dict) -> dict:
             },
         },
     }
-    response = _methods["run.submit"](rid, submit_params)
+    response = _submit_run_via_worker_with_response(rid, submit_params)
     if isinstance(response, dict) and response.get("error"):
         node = db.upsert_team_mission_node(
             mission_id=mission_id,
