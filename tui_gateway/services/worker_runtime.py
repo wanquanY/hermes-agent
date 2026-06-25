@@ -265,13 +265,25 @@ async def _dispatch_interactive_response(
     (the entry was already popped by the first call).
     """
     rid = req.get("id")
-    request_id = str(params.get("request_id") or "").strip()
+    interactive_kind, answer_field = _INTERACTIVE_RESPONSE_METHODS[method]
+    # ``approval.respond`` ships ``session_id`` (the publish bridge uses
+    # the session_key as the request_id for approval — single-slot per
+    # session — see worker_publish_bridge._install_approval_hooks).
+    # The other three (clarify/secret/sudo) ship ``request_id`` directly.
+    # Try both so this dispatcher matches the frontend's actual payload
+    # shape (see runtime.ts:respondCommandApproval / respondInputApproval).
+    request_id = str(
+        params.get("request_id")
+        or params.get("requestId")
+        or params.get("session_id")
+        or params.get("sessionId")
+        or ""
+    ).strip()
     if not request_id:
         return False
     router = worker_frame_router()
     if not router.has_pending_request(request_id):
         return False
-    interactive_kind, answer_field = _INTERACTIVE_RESPONSE_METHODS[method]
     answer = params.get(answer_field, "")
     # ``approval.respond``'s ``choice`` field tends to come back as a
     # plain string; pass through verbatim. ``clarify.respond`` /
