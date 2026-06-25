@@ -224,6 +224,12 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
             full_history = []
         session_record["history"] = _trim_history_to_window(full_history)
 
+    with _server._sessions_lock:
+        _server._sessions[runtime_sid] = session_record
+
+    _server._start_agent_build(runtime_sid, session_record)
+    return runtime_sid, session_record
+
 
 _HYDRATE_TAIL_LIMIT = 40
 
@@ -242,12 +248,6 @@ def _trim_history_to_window(history: list) -> list:
     ):
         start += 1
     return history[start:]
-
-    with _server._sessions_lock:
-        _server._sessions[runtime_sid] = session_record
-
-    _server._start_agent_build(runtime_sid, session_record)
-    return runtime_sid, session_record
 
 
 def _watch_for_cancel(
