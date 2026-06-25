@@ -180,8 +180,8 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
     }
     # Hydrate conversation history from the canonical control_home DB
     # so the agent's ``run_conversation(conversation_history=...)`` call
-    # — fed from this ``session_record["history"]`` — sees every prior
-    # turn on this stable session. Without this every worker turn
+    # — fed from this ``session_record["history"]`` — sees recent prior
+    # turns on this stable session. Without this every worker turn
     # starts from an empty history: the agent has no memory of earlier
     # messages, can't answer "what did I just ask?", and a cancelled
     # turn's partial assistant text never returns to context even
@@ -194,15 +194,26 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
     # truth (Phase 8b), so the read sees every persist + every
     # ``persist_interrupted_partial`` from prior turns including
     # cross-restart history. Failures here degrade gracefully to
-    # empty history rather than crashing the turn — a turn with no
-    # context is still better than a refused submit.
+    # empty history rather than crashing the turn.
+    #
+    # Bounded to the most recent ``_HYDRATE_TAIL_LIMIT`` messages: a
+    # long-running session can accumulate 100+ messages (assistant
+    # turns + each tool call + each tool result + each reasoning
+    # block), and every API call would re-ship the whole tail through
+    # the LLM context, hammering latency and cost. The agent's
+    # session_search tool covers older history on demand. Trim
+    # respects role boundaries — never start the slice on an orphan
+    # ``tool`` message whose ``assistant(tool_calls=...)`` parent was
+    # left behind, because the provider rejects that as a malformed
+    # sequence and the agent's ``repair_message_sequence`` would drop
+    # the tool result anyway.
     try:
         db = _server._db_for_stable_session(frame.stored_session_id)
     except Exception:
         db = None
     if db is not None and hasattr(db, "get_messages_as_conversation"):
         try:
-            session_record["history"] = list(
+            full_history = list(
                 db.get_messages_as_conversation(frame.stored_session_id)
             )
         except Exception:
@@ -210,6 +221,27 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
                 "[agent-runner] history hydration failed stored_session=%s",
                 frame.stored_session_id, exc_info=True,
             )
+            full_history = []
+        session_record["history"] = _trim_history_to_window(full_history)
+
+
+_HYDRATE_TAIL_LIMIT = 40
+
+
+def _trim_history_to_window(history: list) -> list:
+    """Return the last ``_HYDRATE_TAIL_LIMIT`` messages, advanced
+    forward to the next non-``tool`` message so the slice never
+    starts on an orphan tool result. Returns the original list
+    unchanged when it's at or under the limit."""
+    if len(history) <= _HYDRATE_TAIL_LIMIT:
+        return history
+    start = len(history) - _HYDRATE_TAIL_LIMIT
+    while start < len(history) and (
+        isinstance(history[start], dict)
+        and history[start].get("role") == "tool"
+    ):
+        start += 1
+    return history[start:]
 
     with _server._sessions_lock:
         _server._sessions[runtime_sid] = session_record
