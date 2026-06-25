@@ -524,6 +524,24 @@ async def handle_ws(ws: Any) -> None:
         await transport.aclose()
         _log.info("gateway ws closed %s", transport._diagnostics())
 
+        # Detach the dead transport from run_control's subscription
+        # indexes. Without this, ``record_event`` keeps returning the
+        # closed transport as a "subscriber" and ``_write_event`` writes
+        # to it; ``WSTransport.write`` short-circuits on ``_closed`` but
+        # ``_write_event`` ignores that return value and reports
+        # success. The new run_worker path hits this hard because the
+        # frontend ws often gets recycled (HMR, reconnect) and the
+        # stale subscription silently swallows every live event until
+        # the user navigates away and DB-hydrates.
+        try:
+            from tui_gateway.services.run_control import detach_transport
+            detach_transport(transport)
+        except Exception:
+            _log.exception(
+                "gateway ws subscription detach failed %s",
+                transport._diagnostics(),
+            )
+
         # C1 disconnect reap (ported from upstream ae94ed172): hand off to
         # server._close_sessions_for_transport, which (a) tears down sessions
         # that opted in via close_on_disconnect (dovie sidecar / dashboard

@@ -81,6 +81,14 @@ class RunWorker:
     def scope_key(self) -> str:
         return self.scope.runtime_scope_key
 
+    @property
+    def hermes_home(self) -> str:
+        """Per-profile HERMES_HOME this worker is bound to. Routed
+        callbacks use this to enter the profile context so events
+        publish into the right per-profile DB (matching what
+        ``events.subscribe`` captured on the frontend's behalf)."""
+        return self.scope.hermes_home
+
     def running(self) -> bool:
         return self.process.returncode is None
 
@@ -256,7 +264,7 @@ class WorkerSupervisor:
             self._dispatch_loop(worker),
             name=f"run-worker-dispatch[{scope.runtime_scope_key}]",
         )
-        _log.info(
+        _log.warning(
             "[worker-supervisor] spawned run_worker pid=%s scope=%s",
             process.pid, scope.runtime_scope_key,
         )
@@ -328,26 +336,51 @@ class WorkerSupervisor:
 
     async def _dispatch_one(self, worker: RunWorker, frame: OutgoingFrame) -> None:
         scope_key = worker.scope_key
-        if isinstance(frame, EventFrame):
-            await self._on_event(scope_key, frame)
-        elif isinstance(frame, InteractiveRequestFrame):
-            await self._on_interactive_request(scope_key, frame)
-        elif isinstance(frame, RunTerminalFrame):
-            worker.active_runs.discard(frame.run_id)
-            await self._on_run_terminal(scope_key, frame)
-        elif isinstance(frame, LogFrame):
-            if self._on_log is not None:
-                await self._on_log(scope_key, frame)
-            else:
-                _log.info(
-                    "[worker-log] scope=%s level=%s text=%s",
-                    scope_key, frame.level, frame.text,
+        # Enter the worker's profile context so callbacks (notably
+        # publish_recorded_event) resolve to the right per-profile DB.
+        # Without this, the router runs in the main sidecar's default
+        # ``_active_hermes_home`` and events land in the control_home
+        # DB while the frontend's ``events.subscribe`` poller queries
+        # the per-profile DB — events never reach the live ws.
+        token = None
+        if worker.hermes_home:
+            try:
+                from tui_gateway.services.profile_context import enter_profile_context
+                token = enter_profile_context(
+                    {"hermes_home": worker.hermes_home, "runtime_scope_key": scope_key},
                 )
-        else:  # pragma: no cover — exhausted by Union
-            _log.warning(
-                "[worker-supervisor] %s unknown frame type %r",
-                scope_key, type(frame),
-            )
+            except Exception:
+                _log.exception(
+                    "[worker-supervisor] enter_profile_context failed scope=%s", scope_key,
+                )
+        try:
+            if isinstance(frame, EventFrame):
+                await self._on_event(scope_key, frame)
+            elif isinstance(frame, InteractiveRequestFrame):
+                await self._on_interactive_request(scope_key, frame)
+            elif isinstance(frame, RunTerminalFrame):
+                worker.active_runs.discard(frame.run_id)
+                await self._on_run_terminal(scope_key, frame)
+            elif isinstance(frame, LogFrame):
+                if self._on_log is not None:
+                    await self._on_log(scope_key, frame)
+                else:
+                    _log.info(
+                        "[worker-log] scope=%s level=%s text=%s",
+                        scope_key, frame.level, frame.text,
+                    )
+            else:  # pragma: no cover — exhausted by Union
+                _log.warning(
+                    "[worker-supervisor] %s unknown frame type %r",
+                    scope_key, type(frame),
+                )
+        finally:
+            if token is not None:
+                try:
+                    from tui_gateway.services.profile_context import leave_profile_context
+                    leave_profile_context(token)
+                except Exception:
+                    pass
 
     async def _terminate(self, worker: RunWorker) -> None:
         worker.closing = True

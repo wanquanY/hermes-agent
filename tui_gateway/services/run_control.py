@@ -660,11 +660,18 @@ def _event_frame(event: dict[str, Any]) -> dict[str, Any]:
 
 def _write_event(transport: Transport, event: dict[str, Any]) -> bool:
     try:
-        transport.write(_event_frame(event))
-        return True
+        wrote = transport.write(_event_frame(event))
     except Exception:
         detach_transport(transport)
         return False
+    # ``WSTransport.write`` returns False when the underlying ws is
+    # already closed — without honoring that, ``publish_recorded_event``
+    # would silently report ``delivered=1`` to a dead transport and
+    # the frontend would never see the live stream.
+    if wrote is False:
+        detach_transport(transport)
+        return False
+    return True
 
 
 def _max_event_seq(events: list[dict[str, Any]], fallback: int = 0) -> int:
@@ -1444,7 +1451,133 @@ def record_event(
             trigger_event=event_type,
             run_id=run_id,
         )
+    # Group-chat mirror: a registered member-chat run gets every frame mirrored
+    # into its team conversation session via a NESTED record_event call. The
+    # nested call walks the full pipeline — participant_id stamp, broadcast to
+    # conversation subscribers, persist, terminal-frame prune, append_message —
+    # so the frontend stream UX is identical to the leader's.
+    if (
+        run_id
+        and stable
+        and not bool((payload or {}).get("member_chat_conversation_mirror"))
+    ):
+        _mirror_member_chat_frame_if_registered(
+            run_id=run_id,
+            source_frame=frame,
+            owner_transport=owner_transport,
+            skip_owner_transport=skip_owner_transport,
+            db=db,
+        )
     return result
+
+
+def _mirror_member_chat_frame_if_registered(
+    *,
+    run_id: str,
+    source_frame: dict[str, Any],
+    owner_transport: Transport | None,
+    skip_owner_transport: bool,
+    db: Any,
+) -> None:
+    """If ``run_id`` is registered as a member-chat run, replay the frame on
+    the team conversation session. Recurses into record_event so the mirrored
+    frame goes through the full publish pipeline (broadcast + persist +
+    participant stamping + terminal prune)."""
+    lookup = _db_method(db, "get_member_chat_run")
+    if not lookup:
+        return
+    try:
+        registration = lookup(run_id)
+    except Exception:
+        return
+    if not isinstance(registration, dict) or not registration:
+        return
+    conversation_session_id = str(registration.get("conversation_session_id") or "").strip()
+    source_session_id = str(
+        source_frame.get("stored_session_id") or source_frame.get("session_id") or ""
+    ).strip()
+    if not conversation_session_id or conversation_session_id == source_session_id:
+        return
+    member_id = str(registration.get("member_id") or "").strip()
+    agent_profile_id = str(registration.get("agent_profile_id") or "").strip()
+    display_name = str(registration.get("display_name") or "").strip()
+    optimistic_run_id = str(registration.get("optimistic_run_id") or "").strip()
+    # Prefer the frontend's pre-reserved optimistic run_id so its existing
+    # "运行中" indicator on the conversation settles the moment the worker's
+    # terminal frame mirrors in. Fall back to a namespaced id only when no
+    # optimistic id was recorded (legacy registrations).
+    relay_run_id = optimistic_run_id or f"member-chat:{run_id}"
+    source_payload = source_frame.get("payload")
+    source_payload = source_payload if isinstance(source_payload, dict) else {}
+    member_identity = {
+        "kind": "member_chat",
+        "surface": "member_chat",
+        "member_id": member_id,
+        "agent_profile_id": agent_profile_id,
+        "display_name": display_name,
+        "conversation_session_id": conversation_session_id,
+    }
+    mirror_payload = {
+        **source_payload,
+        "participant_id": member_id,
+        "run_id": relay_run_id,
+        "source_run_id": run_id,
+        "source_session_id": source_session_id,
+        "source_seq": int(source_frame.get("seq") or 0),
+        "team_mission": member_identity,
+        "member_chat_conversation_mirror": True,
+    }
+    mirror_frame = {
+        **{
+            k: v
+            for k, v in source_frame.items()
+            if k not in (
+                "payload", "seq", "stored_session_id", "session_id",
+                "run_id", "turn_id", "runtime_scope_key", "participant_id",
+            )
+        },
+        "stored_session_id": conversation_session_id,
+        "session_id": conversation_session_id,
+        "run_id": relay_run_id,
+        "turn_id": str(source_frame.get("turn_id") or f"member-turn:{run_id}"),
+        "runtime_scope_key": f"member-chat:{member_id}",
+        "participant_id": member_id,
+        "payload": mirror_payload,
+        # seq=0 → next_event_seq allocates in the conversation session's domain.
+        "seq": 0,
+    }
+    try:
+        record_event(
+            mirror_frame,
+            owner_transport=owner_transport,
+            skip_owner_transport=skip_owner_transport,
+            db=db,
+        )
+    except Exception:
+        logger.warning("failed to mirror member-chat frame", exc_info=True)
+    # On the terminal frame, also persist the assistant message into the
+    # conversation session's messages table so history rehydration shows the
+    # member's reply (run_events are pruned over time; messages are durable).
+    if (
+        str(source_frame.get("type") or "").strip() == "message.complete"
+        and (appender := _db_method(db, "append_message"))
+    ):
+        reply_text = ""
+        for key in ("text", "final_response", "finalResponse", "summary", "message"):
+            value = source_payload.get(key)
+            if str(value or "").strip():
+                reply_text = str(value).strip()
+                break
+        if reply_text:
+            try:
+                appender(
+                    conversation_session_id,
+                    role="assistant",
+                    content=reply_text,
+                    metadata={"team_mission": member_identity},
+                )
+            except Exception:
+                logger.warning("failed to persist member-chat assistant message", exc_info=True)
 
 
 def publish_recorded_event(
