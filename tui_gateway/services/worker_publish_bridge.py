@@ -49,6 +49,22 @@ _log = logging.getLogger(__name__)
 EmitAsync = Callable[[OutgoingFrame], Awaitable[None]]
 
 
+# Map ``server._block`` event types to the ``InteractiveRequestFrame``
+# kind the main router tracks pending responses under. Mirrors
+# ``WorkerInteractiveResponder._BUILTINS`` / the kinds the router
+# accepts in ``_INTERACTIVE_KINDS``.
+_BLOCK_EVENT_KINDS = {
+    "clarify.request": "clarify",
+    "approval.request": "approval",
+    "secret.request": "secret",
+    "sudo.request": "sudo",
+}
+
+
+def _block_event_interactive_kind(event_type: str) -> Optional[str]:
+    return _BLOCK_EVENT_KINDS.get(event_type)
+
+
 @dataclass
 class _PatchHandle:
     """Records what was patched so ``uninstall`` can undo it. One
@@ -160,6 +176,49 @@ class WorkerPublishBridge:
             # persist is the canonical truth that gets read on replay.
             if isinstance(params, dict):
                 bridge.emit_threadsafe(EventFrame(params=dict(params)))
+                # The Dovie-native blocking primitive (``server._block``)
+                # bypasses ``tools/clarify_gateway.register`` /
+                # ``tools/approval.submit_pending`` (where the dedicated
+                # clarify/approval hooks live) and writes its rid into
+                # the worker process's own ``server._pending`` dict
+                # instead, then publishes a regular
+                # ``clarify.request`` / ``approval.request`` /
+                # ``secret.request`` / ``sudo.request`` event. The main
+                # sidecar has no way to look up that rid (the dict
+                # lives in the worker process) so the frontend's
+                # ``clarify.respond`` errors with
+                # ``4009 no pending answer request``. Mirror the
+                # ``InteractiveRequestFrame`` emission the
+                # clarify/approval hooks already do — same plumbing,
+                # routes the request_id → scope_key map into the main
+                # router so ``primary_dispatch``'s ``*.respond``
+                # interceptor can find it.
+                event_type = str(params.get("type") or "")
+                interactive_kind = _block_event_interactive_kind(event_type)
+                if interactive_kind is not None:
+                    payload = params.get("payload")
+                    payload_dict = payload if isinstance(payload, dict) else {}
+                    request_id = str(
+                        payload_dict.get("request_id")
+                        or payload_dict.get("requestId")
+                        or params.get("request_id")
+                        or ""
+                    ).strip()
+                    if request_id:
+                        stored = str(
+                            params.get("stored_session_id")
+                            or params.get("session_id")
+                            or bridge._stored_session_id
+                            or ""
+                        ).strip()
+                        bridge.emit_threadsafe(
+                            InteractiveRequestFrame(
+                                kind=interactive_kind,
+                                request_id=request_id,
+                                payload=dict(payload_dict) if payload_dict else {},
+                                stored_session_id=stored,
+                            )
+                        )
             return original(params, *args, **kwargs)
 
         run_control.publish_recorded_event = wrapped  # type: ignore[assignment]

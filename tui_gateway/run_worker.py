@@ -499,17 +499,27 @@ class RealInteractiveResponder(WorkerInteractiveResponder):
     """
 
     async def resolve(self, frame: InteractiveResponseFrame) -> bool:
+        # Try the kind-specific registry FIRST (legacy/tools-driven
+        # flows: ``tools.clarify_gateway.register`` /
+        # ``tools.approval.submit_pending``). Fall through to the
+        # generic ``server._pending`` dict (the Dovie-native
+        # ``server._block`` path) because the desktop's clarify tool
+        # bypasses ``clarify_gateway.register`` entirely and just
+        # rid-keyed-blocks on ``_pending`` instead — the
+        # kind-specific resolver returns False for that flow, and
+        # the answer would otherwise vanish.
         answer = frame.answer
+        answer_text = _stringify_answer(answer)
         if frame.kind == "clarify":
             from tools.clarify_gateway import resolve_gateway_clarify
-            return resolve_gateway_clarify(frame.request_id, _stringify_answer(answer))
-        if frame.kind == "approval":
+            if resolve_gateway_clarify(frame.request_id, answer_text):
+                return True
+        elif frame.kind == "approval":
             from tools.approval import resolve_gateway_approval
-            choice = _stringify_answer(answer) or "once"
-            return resolve_gateway_approval(frame.request_id, choice) > 0
-        if frame.kind in ("secret", "sudo"):
-            return _resolve_generic_pending(frame.request_id, _stringify_answer(answer))
-        return False
+            choice = answer_text or "once"
+            if resolve_gateway_approval(frame.request_id, choice) > 0:
+                return True
+        return _resolve_generic_pending(frame.request_id, answer_text)
 
 
 def _stringify_answer(answer: Any) -> str:
