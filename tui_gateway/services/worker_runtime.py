@@ -107,20 +107,64 @@ def worker_frame_router() -> WorkerFrameRouter:
     stub that forwards to the supervisor singleton. The sender uses
     ``worker_supervisor()`` lazily — both directions are lazy so
     construction order between supervisor and router doesn't deadlock.
+
+    ``publish_event`` is wrapped to RESOLVE the per-profile DB from
+    ``params["stored_session_id"]`` BEFORE calling
+    ``publish_recorded_event``. Without this, ``db`` defaults to None
+    and the run-control persist path drops the event with
+    ``terminal-event-not-persisted-no-db-method`` — and worse, the
+    subscriber fanout misses the event because no in-memory
+    ``_events_by_session`` entry is built. The router runs outside
+    any RPC handler context so the ContextVar-based
+    ``_active_hermes_home`` chain ``_get_db`` would follow isn't set;
+    explicit resolution via ``_db_for_stable_session`` is required.
     """
     global _router_singleton
     with _singleton_lock:
         if _router_singleton is None:
             from tui_gateway.services import run_control  # late import — heavy module
+            from tui_gateway import server as _server
 
             class _SupervisorSenderProxy:
                 async def send(self, scope_key: str, frame):
                     return await worker_supervisor().send(scope_key, frame)
 
+            def _publish_event_with_db(params: dict):
+                stable = ""
+                if isinstance(params, dict):
+                    stable = str(
+                        params.get("stored_session_id")
+                        or params.get("session_id")
+                        or ""
+                    ).strip()
+                db = None
+                if stable:
+                    try:
+                        db = _server._db_for_stable_session(stable)
+                    except Exception:
+                        db = None
+                return run_control.publish_recorded_event(params, db=db)
+
+            def _publish_run_terminal_with_db(**kwargs):
+                stable = str(
+                    kwargs.get("stored_session_id")
+                    or kwargs.get("runtime_session_id")
+                    or ""
+                ).strip()
+                db = kwargs.get("db")
+                if db is None and stable:
+                    try:
+                        db = _server._db_for_stable_session(stable)
+                    except Exception:
+                        db = None
+                if db is not None:
+                    kwargs["db"] = db
+                return run_control.publish_run_terminal_event(**kwargs)
+
             _router_singleton = WorkerFrameRouter(
                 sender=_SupervisorSenderProxy(),
-                publish_event=run_control.publish_recorded_event,
-                publish_run_terminal=run_control.publish_run_terminal_event,
+                publish_event=_publish_event_with_db,
+                publish_run_terminal=_publish_run_terminal_with_db,
             )
         return _router_singleton
 

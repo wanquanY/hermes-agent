@@ -76,12 +76,20 @@ def _scope(tmp_path) -> RuntimeScope:
 @pytest.mark.asyncio
 async def test_spawn_send_run_start_receive_terminal(tmp_path) -> None:
     """End-to-end: spawn a real worker, send run.start, receive
-    run.terminal. Phase 5c switched the default backend from the
-    stub to ``AgentRunBackend`` with a placeholder runner — the
-    placeholder is a no-op that returns cleanly, so status is
-    ``completed`` (not ``stubbed``). The status flips back to
-    something LLM-meaningful in Phase 5c.2 when the placeholder is
-    replaced by the real agent runner."""
+    run.terminal.
+
+    Phase 5c.2: the default backend now invokes ``_execute_prompt_submit``
+    on a real session record. With no LLM provider configured in the
+    test env, agent build fails — the runner still surfaces that as an
+    ``EventFrame(type=error)`` plus a ``message.complete`` event with
+    payload.status=error, and finally emits a ``RunTerminalFrame
+    status=completed`` (runner returned without raising). The bridge
+    + protocol round-trip is what's being verified here, not the LLM
+    output.
+
+    The startup is heavy (~5s for ``setup_worker_environment`` → import
+    of ``tui_gateway.server``, plugin discovery, agent build attempt),
+    so the timeout is generous."""
     collector = _Collector()
     sup = _make_supervisor(collector)
     try:
@@ -101,7 +109,7 @@ async def test_spawn_send_run_start_receive_terminal(tmp_path) -> None:
         )
         assert ok
 
-        await asyncio.wait_for(collector.terminal_received.wait(), timeout=10.0)
+        await asyncio.wait_for(collector.terminal_received.wait(), timeout=25.0)
         assert len(collector.terminal) == 1
         scope, terminal = collector.terminal[0]
         assert scope == worker.scope_key
@@ -109,7 +117,14 @@ async def test_spawn_send_run_start_receive_terminal(tmp_path) -> None:
         assert terminal.status == "completed"
         assert terminal.stored_session_id == "sess-1"
         assert terminal.turn_id == "turn-1"
-        # The backend also emits a startup log.
+        # The bridge surfaced the agent-init failure as an EventFrame.
+        event_payloads = [
+            f.params for _, f in collector.events
+            if isinstance(f.params, dict)
+        ]
+        error_events = [p for p in event_payloads if p.get("type") == "error"]
+        assert error_events, "expected an EventFrame(type=error) surfacing the agent init failure"
+        # The startup log is also emitted.
         log_texts = [f.text for _, f in collector.logs]
         assert any("run_worker: started" in t for t in log_texts)
     finally:

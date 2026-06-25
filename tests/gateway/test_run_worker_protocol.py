@@ -603,7 +603,15 @@ async def test_real_responder_secret_routes_to_prompt_pending(monkeypatch) -> No
     fake_mod = _FakePromptMod()
     ev = threading.Event()
     fake_mod._pending["req-secret"] = (object(), ev)
+    # ``from tui_gateway.methods import prompt`` (used in
+    # ``_resolve_generic_pending``) consults the parent package
+    # attribute first and the sys.modules entry second. If any earlier
+    # test imported the real module, the package already has a cached
+    # attribute — patching sys.modules alone leaves that attribute
+    # pointing at the real module. Override both.
     monkeypatch.setitem(sys.modules, "tui_gateway.methods.prompt", fake_mod)
+    import tui_gateway.methods as methods_pkg
+    monkeypatch.setattr(methods_pkg, "prompt", fake_mod, raising=False)
 
     responder = RealInteractiveResponder()
     ok = await responder.resolve(

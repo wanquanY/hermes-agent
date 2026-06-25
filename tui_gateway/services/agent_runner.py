@@ -1,0 +1,316 @@
+"""Phase 5c.2 — real ``AgentRunner`` binding for the run_worker subprocess.
+
+Wires the new ``WorkerRunBackend`` to ``methods/prompt._execute_prompt_submit``
+inside the worker process. Three responsibilities, each addressing a
+hazard the Plan agent investigation surfaced
+(see commit history around Phase 5c.2):
+
+1. ``setup_worker_environment()`` — neutralizes the legacy
+   ``_stdio_transport`` so stray ``write_json`` / ``_emit`` calls do
+   NOT leak JSON-RPC envelopes onto the protocol pipe that the
+   supervisor decodes.
+2. ``_ensure_worker_session(frame)`` — materializes the
+   ``_sessions[sid]`` record the legacy code path expects. The main
+   sidecar's ``session.create`` only updates the main process's
+   ``_sessions`` dict; the worker has its own empty registry.
+3. ``run_agent(frame, cancel_event)`` — the ``AgentRunner`` itself.
+   Sets up a cancel watcher, invokes ``_execute_prompt_submit``, and
+   **blocks until the agent's background thread truly finishes**
+   (legacy ``_execute_prompt_submit`` spawns a thread internally and
+   returns immediately — the runner must NOT return early, or the
+   ``WorkerPublishBridge`` will uninstall mid-stream and event/
+   terminal frames will race).
+
+Phase 5c.2 deliberately leaves several follow-ups for Phase 5d / 6:
+- MCP discovery (``discover_mcp_tools``) is not called — non-MCP
+  tools still work; MCP-using agents will see a smaller toolset.
+- The team-mission approval observer is not installed inside the
+  worker — sidebar approval indicators for team-mission member runs
+  won't update via this path.
+- Cron ticker is not started here (lives in the main sidecar).
+"""
+
+from __future__ import annotations
+
+import io
+import logging
+import threading
+import time
+import uuid
+from typing import Any, Optional
+
+from tui_gateway.run_worker import RunStartFrame
+
+_log = logging.getLogger(__name__)
+
+
+# Idempotent env setup — invoked from ``_build_default_backend`` at
+# worker bootstrap. ``_setup_lock`` guards repeated calls during tests.
+_setup_lock = threading.Lock()
+_setup_done = False
+
+
+class _NoopTransport:
+    """Stand-in for ``_stdio_transport`` inside the worker. Every legacy
+    ``write_json`` / ``_emit`` invocation that would otherwise dump a
+    JSON-RPC envelope to the protocol pipe becomes a successful no-op,
+    so the supervisor's stdout decoder never sees a malformed line.
+
+    ``write`` returns True because ``write_json`` / ``_emit`` consult
+    the boolean to decide whether to retry; True means "delivered"."""
+
+    def write(self, obj: Any) -> bool:  # noqa: D401 — single-method protocol
+        return True
+
+    def is_connected(self) -> bool:
+        return True
+
+
+def setup_worker_environment() -> None:
+    """Import the legacy gateway server module and neutralize its
+    stdout transport. Safe to call multiple times — only the first
+    call has effect.
+
+    Importing ``tui_gateway.server`` triggers a chain of side effects
+    that the agent code path depends on:
+      - ``HERMES_HOME`` is resolved from the worker's env (already
+        set by ``WorkerSupervisor._spawn_locked``)
+      - ``@method`` registry gets populated transitively
+      - ``_real_stdout`` is captured (the worker's true stdout fd —
+        ALSO the protocol pipe; that's what we then neutralize)
+
+    Importing ``tui_gateway.methods.prompt`` and
+    ``tui_gateway.methods.session`` populates the ``@method`` registry
+    with the entries we'll dispatch through.
+    """
+    global _setup_done
+    with _setup_lock:
+        if _setup_done:
+            return
+        from tui_gateway import server as _server  # noqa: F401 — side-effect import
+        # Must NOT touch ``_real_stdout`` directly: server.py captures
+        # it before the swap so any later reassign there is too late.
+        # Replace the transport instance instead.
+        _server._stdio_transport = _NoopTransport()  # type: ignore[assignment]
+
+        from tui_gateway.methods import prompt as _prompt  # noqa: F401
+        from tui_gateway.methods import session as _session  # noqa: F401
+        _setup_done = True
+        _log.info("[agent-runner] worker environment set up")
+
+
+def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
+    """Materialize a ``_sessions[sid]`` record for the run.
+
+    The main sidecar's ``session.create`` only touched its OWN
+    ``_sessions`` dict — the worker has no record. We build one inline
+    with the same field shape ``methods/session.py:780-819`` produces,
+    keyed by a fresh runtime sid, with ``session_key`` bound to the
+    frame's ``stored_session_id`` (the stable id the agent uses for
+    DB row lookups).
+
+    After the record is registered, kick ``_start_agent_build`` so
+    the AIAgent gets constructed on a background thread. The actual
+    prompt invocation waits on ``agent_ready``.
+    """
+    from tui_gateway import server as _server
+
+    runtime_sid = uuid.uuid4().hex[:8]
+    params = frame.params if isinstance(frame.params, dict) else {}
+
+    cwd = str(params.get("cwd") or "").strip() or None
+    workspace = params.get("workspace") if isinstance(params.get("workspace"), dict) else {}
+    runtime_scope_key = str(
+        params.get("runtime_scope_key")
+        or params.get("runtimeScopeKey")
+        or ""
+    ).strip()
+    transient = bool(
+        params.get("transient")
+        or params.get("temporary")
+        or params.get("ephemeral")
+    )
+    profile_context: Optional[dict] = None
+    if isinstance(params.get("dovie_profile"), dict):
+        profile_context = params["dovie_profile"]
+
+    # Match the legacy field set so every code path the prompt handler
+    # touches finds what it expects. Don't trim — missing fields like
+    # ``history_lock`` / ``attached_images`` / ``edit_snapshots`` crash
+    # the run as soon as the agent reaches the first tool call.
+    session_record: dict[str, Any] = {
+        "agent": None,
+        "agent_error": None,
+        "agent_ready": threading.Event(),
+        "attached_images": [],
+        "cols": int(params.get("cols", 80) or 80),
+        "cwd": cwd,
+        "edit_snapshots": {},
+        "history": [],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "image_counter": 0,
+        "pending_title": None,
+        "model_override": None,
+        "create_reasoning_override": None,
+        "create_service_tier_override": None,
+        "close_on_disconnect": False,
+        "profile_context": profile_context,
+        "agent_context_mode": None,
+        "runtime_scope_key": runtime_scope_key,
+        "running": False,
+        "active_run_id": None,
+        "active_turn_id": None,
+        "pending_turn": None,
+        "run_started_at": 0,
+        "run_updated_at": 0,
+        "event_seq": 0,
+        "interrupted_run_id": "",
+        "interrupted_turn_id": "",
+        "interrupt_seq": 0,
+        "recalled_turn_ids": set(),
+        "session_key": frame.stored_session_id,
+        "show_reasoning": False,
+        "slash_worker": None,
+        "tool_progress_mode": None,
+        "tool_started_at": {},
+        "transport": _server._stdio_transport,  # the NoopTransport
+        "transient": transient,
+        "workspace": workspace,
+    }
+    with _server._sessions_lock:
+        _server._sessions[runtime_sid] = session_record
+
+    _server._start_agent_build(runtime_sid, session_record)
+    return runtime_sid, session_record
+
+
+def _watch_for_cancel(
+    sid: str,
+    session: dict,
+    frame: RunStartFrame,
+    cancel_event: threading.Event,
+) -> None:
+    """Background thread: when ``cancel_event`` is set, translate it
+    into the legacy interrupt path so the agent's polling sees it.
+
+    The legacy ``session.interrupt`` handler mutates the session's
+    ``interrupted_*`` keys + bumps ``interrupt_seq`` + calls into the
+    agent's own interrupt RPC. We replicate the relevant subset
+    inline — calling the @method handler from here would require a
+    proper transport, and we don't have one inside the worker for
+    this synthetic path."""
+    cancel_event.wait()
+    try:
+        with session["history_lock"]:
+            session["interrupted_run_id"] = frame.run_id
+            session["interrupted_turn_id"] = frame.turn_id
+            session["interrupt_seq"] = int(session.get("interrupt_seq") or 0) + 1
+        from tui_gateway.methods.session import _request_agent_interrupt_async
+        _request_agent_interrupt_async(sid, session.get("agent"))
+    except Exception:
+        _log.exception(
+            "[agent-runner] cancel propagation failed run_id=%s", frame.run_id,
+        )
+
+
+def run_agent(frame: RunStartFrame, cancel_event: threading.Event) -> None:
+    """The ``AgentRunner`` callable wired into ``AgentRunBackend``.
+
+    Runs on a background thread spawned by ``AgentRunBackend.start``.
+    Returns only after the agent has truly stopped — so the publish
+    bridge stays installed for every event the agent emits."""
+    setup_worker_environment()
+
+    from tui_gateway import server as _server
+    from tui_gateway.methods.prompt import _execute_prompt_submit
+
+    sid, session = _ensure_worker_session(frame)
+
+    watcher = threading.Thread(
+        target=_watch_for_cancel,
+        args=(sid, session, frame, cancel_event),
+        name=f"agent-cancel-watch[{frame.run_id}]",
+        daemon=True,
+    )
+    watcher.start()
+
+    base_params = frame.params if isinstance(frame.params, dict) else {}
+    # The main side's ``primary_dispatch`` already stripped the keys
+    # it lifted into named ``RunStartFrame`` fields; re-merge them now.
+    prompt_params: dict[str, Any] = {
+        **base_params,
+        "session_id": sid,
+        "stored_session_id": frame.stored_session_id,
+        "text": frame.prompt,
+        "run_id": frame.run_id,
+        "client_run_id": frame.run_id,
+        "turn_id": frame.turn_id,
+        # The main sidecar has already done the registry reservation
+        # via ``run.reserve``; bypass the legacy adapter's recursive
+        # forward through run.submit.
+        "_run_registry_reserved": True,
+    }
+
+    # ``rid`` is the JSON-RPC request id used by ``_ok`` / ``_err``
+    # envelope builders only; the agent code never reads it.
+    rid = f"worker-{frame.run_id}"
+    resp = _execute_prompt_submit(rid, prompt_params)
+    if isinstance(resp, dict) and resp.get("error"):
+        err = resp["error"]
+        raise RuntimeError(
+            f"_execute_prompt_submit returned error code={err.get('code')} "
+            f"message={err.get('message')!r}"
+        )
+
+    # CRITICAL: ``_execute_prompt_submit`` spawns its own background
+    # thread for the agent run and returns immediately. We must NOT
+    # return from ``run_agent`` until the agent stops; otherwise the
+    # ``AgentRunBackend`` will uninstall ``WorkerPublishBridge`` and
+    # subsequent ``publish_recorded_event`` calls — including the
+    # agent's terminal ``message.complete`` — will go through the
+    # restored original publish path (DB only, no stdout EventFrame).
+    _block_until_run_finished(session, frame, cancel_event)
+
+
+def _block_until_run_finished(
+    session: dict,
+    frame: RunStartFrame,
+    cancel_event: threading.Event,
+) -> None:
+    """Poll the session's ``active_run_id`` / ``running`` flags until
+    the legacy agent thread (spawned by ``_execute_prompt_submit``)
+    clears them.
+
+    Per ``methods/prompt.py``, the agent's ``finally`` block on the
+    background thread clears ``active_run_id`` and sets
+    ``running=False``. Polling is the lowest-coupling synchronization
+    point — adding an explicit ``Event`` would require touching the
+    legacy code path.
+    """
+    poll_interval_s = 0.05
+    cancel_drain_total_s = 8.0
+    cancel_drain_check_s = 0.1
+
+    while True:
+        with session["history_lock"]:
+            active = str(session.get("active_run_id") or "")
+            running = bool(session.get("running"))
+        if active != frame.run_id and not running:
+            return
+        if cancel_event.is_set():
+            # The watcher already pushed the interrupt; give the
+            # agent a bounded grace period to drain its final emit
+            # before we return and let the bridge uninstall.
+            deadline = time.monotonic() + cancel_drain_total_s
+            while time.monotonic() < deadline:
+                with session["history_lock"]:
+                    if str(session.get("active_run_id") or "") != frame.run_id:
+                        return
+                time.sleep(cancel_drain_check_s)
+            _log.warning(
+                "[agent-runner] cancel drain timed out run_id=%s",
+                frame.run_id,
+            )
+            return
+        time.sleep(poll_interval_s)

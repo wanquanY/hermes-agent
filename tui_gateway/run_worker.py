@@ -37,6 +37,16 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Union
 
 
+# Capture the REAL stdout immediately at module import — BEFORE any
+# transitive import of ``tui_gateway.server`` (the agent runner pulls
+# it in lazily), which does ``sys.stdout = sys.stderr`` at module
+# load to keep stray library ``print()`` calls out of the JSON-RPC
+# protocol. If we don't snapshot here, every ``_flush_stdout`` later
+# writes to stderr instead of the protocol pipe and the supervisor
+# never sees a single outbound frame.
+_real_stdout = sys.stdout
+
+
 # ── Inbound frame types (main → worker) ──────────────────────────────
 
 
@@ -394,8 +404,11 @@ def _stdout_writer() -> Callable[[str], Awaitable[None]]:
 
 
 def _flush_stdout(payload: str) -> None:
-    sys.stdout.write(payload)
-    sys.stdout.flush()
+    # Use the snapshot captured at module import — ``sys.stdout`` will
+    # have been redirected to stderr by the time the agent runner has
+    # imported ``tui_gateway.server``.
+    _real_stdout.write(payload)
+    _real_stdout.flush()
 
 
 # ── Run backend + interactive responder (worker-side dispatch) ──────
@@ -548,35 +561,32 @@ def _build_default_handler(
 
 
 def _build_default_backend() -> WorkerRunBackend:
-    """Production backend factory. Imports ``AgentRunBackend`` lazily so
-    a unit-test launch of ``run_worker`` (no Hermes agent stack
-    installed) still works with the stub.
+    """Production backend factory.
 
-    Phase 5c.2 will replace the placeholder ``_runner`` with a real
-    binding to ``tui_gateway.methods.prompt._execute_prompt_submit``.
-    For now the runner does nothing — primary-mode prompt.submit
-    still flows through every routing seam (record_run_start →
-    supervisor.send → worker → bridge install → terminal frame),
-    just without firing an LLM. This makes Phase 5c testable in
-    dev app without committing to a real agent run yet.
+    Phase 5c.2 binds the runner to ``tui_gateway.services.agent_runner.
+    run_agent`` — the real ``_execute_prompt_submit`` invocation path.
+    If either ``AgentRunBackend`` or ``agent_runner`` is unavailable
+    (e.g. a unit-test launch of run_worker without the agent stack
+    installed), fall back to ``_StubBackend`` so the protocol still
+    round-trips cleanly.
     """
     try:
         from tui_gateway.services.agent_run_backend import AgentRunBackend
+        from tui_gateway.services.agent_runner import run_agent, setup_worker_environment
     except Exception:
         return _StubBackend()
-
-    import threading as _threading
-
-    def _placeholder_runner(
-        frame: RunStartFrame, cancel_event: _threading.Event,
-    ) -> None:
-        # Phase 5c.2 fills this in. For now: brief noop so the run
-        # has positive duration and bridge install/uninstall both
-        # exercise. The publish hook is in place; the agent code
-        # just hasn't been invoked yet.
-        cancel_event.wait(timeout=0.05)
-
-    return AgentRunBackend(runner=_placeholder_runner)
+    try:
+        # Eagerly run the env setup so the first ``run.start`` frame
+        # doesn't pay the (heavy) Hermes server import cost on the
+        # critical path. The agent runner's lazy guard tolerates a
+        # repeated call.
+        setup_worker_environment()
+    except Exception:
+        # Setup failure shouldn't crash the worker — the runner will
+        # retry, and any subsequent run.start will surface the error
+        # as a failed RunTerminalFrame.
+        pass
+    return AgentRunBackend(runner=run_agent)
 
 
 async def _main_async() -> int:
