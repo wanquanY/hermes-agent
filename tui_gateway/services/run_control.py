@@ -1401,6 +1401,104 @@ def record_event(
     return result
 
 
+def _synthesise_member_chat_registration_from_payload(
+    *,
+    run_id: str,
+    source_payload: dict[str, Any],
+    source_team_mission: dict[str, Any],
+    source_session_id: str,
+    db: Any,
+) -> dict[str, Any] | None:
+    """P0 TEMPORARY: build a registration dict from worker payload when
+    member_chat_runs has no row.
+
+    Removed when P2 RunContext makes the mirror path obsolete. Until
+    then this lets a registration-race lost frame still reach the
+    conversation timeline so users don't see blank @member replies.
+
+    Returns None when the payload lacks enough identity (i.e. the run
+    is not actually a member chat and the original drop-silently
+    behaviour is correct).
+    """
+    # First-class identity carriers, in priority order:
+    candidate_conv_session = ""
+    candidate_member_id = ""
+    candidate_profile_id = ""
+    candidate_display_name = ""
+
+    for source in (source_team_mission, source_payload):
+        if not isinstance(source, dict):
+            continue
+        if not candidate_conv_session:
+            for key in (
+                "conversation_session_id",
+                "conversationSessionId",
+                "stable_session_id",
+                "stableSessionId",
+            ):
+                value = str(source.get(key) or "").strip()
+                if value:
+                    candidate_conv_session = value
+                    break
+        if not candidate_member_id:
+            value = str(source.get("member_id") or source.get("memberId") or "").strip()
+            if value:
+                candidate_member_id = value
+        if not candidate_profile_id:
+            value = str(source.get("agent_profile_id") or source.get("agentProfileId") or "").strip()
+            if value:
+                candidate_profile_id = value
+        if not candidate_display_name:
+            value = str(source.get("display_name") or source.get("displayName") or "").strip()
+            if value:
+                candidate_display_name = value
+
+    # Fallback: derive conv_session from team_mission_conversations using
+    # conversation_id when we have one. Costs one query but only when the
+    # payload didn't already carry the session id directly.
+    if not candidate_conv_session:
+        for source in (source_team_mission, source_payload):
+            if not isinstance(source, dict):
+                continue
+            conv_id = str(source.get("conversation_id") or source.get("conversationId") or "").strip()
+            if not conv_id:
+                continue
+            resolver = _db_method(db, "get_team_mission_conversation_by_id")
+            if not resolver:
+                resolver = _db_method(db, "get_team_mission_conversation")
+            if not resolver:
+                break
+            try:
+                conv_row = resolver(conv_id)
+            except Exception:
+                break
+            if isinstance(conv_row, dict):
+                stable = str(
+                    conv_row.get("stable_session_id")
+                    or conv_row.get("stableSessionId")
+                    or ""
+                ).strip()
+                if stable:
+                    candidate_conv_session = stable
+                    break
+
+    # We need at minimum a conv session distinct from the source and a
+    # member identity. Without these the synthesis can't address the
+    # right conversation and the original drop is correct.
+    if not candidate_conv_session or candidate_conv_session == source_session_id:
+        return None
+    if not candidate_member_id:
+        return None
+
+    return {
+        "conversation_session_id": candidate_conv_session,
+        "member_id": candidate_member_id,
+        "agent_profile_id": candidate_profile_id,
+        "display_name": candidate_display_name,
+        "optimistic_run_id": "",  # no frontend pre-reservation in this path
+    }
+
+
 def _mirror_member_chat_frame_if_registered(
     *,
     run_id: str,
@@ -1413,20 +1511,113 @@ def _mirror_member_chat_frame_if_registered(
     the team conversation session. Recurses into record_event so the mirrored
     frame goes through the full publish pipeline (broadcast + persist +
     participant stamping + terminal prune)."""
-    lookup = _db_method(db, "get_member_chat_run")
-    if not lookup:
-        return
-    try:
-        registration = lookup(run_id)
-    except Exception:
-        return
-    if not isinstance(registration, dict) or not registration:
-        return
-    conversation_session_id = str(registration.get("conversation_session_id") or "").strip()
+    source_payload = source_frame.get("payload")
+    source_payload = source_payload if isinstance(source_payload, dict) else {}
     source_session_id = str(
         source_frame.get("stored_session_id") or source_frame.get("session_id") or ""
     ).strip()
+    source_scope = str(
+        source_frame.get("runtime_scope_key")
+        or source_payload.get("runtime_scope_key")
+        or ""
+    ).strip()
+    source_team_mission = source_payload.get("team_mission")
+    source_team_mission = source_team_mission if isinstance(source_team_mission, dict) else {}
+    is_member_chat_candidate = (
+        source_session_id.startswith("memberchat:")
+        or source_scope.startswith("member-chat:")
+        or str(source_team_mission.get("kind") or "").strip() == "member_chat"
+    )
+    lookup = _db_method(db, "get_member_chat_run")
+    if not lookup:
+        if is_member_chat_candidate:
+            _diagnostic_warning(
+                "member-chat-diagnostic-mirror-no-lookup-method",
+                db=_db_label(db),
+                event_type=str(source_frame.get("type") or ""),
+                source_run_id=run_id,
+                source_session_id=source_session_id,
+                runtime_scope_key=source_scope,
+            )
+        return
+    try:
+        registration = lookup(run_id)
+    except Exception as exc:
+        if is_member_chat_candidate:
+            _diagnostic_warning(
+                "member-chat-diagnostic-mirror-lookup-error",
+                db=_db_label(db),
+                event_type=str(source_frame.get("type") or ""),
+                source_run_id=run_id,
+                source_session_id=source_session_id,
+                runtime_scope_key=source_scope,
+                error=str(exc),
+            )
+        return
+    if not isinstance(registration, dict) or not registration:
+        # ── P0 TEMPORARY band-aid (remove when P2 RunContext lands) ────
+        #
+        # The mirror table is missing this run_id (registration race lost,
+        # crashed before write, or worker spawned outside the gateway's
+        # registration path). Today this silently drops the frame and the
+        # user sees a blank @member reply page.
+        #
+        # Until P2 makes the memberchat:* session obsolete entirely, we
+        # synthesise a registration from the worker's payload IF it
+        # carries enough identity:
+        #   payload.team_mission.conversation_session_id +
+        #   payload.team_mission.member_id (or payload.member_id)
+        #
+        # The worker is the source of truth for "who am I" — it knows
+        # its own member_id and which conversation it was spawned for.
+        # Plumbing this through registration is overhead the new model
+        # will not need.
+        #
+        # Removal triggered by: tests/gateway/
+        #   test_conversation_unified_event_routing.py
+        # turning the @member-without-registration case GREEN via P2's
+        # direct conversation-session publishing. Keep this branch until
+        # that test no longer needs it (then delete this whole block).
+        registration = _synthesise_member_chat_registration_from_payload(
+            run_id=run_id,
+            source_payload=source_payload,
+            source_team_mission=source_team_mission,
+            source_session_id=source_session_id,
+            db=db,
+        )
+        if not registration:
+            if is_member_chat_candidate:
+                _diagnostic_warning(
+                    "member-chat-diagnostic-mirror-lookup-miss",
+                    db=_db_label(db),
+                    event_type=str(source_frame.get("type") or ""),
+                    source_run_id=run_id,
+                    source_session_id=source_session_id,
+                    runtime_scope_key=source_scope,
+                    source_seq=int(source_frame.get("seq") or 0),
+                )
+            return
+        _diagnostic_warning(
+            "member-chat-diagnostic-mirror-payload-fallback-hit",
+            db=_db_label(db),
+            event_type=str(source_frame.get("type") or ""),
+            source_run_id=run_id,
+            source_session_id=source_session_id,
+            conversation_session_id=registration.get("conversation_session_id"),
+            member_id=registration.get("member_id"),
+            runtime_scope_key=source_scope,
+        )
+    conversation_session_id = str(registration.get("conversation_session_id") or "").strip()
     if not conversation_session_id or conversation_session_id == source_session_id:
+        _diagnostic_warning(
+            "member-chat-diagnostic-mirror-skip-session",
+            db=_db_label(db),
+            event_type=str(source_frame.get("type") or ""),
+            source_run_id=run_id,
+            source_session_id=source_session_id,
+            conversation_session_id=conversation_session_id,
+            runtime_scope_key=source_scope,
+        )
         return
     member_id = str(registration.get("member_id") or "").strip()
     agent_profile_id = str(registration.get("agent_profile_id") or "").strip()
@@ -1437,8 +1628,20 @@ def _mirror_member_chat_frame_if_registered(
     # terminal frame mirrors in. Fall back to a namespaced id only when no
     # optimistic id was recorded (legacy registrations).
     relay_run_id = optimistic_run_id or f"member-chat:{run_id}"
-    source_payload = source_frame.get("payload")
-    source_payload = source_payload if isinstance(source_payload, dict) else {}
+    relay_scope_key = source_scope or f"member-chat:{member_id}"
+    _diagnostic_warning(
+        "member-chat-diagnostic-mirror-lookup-hit",
+        db=_db_label(db),
+        event_type=str(source_frame.get("type") or ""),
+        source_run_id=run_id,
+        relay_run_id=relay_run_id,
+        optimistic_run_id=optimistic_run_id,
+        source_session_id=source_session_id,
+        conversation_session_id=conversation_session_id,
+        runtime_scope_key=relay_scope_key,
+        member_id=member_id,
+        source_seq=int(source_frame.get("seq") or 0),
+    )
     member_identity = {
         "kind": "member_chat",
         "surface": "member_chat",
@@ -1451,8 +1654,10 @@ def _mirror_member_chat_frame_if_registered(
         **source_payload,
         "participant_id": member_id,
         "run_id": relay_run_id,
+        "runtime_scope_key": relay_scope_key,
         "source_run_id": run_id,
         "source_session_id": source_session_id,
+        "source_runtime_scope_key": source_scope,
         "source_seq": int(source_frame.get("seq") or 0),
         "team_mission": member_identity,
         "member_chat_conversation_mirror": True,
@@ -1470,14 +1675,14 @@ def _mirror_member_chat_frame_if_registered(
         "session_id": conversation_session_id,
         "run_id": relay_run_id,
         "turn_id": str(source_frame.get("turn_id") or f"member-turn:{run_id}"),
-        "runtime_scope_key": f"member-chat:{member_id}",
+        "runtime_scope_key": relay_scope_key,
         "participant_id": member_id,
         "payload": mirror_payload,
         # seq=0 → next_event_seq allocates in the conversation session's domain.
         "seq": 0,
     }
     try:
-        record_event(
+        delivered = record_event(
             mirror_frame,
             owner_transport=owner_transport,
             skip_owner_transport=skip_owner_transport,
@@ -1485,6 +1690,29 @@ def _mirror_member_chat_frame_if_registered(
         )
     except Exception:
         logger.warning("failed to mirror member-chat frame", exc_info=True)
+        _diagnostic_warning(
+            "member-chat-diagnostic-mirror-publish-error",
+            db=_db_label(db),
+            event_type=str(source_frame.get("type") or ""),
+            source_run_id=run_id,
+            relay_run_id=relay_run_id,
+            source_session_id=source_session_id,
+            conversation_session_id=conversation_session_id,
+            runtime_scope_key=relay_scope_key,
+        )
+    else:
+        _diagnostic_warning(
+            "member-chat-diagnostic-mirror-published",
+            db=_db_label(db),
+            event_type=str(source_frame.get("type") or ""),
+            source_run_id=run_id,
+            relay_run_id=relay_run_id,
+            optimistic_run_id=optimistic_run_id,
+            source_session_id=source_session_id,
+            conversation_session_id=conversation_session_id,
+            runtime_scope_key=relay_scope_key,
+            delivered_transport_count=len(delivered or []),
+        )
     # On the terminal frame, also persist the assistant message into the
     # conversation session's messages table so history rehydration shows the
     # member's reply (run_events are pruned over time; messages are durable).
@@ -1506,8 +1734,33 @@ def _mirror_member_chat_frame_if_registered(
                     content=reply_text,
                     metadata={"team_mission": member_identity},
                 )
+                _diagnostic_warning(
+                    "member-chat-diagnostic-assistant-message-persisted",
+                    db=_db_label(db),
+                    source_run_id=run_id,
+                    relay_run_id=relay_run_id,
+                    conversation_session_id=conversation_session_id,
+                    reply_len=len(reply_text),
+                )
             except Exception:
                 logger.warning("failed to persist member-chat assistant message", exc_info=True)
+                _diagnostic_warning(
+                    "member-chat-diagnostic-assistant-message-persist-error",
+                    db=_db_label(db),
+                    source_run_id=run_id,
+                    relay_run_id=relay_run_id,
+                    conversation_session_id=conversation_session_id,
+                    reply_len=len(reply_text),
+                )
+        else:
+            _diagnostic_warning(
+                "member-chat-diagnostic-assistant-message-empty",
+                db=_db_label(db),
+                source_run_id=run_id,
+                relay_run_id=relay_run_id,
+                conversation_session_id=conversation_session_id,
+                payload_keys=sorted(str(key) for key in source_payload.keys()),
+            )
 
 
 def publish_recorded_event(

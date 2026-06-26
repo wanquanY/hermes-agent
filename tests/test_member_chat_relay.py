@@ -45,19 +45,19 @@ def _conv_events(db: SessionDB):
     return out
 
 
-def _publish(db: SessionDB, *, seq: int, ev_type: str, payload):
-    record_event(
-        {
-            "type": ev_type,
-            "session_id": "member-sess",
-            "stored_session_id": "member-sess",
-            "run_id": "run-1",
-            "turn_id": "t1",
-            "seq": seq,
-            "payload": payload,
-        },
-        db=db,
-    )
+def _publish(db: SessionDB, *, seq: int, ev_type: str, payload, runtime_scope_key: str = ""):
+    frame = {
+        "type": ev_type,
+        "session_id": "member-sess",
+        "stored_session_id": "member-sess",
+        "run_id": "run-1",
+        "turn_id": "t1",
+        "seq": seq,
+        "payload": payload,
+    }
+    if runtime_scope_key:
+        frame["runtime_scope_key"] = runtime_scope_key
+    record_event(frame, db=db)
 
 
 # ── architecture: full frame-for-frame mirror (NOT terminal-only) ───
@@ -139,6 +139,29 @@ def test_mirror_stamps_optimistic_run_id_so_frontend_settles(tmp_path: Path):
     mirrored = _conv_events(db)
     assert mirrored, "no mirror produced"
     assert all(e["run_id"] == "team-leader-run-optimistic" for e in mirrored), [e["run_id"] for e in mirrored]
+
+
+def test_mirror_preserves_full_member_chat_runtime_scope_for_subscriptions(tmp_path: Path):
+    """The frontend subscribes to the full worker scope
+    member-chat:<conversation_id>:<member_id>. Mirrored conversation frames must
+    carry the same scope; shortening it to member-chat:<member_id> makes scoped
+    subscriptions drop every live frame."""
+    db = _setup(tmp_path, optimistic_run_id="team-member-run-optimistic")
+    full_scope = "member-chat:team-conversation-1:m1"
+
+    _publish(
+        db,
+        seq=1,
+        ev_type="message.delta",
+        payload={"delta": "你", "mode": "append", "runtime_scope_key": full_scope},
+        runtime_scope_key=full_scope,
+    )
+
+    mirrored = _conv_events(db)
+    assert mirrored
+    assert all(e["scope"] == full_scope for e in mirrored), [e["scope"] for e in mirrored]
+    assert all(e["payload"].get("runtime_scope_key") == full_scope for e in mirrored)
+    assert all(e["payload"].get("source_runtime_scope_key") == full_scope for e in mirrored)
 
 
 def test_mirror_falls_back_to_namespaced_id_when_no_optimistic(tmp_path: Path):

@@ -7,6 +7,16 @@ from .common import *
 _MEMBER_CHAT_RUN_PREFIX = "member-chat"
 
 
+def _member_chat_diagnostic(label: str, **fields) -> None:
+    try:
+        run_control._diagnostic_warning(  # noqa: SLF001
+            f"member-chat-diagnostic-{label}",
+            **fields,
+        )
+    except Exception:
+        pass
+
+
 def _target_member_id_from_params(params: dict) -> str:
     return str(params.get("target_member_id") or params.get("targetMemberId") or "").strip()
 
@@ -356,6 +366,43 @@ def _submit_message_to_member(
         display_name=display_name,
         optimistic_run_id=optimistic_run_id,
     )
+    _member_chat_diagnostic(
+        "register-written",
+        db=str(getattr(db, "db_path", "") or ""),
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        stored_session_id=stored_session_id,
+        worker_run_id=run_id,
+        optimistic_run_id=optimistic_run_id,
+        turn_id=turn_id,
+        member_scope=member_scope,
+        target_member_id=target_member_id,
+        agent_profile_id=agent_profile_id,
+    )
+    try:
+        worker_registration = db.get_member_chat_run(run_id) if hasattr(db, "get_member_chat_run") else {}
+    except Exception as exc:
+        worker_registration = {"_read_error": str(exc)}
+    try:
+        optimistic_registration = (
+            db.find_member_chat_run_by_optimistic_run_id(optimistic_run_id)
+            if optimistic_run_id and hasattr(db, "find_member_chat_run_by_optimistic_run_id")
+            else {}
+        )
+    except Exception as exc:
+        optimistic_registration = {"_read_error": str(exc)}
+    _member_chat_diagnostic(
+        "register-readback",
+        db=str(getattr(db, "db_path", "") or ""),
+        worker_run_id=run_id,
+        optimistic_run_id=optimistic_run_id,
+        worker_lookup_found=bool(worker_registration and not worker_registration.get("_read_error")),
+        optimistic_lookup_found=bool(optimistic_registration and not optimistic_registration.get("_read_error")),
+        worker_lookup_session=str((worker_registration or {}).get("conversation_session_id") or ""),
+        optimistic_lookup_worker_run_id=str((optimistic_registration or {}).get("run_id") or ""),
+        worker_lookup_error=str((worker_registration or {}).get("_read_error") or ""),
+        optimistic_lookup_error=str((optimistic_registration or {}).get("_read_error") or ""),
+    )
 
     # 5. run.submit with CLEAN member params only — NOT {**params} (which carries
     #    the frontend's leader scope/profile and breaks the worker spawn).
@@ -396,6 +443,19 @@ def _submit_message_to_member(
     # the member's SOUL.md / memories / skills never loaded and every member
     # answered with the default "Hermes Agent" persona.
     proxied = _proxy_run_submit_via_worker(submit_params)
+    _member_chat_diagnostic(
+        "worker-dispatch-returned",
+        db=str(getattr(db, "db_path", "") or ""),
+        conversation_session_id=conversation_session_id,
+        stored_session_id=stored_session_id,
+        worker_run_id=run_id,
+        optimistic_run_id=optimistic_run_id,
+        turn_id=turn_id,
+        member_scope=member_scope,
+        proxied_ok=bool(proxied.get("ok")),
+        proxied_error=str(proxied.get("error") or ""),
+        proxied_reason=str(proxied.get("reason") or ""),
+    )
     if proxied.get("error"):
         return _err(rid, 5020, proxied["error"])
     if not proxied.get("ok"):
@@ -415,13 +475,37 @@ def _submit_message_to_member(
     # Dispatched async via the proxy path — synthesize a turn descriptor that
     # matches what the in-process path used to return (run_id, turn_id, etc.)
     # so the frontend's optimistic UI has the same payload shape.
+    conversation_run_id = optimistic_run_id or f"{_MEMBER_CHAT_RUN_PREFIX}:{run_id}"
     member_turn = {
-        "run_id": run_id,
+        # Conversation-side identity: this is the run id that mirrored frames
+        # use on the team conversation session. The worker run id remains an
+        # internal execution detail carried separately for diagnostics/cancel
+        # routing via member_chat_runs.
+        "run_id": conversation_run_id,
+        "worker_run_id": run_id,
+        "source_run_id": run_id,
         "turn_id": turn_id,
-        "stored_session_id": stored_session_id,
+        "stored_session_id": conversation_session_id,
+        "session_id": conversation_session_id,
+        "worker_stored_session_id": stored_session_id,
         "runtime_scope_key": member_scope,
         "status": "streaming",
     }
+    _member_chat_diagnostic(
+        "submit-return",
+        db=str(getattr(db, "db_path", "") or ""),
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        stored_session_id=stored_session_id,
+        worker_run_id=run_id,
+        optimistic_run_id=optimistic_run_id,
+        turn_id=turn_id,
+        member_scope=member_scope,
+        returned_leader_turn_run_id=str(member_turn.get("run_id") or ""),
+        returned_worker_run_id=str(member_turn.get("worker_run_id") or ""),
+        returned_leader_turn_session_id=str(member_turn.get("stored_session_id") or ""),
+        returned_worker_session_id=str(member_turn.get("worker_stored_session_id") or ""),
+    )
     # Use the conversation we just ensured (guaranteed to carry canonical
     # fields). For graph, fall back to the read model — it may be empty for
     # a brand-new conv with no mission, but that's fine: the frontend
@@ -1336,6 +1420,18 @@ def _(rid, params: dict) -> dict:
         if optimistic_run_id else {}
     )
     is_group_chat = bool(member_chat_run)
+    _member_chat_diagnostic(
+        "recall-lookup",
+        db=str(getattr(db, "db_path", "") or ""),
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        optimistic_run_id=optimistic_run_id,
+        turn_id=turn_id,
+        member_chat_run_found=is_group_chat,
+        worker_run_id=str((member_chat_run or {}).get("run_id") or ""),
+        member_id=str((member_chat_run or {}).get("member_id") or ""),
+        registered_conversation_session_id=str((member_chat_run or {}).get("conversation_session_id") or ""),
+    )
 
     # Mission identity (only meaningful for B; ignored for A/C).
     resolved_mission = {}
@@ -1396,6 +1492,16 @@ def _(rid, params: dict) -> dict:
             worker_session_id = _member_chat_session_id(conversation_id, member_id)
         else:
             worker_session_id = worker_stored_session_id
+        _member_chat_diagnostic(
+            "recall-worker-cancel-target",
+            db=str(getattr(db, "db_path", "") or ""),
+            conversation_id=conversation_id,
+            conversation_session_id=conversation_session_id,
+            optimistic_run_id=optimistic_run_id,
+            worker_run_id=worker_run_id,
+            worker_session_id=worker_session_id,
+            member_id=member_id,
+        )
         if worker_run_id and worker_session_id:
             try:
                 cancel_resp = _methods["run.cancel"](rid, {
