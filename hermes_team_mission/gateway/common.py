@@ -111,6 +111,43 @@ def _attach_team_detail_projection(db, result: dict) -> dict:
 
 
 def _conversation_title_from_submit(db, params: dict, text: str) -> str:
+    # PRESERVE-FIRST-MESSAGE-TITLE (2026-06-27): if this conversation
+    # already carries a real (non-placeholder) title — i.e. the FIRST user
+    # message of the conversation was already used — return '' so the
+    # downstream ensure_team_mission_conversation upsert does NOT overwrite
+    # it. Empty incoming title means "no change" to the existing title
+    # column in upsert_team_mission_conversation's COALESCE-style merge.
+    #
+    # Symptom of NOT having this guard: @member sends "滴滴滴滴" → title is
+    # set. User then types "你好" to leader → title gets overwritten to
+    # "你好". Then some downstream ensure call (mission resolve path) sets
+    # title back to "Team Mission" placeholder. User-visible title bounces
+    # away from the original first message.
+    try:
+        _conv_id = str(params.get("conversation_id") or params.get("conversationId") or "").strip()
+        _conv_session = str(params.get("conversation_session_id") or params.get("conversationSessionId") or "").strip()
+        _existing_row: dict = {}
+        if _conv_id and hasattr(db, "get_team_mission_conversation"):
+            _existing_row = db.get_team_mission_conversation(_conv_id) or {}
+        if not _existing_row and _conv_session and hasattr(db, "get_team_mission_conversation_by_session"):
+            _existing_row = db.get_team_mission_conversation_by_session(_conv_session) or {}
+        if isinstance(_existing_row, dict):
+            _existing_title = str(_existing_row.get("title") or "").strip()
+            if _existing_title and not _is_placeholder_team_mission_conversation_title(_existing_title):
+                # Real first-message title is already locked in. Returning
+                # '' tells ensure_team_mission_conversation NOT to update
+                # the title column on this submit.
+                print(
+                    f"[member-leader-history-debug] title_from_submit "
+                    f"PRESERVE existing='{_existing_title[:60]}' "
+                    f"would_have_computed_from='{(text or '')[:40]}' "
+                    f"conv_id={_conv_id}"
+                )
+                return ""
+    except Exception as _diag_exc:
+        # Don't let title-preservation logic block submit on a query error.
+        print(f"[member-leader-history-debug] title_from_submit preserve-check error: {_diag_exc}")
+
     message_title = str(
         params.get("persist_user_message")
         or params.get("persistUserMessage")
@@ -121,11 +158,53 @@ def _conversation_title_from_submit(db, params: dict, text: str) -> str:
     ).strip()
     message_title = " ".join(message_title.split())
     if not message_title:
+        # ── DIAGNOSTIC: title computation result ────────────────────
+        try:
+            _conv_id = str(params.get("conversation_id") or params.get("conversationId") or "").strip()
+            _conv_session = str(params.get("conversation_session_id") or params.get("conversationSessionId") or "").strip()
+            _target = str(params.get("target_member_id") or params.get("targetMemberId") or "").strip()
+            print(f"[member-leader-history-debug] title_from_submit return='' (no message_title) conv_id={_conv_id} conv_session={_conv_session} target_member={_target}")
+        except Exception:
+            pass
         return ""
     try:
-        return db.sanitize_title(message_title[:100].rstrip()) or ""
+        computed = db.sanitize_title(message_title[:100].rstrip()) or ""
     except Exception:
-        return ""
+        computed = ""
+    # ── DIAGNOSTIC: title computation result + existing title in DB ──────
+    # This is THE function the user reported as buggy: it returns a title
+    # built from the CURRENT message text every time, with no "only first
+    # message" gate. Combined with ensure_team_mission_conversation upsert
+    # that runs on EVERY submit (member AND leader), the conv's title gets
+    # overwritten by whatever message was just sent.
+    try:
+        _conv_id = str(params.get("conversation_id") or params.get("conversationId") or "").strip()
+        _conv_session = str(params.get("conversation_session_id") or params.get("conversationSessionId") or "").strip()
+        _target = str(params.get("target_member_id") or params.get("targetMemberId") or "").strip()
+        _path = "member" if _target else "leader"
+        # Query existing conv title so we can SEE the overwrite in the log
+        _existing_title = ""
+        try:
+            if _conv_id and hasattr(db, "get_team_mission_conversation"):
+                _row = db.get_team_mission_conversation(_conv_id)
+                if isinstance(_row, dict):
+                    _existing_title = str(_row.get("title") or "").strip()
+            elif _conv_session and hasattr(db, "get_team_mission_conversation_by_session"):
+                _row = db.get_team_mission_conversation_by_session(_conv_session)
+                if isinstance(_row, dict):
+                    _existing_title = str(_row.get("title") or "").strip()
+        except Exception:
+            _existing_title = "<lookup-error>"
+        _will_overwrite = bool(_existing_title) and _existing_title != computed and bool(computed)
+        print(
+            f"[member-leader-history-debug] title_from_submit path={_path} "
+            f"computed='{computed[:60]}' existing='{_existing_title[:60]}' "
+            f"will_overwrite_existing={_will_overwrite} "
+            f"conv_id={_conv_id} conv_session={_conv_session} target_member={_target}"
+        )
+    except Exception:
+        pass
+    return computed
 
 
 def _ensure_team_mission_runtime_session_shell(stable_session_id: str) -> str:

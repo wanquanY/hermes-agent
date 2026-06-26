@@ -261,45 +261,25 @@ def _submit_message_to_member(
         or ""
     ).strip()
 
-    # 1. Record the user's @-message into the shared conversation transcript.
-    try:
-        db.append_message(
-            conversation_session_id,
-            role="user",
-            content=text,
-            metadata={"team_mission": {
-                "kind": "member_chat_user",
-                "target_member_id": target_member_id,
-                "conversation_session_id": conversation_session_id,
-                "display_name": display_name,
-            }},
-        )
-    except Exception:
-        pass
+    # STEP ORDER FIX (2026-06-27): The original code did
+    #   1. append_message(conv_session, role=user, ...)   ← FK FAIL: conv session row doesn't exist yet
+    #   2. create memberchat worker session
+    #   3. sync_member_chat_conversation_view
+    #   4. ensure_team_mission_conversation  ← THIS creates the conv session row in sessions table
+    #
+    # The user's @-mention message silently vanished because step 1 hit a
+    # FOREIGN KEY constraint (conv session_id wasn't in sessions table yet)
+    # and the except/pass swallowed it. Once leader subsequently sent a
+    # message, the conv was correctly seeded (leader path ensures conv
+    # before appending) and the leader transcript persisted — but the
+    # @member exchange was already lost. From the user's perspective:
+    # "@member 那一轮历史消失了".
+    #
+    # Fix: ensure the conv session row exists FIRST (workspace resolve +
+    # ensure_team_mission_conversation), THEN append the user message.
 
-    # 2. The member's runtime session (plain; never projected to session_index →
-    #    never in the sidebar; never a team conversation).
+    # 1. Resolve workspace context (needed by ensure_team_mission_conversation).
     stored_session_id = _member_chat_session_id(conversation_id, target_member_id)
-    if not db.get_session(stored_session_id):
-        db.create_session(stored_session_id, source="team_mission_member_chat", transient=False)
-
-    # 3. Materialize the team conversation as STRUCTURED chat history on the
-    #    member's session — not as a text transcript inlined into the prompt.
-    #    The worker hydrates this session's messages as its conversation
-    #    context; other participants' turns are tagged as observed user-side
-    #    speech ("[<speaker>] ..."), and the member's own past replies stay
-    #    as assistant turns. This way the LLM answers with its OWN SOUL.md
-    #    persona instead of mimicking the wording of past assistant turns
-    #    it sees in the transcript (which is what made every member answer
-    #    "I am Hermes Agent" when the prompt was stringly-injected).
-    try:
-        db.sync_member_chat_conversation_view(
-            conversation_session_id=conversation_session_id,
-            member_chat_session_id=stored_session_id,
-            member_id=target_member_id,
-        )
-    except Exception:
-        pass
     try:
         workspace_context = resolve_team_mission_workspace_context(
             params,
@@ -309,17 +289,10 @@ def _submit_message_to_member(
         )
     except ValueError as exc:
         return _err(rid, 4004, str(exc))
-    runtime_session_error = _ensure_team_mission_runtime_session_shell(stored_session_id)
-    if runtime_session_error:
-        return _err(rid, 5008, runtime_session_error)
 
-    # 3b. Ensure the team conversation row exists (mirrors leader path). The
-    # frontend's view-model insists on canonical {conversation_id,
-    # stable_session_id, team_id, title} in the response; on a brand-new
-    # conv whose FIRST message goes to a @-member, the row hasn't been
-    # created yet (only leader path used to do this), resolve returns {},
-    # and the electron adapter's canonicalConversationPayload throws "did
-    # not return canonical conversation id".
+    # 2. Ensure the team conversation row exists (creates conv session row in
+    # sessions table so subsequent append_message FK is satisfied). MUST run
+    # before any append_message(conversation_session_id, ...) call.
     conversation_title = _conversation_title_from_submit(db, params, text)
     team_id_for_ensure = str(
         params.get("team_id") or params.get("teamId")
@@ -342,6 +315,73 @@ def _submit_message_to_member(
         )
     except Exception as exc:
         return _err(rid, 5008, f"team conversation session unavailable: {exc}")
+
+    # 3. NOW it is safe to record the user's @-message into the shared
+    # conversation transcript. The conv session row exists, FK satisfied.
+    # ── DIAGNOSTIC: count messages BEFORE/AFTER this append so we can SEE
+    #    whether the user's @-message actually lands and persists.
+    _diag_before = 0
+    try:
+        _msgs = db.get_messages(conversation_session_id) if hasattr(db, "get_messages") else []
+        _diag_before = len(_msgs) if isinstance(_msgs, list) else 0
+    except Exception:
+        _diag_before = -1
+    _append_ok = False
+    _append_err = ""
+    try:
+        db.append_message(
+            conversation_session_id,
+            role="user",
+            content=text,
+            metadata={"team_mission": {
+                "kind": "member_chat_user",
+                "target_member_id": target_member_id,
+                "conversation_session_id": conversation_session_id,
+                "display_name": display_name,
+            }},
+        )
+        _append_ok = True
+    except Exception as _exc:
+        _append_err = str(_exc)
+    _diag_after = 0
+    try:
+        _msgs2 = db.get_messages(conversation_session_id) if hasattr(db, "get_messages") else []
+        _diag_after = len(_msgs2) if isinstance(_msgs2, list) else 0
+    except Exception:
+        _diag_after = -1
+    print(
+        f"[member-leader-history-debug] member_submit append_user_message "
+        f"conv_session={conversation_session_id} target_member={target_member_id} "
+        f"text_preview='{text[:40]}' append_ok={_append_ok} "
+        f"before_count={_diag_before} after_count={_diag_after} "
+        f"err='{_append_err[:80]}'"
+    )
+
+    # 4. Create the member's runtime session (plain; never projected to
+    # session_index → never in the sidebar; never a team conversation).
+    if not db.get_session(stored_session_id):
+        db.create_session(stored_session_id, source="team_mission_member_chat", transient=False)
+
+    # 5. Materialize the team conversation as STRUCTURED chat history on the
+    #    member's session — not as a text transcript inlined into the prompt.
+    #    The worker hydrates this session's messages as its conversation
+    #    context; other participants' turns are tagged as observed user-side
+    #    speech ("[<speaker>] ..."), and the member's own past replies stay
+    #    as assistant turns. This way the LLM answers with its OWN SOUL.md
+    #    persona instead of mimicking the wording of past assistant turns
+    #    it sees in the transcript (which is what made every member answer
+    #    "I am Hermes Agent" when the prompt was stringly-injected).
+    try:
+        db.sync_member_chat_conversation_view(
+            conversation_session_id=conversation_session_id,
+            member_chat_session_id=stored_session_id,
+            member_id=target_member_id,
+        )
+    except Exception:
+        pass
+    runtime_session_error = _ensure_team_mission_runtime_session_shell(stored_session_id)
+    if runtime_session_error:
+        return _err(rid, 5008, runtime_session_error)
     if not isinstance(ensured_conversation, dict):
         ensured_conversation = {}
 
@@ -637,6 +677,36 @@ def _(rid, params: dict) -> dict:
             session_id=conversation_session_id,
             require=True,
         )
+        # ── DIAGNOSTIC: leader submit entering ensure_team_mission_conversation
+        # This is THE path where leader replies overwrite the conv title
+        # set by the first @member message. Count messages too so we can
+        # see if anything happens to the transcript across this call.
+        try:
+            _diag_msgs = db.get_messages(conversation_session_id) if hasattr(db, "get_messages") else []
+            _diag_count = len(_diag_msgs) if isinstance(_diag_msgs, list) else 0
+            print(
+                f"[member-leader-history-debug] leader_submit pre-ensure "
+                f"conv_session={conversation_session_id} "
+                f"text_preview='{text[:40]}' messages_in_transcript={_diag_count}"
+            )
+            if isinstance(_diag_msgs, list) and _diag_count > 0:
+                for _i, _m in enumerate(_diag_msgs[:6]):
+                    _role = str(_m.get("role") or "")
+                    _c = str(_m.get("content") or "")[:40]
+                    _meta = _m.get("metadata") or {}
+                    _kind = ""
+                    if isinstance(_meta, str):
+                        try:
+                            _meta = json.loads(_meta)
+                        except Exception:
+                            _meta = {}
+                    if isinstance(_meta, dict):
+                        _tm = _meta.get("team_mission") or {}
+                        if isinstance(_tm, dict):
+                            _kind = str(_tm.get("kind") or "")
+                    print(f"[member-leader-history-debug]   transcript[{_i}] role={_role} kind={_kind} content='{_c}'")
+        except Exception as _diag_exc:
+            print(f"[member-leader-history-debug] leader_submit pre-ensure diag-error: {_diag_exc}")
         conversation_title = _conversation_title_from_submit(db, params, text)
         conversation = db.ensure_team_mission_conversation(
             conversation_id=conversation_id,

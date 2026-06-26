@@ -444,6 +444,32 @@ class SessionDBTeamMissionConversationMixin:
         merged_metadata["conversation_id"] = resolved_conversation_id
         merged_metadata["conversation_session_id"] = resolved_stable_session_id
         merged_metadata["stableTeamSessionId"] = resolved_stable_session_id
+        # ── DIAGNOSTIC: ensure_team_mission_conversation entry ──────────
+        # Snapshot the existing row BEFORE upsert so we can see exactly
+        # what the upsert changed (title field is the primary suspect).
+        try:
+            _before = self.get_team_mission_conversation(resolved_conversation_id) if resolved_conversation_id else None
+            _before = _before if isinstance(_before, dict) else {}
+            _before_title = str(_before.get("title") or "").strip()
+            _before_msg_count = 0
+            try:
+                if resolved_stable_session_id:
+                    _msgs = self.get_messages(resolved_stable_session_id) if hasattr(self, "get_messages") else []
+                    _before_msg_count = len(_msgs) if isinstance(_msgs, list) else 0
+            except Exception:
+                _before_msg_count = -1
+            _incoming_title = _text(title)
+            _will_change_title = bool(_incoming_title) and _incoming_title != _before_title
+            print(
+                f"[member-leader-history-debug] ensure_conv conv_id={resolved_conversation_id} "
+                f"session={resolved_stable_session_id} "
+                f"incoming_title='{_incoming_title[:60]}' "
+                f"before_title='{_before_title[:60]}' "
+                f"will_change_title={_will_change_title} "
+                f"before_message_count={_before_msg_count}"
+            )
+        except Exception as _diag_exc:
+            print(f"[member-leader-history-debug] ensure_conv diag-error: {_diag_exc}")
         conversation = self.upsert_team_mission_conversation(
             conversation_id=resolved_conversation_id,
             team_id=_text(team_id or mission.get("team_id")),
@@ -459,6 +485,26 @@ class SessionDBTeamMissionConversationMixin:
             metadata=merged_metadata,
             touch=touch,
         )
+        # ── DIAGNOSTIC: ensure_team_mission_conversation result ─────────
+        try:
+            _final_title = ""
+            _msg_count_after = 0
+            if isinstance(conversation, dict):
+                _final_title = str(conversation.get("title") or "").strip()
+            try:
+                if resolved_stable_session_id:
+                    _msgs2 = self.get_messages(resolved_stable_session_id) if hasattr(self, "get_messages") else []
+                    _msg_count_after = len(_msgs2) if isinstance(_msgs2, list) else 0
+            except Exception:
+                _msg_count_after = -1
+            print(
+                f"[member-leader-history-debug] ensure_conv DONE conv_id={resolved_conversation_id} "
+                f"session={resolved_stable_session_id} "
+                f"final_title='{_final_title[:60]}' "
+                f"after_message_count={_msg_count_after}"
+            )
+        except Exception as _diag_exc:
+            print(f"[member-leader-history-debug] ensure_conv DONE diag-error: {_diag_exc}")
         if resolved_mission_id:
             def _bind(conn: sqlite3.Connection) -> None:
                 conn.execute(

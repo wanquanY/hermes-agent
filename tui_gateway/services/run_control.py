@@ -1727,12 +1727,36 @@ def _mirror_member_chat_frame_if_registered(
                 reply_text = str(value).strip()
                 break
         if reply_text:
+            # ── DIAGNOSTIC: count BEFORE/AFTER so we can SEE the assistant
+            #    message actually landing in the conv messages table.
+            _diag_before = -1
+            try:
+                getter = _db_method(db, "get_messages")
+                if getter:
+                    _diag_msgs = getter(conversation_session_id)
+                    _diag_before = len(_diag_msgs) if isinstance(_diag_msgs, list) else -1
+            except Exception:
+                _diag_before = -1
             try:
                 appender(
                     conversation_session_id,
                     role="assistant",
                     content=reply_text,
                     metadata={"team_mission": member_identity},
+                )
+                _diag_after = -1
+                try:
+                    getter = _db_method(db, "get_messages")
+                    if getter:
+                        _diag_msgs2 = getter(conversation_session_id)
+                        _diag_after = len(_diag_msgs2) if isinstance(_diag_msgs2, list) else -1
+                except Exception:
+                    _diag_after = -1
+                print(
+                    f"[member-leader-history-debug] mirror_append_assistant "
+                    f"conv_session={conversation_session_id} "
+                    f"reply_preview='{reply_text[:40]}' "
+                    f"before_count={_diag_before} after_count={_diag_after}"
                 )
                 _diagnostic_warning(
                     "member-chat-diagnostic-assistant-message-persisted",

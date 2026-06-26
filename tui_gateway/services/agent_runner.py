@@ -233,7 +233,55 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
                 frame.stored_session_id, exc_info=True,
             )
             full_history = []
+        # ── DIAGNOSTIC: what the WORKER actually sees as conversation history.
+        # If user reports "leader 看不到之前 @成员的对话", this is the
+        # exact read that fails to surface it. Logs each history row's
+        # role + a content preview + any team_mission.kind metadata so
+        # we can tell which turns made it across.
+        try:
+            print(
+                f"[member-leader-history-debug] worker_hydrate "
+                f"stored_session={frame.stored_session_id} "
+                f"runtime_scope={getattr(frame, 'runtime_scope_key', '') or ''} "
+                f"history_full_count={len(full_history)}"
+            )
+            for _i, _row in enumerate(full_history[:10]):
+                _role = str(_row.get("role") or "")
+                _content_preview = str(_row.get("content") or "")[:40].replace("\n", "\\n")
+                _meta = _row.get("metadata") or {}
+                _kind = ""
+                _participant_id = ""
+                _member_id = ""
+                if isinstance(_meta, str):
+                    try:
+                        import json as _json
+                        _meta = _json.loads(_meta)
+                    except Exception:
+                        _meta = {}
+                if isinstance(_meta, dict):
+                    _tm = _meta.get("team_mission") or {}
+                    if isinstance(_tm, dict):
+                        _kind = str(_tm.get("kind") or "")
+                        _member_id = str(_tm.get("member_id") or _tm.get("target_member_id") or "")
+                    _participant_id = str(_meta.get("participant_id") or "")
+                print(
+                    f"[member-leader-history-debug]   history[{_i}] role={_role} "
+                    f"kind={_kind} member_id={_member_id} participant={_participant_id} "
+                    f"content='{_content_preview}'"
+                )
+        except Exception as _diag_exc:
+            print(f"[member-leader-history-debug] worker_hydrate diag-error: {_diag_exc}")
         session_record["history"] = _trim_history_to_window(full_history)
+        # ── DIAGNOSTIC: after the 40-msg window trim, what does the LLM see ──
+        try:
+            _trimmed = session_record["history"]
+            print(
+                f"[member-leader-history-debug] worker_hydrate_after_trim "
+                f"stored_session={frame.stored_session_id} "
+                f"trimmed_count={len(_trimmed)}"
+            )
+        except Exception:
+            pass
 
     with _server._sessions_lock:
         _server._sessions[runtime_sid] = session_record
