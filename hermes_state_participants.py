@@ -172,6 +172,45 @@ class SessionDBParticipantMixin:
         return self._participant_row_to_dict(row) if row else {}
 
     # ── resolver (keystone: run → participant) ───────────────────────
+    def resolve_participant_id(
+        self,
+        *,
+        conversation_session_id: str,
+        agent_profile_id: str = "",
+        member_id: str = "",
+        runtime_scope_key: str = "",
+    ) -> str:
+        """Resolve a participant by the authoritative conversation roster.
+
+        Empty string is a legitimate lookup miss. Callers must keep legacy
+        speaker fallback available and must not silently substitute leader.
+        """
+        conversation_session_id = _text(conversation_session_id)
+        if not conversation_session_id:
+            return ""
+        member_id = _text(member_id)
+        agent_profile_id = _text(agent_profile_id)
+        runtime_scope_key = _text(runtime_scope_key)
+        if member_id:
+            return self._conversation_participant_id_for_predicate(
+                conversation_session_id,
+                "role IN ('member', 'leader') AND member_id = ?",
+                (member_id,),
+            )
+        if agent_profile_id:
+            return self._conversation_participant_id_for_predicate(
+                conversation_session_id,
+                "agent_profile_id = ?",
+                (agent_profile_id,),
+            )
+        if runtime_scope_key:
+            return self._conversation_participant_id_for_predicate(
+                conversation_session_id,
+                "runtime_scope_key = ?",
+                (runtime_scope_key,),
+            )
+        return ""
+
     def resolve_participant_id_for_run(
         self,
         conversation_session_id: str,
@@ -182,40 +221,42 @@ class SessionDBParticipantMixin:
     ) -> str:
         """Map a run's identity hints to a participant_id within a conversation.
 
-        Priority, most-specific first: explicit member_id, then the runtime
-        scope key (uniquely identifies a running participant), then the agent
-        profile id (UNIQUE(team_id, agent_profile_id) makes this unambiguous
-        within a team). Returns '' when nothing matches — the caller decides
-        the fallback (leader for team rooms, the lone agent for 1:1).
+        Kept for older callers; PR-B's authoritative lookup is
+        ``resolve_participant_id``.
         """
-        conversation_session_id = _text(conversation_session_id)
-        if not conversation_session_id:
-            return ""
-        member_id = _text(member_id)
-        runtime_scope_key = _text(runtime_scope_key)
-        agent_profile_id = _text(agent_profile_id)
-        participants = self.list_conversation_participants(conversation_session_id)
-        if not participants:
-            return ""
-        if member_id:
-            for p in participants:
-                if p.get("member_id") and p["member_id"] == member_id:
-                    return p["participant_id"]
-            # member_id may itself be the participant_id
-            for p in participants:
-                if p["participant_id"] == member_id:
-                    return p["participant_id"]
-        if runtime_scope_key:
-            for p in participants:
-                if p.get("runtime_scope_key") and p["runtime_scope_key"] == runtime_scope_key:
-                    return p["participant_id"]
-        if agent_profile_id:
-            for p in participants:
-                if p.get("agent_profile_id") and p["agent_profile_id"] == agent_profile_id:
-                    return p["participant_id"]
-        return ""
+        return self.resolve_participant_id(
+            conversation_session_id=conversation_session_id,
+            agent_profile_id=agent_profile_id,
+            member_id=member_id,
+            runtime_scope_key=runtime_scope_key,
+        )
 
     # ── helpers ──────────────────────────────────────────────────────
+    def _conversation_participant_id_for_predicate(
+        self,
+        conversation_session_id: str,
+        where_sql: str,
+        values: tuple[str, ...],
+    ) -> str:
+        with self._lock:  # type: ignore[attr-defined]
+            row = self._conn.execute(  # type: ignore[attr-defined]
+                f"""
+                SELECT participant_id
+                FROM conversation_participants
+                WHERE conversation_session_id = ?
+                  AND {where_sql}
+                ORDER BY
+                    role = 'member' DESC,
+                    role = 'leader' DESC,
+                    role = 'agent' DESC,
+                    role = 'user' DESC,
+                    created_at ASC
+                LIMIT 1
+                """,
+                (conversation_session_id, *values),
+            ).fetchone()
+        return _text(row["participant_id"] if row else "")
+
     @staticmethod
     def _participant_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         metadata: Dict[str, Any] = {}
