@@ -130,10 +130,11 @@ class SessionDBTeamMissionConversationMixin:
     def _project_team_conversation_to_session_index(self, record: Dict[str, Any]) -> None:
         """Surface a team-mission conversation in the control-plane session_index.
 
-        ON CONFLICT updates only the static/team fields — never the live status
-        projection (that is owned by update_session_index_for_mission, driven by
-        the graph reducer). Keyed by the conversation's stable session id; carries
-        mission_id so mission-status updates can target it. Best-effort."""
+        ON CONFLICT updates static/team fields plus the conversation-level running
+        boolean, whose source is conversation_missions any-active. Detailed live
+        status/run fields remain owned by update_session_index_for_mission. Keyed
+        by the conversation's stable session id; carries mission_id so mission
+        status updates can target it. Best-effort."""
         if not record:
             return
         sid = _text(record.get("stable_session_id")) or _text(record.get("conversation_id"))
@@ -143,6 +144,7 @@ class SessionDBTeamMissionConversationMixin:
         team_id = _text(record.get("team_id"))
         conversation_id = _text(record.get("conversation_id"))
         mission_id = _text(record.get("active_mission_id"))
+        running = self.has_active_mission(conversation_id)
         message_count = int(record.get("message_count") or 0)
         started = float(record.get("created_at") or 0)
         updated = float(record.get("updated_at") or 0) or started
@@ -152,8 +154,8 @@ class SessionDBTeamMissionConversationMixin:
                 """
                 INSERT INTO session_index (
                     session_id, title, source, session_kind, team_id,
-                    conversation_id, mission_id, message_count, started_at, updated_at
-                ) VALUES (?, ?, 'team_mission', 'team_mission', ?, ?, ?, ?, ?, ?)
+                    conversation_id, mission_id, running, message_count, started_at, updated_at
+                ) VALUES (?, ?, 'team_mission', 'team_mission', ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     title=excluded.title,
                     source=excluded.source,
@@ -161,10 +163,21 @@ class SessionDBTeamMissionConversationMixin:
                     team_id=excluded.team_id,
                     conversation_id=excluded.conversation_id,
                     mission_id=excluded.mission_id,
+                    running=excluded.running,
                     message_count=excluded.message_count,
                     updated_at=excluded.updated_at
                 """,
-                (sid, title, team_id, conversation_id, mission_id, message_count, started, updated),
+                (
+                    sid,
+                    title,
+                    team_id,
+                    conversation_id,
+                    mission_id,
+                    1 if running else 0,
+                    message_count,
+                    started,
+                    updated,
+                ),
             )
 
         try:
@@ -668,12 +681,33 @@ class SessionDBTeamMissionConversationMixin:
                 """,
                 (*params, bounded_limit),
             ).fetchall()
-        return [
+        conversations = [
             conversation for conversation in (
                 self._team_mission_conversation_from_row(row)
                 for row in rows
             ) if conversation is not None
         ]
+        conversation_ids = [_text(item.get("conversation_id")) for item in conversations if _text(item.get("conversation_id"))]
+        active_conversation_ids: set[str] = set()
+        if conversation_ids:
+            placeholders = ",".join("?" for _ in conversation_ids)
+            with self._lock:
+                active_conversation_ids = {
+                    _text(_row_value(row, "conversation_id", ""))
+                    for row in self._conn.execute(
+                        f"""
+                        SELECT DISTINCT conversation_id
+                        FROM conversation_missions
+                        WHERE status = 'active'
+                          AND conversation_id IN ({placeholders})
+                        """,
+                        tuple(conversation_ids),
+                    ).fetchall()
+                    if _text(_row_value(row, "conversation_id", ""))
+                }
+        for conversation in conversations:
+            conversation["running"] = _text(conversation.get("conversation_id")) in active_conversation_ids
+        return conversations
 
     def list_team_mission_conversation_runtime_session_ids(
         self,
@@ -1362,6 +1396,7 @@ class SessionDBTeamMissionConversationMixin:
             if isinstance(item, dict)
         ]
         mission_status = _text(summary.get("mission_status"))
+        has_active_mission = self.has_active_mission(conversation_id)
         # Resolve the run state from the ACTIVE MISSION's real status. Never fall
         # back to conversation.get("status") — that is the conversation lifecycle
         # state ('active' = not archived), NOT a run state, and treating it as
@@ -1381,17 +1416,10 @@ class SessionDBTeamMissionConversationMixin:
         active_node_count = int(summary.get("active_node_count") or 0)
         if active_node_run and active_node_count <= 0:
             active_node_count = 1
-        terminal = mission_status in _TERMINAL_MISSION_STATUSES
-        # A terminal mission's conversation is NEVER running — ignore any lingering
-        # active_run / active_node_run / stale active node count (those are zombies
-        # from a worker that didn't get to emit its terminal event). This is the
-        # robust source of truth and does not depend on a fresh graph reduce.
-        running = (not terminal) and (
-            bool(active_run)
-            or bool(active_node_run)
-            or active_node_count > 0
-            or mission_status in _RUNNING_MISSION_STATUSES
-        )
+        # A conversation is running when any conversation_missions row is active.
+        # Run/node facts below still supply details, but they no longer decide the
+        # conversation-level boolean; one conversation can own multiple missions.
+        running = has_active_mission
         waiting_approval = bool(pending_approvals) or mission_status == "waiting_approval"
         projected_state = "waiting_approval" if waiting_approval else "running" if running else (
             "completed" if mission_status == "completed"

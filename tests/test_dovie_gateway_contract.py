@@ -523,6 +523,7 @@ def test_conversation_render_snapshot_returns_active_team_structural_runtime_eve
             stable_session_id="team-session-1",
             team_id="team-1",
             title="团队会话",
+            active_mission_id="mission-active",
         )
         monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
         monkeypatch.setattr(session_methods, "_get_db", lambda: db)

@@ -209,6 +209,15 @@ class SessionDBConversationMissionMixin:
             if item is not None
         ]
 
+    def has_active_mission(self, conversation_id: str) -> bool:
+        return bool(self.list_conversation_missions(conversation_id, status="active"))
+
+    def active_mission_ids(self, conversation_id: str) -> list[str]:
+        return [
+            mission["mission_id"]
+            for mission in self.list_conversation_missions(conversation_id, status="active")
+        ]
+
     def remove_mission_from_conversation(
         self,
         *,

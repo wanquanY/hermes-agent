@@ -4402,7 +4402,7 @@ def test_team_mission_subscribe_streams_conversation_status_projection(monkeypat
     assert status_payload["stable_session_id"] == "team-session-1"
     assert status_payload["source_event_type"] == "message.complete"
     assert conversation["mission_status"] == "ready"
-    assert conversation["running"] is False
+    assert conversation["running"] is True
 
     removed = run_control.unsubscribe_session(subscription_id=subscription_id)
     assert removed == 1

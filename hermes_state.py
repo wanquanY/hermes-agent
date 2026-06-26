@@ -2087,6 +2087,13 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         item = {key: row[key] for key in row.keys()}
         for flag in ("transient", "running", "waiting_approval"):
             item[flag] = bool(item.get(flag))
+        if (
+            item.get("session_kind") == "team_mission"
+            and item.get("conversation_id")
+            and "conversation_has_active_mission" in item
+        ):
+            item["running"] = bool(item.get("conversation_has_active_mission"))
+        item.pop("conversation_has_active_mission", None)
         item["_page_cursor"] = {
             "updated_at": row["updated_at"],
             "started_at": row["started_at"],
@@ -2264,7 +2271,13 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             "       tmc.objective AS team_conversation_objective, "
             "       tmc.workspace_id AS team_conversation_workspace_id, "
             "       tmc.workspace_path AS team_conversation_workspace_path, "
-            "       tmc.active_mission_id AS team_conversation_active_mission_id "
+            "       tmc.active_mission_id AS team_conversation_active_mission_id, "
+            "       EXISTS ("
+            "           SELECT 1 FROM conversation_missions cm"
+            "            WHERE cm.conversation_id = si.conversation_id"
+            "              AND cm.status = 'active'"
+            "            LIMIT 1"
+            "       ) AS conversation_has_active_mission "
             "  FROM session_index si "
             "  LEFT JOIN agent_teams at ON at.id = si.team_id "
             "  LEFT JOIN agent_profiles ap ON ap.id = at.lead_agent_profile_id "

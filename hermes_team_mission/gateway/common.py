@@ -1244,6 +1244,10 @@ def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
         runtime_summary = summary_fn(conversation_id) or {}
     if isinstance(runtime_summary, dict):
         mission_id = str(runtime_summary.get("active_mission_id") or mission_id or "").strip()
+    has_active_mission = False
+    has_active_mission_fn = getattr(db, "has_active_mission", None)
+    if callable(has_active_mission_fn) and conversation_id:
+        has_active_mission = bool(has_active_mission_fn(conversation_id))
     graph = db.get_team_mission_graph(mission_id) if mission_id and not runtime_summary else {}
     mission = (
         runtime_summary.get("mission") if isinstance(runtime_summary, dict) else {}
@@ -1291,7 +1295,9 @@ def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
     node_running = bool(active_node_run)
     mission_running = bool(active_node_count) or mission_status in _TEAM_MISSION_ACTIVE_STATUSES
     terminal = mission_status in _TEAM_MISSION_TERMINAL_STATUSES
-    running = bool(leader_running or node_running or (mission_running and not terminal))
+    running = has_active_mission if callable(has_active_mission_fn) else bool(
+        leader_running or node_running or (mission_running and not terminal)
+    )
     waiting_approval = approval_waiting or mission_status == "waiting_approval"
     active_run_id = str(run_state.get("active_run_id") or "") if leader_running else str(active_node_run.get("run_id") or "")
     active_turn_id = str(run_state.get("active_turn_id") or "") if leader_running else str(active_node_run.get("turn_id") or "")

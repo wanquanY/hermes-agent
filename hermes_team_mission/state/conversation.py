@@ -24,7 +24,7 @@ def is_replaceable_team_mission_conversation_title(title: Any, display_title_sou
 def team_mission_conversation_history_sql(table_name: str = "team_mission_conversations") -> str:
     table_name = _text(table_name) or "team_mission_conversations"
     return (
-        f"(COALESCE({table_name}.active_mission_id, '') != '' "
+        f"(EXISTS (SELECT 1 FROM conversation_missions cm WHERE cm.conversation_id = {table_name}.conversation_id AND cm.status = 'active' LIMIT 1) "
         f"OR EXISTS (SELECT 1 FROM team_missions tm WHERE tm.conversation_id = {table_name}.conversation_id LIMIT 1) "
         f"OR EXISTS (SELECT 1 FROM sessions hist_s WHERE hist_s.id = {table_name}.stable_session_id AND COALESCE(hist_s.message_count, 0) > 0 LIMIT 1) "
         f"OR EXISTS (SELECT 1 FROM runs hist_r WHERE hist_r.session_id = {table_name}.stable_session_id AND hist_r.status IN ({_ACTIVE_RUN_STATUS_SQL}) LIMIT 1))"
@@ -433,7 +433,13 @@ def prune_empty_team_mission_conversations(db: Any, *, limit: int = 5000) -> int
             SELECT c.conversation_id AS conversation_id,
                    c.stable_session_id AS stable_session_id
             FROM team_mission_conversations c
-            WHERE COALESCE(c.active_mission_id, '') = ''
+            WHERE NOT EXISTS (
+                  SELECT 1
+                  FROM conversation_missions cm
+                  WHERE cm.conversation_id = c.conversation_id
+                    AND cm.status = 'active'
+                  LIMIT 1
+              )
               AND NOT EXISTS (
                   SELECT 1
                   FROM team_missions tm

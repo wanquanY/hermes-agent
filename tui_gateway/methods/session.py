@@ -367,6 +367,8 @@ def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str
             return None
         updated_at = conversation.get("updated_at") or row.get("last_active") or row.get("started_at") or 0
         created_at = conversation.get("created_at") or row.get("started_at") or updated_at
+        has_active_mission = getattr(db, "has_active_mission", None)
+        running = bool(has_active_mission(conversation_id)) if callable(has_active_mission) else bool(row.get("running"))
         return {
             **row,
             "id": stable_session_id,
@@ -379,6 +381,7 @@ def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str
             "active_mission_id": str(conversation.get("active_mission_id") or "").strip(),
             "mission_id": str(conversation.get("active_mission_id") or "").strip(),
             "status": str(conversation.get("status") or "").strip(),
+            "running": running,
             "title": str(conversation.get("title") or row.get("title") or "").strip(),
             "display_title": str(conversation.get("display_title") or conversation.get("title") or row.get("display_title") or row.get("preview") or "").strip(),
             "display_title_source": str(conversation.get("display_title_source") or "first_user_message").strip(),
@@ -981,6 +984,7 @@ def _(rid, params: dict) -> dict:
                 continue
             live_sid, live_session = live_by_key.get(s["id"], ("", None))
             live_state = _session_run_snapshot(live_sid, live_session, db=db)
+            running = bool(live_state.get("running") or s.get("running"))
             if not live_sid and _is_empty_stored_conversation(s):
                 continue
             session_items.append(
@@ -1004,6 +1008,7 @@ def _(rid, params: dict) -> dict:
                     "mission_id": s.get("mission_id") or "",
                     "status": s.get("status") or "",
                     **live_state,
+                    "running": running,
                 })
             )
         next_cursor = ""
@@ -1142,6 +1147,17 @@ def _session_index_list_item(row: dict) -> dict:
     return item
 
 
+def _session_index_row_with_active_mission_running(db, row: dict) -> dict:
+    item = dict(row or {})
+    session_kind = item.get("session_kind") or "hermes_session"
+    is_team_mission_row = session_kind == "team_mission" or bool(item.get("team_id"))
+    conversation_id = str(item.get("conversation_id") or "").strip()
+    has_active_mission = getattr(db, "has_active_mission", None)
+    if is_team_mission_row and conversation_id and callable(has_active_mission):
+        item["running"] = bool(has_active_mission(conversation_id))
+    return item
+
+
 def _safe_json_decode(value):
     if not value:
         return None
@@ -1200,9 +1216,13 @@ def _(rid, params: dict) -> dict:
             cursor=cursor or None,
             include_transient=include_transient,
         )
+        rows = [
+            _session_index_row_with_active_mission_running(db, row)
+            for row in (result.get("sessions") or [])
+        ]
         items = [
             sanitize_session_list_item(_session_index_list_item(row))
-            for row in (result.get("sessions") or [])
+            for row in rows
             if not _is_hidden_empty_index_draft(row)
         ]
         page = result.get("pageInfo") or {}
