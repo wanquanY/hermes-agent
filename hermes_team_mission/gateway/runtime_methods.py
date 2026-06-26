@@ -2,10 +2,46 @@
 from __future__ import annotations
 
 from .common import *
-from hermes_state_participants import member_participant_id
+from hermes_state_participants import leader_participant_id, member_participant_id
+from hermes_team_mission.domain.run_context import RunContext
 
 
 _MEMBER_CHAT_RUN_PREFIX = "member-chat"
+
+
+def _home_from_dovie_profile(dovie_profile: dict) -> str:
+    if isinstance(dovie_profile, dict):
+        home = str(
+            dovie_profile.get("hermesHomePath")
+            or dovie_profile.get("hermes_home_path")
+            or dovie_profile.get("hermes_home")
+            or ""
+        ).strip()
+        if home:
+            return home
+    return str(get_hermes_home())
+
+
+def _home_from_profile_params(profile_params: dict) -> str:
+    profile_params = profile_params if isinstance(profile_params, dict) else {}
+    dovie_profile = (
+        profile_params.get("dovie_profile")
+        if isinstance(profile_params.get("dovie_profile"), dict)
+        else {}
+    )
+    home = str(
+        profile_params.get("hermesHomePath")
+        or profile_params.get("hermes_home_path")
+        or profile_params.get("hermes_home")
+        or ""
+    ).strip()
+    if home:
+        return home
+    return _home_from_dovie_profile(dovie_profile)
+
+
+def _run_context_json(run_context: RunContext) -> str:
+    return json.dumps(run_context.to_payload(), ensure_ascii=False)
 
 
 def _member_chat_diagnostic(label: str, **fields) -> None:
@@ -353,6 +389,16 @@ def _submit_message_to_member(
     # session_index → never in the sidebar; never a team conversation).
     if not db.get_session(stored_session_id):
         db.create_session(stored_session_id, source="team_mission_member_chat", transient=False)
+    member_run_home = _home_from_dovie_profile(dovie_profile)
+    run_context = RunContext(
+        conversation_session_id=conversation_session_id,
+        participant_id=member_participant_id(target_member_id),
+        activity_id="member_chat",
+        activity_kind="member_chat",
+        execution_scope_key=member_scope,
+        control_home=member_run_home,
+        execution_home=member_run_home,
+    )
 
     # 5. Materialize the team conversation as STRUCTURED chat history on the
     #    member's session — not as a text transcript inlined into the prompt.
@@ -447,6 +493,7 @@ def _submit_message_to_member(
         "agent_profile_id": agent_profile_id,
         "agent_profile_version_id": str(profile_params.get("agent_profile_version_id") or ""),
         "runtime_scope_key": member_scope,
+        "run_context_json": _run_context_json(run_context),
         "dovie_profile": dovie_profile,
         "cwd": workspace_context["cwd"],
         "workspace": workspace_context["workspace"],
@@ -733,6 +780,23 @@ def _(rid, params: dict) -> dict:
         team_context["team_capability_snapshot_id"] = snapshot_id
     if mission_id:
         team_context["mission_id"] = mission_id
+    activity_mission_id = str(
+        (identity_mission or {}).get("mission_id")
+        or (identity_mission or {}).get("missionId")
+        or mission_id
+        or ""
+    ).strip() if isinstance(identity_mission, dict) else str(mission_id or "").strip()
+    leader_activity_kind = "mission" if activity_mission_id else "chat"
+    leader_run_home = _home_from_profile_params(profile_params)
+    run_context = RunContext(
+        conversation_session_id=conversation_session_id,
+        participant_id=leader_participant_id(conversation_id),
+        activity_id=activity_mission_id or "chat",
+        activity_kind=leader_activity_kind,
+        execution_scope_key=runtime_scope_key,
+        control_home=leader_run_home,
+        execution_home=leader_run_home,
+    )
     submit_params = {
         **params,
         **profile_params,
@@ -742,6 +806,7 @@ def _(rid, params: dict) -> dict:
         "run_id": run_id,
         "turn_id": turn_id,
         "runtime_scope_key": runtime_scope_key,
+        "run_context_json": _run_context_json(run_context),
         "agent_context_mode": "team_leader",
         "cwd": workspace_context["cwd"],
         "workspace": workspace_context["workspace"],

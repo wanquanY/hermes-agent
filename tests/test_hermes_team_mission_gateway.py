@@ -765,6 +765,16 @@ def test_team_mission_message_submit_derives_conversation_title_from_first_user_
     assert conversation["title"] == "你是谁？ 我是谁？"
     assert conversation["display_title_source"] == "first_user_message"
     assert submitted["persist_user_message"] == "你是谁？ 我是谁？"
+    run_context = json.loads(submitted["run_context_json"])
+    assert run_context == {
+        "conversation_session_id": "team-session-1",
+        "participant_id": "leader:conversation-1",
+        "activity_id": "chat",
+        "activity_kind": "chat",
+        "execution_scope_key": "team:conversation-1:leader-conversation",
+        "control_home": run_context["control_home"],
+        "execution_home": run_context["control_home"],
+    }
 
 
 def test_team_mission_message_submit_rejects_session_id_as_conversation_identity(monkeypatch, tmp_path: Path):
@@ -790,6 +800,76 @@ def test_team_mission_message_submit_rejects_session_id_as_conversation_identity
     assert response["error"]["code"] == 4006
     assert "mission_id or conversation_id required" in response["error"]["message"]
     assert db.resolve_team_mission_conversation("team-session-1") == {}
+
+
+def test_team_mission_member_submit_carries_run_context_json(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = team_mission_gateway()
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    workspace = _workspace_payload(tmp_path)
+    captured = {}
+
+    def fake_proxy_run_submit(params):
+        captured.update(params)
+        return {"ok": True}
+
+    monkeypatch.setattr(team_mission, "_proxy_run_submit_via_worker", fake_proxy_run_submit)
+    member = {
+        "member_id": "member-builder",
+        "profile_id": "profile-builder",
+        "profile_version_id": "version-builder",
+        "role": "builder",
+        "runtime_scope_key": "profile:profile-builder:version:version-builder",
+        "dovie_profile": {
+            "id": "profile-builder",
+            "agentProfileVersionId": "version-builder",
+            "runtimeScopeKey": "profile:profile-builder:version:version-builder",
+            "hermesHomePath": str(tmp_path / "builder-home"),
+        },
+    }
+    db.initialize_team_mission_from_strategy(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="成员会话",
+        objective="检查",
+        **_workspace_kwargs(tmp_path),
+        mode="supervised_mission",
+        leader_session_id="team-session-1",
+        metadata={"conversation_session_id": "team-session-1"},
+        members=[member],
+    )
+
+    response = server._methods["team_mission.message.submit"](
+        1,
+        {
+            "mission_id": "mission-1",
+            "conversation_id": "conversation-1",
+            "conversation_session_id": "team-session-1",
+            "team_id": "team-1",
+            "workspace": workspace,
+            "text": "@Builder 帮我检查",
+            "target_member_id": "member-builder",
+            "members": [member],
+        },
+    )
+
+    assert "error" not in response
+    run_context = json.loads(captured["run_context_json"])
+    assert run_context == {
+        "conversation_session_id": "team-session-1",
+        "participant_id": "member:member-builder",
+        "activity_id": "member_chat",
+        "activity_kind": "member_chat",
+        "execution_scope_key": "member-chat:conversation-1:member-builder",
+        "control_home": str(tmp_path / "builder-home"),
+        "execution_home": str(tmp_path / "builder-home"),
+    }
 
 
 def test_team_mission_message_submit_conversation_only_does_not_bind_previous_active_mission(monkeypatch, tmp_path: Path):
@@ -1407,6 +1487,16 @@ def test_team_mission_message_submit_forwards_leader_profile_context(monkeypatch
     assert submitted["dovie_profile"]["hermesHomePath"] == str(tmp_path / "leader-home")
     assert submitted["dovie_profile"]["agentProfileVersionId"] == "version-leader"
     assert submitted["dovie_profile"]["runtimeScopeKey"] == "profile:profile-leader:version:version-leader"
+    run_context = json.loads(submitted["run_context_json"])
+    assert run_context == {
+        "conversation_session_id": "team-session-1",
+        "participant_id": "leader:mission-1",
+        "activity_id": "mission-1",
+        "activity_kind": "mission",
+        "execution_scope_key": "team:mission-1:leader-conversation",
+        "control_home": str(tmp_path / "leader-home"),
+        "execution_home": str(tmp_path / "leader-home"),
+    }
 
 
 def test_team_mission_message_submit_keeps_team_scope_out_of_profile_owner_check(monkeypatch, tmp_path: Path):
