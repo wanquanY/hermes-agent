@@ -524,6 +524,33 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"conversations": conversations})
 
 
+@method("team_mission.conversation.participants")
+def _(rid, params: dict) -> dict:
+    metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    conversation_session_id = _conversation_session_id_from_params(params, metadata)
+    if not conversation_session_id:
+        return _err(rid, 4006, "conversation_session_id required")
+    db = _get_db()
+    if db is None:
+        return _ok(
+            rid,
+            {
+                "conversation_session_id": conversation_session_id,
+                "conversationSessionId": conversation_session_id,
+                "participants": [],
+            },
+        )
+    participants = db.list_conversation_participants(conversation_session_id)
+    return _ok(
+        rid,
+        {
+            "conversation_session_id": conversation_session_id,
+            "conversationSessionId": conversation_session_id,
+            "participants": participants if isinstance(participants, list) else [],
+        },
+    )
+
+
 @method("team_mission.conversation.runtime_session_ids")
 def _(rid, params: dict) -> dict:
     db = _get_db()
