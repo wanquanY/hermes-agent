@@ -1048,40 +1048,77 @@ def record_event(
     owner_metadata = owner_metadata if isinstance(owner_metadata, dict) else {}
     now = time.time()
     frame["timestamp"] = now
-    # Conversation-architecture refactor (P1): stamp participant_id at publish
-    # so persisted events carry their speaker identity. Frontend speaker
-    # resolution will prefer this over the legacy nodeId->node->member->profile
-    # walk. Defensive: a missing resolver / lookup miss must NEVER block the
-    # event — the worst case is a fallback to the old four-path lookup.
-    if stable and not frame.get("participant_id"):
-        if resolver := _db_method(db, "resolve_participant_id_for_run"):
-            try:
-                scope_hint = (
-                    str((payload or {}).get("runtime_scope_key") or "").strip()
-                    or str(frame.get("runtime_scope_key") or "").strip()
-                )
-                member_hint = (
-                    str((payload or {}).get("member_id") or "").strip()
-                    or str(frame.get("member_id") or "").strip()
-                )
-                profile_hint = (
-                    str((payload or {}).get("agent_profile_id") or "").strip()
-                    or str(frame.get("agent_profile_id") or "").strip()
-                )
-                if scope_hint or member_hint or profile_hint:
-                    resolved_participant = resolver(
-                        stable,
+    # Conversation-architecture refactor (P1-PR-B): event speaker identity is
+    # authoritative when present, otherwise resolved from conversation_participants.
+    # Lookup miss/error intentionally leaves participant_id blank so PR-C can
+    # keep using legacy speaker fallback without silently misattributing to leader.
+    participant_id = str(frame.get("participant_id") or "").strip()
+    if not participant_id and isinstance(payload, dict):
+        participant_id = str(payload.get("participant_id") or "").strip()
+        if participant_id:
+            frame["participant_id"] = participant_id
+    if stable and not participant_id:
+        team_identity = payload.get("team_mission") if isinstance(payload.get("team_mission"), dict) else {}
+        scope_hint = (
+            str(payload.get("runtime_scope_key") or "").strip()
+            or str(frame.get("runtime_scope_key") or "").strip()
+        )
+        member_hint = (
+            str(payload.get("member_id") or "").strip()
+            or str(frame.get("member_id") or "").strip()
+            or str(team_identity.get("member_id") or "").strip()
+        )
+        profile_hint = (
+            str(payload.get("agent_profile_id") or "").strip()
+            or str(frame.get("agent_profile_id") or "").strip()
+            or str(team_identity.get("agent_profile_id") or "").strip()
+        )
+        if scope_hint or member_hint or profile_hint:
+            resolved_participant = ""
+            resolver = _db_method(db, "resolve_participant_id")
+            resolver_failed = False
+            if resolver:
+                try:
+                    resolved_participant = str(
+                        resolver(
+                            conversation_session_id=stable,
+                            runtime_scope_key=scope_hint,
+                            member_id=member_hint,
+                            agent_profile_id=profile_hint,
+                        )
+                        or ""
+                    ).strip()
+                except Exception as exc:
+                    resolver_failed = True
+                    _diagnostic_warning(
+                        "participant-resolve-error",
+                        db=_db_label(db),
+                        event_type=event_type,
+                        session_id=stable,
+                        run_id=run_id,
+                        turn_id=turn_id,
                         runtime_scope_key=scope_hint,
                         member_id=member_hint,
                         agent_profile_id=profile_hint,
+                        error=f"{type(exc).__name__}: {exc}",
                     )
-                    if resolved_participant:
-                        frame["participant_id"] = resolved_participant
-                        if isinstance(frame.get("payload"), dict):
-                            frame["payload"]["participant_id"] = resolved_participant
-                            payload = frame["payload"]
-            except Exception:
-                pass
+            if resolved_participant:
+                frame["participant_id"] = resolved_participant
+                if isinstance(frame.get("payload"), dict):
+                    frame["payload"]["participant_id"] = resolved_participant
+                    payload = frame["payload"]
+            elif resolver and not resolver_failed:
+                _diagnostic_warning(
+                    "participant-resolve-miss",
+                    db=_db_label(db),
+                    event_type=event_type,
+                    session_id=stable,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    runtime_scope_key=scope_hint,
+                    member_id=member_hint,
+                    agent_profile_id=profile_hint,
+                )
     terminal_event = _terminal_status(event_type, payload)
     scheduler_mission_id = ""
     mission_events_for_fanout: list[dict[str, Any]] = []

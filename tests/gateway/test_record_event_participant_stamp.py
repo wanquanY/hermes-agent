@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from hermes_state import SessionDB
+from tui_gateway.services import run_control
+
+
+CONV_SESSION = "team-session-1"
+
+
+def _new_db(tmp_path: Path) -> SessionDB:
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session(CONV_SESSION, source="team_mission", transient=False)
+    db.upsert_conversation_participant(
+        conversation_session_id=CONV_SESSION,
+        participant_id="leader:conv-1",
+        role="leader",
+        member_id="m-lead",
+        agent_profile_id="p-lead",
+        runtime_scope_key="team:conv-1:leader-conversation",
+        display_name="Lead",
+    )
+    db.upsert_conversation_participant(
+        conversation_session_id=CONV_SESSION,
+        participant_id="member:m-alice",
+        role="member",
+        member_id="m-alice",
+        agent_profile_id="p-alice",
+        runtime_scope_key="member-chat:conv-1:m-alice",
+        display_name="Alice",
+    )
+    return db
+
+
+def _record_message(db: SessionDB, *, run_id: str, payload: dict, frame_participant_id: str = "") -> dict:
+    db.upsert_run(run_id=run_id, session_id=CONV_SESSION, status="running")
+    frame = {
+        "type": "message.complete",
+        "session_id": CONV_SESSION,
+        "stored_session_id": CONV_SESSION,
+        "run_id": run_id,
+        "turn_id": f"turn-{run_id}",
+        "seq": 1,
+        "payload": {"text": f"text from {run_id}", "status": "complete", **payload},
+    }
+    if frame_participant_id:
+        frame["participant_id"] = frame_participant_id
+    run_control.record_event(frame, db=db)
+    events = db.list_run_events(CONV_SESSION, run_id=run_id)
+    assert events, "event was not persisted"
+    return events[0]
+
+
+def test_record_event_stamps_leader_participant_from_table(tmp_path: Path):
+    db = _new_db(tmp_path)
+
+    event = _record_message(
+        db,
+        run_id="run-leader",
+        payload={"runtime_scope_key": "team:conv-1:leader-conversation"},
+    )
+
+    assert event.get("participant_id") == "leader:conv-1"
+    assert (event.get("payload") or {}).get("participant_id") == "leader:conv-1"
+
+
+def test_record_event_stamps_member_participant_from_table(tmp_path: Path):
+    db = _new_db(tmp_path)
+
+    event = _record_message(
+        db,
+        run_id="run-member",
+        payload={"member_id": "m-alice", "agent_profile_id": "p-alice"},
+    )
+
+    assert event.get("participant_id") == "member:m-alice"
+    assert (event.get("payload") or {}).get("participant_id") == "member:m-alice"
+
+
+def test_record_event_lookup_miss_logs_diagnostic_and_leaves_participant_blank(
+    tmp_path: Path,
+    monkeypatch,
+):
+    db = _new_db(tmp_path)
+    diagnostics: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        run_control,
+        "_diagnostic_warning",
+        lambda label, **fields: diagnostics.append((label, fields)),
+    )
+
+    event = _record_message(
+        db,
+        run_id="run-unregistered",
+        payload={"member_id": "m-ghost", "agent_profile_id": "p-ghost"},
+    )
+
+    assert not event.get("participant_id")
+    assert not (event.get("payload") or {}).get("participant_id")
+    miss = [fields for label, fields in diagnostics if label == "participant-resolve-miss"]
+    assert miss, diagnostics
+    assert miss[0]["session_id"] == CONV_SESSION
+    assert miss[0]["member_id"] == "m-ghost"
+    assert miss[0]["agent_profile_id"] == "p-ghost"
+
+
+def test_record_event_preserves_existing_frame_participant_id_and_skips_lookup(
+    tmp_path: Path,
+    monkeypatch,
+):
+    db = _new_db(tmp_path)
+
+    def _fail_lookup(**_kwargs):
+        raise AssertionError("resolver must not run for pre-stamped frames")
+
+    monkeypatch.setattr(db, "resolve_participant_id", _fail_lookup)
+
+    event = _record_message(
+        db,
+        run_id="run-prestamped",
+        frame_participant_id="member:pre-stamped",
+        payload={"member_id": "m-alice", "participant_id": "member:pre-stamped"},
+    )
+
+    assert event.get("participant_id") == "member:pre-stamped"
+    assert (event.get("payload") or {}).get("participant_id") == "member:pre-stamped"
