@@ -31,9 +31,6 @@ DEFAULT_RUN_EVENT_MAX_PER_SESSION = 5000
 RUN_EVENT_PRUNE_INTERVAL_EVENTS = 500
 CONTROL_ONLY_ACTIVE_RUN_REPAIR_STALE_SECONDS = 60.0
 CONTROL_ONLY_ACTIVE_RUN_REPAIR_OWNER_DEAD_GRACE_SECONDS = 10.0
-TERMINAL_RUN_PRUNABLE_EVENT_TYPES = {
-    "message.delta",
-}
 COALESCIBLE_STREAM_EVENT_TYPES = {
     "reasoning.delta",
     "thinking.delta",
@@ -42,6 +39,12 @@ COALESCIBLE_STREAM_EVENT_TYPES = {
     "subagent.thinking",
     "agent_profile_test.output_delta",
     "agent_profile_test.thinking",
+}
+TERMINAL_RUN_PRUNABLE_EVENT_TYPES = {
+    "message.delta",
+    "tool.progress",
+    "tool.generating",
+    *COALESCIBLE_STREAM_EVENT_TYPES,
 }
 STREAM_COMPACTION_BOUNDARY_EVENT_TYPES = {
     "message.start",
@@ -116,6 +119,28 @@ def _json_loads(value: str | None, fallback: Any) -> Any:
 
 def _sql_status_literals(statuses: set[str]) -> str:
     return ",".join("'" + status.replace("'", "''") + "'" for status in sorted(statuses))
+
+
+def _terminal_run_storage_predicate(event_alias: str = "e", run_alias: str = "r") -> str:
+    terminal_statuses = _sql_status_literals(TERMINAL_RUN_STATUSES)
+    terminal_event_types = ("message.complete", "error", "session.interrupted")
+    terminal_type_literals = ",".join("'" + event_type + "'" for event_type in terminal_event_types)
+    return f"""
+    (
+        COALESCE({run_alias}.status, '') IN ({terminal_statuses})
+        OR (
+            COALESCE({event_alias}.run_id, '') != ''
+            AND EXISTS (
+                SELECT 1
+                FROM run_events terminal_events
+                WHERE terminal_events.session_id = {event_alias}.session_id
+                  AND COALESCE(terminal_events.run_id, '') = COALESCE({event_alias}.run_id, '')
+                  AND terminal_events.event_type IN ({terminal_type_literals})
+                  AND COALESCE(terminal_events.status, '') IN ({terminal_statuses})
+            )
+        )
+    )
+    """
 
 
 def _event_run_id(event: Dict[str, Any]) -> str:
@@ -684,7 +709,7 @@ class SessionDBRunMixin:
                         """,
                         (run_id, str(runtime_session_id or ""), float(updated_at or 0), sid, conv_sid),
                     )
-                    logger.warning(
+                    logger.debug(
                         "[doxie-session-index] project_run set_running session_id=%s conv_session_id=%s run_id=%s status=%s rows=%s",
                         sid, conv_sid, run_id, status, cur.rowcount,
                     )
@@ -699,7 +724,7 @@ class SessionDBRunMixin:
                         """,
                         (run_id, str(runtime_session_id or ""), float(updated_at or 0), sid),
                     )
-                    logger.warning(
+                    logger.debug(
                         "[doxie-session-index] project_run set_running session_id=%s run_id=%s status=%s rows=%s",
                         sid, run_id, status, cur.rowcount,
                     )
@@ -740,7 +765,7 @@ class SessionDBRunMixin:
                     """,
                     (float(updated_at or 0), *clear_ids, run_id),
                 )
-                logger.warning(
+                logger.debug(
                     "[doxie-session-index] project_run clear session_id=%s conv_session_id=%s run_id=%s status=%s rows=%s",
                     sid, conv_sid, run_id, status, cur.rowcount,
                 )
@@ -1227,6 +1252,12 @@ class SessionDBRunMixin:
             return inserted_event
 
         saved = self._execute_write(_do)
+        ignored_terminal_stream_event = bool(
+            isinstance(saved, dict)
+            and saved.get("_persistence_disposition") == "ignored_after_terminal"
+            and event_type in TERMINAL_RUN_PRUNABLE_EVENT_TYPES
+            and run_id
+        )
         defer_terminal_maintenance = (
             terminal_status in TERMINAL_RUN_STATUSES
             and bool(getattr(self, "_team_mission_projecting", False))
@@ -1246,10 +1277,16 @@ class SessionDBRunMixin:
         ):
             if hasattr(self, "_project_team_mission_run_event"):
                 self._project_team_mission_run_event(run_id=run_id, saved=saved)
-            # Decoupled group-chat: relay a member's direct-chat reply into the
-            # conversation session (no mission involved). See SessionDBMemberChatMixin.
-            if hasattr(self, "_project_member_chat_run_event"):
-                self._project_member_chat_run_event(run_id=run_id, saved=saved)
+            # Decoupled group-chat (member-chat) mirroring is performed at the
+            # record_event layer instead — that layer can both broadcast the
+            # mirrored frame to the conversation's live subscribers AND
+            # persist it. Mirroring from the db hook can only persist; the
+            # frontend would never see the stream.
+        if ignored_terminal_stream_event:
+            try:
+                self.prune_terminal_run_stream_events(session_id=stable, run_id=run_id)
+            except Exception as exc:
+                logger.debug("ignored terminal stream pruning skipped for %s/%s: %s", stable, run_id, exc)
         if not defer_terminal_maintenance:
             self._maintain_run_events_after_append(
                 session_id=stable,
@@ -1896,7 +1933,7 @@ class SessionDBRunMixin:
             return {"deleted_events": 0, "event_types": list(normalized_types)}
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
-            terminal_statuses = _sql_status_literals(TERMINAL_RUN_STATUSES)
+            terminal_run_sql = _terminal_run_storage_predicate("e", "r")
             placeholders = ",".join("?" for _ in normalized_types)
             rows = conn.execute(
                 f"""
@@ -1906,7 +1943,7 @@ class SessionDBRunMixin:
                 WHERE e.session_id = ?
                   AND e.run_id = ?
                   AND e.event_type IN ({placeholders})
-                  AND COALESCE(r.status, '') IN ({terminal_statuses})
+                  AND {terminal_run_sql}
                 ORDER BY e.seq ASC, e.id ASC
                 """,
                 (stable, normalized_run_id, *normalized_types),
@@ -1961,24 +1998,53 @@ class SessionDBRunMixin:
             if stable_filter:
                 session_clause = "AND e.session_id = ?"
                 params.append(stable_filter)
-            rows = conn.execute(
-                f"""
-                SELECT e.*
-                FROM run_events e
-                LEFT JOIN runs r ON r.run_id = e.run_id
-                WHERE COALESCE(r.status, '') NOT IN ({active_statuses})
-                  {session_clause}
-                ORDER BY e.session_id ASC, e.seq ASC, e.id ASC
-                """,
-                tuple(params),
-            ).fetchall()
 
             compacted_segments = 0
             deleted_events = 0
+            pruned_terminal_stream_events = 0
             deduplicated_terminal_groups = 0
             updated_events = 0
             pending_by_key: dict[tuple[Any, ...], list[tuple[sqlite3.Row, Dict[str, Any]]]] = {}
             affected_run_ids: set[str] = set()
+
+            def prune_terminal_stream_rows() -> None:
+                nonlocal deleted_events, pruned_terminal_stream_events
+                prunable_types = tuple(sorted(TERMINAL_RUN_PRUNABLE_EVENT_TYPES))
+                if not prunable_types:
+                    return
+                terminal_run_sql = _terminal_run_storage_predicate("e", "r")
+                type_placeholders = ",".join("?" for _ in prunable_types)
+                prune_params: list[Any] = [*prunable_types]
+                prune_session_clause = ""
+                if stable_filter:
+                    prune_session_clause = "AND e.session_id = ?"
+                    prune_params.append(stable_filter)
+                rows_to_delete = conn.execute(
+                    f"""
+                    SELECT e.*
+                    FROM run_events e
+                    LEFT JOIN runs r ON r.run_id = e.run_id
+                    WHERE e.event_type IN ({type_placeholders})
+                      AND {terminal_run_sql}
+                      {prune_session_clause}
+                    ORDER BY e.session_id ASC, e.seq ASC, e.id ASC
+                    """,
+                    tuple(prune_params),
+                ).fetchall()
+                if not rows_to_delete:
+                    return
+                self._archive_run_event_rows(conn, rows_to_delete, reason="terminal_run_stream_events")
+                ids = [int(row["id"]) for row in rows_to_delete]
+                for start in range(0, len(ids), 500):
+                    chunk = ids[start:start + 500]
+                    id_placeholders = ",".join("?" for _ in chunk)
+                    conn.execute(f"DELETE FROM run_events WHERE id IN ({id_placeholders})", tuple(chunk))
+                for row in rows_to_delete:
+                    normalized_run_id = str(row["run_id"] or "").strip()
+                    if normalized_run_id:
+                        affected_run_ids.add(normalized_run_id)
+                pruned_terminal_stream_events += len(rows_to_delete)
+                deleted_events += len(rows_to_delete)
 
             def compact_terminal_duplicates() -> None:
                 nonlocal deduplicated_terminal_groups, deleted_events, updated_events
@@ -2070,6 +2136,19 @@ class SessionDBRunMixin:
                     deleted_events += len(delete_ids)
                     updated_events += 1
 
+            def rows_for_compaction() -> list[sqlite3.Row]:
+                return conn.execute(
+                    f"""
+                    SELECT e.*
+                    FROM run_events e
+                    LEFT JOIN runs r ON r.run_id = e.run_id
+                    WHERE COALESCE(r.status, '') NOT IN ({active_statuses})
+                      {session_clause}
+                    ORDER BY e.session_id ASC, e.seq ASC, e.id ASC
+                    """,
+                    tuple(params),
+                ).fetchall()
+
             def flush_pending() -> None:
                 nonlocal compacted_segments, deleted_events, updated_events
                 for key in list(pending_by_key.keys()):
@@ -2134,8 +2213,9 @@ class SessionDBRunMixin:
                 if normalized_run_id:
                     affected_run_ids.add(normalized_run_id)
 
+            prune_terminal_stream_rows()
             compact_terminal_duplicates()
-            for row in rows:
+            for row in rows_for_compaction():
                 event = _json_loads(row["event_json"], {})
                 if not isinstance(event, dict) or not _event_is_coalescible_stream_delta(event):
                     event_dict = event if isinstance(event, dict) else {}
@@ -2177,6 +2257,7 @@ class SessionDBRunMixin:
                 )
             return {
                 "compacted_segments": compacted_segments,
+                "pruned_terminal_stream_events": pruned_terminal_stream_events,
                 "deduplicated_terminal_groups": deduplicated_terminal_groups,
                 "deleted_events": deleted_events,
                 "updated_events": updated_events,

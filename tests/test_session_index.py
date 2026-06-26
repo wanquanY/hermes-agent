@@ -500,6 +500,131 @@ def test_cancel_team_mission_sets_conversation_index_idle(tmp_path: Path):
     item = db.list_session_index()["sessions"][0]
     assert item["running"] is False
     assert item["status"] == "idle"
+    assert item["waiting_approval"] is False
+
+    events = db.list_team_mission_events("m-y")
+    assert any(
+        (event.get("payload") or {}).get("source_event_type") == "mission.cancelled"
+        for event in events
+    )
+    status_events = [event for event in events if event.get("type") == "team_mission.conversation.status"]
+    assert status_events
+    conversation = status_events[-1]["payload"]["conversation"]
+    assert conversation["mission_status"] == "cancelled"
+    assert conversation["run_state"] == "cancelled"
+    assert conversation["waiting_approval"] is False
+    assert conversation["pending_approval_count"] == 0
+
+
+def test_reject_team_mission_plan_clears_conversation_approval_projection(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="c-r",
+        team_id="t",
+        stable_session_id="team-session-r",
+        title="t",
+        active_mission_id="m-r",
+    )
+    db.upsert_team_mission(
+        mission_id="m-r",
+        conversation_id="c-r",
+        team_id="t",
+        title="T",
+        mode="supervised_mission",
+        status="waiting_approval",
+        leader_session_id="team-session-r",
+    )
+    db.upsert_team_mission_node(
+        mission_id="m-r",
+        node_id="root",
+        kind="root",
+        title="Root",
+        status="waiting_approval",
+        runtime_scope_key="team:m-r:root",
+        metadata={"task_id": "task-r"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="m-r",
+        node_id="approval",
+        kind="approval_gate",
+        title="审批任务图",
+        status="waiting_approval",
+        runtime_scope_key="team:m-r:approval",
+        metadata={"task_id": "task-r"},
+    )
+    db.update_session_index_for_mission("m-r", status="waiting_approval", running=False, waiting_approval=True)
+    assert db.list_session_index()["sessions"][0]["waiting_approval"] is True
+
+    result = db.reject_team_mission_plan(
+        mission_id="m-r",
+        task_id="task-r",
+        rejected_by="user",
+        reason="用户取消规划审批",
+    )
+
+    assert result["graph"]["mission"]["status"] == "draft"
+    item = db.list_session_index()["sessions"][0]
+    assert item["running"] is False
+    assert item["status"] == "idle"
+    assert item["waiting_approval"] is False
+    assert item["pending_approval_count"] == 0
+
+    events = db.list_team_mission_events("m-r")
+    assert any(
+        (event.get("payload") or {}).get("source_event_type") == "mission.plan.rejected"
+        for event in events
+    )
+    status_events = [event for event in events if event.get("type") == "team_mission.conversation.status"]
+    assert status_events
+    conversation = status_events[-1]["payload"]["conversation"]
+    assert conversation["mission_status"] == "draft"
+    assert conversation["run_state"] == "idle"
+    assert conversation["waiting_approval"] is False
+    assert conversation["pending_approval_count"] == 0
+
+
+def test_reconcile_clears_stale_waiting_approval_for_rejected_draft_mission(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="c-r2",
+        team_id="t",
+        stable_session_id="team-session-r2",
+        title="t",
+        active_mission_id="m-r2",
+    )
+    db.upsert_team_mission(
+        mission_id="m-r2",
+        conversation_id="c-r2",
+        team_id="t",
+        title="T",
+        mode="supervised_mission",
+        status="draft",
+        leader_session_id="team-session-r2",
+    )
+    db.upsert_team_mission_node(
+        mission_id="m-r2",
+        node_id="approval",
+        kind="approval_gate",
+        title="审批任务图",
+        status="cancelled",
+    )
+    db.upsert_team_mission_node(
+        mission_id="m-r2",
+        node_id="worker",
+        kind="worker",
+        title="执行",
+        status="cancelled",
+    )
+    db.update_session_index_for_mission("m-r2", status="waiting_approval", running=False, waiting_approval=True)
+    assert db.list_session_index()["sessions"][0]["waiting_approval"] is True
+
+    db.reconcile_session_index()
+
+    item = db.list_session_index()["sessions"][0]
+    assert item["running"] is False
+    assert item["status"] == "idle"
+    assert item["waiting_approval"] is False
+    assert item["pending_approval_count"] == 0
 
 
 def test_update_for_mission_not_running_clears_active_run_id(tmp_path: Path):

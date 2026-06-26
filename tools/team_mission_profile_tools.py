@@ -8,6 +8,7 @@ from typing import Any
 
 from hermes_state import SessionDB
 from hermes_team_mission_assignees import normalized_member_dicts
+from hermes_team_mission_context import TOOL_RESULT_BUDGET_CHARS
 from hermes_team_mission_profile_tools import compact_team_profile_snapshot
 from hermes_team_mission_profile_tools import gateway_call
 from hermes_team_mission_profile_tools import metadata as _metadata
@@ -96,6 +97,25 @@ def _active_run_id(args: dict[str, Any], parent_agent=None) -> str:
         if value:
             return value
     return ""
+
+
+def _profile_request_options(args: Mapping[str, Any]) -> dict[str, Any]:
+    raw_member_ids = args.get("member_ids") or args.get("memberIds") or args.get("member_id") or args.get("memberId")
+    if isinstance(raw_member_ids, str):
+        member_ids = {_text(item) for item in raw_member_ids.replace(",", "\n").split("\n") if _text(item)}
+    elif isinstance(raw_member_ids, (list, tuple, set)):
+        member_ids = {_text(item) for item in raw_member_ids if _text(item)}
+    else:
+        member_ids = set()
+    try:
+        limit = int(args.get("limit") or 12)
+    except Exception:
+        limit = 12
+    return {
+        "detail": _text(args.get("detail")) or "assignment",
+        "member_ids": member_ids,
+        "limit": limit,
+    }
 
 
 def _leader_run_context(args: dict[str, Any], parent_agent=None) -> tuple[Any, str, dict[str, Any], dict[str, Any], dict[str, Any]] | str:
@@ -209,7 +229,7 @@ def _resolve_leader_run_profile(db, mission: Mapping[str, Any]) -> tuple[dict[st
 
 
 def _handle_leader_team_profile(args: dict[str, Any], parent_agent=None) -> str:
-    del args
+    options = _profile_request_options(args if isinstance(args, Mapping) else {})
     ctx = _leader_team_context()
     if isinstance(ctx, str):
         return tool_error(ctx)
@@ -226,11 +246,12 @@ def _handle_leader_team_profile(args: dict[str, Any], parent_agent=None) -> str:
         mission_id=mission_id,
         source=_text(result.get("source")),
         binding=result.get("binding") if isinstance(result.get("binding"), Mapping) else {},
-        snapshot=compact_team_profile_snapshot(snapshot),
+        snapshot=compact_team_profile_snapshot(snapshot, **options),
     )
 
 
 def _handle_leader_run_team_profile(args: dict[str, Any], parent_agent=None) -> str:
+    options = _profile_request_options(args if isinstance(args, Mapping) else {})
     ctx = _leader_run_context(args, parent_agent)
     if isinstance(ctx, str):
         return tool_error(ctx)
@@ -248,7 +269,7 @@ def _handle_leader_run_team_profile(args: dict[str, Any], parent_agent=None) -> 
             "role": _text(_metadata(node.get("metadata")).get("role") or node.get("kind")),
             "phase": _text(_metadata(node.get("metadata")).get("phase") or mission.get("status")),
         },
-        snapshot=compact_team_profile_snapshot(snapshot),
+        snapshot=compact_team_profile_snapshot(snapshot, **options),
     )
 
 
@@ -278,10 +299,27 @@ registry.register(
         ),
         "parameters": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "detail": {
+                    "type": "string",
+                    "description": "Profile detail level: compact, assignment, or full. Defaults to assignment. Use full only for a specific member/page.",
+                    "enum": ["compact", "assignment", "full"],
+                },
+                "member_ids": {
+                    "type": "array",
+                    "items": {"type": "string", "maxLength": 120},
+                    "description": "Optional member ids to inspect. Leave empty for the assignment overview.",
+                    "maxItems": 12,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum members to return. Defaults to 12, hard capped at 50.",
+                },
+            },
             "required": [],
         },
     },
     handler=_handle_team_profile,
     emoji="",
+    max_result_size_chars=TOOL_RESULT_BUDGET_CHARS,
 )

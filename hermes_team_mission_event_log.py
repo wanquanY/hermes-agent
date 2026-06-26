@@ -7,6 +7,8 @@ import time
 import logging
 from typing import Any, Dict, List
 
+from hermes_team_mission_failure import classify_team_mission_failure
+
 
 TEAM_MISSION_EVENT_PROTOCOL = "team_mission.event.v1"
 TEAM_MISSION_RUNTIME_EVENT_TYPE = "team_mission.runtime.event"
@@ -341,6 +343,52 @@ def _apply_subject_node_identity(target: Dict[str, Any], subject: Dict[str, Any]
             target["approvalId"] = approval_id
 
 
+def _tool_identity_contract(source_event: Dict[str, Any]) -> Dict[str, Any]:
+    event_type = source_event_type(source_event)
+    if event_type not in {"tool.start", "tool.progress", "tool.generating", "tool.complete"}:
+        return {}
+    payload = event_payload(source_event)
+    tool = mapping(payload.get("tool"))
+    function = mapping(payload.get("function") or tool.get("function"))
+    name = _first_text(
+        payload.get("name"),
+        payload.get("tool_name"),
+        payload.get("toolName"),
+        payload.get("tool"),
+        tool.get("name"),
+        function.get("name"),
+        source_event.get("name"),
+        source_event.get("tool_name"),
+        source_event.get("toolName"),
+    )
+    call_id = _first_text(
+        payload.get("tool_call_id"),
+        payload.get("toolCallId"),
+        payload.get("tool_id"),
+        payload.get("toolId"),
+        payload.get("id"),
+        source_event.get("tool_call_id"),
+        source_event.get("toolCallId"),
+        source_event.get("tool_id"),
+        source_event.get("toolId"),
+    )
+    contract: Dict[str, Any] = {}
+    if name:
+        contract.update({
+            "name": name,
+            "tool_name": name,
+            "toolName": name,
+        })
+    if call_id:
+        contract.update({
+            "tool_call_id": call_id,
+            "toolCallId": call_id,
+            "tool_id": call_id,
+            "toolId": call_id,
+        })
+    return contract
+
+
 def source_event_type(event: Dict[str, Any] | None) -> str:
     return text((event or {}).get("type"))
 
@@ -398,6 +446,12 @@ def mission_event_kind(source_event: Dict[str, Any], identity: Dict[str, str] | 
         return "node.started"
     if event_type == "mission.node.run.bound":
         return "node.bound"
+    if event_type == "mission.node.deliverable.recorded":
+        return "node.deliverable.recorded"
+    if event_type == "mission.node.blocked":
+        return "node.blocked"
+    if event_type == "mission.node.failed":
+        return "node.failed"
     if event_type == "mission.edge.created":
         return "edge.created"
     if event_type == "mission.approval.requested":
@@ -434,6 +488,7 @@ def projection_event(
     timestamp = float(source_event.get("timestamp") or time.time())
     subject = _canonical_subject(source_event, identity)
     text_stream = _text_stream_contract(source_event, subject)
+    tool_identity = _tool_identity_contract(source_event)
     # Keep exactly one copy of each field. The previous projection duplicated
     # source_event 4x (source_event/sourceEvent/runtime_event/runtimeEvent),
     # source_payload 2x and text_stream 2x, bloating every streamed delta to
@@ -451,6 +506,12 @@ def projection_event(
         "source_event": source_event,
         "source_payload": dict(source_payload),
     }
+    failure = classify_team_mission_failure(event_type, source_payload)
+    if failure:
+        payload["reason_code"] = failure["reason_code"]
+        payload["recoverability"] = failure["recoverability"]
+        payload["failure_message"] = failure["message"]
+    payload.update(tool_identity)
     if text_stream:
         payload["text_stream"] = text_stream
     for key, value in identity.items():
@@ -482,6 +543,9 @@ def projection_event(
         event["subject"] = subject
     if text_stream:
         event["text_stream"] = text_stream
+    for key, value in tool_identity.items():
+        if text(value):
+            event[key] = value
     for key, value in identity.items():
         if key in {"node_id", "nodeId"} and _subject_node_id(subject):
             continue

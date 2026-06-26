@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from hermes_team_mission_memory_utils import MEMORY_COMMITTED_STATUS as _MEMORY_COMMITTED_STATUS
 from hermes_team_mission_memory_utils import stable_id as _stable_id
 from hermes_team_mission_memory_utils import text as _text
+from hermes_team_mission_failure import classify_team_mission_failure as _classify_team_mission_failure
 from hermes_team_mission_conversation_utils import mirror_event_to_conversation as _mirror_team_mission_event
 from hermes_runtime_event_payloads import primary_deliverable_text
 from hermes_team_mission_conversation_state import delete_team_mission_conversation as _delete_team_mission_conversation
@@ -30,6 +31,7 @@ from hermes_team_mission_conversation_projection import message_with_deliverable
 import hermes_team_mission_memory_state as _memory_state
 import hermes_team_mission_graph_state as _graph_state
 import hermes_team_mission_event_log as _event_log
+import hermes_team_mission_deliverables as _deliverable_state
 from hermes_team_mission_assignees import assignee_public_fields as _assignee_public_fields
 from hermes_team_mission_assignees import mission_metadata_with_members as _mission_metadata_with_members
 from hermes_team_mission_assignees import resolve_node_assignee as _resolve_node_assignee
@@ -134,6 +136,8 @@ _TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES = {
     "session.recalled",
     "mission.strategy.actions",
     "mission.approval.requested",
+    "mission.cancelled",
+    "mission.status.projected",
     "mission.plan.rejected",
     "mission.node.created",
     "mission.node.updated",
@@ -191,6 +195,19 @@ def _event_has_deliverable_text(event_type: str, payload: Dict[str, Any] | None)
     if event_type == "message.complete" and _text(payload.get("status")).lower() in {"error", "failed"}:
         return bool(primary_deliverable_text(payload))
     return bool(_payload_text_value(payload))
+
+
+def _node_requires_explicit_handoff(node: Dict[str, Any] | None) -> bool:
+    node = node if isinstance(node, dict) else {}
+    output_contract = node.get("output_contract") if isinstance(node.get("output_contract"), dict) else {}
+    if output_contract.get("requires_explicit_handoff") is True:
+        return True
+    if output_contract.get("requiresExplicitHandoff") is True:
+        return True
+    delivery_channel = _text(output_contract.get("delivery_channel") or output_contract.get("deliveryChannel")).lower()
+    if delivery_channel in {"handoff", "internal_handoff"}:
+        return True
+    return False
 
 
 def _terminal_run_status_for_event(event_type: str, payload: Dict[str, Any] | None) -> str | None:
@@ -869,6 +886,9 @@ class SessionDBTeamMissionMixin:
             "created_at": float(row["created_at"] or 0),
         }
 
+    def _team_mission_deliverable_from_row(self, row: sqlite3.Row | None) -> Dict[str, Any]:
+        return _deliverable_state.row_to_deliverable(row)
+
     def upsert_team_mission_conversation(
         self,
         *,
@@ -1199,7 +1219,7 @@ class SessionDBTeamMissionMixin:
                 sk, waiting_approval, exc,
             )
             return 0
-        _log.warning(
+        _log.debug(
             "[doxie-session-index] update_pending_for_session_key session_key=%s waiting=%s rows=%s",
             sk, waiting_approval, rows,
         )
@@ -1252,7 +1272,7 @@ class SessionDBTeamMissionMixin:
                 mid, status, running, waiting_approval, exc,
             )
             return 0
-        _log.warning(
+        _log.debug(
             "[doxie-session-index] update_for_mission mission_id=%s status=%s running=%s waiting=%s rows=%s",
             mid, status, running, waiting_approval, rows,
         )
@@ -1976,6 +1996,8 @@ class SessionDBTeamMissionMixin:
         active_node_count = 0
         for mission in missions:
             mission_id = _text(mission.get("mission_id"))
+            mission_status = _text(mission.get("status")).lower()
+            mission_is_active_runtime_scope = mission_id == active_mission_id or mission_status not in _TERMINAL_MISSION_STATUSES
             mission_nodes = nodes_by_mission.get(mission_id) or []
             node_ids: List[str] = []
             root_node_id = ""
@@ -1989,9 +2011,13 @@ class SessionDBTeamMissionMixin:
                 node_status = _text(node.get("status")).lower()
                 if not root_node_id and node_kind == "root":
                     root_node_id = namespaced_node_id
-                if node_status in _ACTIVE_NODE_STATUSES:
+                if mission_is_active_runtime_scope and node_status in _ACTIVE_NODE_STATUSES:
                     active_node_count += 1
-                if node_kind == "approval_gate" and node_status == "waiting_approval":
+                if (
+                    mission_is_active_runtime_scope
+                    and node_kind == "approval_gate"
+                    and node_status == "waiting_approval"
+                ):
                     pending_approvals.append({
                         "mission_id": mission_id,
                         "missionId": mission_id,
@@ -2280,6 +2306,10 @@ class SessionDBTeamMissionMixin:
             else "idle"
         )
         projected_active_run = active_run or active_node_run
+        active_mission = summary.get("mission") if isinstance(summary.get("mission"), dict) else {}
+        mission_started_at = float((active_mission or {}).get("created_at") or 0)
+        mission_updated_at = float((active_mission or {}).get("updated_at") or 0)
+        mission_completed_at = float((active_mission or {}).get("completed_at") or 0)
         run_updated_at = max(
             float((active_run or {}).get("updated_at") or 0),
             float((active_node_run or {}).get("updated_at") or 0),
@@ -2311,6 +2341,9 @@ class SessionDBTeamMissionMixin:
             "runtime_scope_key": _text(projected_active_run.get("runtime_scope_key")) if running and projected_active_run else "",
             "run_started_at": projected_active_run.get("started_at") or 0 if running and projected_active_run else 0,
             "run_updated_at": run_updated_at,
+            "mission_started_at": mission_started_at,
+            "mission_updated_at": mission_updated_at,
+            "mission_completed_at": mission_completed_at,
             "active_node_count": active_node_count,
             "task_frames": list(summary.get("task_frames") or []),
             "task_frame_count": int(summary.get("task_frame_count") or 0),
@@ -2325,6 +2358,32 @@ class SessionDBTeamMissionMixin:
             "updated_at": updated_at,
         }
         return projection
+
+    def _append_team_mission_state_projection_event(
+        self,
+        *,
+        mission_id: str,
+        event: Dict[str, Any],
+        identity: Dict[str, str] | None = None,
+        dedupe_key: str = "",
+    ) -> Dict[str, Any]:
+        stored = self.append_team_mission_structural_event(
+            mission_id=mission_id,
+            source_event=event,
+            identity=identity,
+            dedupe_key=dedupe_key,
+        )
+        source_seq = _event_seq(stored)
+        if source_seq > 0:
+            try:
+                self.append_team_mission_conversation_status_event(
+                    mission_id=mission_id,
+                    source_event=event,
+                    source_mission_seq=source_seq,
+                )
+            except Exception:
+                pass
+        return stored
 
     def _team_mission_conversation_status_event(
         self,
@@ -2488,7 +2547,9 @@ class SessionDBTeamMissionMixin:
         if mission:
             self.ensure_team_mission_conversation(mission=mission)
             refreshed = self.get_team_mission_graph(mission_id).get("mission")
-            return refreshed or mission
+            result = refreshed or mission
+            self._prune_team_mission_events_if_terminal(mission_id)
+            return result
         return mission
 
     def initialize_team_mission_from_strategy(
@@ -2591,7 +2652,7 @@ class SessionDBTeamMissionMixin:
             idx_status, idx_running, idx_waiting = "running", True, False
         else:
             idx_status, idx_running, idx_waiting = "", False, False
-        _log.warning(
+        _log.debug(
             "[doxie-session-index] initialize_mission mission_id=%s patch_status=%s idx_status=%s idx_running=%s",
             mission_id, ms, idx_status, idx_running,
         )
@@ -3238,13 +3299,18 @@ class SessionDBTeamMissionMixin:
             leader_session_id=str(mission.get("leader_session_id") or ""),
             metadata=dict(mission.get("metadata") or {}),
         )
+        self.update_session_index_for_mission(
+            mission_id, status="idle", running=False, waiting_approval=False,
+        )
         event = {
             "type": "mission.plan.rejected",
+            "timestamp": time.time(),
             "payload": {
                 "task_id": normalized_task_id,
                 "node_ids": [str(node.get("node_id") or "") for node in canceled_nodes],
                 "rejected_by": _text(rejected_by),
                 "reason": _text(reason),
+                "mission_status": "draft",
             },
         }
         if run_id:
@@ -3252,6 +3318,17 @@ class SessionDBTeamMissionMixin:
                 mission_id=mission_id,
                 run_id=run_id,
                 event=event,
+            )
+        else:
+            self._append_team_mission_state_projection_event(
+                mission_id=mission_id,
+                event=event,
+                identity={
+                    "mission_id": mission_id,
+                    "missionId": mission_id,
+                    **({"task_id": normalized_task_id, "taskId": normalized_task_id} if normalized_task_id else {}),
+                },
+                dedupe_key=f"mission-plan-rejected:{mission_id}:{normalized_task_id or 'whole-graph'}",
             )
         return {
             "mission_id": mission_id,
@@ -3276,7 +3353,7 @@ class SessionDBTeamMissionMixin:
         if not isinstance(mission, dict):
             _log.warning("[doxie-cancel] cancel_team_mission ABORT mission_id=%s mission_not_dict", mission_id)
             return {}
-        _log.warning(
+        _log.debug(
             "[doxie-cancel] cancel_team_mission ENTRY mission_id=%s current_status=%s node_count=%s",
             mission_id, _text(mission.get("status")), len(graph.get("nodes", []) or []),
         )
@@ -3326,6 +3403,22 @@ class SessionDBTeamMissionMixin:
             # Mission is already terminal, but we still return (and have just
             # reaped) any runs that were left non-terminal so the gateway can
             # terminate the live worker runs and clear the zombie state.
+            self.update_session_index_for_mission(
+                mission_id, status="idle", running=False, waiting_approval=False,
+            )
+            self._append_team_mission_state_projection_event(
+                mission_id=mission_id,
+                event={
+                    "type": "mission.status.projected",
+                    "timestamp": time.time(),
+                    "payload": {
+                        "mission_status": mission_status or "cancelled",
+                        "reason": "already_terminal_cancel_observed",
+                    },
+                },
+                identity={"mission_id": mission_id, "missionId": mission_id},
+                dedupe_key=f"mission-status-projected:{mission_id}:{mission_status or 'terminal'}",
+            )
             return {
                 "mission_id": mission_id,
                 "mission_status": mission_status or "cancelled",
@@ -3415,9 +3508,24 @@ class SessionDBTeamMissionMixin:
         self.update_session_index_for_mission(
             mission_id, status="idle", running=False, waiting_approval=False,
         )
-        _log.warning(
+        self._append_team_mission_state_projection_event(
+            mission_id=mission_id,
+            event={
+                "type": "mission.cancelled",
+                "timestamp": canceled_at,
+                "payload": {
+                    "mission_status": "cancelled",
+                    "node_ids": [str(node.get("node_id") or "") for node in canceled_nodes],
+                    "canceled_by": _text(canceled_by),
+                    "reason": _text(reason),
+                },
+            },
+            identity={"mission_id": mission_id, "missionId": mission_id},
+            dedupe_key=f"mission-cancelled:{mission_id}",
+        )
+        _log.debug(
             "[doxie-cancel] cancel_team_mission DONE mission_id=%s canceled_node_count=%s canceled_run_count=%s "
-            "event_emit=NO (does not call append_team_mission_event for node/mission cancellation)",
+            "event_emit=YES",
             mission_id, len(canceled_nodes), len(cancel_run_bindings),
         )
         return {
@@ -3518,6 +3626,13 @@ class SessionDBTeamMissionMixin:
             return int(cursor.rowcount or 0)
 
         return self._execute_write(_do)
+
+    def _prune_team_mission_events_if_terminal(self, mission_id: str) -> int:
+        try:
+            return self.prune_team_mission_events(mission_id)
+        except Exception as exc:
+            _log.debug("team mission stream pruning skipped for %s: %s", mission_id, exc)
+            return 0
 
     def bind_team_mission_run(
         self,
@@ -3671,6 +3786,87 @@ class SessionDBTeamMissionMixin:
                 return True
         return False
 
+    def _derive_missing_team_mission_handoff(
+        self,
+        *,
+        binding: Dict[str, Any],
+        node: Dict[str, Any],
+        run_id: str,
+        event: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload = event.get("payload") if isinstance((event or {}).get("payload"), dict) else {}
+        terminal_text = primary_deliverable_text(payload)
+        if not terminal_text:
+            return {}
+        mission_id = _text(binding.get("mission_id"))
+        node_id = _text(binding.get("node_id"))
+        derived = _deliverable_state.derived_degraded_deliverable_from_text(
+            terminal_text,
+            node_id=node_id,
+            status="completed",
+            result="",
+        )
+        if not derived:
+            return {}
+        node_metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        task_id = _text(
+            node_metadata.get("task_id")
+            or node_metadata.get("taskId")
+            or (binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}).get("task_id")
+            or (binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}).get("taskId")
+        )
+        deliverable = self.upsert_team_mission_deliverable(
+            mission_id=mission_id,
+            node_id=node_id,
+            run_id=run_id,
+            task_id=task_id,
+            status=derived.get("status") or "completed",
+            result=derived.get("result") or "",
+            summary=derived.get("summary") or "",
+            payload=derived.get("payload") if isinstance(derived.get("payload"), dict) else {},
+            artifact_refs=derived.get("artifact_refs") if isinstance(derived.get("artifact_refs"), list) else [],
+            next_context=derived.get("next_context") if isinstance(derived.get("next_context"), dict) else {},
+            output_contract=dict(node.get("output_contract") or {}),
+            source=_text(derived.get("source")) or _deliverable_state.DELIVERABLE_SOURCE_DERIVED_DEGRADED,
+            confidence=float(derived.get("confidence") or 0.5),
+            visibility=_deliverable_state.DELIVERABLE_VISIBILITY_HANDOFF,
+        )
+        if deliverable:
+            try:
+                _event_log.append_team_mission_structural_event(
+                    self,
+                    mission_id=mission_id,
+                    source_event={
+                        "type": "mission.node.deliverable.recorded",
+                        "run_id": run_id,
+                        "seq": _event_seq(event),
+                        "payload": {
+                            "mission_id": mission_id,
+                            "missionId": mission_id,
+                            "node_id": node_id,
+                            "nodeId": node_id,
+                            "run_id": run_id,
+                            "runId": run_id,
+                            "task_id": task_id,
+                            "taskId": task_id,
+                            "deliverable_id": deliverable.get("deliverable_id") or "",
+                            "deliverableId": deliverable.get("deliverable_id") or "",
+                            "status": deliverable.get("status") or "completed",
+                            "result": deliverable.get("result") or "",
+                            "summary": deliverable.get("summary") or "",
+                            "artifact_refs": deliverable.get("artifact_refs") or [],
+                            "artifactRefs": deliverable.get("artifact_refs") or [],
+                            "source": _text(derived.get("source")) or _deliverable_state.DELIVERABLE_SOURCE_DERIVED_DEGRADED,
+                            "visibility": "handoff",
+                            "channel": "handoff",
+                        },
+                    },
+                    dedupe_key=f"node-deliverable-derived:{mission_id}:{node_id}:{run_id}",
+                )
+            except Exception:
+                pass
+        return deliverable
+
     def reduce_team_mission_run_event(self, *, run_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
         run_id = str(run_id or "").strip()
         if not run_id:
@@ -3690,7 +3886,10 @@ class SessionDBTeamMissionMixin:
             elif status == "interrupted":
                 next_status = "interrupted"
             elif status in {"failed", "error"}:
-                if self._team_mission_run_has_deliverable_text(run_id, max_seq=_event_seq(event)):
+                if (
+                    self.team_mission_run_has_deliverable(run_id)
+                    or self._team_mission_run_has_deliverable_text(run_id, max_seq=_event_seq(event))
+                ):
                     next_status = "completed"
                 else:
                     next_status = "failed"
@@ -3701,7 +3900,28 @@ class SessionDBTeamMissionMixin:
         node = self.get_team_mission_node(str(binding.get("mission_id") or ""), str(binding.get("node_id") or ""))
         if not node:
             return {}
+        missing_required_handoff = False
+        missing_handoff_failure: Dict[str, str] = {}
+        if (
+            next_status == "completed"
+            and _node_requires_explicit_handoff(node)
+            and not self.team_mission_run_has_deliverable(run_id)
+        ):
+            derived_handoff = self._derive_missing_team_mission_handoff(
+                binding=binding,
+                node=node,
+                run_id=run_id,
+                event=event,
+            )
+            if not derived_handoff:
+                next_status = "blocked"
+                missing_required_handoff = True
+                missing_handoff_failure = _classify_team_mission_failure(
+                    "error",
+                    {"error": "protocol violation: Team Mission node ended without calling team_mission_submit_deliverable"},
+                )
         metadata = dict(node.get("metadata") or {})
+        failure = _classify_team_mission_failure(event_type, payload)
         event_seq = _event_seq(event)
         existing_terminal_run_id = str(metadata.get("last_run_id") or "").strip()
         existing_terminal_status = str(
@@ -3736,15 +3956,46 @@ class SessionDBTeamMissionMixin:
                 "last_run_terminal_event": event_type,
                 "last_run_terminal_status": next_status,
                 "last_run_terminal_seq": event_seq,
+                **({
+                    "last_run_reason_code": missing_handoff_failure.get("reason_code") or "protocol_violation",
+                    "last_run_recoverability": missing_handoff_failure.get("recoverability") or "blocked",
+                    "last_run_error_message": missing_handoff_failure.get("message") or "Team Mission node ended without submitting required handoff deliverable.",
+                } if missing_required_handoff else {}),
+                **({
+                    "last_run_reason_code": failure["reason_code"],
+                    "last_run_recoverability": failure["recoverability"],
+                    "last_run_error_message": failure["message"],
+                } if failure and not missing_required_handoff else {}),
             },
             position_x=float(node.get("position_x") or 0),
             position_y=float(node.get("position_y") or 0),
         )
+        if missing_required_handoff:
+            try:
+                _event_log.append_team_mission_structural_event(
+                    self,
+                    mission_id=str(binding.get("mission_id") or ""),
+                    source_event={
+                        "type": "mission.node.blocked",
+                        "run_id": run_id,
+                        "seq": event_seq,
+                        "payload": {
+                            "node": updated,
+                            "run_id": run_id,
+                            "reason_code": missing_handoff_failure.get("reason_code") or "protocol_violation",
+                            "recoverability": missing_handoff_failure.get("recoverability") or "blocked",
+                            "message": missing_handoff_failure.get("message") or "Team Mission node ended without submitting required handoff deliverable.",
+                        },
+                    },
+                    dedupe_key=f"node-blocked:missing-handoff:{binding.get('mission_id') or ''}:{binding.get('node_id') or ''}:{run_id}",
+                )
+            except Exception:
+                pass
         self.reduce_team_mission_graph(str(binding.get("mission_id") or ""))
         compile_mode = "final"
         if next_status in {"cancelled", "interrupted"}:
             compile_mode = "canceled"
-        elif next_status in {"failed"}:
+        elif next_status in {"failed", "blocked"}:
             compile_mode = "blocked"
         try:
             self.compile_team_mission_memory(
@@ -3878,6 +4129,7 @@ class SessionDBTeamMissionMixin:
                     )
                 except Exception:
                     pass
+                self._prune_team_mission_events_if_terminal(mission_id)
             return saved
         finally:
             self._team_mission_projecting = prev_projecting
@@ -3974,13 +4226,17 @@ class SessionDBTeamMissionMixin:
             # owned by the explicit streaming paths (append_team_mission_run_event
             # and run_control.record_event); doing them here would double-mirror
             # and rewrite conversation stream history.
+            source_event = dict(saved)
             _event_log.append_team_mission_runtime_event(
                 self,
                 mission_id=mission_id,
                 run_id=run_id,
-                source_event=dict(saved),
+                source_event=source_event,
                 identity=identity,
             )
+            payload = source_event.get("payload") if isinstance(source_event.get("payload"), dict) else {}
+            if _terminal_run_status_for_event(_text(source_event.get("type")), payload):
+                self._prune_team_mission_events_if_terminal(mission_id)
         finally:
             self._team_mission_projecting = prev_projecting
 
@@ -4031,12 +4287,43 @@ class SessionDBTeamMissionMixin:
                 ) if binding is not None
             ]
             nodes = self._team_mission_nodes_with_runtime_bindings(nodes, run_bindings)
+            deliverables = [
+                deliverable for deliverable in (
+                    self._team_mission_deliverable_from_row(row)
+                    for row in self._conn.execute(
+                        """
+                        SELECT *
+                        FROM team_mission_deliverables
+                        WHERE mission_id = ?
+                        ORDER BY updated_at ASC, created_at ASC, deliverable_id ASC
+                        """,
+                        (mission_id,),
+                    ).fetchall()
+                ) if deliverable
+            ]
+        latest_deliverable_by_node: Dict[str, Dict[str, Any]] = {}
+        for deliverable in deliverables:
+            node_id = _text(deliverable.get("node_id") or deliverable.get("nodeId"))
+            if node_id:
+                latest_deliverable_by_node[node_id] = deliverable
+        nodes = [
+            {
+                **node,
+                **({
+                    "deliverable": latest_deliverable_by_node[_text(node.get("node_id"))],
+                    "last_deliverable": latest_deliverable_by_node[_text(node.get("node_id"))],
+                    "lastDeliverable": latest_deliverable_by_node[_text(node.get("node_id"))],
+                } if _text(node.get("node_id")) in latest_deliverable_by_node else {}),
+            }
+            for node in nodes
+        ]
         return {
             "mission": mission,
             "conversation": conversation or {},
             "nodes": nodes,
             "edges": edges,
             "run_bindings": run_bindings,
+            "deliverables": deliverables,
         }
 
     def get_team_mission_conversation_graph(self, conversation_id: str) -> Dict[str, Any]:
@@ -4228,6 +4515,81 @@ class SessionDBTeamMissionMixin:
 
     def _team_mission_memory_context(self, mission: Dict[str, Any]) -> Dict[str, Any]:
         return _memory_state.team_mission_memory_context(self, mission)
+
+    def upsert_team_mission_deliverable(
+        self,
+        *,
+        deliverable_id: str = "",
+        mission_id: str,
+        node_id: str,
+        run_id: str,
+        task_id: str = "",
+        status: str = "completed",
+        result: str = "",
+        summary: str = "",
+        payload: Dict[str, Any] | None = None,
+        artifact_refs: List[Dict[str, Any]] | None = None,
+        next_context: Dict[str, Any] | None = None,
+        output_contract: Dict[str, Any] | None = None,
+        source: str = _deliverable_state.DELIVERABLE_SOURCE_AUTHORITATIVE,
+        confidence: float = 0.9,
+        visibility: str = _deliverable_state.DELIVERABLE_VISIBILITY_HANDOFF,
+        created_at: float | None = None,
+        updated_at: float | None = None,
+    ) -> Dict[str, Any]:
+        return _deliverable_state.upsert_team_mission_deliverable(
+            self,
+            deliverable_id=deliverable_id,
+            mission_id=mission_id,
+            node_id=node_id,
+            run_id=run_id,
+            task_id=task_id,
+            status=status,
+            result=result,
+            summary=summary,
+            payload=payload,
+            artifact_refs=artifact_refs,
+            next_context=next_context,
+            output_contract=output_contract,
+            source=source,
+            confidence=confidence,
+            visibility=visibility,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+
+    def list_team_mission_deliverables(
+        self,
+        *,
+        mission_id: str = "",
+        node_id: str = "",
+        run_id: str = "",
+        task_id: str = "",
+        statuses: List[str] | None = None,
+        sources: List[str] | None = None,
+        visibility: List[str] | None = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        return _deliverable_state.list_team_mission_deliverables(
+            self,
+            mission_id=mission_id,
+            node_id=node_id,
+            run_id=run_id,
+            task_id=task_id,
+            statuses=statuses,
+            sources=sources,
+            visibility=visibility,
+            limit=limit,
+        )
+
+    def get_team_mission_deliverable(self, deliverable_id: str) -> Dict[str, Any]:
+        return _deliverable_state.get_team_mission_deliverable(self, deliverable_id)
+
+    def latest_team_mission_deliverable_for_run(self, run_id: str) -> Dict[str, Any]:
+        return _deliverable_state.latest_team_mission_deliverable_for_run(self, run_id)
+
+    def team_mission_run_has_deliverable(self, run_id: str) -> bool:
+        return _deliverable_state.team_mission_run_has_deliverable(self, run_id)
 
     def upsert_team_mission_memory_item(
         self,

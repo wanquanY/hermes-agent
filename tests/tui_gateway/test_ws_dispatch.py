@@ -107,15 +107,66 @@ def test_conversation_render_snapshot_uses_control_plane_executor():
 @pytest.mark.parametrize(
     "method",
     [
-        "events.subscribe",
-        "events.unsubscribe",
-        "run.events",
         "run.list",
         "run.status",
     ],
 )
 def test_profile_scoped_runtime_read_methods_are_proxied_to_runtime_worker(method):
+    """``run.list`` / ``run.status`` read per-profile run state; they're
+    re-proxied to the worker until Phase 4-5 ports them over the
+    stdin/stdout protocol."""
     assert runtime_proxy.should_proxy_to_runtime(
+        {
+            "id": "1",
+            "method": method,
+            "params": {
+                "stored_session_id": "stored-session-1",
+                "runtime_scope_key": "profile:agent-a:version:v1",
+                "dovie_profile": {
+                    "id": "agent-a",
+                    "runtimeScopeKey": "profile:agent-a:version:v1",
+                    "agentProfileVersionId": "v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.dovie/versions/v1",
+                },
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "events.subscribe",
+        "events.unsubscribe",
+        "run.events",
+    ],
+)
+def test_event_read_methods_stay_on_control_plane(method):
+    """``events.subscribe``, ``events.unsubscribe`` and ``run.events`` were
+    historically routed to the worker so its local broadcaster could replay
+    events to the subscriber. In the current architecture every worker
+    frame is persisted to the MAIN db via the runtime bridge and broadcast
+    from the MAIN gateway — the in-process handler reads from the same db,
+    sees the same events, and never has to wait on a cold worker spawn.
+
+    Routing these to the worker had two real costs we've already paid for
+    in production:
+      1) ``events.subscribe`` on a brand-new team conversation would force
+         a leader worker spawn before the user had typed anything (no
+         ``dovie_profile`` in flight → ``ensure_worker`` errored with
+         ``runtime profile hermes home required``).
+      2) Every frontend reconnect issued ``events.subscribe`` then a
+         ``run.events`` backfill; the latter still proxied, triggering a
+         10-20s cold worker spawn that read as "运行中" hanging after the
+         user clicked a clarify option / switched conversations.
+
+    Pin the rule: these three methods MUST stay in-process regardless of
+    scope (profile-scoped, team-leader-scoped, anything). If you need to
+    re-route one to the worker, you also need to either (a) prove the
+    worker now has events the main db doesn't, or (b) gate the proxy on
+    "worker already exists" so reconnect doesn't cold-spawn.
+    """
+    assert not runtime_proxy.should_proxy_to_runtime(
         {
             "id": "1",
             "method": method,
@@ -144,6 +195,9 @@ def test_profile_scoped_runtime_read_methods_are_proxied_to_runtime_worker(metho
     ],
 )
 def test_team_mission_scoped_methods_are_proxied_to_runtime_worker(method):
+    """Team-mission writes touch in-worker scheduler state — they're
+    proxied until the Phase 4-5 stdin/stdout worker protocol forwards
+    these operations over its own command channel."""
     assert runtime_proxy.should_proxy_to_runtime(
         {
             "id": "1",
@@ -165,12 +219,12 @@ def test_team_mission_scoped_methods_are_proxied_to_runtime_worker(method):
 
 
 def test_clarify_respond_with_local_pending_stays_on_control_plane():
-    # The team leader conversation runs IN the control-plane process (team_mission.
-    # message.submit calls run.submit in-process), so its clarify pending is registered
-    # locally. clarify.respond must be answered here — proxying it to the scoped worker
-    # for team:...:leader-conversation hits a process that never saw the request and
-    # returns "no pending answer request". Match is by request_id, so an unknown id
-    # (a member-node clarify living in a worker) still proxies correctly.
+    """The team leader conversation runs IN the control-plane process
+    (team_mission.message.submit calls run.submit in-process), so its
+    clarify pending is registered locally. ``_interactive_respond_is_local``
+    checks the local clarify_gateway registry by request_id and keeps the
+    response in-process when the pending is here. An unknown request_id
+    (a member-node clarify living in a worker process) still proxies."""
     from tools import clarify_gateway
 
     clarify_id = "test-clarify-local-1"
@@ -187,6 +241,10 @@ def test_clarify_respond_with_local_pending_stays_on_control_plane():
                 },
             }
         )
+        # An unknown request_id (a member-node clarify whose pending
+        # lives in a worker process) still proxies to the worker that
+        # owns it — until Phase 4-5 replaces this with the stdin/stdout
+        # forwarding protocol.
         assert runtime_proxy.should_proxy_to_runtime(
             {
                 "id": "2",
@@ -1257,6 +1315,9 @@ def test_control_plane_team_mission_node_history_is_not_proxied_to_runtime_worke
 
 
 def test_profile_scoped_cron_manage_is_proxied_to_runtime_worker():
+    """cron.manage default (no controlPlaneOnly) writes cron jobs into
+    the worker's in-memory cron runtime — proxy until Phase 4-5
+    forwards cron ops over the new worker protocol."""
     assert runtime_proxy.should_proxy_to_runtime(
         {
             "id": "1",
@@ -1316,6 +1377,9 @@ def test_profile_growth_summary_stays_on_control_plane_with_profile_scope():
 
 @pytest.mark.parametrize("action", ["add", "update", "remove", "run", "pause", "resume"])
 def test_profile_scoped_cron_control_plane_flag_does_not_bypass_runtime_mutations(action):
+    """Cron mutations target the worker's cron runtime regardless of
+    the ``controlPlaneOnly`` hint — that hint is only honored for the
+    read-only list/status actions. Mutations proxy until Phase 4-5."""
     assert runtime_proxy.should_proxy_to_runtime(
         {
             "id": "1",
@@ -1337,14 +1401,20 @@ def test_profile_scoped_cron_control_plane_flag_does_not_bypass_runtime_mutation
 @pytest.mark.parametrize(
     "method",
     [
-        "approval.pending.list",
         "approval.policy.get",
         "approval.policy.set",
-        "approval.respond",
     ],
 )
-def test_profile_scoped_approval_methods_are_proxied_to_runtime_worker(method):
-    assert runtime_proxy.should_proxy_to_runtime(
+def test_interactive_respond_methods_stay_on_control_plane(method):
+    """Phase 3 of sub-sidecar removal: clarify.respond / approval.respond
+    / secret.respond / sudo.respond / approval.pending.list operate on
+    pure in-memory state (``tools/clarify_gateway.py:_entries`` etc.)
+    that is now keyed by ProfileContext. Proxying them to a worker
+    process used to land them in the wrong sub map (the worker's own
+    ``_gateway_queues``, never written to from the main side), causing
+    the "clarify response triggered but no message.delta appeared"
+    bug. Pin the new contract: control plane handles them in-process."""
+    assert not runtime_proxy.should_proxy_to_runtime(
         {
             "id": "1",
             "method": method,
@@ -1369,6 +1439,10 @@ def test_profile_scoped_approval_methods_are_proxied_to_runtime_worker(method):
     ],
 )
 def test_profile_scoped_runtime_tool_methods_are_proxied_to_runtime_worker(method):
+    """skills.reload / toolsets.list / tools.configure touch in-worker
+    registries (skill module map, toolset enable/disable state). They
+    proxy until Phase 4-5 forwards these registry ops over the new
+    worker protocol."""
     assert runtime_proxy.should_proxy_to_runtime(
         {
             "id": "1",

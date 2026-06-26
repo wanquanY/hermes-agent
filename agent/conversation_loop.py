@@ -276,6 +276,26 @@ def _get_continuation_prompt(is_partial_stub: bool, dropped_tools: Optional[List
         )
 
 
+def _get_large_tool_call_recovery_prompt(tool_names: Optional[List[str]] = None) -> str:
+    names = [str(name or "").strip() for name in (tool_names or []) if str(name or "").strip()]
+    tool_list = ", ".join(names[:3]) if names else "a tool call"
+    execute_code_hint = (
+        " If you need to write a large file, prefer execute_code with "
+        "`from hermes_tools import write_file` and call write_file(path, content) "
+        "inside Python, so the large content is created inside the script rather "
+        "than emitted as one huge tool-call JSON argument."
+    )
+    return (
+        "[System: Your previous tool call "
+        f"({tool_list}) was truncated because its JSON arguments were too large "
+        "for one model response. Do NOT retry the same huge tool call. "
+        "Use smaller tool-call arguments, split the work into smaller files or "
+        "sections, or generate the large content programmatically."
+        f"{execute_code_hint} Keep each direct tool-call argument payload under "
+        "~8K tokens.]"
+    )
+
+
 # Shared recovery hint appended to every content-policy refusal message. Both
 # the HTTP-200 refusal path (``finish_reason=content_filter``) and the
 # exception path (a provider moderation error classified as
@@ -1129,6 +1149,7 @@ def run_conversation(
         auth_failover_attempted = False
         restart_with_compressed_messages = False
         restart_with_length_continuation = False
+        restart_with_rebuilt_messages = False
 
         finish_reason = "stop"
         response = None  # Guard against UnboundLocalError if all retries fail
@@ -1813,6 +1834,14 @@ def run_conversation(
                                 continue_msg = {
                                     "role": "user",
                                     "content": _continue_content,
+                                    # In-memory trajectory only — the LLM needs to
+                                    # see this to know it must continue, but it is
+                                    # a private retry artifact, NOT something the
+                                    # human ever typed. Skip it during session-DB
+                                    # persistence so it doesn't leak into the
+                                    # transcript UI as a phantom user message.
+                                    "_synthetic_continuation": True,
+                                    "metadata": {"synthetic_kind": "length_continuation"},
                                 }
                                 messages.append(continue_msg)
                                 agent._session_messages = messages
@@ -1836,14 +1865,40 @@ def run_conversation(
                         if assistant_message is not None and _trunc_has_tool_calls:
                             if truncated_tool_call_retries < 1:
                                 truncated_tool_call_retries += 1
+                                _tool_names = [
+                                    str(getattr(getattr(tc, "function", None), "name", "") or "").strip()
+                                    for tc in getattr(assistant_message, "tool_calls", []) or []
+                                ]
+                                _tool_names = [name for name in _tool_names if name]
                                 agent._vprint(
-                                    f"{agent.log_prefix}⚠️  Truncated tool call detected — retrying API call...",
+                                    f"{agent.log_prefix}⚠️  Truncated large tool call detected — requesting chunked retry...",
                                     force=True,
                                 )
                                 # Don't append the broken response to messages;
-                                # just re-run the same API call from the current
-                                # message state, giving the model another chance.
-                                continue
+                                # guide the model away from re-emitting the same
+                                # huge JSON arguments that hit the output cap.
+                                # Both rows are in-memory trajectory artifacts —
+                                # required so the model sees the bracketed
+                                # critique but NOT real conversation content.
+                                # Skip them at DB-flush time (same mechanism as
+                                # the length-continuation prompt above).
+                                messages.append({
+                                    "role": "assistant",
+                                    "content": "[Tool call omitted: arguments were truncated before execution.]",
+                                    "_synthetic_continuation": True,
+                                    "metadata": {"synthetic_kind": "truncated_tool_call_critique"},
+                                })
+                                messages.append({
+                                    "role": "user",
+                                    "content": _get_large_tool_call_recovery_prompt(_tool_names),
+                                    "_synthetic_continuation": True,
+                                    "metadata": {"synthetic_kind": "large_tool_call_recovery"},
+                                })
+                                agent._session_messages = messages
+                                _boost_base = agent.max_tokens if agent.max_tokens else 4096
+                                agent._ephemeral_max_output_tokens = min(_boost_base * 2, 32768)
+                                restart_with_rebuilt_messages = True
+                                break
                             agent._vprint(
                                 f"{agent.log_prefix}⚠️  Truncated tool call response detected again — refusing to execute incomplete tool arguments.",
                                 force=True,
@@ -3379,6 +3434,9 @@ def run_conversation(
             restart_with_compressed_messages = False
             continue
 
+        if restart_with_rebuilt_messages:
+            continue
+
         if restart_with_length_continuation:
             # Progressively boost the output token budget on each retry.
             # Retry 1 → 2× base, retry 2 → 3× base, capped at 32 768.
@@ -3668,8 +3726,27 @@ def run_conversation(
                         if tc.function.name in {n for n, _ in invalid_json_args}
                     )
                     if _truncated:
+                        if truncated_tool_call_retries < 1:
+                            truncated_tool_call_retries += 1
+                            _invalid_tool_names = sorted({name for name, _ in invalid_json_args if name})
+                            agent._vprint(
+                                f"{agent.log_prefix}⚠️  Truncated tool call arguments detected "
+                                f"(finish_reason={finish_reason!r}) — requesting chunked retry.",
+                                force=True,
+                            )
+                            agent._invalid_json_retries = 0
+                            messages.append({
+                                "role": "assistant",
+                                "content": "[Tool call omitted: arguments were truncated before execution.]",
+                            })
+                            messages.append({
+                                "role": "user",
+                                "content": _get_large_tool_call_recovery_prompt(_invalid_tool_names),
+                            })
+                            agent._session_messages = messages
+                            continue
                         agent._vprint(
-                            f"{agent.log_prefix}⚠️  Truncated tool call arguments detected "
+                            f"{agent.log_prefix}⚠️  Truncated tool call arguments detected again "
                             f"(finish_reason={finish_reason!r}) — refusing to execute.",
                             force=True,
                         )

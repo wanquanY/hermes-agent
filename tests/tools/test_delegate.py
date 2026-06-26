@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import unittest
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from unittest.mock import MagicMock, patch
 
 from tools.delegate_tool import (
@@ -2281,6 +2282,70 @@ class TestChildCredentialLeasing(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         child._credential_pool.release_lease.assert_called_once_with("cred-a")
+
+
+class TestDelegateChildIdleTimeout(unittest.TestCase):
+    """Child timeout is based on activity, not total runtime."""
+
+    class _ActivityChild:
+        def __init__(self):
+            self._lock = threading.Lock()
+            self._api_call_count = 0
+            self._activity_ts = time.time()
+            self._activity_desc = "initializing"
+
+        def touch(self, desc: str):
+            with self._lock:
+                self._api_call_count += 1
+                self._activity_ts = time.time()
+                self._activity_desc = desc
+
+        def get_activity_summary(self):
+            with self._lock:
+                return {
+                    "last_activity_ts": self._activity_ts,
+                    "last_activity_desc": self._activity_desc,
+                    "current_tool": None,
+                    "api_call_count": self._api_call_count,
+                    "budget_used": self._api_call_count,
+                    "budget_max": 50,
+                }
+
+    def test_wait_allows_runtime_longer_than_timeout_when_child_is_active(self):
+        from tools.delegate_tool import _wait_for_child_result_with_idle_timeout
+
+        child = self._ActivityChild()
+
+        def active_run():
+            for i in range(4):
+                time.sleep(0.03)
+                child.touch(f"progress {i}")
+            return "done"
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(active_run)
+            result = _wait_for_child_result_with_idle_timeout(
+                future,
+                child=child,
+                idle_timeout_seconds=0.08,
+                poll_interval=0.01,
+            )
+
+        self.assertEqual(result, "done")
+
+    def test_wait_times_out_when_child_activity_does_not_change(self):
+        from tools.delegate_tool import _wait_for_child_result_with_idle_timeout
+
+        child = self._ActivityChild()
+        future = Future()
+
+        with self.assertRaises(FuturesTimeoutError):
+            _wait_for_child_result_with_idle_timeout(
+                future,
+                child=child,
+                idle_timeout_seconds=0.05,
+                poll_interval=0.01,
+            )
 
 
 class TestDelegateHeartbeat(unittest.TestCase):

@@ -1354,6 +1354,16 @@ class AIAgent:
                     current_turn_metadata = _turn_metadata(prior.get("metadata"))
                     break
             for msg in messages[flush_from:]:
+                # In-memory trajectory artifacts (truncation continuation prompt,
+                # large-tool-call recovery) are added so the LLM can continue the
+                # turn, but they are NOT real conversation content. Skip them
+                # here so they never reach the session DB / the transcript UI.
+                # IMPORTANT: also bump the turn-metadata cursor when the synthetic
+                # message is a user row, so a subsequent real assistant reply still
+                # gets stamped with the OUTER turn's ids (the synthetic doesn't
+                # define a new turn).
+                if isinstance(msg, dict) and msg.get("_synthetic_continuation"):
+                    continue
                 role = msg.get("role", "unknown")
                 msg_metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
                 if role == "user":

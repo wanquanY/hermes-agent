@@ -440,8 +440,8 @@ def _get_max_async_children() -> int:
 def _get_child_timeout() -> Optional[float]:
     """Read delegation.child_timeout_seconds from config.
 
-    Returns the number of seconds a single child agent is allowed to run
-    before being considered stuck.  Default: 600 s (10 minutes).
+    Returns the number of seconds a single child agent is allowed to stay
+    inactive before being considered stuck. Default: 600 s (10 minutes).
     """
     cfg = _load_config()
     val = cfg.get("child_timeout_seconds")
@@ -462,6 +462,78 @@ def _get_child_timeout() -> Optional[float]:
         except (TypeError, ValueError):
             pass
     return float(DEFAULT_CHILD_TIMEOUT)
+
+
+_CHILD_ACTIVITY_TOKEN_FIELDS = (
+    "last_activity_ts",
+    "last_activity_desc",
+    "current_tool",
+    "api_call_count",
+    "budget_used",
+    "budget_max",
+)
+
+
+def _get_child_activity_token(child: Any) -> Optional[tuple]:
+    """Return a comparable child activity token, or None if unavailable."""
+    if child is None:
+        return None
+    try:
+        summary = child.get_activity_summary()
+    except Exception:
+        return None
+    if not isinstance(summary, dict):
+        return None
+    return tuple(
+        (field, repr(summary.get(field)))
+        for field in _CHILD_ACTIVITY_TOKEN_FIELDS
+    )
+
+
+def _wait_for_child_result_with_idle_timeout(
+    child_future: Any,
+    *,
+    child: Any,
+    idle_timeout_seconds: Optional[float],
+    poll_interval: Optional[float] = None,
+) -> Any:
+    """Wait for a child result and time out only after child inactivity.
+
+    ``delegation.child_timeout_seconds`` used to be applied as a wall-clock
+    future timeout, which killed legitimate long-running subagents even while
+    they were actively streaming or executing tools. The child already exposes
+    activity via ``get_activity_summary()``; this watcher resets its idle timer
+    whenever that activity token changes and only raises after continuous
+    inactivity for the configured duration.
+    """
+    if idle_timeout_seconds is None:
+        return child_future.result()
+
+    idle_timeout = float(idle_timeout_seconds)
+    if idle_timeout <= 0:
+        return child_future.result()
+
+    poll = max(0.05, float(poll_interval or _CHILD_IDLE_TIMEOUT_POLL_INTERVAL))
+    last_activity_at = time.monotonic()
+    last_token = _get_child_activity_token(child)
+
+    while True:
+        now = time.monotonic()
+        remaining_idle = idle_timeout - (now - last_activity_at)
+        if remaining_idle <= 0:
+            if child_future.done():
+                return child_future.result()
+            raise FuturesTimeoutError(
+                f"child idle for {idle_timeout:g}s without activity"
+            )
+
+        try:
+            return child_future.result(timeout=min(poll, remaining_idle))
+        except FuturesTimeoutError:
+            current_token = _get_child_activity_token(child)
+            if current_token is not None and current_token != last_token:
+                last_token = current_token
+                last_activity_at = time.monotonic()
 
 
 def _get_max_spawn_depth() -> int:
@@ -526,15 +598,15 @@ def _get_inherit_mcp_toolsets() -> bool:
 
 
 DEFAULT_MAX_ITERATIONS = 50
-DEFAULT_CHILD_TIMEOUT = 600  # seconds before a child agent is considered stuck
+DEFAULT_CHILD_TIMEOUT = 600  # idle seconds before a child agent is considered stuck
+_CHILD_IDLE_TIMEOUT_POLL_INTERVAL = 1.0
 _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during delegation
 # Stale-heartbeat thresholds. A child with no API-call progress is either:
-#   - idle between turns (no current_tool) — probably stuck on a slow API call
+#   - idle between turns (no current_tool) — no visible child activity
 #   - inside a tool (current_tool set) — probably running a legitimately long
 #     operation (terminal command, web fetch, large file read)
-# The idle ceiling stays tight so genuinely stuck children don't mask the gateway
-# timeout. The in-tool ceiling is much higher so legit long-running tools get
-# time to finish; child_timeout_seconds (default 600s) is still the hard cap.
+# The child idle timeout is the authoritative stuck detector. These heartbeat
+# ceilings only prevent endless parent heartbeats if the idle watcher fails.
 _HEARTBEAT_STALE_CYCLES_IDLE = 15  # 15 * 30s = 450s idle between turns → stale
 _HEARTBEAT_STALE_CYCLES_IN_TOOL = 40  # 40 * 30s = 1200s stuck on same tool → stale
 DEFAULT_TOOLSETS = ["terminal", "file", "web"]
@@ -1477,7 +1549,7 @@ def _dump_subagent_timeout_diagnostic(
         _w("## Timeout")
         _w(f"  task_index:        {task_index}")
         _w(f"  subagent_id:       {subagent_id}")
-        _w(f"  configured_timeout: {timeout_seconds}s")
+        _w(f"  configured_idle_timeout: {timeout_seconds}s")
         _w(f"  actual_duration:   {duration_seconds:.2f}s")
         _w("")
 
@@ -1586,6 +1658,7 @@ def _run_single_child(
     Returns a structured result dict.
     """
     child_start = time.monotonic()
+    child_timeout = _get_child_timeout()
 
     # Get the progress callback from the child agent
     child_progress_cb = getattr(child, "tool_progress_callback", None)
@@ -1659,15 +1732,17 @@ def _run_single_child(
                     _stale_count[0] += 1
 
                 # Pick threshold based on whether the child is currently
-                # inside a tool call. In-tool threshold is high enough to
-                # cover legitimately slow tools; idle threshold stays
-                # tight so the gateway timeout can fire on a truly wedged
-                # child.
+                # inside a tool call. Keep this threshold at or beyond the
+                # configured child idle timeout so delegate_task, not the
+                # gateway, owns the stuck-child decision.
                 stale_limit = (
                     _HEARTBEAT_STALE_CYCLES_IN_TOOL
                     if child_tool
                     else _HEARTBEAT_STALE_CYCLES_IDLE
                 )
+                if child_timeout and _HEARTBEAT_INTERVAL > 0:
+                    timeout_cycles = int(child_timeout / _HEARTBEAT_INTERVAL) + 1
+                    stale_limit = max(stale_limit, timeout_cycles)
                 if _stale_count[0] >= stale_limit:
                     logger.warning(
                         "Subagent %d appears stale (no progress for %d "
@@ -1676,7 +1751,7 @@ def _run_single_child(
                         _stale_count[0],
                         child_tool or "<none>",
                     )
-                    break  # stop touching parent, let gateway timeout fire
+                    break  # final safeguard; idle watcher remains authoritative
 
                 if child_tool:
                     desc = (
@@ -1753,9 +1828,9 @@ def _run_single_child(
             list(file_state.known_reads(parent_task_id)) if parent_task_id else []
         )
 
-        # Run child with a hard timeout to prevent indefinite blocking
-        # when the child's API call or tool-level HTTP request hangs.
-        child_timeout = _get_child_timeout()
+        # Run child with an activity-based idle timeout. The configured value
+        # is not a total runtime cap: active streaming, API progress, and tool
+        # progress reset the idle timer.
         _timeout_executor = ThreadPoolExecutor(
             max_workers=1,
             # Install a non-interactive approval callback in the worker thread
@@ -1778,7 +1853,11 @@ def _run_single_child(
 
         _child_future = _timeout_executor.submit(_run_with_thread_capture)
         try:
-            result = _child_future.result(timeout=child_timeout)
+            result = _wait_for_child_result_with_idle_timeout(
+                _child_future,
+                child=child,
+                idle_timeout_seconds=child_timeout,
+            )
         except Exception as _timeout_exc:
             # Signal the child to stop so its thread can exit cleanly.
             try:
@@ -1794,7 +1873,11 @@ def _run_single_child(
             logger.warning(
                 "Subagent %d %s after %.1fs",
                 task_index,
-                "timed out" if is_timeout else f"raised {type(_timeout_exc).__name__}",
+                (
+                    "idle timed out"
+                    if is_timeout
+                    else f"raised {type(_timeout_exc).__name__}"
+                ),
                 duration,
             )
 
@@ -1829,7 +1912,7 @@ def _run_single_child(
                     child_progress_cb(
                         "subagent.complete",
                         preview=(
-                            f"Timed out after {duration}s"
+                            f"Idle timeout after {duration}s"
                             if is_timeout
                             else str(_timeout_exc)
                         ),
@@ -1843,7 +1926,7 @@ def _run_single_child(
             if is_timeout:
                 if child_api_calls == 0:
                     _err = (
-                        f"Subagent timed out after {child_timeout}s without "
+                        f"Subagent was idle for {child_timeout}s without "
                         f"making any API call — the child never reached its "
                         f"first LLM request (prompt construction, credential "
                         f"resolution, or transport may be stuck)."
@@ -1852,9 +1935,9 @@ def _run_single_child(
                         _err += f" Diagnostic: {diagnostic_path}"
                 else:
                     _err = (
-                        f"Subagent timed out after {child_timeout}s with "
-                        f"{child_api_calls} API call(s) completed — likely "
-                        f"stuck on a slow API call or unresponsive network request."
+                        f"Subagent was idle for {child_timeout}s with "
+                        f"{child_api_calls} API call(s) completed — no child "
+                        f"activity was observed during the configured idle window."
                     )
             else:
                 _err = str(_timeout_exc)

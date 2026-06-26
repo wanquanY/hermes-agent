@@ -13,6 +13,8 @@ from hermes_team_mission_artifact_refs import artifact_refs_from_payload
 from hermes_team_mission_conversation_state import is_placeholder_team_mission_conversation_title as _is_placeholder_team_mission_conversation_title
 from hermes_team_mission_conversation_utils import append_user_task_message as _append_team_user_task_message
 from hermes_team_mission_conversation_utils import conversation_session_id as _team_conversation_session_id
+from hermes_team_mission_context import build_team_mission_worker_context
+from hermes_team_mission_failure import classify_team_mission_failure
 from hermes_team_mission_modes import MODE_AUTONOMOUS_MISSION
 from hermes_team_mission_modes import MODE_SUPERVISED_MISSION
 from hermes_team_mission_modes import strategy_for_mode
@@ -4378,16 +4380,28 @@ def _(rid, params: dict) -> dict:
     runtime_session_error = _ensure_team_mission_runtime_session_shell(stored_session_id)
     if runtime_session_error:
         return _err(rid, 5008, runtime_session_error)
-    text = _strategy_start_text(params, mission if isinstance(mission, dict) else {}, node)
+    leader_control_node = _is_team_leader_control_node(node)
+    base_text = _strategy_start_text(params, mission if isinstance(mission, dict) else {}, node)
     memory_context, memory_text = _team_memory_for_node(
         db,
         params,
         mission if isinstance(mission, dict) else {},
         node,
-        objective=text,
+        objective=base_text,
     )
-    if memory_text:
-        text = f"{text}\n\n{memory_text}"
+    worker_context: dict = {}
+    if leader_control_node:
+        text = f"{base_text}\n\n{memory_text}".strip() if memory_text else base_text
+    else:
+        worker_context = build_team_mission_worker_context(
+            mission=mission if isinstance(mission, dict) else {},
+            node=node,
+            graph=graph if isinstance(graph, dict) else {},
+            db=db,
+            memory_context=memory_context if isinstance(memory_context, dict) else {},
+            memory_text=memory_text,
+        )
+        text = str(worker_context.get("text") or base_text).strip()
     enabled_toolsets = _start_toolsets(
         params,
         mission if isinstance(mission, dict) else {},
@@ -4395,7 +4409,6 @@ def _(rid, params: dict) -> dict:
         profile_params=profile_params,
         db=db,
     )
-    leader_control_node = _is_team_leader_control_node(node)
     agent_profile_id = str(
         profile_params.get("agent_profile_id")
         or params.get("agent_profile_id")
@@ -4473,9 +4486,14 @@ def _(rid, params: dict) -> dict:
                 "node_role": _node_role(node),
                 "node_phase": _node_phase(node),
                 "active_task": active_task,
-                "task_brief": _node_task_brief(node),
+                "task_brief": worker_context.get("task_brief") if worker_context else _node_task_brief(node),
                 "output_contract": node.get("output_contract") or {},
                 "memory": memory_context,
+                "worker_context": {
+                    key: value
+                    for key, value in (worker_context or {}).items()
+                    if key not in {"text", "task_brief", "memory"}
+                },
                 "delegate_inherits_parent_tools": not leader_control_node,
                 **({"tool_policy": _team_leader_tool_policy(surface="leader_node")} if leader_control_node else {}),
             },
@@ -4483,6 +4501,8 @@ def _(rid, params: dict) -> dict:
     }
     response = _submit_run_via_worker_with_response(rid, submit_params)
     if isinstance(response, dict) and response.get("error"):
+        response_error = response.get("error") if isinstance(response.get("error"), dict) else {"error": response.get("error")}
+        failure = classify_team_mission_failure("error", response_error)
         node = db.upsert_team_mission_node(
             mission_id=mission_id,
             node_id=node_id,
@@ -4497,8 +4517,12 @@ def _(rid, params: dict) -> dict:
             metadata={
                 **metadata,
                 "stored_session_id": stored_session_id,
-                "start_error": response.get("error", {}).get("message") or "",
+                "start_error": str(response_error.get("message") or response_error.get("error") or ""),
                 "effective_toolsets": enabled_toolsets,
+                **({
+                    "start_error_reason_code": failure["reason_code"],
+                    "start_error_recoverability": failure["recoverability"],
+                } if failure else {}),
             },
             position_x=float(node.get("position_x") or 0),
             position_y=float(node.get("position_y") or 0),

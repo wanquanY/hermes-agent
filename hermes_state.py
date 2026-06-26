@@ -605,6 +605,26 @@ CREATE TABLE IF NOT EXISTS team_mission_artifacts (
     created_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS team_mission_deliverables (
+    deliverable_id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    task_id TEXT,
+    status TEXT NOT NULL,
+    result TEXT,
+    summary TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    artifact_refs_json TEXT,
+    next_context_json TEXT,
+    output_contract_json TEXT,
+    source TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    visibility TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS team_mission_memory_items (
     id TEXT PRIMARY KEY,
     team_id TEXT NOT NULL,
@@ -737,6 +757,10 @@ CREATE INDEX IF NOT EXISTS idx_team_mission_events_source_run
     ON team_mission_events(source_run_id, source_seq);
 CREATE INDEX IF NOT EXISTS idx_team_mission_artifacts_mission
     ON team_mission_artifacts(mission_id, node_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_deliverables_mission
+    ON team_mission_deliverables(mission_id, node_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_deliverables_run
+    ON team_mission_deliverables(run_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_mission
     ON team_mission_memory_items(mission_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_conversation
@@ -2743,6 +2767,31 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                        SELECT mission_id FROM team_missions
                         WHERE LOWER(COALESCE(status,'')) IN
                               ('completed','failed','cancelled','canceled','interrupted')
+                   )
+                """
+            )
+            # Heal plan-rejection rows produced by older builds: the graph nodes
+            # were cancelled and the mission went back to draft, but the sidebar
+            # projection stayed waiting_approval forever because no terminal
+            # reducer/event fired. Draft missions with no active/approval nodes
+            # are idle, not approval-blocked.
+            conn.execute(
+                """
+                UPDATE session_index
+                   SET running = 0, status = 'idle', waiting_approval = 0,
+                       active_run_id = '', active_runtime_session_id = '',
+                       pending_approval_count = 0
+                 WHERE session_kind = 'team_mission'
+                   AND waiting_approval = 1
+                   AND mission_id IN (
+                       SELECT mission_id FROM team_missions
+                        WHERE LOWER(COALESCE(status,'')) IN ('draft', 'idle')
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM team_mission_nodes n
+                        WHERE n.mission_id = session_index.mission_id
+                          AND LOWER(COALESCE(n.status,'')) IN
+                              ('waiting_approval','running','starting')
                    )
                 """
             )

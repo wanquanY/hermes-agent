@@ -3578,9 +3578,9 @@ class TestRunConversation:
         assert "truncated due to output length limit" in result["error"]
         mock_handle_function_call.assert_not_called()
 
-    def test_truncated_tool_call_retries_once_before_refusing(self, agent):
-        """When tool call args are truncated, the agent retries the API call
-        once. If the retry succeeds (valid JSON args), tool execution proceeds."""
+    def test_truncated_tool_call_requests_chunked_retry_before_refusing(self, agent):
+        """When tool call args are truncated, the agent tells the model to
+        avoid re-emitting the same oversized JSON args before retrying."""
         self._setup_agent(agent)
         agent.valid_tool_names.add("write_file")
         bad_tc = _mock_tool_call(
@@ -3616,11 +3616,16 @@ class TestRunConversation:
         # Tool was executed on the retry (good_resp)
         mock_hfc.assert_called_once()
         assert result["final_response"] == "Done!"
+        retry_messages = agent.client.chat.completions.create.call_args_list[1].kwargs["messages"]
+        assert retry_messages[-1]["role"] == "user"
+        assert "JSON arguments were too large" in retry_messages[-1]["content"]
+        assert "Do NOT retry the same huge tool call" in retry_messages[-1]["content"]
+        assert "execute_code" in retry_messages[-1]["content"]
+        assert "write_file" in retry_messages[-1]["content"]
 
-    def test_truncated_tool_args_detected_when_finish_reason_not_length(self, agent):
+    def test_truncated_tool_args_detected_when_finish_reason_not_length_requests_chunked_retry(self, agent):
         """When a router rewrites finish_reason from 'length' to 'tool_calls',
-        truncated JSON arguments should still be detected and refused rather
-        than wasting 3 retry attempts."""
+        truncated JSON arguments should still get the same chunked recovery path."""
         self._setup_agent(agent)
         agent.valid_tool_names.add("write_file")
         bad_tc = _mock_tool_call(
@@ -3628,23 +3633,35 @@ class TestRunConversation:
             arguments='{"path":"report.md","content":"partial',
             call_id="c1",
         )
-        resp = _mock_response(
+        truncated_resp = _mock_response(
             content="", finish_reason="tool_calls", tool_calls=[bad_tc],
         )
-        agent.client.chat.completions.create.return_value = resp
+        good_tc = _mock_tool_call(
+            name="write_file",
+            arguments='{"path":"report.md","content":"full content"}',
+            call_id="c2",
+        )
+        good_resp = _mock_response(
+            content="", finish_reason="tool_calls", tool_calls=[good_tc],
+        )
 
         with (
-            patch("run_agent.handle_function_call") as mock_handle_function_call,
+            patch("run_agent.handle_function_call", return_value='{"success":true}') as mock_hfc,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
         ):
+            final_resp = _mock_response(content="Done!", finish_reason="stop")
+            agent.client.chat.completions.create.side_effect = [
+                truncated_resp, good_resp, final_resp,
+            ]
             result = agent.run_conversation("write the report")
 
-        assert result["completed"] is False
-        assert result["partial"] is True
-        assert "truncated due to output length limit" in result["error"]
-        mock_handle_function_call.assert_not_called()
+        mock_hfc.assert_called_once()
+        assert result["final_response"] == "Done!"
+        retry_messages = agent.client.chat.completions.create.call_args_list[1].kwargs["messages"]
+        assert "JSON arguments were too large" in retry_messages[-1]["content"]
+        assert "Do NOT retry the same huge tool call" in retry_messages[-1]["content"]
 
     def test_kanban_block_called_on_iteration_exhaustion(self, agent, monkeypatch):
         """Regression: kanban worker must call kanban_block when iteration

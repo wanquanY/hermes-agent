@@ -65,10 +65,27 @@ class _ClarifyEntry:
 
 
 _lock = threading.RLock()
-# clarify_id → _ClarifyEntry  (primary lookup for button callbacks)
-_entries: Dict[str, _ClarifyEntry] = {}
-# session_key → list[clarify_id]  (FIFO; for text-fallback intercept and session cleanup)
-_session_index: Dict[str, List[str]] = {}
+
+# Per-profile state (see services/profile_context.py for the broader
+# sub-sidecar removal refactor). These proxies look like flat dicts
+# to every call site; internally they route to the active profile's
+# ProfileContext when the `current_profile` ContextVar is set,
+# otherwise fall back to the module-level dicts below.
+_entries_fallback: Dict[str, _ClarifyEntry] = {}
+_session_index_fallback: Dict[str, List[str]] = {}
+try:
+    from tui_gateway.services.profile_context import _PerProfileDict as _PerProfileDict  # noqa: F401
+    # clarify_id → _ClarifyEntry  (primary lookup for button callbacks)
+    _entries: Dict[str, _ClarifyEntry] = _PerProfileDict(  # type: ignore[assignment]
+        "clarify_entries", _entries_fallback,
+    )
+    # session_key → list[clarify_id]  (FIFO; for text-fallback intercept and session cleanup)
+    _session_index: Dict[str, List[str]] = _PerProfileDict(  # type: ignore[assignment]
+        "clarify_session_index", _session_index_fallback,
+    )
+except ImportError:
+    _entries = _entries_fallback
+    _session_index = _session_index_fallback
 
 # Optional state-change observers (session_key:str, present:bool) -> None
 # Populated by tui_gateway at startup so the team mission conversation status
@@ -304,7 +321,14 @@ def get_clarify_timeout() -> int:
 # callback bridges sync→async (runs on the agent thread; schedules the
 # adapter ``send_clarify`` call on the event loop).
 
-_notify_cbs: Dict[str, Callable[[_ClarifyEntry], None]] = {}
+# Per-profile (see _entries above for the design — same proxy pattern).
+_notify_cbs_fallback: Dict[str, Callable[[_ClarifyEntry], None]] = {}
+try:
+    _notify_cbs: Dict[str, Callable[[_ClarifyEntry], None]] = _PerProfileDict(  # noqa: F811 — same import guard as _entries
+        "clarify_notify_cbs", _notify_cbs_fallback,
+    )  # type: ignore[assignment]
+except NameError:
+    _notify_cbs = _notify_cbs_fallback
 
 
 def register_notify(session_key: str, cb: Callable[[_ClarifyEntry], None]) -> None:

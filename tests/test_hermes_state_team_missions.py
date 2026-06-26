@@ -1290,6 +1290,15 @@ def test_team_mission_runtime_events_reuse_ordinary_run_event_coalescing(tmp_pat
     assert events[0]["payload"]["taskFrameId"] == "mission-frame:mission-1"
     assert events[0]["payload"]["source_seq"] == 1
     assert events[0]["payload"]["team_mission_event_seq"] == events[0]["seq"]
+    assert events[2]["name"] == "team_mission.node.create"
+    assert events[2]["tool_name"] == "team_mission.node.create"
+    assert events[2]["toolName"] == "team_mission.node.create"
+    assert events[2]["tool_call_id"] == "tool-1"
+    assert events[2]["payload"]["name"] == "team_mission.node.create"
+    assert events[2]["payload"]["tool_name"] == "team_mission.node.create"
+    assert events[2]["payload"]["toolName"] == "team_mission.node.create"
+    assert events[2]["payload"]["tool_call_id"] == "tool-1"
+    assert events[2]["payload"]["toolCallId"] == "tool-1"
     assert events[3]["payload"]["source_event"]["payload"]["delta"] == " after tool"
     rows = db._conn.execute(  # noqa: SLF001 - contract test for the canonical mission event log.
         """
@@ -1514,6 +1523,8 @@ def test_team_mission_conversation_status_projection_uses_active_member_run_bind
         mode="supervised_mission",
         status="ready",
         leader_session_id="team-session-1",
+        created_at=100,
+        updated_at=350,
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -1530,6 +1541,7 @@ def test_team_mission_conversation_status_projection_uses_active_member_run_bind
         runtime_session_id="runtime-verify",
         turn_id="turn-verify",
         status="running",
+        started_at=250,
         updated_at=300,
     )
     db.bind_team_mission_run(
@@ -1549,6 +1561,10 @@ def test_team_mission_conversation_status_projection_uses_active_member_run_bind
     assert projection["run_state"] == "running"
     assert projection["active_run_id"] == "run-verify"
     assert projection["active_runtime_session_id"] == "runtime-verify"
+    assert projection["run_started_at"] == 250
+    assert projection["mission_started_at"] == 100
+    assert projection["mission_updated_at"] == 350
+    assert projection["mission_completed_at"] == 0
     assert projection["active_node_count"] == 1
 
 
@@ -1571,6 +1587,9 @@ def test_team_mission_conversation_status_projection_terminal_mission_never_runn
         mode="supervised_mission",
         status="cancelled",
         leader_session_id="team-session-1",
+        created_at=100,
+        updated_at=400,
+        completed_at=410,
     )
     # a lingering "running" node + run (zombie that never emitted its terminal event)
     db.upsert_team_mission_node(
@@ -1593,6 +1612,10 @@ def test_team_mission_conversation_status_projection_terminal_mission_never_runn
     assert projection["mission_status"] == "cancelled"
     assert projection["running"] is False
     assert projection["run_state"] == "cancelled"
+    assert projection["run_started_at"] == 0
+    assert projection["mission_started_at"] == 100
+    assert projection["mission_updated_at"] == 400
+    assert projection["mission_completed_at"] == 410
 
 
 def test_team_mission_runtime_projection_uses_structured_final_node_contract(tmp_path: Path):
@@ -2317,6 +2340,101 @@ def test_team_mission_memory_pack_reuses_previous_task_in_same_conversation(tmp_
     assert edges[0]["metadata"]["task_id"] == "task-2"
 
 
+def test_team_mission_memory_compile_batches_run_events(monkeypatch, tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        objective="Compile memory",
+        mode="autonomous_mission",
+        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+    )
+    for index in range(3):
+        node_id = f"node-{index}"
+        run_id = f"run-{index}"
+        session_id = f"session-{index}"
+        db.upsert_team_mission_node(
+            mission_id="mission-1",
+            node_id=node_id,
+            kind="worker",
+            title=f"Node {index}",
+            status="completed",
+        )
+        db.upsert_run(run_id=run_id, session_id=session_id, status="completed")
+        db.bind_team_mission_run(
+            mission_id="mission-1",
+            node_id=node_id,
+            run_id=run_id,
+            session_id=session_id,
+            runtime_scope_key=f"team:mission-1:node:{node_id}",
+            role="worker",
+        )
+        db.append_run_event(
+            session_id,
+            {
+                "type": "message.complete",
+                "run_id": run_id,
+                "runtime_scope_key": f"team:mission-1:node:{node_id}",
+                "payload": {"status": "complete", "text": f"Reusable memory {index}."},
+            },
+        )
+
+    def fail_list_run_events(*_args, **_kwargs):
+        raise AssertionError("compile_team_mission_memory should batch load run_events")
+
+    monkeypatch.setattr(db, "list_run_events", fail_list_run_events)
+    compiled = db.compile_team_mission_memory(mission_id="mission-1", emit_event=False)
+
+    assert len(compiled["source_run_ids"]) == 3
+    assert compiled["memory_item_ids"]
+
+
+def test_team_mission_memory_pack_dedupes_similar_items(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        objective="Use Chinese output preference",
+        mode="autonomous_mission",
+        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+    )
+    first = db.upsert_team_mission_memory_item(
+        team_id="team-1",
+        mission_id="mission-1",
+        conversation_session_id="team-session-1",
+        task_id="task-1",
+        scope="conversation",
+        kind="constraint",
+        content="User preference: final deliverables should be written in Chinese.",
+        source_node_ids=["node-a"],
+        source_run_ids=["run-a"],
+        visibility="team",
+    )
+    second = db.upsert_team_mission_memory_item(
+        team_id="team-1",
+        mission_id="mission-1",
+        conversation_session_id="team-session-1",
+        task_id="task-1",
+        scope="conversation",
+        kind="constraint",
+        content="User preference: final deliverables should be written in Chinese.",
+        source_node_ids=["node-b"],
+        source_run_ids=["run-b"],
+        visibility="team",
+    )
+
+    pack = db.build_team_mission_memory_pack(
+        mission_id="mission-1",
+        objective="Chinese output preference",
+        limit=5,
+    )
+
+    assert first["id"] != second["id"]
+    assert len([item_id for item_id in pack["memory_pack"]["item_ids"] if item_id in {first["id"], second["id"]}]) == 1
+
+
 def test_team_mission_memory_compile_collects_runtime_artifact_sources(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
@@ -3039,14 +3157,14 @@ def test_reap_terminal_mission_runs_leaves_active_mission_runs(tmp_path: Path):
     assert db.get_run("run-impl")["status"] == "running"
 
 
-def test_prune_team_mission_events_drops_terminal_deltas_keeps_completes(tmp_path: Path):
+def test_upsert_team_mission_terminal_prunes_deltas_keeps_completes(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
         title="Mission",
         mode="supervised_mission",
-        status="completed",
+        status="running",
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -3079,7 +3197,6 @@ def test_prune_team_mission_events_drops_terminal_deltas_keeps_completes(tmp_pat
     assert "message.delta" in before_types
     assert "message.complete" in before_types
 
-    # Prune runs once the mission is terminal with no further events arriving.
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
@@ -3087,11 +3204,9 @@ def test_prune_team_mission_events_drops_terminal_deltas_keeps_completes(tmp_pat
         mode="supervised_mission",
         status="completed",
     )
-    deleted = db.prune_team_mission_events("mission-1")
 
     after = db.list_team_mission_events("mission-1")
     after_types = [e.get("payload", {}).get("source_event_type") for e in after]
-    assert deleted >= 3
     assert "message.delta" not in after_types
     assert "message.complete" in after_types
 
@@ -3356,6 +3471,107 @@ def test_leader_planning_run_terminating_after_plan_complete_does_not_fail_missi
 
     mission = db.get_team_mission_graph("m2").get("mission") or {}
     assert mission.get("status") != "failed"
+
+
+def test_team_mission_required_handoff_blocks_missing_deliverable_and_persists_submitted_one(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    output_contract = {
+        "format": "structured_deliverable",
+        "delivery_channel": "handoff",
+        "requires_explicit_handoff": True,
+    }
+    db.upsert_team_mission(
+        mission_id="mission-handoff",
+        team_id="team-1",
+        title="Hidden handoff mission",
+        objective="Separate visible output from downstream context.",
+        mode="supervised_mission",
+        status="running",
+        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-handoff",
+        node_id="node-worker",
+        kind="worker",
+        title="Worker",
+        objective="Produce a hidden handoff deliverable.",
+        status="running",
+        output_contract=output_contract,
+        metadata={"task_id": "task-1"},
+    )
+    db.upsert_run(run_id="run-missing", session_id="session-missing", status="running")
+    db.bind_team_mission_run(
+        mission_id="mission-handoff",
+        node_id="node-worker",
+        run_id="run-missing",
+        session_id="session-missing",
+        runtime_scope_key="team:mission-handoff:node:node-worker",
+        role="worker",
+    )
+
+    db.reduce_team_mission_run_event(
+        run_id="run-missing",
+        event={"type": "message.complete", "seq": 1, "payload": {"status": "complete", "text": "visible only"}},
+    )
+
+    blocked = db.get_team_mission_node("mission-handoff", "node-worker")
+    assert blocked["status"] == "blocked"
+    assert blocked["metadata"]["last_run_reason_code"] == "protocol_violation"
+    blocked_events = [
+        event for event in db.list_team_mission_events("mission-handoff")
+        if event.get("payload", {}).get("source_event_type") == "mission.node.blocked"
+    ]
+    assert blocked_events
+    assert blocked_events[0]["payload"]["reason_code"] == "protocol_violation"
+
+    db.upsert_team_mission_node(
+        mission_id="mission-handoff",
+        node_id="node-worker",
+        kind="worker",
+        title="Worker",
+        objective="Produce a hidden handoff deliverable.",
+        status="running",
+        output_contract=output_contract,
+        metadata={"task_id": "task-1"},
+    )
+    db.upsert_run(run_id="run-submitted", session_id="session-submitted", status="running")
+    db.bind_team_mission_run(
+        mission_id="mission-handoff",
+        node_id="node-worker",
+        run_id="run-submitted",
+        session_id="session-submitted",
+        runtime_scope_key="team:mission-handoff:node:node-worker",
+        role="worker",
+    )
+    submitted = db.upsert_team_mission_deliverable(
+        mission_id="mission-handoff",
+        node_id="node-worker",
+        run_id="run-submitted",
+        task_id="task-1",
+        status="completed",
+        result="PASS",
+        summary="Structured handoff is ready.",
+        payload={"answer": "machine-readable", "do_not_render": True},
+        artifact_refs=[{"path": "/tmp/workspace/result.md", "kind": "file"}],
+        output_contract=output_contract,
+        visibility="handoff",
+    )
+
+    db.reduce_team_mission_run_event(
+        run_id="run-submitted",
+        event={"type": "message.complete", "seq": 2, "payload": {"status": "complete", "text": "visible final"}},
+    )
+
+    node = db.get_team_mission_node("mission-handoff", "node-worker")
+    graph = db.get_team_mission_graph("mission-handoff")
+    graph_node = next(item for item in graph["nodes"] if item["node_id"] == "node-worker")
+
+    assert db.team_mission_run_has_deliverable("run-submitted") is True
+    assert node["status"] == "completed"
+    assert node["metadata"]["last_deliverable_id"] == submitted["deliverable_id"]
+    assert graph["deliverables"][0]["visibility"] == "handoff"
+    assert graph_node["deliverable"]["payload"]["answer"] == "machine-readable"
+    assert graph_node["lastDeliverable"]["summary"] == "Structured handoff is ready."
 
 
 def test_conversation_runtime_summary_includes_in_process_tool_approval(tmp_path: Path):

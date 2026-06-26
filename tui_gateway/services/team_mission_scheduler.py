@@ -5,6 +5,8 @@ import time
 import uuid
 from typing import Any, Callable
 
+from hermes_team_mission_failure import REASON_PROVIDER_RATE_LIMITED
+from hermes_team_mission_failure import classify_team_mission_failure
 from hermes_team_mission_modes import strategy_for_mode
 from hermes_team_mission_node_kinds import normalize_team_mission_node_kind
 
@@ -16,6 +18,8 @@ _ACTIVE_EXECUTION_NODE_STATUSES = {"starting", "running", "waiting_approval"}
 _NON_EXECUTION_NODE_KINDS = {"root", "approval_gate"}
 _DEFAULT_MAX_PARALLEL_NODES = 3
 _HARD_MAX_PARALLEL_NODES = 5
+_PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS = 60.0
+_DEFAULT_STALE_NODE_SECONDS = 180.0
 
 
 def _node_id(node: dict[str, Any]) -> str:
@@ -42,6 +46,31 @@ def _node_kind(node: dict[str, Any]) -> str:
 def _node_metadata(node: dict[str, Any]) -> dict[str, Any]:
     metadata = (node or {}).get("metadata")
     return metadata if isinstance(metadata, dict) else {}
+
+
+def _node_by_id(graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        node_id: node
+        for node in _graph_nodes(graph)
+        for node_id in (_node_id(node),)
+        if node_id
+    }
+
+
+def _number(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _cooldown_remaining_seconds(node: dict[str, Any], *, now: float | None = None) -> float:
+    metadata = _node_metadata(node)
+    cooldown_until = _number(metadata.get("rate_limit_cooldown_until"), 0.0)
+    if cooldown_until <= 0:
+        return 0.0
+    current = time.time() if now is None else now
+    return max(0.0, cooldown_until - current)
 
 
 def _mission_metadata(mission: dict[str, Any]) -> dict[str, Any]:
@@ -157,6 +186,17 @@ class TeamMissionReadyScheduler:
         mission = graph.get("mission") if isinstance(graph, dict) else {}
         if not isinstance(mission, dict):
             return {}
+        reclaimed = self._reclaim_stale_nodes(
+            mission_id=normalized_mission_id,
+            graph=graph,
+            trigger=trigger,
+        )
+        if reclaimed:
+            reduced = self._db.reduce_team_mission_graph(normalized_mission_id)
+            graph = reduced.get("graph") if isinstance(reduced.get("graph"), dict) else self._db.get_team_mission_graph(normalized_mission_id)
+            mission = graph.get("mission") if isinstance(graph, dict) else {}
+            if not isinstance(mission, dict):
+                return {}
         if _mission_status(mission) in _TERMINAL_MISSION_STATUSES:
             return {
                 "mission_id": normalized_mission_id,
@@ -194,8 +234,26 @@ class TeamMissionReadyScheduler:
                 "errors": [],
                 "graph": graph,
             }
+        nodes_by_id = _node_by_id(graph)
+        cooldown_skipped: list[dict[str, Any]] = []
+        cooled_ready_node_ids: list[str] = []
+        now = time.time()
+        for node_id in ready_node_ids:
+            node = nodes_by_id.get(node_id) or {}
+            cooldown_remaining = _cooldown_remaining_seconds(node, now=now)
+            if cooldown_remaining > 0:
+                metadata = _node_metadata(node)
+                cooldown_skipped.append({
+                    "node_id": node_id,
+                    "reason": "provider_rate_limited_cooldown",
+                    "cooldown_until": metadata.get("rate_limit_cooldown_until"),
+                    "cooldown_seconds_remaining": round(cooldown_remaining, 3),
+                })
+                continue
+            cooled_ready_node_ids.append(node_id)
+        ready_node_ids = cooled_ready_node_ids
         started: list[dict[str, Any]] = []
-        skipped: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = list(cooldown_skipped)
         errors: list[dict[str, Any]] = []
         requested_limit = _bounded_limit(limit if limit is not None else schedule_params.get("limit"))
         node_limit = min(requested_limit, available_slots)
@@ -207,12 +265,12 @@ class TeamMissionReadyScheduler:
                 "active_node_count": active_node_count,
                 "available_slots": available_slots,
                 "started": [],
-                "skipped": [
+                "skipped": skipped + ([
                     {
                         "reason": "concurrency_limit",
                         "node_ids": ready_node_ids,
                     }
-                ] if ready_node_ids else [],
+                ] if ready_node_ids else []),
                 "errors": [],
                 "graph": self._db.get_team_mission_graph(normalized_mission_id),
             }
@@ -247,23 +305,47 @@ class TeamMissionReadyScheduler:
                 )
             except Exception as exc:
                 logger.exception("Team Mission scheduler failed to start node %s", node_id)
-                self._mark_node_start_failed(
-                    normalized_mission_id,
-                    node_id,
-                    error=f"{type(exc).__name__}: {exc}",
-                    trigger=trigger,
-                )
-                errors.append({"node_id": node_id, "error": f"{type(exc).__name__}: {exc}"})
+                error_text = f"{type(exc).__name__}: {exc}"
+                failure = classify_team_mission_failure("error", {"error": error_text})
+                if failure.get("reason_code") == REASON_PROVIDER_RATE_LIMITED:
+                    requeued = self._requeue_rate_limited_node(
+                        normalized_mission_id,
+                        node_id,
+                        error=error_text,
+                        failure=failure,
+                        trigger=trigger,
+                    )
+                    skipped.append(self._rate_limit_skip(node_id=node_id, node=requeued, failure=failure))
+                else:
+                    self._mark_node_start_failed(
+                        normalized_mission_id,
+                        node_id,
+                        error=error_text,
+                        trigger=trigger,
+                    )
+                    errors.append({"node_id": node_id, "error": error_text})
                 continue
             if isinstance(response, dict) and response.get("error"):
                 error = response.get("error")
-                self._mark_node_start_failed(
-                    normalized_mission_id,
-                    node_id,
-                    error=str(error),
-                    trigger=trigger,
-                )
-                errors.append({"node_id": node_id, "error": error})
+                error_payload = {"error": error} if isinstance(error, dict) else {"error": str(error)}
+                failure = classify_team_mission_failure("error", error_payload)
+                if failure.get("reason_code") == REASON_PROVIDER_RATE_LIMITED:
+                    requeued = self._requeue_rate_limited_node(
+                        normalized_mission_id,
+                        node_id,
+                        error=str(error),
+                        failure=failure,
+                        trigger=trigger,
+                    )
+                    skipped.append(self._rate_limit_skip(node_id=node_id, node=requeued, failure=failure))
+                else:
+                    self._mark_node_start_failed(
+                        normalized_mission_id,
+                        node_id,
+                        error=str(error),
+                        trigger=trigger,
+                    )
+                    errors.append({"node_id": node_id, "error": error})
                 continue
             started.append({"node_id": node_id, "result": response.get("result") if isinstance(response, dict) else {}})
         return {
@@ -327,20 +409,137 @@ class TeamMissionReadyScheduler:
                 node_id=node_id,
                 metadata={
                     "scheduler_trigger": str(trigger or "team_mission.scheduler"),
+                    "start_error": "",
+                    "start_error_reason_code": "",
+                    "start_error_recoverability": "",
+                    "rate_limit_cooldown_until": 0,
+                    "rate_limit_cooldown_seconds": 0,
                 },
             )
         logger.debug("Team Mission scheduler db has no claim method; starting without atomic claim")
         return self._db.get_team_mission_node(mission_id, node_id)
+
+    def _requeue_rate_limited_node(
+        self,
+        mission_id: str,
+        node_id: str,
+        *,
+        error: str,
+        failure: dict[str, Any],
+        trigger: str = "",
+    ) -> dict[str, Any]:
+        node = self._db.get_team_mission_node(mission_id, node_id)
+        if not node:
+            return {}
+        now = time.time()
+        retry_after = _number(failure.get("retry_after_s"), _PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS)
+        cooldown_seconds = max(1.0, retry_after or _PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS)
+        cooldown_until = now + cooldown_seconds
+        metadata = dict(node.get("metadata") or {})
+        metadata.update({
+            "start_error": str(error or "provider rate limited"),
+            "last_rate_limit_error": str(error or "provider rate limited"),
+            "start_failed_at": 0,
+            "start_rate_limited_at": now,
+            "rate_limit_cooldown_until": cooldown_until,
+            "rate_limit_cooldown_seconds": cooldown_seconds,
+            "scheduler_trigger": str(trigger or "team_mission.scheduler"),
+            "start_error_reason_code": failure.get("reason_code") or REASON_PROVIDER_RATE_LIMITED,
+            "start_error_recoverability": failure.get("recoverability") or "retryable",
+        })
+        upsert = getattr(self._db, "upsert_team_mission_node", None)
+        if not callable(upsert):
+            return {**node, "metadata": metadata}
+        return upsert(
+            mission_id=mission_id,
+            node_id=node_id,
+            kind=str(node.get("kind") or "worker"),
+            title=str(node.get("title") or ""),
+            objective=str(node.get("objective") or ""),
+            status="ready",
+            assignee_profile_id=str(node.get("assignee_profile_id") or ""),
+            assignee_profile_version_id=str(node.get("assignee_profile_version_id") or ""),
+            runtime_scope_key=str(node.get("runtime_scope_key") or ""),
+            output_contract=dict(node.get("output_contract") or {}),
+            metadata=metadata,
+            position_x=float(node.get("position_x") or 0),
+            position_y=float(node.get("position_y") or 0),
+        )
+
+    @staticmethod
+    def _rate_limit_skip(*, node_id: str, node: dict[str, Any], failure: dict[str, Any]) -> dict[str, Any]:
+        metadata = _node_metadata(node)
+        cooldown_until = metadata.get("rate_limit_cooldown_until")
+        cooldown_remaining = _cooldown_remaining_seconds(node)
+        return {
+            "node_id": node_id,
+            "reason": "provider_rate_limited",
+            "reason_code": failure.get("reason_code") or REASON_PROVIDER_RATE_LIMITED,
+            "recoverability": failure.get("recoverability") or "retryable",
+            "cooldown_until": cooldown_until,
+            "cooldown_seconds": metadata.get("rate_limit_cooldown_seconds") or _PROVIDER_RATE_LIMIT_COOLDOWN_SECONDS,
+            "cooldown_seconds_remaining": round(cooldown_remaining, 3),
+        }
+
+    def _reclaim_stale_nodes(self, *, mission_id: str, graph: dict[str, Any], trigger: str = "") -> list[dict[str, Any]]:
+        now = time.time()
+        reclaimed: list[dict[str, Any]] = []
+        for node in _graph_nodes(graph):
+            node_id = _node_id(node)
+            if not node_id or not _is_execution_node(node):
+                continue
+            status = _node_status(node)
+            if status not in {"starting", "running"}:
+                continue
+            metadata = dict(_node_metadata(node))
+            heartbeat_at = _number(metadata.get("heartbeat_at") or metadata.get("last_heartbeat_at"), 0.0)
+            anchor = heartbeat_at or _number(metadata.get("start_claimed_at"), 0.0) or _number(node.get("updated_at"), 0.0)
+            stale_after = _number(metadata.get("heartbeat_stale_after_seconds"), _DEFAULT_STALE_NODE_SECONDS) or _DEFAULT_STALE_NODE_SECONDS
+            if anchor <= 0 or now - anchor < stale_after:
+                continue
+            metadata.update({
+                "heartbeat_stale_at": now,
+                "heartbeat_stale_seconds": round(now - anchor, 3),
+                "last_run_reason_code": "heartbeat_stale",
+                "last_run_recoverability": "retryable",
+                "scheduler_trigger": str(trigger or "team_mission.scheduler"),
+                "requeued_from_status": status,
+            })
+            upsert = getattr(self._db, "upsert_team_mission_node", None)
+            if not callable(upsert):
+                continue
+            updated = upsert(
+                mission_id=mission_id,
+                node_id=node_id,
+                kind=str(node.get("kind") or "worker"),
+                title=str(node.get("title") or ""),
+                objective=str(node.get("objective") or ""),
+                status="ready",
+                assignee_profile_id=str(node.get("assignee_profile_id") or ""),
+                assignee_profile_version_id=str(node.get("assignee_profile_version_id") or ""),
+                runtime_scope_key=str(node.get("runtime_scope_key") or ""),
+                output_contract=dict(node.get("output_contract") or {}),
+                metadata=metadata,
+                position_x=float(node.get("position_x") or 0),
+                position_y=float(node.get("position_y") or 0),
+            )
+            reclaimed.append(updated)
+        return reclaimed
 
     def _mark_node_start_failed(self, mission_id: str, node_id: str, *, error: str, trigger: str = "") -> dict[str, Any]:
         node = self._db.get_team_mission_node(mission_id, node_id)
         if not node:
             return {}
         metadata = dict(node.get("metadata") or {})
+        failure = classify_team_mission_failure("error", {"error": error})
         metadata.update({
             "start_error": str(error or "node start failed"),
             "start_failed_at": time.time(),
             "scheduler_trigger": str(trigger or "team_mission.scheduler"),
+            **({
+                "start_error_reason_code": failure["reason_code"],
+                "start_error_recoverability": failure["recoverability"],
+            } if failure else {}),
         })
         upsert = getattr(self._db, "upsert_team_mission_node", None)
         if not callable(upsert):

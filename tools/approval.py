@@ -10,6 +10,7 @@ This module is the single source of truth for the dangerous command system:
 
 import contextvars
 import fnmatch
+import functools
 import logging
 import os
 import re
@@ -42,6 +43,14 @@ _approval_session_key: contextvars.ContextVar[str] = contextvars.ContextVar(
     "approval_session_key",
     default="",
 )
+_approval_turn_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "approval_turn_id",
+    default="",
+)
+_approval_tool_call_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "approval_tool_call_id",
+    default="",
+)
 _cron_approval_mode_override: contextvars.ContextVar[str] = contextvars.ContextVar(
     "cron_approval_mode_override",
     default="",
@@ -65,6 +74,8 @@ def _fire_approval_hook(hook_name: str, **kwargs) -> None:
         # (e.g. bare tool-only imports, minimal test environments).
         return
     try:
+        kwargs.setdefault("turn_id", _approval_turn_id.get())
+        kwargs.setdefault("tool_call_id", _approval_tool_call_id.get())
         invoke_hook(hook_name, **kwargs)
     except Exception as exc:
         # invoke_hook() already swallows per-callback errors, so reaching here
@@ -82,6 +93,27 @@ def set_current_session_key(session_key: str) -> contextvars.Token[str]:
 def reset_current_session_key(token: contextvars.Token[str]) -> None:
     """Restore the prior approval session key context."""
     _approval_session_key.reset(token)
+
+
+def set_current_observability_context(
+    *,
+    turn_id: str = "",
+    tool_call_id: str = "",
+) -> tuple[contextvars.Token[str], contextvars.Token[str]]:
+    """Bind active tool correlation IDs to approval hooks."""
+    return (
+        _approval_turn_id.set(turn_id or ""),
+        _approval_tool_call_id.set(tool_call_id or ""),
+    )
+
+
+def reset_current_observability_context(
+    tokens: tuple[contextvars.Token[str], contextvars.Token[str]],
+) -> None:
+    """Restore prior approval hook correlation IDs."""
+    turn_token, tool_token = tokens
+    _approval_tool_call_id.reset(tool_token)
+    _approval_turn_id.reset(turn_token)
 
 
 def set_cron_approval_mode_override(mode: str) -> contextvars.Token[str]:
@@ -198,6 +230,11 @@ _SENSITIVE_WRITE_TARGET = (
     rf'{_SSH_SENSITIVE_PATH}|'
     rf'{_HERMES_ENV_PATH}|'
     rf'{_HERMES_CONFIG_PATH}|'
+    rf'{_SHELL_RC_FILES}|'
+    rf'{_CREDENTIAL_FILES})'
+)
+_USER_SENSITIVE_WRITE_TARGET = (
+    rf'(?:{_SSH_SENSITIVE_PATH}|'
     rf'{_SHELL_RC_FILES}|'
     rf'{_CREDENTIAL_FILES})'
 )
@@ -394,7 +431,7 @@ DANGEROUS_PATTERNS = [
     # Any shell invocation via -c or combined flags like -lc, -ic, etc.
     (r'\b(bash|sh|zsh|ksh)\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
     (r'\b(python[23]?|perl|ruby|node)\s+-[ec]\s+', "script execution via -e/-c flag"),
-    (r'\b(curl|wget)\b.*\|\s*(ba)?sh\b', "pipe remote content to shell"),
+    (r'\b(curl|wget)\b.*\|\s*(?:[/\w]*/)?(?:ba)?sh(?:\s|$|-c)', "pipe remote content to shell"),
     (r'\b(bash|sh|zsh|ksh)\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
     (rf'\btee\b.*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via tee"),
     (rf'>>?\s*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via redirection"),
@@ -412,6 +449,11 @@ DANGEROUS_PATTERNS = [
     # terminates all running agents mid-work.
     (r'\bhermes\s+gateway\s+(stop|restart)\b', "stop/restart hermes gateway (kills running agents)"),
     (r'\bhermes\s+update\b', "hermes update (restarts gateway, kills running agents)"),
+    # Docker container lifecycle. With docker.sock mounted, these can restart,
+    # stop, or kill host containers and should require the same consent as
+    # Hermes gateway lifecycle operations.
+    (r'\bdocker\s+compose\s+(restart|stop|kill|down)\b', "docker compose restart/stop/kill/down (container lifecycle)"),
+    (r'\bdocker\s+(restart|stop|kill)\b', "docker restart/stop/kill (container lifecycle)"),
     # Gateway protection: never start gateway outside systemd management
     (r'gateway\s+run\b.*(&\s*$|&\s*;|\bdisown\b|\bsetsid\b)', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
     (r'\bnohup\b.*gateway\s+run\b', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
@@ -427,6 +469,15 @@ DANGEROUS_PATTERNS = [
     # /private/etc/ mirror).
     (rf'\b(cp|mv|install)\b.*\s{_SYSTEM_CONFIG_PATH}', "copy/move file into system config path"),
     (rf'\b(cp|mv|install)\b.*\s["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_COMMAND_TAIL}', "overwrite project env/config file"),
+    # cp/mv/install OVERWRITING a sensitive credential/SSH/shell-rc/Hermes file.
+    # Anchor the sensitive target to the command tail so this fires on the
+    # destination only: copying OUT of a sensitive path remains safe.
+    (rf'\b(cp|mv|install)\b.*\s["\']?{_SENSITIVE_WRITE_TARGET}[^\s"\']*["\']?{_COMMAND_TAIL}', "copy/move file into sensitive credential/SSH/shell-rc path"),
+    # In-place edits mutate user startup/credential files directly, bypassing
+    # redirection, tee, and copy/move/install coverage.
+    (rf'\bsed\s+-[^\s]*i.*(?:{_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path"),
+    (rf'\bsed\s+--in-place\b.*(?:{_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path (long flag)"),
+    (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path (perl/ruby)"),
     (rf'\bsed\s+-[^\s]*i.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config"),
     (rf'\bsed\s+--in-place\b.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config (long flag)"),
     (rf'\bsed\s+-[^\s]*i.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env"),
@@ -520,52 +571,78 @@ def _normalize_command_for_detection(command: str) -> str:
     command = command.replace('\x00', '')
     # Normalize Unicode (fullwidth Latin, halfwidth Katakana, etc.)
     command = unicodedata.normalize('NFKC', command)
+    # Fold absolute home / active-profile-home prefixes into their canonical
+    # ~/ and ~/.hermes/ forms before stripping shell backslash escapes. On
+    # Windows, backslashes are path separators and would otherwise be dissolved.
+    command = _rewrite_resolved_hermes_home(command)
+    command = _rewrite_resolved_user_home(command)
     # Strip shell backslash-escapes: r\m → rm. Prevents \-injection bypass.
     command = re.sub(r'\\([^\n])', r'\1', command)
     # Strip empty-string literals that split tokens: r''m → rm, r"\"m → rm.
     command = re.sub(r"''|\"\"", '', command)
-    # Fold the resolved absolute active-profile home path into the canonical
-    # ~/.hermes/ form so the Hermes config/env patterns catch it. In Docker and
-    # gateway deployments the agent often references the resolved absolute path
-    # directly (e.g. `sed -i ... /home/hermes/.hermes/config.yaml`) rather than
-    # ~, $HOME, or $HERMES_HOME. Done at detection time (not via an import-time
-    # pattern snapshot) so it tracks the live HERMES_HOME even when that is set
-    # after this module is imported — as the hermetic test conftest does.
-    command = _rewrite_resolved_hermes_home(command)
     return command
 
 
-def _rewrite_resolved_hermes_home(command: str) -> str:
-    """Rewrite the resolved absolute Hermes home prefix to ``~/.hermes/``.
+# Shell metacharacters, quotes, and whitespace that terminate a filesystem
+# path token on a command line. Used to bound the path tail we normalize.
+_PATH_TOKEN_STOP = r"""\s'"`;|&<>()"""
+_PATH_TAIL = r"(?P<tail>(?:[/\\][^/\\" + _PATH_TOKEN_STOP + r"]*)+)"
 
-    Resolves the active ``HERMES_HOME`` at call time (and its symlink-resolved
-    form) and replaces an occurrence of ``<home>/`` in *command* with
-    ``~/.hermes/`` so the static ``_HERMES_CONFIG_PATH`` / ``_HERMES_ENV_PATH``
-    patterns match. No-op when the path can't be resolved or doesn't appear.
-    """
+
+@functools.lru_cache(maxsize=64)
+def _home_prefix_fold_regex(path: str):
+    """Compile a regex matching *path* used as an absolute directory prefix."""
+    if not path:
+        return None
+    components = [c for c in re.split(r"[/\\]+", path) if c]
+    if len(components) < 2:
+        return None
+    body = r"[/\\]+".join(re.escape(c) for c in components)
+    return re.compile(r"[/\\]*" + body + _PATH_TAIL)
+
+
+def _fold_home_prefixes(command: str, paths, replacement: str) -> str:
+    """Fold resolved home prefixes in *command* to *replacement*."""
+    seen: set[str] = set()
+    for path in sorted((p for p in paths if p), key=len, reverse=True):
+        if path in seen:
+            continue
+        seen.add(path)
+        pattern = _home_prefix_fold_regex(path)
+        if pattern is not None:
+            command = pattern.sub(
+                lambda m: replacement + m.group("tail").replace("\\", "/"),
+                command,
+            )
+    return command
+
+
+def _rewrite_resolved_user_home(command: str) -> str:
+    """Rewrite the current user's absolute home prefix to ``~/``."""
+    try:
+        home = os.path.expanduser("~")
+        candidates = [
+            home,
+            os.path.realpath(home),
+            os.environ.get("HOME", ""),
+        ]
+    except Exception:
+        return command
+    return _fold_home_prefixes(command, candidates, "~")
+
+
+def _rewrite_resolved_hermes_home(command: str) -> str:
+    """Rewrite the resolved absolute Hermes home prefix to ``~/.hermes/``."""
     try:
         from hermes_constants import get_hermes_home
         home = get_hermes_home().expanduser()
         candidates = [
-            str(home).rstrip("/"),
-            str(home.resolve(strict=False)).rstrip("/"),
+            str(home),
+            str(home.resolve(strict=False)),
         ]
     except Exception:
         return command
-    seen: set[str] = set()
-    for path in candidates:
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        # Guard against a degenerate HERMES_HOME (e.g. "/" or "") rewriting
-        # unrelated paths: require an absolute path with at least one non-root
-        # component. The active profile home is always a real directory like
-        # /home/hermes/.hermes or a per-test tempdir, never a bare root.
-        normalized = path.rstrip("/")
-        if not normalized.startswith("/") or normalized.count("/") < 2:
-            continue
-        command = command.replace(normalized + "/", "~/.hermes/")
-    return command
+    return _fold_home_prefixes(command, candidates, "~/.hermes")
 
 
 def detect_dangerous_command(command: str) -> tuple:
@@ -1652,9 +1729,16 @@ def check_all_command_guards(command: str, env_type: str,
                         _gateway_queues.pop(session_key, None)
                 return {
                     "approved": False,
-                    "message": "BLOCKED: Failed to send approval request to user. Do NOT retry.",
+                    "message": (
+                        "BLOCKED: Failed to send approval request to user. "
+                        "The user has NOT consented to running this command. "
+                        "Do NOT retry, do NOT rephrase the command, and do NOT "
+                        "attempt the same outcome via a different command."
+                    ),
                     "pattern_key": primary_key,
                     "description": combined_desc,
+                    "outcome": "notify_failed",
+                    "user_consent": False,
                 }
 
             # Block until the user responds or timeout (default 5 min).
@@ -1729,12 +1813,20 @@ def check_all_command_guards(command: str, env_type: str,
             )
 
             if not resolved or choice is None or choice == "deny":
-                reason = "timed out" if not resolved else "denied by user"
+                reason = "timed out without user response" if not resolved else "denied by user"
+                addendum = " Silence is not consent." if not resolved else ""
                 return {
                     "approved": False,
-                    "message": f"BLOCKED: Command {reason}. Do NOT retry this command.",
+                    "message": (
+                        f"BLOCKED: Command {reason}. The user has NOT consented "
+                        f"to running this command. Do NOT retry, do NOT rephrase "
+                        f"the command, and do NOT attempt the same outcome via a "
+                        f"different command.{addendum}"
+                    ),
                     "pattern_key": primary_key,
                     "description": combined_desc,
+                    "outcome": "timeout" if not resolved else "denied",
+                    "user_consent": False,
                 }
 
             # User approved — persist based on scope (same logic as CLI)

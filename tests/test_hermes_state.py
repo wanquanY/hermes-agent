@@ -595,7 +595,7 @@ def test_append_run_event_deduplicates_repeated_terminal_for_run(db):
     assert first["seq"] == 2
     assert duplicate["_persistence_disposition"] == "duplicate_terminal"
     assert duplicate["seq"] == 2
-    assert [event["type"] for event in events] == ["message.delta", "message.complete"]
+    assert [event["type"] for event in events] == ["message.complete"]
     assert events[-1]["payload"]["text"] == "done"
     assert run["status"] == "completed"
     assert run["last_seq"] == 2
@@ -645,15 +645,10 @@ def test_append_run_event_ignores_stream_events_after_terminal_for_run(db):
     assert terminal["seq"] == 2
     assert late_delta["_persistence_disposition"] == "ignored_after_terminal"
     assert late_delta["seq"] == 3
-    assert [event["type"] for event in events] == [
-        "message.delta",
-        "message.complete",
-        "message.delta",
-    ]
-    assert events[-1]["_persistence_disposition"] == "ignored_after_terminal"
-    assert events[-1]["payload"]["text"] == "late"
+    assert [event["type"] for event in events] == ["message.complete"]
+    assert events[-1]["payload"]["text"] == "done"
     assert run["status"] == "completed"
-    assert run["last_seq"] == 3
+    assert run["last_seq"] == 2
 
 
 def test_append_run_event_allows_higher_priority_terminal_upgrade(db):
@@ -690,125 +685,92 @@ def test_append_run_event_allows_higher_priority_terminal_upgrade(db):
     assert run["last_seq"] == 2
 
 
-def test_compact_run_events_preserves_existing_message_delta_rows(db):
-    db.append_run_event(
-        "stored-1",
-        {
-            "type": "message.delta",
-            "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
-            "run_id": "run-1",
-            "turn_id": "turn-1",
-            "seq": 1,
-            "payload": {"mode": "append", "text": "A", "delta": "A", "offset": 0},
-        },
-    )
-    db.append_run_event(
-        "stored-1",
-        {
-            "type": "tool.start",
-            "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
-            "run_id": "run-1",
-            "turn_id": "turn-1",
-            "seq": 2,
-            "payload": {"tool_name": "terminal"},
-        },
-    )
-    db.append_run_event(
-        "stored-1",
-        {
-            "type": "message.delta",
-            "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
-            "run_id": "run-1",
-            "turn_id": "turn-1",
-            "seq": 3,
-            "payload": {"mode": "append", "text": "B", "delta": "B", "offset": 1},
-        },
-    )
-    db.append_run_event(
-        "stored-1",
-        {
-            "type": "message.delta",
-            "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
-            "run_id": "run-1",
-            "turn_id": "turn-1",
-            "seq": 4,
-            "payload": {"mode": "append", "text": "C", "delta": "C", "offset": 2},
-        },
-    )
-    db.append_run_event(
-        "stored-1",
-        {
-            "type": "message.complete",
-            "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
-            "run_id": "run-1",
-            "turn_id": "turn-1",
-            "seq": 5,
-            "payload": {"status": "completed", "text": "ABC"},
-        },
+def test_compact_run_events_prunes_terminal_stream_rows_from_old_database(db):
+    db.upsert_run(
+        run_id="run-1",
+        session_id="stored-1",
+        runtime_scope_key="stored-1",
+        turn_id="turn-1",
+        runtime_session_id="runtime-1",
+        status="completed",
     )
 
-    # Insert raw rows after append-time coalescing to mimic an old database.
-    db._conn.execute(
-        """
-        INSERT INTO run_events (
-            session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
-            event_type, seq, timestamp, payload_json, event_json, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "stored-1",
-            "run-1",
-            "turn-1",
-            "runtime-1",
-            "stored-1",
-            "message.delta",
-            6,
-            6.0,
-            '{"mode":"append","text":"D","delta":"D","offset":3}',
-            '{"type":"message.delta","session_id":"runtime-1","stored_session_id":"stored-1","run_id":"run-1","turn_id":"turn-1","runtime_scope_key":"stored-1","seq":6,"timestamp":6.0,"payload":{"mode":"append","text":"D","delta":"D","offset":3}}',
-            "",
-        ),
+    prunable_rows = (
+        ("message.delta", '{"mode":"append","text":"A","delta":"A","offset":0}'),
+        ("reasoning.delta", '{"mode":"append","delta":"thinking"}'),
+        ("thinking.delta", '{"mode":"append","delta":"thinking"}'),
+        ("subagent.output_delta", '{"mode":"append","delta":"worker"}'),
+        ("subagent.reasoning_delta", '{"mode":"append","delta":"worker-thinking"}'),
+        ("subagent.thinking", '{"mode":"append","delta":"worker-thought"}'),
+        ("agent_profile_test.output_delta", '{"mode":"append","delta":"profile"}'),
+        ("agent_profile_test.thinking", '{"mode":"append","delta":"profile-thinking"}'),
+        ("tool.progress", '{"message":"working"}'),
+        ("tool.generating", '{"message":"generating"}'),
     )
-    db._conn.execute(
-        """
-        INSERT INTO run_events (
-            session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
-            event_type, seq, timestamp, payload_json, event_json, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "stored-1",
-            "run-1",
-            "turn-1",
-            "runtime-1",
-            "stored-1",
-            "message.delta",
-            7,
-            7.0,
-            '{"mode":"append","text":"E","delta":"E","offset":4}',
-            '{"type":"message.delta","session_id":"runtime-1","stored_session_id":"stored-1","run_id":"run-1","turn_id":"turn-1","runtime_scope_key":"stored-1","seq":7,"timestamp":7.0,"payload":{"mode":"append","text":"E","delta":"E","offset":4}}',
-            "",
-        ),
+
+    def insert_run_event(seq: int, event_type: str, payload: str, status: str = "") -> None:
+        db._conn.execute(
+            """
+            INSERT INTO run_events (
+                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                event_type, seq, timestamp, payload_json, event_json, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "stored-1",
+                "run-1",
+                "turn-1",
+                "runtime-1",
+                "stored-1",
+                event_type,
+                seq,
+                float(seq),
+                payload,
+                (
+                    f'{{"type":"{event_type}","session_id":"runtime-1",'
+                    '"stored_session_id":"stored-1","run_id":"run-1",'
+                    '"turn_id":"turn-1","runtime_scope_key":"stored-1",'
+                    f'"seq":{seq},"timestamp":{float(seq)},"payload":{payload}}}'
+                ),
+                status,
+            ),
+        )
+    for seq, (event_type, payload) in enumerate(prunable_rows, start=1):
+        insert_run_event(seq, event_type, payload)
+    insert_run_event(
+        len(prunable_rows) + 1,
+        "message.complete",
+        '{"status":"complete","text":"final"}',
+        "completed",
     )
 
     result = db.compact_run_events(session_id="stored-1")
-    events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
+    events = db.list_run_events("stored-1")
+    run = db.get_run("run-1")
+    archive = db._conn.execute(  # noqa: SLF001 - storage contract assertion.
+        "SELECT reason, event_count, first_seq, last_seq FROM run_event_archives"
+    ).fetchone()
 
-    assert result["deleted_events"] == 0
-    assert [event["seq"] for event in events] == [1, 3, 4, 6, 7]
-    assert events[0]["payload"] == {"mode": "append", "text": "A", "delta": "A", "offset": 0}
-    assert events[1]["payload"] == {"mode": "append", "text": "B", "delta": "B", "offset": 1}
-    assert events[2]["payload"] == {"mode": "append", "text": "C", "delta": "C", "offset": 2}
-    assert events[3]["payload"] == {"mode": "append", "text": "D", "delta": "D", "offset": 3}
-    assert events[4]["payload"] == {"mode": "append", "text": "E", "delta": "E", "offset": 4}
+    assert result["pruned_terminal_stream_events"] == len(prunable_rows)
+    assert result["deleted_events"] == len(prunable_rows)
+    assert [event["type"] for event in events] == ["message.complete"]
+    assert events[0]["payload"] == {"status": "complete", "text": "final"}
+    assert run["last_seq"] == len(prunable_rows) + 1
+    assert archive["reason"] == "terminal_run_stream_events"
+    assert archive["event_count"] == len(prunable_rows)
+    assert archive["first_seq"] == 1
+    assert archive["last_seq"] == len(prunable_rows)
 
 
-def test_compact_run_events_does_not_coalesce_restarted_message_append_offsets(db):
+def test_compact_run_events_preserves_active_message_delta_rows(db):
+    db.upsert_run(
+        run_id="run-1",
+        session_id="stored-1",
+        runtime_scope_key="stored-1",
+        turn_id="turn-1",
+        runtime_session_id="runtime-1",
+        status="running",
+    )
     for seq, payload in (
         (1, '{"mode":"append","text":"A","delta":"A","offset":0}'),
         (2, '{"mode":"append","text":"B","delta":"B","offset":1}'),
@@ -845,10 +807,52 @@ def test_compact_run_events_does_not_coalesce_restarted_message_append_offsets(d
     events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
 
     assert result["deleted_events"] == 0
+    assert result["pruned_terminal_stream_events"] == 0
     assert [event["seq"] for event in events] == [1, 2, 3]
     assert events[0]["payload"] == {"mode": "append", "text": "A", "delta": "A", "offset": 0}
     assert events[1]["payload"] == {"mode": "append", "text": "B", "delta": "B", "offset": 1}
     assert events[2]["payload"] == {"mode": "append", "text": "RESET", "delta": "RESET", "offset": 0}
+
+
+def test_compact_run_events_prunes_terminal_stream_rows_without_run_row(db):
+    for seq, event_type, payload, status in (
+        (1, "message.delta", '{"mode":"append","text":"A","delta":"A","offset":0}', ""),
+        (2, "message.complete", '{"status":"complete","text":"A"}', "completed"),
+    ):
+        db._conn.execute(
+            """
+            INSERT INTO run_events (
+                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                event_type, seq, timestamp, payload_json, event_json, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "stored-1",
+                "run-missing",
+                "turn-1",
+                "runtime-1",
+                "stored-1",
+                event_type,
+                seq,
+                float(seq),
+                payload,
+                (
+                    f'{{"type":"{event_type}","session_id":"runtime-1",'
+                    '"stored_session_id":"stored-1","run_id":"run-missing",'
+                    '"turn_id":"turn-1","runtime_scope_key":"stored-1",'
+                    f'"seq":{seq},"timestamp":{float(seq)},"payload":{payload}}}'
+                ),
+                status,
+            ),
+        )
+
+    result = db.compact_run_events(session_id="stored-1")
+    events = db.list_run_events("stored-1")
+
+    assert result["pruned_terminal_stream_events"] == 1
+    assert result["deleted_events"] == 1
+    assert [event["type"] for event in events] == ["message.complete"]
+    assert db.get_run("run-missing") is None
 
 
 def test_compact_run_events_deduplicates_existing_terminal_rows(db):
@@ -4308,10 +4312,19 @@ class TestAutoMaintenance:
         # But last-run is still recorded so we don't retry immediately.
         assert db.get_meta("last_auto_prune") is not None
 
-    def test_auto_run_event_compaction_preserves_message_delta_chunks(self, db):
+    def test_auto_run_event_compaction_prunes_terminal_message_delta_chunks(self, db):
+        db.upsert_run(
+            run_id="run-1",
+            session_id="stored-1",
+            runtime_scope_key="stored-1",
+            turn_id="turn-1",
+            runtime_session_id="runtime-1",
+            status="completed",
+        )
         for seq, payload in (
             (1, '{"mode":"append","text":"A","delta":"A","offset":0}'),
             (2, '{"mode":"append","text":"B","delta":"B","offset":1}'),
+            (3, '{"status":"complete","text":"AB"}'),
         ):
             db._conn.execute(
                 """
@@ -4326,34 +4339,34 @@ class TestAutoMaintenance:
                     "turn-1",
                     "runtime-1",
                     "stored-1",
-                    "message.delta",
+                    "message.complete" if seq == 3 else "message.delta",
                     seq,
                     float(seq),
                     payload,
                     (
-                        '{"type":"message.delta","session_id":"runtime-1",'
+                        f'{{"type":"{"message.complete" if seq == 3 else "message.delta"}","session_id":"runtime-1",'
                         '"stored_session_id":"stored-1","run_id":"run-1",'
                         '"turn_id":"turn-1","runtime_scope_key":"stored-1",'
                         f'"seq":{seq},"timestamp":{float(seq)},"payload":{payload}}}'
                     ),
-                    "",
+                    "completed" if seq == 3 else "",
                 ),
             )
         db._conn.commit()
 
         result = db.maybe_auto_compact_run_events(vacuum=False)
         second = db.maybe_auto_compact_run_events(vacuum=False)
-        events = db.list_run_events_filtered("stored-1", event_types=["message.delta"], limit=10)
+        events = db.list_run_events("stored-1")
 
         assert result["skipped"] is False
-        assert result["deleted_events"] == 0
+        assert result["deleted_events"] == 2
+        assert result["pruned_terminal_stream_events"] == 2
         assert result["compacted_segments"] == 0
         assert result["vacuumed"] is False
         assert db.get_meta("last_auto_run_event_compaction_v1") is not None
         assert second["skipped"] is True
-        assert [event["seq"] for event in events] == [1, 2]
-        assert events[0]["payload"] == {"mode": "append", "text": "A", "delta": "A", "offset": 0}
-        assert events[1]["payload"] == {"mode": "append", "text": "B", "delta": "B", "offset": 1}
+        assert [event["type"] for event in events] == ["message.complete"]
+        assert events[0]["payload"] == {"status": "complete", "text": "AB"}
 
     def test_vacuum_disabled_via_flag(self, db):
         self._make_old_ended(db, "old", days_old=100)

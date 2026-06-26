@@ -3,6 +3,8 @@ from pathlib import Path
 import time
 from types import SimpleNamespace
 
+import pytest
+
 
 class _MemoryTransport:
     def __init__(self):
@@ -2307,9 +2309,12 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
         )
     )
     assert created_worker.get("success") is True, created_worker
-    assert created_worker["node"]["metadata"]["task_id"] == "task-2"
-    assert created_worker["node"]["metadata"]["task_title"] == "第二个任务"
-    assert created_worker["node"]["metadata"]["task_objective"] == "规划并执行第二个任务"
+    persisted_worker = db.get_team_mission_node(result["mission_id"], "worker-second-task")
+    assert created_worker["node_id"] == "worker-second-task"
+    assert "node" not in created_worker
+    assert persisted_worker["metadata"]["task_id"] == "task-2"
+    assert persisted_worker["metadata"]["task_title"] == "第二个任务"
+    assert persisted_worker["metadata"]["task_objective"] == "规划并执行第二个任务"
     completed = json.loads(
         registry.dispatch(
             "team_mission_plan_complete",
@@ -2319,7 +2324,8 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
     )
     assert completed["success"] is True
     assert completed["approval_requests"][0]["task_id"] == "task-2"
-    completed_nodes = completed["graph"]["nodes"]
+    assert "graph" not in completed
+    completed_nodes = db.get_team_mission_graph(result["mission_id"])["nodes"]
     approval_node = next(node for node in completed_nodes if node["kind"] == "approval_gate")
     assert approval_node["metadata"]["task_id"] == "task-2"
     rejected = server._methods["team_mission.plan.reject"](
@@ -3251,18 +3257,17 @@ def test_final_deliverable_recovery_does_not_rewrite_legacy_snapshot_mirror_even
 
     assert recover_final_deliverable_messages(db, {"stable_session_id": "team-session-1"}) == 1
 
+    # Terminal-run retention prunes replay-redundant stream deltas from the
+    # durable run_events log. Recovery must therefore use the source run or
+    # complete payload, not rewrite/keep old legacy snapshot mirror deltas.
     delta_events = [
         event
         for event in db.list_run_events("team-session-1")
         if event["type"] == "message.delta"
     ]
-    assert len(delta_events) == 2
-    assert delta_events[0]["payload"]["mode"] == "snapshot"
-    assert delta_events[0]["payload"]["snapshot"] == "旧 snapshot 内容"
-    assert delta_events[0]["payload"]["text"] == "旧 snapshot 内容"
-    assert delta_events[1]["payload"]["mode"] == "snapshot"
-    assert delta_events[1]["payload"]["snapshot"] == "重复旧 snapshot 内容"
-    assert delta_events[1]["payload"]["text"] == "重复旧 snapshot 内容"
+    assert delta_events == []
+    messages = db.get_messages("team-session-1")
+    assert messages[-1]["content"] == "最终汇总交付内容"
 
 
 def test_team_mission_cancel_marks_graph_and_cancels_active_runs(monkeypatch, tmp_path: Path):
@@ -5873,4 +5878,3 @@ def test_recall_turn_path_A_leader_direct_cancels_leader_run(monkeypatch, tmp_pa
         "stored_session_id": "team-session-1",
         "reason": "Recalled by user.",
     }]
-

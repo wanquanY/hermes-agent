@@ -510,13 +510,14 @@ def _(rid, params: dict) -> dict:
         runtime_scope_key=runtime_scope_key,
         db=db,
     )
+    last_seq = max([int(event.get("seq") or 0) for event in replay], default=after_seq)
     return _ok(
         rid,
         {
             "stored_session_id": stable_session_id,
             "subscription_id": subscription_id,
             "events": replay,
-            "last_event_seq": max([int(event.get("seq") or 0) for event in replay], default=after_seq),
+            "last_event_seq": last_seq,
         },
     )
 

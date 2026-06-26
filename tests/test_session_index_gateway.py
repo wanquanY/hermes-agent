@@ -127,6 +127,65 @@ def test_session_index_list_hides_empty_draft_but_keeps_live_and_content(monkeyp
     assert "real" in ids
 
 
+def test_session_index_list_emits_team_display_context_for_team_rows(monkeypatch, tmp_path: Path):
+    """Conversation-architecture refactor (P2): the sidebar's single read now
+    carries the team display (team name/avatar, lead profile name/avatar) and
+    the conversation's objective — replacing the supplementary
+    loadTeamConversationSidebarSessions stream and the merge heuristic."""
+    db = _setup(monkeypatch, tmp_path)
+
+    # Reference data the JOIN needs.
+    db.upsert_agent_team(
+        team_id="team-1", name="Stellar", description="",
+        lead_agent_profile_id="profile-leader",
+    )
+    db.upsert_agent_profile(
+        profile_id="profile-leader", slug="leader", name="多多", avatar="🤖",
+        hermes_home_path="/tmp/leader-home",
+    )
+    db.ensure_team_mission_conversation(
+        conversation_id="conv-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        title="星舰",
+        objective="抵达火星",
+    )
+    # session_index for the team conversation (mirrors what upsert_team_mission_conversation does).
+    db.upsert_session_index(
+        session_id="team-session-1",
+        title="星舰",
+        preview="...",
+        source="team_mission",
+        session_kind="team_mission",
+        team_id="team-1",
+        conversation_id="conv-1",
+        started_at=10.0,
+        updated_at=10.0,
+    )
+    # Plain chat row — must NOT receive any team_ fields.
+    db.upsert_session_index(
+        session_id="plain-1", title="Plain", preview="hi",
+        started_at=20.0, updated_at=20.0,
+    )
+
+    resp = server._methods["session.index.list"](1, {})
+    by_id = {s["id"]: s for s in resp["result"]["sessions"]}
+
+    team_item = by_id["team-session-1"]
+    assert team_item["team_id"] == "team-1"
+    assert team_item["team_name"] == "Stellar"
+    assert team_item["team"]["name"] == "Stellar"
+    assert team_item["team"]["lead_agent_profile_id"] == "profile-leader"
+    assert team_item["lead_profile_name"] == "多多"
+    assert team_item["lead_profile_avatar"] == "🤖"
+    assert team_item["objective"] == "抵达火星"
+
+    plain_item = by_id["plain-1"]
+    assert "team" not in plain_item
+    assert "team_name" not in plain_item
+    assert "objective" not in plain_item
+
+
 def test_session_index_list_reconciles_preexisting_sessions_once(monkeypatch, tmp_path: Path):
     from tui_gateway.methods import session as session_methods
     db = _setup(monkeypatch, tmp_path)

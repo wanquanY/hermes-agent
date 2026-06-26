@@ -149,6 +149,9 @@ def test_supervised_strategy_waits_for_whole_graph_approval_after_planning():
     assert "team_mission_node_create" in leader_text
     assert "team_mission_team_profile" in leader_text
     assert "team_mission_plan_complete" in leader_text
+    assert "task_brief.background" in leader_text
+    assert "task_brief.execution" in leader_text
+    assert "task_brief.acceptance_criteria" in leader_text
     assert "Hermes" not in leader_text
     assert "DoXie team Leader Planner" in leader_text
     assert "Keep the same persona, identity, tone, and memory as the underlying DoXie profile" in leader_text

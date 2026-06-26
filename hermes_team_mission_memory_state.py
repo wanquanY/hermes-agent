@@ -429,6 +429,36 @@ def team_mission_binding_events(db: Any, binding: Dict[str, Any], *, limit: int 
     ]
 
 
+def team_mission_bindings_events_map(db: Any, bindings: List[Dict[str, Any]], *, limit_per_run: int = 2000) -> Dict[str, List[Dict[str, Any]]]:
+    run_ids = dedupe_text([binding.get("run_id") for binding in bindings if isinstance(binding, dict)])
+    if not run_ids or not getattr(db, "_conn", None):
+        return {}
+    placeholders = ",".join("?" for _ in run_ids)
+    bounded_limit = max(1, min(int(limit_per_run or 2000), 5000))
+    with db._lock:
+        rows = db._conn.execute(
+            f"""
+            SELECT run_id, event_json
+              FROM run_events
+             WHERE run_id IN ({placeholders})
+             ORDER BY run_id ASC, seq ASC, id ASC
+            """,
+            tuple(run_ids),
+        ).fetchall()
+    result: dict[str, list[dict[str, Any]]] = {run_id: [] for run_id in run_ids}
+    for row in rows:
+        run_id = text(_row_value(row, "run_id"))
+        if not run_id or len(result.setdefault(run_id, [])) >= bounded_limit:
+            continue
+        try:
+            event = json.loads(_row_value(row, "event_json", "{}") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            event = {}
+        if isinstance(event, dict):
+            result[run_id].append(event)
+    return result
+
+
 def team_mission_binding_message_excerpt(db: Any, binding: Dict[str, Any]) -> str:
     try:
         messages = db.get_messages(text(binding.get("session_id")))
@@ -458,21 +488,32 @@ def compile_memory_for_binding(
     context: Dict[str, Any],
     task_id: str,
     mode: str,
+    preloaded_events: List[Dict[str, Any]] | None = None,
 ) -> List[Dict[str, Any]]:
     run_id = text(binding.get("run_id"))
     node_id = text(node.get("node_id") or binding.get("node_id"))
     if not run_id or not node_id:
         return []
-    events = team_mission_binding_events(db, binding)
-    text_parts = [event_text(event) for event in events]
-    text_parts = [part for part in text_parts if part]
-    if not text_parts:
-        excerpt = team_mission_binding_message_excerpt(db, binding)
-        if excerpt:
-            text_parts.append(excerpt)
-    raw_artifacts: list[dict[str, Any]] = []
-    for event in events:
-        raw_artifacts.extend(event_artifacts(event))
+    deliverable_getter = getattr(db, "latest_team_mission_deliverable_for_run", None)
+    deliverable = deliverable_getter(run_id) if callable(deliverable_getter) else {}
+    deliverable = deliverable if isinstance(deliverable, dict) else {}
+    events = [] if deliverable else (preloaded_events if preloaded_events is not None else team_mission_binding_events(db, binding))
+    text_parts = []
+    if deliverable:
+        summary_text = text(deliverable.get("summary"))
+        if summary_text:
+            text_parts.append(summary_text)
+    else:
+        text_parts = [event_text(event) for event in events]
+        text_parts = [part for part in text_parts if part]
+        if not text_parts:
+            excerpt = team_mission_binding_message_excerpt(db, binding)
+            if excerpt:
+                text_parts.append(excerpt)
+    raw_artifacts: list[dict[str, Any]] = list(deliverable.get("artifact_refs") or deliverable.get("artifactRefs") or [])
+    if not raw_artifacts:
+        for event in events:
+            raw_artifacts.extend(event_artifacts(event))
     artifact_refs: list[dict[str, Any]] = []
     seen_artifacts: set[str] = set()
     for artifact in raw_artifacts:
@@ -503,6 +544,16 @@ def compile_memory_for_binding(
         "run_id": run_id,
         "event_count": len(events),
     }
+    if deliverable:
+        structured_payload["deliverable"] = {
+            "deliverable_id": deliverable.get("deliverable_id") or deliverable.get("deliverableId"),
+            "status": deliverable.get("status"),
+            "result": deliverable.get("result"),
+            "summary": deliverable.get("summary"),
+            "payload": deliverable.get("payload") if isinstance(deliverable.get("payload"), dict) else {},
+            "source": deliverable.get("source"),
+            "visibility": deliverable.get("visibility"),
+        }
     items: list[dict[str, Any]] = []
     summary_item = upsert_team_mission_memory_item(
         db,
@@ -595,6 +646,36 @@ def compile_memory_for_binding(
     return items
 
 
+def _dedupe_memory_items_by_similarity(items: List[Dict[str, Any]], *, threshold: float = 0.8) -> List[Dict[str, Any]]:
+    kept: list[dict[str, Any]] = []
+    kept_tokens: list[set[str]] = []
+    for item in items:
+        tokens = tokenize(
+            " ".join([
+                text(item.get("kind")),
+                text(item.get("content")),
+                _json_dumps(item.get("structured_payload") or {}),
+            ])
+        )
+        if not tokens:
+            kept.append(item)
+            kept_tokens.append(set())
+            continue
+        duplicate = False
+        for existing in kept_tokens:
+            if not existing:
+                continue
+            similarity = len(tokens & existing) / max(1, len(tokens | existing))
+            if similarity >= threshold:
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        kept.append(item)
+        kept_tokens.append(tokens)
+    return kept
+
+
 def compile_team_mission_memory(
     db: Any,
     *,
@@ -621,7 +702,9 @@ def compile_team_mission_memory(
     }
     items: list[dict[str, Any]] = []
     compiled_run_ids: list[str] = []
-    for binding in graph.get("run_bindings", []):
+    raw_bindings = [binding for binding in graph.get("run_bindings", []) if isinstance(binding, dict)]
+    eligible_bindings: list[dict[str, Any]] = []
+    for binding in raw_bindings:
         if not isinstance(binding, dict):
             continue
         run_id = text(binding.get("run_id"))
@@ -632,6 +715,12 @@ def compile_team_mission_memory(
         node_status = text(node.get("status"))
         if not requested_runs and node_status and node_status not in MEMORY_TERMINAL_STATUSES:
             continue
+        eligible_bindings.append(binding)
+    events_by_run = team_mission_bindings_events_map(db, eligible_bindings)
+    for binding in eligible_bindings:
+        run_id = text(binding.get("run_id"))
+        node = nodes_by_id.get(text(binding.get("node_id"))) or {}
+        binding_task_id = _task_id_from_node_and_binding(node, binding) or normalized_task_id
         compiled = compile_memory_for_binding(
             db,
             mission=mission,
@@ -640,6 +729,7 @@ def compile_team_mission_memory(
             context=context,
             task_id=binding_task_id,
             mode=mode,
+            preloaded_events=events_by_run.get(run_id),
         )
         if compiled:
             compiled_run_ids.append(run_id)
@@ -745,7 +835,8 @@ def select_team_mission_memory_items(
         ),
         reverse=True,
     )
-    return ranked[: max(1, min(int(limit or 8), 50))]
+    deduped = _dedupe_memory_items_by_similarity(ranked)
+    return deduped[: max(1, min(int(limit or 8), 50))]
 
 
 def record_team_mission_memory_references(

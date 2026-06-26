@@ -11,8 +11,8 @@ These tests pin:
 - the diagnostic writer's output format and content
 - the timeout branch in _run_single_child only dumps when api_calls == 0
 - the error message surfaces the diagnostic path
-- api_calls > 0 timeouts do NOT write a dump (the old "stuck on slow API
-  call" explanation still applies)
+- api_calls > 0 timeouts do NOT write a dump (the idle-timeout explanation
+  still applies)
 """
 from __future__ import annotations
 
@@ -124,7 +124,7 @@ class TestDumpSubagentTimeoutDiagnostic:
         # Timeout facts
         assert "task_index:        7" in content
         assert "subagent_id:       sa-7-abc123" in content
-        assert "configured_timeout: 300.0s" in content
+        assert "configured_idle_timeout: 300.0s" in content
         assert "actual_duration:   300.01s" in content
         # Goal
         assert "Research something long" in content
@@ -268,17 +268,18 @@ class TestRunSingleChildTimeoutDump:
         assert "Diagnostic:" in result["error"]
         assert str(dump_path) in result["error"]
 
-    def test_nonzero_api_calls_skips_dump_and_uses_old_message(self, hermes_home, monkeypatch):
+    def test_nonzero_api_calls_skips_dump_and_uses_idle_timeout_message(
+        self, hermes_home, monkeypatch
+    ):
         child = _StubChild(api_call_count=5, hang_seconds=10.0)
         result = self._invoke_with_short_timeout(child, monkeypatch)
 
         assert result["status"] == "timeout"
         assert result["api_calls"] == 5
         # No diagnostic file should be written for timeouts that made
-        # actual API calls — the old generic "stuck on slow call" message
-        # still applies.
+        # actual API calls — the generic idle-timeout message still applies.
         assert result.get("diagnostic_path") is None
-        assert "stuck on a slow API call" in result["error"]
+        assert "no child activity was observed" in result["error"]
         # And no subagent-timeout-* file should exist under logs/
         logs_dir = hermes_home / "logs"
         if logs_dir.is_dir():

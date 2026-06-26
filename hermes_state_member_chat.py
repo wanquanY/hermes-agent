@@ -1,35 +1,209 @@
-"""Decoupled group-chat: relay a worker member's direct-chat reply into the team
-conversation session.
+"""Decoupled group-chat — registry + participant-view projection.
 
-This is intentionally INDEPENDENT of the team-mission/task machinery. A member
-@-chat is NOT a mission node — it has no graph node, no mission run-binding, and
-is never touched by the terminal-mission run reaper. The member runs on its own
-session (isolated worker); its reply is relayed here into the shared conversation
-session, tagged with the member's identity, so the leader + every member share
-one conversation transcript.
+A member @-chat is NOT a mission node. The worker runs on its own session
+(so leader and members run concurrently, each owning a session-busy lock
+and an independent runtime process); every event the worker emits gets
+mirrored frame-for-frame into the team conversation session by the
+run_control.record_event mirror block — that layer can both broadcast the
+mirrored frame to the conversation's live subscribers AND persist it via
+the normal append_run_event path.
 
-Mirrors the team-mission conversation-mirror's shape (append a run event to the
-conversation session + persist the assistant message) but keyed by a member-chat
-run registry instead of a mission binding.
+This module owns:
+  - the run → conversation routing table (register a member-chat run, look
+    it up at mirror time)
+  - the participant-view projection (how the team conversation's shared
+    message log looks from a given participant's first-person perspective:
+    that participant's own assistant turns stay assistant, every other
+    speaker becomes user-side observed speech with a "[<speaker>] ..."
+    prefix so the LLM doesn't impersonate them)
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _complete_text(payload: Dict[str, Any]) -> str:
-    for key in ("text", "final_response", "finalResponse", "summary", "message"):
-        value = payload.get(key)
-        if _text(value):
-            return _text(value)
-    return ""
+# Sentinel for the team leader's participant view.
+LEADER_PARTICIPANT_ID = "leader"
+
+
+def _coerce_metadata(meta: Any) -> Dict[str, Any]:
+    if isinstance(meta, dict):
+        return meta
+    if isinstance(meta, str) and meta.strip():
+        try:
+            parsed = json.loads(meta)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
+def _is_viewer_own_assistant(message: Dict[str, Any], viewer: str) -> bool:
+    """Decide whether an ``assistant`` row is the viewer's own past turn.
+
+    Heuristic by viewer kind:
+      - viewer == LEADER: the leader writes directly into the conv session
+        with NO ``team_mission.member_id`` and (importantly) NOT through the
+        member-chat mirror, so any assistant row that lacks a member_id and
+        whose ``kind`` is neither ``member_chat`` nor ``leader_mirror`` is
+        leader-authored.
+      - viewer == <member_id>: any row whose
+        ``metadata.team_mission.member_id`` matches.
+    """
+    meta = _coerce_metadata(message.get("metadata"))
+    team_meta = meta.get("team_mission") if isinstance(meta.get("team_mission"), dict) else {}
+    src_member_id = _text(team_meta.get("member_id"))
+    kind = _text(team_meta.get("kind"))
+    if not viewer:
+        return False
+    if viewer == LEADER_PARTICIPANT_ID:
+        return not src_member_id and kind not in {"member_chat", "leader_mirror"}
+    return bool(src_member_id) and src_member_id == viewer
+
+
+def _should_skip_for_viewer(message: Dict[str, Any], viewer: str) -> bool:
+    """Skip rules independent of role — rows the viewer should not see at
+    all (own mirror that already exists locally, in-flight @-request the
+    worker will receive via run.submit text)."""
+    meta = _coerce_metadata(message.get("metadata"))
+    # Never re-project a row WE wrote as a view (avoid speaker-prefix
+    # nesting on resync).
+    if meta.get("member_chat_view"):
+        return True
+    team_meta = meta.get("team_mission") if isinstance(meta.get("team_mission"), dict) else {}
+    kind = _text(team_meta.get("kind"))
+    src_member_id = _text(team_meta.get("member_id"))
+    target_member_id = _text(team_meta.get("target_member_id"))
+    viewer = _text(viewer)
+    if kind == "member_chat" and src_member_id and src_member_id == viewer:
+        return True
+    if kind == "member_chat_user" and target_member_id and target_member_id == viewer:
+        return True
+    return False
+
+
+def project_messages_for_viewer(
+    messages: List[Dict[str, Any]],
+    viewer_participant_id: str,
+) -> List[Dict[str, Any]]:
+    """Project a conversation's shared message log into the first-person
+    history a single participant should hydrate from.
+
+    Stateful walk — preserves the structural integrity of tool-call
+    sequences (``assistant`` with tool_calls + paired ``tool`` rows must
+    stay together or the model errors on unmatched tool_call_id):
+
+      - ``role=user`` rows: kept (subject to the per-viewer skip rules
+        above; the in-flight @-request to this viewer is dropped because
+        the worker re-appends it via ``run.submit text=``).
+      - ``role=assistant`` rows authored by the viewer: kept VERBATIM —
+        content, tool_calls, reasoning, the lot. Subsequent ``tool`` rows
+        belong to this turn and are kept.
+      - ``role=assistant`` rows authored by anybody else: rewritten as
+        ``role=user`` with a ``[<speaker> 在群聊里说] <content>`` prefix
+        so the LLM sees observed group-chat speech instead of impersonating
+        them. Any ``tool`` rows that immediately follow that other-author
+        assistant are theirs and get dropped (the viewer never invoked
+        those tools; surfacing the responses would confuse the model and
+        waste tokens).
+      - ``role=tool`` rows: kept iff the most-recent ``assistant`` we
+        emitted was the viewer's own — otherwise discarded.
+      - Other roles (``system`` etc.): kept verbatim.
+
+    Empty-content rows are kept for the viewer's own assistant (a
+    tool-only turn legitimately has empty content). Other-author rows with
+    empty content are dropped (nothing to reflect).
+    """
+    out: List[Dict[str, Any]] = []
+    drop_following_tools = False  # True after we projected an "other" assistant
+    viewer = _text(viewer_participant_id)
+
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = _text(message.get("role")).lower()
+
+        if role == "tool":
+            if drop_following_tools:
+                continue
+            out.append(dict(message))
+            continue
+
+        # A non-tool row delimits the previous turn's tail.
+        drop_following_tools = False
+
+        if _should_skip_for_viewer(message, viewer):
+            continue
+
+        if role == "user":
+            content = _text(message.get("content"))
+            if not content:
+                continue
+            new_msg = dict(message)
+            new_msg["role"] = "user"
+            new_msg["content"] = content
+            out.append(new_msg)
+            continue
+
+        if role == "assistant":
+            if _is_viewer_own_assistant(message, viewer):
+                # Verbatim — keeps tool_calls / reasoning intact so the
+                # paired ``tool`` rows that follow stay valid.
+                out.append(dict(message))
+                continue
+            # Other speaker — rewrite as observed user-side speech and
+            # mark the following tool rows for skip.
+            content = _text(message.get("content"))
+            if not content:
+                # No surfaceable text and not ours — drop the row entirely
+                # and also drop any tool rows it would have brought.
+                drop_following_tools = True
+                continue
+            meta = _coerce_metadata(message.get("metadata"))
+            team_meta = meta.get("team_mission") if isinstance(meta.get("team_mission"), dict) else {}
+            speaker = _text(team_meta.get("display_name"))
+            if not speaker:
+                speaker = _text(team_meta.get("member_id")) or "Leader"
+            new_msg = dict(message)
+            new_msg["role"] = "user"
+            new_msg["content"] = f"[{speaker} 在群聊里说] {content}"
+            # Drop tool_calls/reasoning fields so the row stops looking
+            # like a model turn — it's user-side speech now.
+            new_msg.pop("tool_calls", None)
+            new_msg.pop("tool_call_id", None)
+            new_msg.pop("reasoning", None)
+            new_msg.pop("reasoning_content", None)
+            new_msg.pop("reasoning_details", None)
+            out.append(new_msg)
+            drop_following_tools = True
+            continue
+
+        # Anything else (system, etc.) — passthrough.
+        out.append(dict(message))
+
+    return out
+
+
+def project_message_for_viewer(
+    message: Dict[str, Any],
+    viewer_participant_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Single-message convenience for callers that don't care about
+    tool-pairing (e.g. sync_member_chat_conversation_view, which works on
+    write-time rows that never carry tool_calls — leader/member assistant
+    REPLIES into the conv are plain text mirror frames). Delegates to the
+    stateful walker via a one-element list."""
+    projected = project_messages_for_viewer([message], viewer_participant_id)
+    return projected[0] if projected else None
 
 
 class SessionDBMemberChatMixin:
@@ -42,6 +216,7 @@ class SessionDBMemberChatMixin:
         member_id: str,
         agent_profile_id: str = "",
         display_name: str = "",
+        optimistic_run_id: str = "",
     ) -> None:
         run_id = _text(run_id)
         if not run_id:
@@ -50,19 +225,21 @@ class SessionDBMemberChatMixin:
         def _do(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT INTO member_chat_runs "
-                "(run_id, conversation_session_id, member_id, agent_profile_id, display_name, relayed, created_at) "
-                "VALUES (?, ?, ?, ?, ?, 0, ?) "
+                "(run_id, conversation_session_id, member_id, agent_profile_id, display_name, optimistic_run_id, relayed, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0, ?) "
                 "ON CONFLICT(run_id) DO UPDATE SET "
                 "conversation_session_id=excluded.conversation_session_id, "
                 "member_id=excluded.member_id, "
                 "agent_profile_id=excluded.agent_profile_id, "
-                "display_name=excluded.display_name",
+                "display_name=excluded.display_name, "
+                "optimistic_run_id=excluded.optimistic_run_id",
                 (
                     run_id,
                     _text(conversation_session_id),
                     _text(member_id),
                     _text(agent_profile_id),
                     _text(display_name),
+                    _text(optimistic_run_id),
                     time.time(),
                 ),
             )
@@ -75,92 +252,179 @@ class SessionDBMemberChatMixin:
             return {}
         with self._lock:
             row = self._conn.execute(
-                "SELECT run_id, conversation_session_id, member_id, agent_profile_id, display_name, relayed "
+                "SELECT run_id, conversation_session_id, member_id, agent_profile_id, display_name, optimistic_run_id, relayed "
                 "FROM member_chat_runs WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
         if row is None:
             return {}
-        keys = ["run_id", "conversation_session_id", "member_id", "agent_profile_id", "display_name", "relayed"]
+        keys = ["run_id", "conversation_session_id", "member_id", "agent_profile_id", "display_name", "optimistic_run_id", "relayed"]
         if isinstance(row, sqlite3.Row):
             return {k: row[k] for k in keys}
         return {k: row[i] for i, k in enumerate(keys)}
 
-    def _mark_member_chat_run_relayed(self, run_id: str) -> None:
-        def _do(conn: sqlite3.Connection) -> None:
-            conn.execute("UPDATE member_chat_runs SET relayed = 1 WHERE run_id = ?", (_text(run_id),))
+    def find_member_chat_run_by_optimistic_run_id(self, optimistic_run_id: str) -> Dict[str, Any]:
+        """Reverse-lookup the worker run from the frontend's pre-reserved
+        optimistic run_id (the one stamped onto mirrored frames so the
+        sidebar settles cleanly). Used by recall to find the worker run that
+        must be cancelled when the user retracts a group-chat turn."""
+        optimistic_run_id = _text(optimistic_run_id)
+        if not optimistic_run_id:
+            return {}
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT run_id, conversation_session_id, member_id, agent_profile_id, display_name, optimistic_run_id, relayed "
+                "FROM member_chat_runs WHERE optimistic_run_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (optimistic_run_id,),
+            ).fetchone()
+        if row is None:
+            return {}
+        keys = ["run_id", "conversation_session_id", "member_id", "agent_profile_id", "display_name", "optimistic_run_id", "relayed"]
+        if isinstance(row, sqlite3.Row):
+            return {k: row[k] for k in keys}
+        return {k: row[i] for i, k in enumerate(keys)}
 
-        self._execute_write(_do)
+    def list_member_chat_runs_for_conversation(self, conversation_session_id: str) -> "list[Dict[str, Any]]":
+        """All member-chat runs that mirrored into this conversation. Used by
+        recall to know which member-chat view sessions need to be synced
+        (their materialized view rows of the recalled messages must also be
+        deactivated, otherwise the next time the user @-mentions that member
+        the worker would still see the retracted message)."""
+        conversation_session_id = _text(conversation_session_id)
+        if not conversation_session_id:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT run_id, conversation_session_id, member_id, agent_profile_id, display_name, optimistic_run_id, relayed "
+                "FROM member_chat_runs WHERE conversation_session_id = ?",
+                (conversation_session_id,),
+            ).fetchall()
+        keys = ["run_id", "conversation_session_id", "member_id", "agent_profile_id", "display_name", "optimistic_run_id", "relayed"]
+        out = []
+        for row in rows:
+            if isinstance(row, sqlite3.Row):
+                out.append({k: row[k] for k in keys})
+            else:
+                out.append({k: row[i] for i, k in enumerate(keys)})
+        return out
 
-    # ── relay projection (called from the run-event write hook) ───────
-    def _project_member_chat_run_event(self, *, run_id: str, saved: Dict[str, Any]) -> None:
-        """If ``run_id`` is a registered member-chat run, relay its completed
-        reply into the conversation session with member identity. First cut:
-        only message.complete (the final reply), so the reply shows live + is
-        persisted for the leader to read. Streaming deltas can be added later."""
-        if not run_id or not isinstance(saved, dict):
-            return
-        if _text(saved.get("type")) != "message.complete":
-            return
-        registration = self.get_member_chat_run(run_id)
-        if not registration or int(registration.get("relayed") or 0):
-            return
-        conversation_session_id = _text(registration.get("conversation_session_id"))
-        source_session_id = _text(saved.get("stored_session_id") or saved.get("session_id"))
-        if not conversation_session_id or conversation_session_id == source_session_id:
-            return
-        payload = dict(saved.get("payload") or {}) if isinstance(saved.get("payload"), dict) else {}
-        reply_text = _complete_text(payload)
-        if not reply_text:
-            return
+    def recall_member_chat_view_messages(
+        self,
+        *,
+        member_chat_session_id: str,
+        source_message_ids: "list[int]",
+    ) -> int:
+        """Deactivate (active=0) any view rows in a member-chat session whose
+        ``metadata.member_chat_view.source_message_id`` points at one of the
+        recalled conversation messages. Mirrors the recall semantics into the
+        worker's hydration view so the next turn the member runs no longer
+        sees the retracted turn.
 
-        member_identity = {
-            "kind": "member_chat",
-            "surface": "member_chat",
-            "member_id": _text(registration.get("member_id")),
-            "agent_profile_id": _text(registration.get("agent_profile_id")),
-            "display_name": _text(registration.get("display_name")),
-            "conversation_session_id": conversation_session_id,
-        }
-        relay_run_id = f"member-chat:{run_id}"
-        relay_payload = {
-            **payload,
-            "text": reply_text,
-            "run_id": relay_run_id,
-            "source_run_id": run_id,
-            "source_session_id": source_session_id,
-            "team_mission": member_identity,
-            "member_chat_conversation_mirror": True,
-        }
-        relay_event = {
-            **{k: v for k, v in saved.items() if k not in ("payload", "seq")},
-            "stored_session_id": conversation_session_id,
-            "session_id": conversation_session_id,
-            "run_id": relay_run_id,
-            "runtime_scope_key": f"member-chat:{_text(registration.get('member_id'))}",
-            "payload": relay_payload,
-            "seq": 0,
-            "timestamp": float(saved.get("timestamp") or time.time()),
-        }
+        Returns the number of rows deactivated.
+        """
+        member_chat_session_id = _text(member_chat_session_id)
+        if not member_chat_session_id or not source_message_ids:
+            return 0
+        # source_message_id is stored stringified inside metadata_json; match
+        # the exact JSON fragment to avoid LIKE false positives.
+        normalized_ids = [str(int(mid)) for mid in source_message_ids if str(mid).strip()]
+        if not normalized_ids:
+            return 0
 
-        previous = getattr(self, "_member_chat_projecting", False)
-        self._member_chat_projecting = True
-        try:
-            try:
-                if not self.get_session(conversation_session_id):
-                    self.create_session(conversation_session_id, source="team_mission", transient=False)
-            except Exception:
-                pass
+        def _do(conn: sqlite3.Connection) -> int:
+            affected = 0
+            for mid in normalized_ids:
+                fragment = f'"source_message_id": "{mid}"'
+                alt_fragment = f'"source_message_id":"{mid}"'  # no-space variant
+                cur = conn.execute(
+                    "UPDATE messages SET active = 0 "
+                    "WHERE session_id = ? AND active = 1 "
+                    "  AND (instr(metadata_json, ?) > 0 OR instr(metadata_json, ?) > 0)",
+                    (member_chat_session_id, fragment, alt_fragment),
+                )
+                affected += int(cur.rowcount or 0)
+            return affected
+
+        return int(self._execute_write(_do) or 0)
+
+    # ── group-chat history view ──────────────────────────────────────
+    def sync_member_chat_conversation_view(
+        self,
+        *,
+        conversation_session_id: str,
+        member_chat_session_id: str,
+        member_id: str,
+    ) -> int:
+        """Materialize the team conversation's structured history into the
+        member-chat session's messages table.
+
+        The worker's runtime hydrates conversation history from
+        ``messages WHERE session_id = <member-chat-session>``, so this is how
+        we hand it a REAL chat history (system prompt + role-tagged turns)
+        instead of stringly cramming a transcript into the user prompt — the
+        latter makes the LLM copy other assistants' wording ("I am Hermes
+        Agent...") because to it those just look like prior turns from the
+        same assistant role.
+
+        Role remap (from this member's first-person perspective):
+          - source user messages → ``role=user``, content unchanged
+          - this member's OWN past replies (mirrored back into the
+            conversation by the member-chat mirror) → ``role=assistant``
+          - everyone else (leader, other members, unattributed assistants)
+            → ``role=user`` with a ``[<speaker> 在群聊里说] <content>``
+            prefix, so the LLM treats them as observed group-chat speech
+            from other participants, not its own prior turns to mimic
+
+        Skip rules:
+          - tool messages / empty content
+          - source messages already mirrored (tracked by source message id
+            stamped in metadata.member_chat_view.source_message_id)
+          - this member's OWN ``kind=member_chat`` mirrors AND
+            ``kind=member_chat_user`` current request — the worker already
+            has those locally (its own past assistant turns and the in-
+            flight user prompt arrive through `text=` on run.submit).
+
+        Idempotent — only newly-arrived source messages get appended.
+        Returns the number of rows appended this call.
+        """
+        conversation_session_id = _text(conversation_session_id)
+        member_chat_session_id = _text(member_chat_session_id)
+        member_id = _text(member_id)
+        if not conversation_session_id or not member_chat_session_id:
+            return 0
+
+        source_messages = self.get_messages(conversation_session_id) or []
+        own_messages = self.get_messages(member_chat_session_id) or []
+
+        mirrored_source_ids: set[str] = set()
+        for m in own_messages:
+            if not isinstance(m, dict):
+                continue
+            meta = _coerce_metadata(m.get("metadata"))
+            view = meta.get("member_chat_view") if isinstance(meta.get("member_chat_view"), dict) else {}
+            source_id = _text(view.get("source_message_id"))
+            if source_id:
+                mirrored_source_ids.add(source_id)
+
+        appended = 0
+        for src in source_messages:
+            if not isinstance(src, dict):
+                continue
+            source_id = _text(src.get("id"))
+            if not source_id or source_id in mirrored_source_ids:
+                continue
+            projected = project_message_for_viewer(src, member_id)
+            if projected is None:
+                continue
             try:
                 self.append_message(
-                    conversation_session_id,
-                    role="assistant",
-                    content=reply_text,
-                    metadata={"team_mission": member_identity},
+                    member_chat_session_id,
+                    role=projected["role"],
+                    content=projected["content"],
+                    metadata={"member_chat_view": {"source_message_id": source_id}},
                 )
+                appended += 1
             except Exception:
-                pass
-            self.append_run_event(conversation_session_id, relay_event)
-            self._mark_member_chat_run_relayed(run_id)
-        finally:
-            self._member_chat_projecting = previous
+                continue
+        return appended
