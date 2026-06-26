@@ -30,6 +30,7 @@ import { Card } from "@/components/ui/card";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { ToolCall, type ToolEntry } from "@/components/ToolCall";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
+import { HERMES_BASE_PATH } from "@/lib/api";
 
 import { cn } from "@/lib/utils";
 import { AlertCircle, ChevronDown, RefreshCw } from "lucide-react";
@@ -160,7 +161,7 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const qs = new URLSearchParams({ token, channel });
     const ws = new WebSocket(
-      `${proto}//${window.location.host}/api/events?${qs.toString()}`,
+      `${proto}//${window.location.host}${HERMES_BASE_PATH}/api/events?${qs.toString()}`,
     );
 
     // `unmounting` suppresses the banner during cleanup — `ws.close()`
@@ -278,24 +279,6 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
     setVersion((v) => v + 1);
   }, []);
 
-  // Picker hands us a fully-formed slash command (e.g. "/model anthropic/...").
-  // Fire-and-forget through `slash.exec`; the TUI pane will render the result
-  // via PTY, so the sidebar doesn't need to surface output of its own.
-  const onModelSubmit = useCallback(
-    (slashCommand: string) => {
-      if (!sessionId) {
-        return;
-      }
-
-      void gw.request("slash.exec", {
-        session_id: sessionId,
-        command: slashCommand,
-      });
-      setModelOpen(false);
-    },
-    [gw, sessionId],
-  );
-
   const canPickModel = state === "open" && !!sessionId;
   const modelLabel = (info.model ?? "—").split("/").slice(-1)[0] ?? "—";
   const banner = error ?? info.credential_warning ?? null;
@@ -376,7 +359,6 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
           gw={gw}
           sessionId={sessionId}
           onClose={() => setModelOpen(false)}
-          onSubmit={onModelSubmit}
         />
       )}
     </aside>

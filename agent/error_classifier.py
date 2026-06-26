@@ -50,6 +50,8 @@ class FailoverReason(enum.Enum):
 
     # Request format
     format_error = "format_error"        # 400 bad request — abort or strip + retry
+    invalid_encrypted_content = "invalid_encrypted_content"  # Responses replay blob rejected — strip replay state and retry
+    multimodal_tool_content_unsupported = "multimodal_tool_content_unsupported"  # Provider rejected list-type content in tool messages (e.g. Xiaomi MiMo) — downgrade to text and retry
 
     # Provider-specific
     thinking_signature = "thinking_signature"  # Anthropic thinking block sig invalid
@@ -161,6 +163,9 @@ _IMAGE_TOO_LARGE_PATTERNS = [
     "image too large",      # generic
     "image_too_large",      # error_code variant
     "image size exceeds",   # variant
+    "image dimensions exceed",  # Anthropic pixel dimension cap
+    "dimensions exceed max allowed size",
+    "max allowed size: 8000",
     # "request_too_large" on a request known to contain an image → image is
     # the likely culprit; we still try the shrink path before giving up.
 ]
@@ -252,6 +257,29 @@ _AUTH_PATTERNS = [
 # Anthropic thinking block signature patterns
 _THINKING_SIG_PATTERNS = [
     "signature",  # Combined with "thinking" check
+]
+
+# Deterministic request-validation errors that 5xx-gateway servers sometimes
+# wrap (codex.nekos.me returns 502 for unknown/unsupported parameters).
+# Backfilled from upstream 6212e9ade/2ce3ae3d1 (not on the absorption list but
+# referenced by code that did absorb).
+_REQUEST_VALIDATION_PATTERNS = [
+    "unknown parameter",
+    "unsupported parameter",
+    "unrecognized request argument",
+    "invalid_request_error",
+    "unknown_parameter",
+    "unsupported_parameter",
+]
+
+# Provider safety-filter / content-policy refusals. Determinate per-prompt —
+# retrying unchanged just reproduces the refusal. Backfilled placeholder so
+# refs from absorbed commits do not NameError.
+_CONTENT_POLICY_BLOCKED_PATTERNS = [
+    "content policy",
+    "content_policy",
+    "safety filter",
+    "content_filter",
 ]
 
 # Message-string patterns that indicate a provider-side timeout even when
@@ -439,14 +467,20 @@ def classify_api_error(
 
     # ── 1. Provider-specific patterns (highest priority) ────────────
 
-    # Anthropic thinking block signature invalid (400).
+    # Anthropic thinking block recovery (400). Two failure modes:
+    #   1. Signature mismatch ("signature" + "thinking")
+    #   2. Frozen-block mutation ("thinking" + "cannot be modified" / "must remain as they were")
     # Don't gate on provider — OpenRouter proxies Anthropic errors, so the
     # provider may be "openrouter" even though the error is Anthropic-specific.
-    # The message pattern ("signature" + "thinking") is unique enough.
+    # The combined patterns are unique enough.
     if (
         status_code == 400
-        and "signature" in error_msg
         and "thinking" in error_msg
+        and (
+            "signature" in error_msg
+            or "cannot be modified" in error_msg
+            or "must remain as they were" in error_msg
+        )
     ):
         return _result(
             FailoverReason.thinking_signature,
@@ -508,6 +542,35 @@ def classify_api_error(
             FailoverReason.llama_cpp_grammar_pattern,
             retryable=True,
             should_compress=False,
+        )
+
+    # xAI Grok subscription entitlement errors.
+    #
+    # xAI returns "You have either run out of available resources or do not
+    # have an active Grok subscription" through two distinct code paths:
+    #
+    #   • HTTP 403 — status_code is set; _classify_by_status (step 2) routes
+    #     it to FailoverReason.auth correctly, and _is_entitlement_failure
+    #     then prevents the credential-refresh loop.
+    #
+    #   • SSE ``type=error`` frame — surfaced as _StreamErrorEvent with
+    #     status_code=None.  _classify_by_status is skipped entirely, and
+    #     "grok subscription" / "out of available resources" appear in none
+    #     of the message-pattern lists below.  Without this guard the error
+    #     falls through to FailoverReason.unknown (retryable=True), burning
+    #     max_retries before the agent stops — and _is_entitlement_failure
+    #     is never called because it only runs under FailoverReason.auth.
+    #
+    # Both X Premium+ and SuperGrok subscribers hit this path when their
+    # subscription tier does not cover the requested model or feature.
+    if (
+        "do not have an active grok subscription" in error_msg
+        or ("out of available resources" in error_msg and "grok" in error_msg)
+    ):
+        return _result(
+            FailoverReason.auth,
+            retryable=False,
+            should_fallback=True,
         )
 
     # ── 2. HTTP status code classification ──────────────────────────
@@ -761,6 +824,54 @@ def _classify_400(
             retryable=True,
         )
 
+    # Invalid encrypted reasoning replay blob (OpenAI Responses API).  Must be
+    # checked BEFORE context_overflow because some surfaces emit messages that
+    # contain context-like phrasing ("encrypted content … could not be
+    # verified") which could otherwise trip the context_overflow heuristics.
+    # ``error_msg`` is lowercased upstream — match accordingly.
+    error_code_lower = (error_code or "").lower()
+    if (
+        error_code_lower == "invalid_encrypted_content"
+        or "invalid_encrypted_content" in error_msg
+        or (
+            "encrypted content for item" in error_msg
+            and "could not be verified" in error_msg
+        )
+    ):
+        return result_fn(
+            FailoverReason.invalid_encrypted_content,
+            retryable=True,
+            should_fallback=False,
+        )
+
+    # Request-validation errors (unsupported / unknown parameter) MUST be
+    # checked BEFORE context_overflow.  A GPT-5 model rejecting max_tokens
+    # returns:
+    #   "Unsupported parameter: 'max_tokens' is not supported with this model.
+    #    Use 'max_completion_tokens' instead."
+    # That string contains the literal substring "max_tokens", which is one of
+    # the _CONTEXT_OVERFLOW_PATTERNS — so without this guard the 400 is
+    # misclassified as context_overflow, routed into the compression loop,
+    # re-sent with the same bad parameter, and ends in "Cannot compress
+    # further".  These errors are deterministic (every retry gets the identical
+    # rejection), so classify as a non-retryable format_error and fall back.
+    #
+    # NOTE: we deliberately do NOT key off the generic ``invalid_request_error``
+    # code here — OpenAI stamps that same code on genuine context-overflow 400s,
+    # so matching it would mis-route real overflows away from compression. The
+    # unambiguous signals are the explicit "unsupported/unknown parameter"
+    # message text and the specific parameter-level error codes.
+    if (
+        any(p in error_msg for p in _REQUEST_VALIDATION_PATTERNS
+            if p != "invalid_request_error")
+        or error_code_lower in {"unknown_parameter", "unsupported_parameter"}
+    ):
+        return result_fn(
+            FailoverReason.format_error,
+            retryable=False,
+            should_fallback=True,
+        )
+
     # Context overflow from 400
     if any(p in error_msg for p in _CONTEXT_OVERFLOW_PATTERNS):
         return result_fn(
@@ -868,6 +979,13 @@ def _classify_by_error_code(
             FailoverReason.context_overflow,
             retryable=True,
             should_compress=True,
+        )
+
+    if code_lower == "invalid_encrypted_content":
+        return result_fn(
+            FailoverReason.invalid_encrypted_content,
+            retryable=True,
+            should_fallback=False,
         )
 
     return None
@@ -1030,15 +1148,49 @@ def _extract_error_code(body: dict) -> str:
     """Extract an error code string from the response body."""
     if not body:
         return ""
+
+    def _code_from_payload(payload) -> str:
+        """Extract a code/type from a nested error payload dict (defensive)."""
+        if not isinstance(payload, dict):
+            return ""
+        payload_error = payload.get("error", {})
+        if isinstance(payload_error, dict):
+            nested = payload_error.get("code") or payload_error.get("type") or ""
+            if isinstance(nested, str) and nested.strip() and nested.strip() != "400":
+                return nested.strip()
+        code = payload.get("code") or payload.get("error_code") or ""
+        if isinstance(code, (str, int)):
+            text = str(code).strip()
+            if text and text != "400":
+                return text
+        return ""
+
     error_obj = body.get("error", {})
     if isinstance(error_obj, dict):
         code = error_obj.get("code") or error_obj.get("type") or ""
-        if isinstance(code, str) and code.strip():
+        if isinstance(code, str) and code.strip() and code.strip() != "400":
             return code.strip()
+
+        # Some providers wrap the real JSON error body as a string inside
+        # error.message — peek into it for a nested code (e.g. Responses API
+        # surfaces ``invalid_encrypted_content`` this way).
+        message = error_obj.get("message")
+        if isinstance(message, str) and message.strip().startswith("{"):
+            import json
+            try:
+                inner = json.loads(message)
+            except (json.JSONDecodeError, TypeError):
+                inner = None
+            nested_code = _code_from_payload(inner)
+            if nested_code:
+                return nested_code
+
     # Top-level code
     code = body.get("code") or body.get("error_code") or ""
     if isinstance(code, (str, int)):
-        return str(code).strip()
+        text = str(code).strip()
+        if text and text != "400":
+            return text
     return ""
 
 

@@ -2,7 +2,7 @@
 
 ## Goals
 
-Hermes embedded in Doxie must match the OpenClaw client contract without making the Hermes source directory the implicit user workspace.
+Hermes embedded in Dovie must match the OpenClaw client contract without making the Hermes source directory the implicit user workspace.
 
 The gateway owns two first-class concepts:
 
@@ -63,13 +63,13 @@ The `(workspace_id, path)` pair is unique. Repeated writes update the existing a
 
 ## Persistence
 
-The gateway stores Doxie-facing workspace and artifact state in a dedicated SQLite database:
+The gateway stores Dovie-facing workspace and artifact state in a dedicated SQLite database:
 
 ```text
 $HERMES_HOME/tui-gateway/state.db
 ```
 
-This keeps the Doxie gateway surface decoupled from the core `state.db` transcript schema and avoids growing `hermes_state.py`.
+This keeps the Dovie gateway surface decoupled from the core `state.db` transcript schema and avoids growing `hermes_state.py`.
 
 Tables:
 

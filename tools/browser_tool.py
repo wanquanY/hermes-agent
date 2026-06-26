@@ -79,14 +79,30 @@ try:
     from tools.url_safety import (
         is_safe_url as _is_safe_url,
         is_always_blocked_url as _is_always_blocked_url,
+        normalize_url_for_request as _normalize_url_for_request,
     )
 except Exception:
     _is_safe_url = lambda url: False  # noqa: E731 — fail-closed: block all if safety module unavailable
     _is_always_blocked_url = lambda url: True  # noqa: E731 — fail-closed on the floor too
-from tools.browser_providers.base import CloudBrowserProvider
-from tools.browser_providers.browserbase import BrowserbaseProvider
-from tools.browser_providers.browser_use import BrowserUseProvider
-from tools.browser_providers.firecrawl import FirecrawlProvider
+    _normalize_url_for_request = lambda url: url  # noqa: E731 — best-effort fallback
+# Browser-provider ABC + registry — PR #25214 moved the per-vendor providers
+# (Browserbase / Browser Use / Firecrawl) out of ``tools/browser_providers/``
+# and into ``plugins/browser/<vendor>/``. The dispatcher consults the
+# registry; the legacy class names are re-exported below as backward-compat
+# shims for callers that import them from this module.
+from agent.browser_provider import BrowserProvider as CloudBrowserProvider  # noqa: F401  (legacy alias)
+from agent.browser_registry import (  # noqa: F401  (test-patchable surface)
+    get_provider as _registry_get_browser_provider,
+)
+from plugins.browser.browserbase.provider import (  # noqa: F401  (legacy import surface)
+    BrowserbaseBrowserProvider as BrowserbaseProvider,
+)
+from plugins.browser.browser_use.provider import (  # noqa: F401
+    BrowserUseBrowserProvider as BrowserUseProvider,
+)
+from plugins.browser.firecrawl.provider import (  # noqa: F401
+    FirecrawlBrowserProvider as FirecrawlProvider,
+)
 from tools.tool_backend_helpers import normalize_browser_cloud_provider
 
 # Camofox local anti-detection browser backend (optional).
@@ -144,7 +160,9 @@ def _browser_candidate_path_dirs() -> list[str]:
     """Return ordered browser CLI PATH candidates shared by discovery and execution."""
     hermes_home = get_hermes_home()
     hermes_node_bin = str(hermes_home / "node" / "bin")
-    return [hermes_node_bin, *list(_discover_homebrew_node_dirs()), *_SANE_PATH_DIRS]
+    hermes_node_root = str(hermes_home / "node")
+    hermes_nm_bin = str(hermes_home / "node_modules" / ".bin")
+    return [hermes_node_bin, hermes_node_root, hermes_nm_bin, *list(_discover_homebrew_node_dirs()), *_SANE_PATH_DIRS]
 
 
 def _merge_browser_path(existing_path: str = "") -> str:
@@ -474,12 +492,29 @@ def _activate_current_cdp_target(task_id: str) -> None:
 # ============================================================================
 # Cloud Provider Registry
 # ============================================================================
+#
+# Per-vendor browser providers (Browserbase / Browser Use / Firecrawl) live as
+# plugins under ``plugins/browser/<vendor>/`` and self-register through
+# :mod:`agent.browser_registry` at plugin-discovery time. The legacy
+# class-name registry below is preserved as a backward-compat shim so test
+# fixtures that ``monkeypatch.setattr(browser_tool, "_PROVIDER_REGISTRY", ...)``
+# keep working — but ``_get_cloud_provider()`` now consults
+# :mod:`agent.browser_registry` for the actual lookup.
+#
+# When the test patches ``_PROVIDER_REGISTRY``, we honour it (so the cache
+# unit tests still drive the function); otherwise the registry-backed path
+# wins. This keeps the test surface stable while letting third-party
+# plugins drop in under ``~/.hermes/plugins/browser/<vendor>/``.
 
 _PROVIDER_REGISTRY: Dict[str, type] = {
     "browserbase": BrowserbaseProvider,
     "browser-use": BrowserUseProvider,
     "firecrawl": FirecrawlProvider,
 }
+# Frozen copy of the import-time _PROVIDER_REGISTRY, used by
+# ``_is_legacy_provider_registry_overridden`` to detect test-time
+# monkeypatching. NEVER mutate this dict.
+_DEFAULT_PROVIDER_REGISTRY: Dict[str, type] = dict(_PROVIDER_REGISTRY)
 
 _cached_cloud_provider: Optional[CloudBrowserProvider] = None
 _cloud_provider_resolved = False
@@ -494,13 +529,65 @@ _cached_browser_engine: Optional[str] = None
 _browser_engine_resolved = False
 
 
+def _is_legacy_provider_registry_overridden() -> bool:
+    """Return True when a test has patched ``_PROVIDER_REGISTRY`` to a custom value.
+
+    Detected by spotting any registered class that *isn't* the canonical
+    plugin-backed class for that name. Tests that
+    ``monkeypatch.setattr(browser_tool, "_PROVIDER_REGISTRY", ...)`` install
+    custom factories (`exploding_factory`, `lambda: fake_provider`, etc.);
+    those entries fail the canonical-class identity check below.
+
+    Note: a future maintainer adding a 4th built-in provider only needs to
+    extend ``_DEFAULT_PROVIDER_REGISTRY`` below — they do NOT need to update
+    a hardcoded set of keys here. The detection just compares each registered
+    value against the corresponding canonical class.
+    """
+    try:
+        for key, default_cls in _DEFAULT_PROVIDER_REGISTRY.items():
+            if _PROVIDER_REGISTRY.get(key) is not default_cls:
+                return True
+        # Extra keys not in the default registry → also an override.
+        return len(_PROVIDER_REGISTRY) != len(_DEFAULT_PROVIDER_REGISTRY)
+    except Exception:
+        return False
+
+
+def _ensure_browser_plugins_loaded() -> None:
+    """Idempotently trigger plugin discovery so the browser registry is populated.
+
+    Normally `model_tools` is imported early in any session and that
+    triggers `discover_plugins()` as a side effect. But `_get_cloud_provider`
+    can be called from contexts that haven't gone through `model_tools` —
+    standalone scripts, certain unit-test paths, the parity-sweep harness.
+    Make discovery idempotent and side-effect-only here so users always
+    see registered plugins regardless of import order. Cheap: subsequent
+    calls early-return inside `_ensure_plugins_discovered`.
+    """
+    try:
+        from hermes_cli.plugins import _ensure_plugins_discovered
+
+        _ensure_plugins_discovered()
+    except Exception as exc:
+        logger.debug("Browser plugin discovery failed (non-fatal): %s", exc)
+
+
 def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
     """Return the configured cloud browser provider, or None for local mode.
 
     Reads ``config["browser"]["cloud_provider"]`` once and caches the result
     for the process lifetime. An explicit ``local`` provider disables cloud
-    fallback. If unset, fall back to Browserbase when direct or managed
-    Browserbase credentials are available.
+    fallback. If unset, fall back to Browser Use (managed Nous gateway or
+    direct API key) and then Browserbase (direct credentials only) — the
+    historic auto-detect order, now expressed as the
+    :data:`agent.browser_registry._LEGACY_PREFERENCE` walk.
+
+    Selection routes through :mod:`agent.browser_registry` so third-party
+    browser plugins (``~/.hermes/plugins/browser/<vendor>/``) participate
+    in explicit-config resolution. Test fixtures that override
+    ``_PROVIDER_REGISTRY`` or ``BrowserUseProvider`` / ``BrowserbaseProvider``
+    on this module still drive the function — see
+    ``_is_legacy_provider_registry_overridden``.
     """
     global _cached_cloud_provider, _cloud_provider_resolved
     if _cloud_provider_resolved:
@@ -520,9 +607,33 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
                 _cached_cloud_provider = None
                 _cloud_provider_resolved = True
                 return None
-        if provider_key and provider_key in _PROVIDER_REGISTRY:
+        if provider_key:
             try:
-                resolved = _PROVIDER_REGISTRY[provider_key]()
+                if _is_legacy_provider_registry_overridden():
+                    # Test fixture path: honour the patched dict so the
+                    # cache-policy unit tests keep working.
+                    factory = _PROVIDER_REGISTRY.get(provider_key)
+                    if factory is not None:
+                        resolved = factory()
+                else:
+                    # Ensure plugins are discovered so the registry is
+                    # populated. Idempotent — cheap on subsequent calls.
+                    _ensure_browser_plugins_loaded()
+                    resolved = _registry_get_browser_provider(provider_key)
+                    if resolved is None:
+                        # Explicit config name unknown to the registry —
+                        # might be a typo, an uninstalled plugin, or a
+                        # registry-population failure. Warn the user
+                        # (legacy code would have surfaced a typed
+                        # credentials error via direct class instantiation;
+                        # post-migration we surface this WARNING instead).
+                        logger.warning(
+                            "browser.cloud_provider=%r is not a registered "
+                            "browser plugin; falling back to auto-detect "
+                            "(install the corresponding plugin or fix the "
+                            "config key spelling).",
+                            provider_key,
+                        )
             except Exception:
                 logger.warning(
                     "Failed to instantiate explicit cloud_provider %r; will retry on next call",
@@ -536,8 +647,15 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
         logger.debug("Could not read cloud_provider from config: %s", e)
 
     if resolved is None:
-        # Prefer Browser Use (managed Nous gateway or direct API key),
-        # fall back to Browserbase (direct credentials only).
+        # Auto-detect path: Browser Use first (managed Nous gateway or
+        # direct API key), then Browserbase (direct credentials). Uses
+        # the legacy class names imported at the top of this module so
+        # tests that ``monkeypatch.setattr(browser_tool, "BrowserUseProvider", ...)``
+        # keep driving this branch deterministically. Third-party browser
+        # plugins are intentionally NOT reachable from auto-detect — they
+        # participate only via explicit ``browser.cloud_provider: <name>``,
+        # mirroring the firecrawl gate documented on
+        # :data:`agent.browser_registry._LEGACY_PREFERENCE`.
         try:
             fallback_provider = BrowserUseProvider()
             if fallback_provider.is_configured():
@@ -1842,7 +1960,29 @@ def _find_agent_browser() -> str:
         _agent_browser_resolved = True
         return _cached_agent_browser
 
-    # Nothing found — cache the failure so subsequent calls don't re-scan.
+    # Nothing found — try lazy installation before giving up.
+    try:
+        from hermes_cli.dep_ensure import ensure_dependency
+        if ensure_dependency("browser"):
+            recheck = shutil.which("agent-browser")
+            if not recheck and extended_path:
+                recheck = shutil.which("agent-browser", path=extended_path)
+            if not recheck:
+                hermes_nm = str(get_hermes_home() / "node_modules" / ".bin")
+                recheck = shutil.which("agent-browser", path=hermes_nm)
+            if not recheck:
+                hermes_node_bin = str(get_hermes_home() / "node" / "bin")
+                recheck = shutil.which("agent-browser", path=hermes_node_bin)
+            if not recheck:
+                hermes_node_root = str(get_hermes_home() / "node")
+                recheck = shutil.which("agent-browser", path=hermes_node_root)
+            if recheck:
+                _cached_agent_browser = recheck
+                _agent_browser_resolved = True
+                return recheck
+    except Exception:
+        pass
+
     _agent_browser_resolved = True
     raise FileNotFoundError(
         "agent-browser CLI not found. Install it with: "
@@ -2290,6 +2430,49 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
 # Browser Tool Functions
 # ============================================================================
 
+def _dovie_browser_bridge() -> Any:
+    try:
+        from dovie_extension import browser_bridge as _dovie_browser
+
+        if _dovie_browser.available():
+            return _dovie_browser
+    except Exception as exc:
+        logger.debug("Dovie desktop browser bridge unavailable: %s", exc)
+    return None
+
+
+def _dovie_browser_error(action: str, exc: Exception) -> str:
+    return json.dumps({
+        "success": False,
+        "error": f"Dovie desktop browser {action} failed: {exc}",
+        "provider": "dovie_desktop",
+    }, ensure_ascii=False)
+
+
+def _active_dovie_tab(session: Any) -> Dict[str, Any]:
+    if not isinstance(session, dict):
+        return {}
+    tabs = session.get("tabs")
+    if not isinstance(tabs, list):
+        return {}
+    active_tab_id = str(session.get("activeTabId") or session.get("active_tab_id") or "")
+    for tab in tabs:
+        if isinstance(tab, dict) and active_tab_id and str(tab.get("tabId") or tab.get("tab_id") or "") == active_tab_id:
+            return tab
+    for tab in tabs:
+        if isinstance(tab, dict) and tab.get("active"):
+            return tab
+    return tabs[0] if tabs and isinstance(tabs[0], dict) else {}
+
+
+def _active_tab_url_from_dovie_session(session: Any) -> str:
+    return str(_active_dovie_tab(session).get("url") or "")
+
+
+def _active_tab_title_from_dovie_session(session: Any) -> str:
+    return str(_active_dovie_tab(session).get("title") or "")
+
+
 def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     """
     Navigate to a URL in the browser.
@@ -2309,6 +2492,14 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     from agent.redact import _PREFIX_RE
     url_decoded = urllib.parse.unquote(url)
     if _PREFIX_RE.search(url) or _PREFIX_RE.search(url_decoded):
+        return json.dumps({
+            "success": False,
+            "error": "Blocked: URL contains what appears to be an API key or token. "
+                     "Secrets must not be sent in URLs.",
+        })
+    url = _normalize_url_for_request(url)
+    normalized_decoded = urllib.parse.unquote(url)
+    if _PREFIX_RE.search(url) or _PREFIX_RE.search(normalized_decoded):
         return json.dumps({
             "success": False,
             "error": "Blocked: URL contains what appears to be an API key or token. "
@@ -2358,6 +2549,28 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             "error": blocked["message"],
             "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]},
         })
+
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            session = dovie_browser.navigate(url)
+            observation = dovie_browser.observe(max_nodes=200)
+            snapshot = dovie_browser.snapshot_payload_from_observation(observation)
+            snapshot_text = str(snapshot.get("snapshot") or "")
+            if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
+                snapshot_text = _truncate_snapshot(snapshot_text)
+            _last_active_session_key[effective_task_id] = f"dovie:{dovie_browser.browser_session_id()}"
+            return json.dumps({
+                "success": True,
+                "url": snapshot.get("url") or _active_tab_url_from_dovie_session(session) or url,
+                "title": snapshot.get("title") or _active_tab_title_from_dovie_session(session),
+                "snapshot": snapshot_text,
+                "element_count": snapshot.get("element_count", 0),
+                "provider": "dovie_desktop",
+                "browser_session_id": dovie_browser.browser_session_id(),
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("navigate", exc)
 
     # Camofox backend — delegate after safety checks pass
     if _is_camofox_mode():
@@ -2506,6 +2719,21 @@ def browser_snapshot(
     Returns:
         JSON string with page snapshot
     """
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            observation = dovie_browser.observe(max_nodes=1000 if full else 200)
+            response = dovie_browser.snapshot_payload_from_observation(observation)
+            snapshot_text = str(response.get("snapshot") or "")
+            if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD and user_task:
+                snapshot_text = _extract_relevant_content(snapshot_text, user_task)
+            elif len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
+                snapshot_text = _truncate_snapshot(snapshot_text)
+            response["snapshot"] = snapshot_text
+            return json.dumps(response, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("snapshot", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_snapshot
         return camofox_snapshot(full, task_id, user_task)
@@ -2561,6 +2789,18 @@ def browser_snapshot(
 
 def browser_tabs(task_id: Optional[str] = None) -> str:
     """List tabs in the current browser session."""
+    try:
+        from dovie_extension import browser_bridge as _dovie_browser
+
+        if _dovie_browser.available():
+            session = _dovie_browser.session_from_value(
+                _dovie_browser.call("browser_use_list_sessions")
+            )
+            if session:
+                return json.dumps(_dovie_browser.tab_payload_from_session(session), ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("Dovie desktop browser tab list failed; falling back to native CDP: %s", exc)
+
     if _is_camofox_mode():
         return json.dumps({
             "success": False,
@@ -2608,6 +2848,38 @@ def browser_tabs(task_id: Optional[str] = None) -> str:
 
 def browser_new_tab(url: Optional[str] = None, task_id: Optional[str] = None) -> str:
     """Open a new tab and make it active."""
+    requested_url = str(url or "").strip()
+    try:
+        from dovie_extension import browser_bridge as _dovie_browser
+
+        if _dovie_browser.available():
+            session = _dovie_browser.session_from_value(
+                _dovie_browser.call(
+                    "browser_use_create_tab",
+                    {
+                        "request": {
+                            "browserSessionId": _dovie_browser.browser_session_id(),
+                            "url": requested_url or "about:blank",
+                        },
+                    },
+                )
+            )
+            payload = _dovie_browser.tab_payload_from_session(session)
+            active_tab_id = str(payload.get("active_tab_id") or "")
+            active_tab = next(
+                (tab for tab in payload.get("tabs", []) if isinstance(tab, dict) and tab.get("tab_id") == active_tab_id),
+                {},
+            )
+            return json.dumps({
+                **payload,
+                "tab_id": active_tab_id,
+                "target_id": active_tab_id,
+                "url": str(active_tab.get("url") or requested_url or "about:blank"),
+                "title": str(active_tab.get("title") or ""),
+            }, ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("Dovie desktop browser new tab failed; falling back to native CDP: %s", exc)
+
     if _is_camofox_mode():
         return json.dumps({
             "success": False,
@@ -2618,7 +2890,6 @@ def browser_new_tab(url: Optional[str] = None, task_id: Optional[str] = None) ->
             "success": False,
             "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
         }, ensure_ascii=False)
-    requested_url = str(url or "").strip()
     try:
         created = _cdp_browser_call("Target.createTarget", {"url": "about:blank"})
         target_id = str(created.get("targetId") or "")
@@ -2652,6 +2923,39 @@ def browser_new_tab(url: Optional[str] = None, task_id: Optional[str] = None) ->
 
 def browser_select_tab(tab_id: str, task_id: Optional[str] = None) -> str:
     """Switch to a tab by tab_id."""
+    normalized = str(tab_id or "").strip()
+    if not normalized:
+        return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
+    try:
+        from dovie_extension import browser_bridge as _dovie_browser
+
+        if _dovie_browser.available():
+            session = _dovie_browser.session_from_value(
+                _dovie_browser.call(
+                    "browser_use_activate_tab",
+                    {
+                        "request": {
+                            "browserSessionId": _dovie_browser.browser_session_id(),
+                            "tabId": normalized,
+                        },
+                    },
+                )
+            )
+            payload = _dovie_browser.tab_payload_from_session(session)
+            active_tab = next(
+                (tab for tab in payload.get("tabs", []) if isinstance(tab, dict) and tab.get("tab_id") == normalized),
+                {},
+            )
+            return json.dumps({
+                **payload,
+                "tab_id": normalized,
+                "target_id": normalized,
+                "url": str(active_tab.get("url") or "about:blank"),
+                "title": str(active_tab.get("title") or ""),
+            }, ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("Dovie desktop browser tab select failed; falling back to native CDP: %s", exc)
+
     if _is_camofox_mode():
         return json.dumps({
             "success": False,
@@ -2662,9 +2966,6 @@ def browser_select_tab(tab_id: str, task_id: Optional[str] = None) -> str:
             "success": False,
             "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
         }, ensure_ascii=False)
-    normalized = str(tab_id or "").strip()
-    if not normalized:
-        return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
     try:
         targets = _cdp_page_targets()
         target = next((t for t in targets if str(t.get("targetId") or "") == normalized), None)
@@ -2699,6 +3000,34 @@ def browser_select_tab(tab_id: str, task_id: Optional[str] = None) -> str:
 
 def browser_close_tab(tab_id: str, task_id: Optional[str] = None) -> str:
     """Close a tab by tab_id."""
+    normalized = str(tab_id or "").strip()
+    if not normalized:
+        return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
+    try:
+        from dovie_extension import browser_bridge as _dovie_browser
+
+        if _dovie_browser.available():
+            session = _dovie_browser.session_from_value(
+                _dovie_browser.call(
+                    "browser_use_close_tab",
+                    {
+                        "request": {
+                            "browserSessionId": _dovie_browser.browser_session_id(),
+                            "tabId": normalized,
+                            "fallbackUrl": "about:blank",
+                        },
+                    },
+                )
+            )
+            payload = _dovie_browser.tab_payload_from_session(session)
+            return json.dumps({
+                **payload,
+                "closed_tab_id": normalized,
+                "closed": True,
+            }, ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("Dovie desktop browser tab close failed; falling back to native CDP: %s", exc)
+
     if _is_camofox_mode():
         return json.dumps({
             "success": False,
@@ -2709,9 +3038,6 @@ def browser_close_tab(tab_id: str, task_id: Optional[str] = None) -> str:
             "success": False,
             "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
         }, ensure_ascii=False)
-    normalized = str(tab_id or "").strip()
-    if not normalized:
-        return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
     try:
         targets = _cdp_page_targets()
         if not any(str(t.get("targetId") or "") == normalized for t in targets):
@@ -2771,6 +3097,19 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with click result
     """
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            normalized_ref = ref if ref.startswith("@") else f"@{ref}"
+            dovie_browser.action("click", ref=normalized_ref)
+            return json.dumps({
+                "success": True,
+                "clicked": normalized_ref,
+                "provider": "dovie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("click", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_click
         return camofox_click(ref, task_id)
@@ -2809,6 +3148,20 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with type result
     """
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            normalized_ref = ref if ref.startswith("@") else f"@{ref}"
+            dovie_browser.action("fill", ref=normalized_ref, text=text)
+            return json.dumps({
+                "success": True,
+                "typed": text,
+                "element": normalized_ref,
+                "provider": "dovie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("type", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_type
         return camofox_type(ref, text, task_id)
@@ -2860,6 +3213,21 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
     # ~500px is roughly half a viewport of travel.
     _SCROLL_PIXELS = 500
 
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            dovie_browser.action(
+                "scroll",
+                delta_y=_SCROLL_PIXELS if direction == "down" else -_SCROLL_PIXELS,
+            )
+            return json.dumps({
+                "success": True,
+                "scrolled": direction,
+                "provider": "dovie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("scroll", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_scroll
         # Camofox REST API doesn't support pixel args; use repeated calls
@@ -2896,6 +3264,18 @@ def browser_back(task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with navigation result
     """
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            session = dovie_browser.go_back()
+            return json.dumps({
+                "success": True,
+                "url": _active_tab_url_from_dovie_session(session),
+                "provider": "dovie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("back", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_back
         return camofox_back(task_id)
@@ -2929,6 +3309,18 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with key press result
     """
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            dovie_browser.action("press", key=key)
+            return json.dumps({
+                "success": True,
+                "pressed": key,
+                "provider": "dovie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("press", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_press
         return camofox_press(key, task_id)

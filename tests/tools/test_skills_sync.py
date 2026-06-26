@@ -1,5 +1,8 @@
 """Tests for tools/skills_sync.py — manifest-based skill seeding and updating."""
 
+import shutil
+import json
+import pytest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -179,6 +182,97 @@ class TestComputeRelativeDest:
         assert dest.name == "simple"
 
 
+class TestRmtreeWritableScopeGuard:
+    """``_rmtree_writable`` must refuse to remove anything outside
+    ``HERMES_HOME/skills/``.
+
+    The previous implementation called ``shutil.rmtree(path)`` on whatever
+    argument the caller passed. If any of the five call sites in
+    ``tools/skills_sync.py`` ever computes a path outside the skills
+    root — through a bad join, a missing default, a malicious
+    bundled-manifest entry, or a stale path in scope after an
+    exception — the result is a silent ``shutil.rmtree(~/.hermes/)``
+    that destroys the user's ``.env``, ``MEMORY.md``, ``kanban.db``,
+    custom skills, scripts, and the rest of the install in one go
+    (#48200).
+
+    The scope guard turns that into a loud ``ValueError`` so the
+    failure is observable, reproducible, and recoverable rather than
+    a data-loss incident.
+    """
+
+    def test_refuses_root_path(self, tmp_path):
+        """``Path('/')`` is the entire filesystem — must always be rejected."""
+        from tools.skills_sync import _rmtree_writable, SKILLS_DIR
+
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        with patch("tools.skills_sync.SKILLS_DIR", skills):
+            with pytest.raises(ValueError, match="refusing to rmtree"):
+                _rmtree_writable(Path("/"))
+
+    def test_refuses_hermes_home_itself(self, tmp_path):
+        """``~/.hermes/`` itself is what the #48200 wipe destroyed."""
+        from tools.skills_sync import _rmtree_writable
+
+        hermes = tmp_path / "home"
+        hermes.mkdir()
+        (hermes / "skills").mkdir()
+        with patch("tools.skills_sync.SKILLS_DIR", hermes / "skills"):
+            with pytest.raises(ValueError, match="refusing to rmtree"):
+                _rmtree_writable(hermes)
+
+    def test_refuses_sibling_directory(self, tmp_path):
+        """A directory that is a sibling of SKILLS_DIR (e.g. a wrong
+        ``bundled_dir`` computation) must be rejected, not silently rmtree'd.
+        """
+        from tools.skills_sync import _rmtree_writable
+
+        hermes = tmp_path / "home"
+        hermes.mkdir()
+        skills = hermes / "skills"
+        skills.mkdir()
+        not_skills = hermes / "kanban.db"  # any non-skills path
+        not_skills.mkdir()
+        with patch("tools.skills_sync.SKILLS_DIR", skills):
+            with pytest.raises(ValueError, match="refusing to rmtree"):
+                _rmtree_writable(not_skills)
+
+    def test_refuses_skills_root_itself(self, tmp_path):
+        """The skills root directory itself must be refused.
+
+        No caller in skills_sync.py ever passes SKILLS_DIR directly — every
+        site passes a skill subdirectory or its ``.bak`` sibling. Removing
+        the root would wipe every installed skill, and a ``dest`` that
+        collapses to the root is exactly the degenerate path #48200 guards
+        against. Require a strict-child relationship.
+        """
+        from tools.skills_sync import _rmtree_writable
+
+        skills = tmp_path / "skills"
+        (skills / "keep").mkdir(parents=True)
+        with patch("tools.skills_sync.SKILLS_DIR", skills):
+            with pytest.raises(ValueError, match="refusing to rmtree"):
+                _rmtree_writable(skills)
+        assert (skills / "keep").exists()  # nothing was wiped
+
+    def test_allows_subdirectory_of_skills(self, tmp_path):
+        """Any directory strictly under SKILLS_DIR is allowed."""
+        from tools.skills_sync import _rmtree_writable
+
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        sub = skills / "category" / "old-skill"
+        sub.mkdir(parents=True)
+        (sub / "SKILL.md").write_text("# old")
+
+        with patch("tools.skills_sync.SKILLS_DIR", skills):
+            _rmtree_writable(sub)
+
+        assert skills.exists()
+        assert not sub.exists()
+
+
 class TestSyncSkills:
     def _setup_bundled(self, tmp_path):
         """Create a fake bundled skills directory."""
@@ -216,6 +310,20 @@ class TestSyncSkills:
         assert (skills_dir / "category" / "new-skill" / "SKILL.md").exists()
         assert (skills_dir / "old-skill" / "SKILL.md").exists()
         assert (skills_dir / "category" / "DESCRIPTION.md").exists()
+
+    def test_fresh_install_repairs_non_directory_skills_path(self, tmp_path):
+        bundled = self._setup_bundled(tmp_path)
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+        skills_dir.write_text("legacy corrupt file\n")
+
+        with self._patches(bundled, skills_dir, manifest_file):
+            result = sync_skills(quiet=True)
+
+        assert len(result["copied"]) == 2
+        assert skills_dir.is_dir()
+        assert (skills_dir / "category" / "new-skill" / "SKILL.md").exists()
+        assert any(path.name.startswith("user_skills.invalid-") for path in tmp_path.iterdir())
 
     def test_fresh_install_records_origin_hashes(self, tmp_path):
         """After fresh install, manifest should have v2 format with hashes."""

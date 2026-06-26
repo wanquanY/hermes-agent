@@ -1,0 +1,6 @@
+{
+  "name": "code-samples",
+  "version": "1.0.0",
+  "languages": ["python", "javascript", "typescript", "html", "css", "go", "rust", "java", "sql"],
+  "enabled": true
+}

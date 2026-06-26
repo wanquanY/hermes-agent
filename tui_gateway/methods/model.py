@@ -6,6 +6,47 @@ from tui_gateway.methods._shared import bind_server_globals
 _server = bind_server_globals(globals())
 
 
+def _model_set_value(params: dict) -> str:
+    value = params.get("model", params.get("value", ""))
+    return str(value or "").strip()
+
+
+@method("model.set")
+def _(rid, params: dict) -> dict:
+    value = _model_set_value(params)
+    if not value:
+        return _err(rid, 4002, "model value required")
+
+    session_id = params.get("session_id", "")
+    session = _sessions.get(session_id)
+    try:
+        if session:
+            # Keep model mutation outside in-flight turns. agent.switch_model()
+            # mutates provider/model/client state that run_conversation reads.
+            if session.get("running"):
+                return _err(
+                    rid,
+                    4009,
+                    "session busy — /interrupt the current turn before switching models",
+                )
+            result = _apply_model_switch(session_id, session, value)
+            _set_session_model_descriptor(
+                session,
+                _normalize_model_descriptor(
+                    params.get("model_descriptor") or params.get("modelDescriptor")
+                ),
+                clear_if_empty=True,
+            )
+        else:
+            result = _apply_model_switch("", {"agent": None}, value)
+        return _ok(
+            rid,
+            {"key": "model", "value": result["value"], "warning": result["warning"]},
+        )
+    except Exception as e:
+        return _err(rid, 5001, str(e))
+
+
 @method("model.options")
 def _(rid, params: dict) -> dict:
     try:

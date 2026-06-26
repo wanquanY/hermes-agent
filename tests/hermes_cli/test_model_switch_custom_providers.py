@@ -123,12 +123,12 @@ def test_same_custom_provider_switch_preserves_current_api_key(monkeypatch):
         current_provider="custom",
         current_model="gpt-5.5",
         current_base_url="http://127.0.0.1:8011/api/v1/llm-proxy/v1",
-        current_api_key="doxie-access-token",
+        current_api_key="dovie-access-token",
         user_providers={
-            "doxie-cloud": {
-                "name": "Doxie Cloud",
+            "dovie-cloud": {
+                "name": "Dovie Cloud",
                 "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
-                "key_env": "DOXIE_CLOUD_ACCESS_TOKEN",
+                "key_env": "DOVIE_CLOUD_ACCESS_TOKEN",
                 "default_model": "gpt-5.5",
             }
         },
@@ -137,7 +137,7 @@ def test_same_custom_provider_switch_preserves_current_api_key(monkeypatch):
     assert result.success is True
     assert result.target_provider == "custom"
     assert result.new_model == "gpt-5.5"
-    assert result.api_key == "doxie-access-token"
+    assert result.api_key == "dovie-access-token"
 
 
 def test_list_groups_same_name_custom_providers_into_one_row(monkeypatch):
@@ -379,6 +379,7 @@ def test_list_authenticated_providers_bare_custom_slug_recovers(monkeypatch):
     group = matches[0]
     # Canonical slug, NOT the bare "custom" that caused #17478
     assert group["slug"] == "custom:ollama"
+    assert group["is_current"] is True
 
 
 def test_list_authenticated_providers_distinct_endpoints_stay_separate(monkeypatch):

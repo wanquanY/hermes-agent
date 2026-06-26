@@ -191,6 +191,19 @@ ALL_TOOL_SCHEMAS = [PROFILE_SCHEMA, SEARCH_SCHEMA, REASONING_SCHEMA, CONTEXT_SCH
 class HonchoMemoryProvider(MemoryProvider):
     """Honcho AI-native memory with dialectic Q&A and persistent user modeling."""
 
+    def backup_paths(self) -> List[str]:
+        """Honcho keeps its peer/session config under ~/.honcho when no
+        profile-local honcho.json exists (see client.resolve_config_path)."""
+        paths: List[str] = []
+        try:
+            from .client import resolve_global_config_path
+            global_cfg = resolve_global_config_path()
+            # Capture the whole ~/.honcho dir so sibling state travels with it.
+            paths.append(str(global_cfg.parent))
+        except Exception:
+            pass
+        return paths
+
     def __init__(self):
         self._manager = None   # HonchoSessionManager
         self._config = None    # HonchoClientConfig
@@ -283,7 +296,7 @@ class HonchoMemoryProvider(MemoryProvider):
             # ----- Port #4053: cron guard -----
             agent_context = kwargs.get("agent_context", "")
             platform = kwargs.get("platform", "cli")
-            if agent_context in ("cron", "flush") or platform == "cron":
+            if agent_context in {"cron", "flush"} or platform == "cron":
                 logger.debug("Honcho skipped: cron/flush context (agent_context=%s, platform=%s)",
                              agent_context, platform)
                 self._cron_skipped = True
@@ -404,7 +417,7 @@ class HonchoMemoryProvider(MemoryProvider):
         # pop_context_result() in prefetch(). Dialectic prewarm runs the
         # full configured depth and writes into _prefetch_result so turn 1
         # consumes the result directly.
-        if self._recall_mode in ("context", "hybrid"):
+        if self._recall_mode in {"context", "hybrid"}:
             try:
                 self._manager.prefetch_context(self._session_key)
             except Exception as e:

@@ -85,6 +85,45 @@ def test_acquire_runtime_lease_rebuilds_scope_mismatch():
     assert sessions["runtime-3b"]["runtime_scope_key"] == "profile:new"
 
 
+def test_acquire_runtime_lease_rebuilds_context_mode_mismatch():
+    live = {
+        "session_key": "stored-team",
+        "runtime_scope_key": "team:stored-team:leader-conversation",
+        "agent_context_mode": "profile",
+        "agent": object(),
+    }
+    sessions = {
+        "runtime-team": {
+            "session_key": "stored-team",
+            "runtime_scope_key": "team:stored-team:leader-conversation",
+            "agent_context_mode": "team_leader",
+            "agent_ready": object(),
+        }
+    }
+    captured = {}
+
+    def resume(_rid, params):
+        captured.update(params)
+        return {"result": {"session_id": "runtime-team"}}
+
+    lease = acquire_runtime_lease(
+        rid="r1",
+        stored_session_id="stored-team",
+        params={"agent_context_mode": "team_leader"},
+        resolve_runtime_session=lambda _target: ("runtime-profile", live),
+        resume_runtime_session=resume,
+        session_lookup=lambda sid: sessions.get(sid),
+        transport=None,
+        fallback_transport="fallback",
+        runtime_scope_key="team:stored-team:leader-conversation",
+    )
+
+    assert isinstance(lease, RuntimeLease)
+    assert lease.runtime_session_id == "runtime-team"
+    assert lease.reused is False
+    assert captured["agent_context_mode"] == "team_leader"
+
+
 def test_acquire_runtime_lease_returns_resume_error():
     lease = acquire_runtime_lease(
         rid="r1",

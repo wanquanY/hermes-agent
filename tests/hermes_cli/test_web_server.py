@@ -4,6 +4,7 @@ import os
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -125,6 +126,680 @@ class TestWebServerEndpoints:
         assert "hermes_home" in data
         assert "active_sessions" in data
 
+    # ── GET /api/media (remote image display) ───────────────────────────
+
+    def test_get_media_serves_image_in_root(self):
+        """An image under the gateway's images dir is returned as a data URL."""
+        from hermes_constants import get_hermes_home
+
+        img_dir = get_hermes_home() / "images"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        img = img_dir / "shot.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+
+        resp = self.client.get("/api/media", params={"path": str(img)})
+        assert resp.status_code == 200
+        assert resp.json()["data_url"].startswith("data:image/png;base64,")
+
+    def test_get_media_rejects_path_outside_roots(self, tmp_path):
+        """An image-extension file outside the media roots is forbidden."""
+        outside = tmp_path / "secret.png"
+        outside.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        resp = self.client.get("/api/media", params={"path": str(outside)})
+        assert resp.status_code == 403
+
+    def test_get_media_rejects_non_image_extension(self):
+        from hermes_constants import get_hermes_home
+
+        img_dir = get_hermes_home() / "images"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        env = img_dir / "leak.env"
+        env.write_text("SECRET=1")
+
+        resp = self.client.get("/api/media", params={"path": str(env)})
+        assert resp.status_code == 415
+
+    def test_get_media_404_for_missing_file(self):
+        from hermes_constants import get_hermes_home
+
+        missing = get_hermes_home() / "images" / "nope.png"
+        resp = self.client.get("/api/media", params={"path": str(missing)})
+        assert resp.status_code == 404
+
+    def test_get_media_requires_auth(self):
+        from hermes_cli.web_server import _SESSION_HEADER_NAME
+
+        resp = self.client.get(
+            "/api/media",
+            params={"path": "/tmp/x.png"},
+            headers={_SESSION_HEADER_NAME: "wrong-token"},
+        )
+        assert resp.status_code == 401
+
+    # ── Dashboard font override ─────────────────────────────────────────
+
+    def test_get_dashboard_font_defaults_to_theme(self):
+        """With no override persisted, the active font is the theme sentinel."""
+        resp = self.client.get("/api/dashboard/font")
+        assert resp.status_code == 200
+        assert resp.json() == {"font": "theme"}
+
+    def test_set_dashboard_font_persists_valid_choice(self):
+        """A valid catalog id is accepted, persisted, and read back."""
+        from hermes_cli.config import load_config
+
+        resp = self.client.put("/api/dashboard/font", json={"font": "inter"})
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "font": "inter"}
+
+        # Persisted to config.yaml under dashboard.font.
+        config = load_config()
+        assert config["dashboard"]["font"] == "inter"
+
+        # And reflected by the GET endpoint.
+        assert self.client.get("/api/dashboard/font").json() == {"font": "inter"}
+
+    def test_set_dashboard_font_clears_with_theme_sentinel(self):
+        """Setting 'theme' clears any prior override."""
+        self.client.put("/api/dashboard/font", json={"font": "fraunces"})
+        resp = self.client.put("/api/dashboard/font", json={"font": "theme"})
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "font": "theme"}
+        assert self.client.get("/api/dashboard/font").json() == {"font": "theme"}
+
+    def test_set_dashboard_font_rejects_unknown_id(self):
+        """An id not in the curated catalog coerces to the theme sentinel,
+        so a stale/hostile client can't inject an arbitrary font id."""
+        resp = self.client.put(
+            "/api/dashboard/font", json={"font": "../../etc/passwd"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "font": "theme"}
+
+    def test_get_dashboard_font_coerces_stale_persisted_value(self):
+        """A config value no longer in the catalog reads back as 'theme'."""
+        from hermes_cli.config import load_config, save_config
+
+        config = load_config()
+        config.setdefault("dashboard", {})["font"] = "retired-font-id"
+        save_config(config)
+
+        assert self.client.get("/api/dashboard/font").json() == {"font": "theme"}
+
+    def test_dashboard_font_override_independent_of_theme(self):
+        """The font override and the theme are stored separately — setting
+        one must not disturb the other."""
+        from hermes_cli.config import load_config
+
+        self.client.put("/api/dashboard/theme", json={"name": "ember"})
+        self.client.put("/api/dashboard/font", json={"font": "jetbrains-mono"})
+
+        config = load_config()
+        assert config["dashboard"]["theme"] == "ember"
+        assert config["dashboard"]["font"] == "jetbrains-mono"
+
+
+    def test_get_sessions_uses_only_persisted_cwd(self, monkeypatch):
+        """Session rows without persisted cwd must not inherit TERMINAL_CWD.
+
+        /api/sessions should reflect per-session DB state, not process/global
+        cwd settings, so workspace grouping stays stable and deterministic.
+        """
+        from hermes_state import SessionDB
+
+        monkeypatch.setenv("TERMINAL_CWD", "/tmp/global-default")
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="session-no-cwd", source="cli")
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/sessions?limit=20&offset=0")
+        assert resp.status_code == 200
+
+        rows = resp.json()["sessions"]
+        row = next(s for s in rows if s["id"] == "session-no-cwd")
+        assert row["cwd"] is None
+
+    def test_get_sessions_forwards_min_messages(self, monkeypatch):
+        """The ?min_messages= filter must reach SessionDB.
+
+        The desktop session picker calls /api/sessions?...&min_messages=N to
+        hide empty sessions. The param was silently dropped from the handler
+        in a merge once (SessionDB still supported it); guard the wiring.
+        """
+        captured = {}
+
+        class _FakeDB:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def list_sessions_rich(self, limit, offset, min_message_count=0, **kwargs):
+                captured["list"] = min_message_count
+                return []
+
+            def session_count(self, min_message_count=0, **kwargs):
+                captured["count"] = min_message_count
+                return 0
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("hermes_state.SessionDB", _FakeDB)
+
+        resp = self.client.get("/api/sessions?limit=5&offset=0&min_messages=3")
+        assert resp.status_code == 200
+        assert captured["list"] == 3
+        assert captured["count"] == 3
+
+    def test_rename_session_updates_title(self):
+        """PATCH /api/sessions/{id} renames a session (regression: the route
+        was missing entirely, so the desktop rename dialog got a 405)."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="rename-me", source="cli")
+        finally:
+            db.close()
+
+        resp = self.client.patch("/api/sessions/rename-me", json={"title": "My Chat"})
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "title": "My Chat"}
+
+        db = SessionDB()
+        try:
+            assert db.get_session_title("rename-me") == "My Chat"
+        finally:
+            db.close()
+
+    def test_rename_session_clears_title_when_empty(self):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="clear-me", source="cli")
+            db.set_session_title("clear-me", "Has A Title")
+        finally:
+            db.close()
+
+        resp = self.client.patch("/api/sessions/clear-me", json={"title": ""})
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "title": ""}
+
+        db = SessionDB()
+        try:
+            assert db.get_session_title("clear-me") is None
+        finally:
+            db.close()
+
+    def test_rename_session_not_found(self):
+        resp = self.client.patch("/api/sessions/does-not-exist", json={"title": "x"})
+        assert resp.status_code == 404
+
+    def test_archive_session_via_patch(self):
+        """PATCH archived=true soft-hides a session; archived=false restores it."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="arch-me", source="cli")
+            db.append_message(session_id="arch-me", role="user", content="hi")
+        finally:
+            db.close()
+
+        resp = self.client.patch("/api/sessions/arch-me", json={"archived": True})
+        assert resp.status_code == 200
+        assert resp.json()["archived"] is True
+
+        # Hidden from the default list, surfaced by archived=only.
+        listed = self.client.get("/api/sessions").json()
+        assert all(s["id"] != "arch-me" for s in listed["sessions"])
+        only = self.client.get("/api/sessions?archived=only").json()
+        assert any(s["id"] == "arch-me" for s in only["sessions"])
+
+        resp = self.client.patch("/api/sessions/arch-me", json={"archived": False})
+        assert resp.status_code == 200
+        restored = self.client.get("/api/sessions").json()
+        assert any(s["id"] == "arch-me" for s in restored["sessions"])
+
+    def test_patch_session_without_fields_is_400(self):
+        """An existing session + empty body is a bad request, not a 404."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="no-fields", source="cli")
+        finally:
+            db.close()
+
+        resp = self.client.patch("/api/sessions/no-fields", json={})
+        assert resp.status_code == 400
+
+    def test_profiles_sessions_tags_default_profile(self):
+        """The cross-profile aggregator returns the default profile's rows
+        tagged profile="default" (single-profile parity with /api/sessions)."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="agg-me", source="cli")
+            db.append_message(session_id="agg-me", role="user", content="hi")
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/profiles/sessions?limit=20&min_messages=0")
+        assert resp.status_code == 200
+        data = resp.json()
+        row = next(s for s in data["sessions"] if s["id"] == "agg-me")
+        assert row["profile"] == "default"
+        assert row["is_default_profile"] is True
+        assert isinstance(data.get("errors"), list)
+
+    def test_profiles_sessions_rejects_unknown_archived_value(self):
+        resp = self.client.get("/api/profiles/sessions?archived=bogus")
+        assert resp.status_code == 400
+
+    def test_get_sessions_rejects_unknown_archived_value(self):
+        resp = self.client.get("/api/sessions?archived=bogus")
+        assert resp.status_code == 400
+
+    def test_get_sessions_rejects_unknown_order_value(self):
+        resp = self.client.get("/api/sessions?order=sideways")
+        assert resp.status_code == 400
+
+    def test_get_sessions_order_recent_surfaces_compression_tip(self):
+        """A long-running conversation that auto-compresses must stay on the
+        first page by recency, listed under its live continuation id."""
+        import time as _time
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            old = _time.time() - 86_400
+            # Old conversation that later compresses into a fresh continuation.
+            # The continuation must start at/after the parent's ended_at to be
+            # recognised as a compression tip (not a sub-agent/branch).
+            db.create_session(session_id="root-old", source="cli")
+            db.append_message(session_id="root-old", role="user", content="kickoff")
+            db.end_session("root-old", "compression")
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
+                (old, old + 10, "root-old"),
+            )
+            db.create_session(session_id="tip-new", source="cli", parent_session_id="root-old")
+            db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (old + 10, "tip-new"))
+            db.append_message(session_id="tip-new", role="user", content="continued just now")
+            # A brand-new unrelated session started after the root but before now.
+            db.create_session(session_id="mid", source="cli")
+            db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (_time.time() - 3600, "mid"))
+            db.append_message(session_id="mid", role="user", content="hello")
+            db._conn.commit()
+        finally:
+            db.close()
+
+        rows = self.client.get("/api/sessions?order=recent&limit=5").json()["sessions"]
+        ids = [r["id"] for r in rows]
+        # The compressed conversation surfaces under its live tip id...
+        assert "tip-new" in ids
+        # ...carrying the durable lineage root so the desktop can match pins.
+        tip = next(r for r in rows if r["id"] == "tip-new")
+        assert tip.get("_lineage_root_id") == "root-old"
+
+    def test_search_dedupes_compression_lineage_to_tip(self):
+        """A conversation that auto-compresses leaves the matched term in both
+        the root segment and the continuation. Search must collapse them to a
+        single result keyed by the lineage root and pointing at the live tip,
+        so the sidebar stops showing the same chat several times."""
+        import time as _time
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="search-root", source="cli")
+            db.append_message(session_id="search-root", role="user", content="distinctneedle in the root")
+            db.end_session("search-root", "compression")
+            now = _time.time()
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
+                (now - 100, now - 90, "search-root"),
+            )
+            db.create_session(session_id="search-tip", source="cli", parent_session_id="search-root")
+            db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 90, "search-tip"))
+            db.append_message(session_id="search-tip", role="user", content="distinctneedle again in the tip")
+            db._conn.commit()
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/sessions/search?q=distinctneedle")
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+
+        lineage_hits = [r for r in results if r.get("lineage_root") == "search-root"]
+        # One conversation -> exactly one result despite two FTS hits.
+        assert len(lineage_hits) == 1
+        hit = lineage_hits[0]
+        # Surfaced under the live tip so clicking resumes the current session.
+        assert hit["session_id"] == "search-tip"
+        assert hit["lineage_root"] == "search-root"
+
+    def test_search_keeps_branch_specific_hits_on_branch(self):
+        """Branch sessions share parent_session_id, but they are not compression
+        continuations. A query that only exists in the branch must open the
+        branch instead of being collapsed back to the parent/root."""
+        import time as _time
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            now = _time.time()
+            db.create_session(session_id="branch-parent", source="cli")
+            db.append_message(session_id="branch-parent", role="user", content="ancestor context")
+            db.end_session("branch-parent", "branched")
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
+                (now - 100, now - 90, "branch-parent"),
+            )
+            db.create_session(session_id="branch-child", source="cli", parent_session_id="branch-parent")
+            db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 80, "branch-child"))
+            db.append_message(session_id="branch-child", role="user", content="branchspecificneedle only here")
+            db._conn.commit()
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/sessions/search?q=branchspecificneedle")
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+
+        assert any(
+            r["session_id"] == "branch-child" and r.get("lineage_root") == "branch-child"
+            for r in results
+        )
+
+    def test_get_session_messages_follows_compression_tip(self):
+        """Reading a compressed session by its old id should hydrate from the
+        live continuation, matching /resume behavior."""
+        import time as _time
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="desktop-root", source="cli")
+            db.append_message(session_id="desktop-root", role="user", content="before compression")
+            db.end_session("desktop-root", "compression")
+            now = _time.time()
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
+                (now - 10, now - 5, "desktop-root"),
+            )
+            db.create_session(session_id="desktop-tip", source="cli", parent_session_id="desktop-root")
+            db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 4, "desktop-tip"))
+            db.replace_messages("desktop-root", [])
+            db.append_message(session_id="desktop-tip", role="user", content="after compression")
+            db._conn.commit()
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/sessions/desktop-root/messages")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["session_id"] == "desktop-tip"
+        assert [m["content"] for m in payload["messages"]] == ["after compression"]
+
+    def test_get_sessions_archived_is_boolean(self):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="bool-arch", source="cli")
+            db.append_message(session_id="bool-arch", role="user", content="hi")
+        finally:
+            db.close()
+
+        row = next(s for s in self.client.get("/api/sessions").json()["sessions"] if s["id"] == "bool-arch")
+        assert row["archived"] is False
+
+    def test_rename_response_omits_archived_when_not_set(self):
+        """Title-only PATCH keeps its legacy {ok, title} response shape."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="title-only", source="cli")
+        finally:
+            db.close()
+
+        resp = self.client.patch("/api/sessions/title-only", json={"title": "Hi"})
+        assert resp.status_code == 200
+        assert "archived" not in resp.json()
+
+    def test_audio_transcription_endpoint(self, monkeypatch):
+        import tools.transcription_tools as transcription_tools
+
+        captured = {}
+
+        def fake_transcribe_audio(path):
+            captured["path"] = path
+            return {
+                "success": True,
+                "transcript": "hello from voice mode",
+                "provider": "test",
+            }
+
+        monkeypatch.setattr(transcription_tools, "transcribe_audio", fake_transcribe_audio)
+
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "mime_type": "audio/webm",
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "ok": True,
+            "transcript": "hello from voice mode",
+            "provider": "test",
+        }
+        assert captured["path"].endswith(".webm")
+        assert not Path(captured["path"]).exists()
+
+    def test_audio_transcription_rejects_invalid_base64(self):
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,not base64",
+                "mime_type": "audio/webm",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert "base64" in resp.json()["detail"]
+
+    def test_desktop_audio_routes_registered(self):
+        """All three desktop voice endpoints must exist.
+
+        The renderer (apps/desktop) calls /api/audio/transcribe, /speak, and
+        /elevenlabs/voices. /speak + /voices were silently dropped in a merge
+        once; this guards the contract so a future merge can't lose them
+        without failing CI.
+        """
+        from hermes_cli.web_server import app
+
+        paths = {getattr(r, "path", None) for r in app.routes}
+        assert "/api/audio/transcribe" in paths
+        assert "/api/audio/speak" in paths
+        assert "/api/audio/elevenlabs/voices" in paths
+
+    def test_elevenlabs_voices_unavailable_without_key(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server, "load_env", lambda: {})
+        monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+
+        resp = self.client.get("/api/audio/elevenlabs/voices")
+        assert resp.status_code == 200
+        assert resp.json() == {"available": False, "voices": []}
+
+    def test_speak_text_returns_base64_data_url(self, monkeypatch, tmp_path):
+        import tools.tts_tool as tts_tool
+
+        audio_file = tmp_path / "speech.mp3"
+        audio_file.write_bytes(b"ID3fake-audio-bytes")
+
+        def fake_tts(text):
+            return json.dumps({
+                "success": True,
+                "file_path": str(audio_file),
+                "provider": "test",
+            })
+
+        monkeypatch.setattr(tts_tool, "text_to_speech_tool", fake_tts)
+
+        resp = self.client.post("/api/audio/speak", json={"text": "hello there"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["mime_type"] == "audio/mpeg"
+        assert body["data_url"].startswith("data:audio/mpeg;base64,")
+        assert body["provider"] == "test"
+        # The handler streams the bytes back and removes the temp file.
+        assert not audio_file.exists()
+
+    def test_speak_text_requires_nonempty_text(self):
+        resp = self.client.post("/api/audio/speak", json={"text": "   "})
+        assert resp.status_code == 400
+
+    def test_update_hermes_returns_docker_guidance_without_spawning(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        spawned = False
+
+        def fail_spawn(*_args, **_kwargs):
+            nonlocal spawned
+            spawned = True
+            raise AssertionError("docker update guard should not spawn hermes update")
+
+        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "docker")
+        monkeypatch.setattr(web_server, "_spawn_hermes_action", fail_spawn)
+        web_server._ACTION_PROCS.pop("hermes-update", None)
+        web_server._ACTION_RESULTS.pop("hermes-update", None)
+
+        resp = self.client.post("/api/hermes/update")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["name"] == "hermes-update"
+        assert data["pid"] is None
+        assert data["error"] == "docker_update_unsupported"
+        assert "docker pull nousresearch/hermes-agent:latest" in data["message"]
+        assert spawned is False
+
+        status = self.client.get("/api/actions/hermes-update/status")
+        assert status.status_code == 200
+        status_data = status.json()
+        assert status_data["running"] is False
+        assert status_data["exit_code"] == 1
+        assert status_data["pid"] is None
+        assert any("docker pull nousresearch/hermes-agent:latest" in line for line in status_data["lines"])
+
+    def test_update_hermes_spawns_on_non_docker_install(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        class Proc:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        calls = []
+
+        def fake_spawn(subcommand, name):
+            calls.append((subcommand, name))
+            return Proc()
+
+        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
+        monkeypatch.setattr(web_server, "_spawn_hermes_action", fake_spawn)
+        web_server._ACTION_PROCS.pop("hermes-update", None)
+        web_server._ACTION_RESULTS.pop("hermes-update", None)
+
+        resp = self.client.post("/api/hermes/update")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "pid": 12345, "name": "hermes-update"}
+        assert calls == [(["update"], "hermes-update")]
+
+    def test_action_status_reaps_completed_process(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        waited = {"done": False}
+
+        class _Proc:
+            pid = 42424
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                waited["done"] = True
+
+        proc = _Proc()
+        web_server._ACTION_PROCS.pop("hermes-update", None)
+        web_server._ACTION_RESULTS.pop("hermes-update", None)
+        web_server._ACTION_PROCS["hermes-update"] = proc
+
+        resp = self.client.get("/api/actions/hermes-update/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["running"] is False
+        assert data["exit_code"] == 0
+        assert data["pid"] == 42424
+
+        # Process should have been reaped and moved to results.
+        assert waited["done"] is True
+        assert "hermes-update" not in web_server._ACTION_PROCS
+        assert web_server._ACTION_RESULTS["hermes-update"] == {
+            "exit_code": 0,
+            "pid": 42424,
+        }
+
+    def test_action_status_ignores_wait_failure(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        class _Proc:
+            pid = 99
+
+            def poll(self):
+                return 1
+
+            def wait(self, timeout=None):
+                raise OSError("already reaped")
+
+        proc = _Proc()
+        web_server._ACTION_PROCS.pop("hermes-update", None)
+        web_server._ACTION_RESULTS.pop("hermes-update", None)
+        web_server._ACTION_PROCS["hermes-update"] = proc
+
+        resp = self.client.get("/api/actions/hermes-update/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["exit_code"] == 1
+        # Still reaped despite wait() raising.
+        assert "hermes-update" not in web_server._ACTION_PROCS
+        assert web_server._ACTION_RESULTS["hermes-update"] == {
+            "exit_code": 1,
+            "pid": 99,
+        }
+
+
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config
         import hermes_cli.web_server as web_server
@@ -218,6 +893,72 @@ class TestWebServerEndpoints:
         # Should contain known env var names
         assert any(k.endswith("_API_KEY") or k.endswith("_TOKEN") for k in data.keys())
 
+    def test_get_env_vars_marks_channel_managed_keys(self):
+        from hermes_cli.web_server import _channel_managed_env_keys
+
+        data = self.client.get("/api/env").json()
+        # Every entry carries the classification the Keys page relies on.
+        assert all("channel_managed" in info for info in data.values())
+
+        channel_keys = _channel_managed_env_keys()
+        # Messaging-platform credentials owned by the Channels page are flagged;
+        # everything else stays visible on the Keys page.
+        for key, info in data.items():
+            assert info["channel_managed"] is (key in channel_keys)
+
+    def test_platform_scoped_messaging_env_vars_are_channel_managed(self):
+        from hermes_cli.web_server import (
+            _MESSAGING_KEYS_PAGE_KEYS,
+            _build_catalog_entry,
+            _channel_managed_env_keys,
+        )
+
+        discord = _build_catalog_entry("discord")
+        assert "DISCORD_HOME_CHANNEL" in discord["env_vars"]
+        assert "DISCORD_ALLOW_ALL_USERS" in discord["env_vars"]
+
+        managed = _channel_managed_env_keys()
+        assert "DISCORD_HOME_CHANNEL" in managed
+        assert "BLUEBUBBLES_ALLOW_ALL_USERS" in managed
+        assert "MATTERMOST_ALLOW_ALL_USERS" in managed
+        assert "GATEWAY_PROXY_URL" not in managed
+        assert "GATEWAY_PROXY_URL" in _MESSAGING_KEYS_PAGE_KEYS
+
+    def test_model_set_requires_confirmation_for_expensive_model(self, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_cli.model_cost_guard.expensive_model_warning",
+            lambda *_args, **_kwargs: SimpleNamespace(message="EXPENSIVE MODEL WARNING"),
+        )
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "nous",
+                "model": "openai/gpt-5.5-pro",
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["confirm_required"] is True
+        assert data["confirm_message"] == "EXPENSIVE MODEL WARNING"
+
+        confirmed = self.client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "nous",
+                "model": "openai/gpt-5.5-pro",
+                "confirm_expensive_model": True,
+            },
+        )
+
+        assert confirmed.status_code == 200
+        assert confirmed.json()["ok"] is True
+
+
     def test_reveal_env_var(self, tmp_path):
         """POST /api/env/reveal should return the real unredacted value."""
         from hermes_cli.config import save_env_value
@@ -306,7 +1047,7 @@ class TestWebServerEndpoints:
         resp = self.client.get("/api/auth/session-token")
         # The endpoint is gone — the catch-all SPA route serves index.html
         # or the middleware returns 401 for unauthenticated /api/ paths.
-        assert resp.status_code in (200, 404)
+        assert resp.status_code in {200, 404}
         # Either way, it must NOT return the token as JSON
         try:
             data = resp.json()
@@ -333,7 +1074,7 @@ class TestWebServerEndpoints:
         # %2e%2e = ..
         resp = self.client.get("/%2e%2e/%2e%2e/etc/passwd")
         # Should return 200 with index.html (SPA fallback), not the actual file
-        assert resp.status_code in (200, 404)
+        assert resp.status_code in {200, 404}
         if resp.status_code == 200:
             # Should be the SPA fallback, not the system file
             assert "root:" not in resp.text
@@ -341,9 +1082,457 @@ class TestWebServerEndpoints:
     def test_path_traversal_dotdot_blocked(self):
         """Direct .. path traversal via encoded sequences."""
         resp = self.client.get("/%2e%2e/hermes_cli/web_server.py")
-        assert resp.status_code in (200, 404)
+        assert resp.status_code in {200, 404}
         if resp.status_code == 200:
             assert "FastAPI" not in resp.text  # Should not serve the actual source
+
+    def test_spa_assets_are_read_as_utf8(self, monkeypatch, tmp_path):
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+        import hermes_cli.web_server as ws
+
+        dist = tmp_path / "web_dist"
+        assets = dist / "assets"
+        assets.mkdir(parents=True)
+        index_path = dist / "index.html"
+        css_path = assets / "app.css"
+        index_path.write_text("<html><head></head><body>cafe cafe</body></html>", encoding="utf-8")
+        css_path.write_text("body::before { content: 'cafe'; }", encoding="utf-8")
+
+        original_read_text = Path.read_text
+        seen_encodings = {}
+
+        def tracking_read_text(path_self, *args, **kwargs):
+            if path_self == index_path:
+                seen_encodings["index"] = kwargs.get("encoding")
+            elif path_self == css_path:
+                seen_encodings["css"] = kwargs.get("encoding")
+            return original_read_text(path_self, *args, **kwargs)
+
+        monkeypatch.setattr(ws, "WEB_DIST", dist)
+        monkeypatch.setattr(Path, "read_text", tracking_read_text)
+        spa_app = FastAPI()
+        ws.mount_spa(spa_app)
+        spa_client = TestClient(spa_app)
+
+        index_resp = spa_client.get("/chat")
+        assert index_resp.status_code == 200
+        assert "cafe cafe" in index_resp.text
+
+        css_resp = spa_client.get("/assets/app.css", headers={"x-forwarded-prefix": "/hermes"})
+        assert css_resp.status_code == 200
+        assert "content: 'cafe';" in css_resp.text
+
+        assert seen_encodings == {"index": "utf-8", "css": "utf-8"}
+
+    def test_set_model_main_nous_applies_gateway_defaults(self, monkeypatch):
+        """Switching the main provider to Nous calls apply_nous_managed_defaults
+        (mirroring the CLI's post-model-selection Tool Gateway routing) and
+        surfaces the routed tools in the response."""
+        import hermes_cli.nous_subscription as ns
+
+        called = {}
+
+        def fake_apply(config, *, enabled_toolsets=None, force_fresh=False):
+            called["enabled"] = set(enabled_toolsets or ())
+            called["force_fresh"] = force_fresh
+            # Simulate routing the unconfigured web tool through the gateway.
+            web = config.setdefault("web", {})
+            web["backend"] = "firecrawl"
+            return {"web"}
+
+        monkeypatch.setattr(ns, "apply_nous_managed_defaults", fake_apply)
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "nous", "model": "hermes-4"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["provider"] == "nous"
+        assert data["gateway_tools"] == ["web"]
+        assert called["force_fresh"] is True
+
+    def test_set_model_main_non_nous_skips_gateway_defaults(self, monkeypatch):
+        """Non-Nous providers must NOT trigger Tool Gateway auto-routing."""
+        import hermes_cli.nous_subscription as ns
+
+        def boom(*args, **kwargs):  # pragma: no cover - must not be called
+            raise AssertionError("apply_nous_managed_defaults called for non-nous provider")
+
+        monkeypatch.setattr(ns, "apply_nous_managed_defaults", boom)
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data.get("gateway_tools", []) == []
+
+    def test_apply_main_model_assignment_base_url_and_context_reconcile(self):
+        """The shared main-slot assignment helper must persist a supplied
+        base_url, clear a stale base_url only when switching providers, preserve
+        it on same-provider re-assignment, and always drop a hardcoded
+        context_length override. Both POST /api/model/set and profile-model
+        writes route through this, so the contract is pinned here."""
+        from hermes_cli.web_server import _apply_main_model_assignment
+
+        # Custom + base_url → persisted; stale context_length dropped.
+        out = _apply_main_model_assignment(
+            {"context_length": 8192}, "custom", "llama-3.1-8b", "http://127.0.0.1:8000/v1"
+        )
+        assert out["provider"] == "custom"
+        assert out["default"] == "llama-3.1-8b"
+        assert out["base_url"] == "http://127.0.0.1:8000/v1"
+        assert "context_length" not in out
+
+        # Switching providers (custom → openrouter) → stale base_url cleared.
+        out = _apply_main_model_assignment(
+            {"provider": "custom", "base_url": "http://127.0.0.1:8000/v1"},
+            "openrouter",
+            "anthropic/claude-opus-4.8",
+        )
+        assert out["provider"] == "openrouter"
+        assert out["base_url"] == ""
+
+        # Same provider, no new base_url → existing custom endpoint preserved.
+        # Regression: picking a different MiMo model under xiaomi must NOT wipe a
+        # Token Plan base_url (https://token-plan-*.xiaomimimo.com/v1).
+        out = _apply_main_model_assignment(
+            {"provider": "xiaomi", "base_url": "https://token-plan-ams.xiaomimimo.com/v1"},
+            "xiaomi",
+            "mimo-v2.5-pro",
+        )
+        assert out["provider"] == "xiaomi"
+        assert out["default"] == "mimo-v2.5-pro"
+        assert out["base_url"] == "https://token-plan-ams.xiaomimimo.com/v1"
+
+        # A supplied base_url is honored for any provider, not just custom.
+        out = _apply_main_model_assignment(
+            {"provider": "xiaomi"},
+            "xiaomi",
+            "mimo-v2.5",
+            "https://token-plan-cn.xiaomimimo.com/v1",
+        )
+        assert out["base_url"] == "https://token-plan-cn.xiaomimimo.com/v1"
+
+        # Switching providers without a base_url → don't invent one, clear stale.
+        out = _apply_main_model_assignment(
+            {"provider": "openrouter", "base_url": "http://stale:1/v1"}, "custom", "m"
+        )
+        assert out["base_url"] == ""
+
+        # Non-dict input is coerced to a fresh dict (never raises).
+        out = _apply_main_model_assignment("not-a-dict", "custom", "m", "http://x/v1")
+        assert out == {"provider": "custom", "default": "m", "base_url": "http://x/v1"}
+
+        # api_key follows the same lifecycle as base_url:
+        # supplied → persisted.
+        out = _apply_main_model_assignment(
+            {"api": "sk-legacy-old"}, "custom", "m", "http://x/v1", "sk-secret"
+        )
+        assert out["api_key"] == "sk-secret"
+        assert "api" not in out
+
+        # same provider, no new key → existing key preserved (re-picking a model
+        # on the same custom endpoint must not wipe the saved key).
+        out = _apply_main_model_assignment(
+            {"provider": "custom", "base_url": "http://x/v1", "api_key": "sk-keep"},
+            "custom",
+            "m2",
+        )
+        assert out["api_key"] == "sk-keep"
+
+        # switching providers without a new key → stale key cleared.
+        out = _apply_main_model_assignment(
+            {"provider": "custom", "api_key": "sk-old", "api_mode": "anthropic_messages"},
+            "openrouter",
+            "m",
+        )
+        assert "api_key" not in out
+        assert "api_mode" not in out
+
+    def test_parse_model_ids_handles_openai_and_bare_shapes(self):
+        """Model discovery must tolerate the common /v1/models shapes and
+        never raise (so a slightly non-standard local endpoint still works)."""
+        from hermes_cli.web_server import _parse_model_ids
+
+        class FakeResp:
+            def __init__(self, payload, ok=True):
+                self._payload = payload
+                self.is_success = ok
+
+            def json(self):
+                if isinstance(self._payload, Exception):
+                    raise self._payload
+                return self._payload
+
+        # OpenAI / vLLM / llama.cpp shape.
+        assert _parse_model_ids(
+            FakeResp({"data": [{"id": "llama-3.1-8b"}, {"id": "qwen2.5-7b"}]})
+        ) == ["llama-3.1-8b", "qwen2.5-7b"]
+        # Bare list of ids.
+        assert _parse_model_ids(FakeResp({"data": ["m1", "m2"]})) == ["m1", "m2"]
+        # Top-level list.
+        assert _parse_model_ids(FakeResp([{"id": "x"}])) == ["x"]
+        # Non-success / malformed / exception → [] (never raises).
+        assert _parse_model_ids(FakeResp({"data": []}, ok=False)) == []
+        assert _parse_model_ids(FakeResp({"nope": 1})) == []
+        assert _parse_model_ids(FakeResp(ValueError("bad json"))) == []
+
+    def test_set_model_main_custom_persists_base_url(self):
+        """Custom/local providers must persist model.base_url so the runtime
+        resolver (which ignores OPENAI_BASE_URL) can route to a self-hosted
+        endpoint without an API key. Regression for the desktop onboarding bug
+        where 'Local / custom endpoint' could never be configured."""
+        from hermes_cli.config import load_config
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "custom",
+                "model": "llama-3.1-8b",
+                "base_url": "http://127.0.0.1:8000/v1",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["provider"] == "custom"
+        assert data["base_url"] == "http://127.0.0.1:8000/v1"
+
+        model_cfg = load_config().get("model")
+        assert isinstance(model_cfg, dict)
+        assert model_cfg["provider"] == "custom"
+        assert model_cfg["default"] == "llama-3.1-8b"
+        assert model_cfg["base_url"] == "http://127.0.0.1:8000/v1"
+
+    def test_set_model_main_custom_persists_api_key_and_registers_provider(self):
+        """A custom endpoint that requires auth must persist model.api_key (where
+        the runtime reads it) AND register a named custom_providers entry so the
+        endpoint reappears as a ready row in the picker — matching the
+        ``hermes model`` custom flow. Regression for the desktop loop where a
+        keyed custom endpoint could never be configured from the GUI."""
+        from hermes_cli.config import load_config
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "custom",
+                "model": "gpt-oss-120b",
+                "base_url": "https://text.example.com/v1",
+                "api_key": "sk-secret",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+        cfg = load_config()
+        model_cfg = cfg.get("model")
+        assert isinstance(model_cfg, dict)
+        assert model_cfg["provider"] == "custom"
+        assert model_cfg["base_url"] == "https://text.example.com/v1"
+        assert model_cfg["api_key"] == "sk-secret"
+
+        # Registered in custom_providers (dedup by base_url) so the picker shows
+        # a proper ready row instead of the "needs setup" dead-end.
+        custom = cfg.get("custom_providers") or []
+        assert any(
+            isinstance(e, dict)
+            and e.get("base_url") == "https://text.example.com/v1"
+            and e.get("api_key") == "sk-secret"
+            and e.get("model") == "gpt-oss-120b"
+            for e in custom
+        )
+
+    def test_set_model_main_non_custom_clears_stale_base_url(self):
+        """Switching to a hosted provider must clear a stale base_url so the
+        resolver picks that provider's own default endpoint."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg["model"] = {
+            "provider": "custom",
+            "default": "llama-3.1-8b",
+            "base_url": "http://127.0.0.1:8000/v1",
+        }
+        save_config(cfg)
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["base_url"] == ""
+
+    def test_set_model_main_same_provider_preserves_base_url(self):
+        """Re-picking a model under the SAME provider must NOT wipe a configured
+        base_url. Regression for the desktop bug where selecting a Xiaomi MiMo
+        model reset a Token Plan endpoint back to the registry default, breaking
+        Token Plan keys (https://token-plan-*.xiaomimimo.com/v1)."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg["model"] = {
+            "provider": "xiaomi",
+            "default": "mimo-v2.5-pro",
+            "base_url": "https://token-plan-ams.xiaomimimo.com/v1",
+        }
+        save_config(cfg)
+
+        # Desktop model picker sends provider+model only (no base_url).
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "xiaomi", "model": "mimo-v2.5"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["base_url"] == "https://token-plan-ams.xiaomimimo.com/v1"
+
+        model_cfg = load_config().get("model")
+        assert isinstance(model_cfg, dict)
+        assert model_cfg["default"] == "mimo-v2.5"
+        assert model_cfg["base_url"] == "https://token-plan-ams.xiaomimimo.com/v1"
+
+    def test_set_model_main_reports_stale_auxiliary_pins(self):
+        """Switching the main provider must report auxiliary slots still pinned
+        to a *different* provider so the UI can warn the user their helper tasks
+        aren't following the switch (the silent credit-burn path)."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg["model"] = {"provider": "nous", "default": "hermes-4"}
+        cfg["auxiliary"] = {
+            # Pinned to nous — same as the OLD main, becomes stale after switch.
+            "compression": {"provider": "nous", "model": "anthropic/claude-sonnet-4.6"},
+            # Auto — follows main, never stale.
+            "vision": {"provider": "auto", "model": ""},
+            # Pinned to a third provider — also stale vs the new main.
+            "curator": {"provider": "deepseek", "model": "deepseek-chat"},
+        }
+        save_config(cfg)
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+        )
+        assert resp.status_code == 200
+        stale = resp.json()["stale_aux"]
+        stale_tasks = {entry["task"] for entry in stale}
+        assert stale_tasks == {"compression", "curator"}
+        # auto slot must never appear.
+        assert "vision" not in stale_tasks
+        # Provider/model echoed back for the UI label.
+        comp = next(e for e in stale if e["task"] == "compression")
+        assert comp["provider"] == "nous"
+        assert comp["model"] == "anthropic/claude-sonnet-4.6"
+
+    def test_set_model_main_no_stale_when_aux_matches_new_provider(self):
+        """Aux slots pinned to the SAME provider as the new main are not stale."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg["model"] = {"provider": "nous", "default": "hermes-4"}
+        cfg["auxiliary"] = {
+            "compression": {"provider": "openrouter", "model": "google/gemini-2.5-flash"},
+            "vision": {"provider": "auto", "model": ""},
+        }
+        save_config(cfg)
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["stale_aux"] == []
+
+        model_cfg = load_config().get("model")
+        assert model_cfg["provider"] == "openrouter"
+        assert model_cfg.get("base_url", "") == ""
+
+    def test_set_model_main_gateway_failure_does_not_block_save(self, monkeypatch):
+        """A Portal/gateway hiccup must never prevent saving the model."""
+        import hermes_cli.nous_subscription as ns
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("portal unreachable")
+
+        monkeypatch.setattr(ns, "apply_nous_managed_defaults", boom)
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "nous", "model": "hermes-4"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data.get("gateway_tools", []) == []
+
+    def test_recommended_default_nous_honors_free_tier(self, monkeypatch):
+        """For a free-tier Nous user, the recommended default must be a free
+        model (mirroring `hermes model`), not the first curated paid entry."""
+        import hermes_cli.models as models_mod
+
+        monkeypatch.setattr(models_mod, "get_curated_nous_model_ids", lambda: ["paid/expensive", "free/cheap"])
+        monkeypatch.setattr(
+            models_mod, "get_pricing_for_provider",
+            lambda provider: {"paid/expensive": {"input": "1"}, "free/cheap": {"input": "0"}},
+        )
+        monkeypatch.setattr(models_mod, "check_nous_free_tier", lambda *, force_fresh=False: True)
+        monkeypatch.setattr(
+            models_mod, "union_with_portal_free_recommendations",
+            lambda ids, pricing, url: (ids, pricing),
+        )
+        # Free partition keeps only the free model selectable.
+        monkeypatch.setattr(
+            models_mod, "partition_nous_models_by_tier",
+            lambda ids, pricing, free_tier: (["free/cheap"], ["paid/expensive"]),
+        )
+
+        resp = self.client.get("/api/model/recommended-default?provider=nous")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["provider"] == "nous"
+        assert data["model"] == "free/cheap"
+        assert data["free_tier"] is True
+
+    def test_recommended_default_nous_paid_uses_curated_default(self, monkeypatch):
+        """A paid Nous user gets the first curated/paid-augmented model."""
+        import hermes_cli.models as models_mod
+
+        monkeypatch.setattr(models_mod, "get_curated_nous_model_ids", lambda: ["top/model", "other/model"])
+        monkeypatch.setattr(models_mod, "get_pricing_for_provider", lambda provider: {})
+        monkeypatch.setattr(models_mod, "check_nous_free_tier", lambda *, force_fresh=False: False)
+        monkeypatch.setattr(
+            models_mod, "union_with_portal_paid_recommendations",
+            lambda ids, pricing, url: (ids, pricing),
+        )
+
+        resp = self.client.get("/api/model/recommended-default?provider=nous")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["provider"] == "nous"
+        assert data["model"] == "top/model"
+        assert data["free_tier"] is False
+
+    def test_recommended_default_handles_failure_gracefully(self, monkeypatch):
+        """Endpoint never 500s — returns empty model on internal error."""
+        import hermes_cli.models as models_mod
+
+        def boom():
+            raise RuntimeError("portal down")
+
+        monkeypatch.setattr(models_mod, "get_curated_nous_model_ids", boom)
+
+        resp = self.client.get("/api/model/recommended-default?provider=nous")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["model"] == ""
+        assert data["free_tier"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +1724,7 @@ class TestConfigRoundTrip:
             if val is None:
                 continue  # not set in user config — fine
             expected = entry["type"]
-            if expected in ("string", "select") and not isinstance(val, str):
+            if expected in {"string", "select"} and not isinstance(val, str):
                 mismatches.append(f"{key}: expected str, got {type(val).__name__}")
             elif expected == "number" and not isinstance(val, (int, float)):
                 mismatches.append(f"{key}: expected number, got {type(val).__name__}")
@@ -1032,7 +2221,7 @@ class TestNewEndpoints:
         """GET /api/auth/session-token no longer exists."""
         resp = self.client.get("/api/auth/session-token")
         # Should not return a JSON token object
-        assert resp.status_code in (200, 404)
+        assert resp.status_code in {200, 404}
         try:
             data = resp.json()
             assert "token" not in data
@@ -2081,7 +3270,7 @@ class TestPtyWebSocket:
         self.ws_module = ws
         monkeypatch.setattr(ws, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
         self.token = ws._SESSION_TOKEN
-        self.client = TestClient(ws.app)
+        self.client = TestClient(ws.app, base_url="http://127.0.0.1:9119")
 
     def _url(self, token: str | None = None, **params: str) -> str:
         tok = token if token is not None else self.token
@@ -2091,6 +3280,21 @@ class TestPtyWebSocket:
 
         q = {"token": tok, **params}
         return f"/api/pty?{urlencode(q)}"
+
+    def test_resolve_chat_argv_uses_dashboard_scroll_env(self, monkeypatch):
+        """Dashboard chat runs the TUI in browser-scrollback mode."""
+        import hermes_cli.main as main_mod
+
+        monkeypatch.setattr(
+            main_mod,
+            "_make_tui_argv",
+            lambda project_root, tui_dev=False: (["node", "dist/entry.js"], "/tmp/ui-tui"),
+        )
+
+        _argv, _cwd, env = self.ws_module._resolve_chat_argv()
+
+        assert env["HERMES_TUI_INLINE"] == "1"
+        assert env["HERMES_TUI_DISABLE_MOUSE"] == "1"
 
     def test_rejects_when_embedded_chat_disabled(self, monkeypatch):
         monkeypatch.setattr(self.ws_module, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", False)
@@ -2270,7 +3474,10 @@ class TestPtyWebSocket:
             self.ws_module.app.state, "bound_port", 9119, raising=False
         )
 
-        with self.client.websocket_connect(self._url(channel="abc-123")) as conn:
+        with self.client.websocket_connect(
+            self._url(channel="abc-123"),
+            headers={"host": "127.0.0.1:9119"},
+        ) as conn:
             try:
                 conn.receive_bytes()
             except Exception:
@@ -2324,3 +3531,77 @@ class TestPtyWebSocket:
             ):
                 pass
         assert exc.value.code == 4400
+
+
+class TestDashboardPluginStaticAssetAllowlist:
+    """``/dashboard-plugins/<name>/<path>`` is unauthenticated by design —
+    the SPA loads plugin JS via ``<script src>`` and CSS via
+    ``<link href>``, neither of which can attach a custom auth header.
+    Instead the route restricts file types to the browser-asset
+    allowlist (JS/CSS/JSON/images/fonts) so that user-installed
+    plugins shipping a ``plugin_api.py`` backend module don't leak
+    their Python source to anyone reachable on the loopback port.
+
+    Regression test for the dashboard pentest finding filed alongside
+    the ``web-pentest`` skill (PR #32265 / issue #32267).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup_test_client(self, monkeypatch, _isolate_hermes_home):
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:
+            pytest.skip("fastapi/starlette not installed")
+
+        from hermes_cli.web_server import app
+
+        self.client = TestClient(app)
+
+    def test_python_source_is_404(self):
+        """The example plugin's ``plugin_api.py`` must NOT be served as
+        a static asset, even though the file exists under the plugin's
+        dashboard directory. Suffix not in the allowlist → 404."""
+        resp = self.client.get("/dashboard-plugins/example/plugin_api.py")
+        assert resp.status_code == 404
+
+    def test_pycache_is_404(self):
+        """Same protection for compiled Python (``.pyc``) inside the
+        plugin's ``__pycache__/``. Real plugins ship these as a
+        side-effect of running tests / dashboard once."""
+        # __pycache__ files are only generated after the api file has
+        # been imported once. Use the path the example plugin actually
+        # generates during the dashboard test boot.
+        resp = self.client.get(
+            "/dashboard-plugins/example/__pycache__/plugin_api.cpython-311.pyc"
+        )
+        # 404 either way (file may not exist on this CI Python version);
+        # what matters is we never get a 200 with the bytes.
+        assert resp.status_code == 404
+
+    def test_manifest_json_still_served(self):
+        """JSON files remain browser-fetchable — manifests, localized
+        data, source maps, etc. all sit in this bucket."""
+        resp = self.client.get("/dashboard-plugins/example/manifest.json")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        # And the body is actually the manifest, not the SPA fallback.
+        body = resp.json()
+        assert body.get("name") == "example"
+
+    def test_unknown_plugin_is_404(self):
+        """Existing behaviour preserved: nonexistent plugin name → 404."""
+        resp = self.client.get(
+            "/dashboard-plugins/_definitely_not_a_plugin_/manifest.json"
+        )
+        assert resp.status_code == 404
+
+    def test_path_traversal_still_blocked(self):
+        """The allowlist is on top of the existing ``.resolve()`` /
+        ``is_relative_to()`` check — a ``.js`` named file at an
+        out-of-base path is still rejected as traversal, not served."""
+        resp = self.client.get(
+            "/dashboard-plugins/example/..%2Fplugin_api.py"
+        )
+        # 403 traversal-blocked OR 404 (depending on URL decode order)
+        # — never 200.
+        assert resp.status_code in (403, 404)

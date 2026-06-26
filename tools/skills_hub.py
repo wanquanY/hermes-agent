@@ -25,7 +25,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from hermes_constants import get_hermes_home
+from hermes_constants import ensure_directory_path, get_hermes_home
+from agent.skill_utils import is_excluded_skill_path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -121,6 +122,69 @@ def _validate_skill_name(name: str) -> str:
 
 def _validate_category_name(category: str) -> str:
     return _normalize_bundle_path(category, field_name="category", allow_nested=False)
+
+
+def _normalize_lock_install_path(install_path: str, skill_name: str) -> str:
+    """Validate a skill install path before it touches the lock file or disk.
+
+    Lock-file ``install_path`` entries are the source-of-truth for where
+    ``uninstall_skill`` will call ``shutil.rmtree``. A poisoned or buggy
+    entry — empty string, ``"."``, an absolute path, ``../..`` traversal,
+    or anything whose final component doesn't match the skill name — would
+    let ``rmtree`` wipe either the entire ``skills/`` tree or content
+    outside it.
+
+    Enforce that ``install_path`` is exactly ``<skill_name>`` or
+    ``<category>/<skill_name>``. Reject anything else.
+    """
+    safe_skill_name = _validate_skill_name(skill_name)
+    normalized = _normalize_bundle_path(
+        install_path,
+        field_name="install path",
+        allow_nested=True,
+    )
+    parts = normalized.split("/")
+    if len(parts) not in {1, 2} or parts[-1] != safe_skill_name:
+        raise ValueError(f"Unsafe install path: {install_path}")
+    return normalized
+
+
+def _is_path_redirect(path: Path) -> bool:
+    """True when ``path`` is a symlink or (on Windows) a directory junction.
+
+    Either form lets an attacker who can write into the ``skills/`` tree
+    redirect a subsequent ``rmtree`` to content outside it. ``is_junction``
+    only exists on Python 3.12+ Windows; gate with ``hasattr``.
+    """
+    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+
+
+def _resolve_lock_install_path(install_path: str, skill_name: str) -> Path:
+    """Resolve a lock-file install path without allowing escapes from ``SKILLS_DIR``.
+
+    Two layers of defence on top of the existing ``is_relative_to`` check
+    that's been on main:
+
+    1. Walk the path component-by-component and refuse if any intermediate
+       component is a symlink/junction (a path resolution that follows a
+       symlink to outside skills/ would otherwise be hidden by Path.resolve).
+    2. After resolve(), reject not just escape-out but also ``resolved == SKILLS_DIR``
+       — an empty/``"."``/``""`` install_path resolves to the skills root itself,
+       and ``rmtree(SKILLS_DIR)`` would wipe every installed skill.
+    """
+    normalized = _normalize_lock_install_path(install_path, skill_name)
+    skills_root = SKILLS_DIR.resolve()
+
+    target = SKILLS_DIR
+    for part in normalized.split("/"):
+        target = target / part
+        if _is_path_redirect(target):
+            raise ValueError(f"Unsafe install path: {install_path}")
+
+    target = target.resolve()
+    if target == skills_root or not target.is_relative_to(skills_root):
+        raise ValueError(f"Unsafe install path: {install_path}")
+    return target
 
 
 def _guarded_http_get(url: str, *, timeout: int = 20) -> Optional[httpx.Response]:
@@ -329,6 +393,7 @@ class GitHubSource(SkillSource):
     DEFAULT_TAPS = [
         {"repo": "openai/skills", "path": "skills/"},
         {"repo": "anthropics/skills", "path": "skills/"},
+        {"repo": "huggingface/skills", "path": "skills/"},
         {"repo": "VoltAgent/awesome-agent-skills", "path": "skills/"},
         {"repo": "garrytan/gstack", "path": ""},
         {"repo": "MiniMax-AI/cli", "path": "skill/"},
@@ -378,14 +443,16 @@ class GitHubSource(SkillSource):
                 logger.debug(f"Failed to search {tap['repo']}: {e}")
                 continue
 
-        # Deduplicate by name, preferring higher trust levels
+        # Deduplicate by identifier, preferring higher trust levels.
+        # identifier is unique per skill; name is not (two configured taps can
+        # publish skills with the same name but different identifiers).
         _trust_rank = {"builtin": 2, "trusted": 1, "community": 0}
         seen = {}
         for r in results:
-            if r.name not in seen:
-                seen[r.name] = r
-            elif _trust_rank.get(r.trust_level, 0) > _trust_rank.get(seen[r.name].trust_level, 0):
-                seen[r.name] = r
+            if r.identifier not in seen:
+                seen[r.identifier] = r
+            elif _trust_rank.get(r.trust_level, 0) > _trust_rank.get(seen[r.identifier].trust_level, 0):
+                seen[r.identifier] = r
         results = list(seen.values())
 
         return results[:limit]
@@ -466,11 +533,8 @@ class GitHubSource(SkillSource):
             return [SkillMeta(**s) for s in cached]
 
         url = f"https://api.github.com/repos/{repo}/contents/{path.rstrip('/')}"
-        try:
-            resp = httpx.get(url, headers=self.auth.get_headers(), timeout=15, follow_redirects=True)
-            if resp.status_code != 200:
-                return []
-        except httpx.HTTPError:
+        resp = self._github_get(url)
+        if resp is None or resp.status_code != 200:
             return []
 
         entries = resp.json()
@@ -550,14 +614,97 @@ class GitHubSource(SkillSource):
 
     def _check_rate_limit_response(self, resp: "httpx.Response") -> None:
         """Flag the instance as rate-limited when GitHub returns 403 + exhausted quota."""
-        if resp.status_code == 403:
+        if resp.status_code in (403, 429):
             remaining = resp.headers.get("X-RateLimit-Remaining", "")
-            if remaining == "0":
+            if remaining == "0" or resp.status_code == 429:
                 self._rate_limited = True
                 logger.warning(
                     "GitHub API rate limit exhausted (unauthenticated: 60 req/hr). "
                     "Set GITHUB_TOKEN or install the gh CLI to raise the limit to 5,000/hr."
                 )
+
+    def _github_get(
+        self,
+        url: str,
+        *,
+        params: Optional[Dict] = None,
+        headers: Optional[Dict] = None,
+        timeout: float = 15.0,
+        max_retries: int = 3,
+    ) -> Optional["httpx.Response"]:
+        """GET against the GitHub API with retry/backoff on transient failures.
+
+        Returns the final ``httpx.Response`` (caller inspects status) or
+        ``None`` when every attempt raised a transport error.
+
+        Retries on:
+          - 403/429 with ``X-RateLimit-Remaining: 0`` — waits until the
+            reset time (capped) when the header is present, else exponential
+            backoff. This is the all-GitHub-tap-collapse case: a single
+            shared rate limit zeroes github + claude-marketplace + well-known
+            at once during the index build.
+          - 5xx and connection/timeout errors — exponential backoff.
+
+        On terminal rate-limit exhaustion the instance is flagged via
+        ``_check_rate_limit_response`` so the build can fail loud instead of
+        silently shipping an index with the GitHub sources dropped to zero.
+        """
+        hdrs = headers if headers is not None else self.auth.get_headers()
+        backoff = 1.0
+        last_resp: Optional["httpx.Response"] = None
+        for attempt in range(max_retries):
+            try:
+                resp = httpx.get(
+                    url, params=params, headers=hdrs,
+                    timeout=timeout, follow_redirects=True,
+                )
+            except httpx.HTTPError as e:
+                logger.debug("GitHub GET %s failed (attempt %d/%d): %s",
+                             url, attempt + 1, max_retries, e)
+                if attempt < max_retries - 1:
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 30.0)
+                    continue
+                return None
+
+            last_resp = resp
+            if resp.status_code == 200:
+                return resp
+
+            # Rate-limited: honor the reset header when present, else back off.
+            if resp.status_code in (403, 429):
+                remaining = resp.headers.get("X-RateLimit-Remaining", "")
+                is_rl = remaining == "0" or resp.status_code == 429
+                if is_rl and attempt < max_retries - 1:
+                    wait = backoff
+                    reset = resp.headers.get("X-RateLimit-Reset", "")
+                    retry_after = resp.headers.get("Retry-After", "")
+                    if retry_after.isdigit():
+                        wait = min(float(retry_after), 60.0)
+                    elif reset.isdigit():
+                        delta = float(reset) - time.time()
+                        if 0 < delta <= 60.0:
+                            wait = delta
+                    logger.debug(
+                        "GitHub rate limited on %s, waiting %.1fs (attempt %d/%d)",
+                        url, wait, attempt + 1, max_retries,
+                    )
+                    time.sleep(wait)
+                    backoff = min(backoff * 2, 30.0)
+                    continue
+                # Out of retries (or not a rate-limit 403) — flag and return.
+                self._check_rate_limit_response(resp)
+                return resp
+
+            # 5xx — retry; 4xx (other than rate limit) — return immediately.
+            if 500 <= resp.status_code < 600 and attempt < max_retries - 1:
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+                continue
+            return resp
+
+        return last_resp
+
 
     def _download_directory(self, repo: str, path: str) -> Dict[str, str]:
         """Recursively download all text files from a GitHub directory.
@@ -679,17 +826,12 @@ class GitHubSource(SkillSource):
     def _fetch_file_content(self, repo: str, path: str) -> Optional[str]:
         """Fetch a single file's content from GitHub."""
         url = f"https://api.github.com/repos/{repo}/contents/{path}"
-        try:
-            resp = httpx.get(
-                url,
-                headers={**self.auth.get_headers(), "Accept": "application/vnd.github.v3.raw"},
-                timeout=15, follow_redirects=True,
-            )
-            if resp.status_code == 200:
-                return resp.text
-            self._check_rate_limit_response(resp)
-        except httpx.HTTPError as e:
-            logger.debug("GitHub contents API fetch failed: %s", e)
+        resp = self._github_get(
+            url,
+            headers={**self.auth.get_headers(), "Accept": "application/vnd.github.v3.raw"},
+        )
+        if resp is not None and resp.status_code == 200:
+            return resp.text
         return None
 
     def _read_cache(self, key: str) -> Optional[list]:
@@ -1621,6 +1763,12 @@ class ClawHubSource(SkillSource):
 
     BASE_URL = "https://clawhub.ai/api/v1"
 
+    # Wall-clock budget for a full catalog walk. ClawHub has 50k+ skills and
+    # the walk is sequential (~250 requests, each under per-request
+    # timeout=30 so nothing errors), so an unbounded walk can block for
+    # minutes. Bound it so a slow/large catalog cannot hang the caller.
+    CATALOG_WALK_BUDGET_SECONDS = 12
+
     def source_id(self) -> str:
         return "clawhub"
 
@@ -1787,6 +1935,16 @@ class ClawHubSource(SkillSource):
             results = self._search_catalog(query, limit=limit)
             if results:
                 return results
+        else:
+            # Empty query: route through the paginating catalog walker. When
+            # the full catalog is already disk-cached this returns it whole and
+            # the caller paginates client-side. On a cold cache, bound the walk
+            # to `limit` so a browse command renders its first page without
+            # walking the entire 50k+ catalog (max_items=0 → unbounded, used
+            # only by the offline index builder via search("", limit=0)).
+            catalog = self._load_catalog_index(max_items=limit if limit > 0 else 0)
+            if catalog:
+                return self._dedupe_results(catalog)[:limit] if limit > 0 else self._dedupe_results(catalog)
 
         # Empty query or catalog fallback failure: use the lightweight listing API.
         cache_key = f"clawhub_search_listing_v1_{hashlib.md5(query.encode()).hexdigest()}_{limit}"
@@ -1908,7 +2066,21 @@ class ClawHubSource(SkillSource):
         _write_index_cache(cache_key, [_skill_meta_to_dict(s) for s in results])
         return results
 
-    def _load_catalog_index(self) -> List[SkillMeta]:
+    def _load_catalog_index(self, max_items: int = 0) -> List[SkillMeta]:
+        """Walk the ClawHub catalog via cursor pagination.
+
+        ``max_items`` bounds the walk: once at least that many distinct skills
+        have been gathered the walk stops early. This is what browse's
+        cold-start fallback wants — it only renders one page, so walking the
+        entire 50k+ catalog just to slice off the first N is pure waste.
+        ``max_items=0`` (the default, used by the offline index builder) means
+        walk to exhaustion.
+
+        Caching: only a *complete* catalog (cursor exhausted or page cap) is
+        written to the shared ``clawhub_catalog_v1`` cache. A walk truncated by
+        ``max_items`` OR the wall-clock budget is partial, so caching it would
+        poison the full-catalog cache with an incomplete slice.
+        """
         cache_key = "clawhub_catalog_v1"
         cached = _read_index_cache(cache_key)
         if cached is not None:
@@ -1917,9 +2089,19 @@ class ClawHubSource(SkillSource):
         cursor: Optional[str] = None
         results: List[SkillMeta] = []
         seen: set[str] = set()
+        # dovie keeps max_pages = 50 (10k skills cap) — desktop users do not
+        # need the full upstream walk of 50k+ ClawHub skills, and a smaller cap
+        # cuts cold-start latency. deadline + hit_deadline are still required
+        # because subsequent code references them as the wall-clock safety rail.
         max_pages = 50
+        deadline = time.monotonic() + self.CATALOG_WALK_BUDGET_SECONDS
+        hit_deadline = False
+        hit_max_items = False
 
         for _ in range(max_pages):
+            if time.monotonic() > deadline:
+                hit_deadline = True
+                break
             params: Dict[str, Any] = {"limit": 200}
             if cursor:
                 params["cursor"] = cursor
@@ -1957,7 +2139,19 @@ class ClawHubSource(SkillSource):
             if not isinstance(cursor, str) or not cursor:
                 break
 
-        _write_index_cache(cache_key, [_skill_meta_to_dict(s) for s in results])
+            # Browse's cold-start fallback only renders one page, so stop as
+            # soon as we have enough to satisfy the caller's bound. The index
+            # builder passes max_items=0 (unbounded) and walks to exhaustion.
+            if max_items > 0 and len(results) >= max_items:
+                hit_max_items = True
+                break
+
+        # Only cache a walk that reached a natural stop (cursor exhausted or
+        # page cap). A walk truncated by the wall-clock budget OR by max_items
+        # is partial, so writing it would poison the shared full-catalog cache
+        # with incomplete data.
+        if not hit_deadline and not hit_max_items:
+            _write_index_cache(cache_key, [_skill_meta_to_dict(s) for s in results])
         return results
 
     def _get_json(self, url: str, timeout: int = 20) -> Optional[Any]:
@@ -2109,9 +2303,18 @@ class ClaudeMarketplaceSource(SkillSource):
 
     def __init__(self, auth: GitHubAuth):
         self.auth = auth
+        # Persistent GitHubSource so rate-limit state survives across the
+        # marketplace-index fetch + per-skill inspect calls and can be
+        # surfaced to the index builder (see is_rate_limited).
+        self.github = GitHubSource(auth=auth)
 
     def source_id(self) -> str:
         return "claude-marketplace"
+
+    @property
+    def is_rate_limited(self) -> bool:
+        """Whether the underlying GitHub API hit a rate limit during the crawl."""
+        return self.github.is_rate_limited
 
     def trust_level_for(self, identifier: str) -> str:
         parts = identifier.split("/", 2)
@@ -2151,15 +2354,13 @@ class ClaudeMarketplaceSource(SkillSource):
 
     def fetch(self, identifier: str) -> Optional[SkillBundle]:
         # Delegate to GitHub Contents API since marketplace skills live in GitHub repos
-        gh = GitHubSource(auth=self.auth)
-        bundle = gh.fetch(identifier)
+        bundle = self.github.fetch(identifier)
         if bundle:
             bundle.source = "claude-marketplace"
         return bundle
 
     def inspect(self, identifier: str) -> Optional[SkillMeta]:
-        gh = GitHubSource(auth=self.auth)
-        meta = gh.inspect(identifier)
+        meta = self.github.inspect(identifier)
         if meta:
             meta.source = "claude-marketplace"
             meta.trust_level = self.trust_level_for(identifier)
@@ -2173,16 +2374,15 @@ class ClaudeMarketplaceSource(SkillSource):
             return cached
 
         url = f"https://api.github.com/repos/{repo}/contents/.claude-plugin/marketplace.json"
+        resp = self.github._github_get(
+            url,
+            headers={**self.auth.get_headers(), "Accept": "application/vnd.github.v3.raw"},
+        )
+        if resp is None or resp.status_code != 200:
+            return []
         try:
-            resp = httpx.get(
-                url,
-                headers={**self.auth.get_headers(), "Accept": "application/vnd.github.v3.raw"},
-                timeout=15,
-            )
-            if resp.status_code != 200:
-                return []
             data = json.loads(resp.text)
-        except (httpx.HTTPError, json.JSONDecodeError):
+        except json.JSONDecodeError:
             return []
 
         plugins = data.get("plugins", [])
@@ -2350,6 +2550,181 @@ class LobeHubSource(SkillSource):
 
 
 # ---------------------------------------------------------------------------
+# browse.sh source adapter
+# ---------------------------------------------------------------------------
+
+
+class BrowseShSource(SkillSource):
+    """Discover and install site-specific browser automation skills from browse.sh.
+
+    browse.sh (https://browse.sh) is Browserbase's catalog of 200+ SKILL.md files
+    that describe how to automate specific websites (Airbnb, Amazon, arXiv, etc.).
+    The catalog lives at ``/api/skills`` and each skill's actual SKILL.md content
+    is fetched via ``/api/skills/{slug}`` which returns a ``skillMdUrl`` field
+    pointing at a CDN-hosted blob — the catalog's ``sourceUrl`` field is a GitHub
+    HTML URL whose underlying repository is not always public, so it cannot be
+    relied on for content fetch.
+    """
+
+    CATALOG_URL = "https://browse.sh/api/skills"
+    SKILL_DETAIL_URL = "https://browse.sh/api/skills/{slug}"
+    _CACHE_KEY = "browse_sh_catalog"
+
+    def source_id(self) -> str:
+        return "browse-sh"
+
+    def trust_level_for(self, identifier: str) -> str:
+        return "community"
+
+    def _fetch_catalog(self) -> List[Dict]:
+        cached = _read_index_cache(self._CACHE_KEY)
+        if cached is not None:
+            return cached
+        try:
+            resp = httpx.get(self.CATALOG_URL, timeout=20)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+        except (httpx.HTTPError, json.JSONDecodeError):
+            return []
+        skills = data.get("skills", []) if isinstance(data, dict) else []
+        if isinstance(skills, list):
+            _write_index_cache(self._CACHE_KEY, skills)
+        return skills if isinstance(skills, list) else []
+
+    def _item_to_meta(self, item: Dict) -> Optional[SkillMeta]:
+        slug = item.get("slug", "")
+        name = item.get("name", "")
+        title = item.get("title", name)
+        description = item.get("description", title)
+        if not slug or not name:
+            return None
+        if len(description) > 1024:
+            description = description[:1021] + "..."
+        return SkillMeta(
+            name=name,
+            description=description,
+            source="browse-sh",
+            identifier=f"browse-sh/{slug}",
+            trust_level="community",
+            tags=item.get("tags", []),
+            extra={
+                "slug": slug,
+                "hostname": item.get("hostname", ""),
+                "category": item.get("category", ""),
+                "source_url": item.get("sourceUrl", ""),
+                "recommended_method": item.get("recommendedMethod", ""),
+                "proxies": item.get("proxies", False),
+                "install_count": item.get("installCount", 0),
+            },
+        )
+
+    def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
+        catalog = self._fetch_catalog()
+        query_lower = query.lower()
+        results = []
+        for item in catalog:
+            text = " ".join([
+                item.get("name", ""),
+                item.get("title", ""),
+                item.get("description", ""),
+                item.get("hostname", ""),
+                item.get("category", ""),
+                " ".join(item.get("tags", [])),
+            ]).lower()
+            if not query_lower or query_lower in text:
+                meta = self._item_to_meta(item)
+                if meta:
+                    results.append(meta)
+            if len(results) >= limit:
+                break
+        return results
+
+    def inspect(self, identifier: str) -> Optional[SkillMeta]:
+        slug = self._slug_from_identifier(identifier)
+        if not slug:
+            return None
+        catalog = self._fetch_catalog()
+        for item in catalog:
+            if item.get("slug") == slug:
+                return self._item_to_meta(item)
+        return None
+
+    def fetch(self, identifier: str) -> Optional[SkillBundle]:
+        slug = self._slug_from_identifier(identifier)
+        if not slug:
+            return None
+        catalog = self._fetch_catalog()
+        item = next((i for i in catalog if i.get("slug") == slug), None)
+        if not item:
+            return None
+
+        # Resolve the actual SKILL.md content URL via the per-skill detail
+        # endpoint, which returns a ``skillMdUrl`` (CDN blob). The catalog's
+        # ``sourceUrl`` is a GitHub HTML link whose underlying repo is not
+        # reliably public, so we don't use it for content.
+        md_url = self._resolve_skill_md_url(slug, item)
+        if not md_url:
+            return None
+        try:
+            resp = httpx.get(md_url, timeout=20, follow_redirects=True)
+            if resp.status_code != 200:
+                return None
+            content = resp.text
+        except httpx.HTTPError:
+            return None
+
+        meta = self._item_to_meta(item)
+        name = meta.name if meta else slug.split("/")[-1]
+        return SkillBundle(
+            name=name,
+            files={"SKILL.md": content},
+            source="browse-sh",
+            identifier=identifier,
+            trust_level="community",
+            metadata={
+                "slug": slug,
+                "hostname": item.get("hostname", ""),
+                "source_url": item.get("sourceUrl", ""),
+                "skill_md_url": md_url,
+            },
+        )
+
+    def _resolve_skill_md_url(self, slug: str, item: Dict) -> Optional[str]:
+        """Resolve the SKILL.md content URL for a slug.
+
+        Primary path: hit ``/api/skills/{slug}`` and read ``skillMdUrl``.
+        Fallback: if the catalog item already has a ``raw.githubusercontent.com``
+        ``sourceUrl`` (some entries may), use it directly.
+        """
+        try:
+            detail = httpx.get(
+                self.SKILL_DETAIL_URL.format(slug=slug),
+                timeout=20,
+                follow_redirects=True,
+            )
+            if detail.status_code == 200:
+                data = detail.json()
+                if isinstance(data, dict):
+                    md_url = data.get("skillMdUrl")
+                    if isinstance(md_url, str) and md_url.startswith("http"):
+                        return md_url
+        except (httpx.HTTPError, json.JSONDecodeError):
+            pass
+
+        source_url = item.get("sourceUrl", "") if isinstance(item, dict) else ""
+        if source_url and "raw.githubusercontent.com" in source_url:
+            return source_url
+        return None
+
+    def _slug_from_identifier(self, identifier: str) -> str:
+        """Extract slug from identifier like 'browse-sh/airbnb.com/search-listings-abc'."""
+        if identifier.startswith("browse-sh/"):
+            return identifier[len("browse-sh/"):]
+        return identifier
+
+
+# ---------------------------------------------------------------------------
 # Official optional skills source adapter
 # ---------------------------------------------------------------------------
 
@@ -2461,6 +2836,8 @@ class OptionalSkillSource(SkillSource):
         if not self._optional_dir.is_dir():
             return None
         for skill_md in self._optional_dir.rglob("SKILL.md"):
+            if is_excluded_skill_path(skill_md):
+                continue
             if skill_md.parent.name == name:
                 return skill_md.parent
         return None
@@ -2472,10 +2849,9 @@ class OptionalSkillSource(SkillSource):
 
         results: List[SkillMeta] = []
         for skill_md in sorted(self._optional_dir.rglob("SKILL.md")):
-            parent = skill_md.parent
-            rel_parts = parent.relative_to(self._optional_dir).parts
-            if any(part.startswith(".") for part in rel_parts):
+            if is_excluded_skill_path(skill_md):
                 continue
+            parent = skill_md.parent
 
             try:
                 content = skill_md.read_text(encoding="utf-8")
@@ -2608,14 +2984,20 @@ class HubLockFile:
         files: List[str],
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
+        # Validate both the skill name and the install path SHAPE before
+        # writing into lock.json. A poisoned lock entry is the precondition
+        # for the uninstall_skill rmtree-escape; reject malformed input at
+        # write time so the file never carries the bad state.
+        safe_name = _validate_skill_name(name)
+        safe_install_path = _normalize_lock_install_path(install_path, safe_name)
         data = self.load()
-        data["installed"][name] = {
+        data["installed"][safe_name] = {
             "source": source,
             "identifier": identifier,
             "trust_level": trust_level,
             "scan_verdict": scan_verdict,
             "content_hash": skill_hash,
-            "install_path": install_path,
+            "install_path": safe_install_path,
             "files": files,
             "metadata": metadata or {},
             "installed_at": datetime.now(timezone.utc).isoformat(),
@@ -2711,9 +3093,9 @@ def append_audit_log(action: str, skill_name: str, source: str,
 
 def ensure_hub_dirs() -> None:
     """Create the .hub directory structure if it doesn't exist."""
-    HUB_DIR.mkdir(parents=True, exist_ok=True)
-    QUARANTINE_DIR.mkdir(exist_ok=True)
-    INDEX_CACHE_DIR.mkdir(exist_ok=True)
+    ensure_directory_path(HUB_DIR)
+    ensure_directory_path(QUARANTINE_DIR)
+    ensure_directory_path(INDEX_CACHE_DIR)
     if not LOCK_FILE.exists():
         LOCK_FILE.write_text('{"version": 1, "installed": {}}\n')
     if not AUDIT_LOG.exists():
@@ -2763,9 +3145,14 @@ def install_from_quarantine(
         raise ValueError(f"Unsafe quarantine path: {quarantine_path}")
 
     if safe_category:
-        install_dir = SKILLS_DIR / safe_category / safe_skill_name
+        install_rel_path = f"{safe_category}/{safe_skill_name}"
     else:
-        install_dir = SKILLS_DIR / safe_skill_name
+        install_rel_path = safe_skill_name
+
+    # Resolve via the same lock-path validator the uninstaller uses. Catches
+    # symlink-in-skills-tree redirects at install time so the lock entry's
+    # path can never refer to a redirected target.
+    install_dir = _resolve_lock_install_path(install_rel_path, safe_skill_name)
 
     if install_dir.exists():
         shutil.rmtree(install_dir)
@@ -2785,6 +3172,21 @@ def install_from_quarantine(
                 )
         except OSError:
             pass
+
+    # Reject symlinks inside the quarantined skill before moving it.
+    # A malicious skill bundle could include a symlink pointing outside the
+    # skills tree; its target contents would then be copied into skills/ and
+    # leaked to the agent on the next skill_view call.
+    for entry in quarantine_path.rglob("*"):
+        if not _is_path_redirect(entry):
+            continue
+        try:
+            rel = entry.relative_to(quarantine_resolved)
+        except ValueError:
+            rel = entry
+        raise ValueError(
+            f"Installed skill contains symlinks, which is not allowed: {rel}"
+        )
 
     install_dir.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(quarantine_path), str(install_dir))
@@ -2819,7 +3221,20 @@ def uninstall_skill(skill_name: str) -> Tuple[bool, str]:
     if not entry:
         return False, f"'{skill_name}' is not a hub-installed skill (may be a builtin)"
 
-    install_path = SKILLS_DIR / entry["install_path"]
+    # Validate the lock entry's install_path against the skill name. This is
+    # the destructive boundary — anything that falls through to the rmtree
+    # below MUST be inside SKILLS_DIR and MUST NOT be SKILLS_DIR itself
+    # (an empty/"."/"/" install_path would otherwise wipe the entire tree).
+    # _resolve_lock_install_path enforces shape (<skill_name> or
+    # <category>/<skill_name>), rejects absolute/traversal paths, and walks
+    # the path component-by-component refusing symlink/junction redirects.
+    try:
+        install_path = _resolve_lock_install_path(
+            entry.get("install_path", ""), skill_name
+        )
+    except ValueError as exc:
+        return False, f"Refusing to uninstall '{skill_name}': {exc}"
+
     if install_path.exists():
         shutil.rmtree(install_path)
 
@@ -2892,7 +3307,12 @@ def delete_skill_package(skill_name: str) -> Tuple[bool, str]:
 
 
 def bundle_content_hash(bundle: SkillBundle) -> str:
-    """Compute a deterministic hash for an in-memory skill bundle."""
+    """Compute a deterministic hash matching skills_guard.content_hash().
+
+    Installed skill provenance stores ``content_hash(install_dir)`` in the
+    lock file. The in-memory bundle hash must use the same content-only
+    semantics or update checks will report every installed skill as stale.
+    """
     h = hashlib.sha256()
     for rel_path in sorted(bundle.files):
         content = bundle.files[rel_path]
@@ -3205,6 +3625,7 @@ def create_source_router(auth: Optional[GitHubAuth] = None) -> List[SkillSource]
         ClawHubSource(),
         ClaudeMarketplaceSource(auth=auth),
         LobeHubSource(),
+        BrowseShSource(),   # browse.sh: 169+ site-specific browser automation skills
     ]
 
     return sources
@@ -3271,13 +3692,20 @@ def parallel_search_sources(
     if not active:
         return all_results, source_counts, timed_out_ids
 
-    with ThreadPoolExecutor(max_workers=min(len(active), 8)) as pool:
-        futures = {}
-        for src in active:
-            lim = per_source_limits.get(src.source_id(), 50)
-            fut = pool.submit(_search_one_source, src, query, lim)
-            futures[fut] = src.source_id()
+    # NOTE: a `with ThreadPoolExecutor(...) as pool` block calls
+    # ``shutdown(wait=True)`` on exit, which blocks until every submitted
+    # worker finishes — so a single slow source (e.g. ClawHub) keeps the
+    # caller blocked for minutes and renders ``overall_timeout`` a no-op.
+    # Manage the executor manually and shut it down with ``wait=False`` so
+    # the timeout is actually honoured.
+    pool = ThreadPoolExecutor(max_workers=min(len(active), 8))
+    futures = {}
+    for src in active:
+        lim = per_source_limits.get(src.source_id(), 50)
+        fut = pool.submit(_search_one_source, src, query, lim)
+        futures[fut] = src.source_id()
 
+    try:
         try:
             for fut in as_completed(futures, timeout=overall_timeout):
                 try:
@@ -3297,6 +3725,10 @@ def parallel_search_sources(
                     "Skills browse timed out waiting for: %s",
                     ", ".join(timed_out_ids),
                 )
+    finally:
+        # wait=False so a slow source cannot block the caller's return;
+        # cancel_futures drops not-yet-started work.
+        pool.shutdown(wait=False, cancel_futures=True)
 
     return all_results, source_counts, timed_out_ids
 
@@ -3311,14 +3743,17 @@ def unified_search(query: str, sources: List[SkillSource],
         overall_timeout=30,
     )
 
-    # Deduplicate by name, preferring higher trust levels
+    # Deduplicate by identifier, preferring higher trust levels.
+    # identifier is always unique per skill (e.g. "browse-sh/airbnb.com/search-listings-ddgioa").
+    # Using name would incorrectly collapse browse-sh skills from different sites that share
+    # the same task name (e.g. "search-listings" from Airbnb and Booking.com).
     _TRUST_RANK = {"builtin": 2, "trusted": 1, "community": 0}
     seen: Dict[str, SkillMeta] = {}
     for r in all_results:
-        if r.name not in seen:
-            seen[r.name] = r
-        elif _TRUST_RANK.get(r.trust_level, 0) > _TRUST_RANK.get(seen[r.name].trust_level, 0):
-            seen[r.name] = r
+        if r.identifier not in seen:
+            seen[r.identifier] = r
+        elif _TRUST_RANK.get(r.trust_level, 0) > _TRUST_RANK.get(seen[r.identifier].trust_level, 0):
+            seen[r.identifier] = r
     deduped = list(seen.values())
 
     return deduped[:limit]

@@ -7,6 +7,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
+import sys
 
 from hermes_constants import get_hermes_home
 
@@ -253,7 +254,7 @@ def start_gateway_runtime(load_cfg: Callable[[], dict], *, force_restart: bool =
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["HERMES_HOME"] = str(hermes_home)
-    env["DOXIE_MANAGED_HERMES_GATEWAY"] = "1"
+    env["DOVIE_MANAGED_HERMES_GATEWAY"] = "1"
 
     with open(log_path, "a", encoding="utf-8") as log:
         log.write(f"\n[{time.strftime('%Y-%m-%dT%H:%M:%S%z')}] starting Hermes messaging gateway\n")
@@ -510,7 +511,9 @@ def _poll_dingtalk_qr(
 
 
 def _start_feishu_qr() -> dict[str, Any]:
-    from gateway.platforms import feishu
+    feishu = sys.modules.get("gateway.platforms.feishu")
+    if feishu is None:
+        from gateway.platforms import feishu
 
     domain = "feishu"
     feishu._init_registration(domain)
@@ -532,7 +535,9 @@ def _poll_feishu_qr(
     load_cfg: Callable[[], dict],
     save_cfg: Callable[[dict], None],
 ) -> dict[str, Any]:
-    from gateway.platforms import feishu
+    feishu = sys.modules.get("gateway.platforms.feishu")
+    if feishu is None:
+        from gateway.platforms import feishu
 
     current_domain = str(session.get("domain") or "feishu")
     base_url = feishu._accounts_base_url(current_domain)
@@ -632,7 +637,9 @@ def _start_weixin_qr() -> dict[str, Any]:
     import asyncio
 
     async def _fetch() -> dict[str, Any]:
-        from gateway.platforms import weixin
+        weixin = sys.modules.get("gateway.platforms.weixin")
+        if weixin is None:
+            from gateway.platforms import weixin
 
         if not weixin.AIOHTTP_AVAILABLE:
             raise RuntimeError("aiohttp is required for Weixin QR login")
@@ -670,7 +677,9 @@ def _poll_weixin_qr(
     import asyncio
 
     async def _fetch() -> dict[str, Any]:
-        from gateway.platforms import weixin
+        weixin = sys.modules.get("gateway.platforms.weixin")
+        if weixin is None:
+            from gateway.platforms import weixin
 
         async with weixin.aiohttp.ClientSession(
             trust_env=True,
@@ -683,7 +692,9 @@ def _poll_weixin_qr(
                 timeout_ms=weixin.QR_TIMEOUT_MS,
             )
 
-    from gateway.platforms import weixin
+    weixin = sys.modules.get("gateway.platforms.weixin")
+    if weixin is None:
+        from gateway.platforms import weixin
     from hermes_constants import get_hermes_home
 
     response = asyncio.run(_fetch())
@@ -797,7 +808,7 @@ def _gateway_runtime_log_path() -> Path:
         home = Path(get_hermes_home())
     except Exception:
         home = Path(os.getenv("HERMES_HOME") or Path.home() / ".hermes")
-    return home / "logs" / "doxie-messaging-gateway.log"
+    return home / "logs" / "dovie-messaging-gateway.log"
 
 
 def _pairing_store():

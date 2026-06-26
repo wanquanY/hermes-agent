@@ -12,6 +12,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
+from agent.dovie_diagnostics import emit_dovie_diagnostic
 from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
 from typing import Optional
 
@@ -50,6 +51,21 @@ _CONTEXT_INVISIBLE_CHARS = {
     '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff',
     '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
 }
+
+
+def _log_dovie_prompt_builder_stage(stage: str, **fields) -> None:
+    """Emit focused diagnostics for prompt-builder stalls in DoXie runs."""
+    try:
+        from hermes_constants import get_hermes_home_override
+        has_scoped_home = bool(get_hermes_home_override())
+    except Exception:
+        has_scoped_home = False
+    if not has_scoped_home and not os.environ.get("DOVIE_PROCESS_ROLE"):
+        return
+    emit_dovie_diagnostic(
+        "[dovie-prompt-builder-stage]",
+        {"stage": stage, **fields},
+    )
 
 
 def _scan_context_content(content: str, filename: str) -> str:
@@ -187,12 +203,10 @@ SKILLS_GUIDANCE = (
 
 KANBAN_GUIDANCE = (
     "# Kanban task execution protocol\n"
-    "You have been assigned ONE task from "
-    "the shared board at `~/.hermes/kanban.db`. Your task id is in "
-    "`$HERMES_KANBAN_TASK`; your workspace is `$HERMES_KANBAN_WORKSPACE`. "
-    "The `kanban_*` tools in your schema are your primary coordination surface — "
-    "they write directly to the shared SQLite DB and work regardless of terminal "
-    "backend (local/docker/modal/ssh).\n"
+    "You have been assigned ONE task from the shared Kanban board. Your task "
+    "id is in `$HERMES_KANBAN_TASK`; your workspace is "
+    "`$HERMES_KANBAN_WORKSPACE`. The `kanban_*` tools in your schema are your "
+    "only coordination surface and work regardless of terminal backend.\n"
     "\n"
     "## Lifecycle\n"
     "\n"
@@ -205,26 +219,28 @@ KANBAN_GUIDANCE = (
     "any file operations. The workspace is yours for this run. Don't modify "
     "files outside it unless the task explicitly asks.\n"
     "3. **Heartbeat on long operations.** Call `kanban_heartbeat(note=...)` "
-    "every few minutes during long subprocesses (training, encoding, crawling). "
-    "Skip heartbeats for short tasks.\n"
+    "every few minutes during long subprocesses. Skip heartbeats for short "
+    "tasks. If your task may run longer than 1 hour, call it at least once an "
+    "hour or the dispatcher may reclaim your run.\n"
     "4. **Block on genuine ambiguity.** If you need a human decision you cannot "
     "infer (missing credentials, UX choice, paywalled source, peer output you "
     "need first), call `kanban_block(reason=\"...\")` and stop. Don't guess. "
     "The user will unblock with context and the dispatcher will respawn you.\n"
-    "5. **Complete with structured handoff.** Call `kanban_complete(summary=..., "
-    "metadata=...)`. `summary` is 1–3 human-readable sentences naming concrete "
-    "artifacts. `metadata` is machine-readable facts "
-    "(`{changed_files: [...], tests_run: N, decisions: [...]}`). Downstream "
-    "workers read both via their own `kanban_show`. Never put secrets / "
-    "tokens / raw PII in either field — run rows are durable forever. "
-    "Exception: if your output is a code change that needs human review "
-    "before counting as merged/done (most coding tasks), drop the "
-    "structured metadata (changed_files / tests_run / diff_path) into a "
-    "`kanban_comment` first, then end with "
-    "`kanban_block(reason=\"review-required: <one-line summary>\")` so a "
-    "reviewer can approve+unblock or request changes. Reviewing-then-"
-    "completing is more honest than auto-completing work that still needs "
-    "eyes on it.\n"
+    "5. **Complete with structured, inspectable handoff.** Call "
+    "`kanban_complete(summary=..., metadata=...)` only after the task has an "
+    "observable deliverable; do not finish with only a status sentence. For "
+    "analysis/design/research/code/planning, create or update the relevant "
+    "artifact/code/report/plan/evidence, and use `kanban_comment` at major "
+    "milestones so supervisors see progress. `summary` is 1–3 sentences "
+    "naming concrete artifacts. `metadata` is machine-readable facts "
+    "(`{artifacts: [...], changed_files: [...], tests_run: N, decisions: [...], "
+    "risks: [...], verification: [...]}`). Downstream workers read both via "
+    "their own `kanban_show`; if no file artifact fits, put `deliverable_type` "
+    "and evidence in metadata. Never put secrets / tokens / raw PII in either "
+    "field. Exception: if your output is a code change that needs human review "
+    "before counting as done, put changed_files/tests/diff metadata in "
+    "`kanban_comment`, then `kanban_block(reason=\"review-required: <one-line "
+    "summary>\")`.\n"
     "6. **If follow-up work appears, create it; don't do it.** Use "
     "`kanban_create(title=..., assignee=<right-profile>, parents=[your-task-id])` "
     "to spawn a child task for the appropriate specialist profile instead of "
@@ -234,15 +250,20 @@ KANBAN_GUIDANCE = (
     "\n"
     "If your task is itself a decomposition task (e.g. a planner profile given "
     "a high-level goal), use `kanban_create` to fan out into child tasks — one "
-    "per specialist, each with an explicit `assignee` and `parents=[...]` to "
-    "express dependencies. Then `kanban_complete` your own task with a summary "
-    "of the decomposition. Do NOT execute the work yourself; your job is "
-    "routing, not implementation.\n"
+    "per specialist, each with an explicit `assignee`, expected deliverable, "
+    "and `parents=[...]` to express dependencies. Then `kanban_complete` your "
+    "own task with a summary of the decomposition. Do NOT execute the work "
+    "yourself; your job is routing, not implementation, and a planner "
+    "completion that only says the plan exists is incomplete.\n"
     "\n"
     "## Do NOT\n"
     "\n"
     "- Do not shell out to `hermes kanban <verb>` for board operations. Use "
     "the `kanban_*` tools — they work across all terminal backends.\n"
+    "- Do not inspect, open, or mutate `kanban.db`, `$HERMES_KANBAN_DB`, "
+    "`tasks`, or `task_events` with sqlite3, Python, shell, or raw SQL. If "
+    "a `kanban_*` tool reports disk I/O, corrupt DB, or rollback errors, stop "
+    "and report the storage failure; never self-repair the board.\n"
     "- Do not complete a task you didn't actually finish. Block it.\n"
     "- Do not assign follow-up work to yourself. Assign it to the right "
     "specialist profile.\n"
@@ -268,12 +289,16 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 
 # Model name substrings that trigger tool-use enforcement guidance.
 # Add new patterns here when a model family needs explicit steering.
-TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm")
+TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek")
 
 # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
 # where GPT models abandon work on partial results, skip prerequisite lookups,
 # hallucinate instead of using tools, and declare "done" without verification.
 # Inspired by patterns from OpenAI's GPT-5.4 prompting guide & OpenClaw PR #38953.
+# Also applied to xAI Grok — same failure modes in practice (claims completion
+# without tool calls, suggests workarounds instead of using existing tools,
+# replies with plans/suggestions instead of executing). The body is
+# family-agnostic; the OPENAI_ prefix reflects origin, not exclusivity.
 OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "# Execution discipline\n"
     "<tool_persistence>\n"
@@ -781,7 +806,11 @@ def build_environment_hints() -> str:
         except Exception:
             session_cwd = ""
         try:
-            cwd = session_cwd or os.getcwd()
+            cwd = session_cwd or os.getenv("DOVIE_WORKSPACE_ROOT", "").strip()
+            if not cwd:
+                if os.getenv("DOVIE_PROCESS_ROLE") == "hermes-worker":
+                    raise RuntimeError("Dovie workspace root is not configured")
+                cwd = os.getcwd()
             host_lines.append(f"Current working directory: {cwd}")
         except OSError:
             pass
@@ -834,6 +863,62 @@ def build_environment_hints() -> str:
 CONTEXT_FILE_MAX_CHARS = 20_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
+
+# Dynamic-cap parameters (used when no explicit context_file_max_chars is set).
+# The cap scales with the model's context window so large-context models rarely
+# truncate a project doc, while small-context models stay at the historical
+# 20K floor. ~4 chars/token is the usual English heuristic; we spend a small
+# slice of the window on context files since they share the cached prefix with
+# the system prompt, tools, memory, and the whole conversation.
+_CONTEXT_FILE_CHARS_PER_TOKEN = 4
+_CONTEXT_FILE_WINDOW_FRACTION = 0.06
+_CONTEXT_FILE_DYNAMIC_CEILING = 500_000
+
+
+def _dynamic_context_file_max_chars(context_length: Optional[int]) -> int:
+    """Derive a char cap from the model's context window.
+
+    Returns at least ``CONTEXT_FILE_MAX_CHARS`` (the historical 20K floor) and
+    at most ``_CONTEXT_FILE_DYNAMIC_CEILING``. When ``context_length`` is
+    unknown/invalid, returns the flat default so behavior is unchanged.
+    """
+    if not isinstance(context_length, int) or context_length <= 0:
+        return CONTEXT_FILE_MAX_CHARS
+    budget = int(
+        context_length * _CONTEXT_FILE_CHARS_PER_TOKEN * _CONTEXT_FILE_WINDOW_FRACTION
+    )
+    return max(CONTEXT_FILE_MAX_CHARS, min(budget, _CONTEXT_FILE_DYNAMIC_CEILING))
+
+
+def _get_context_file_max_chars(context_length: Optional[int] = None) -> int:
+    """Return the context-file truncation limit.
+
+    Resolution order:
+      1. Explicit ``context_file_max_chars`` in config.yaml — user knows best,
+         always wins (including over the dynamic cap).
+      2. Dynamic cap derived from the model's ``context_length`` when provided
+         (scales the budget to the window; floor 20K, ceiling 500K).
+      3. ``CONTEXT_FILE_MAX_CHARS`` (20K) as the upstream-compatible fallback.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        val = load_config().get("context_file_max_chars")
+        if isinstance(val, (int, float)) and val > 0:
+            return int(val)
+    except Exception as e:
+        logger.debug("Could not read context_file_max_chars from config: %s", e)
+    return _dynamic_context_file_max_chars(context_length)
+
+# Collect truncation warnings so the caller (run_agent) can surface them.
+_truncation_warnings: list = []
+
+
+def drain_truncation_warnings() -> list:
+    """Return and clear any truncation warnings accumulated since last drain."""
+    warnings = _truncation_warnings.copy()
+    _truncation_warnings.clear()
+    return warnings
 
 
 # =========================================================================
@@ -998,11 +1083,12 @@ def _skill_should_show(
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
+    hidden_categories: "frozenset[str] | None" = None,
 ) -> str:
     """Build a compact skill index for the system prompt.
 
     Two-layer cache:
-      1. In-process LRU dict keyed by (skills_dir, tools, toolsets)
+      1. In-process LRU dict keyed by (skills_dir, tools, toolsets, hidden)
       2. Disk snapshot (``.skills_prompt_snapshot.json``) validated by
          mtime/size manifest — survives process restarts
 
@@ -1012,6 +1098,12 @@ def build_skills_system_prompt(
     scanned alongside the local ``~/.hermes/skills/`` directory.  External dirs
     are read-only — they appear in the index but new skills are always created
     in the local dir.  Local skills take precedence when names collide.
+
+    ``hidden_categories`` (e.g. from the coding posture — see
+    agent/coding_context.py) prunes whole categories from the rendered index.
+    Discovery-only: the snapshot stores everything, ``skills_list`` /
+    ``skill_view`` still reach every skill, and a footer note tells the model
+    the full catalog exists.
     """
     skills_dir = get_skills_dir()
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
@@ -1036,6 +1128,7 @@ def build_skills_system_prompt(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
         tuple(sorted(disabled)),
+        tuple(sorted(hidden_categories or ())),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1169,6 +1262,26 @@ def build_skills_system_prompt(
             except Exception as e:
                 logger.debug("Could not read external skill description %s: %s", desc_file, e)
 
+    # Posture-driven category pruning (e.g. non-coding skills while pairing on
+    # code). Match on the top-level category segment so nested categories
+    # ("social-media/twitter") are pruned with their parent.
+    hidden_note = ""
+    if hidden_categories:
+        before = sum(len(v) for v in skills_by_category.values())
+        skills_by_category = {
+            cat: entries
+            for cat, entries in skills_by_category.items()
+            if cat.split("/", 1)[0] not in hidden_categories
+        }
+        pruned = before - sum(len(v) for v in skills_by_category.values())
+        if pruned:
+            hidden_note = (
+                f"\n(Note: {pruned} skill(s) in categories unrelated to the "
+                "current coding context are not listed here. The full catalog "
+                "is available via skills_list if the user asks for something "
+                "outside this list.)"
+            )
+
     if not skills_by_category:
         result = ""
     else:
@@ -1217,6 +1330,7 @@ def build_skills_system_prompt(
             "</available_skills>\n"
             "\n"
             "Only proceed without loading a skill if genuinely none are relevant to the task."
+            + hidden_note
         )
 
     # ── Store in LRU cache ────────────────────────────────────────────
@@ -1299,47 +1413,104 @@ def build_nous_subscription_prompt(valid_tool_names: "set[str] | None" = None) -
 # Context files (SOUL.md, AGENTS.md, .cursorrules)
 # =========================================================================
 
-def _truncate_content(content: str, filename: str, max_chars: int = CONTEXT_FILE_MAX_CHARS) -> str:
-    """Head/tail truncation with a marker in the middle."""
+def _truncate_content(
+    content: str,
+    filename: str,
+    max_chars: Optional[int] = None,
+    context_length: Optional[int] = None,
+    read_path: Optional[str] = None,
+) -> str:
+    """Head/tail truncation with a marker in the middle.
+
+    ``filename`` is the human label used in warnings. ``read_path`` is the
+    concrete path the agent should ``read_file`` to recover the full content
+    (defaults to ``filename`` when not supplied). ``context_length`` lets the
+    cap scale to the model's window when no explicit config override is set.
+    """
+    if max_chars is None:
+        max_chars = _get_context_file_max_chars(context_length)
     if len(content) <= max_chars:
         return content
+    target = read_path or filename
+    msg = (
+        f"⚠️  Context file {filename} TRUNCATED: "
+        f"{len(content)} chars exceeds limit of {max_chars} — "
+        f"trim the file, pin a larger context_file_max_chars, or use a "
+        f"larger-context model!"
+    )
+    logger.warning(msg)
+    _truncation_warnings.append(msg)
     head_chars = int(max_chars * CONTEXT_TRUNCATE_HEAD_RATIO)
     tail_chars = int(max_chars * CONTEXT_TRUNCATE_TAIL_RATIO)
     head = content[:head_chars]
     tail = content[-tail_chars:]
-    marker = f"\n\n[...truncated {filename}: kept {head_chars}+{tail_chars} of {len(content)} chars. Use file tools to read the full file.]\n\n"
+    marker = (
+        f"\n\n[...truncated {filename}: kept {head_chars}+{tail_chars} of "
+        f"{len(content)} chars. The middle is omitted — if you need the full "
+        f"instructions, read the complete file with the read_file tool: "
+        f"{target}]\n\n"
+    )
     return head + marker + tail
 
 
-def load_soul_md() -> Optional[str]:
+def load_soul_md(context_length: Optional[int] = None) -> Optional[str]:
     """Load SOUL.md from HERMES_HOME and return its content, or None.
 
     Used as the agent identity (slot #1 in the system prompt).  When this
     returns content, ``build_context_files_prompt`` should be called with
     ``skip_soul=True`` so SOUL.md isn't injected twice.
     """
-    try:
-        from hermes_cli.config import ensure_hermes_home
-        ensure_hermes_home()
-    except Exception as e:
-        logger.debug("Could not ensure HERMES_HOME before loading SOUL.md: %s", e)
-
+    _log_dovie_prompt_builder_stage("load-soul-enter")
     soul_path = get_hermes_home() / "SOUL.md"
-    if not soul_path.exists():
-        return None
+    _log_dovie_prompt_builder_stage("load-soul-path", path=str(soul_path))
     try:
+        soul_stat = soul_path.stat()
+    except FileNotFoundError:
+        _log_dovie_prompt_builder_stage("load-soul-missing")
+        return None
+    except Exception as e:
+        _log_dovie_prompt_builder_stage("load-soul-stat-error", error=str(e))
+        logger.debug("Could not stat SOUL.md at %s: %s", soul_path, e)
+        return None
+
+    if not soul_path.is_file():
+        _log_dovie_prompt_builder_stage("load-soul-not-file")
+        logger.debug("SOUL.md at %s is not a regular file", soul_path)
+        return None
+
+    if soul_stat.st_size > CONTEXT_FILE_MAX_CHARS * 16:
+        _log_dovie_prompt_builder_stage("load-soul-too-large", size=soul_stat.st_size)
+        logger.warning(
+            "SOUL.md at %s is too large to load safely (%s bytes)",
+            soul_path,
+            soul_stat.st_size,
+        )
+        return None
+
+    try:
+        _log_dovie_prompt_builder_stage("load-soul-read-start", size=soul_stat.st_size)
         content = soul_path.read_text(encoding="utf-8").strip()
+        _log_dovie_prompt_builder_stage("load-soul-read-end", chars=len(content))
         if not content:
+            _log_dovie_prompt_builder_stage("load-soul-empty")
             return None
+        _log_dovie_prompt_builder_stage("load-soul-scan-start")
         content = _scan_context_content(content, "SOUL.md")
-        content = _truncate_content(content, "SOUL.md")
+        _log_dovie_prompt_builder_stage("load-soul-scan-end", chars=len(content))
+        _log_dovie_prompt_builder_stage("load-soul-truncate-start")
+        content = _truncate_content(
+            content, "SOUL.md", context_length=context_length,
+            read_path=str(soul_path),
+        )
+        _log_dovie_prompt_builder_stage("load-soul-truncate-end", chars=len(content))
         return content
     except Exception as e:
+        _log_dovie_prompt_builder_stage("load-soul-error", error=str(e))
         logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
         return None
 
 
-def _load_hermes_md(cwd_path: Path) -> str:
+def _load_hermes_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """.hermes.md / HERMES.md — walk to git root."""
     hermes_md_path = _find_hermes_md(cwd_path)
     if not hermes_md_path:
@@ -1356,13 +1527,16 @@ def _load_hermes_md(cwd_path: Path) -> str:
             pass
         content = _scan_context_content(content, rel)
         result = f"## {rel}\n\n{content}"
-        return _truncate_content(result, ".hermes.md")
+        return _truncate_content(
+            result, ".hermes.md", context_length=context_length,
+            read_path=str(hermes_md_path),
+        )
     except Exception as e:
         logger.debug("Could not read %s: %s", hermes_md_path, e)
         return ""
 
 
-def _load_agents_md(cwd_path: Path) -> str:
+def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """AGENTS.md — top-level only (no recursive walk)."""
     for name in ["AGENTS.md", "agents.md"]:
         candidate = cwd_path / name
@@ -1372,13 +1546,16 @@ def _load_agents_md(cwd_path: Path) -> str:
                 if content:
                     content = _scan_context_content(content, name)
                     result = f"## {name}\n\n{content}"
-                    return _truncate_content(result, "AGENTS.md")
+                    return _truncate_content(
+                        result, "AGENTS.md", context_length=context_length,
+                        read_path=str(candidate),
+                    )
             except Exception as e:
                 logger.debug("Could not read %s: %s", candidate, e)
     return ""
 
 
-def _load_claude_md(cwd_path: Path) -> str:
+def _load_claude_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """CLAUDE.md / claude.md — cwd only."""
     for name in ["CLAUDE.md", "claude.md"]:
         candidate = cwd_path / name
@@ -1388,13 +1565,16 @@ def _load_claude_md(cwd_path: Path) -> str:
                 if content:
                     content = _scan_context_content(content, name)
                     result = f"## {name}\n\n{content}"
-                    return _truncate_content(result, "CLAUDE.md")
+                    return _truncate_content(
+                        result, "CLAUDE.md", context_length=context_length,
+                        read_path=str(candidate),
+                    )
             except Exception as e:
                 logger.debug("Could not read %s: %s", candidate, e)
     return ""
 
 
-def _load_cursorrules(cwd_path: Path) -> str:
+def _load_cursorrules(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """.cursorrules + .cursor/rules/*.mdc — cwd only."""
     cursorrules_content = ""
     cursorrules_file = cwd_path / ".cursorrules"
@@ -1421,10 +1601,17 @@ def _load_cursorrules(cwd_path: Path) -> str:
 
     if not cursorrules_content:
         return ""
-    return _truncate_content(cursorrules_content, ".cursorrules")
+    return _truncate_content(
+        cursorrules_content, ".cursorrules", context_length=context_length,
+        read_path=str(cwd_path / ".cursorrules"),
+    )
 
 
-def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = False) -> str:
+def build_context_files_prompt(
+    cwd: Optional[str] = None,
+    skip_soul: bool = False,
+    context_length: Optional[int] = None,
+) -> str:
     """Discover and load context files for the system prompt.
 
     Priority (first found wins — only ONE project context type is loaded):
@@ -1434,7 +1621,11 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
       4. .cursorrules / .cursor/rules/*.mdc  (cwd only)
 
     SOUL.md from HERMES_HOME is independent and always included when present.
-    Each context source is capped at 20,000 chars.
+
+    Each context source is capped before injection. The cap defaults to the
+    model's context window (scaled — see ``_dynamic_context_file_max_chars``)
+    when *context_length* is provided, falling back to 20,000 chars otherwise.
+    An explicit ``context_file_max_chars`` in config.yaml always wins.
 
     When *skip_soul* is True, SOUL.md is not included here (it was already
     loaded via ``load_soul_md()`` for the identity slot).
@@ -1447,17 +1638,17 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
 
     # Priority-based project context: first match wins
     project_context = (
-        _load_hermes_md(cwd_path)
-        or _load_agents_md(cwd_path)
-        or _load_claude_md(cwd_path)
-        or _load_cursorrules(cwd_path)
+        _load_hermes_md(cwd_path, context_length)
+        or _load_agents_md(cwd_path, context_length)
+        or _load_claude_md(cwd_path, context_length)
+        or _load_cursorrules(cwd_path, context_length)
     )
     if project_context:
         sections.append(project_context)
 
     # SOUL.md from HERMES_HOME only — skip when already loaded as identity
     if not skip_soul:
-        soul_content = load_soul_md()
+        soul_content = load_soul_md(context_length)
         if soul_content:
             sections.append(soul_content)
 

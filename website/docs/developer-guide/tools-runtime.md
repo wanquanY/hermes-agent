@@ -103,17 +103,21 @@ Toolsets are named bundles of tools. Hermes resolves them through:
 
 ### How `get_tool_definitions()` filters tools
 
-The main entry point is `model_tools.get_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode)`:
+The main entry point is `model_tools.get_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode, enabled_tools)`:
 
-1. **If `enabled_toolsets` is provided** — only tools from those toolsets are included. Each toolset name is resolved via `resolve_toolset()` which expands composite toolsets into individual tool names.
+1. **If `enabled_tools` is provided** — only those exact tool names are considered. This bypasses toolset expansion and is used when a caller already has a resolved parent tool surface, such as `delegate_task` subagents inheriting the parent's loaded tools.
 
-2. **If `disabled_toolsets` is provided** — start with ALL toolsets, then subtract the disabled ones.
+2. **If `enabled_toolsets` is provided** — only tools from those toolsets are included. Each toolset name is resolved via `resolve_toolset()` which expands composite toolsets into individual tool names.
 
-3. **If neither** — include all known toolsets.
+3. **If `disabled_toolsets` is provided** — start with ALL toolsets, then subtract the disabled ones.
 
-4. **Registry filtering** — the resolved tool name set is passed to `registry.get_definitions()`, which applies `check_fn` filtering and returns OpenAI-format schemas.
+4. **If none are provided** — include all known toolsets.
 
-5. **Dynamic schema patching** — after filtering, `execute_code` and `browser_navigate` schemas are dynamically adjusted to only reference tools that actually passed filtering (prevents model hallucination of unavailable tools).
+5. **Registry filtering** — the resolved tool name set is passed to `registry.get_definitions()`, which applies `check_fn` filtering and returns OpenAI-format schemas.
+
+6. **Dynamic schema patching** — after filtering, `execute_code` and `browser_navigate` schemas are dynamically adjusted to only reference tools that actually passed filtering (prevents model hallucination of unavailable tools).
+
+`enabled_tools` is intentionally stricter than `enabled_toolsets`. If a parent agent loaded only `search_files` from a broader toolset, a child that inherits through `enabled_tools=["search_files"]` does not gain sibling tools from that toolset.
 
 ### Legacy toolset names
 
@@ -170,6 +174,21 @@ Four tools are intercepted before registry dispatch because they need agent-leve
 - `delegate_task` — spawns subagent sessions
 
 These tools' schemas are still registered in the registry (for `get_tool_definitions`), but their handlers return a stub error if dispatch somehow reaches them directly.
+
+### Delegate subagent tool inheritance
+
+`delegate_task` resolves child tool access through `tools/delegate_tool_access.py` instead of inlining that policy into `tools/delegate_tool.py`.
+
+The resolver accepts both toolset names and exact tool names from the model-facing `toolsets` argument, then intersects the result with the parent's actual `valid_tool_names`. This preserves the parent's runtime boundary:
+
+- a child cannot gain tools the parent did not load;
+- exact tool requests do not expand to sibling tools in the same toolset;
+- blocked toolsets such as delegation, memory, clarify, and code execution are removed for ordinary leaf children;
+- orchestrator children are the only delegated children that regain `delegate_task`;
+- MCP toolsets can be inherited explicitly from the parent when configured;
+- semantic aliases such as `web`, `search`, `web_search`, and `web_extract` can map to Dovie-managed web tools, but only if those tools are already in the parent tool surface.
+
+Child agents receive the final exact list through `AIAgent(enabled_tools=...)`, while `enabled_toolsets` remains a display and compatibility hint. Keep new delegation policy in `delegate_tool_access.py`; `delegate_tool.py` should stay focused on orchestration, lifecycle events, and child execution.
 
 ### Async bridging
 

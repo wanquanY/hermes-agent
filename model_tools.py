@@ -8,8 +8,13 @@ This module triggers discovery (by importing all tool modules), then provides
 the public API that run_agent.py, cli.py, batch_runner.py, and the RL
 environments consume.
 
-Public API (signatures preserved from the original 2,400-line version):
-    get_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode) -> list
+Public API:
+    get_tool_definitions(
+        enabled_toolsets,
+        disabled_toolsets,
+        quiet_mode,
+        enabled_tools,
+    ) -> list
     handle_function_call(function_name, function_args, task_id, user_task) -> str
     TOOL_TO_TOOLSET_MAP: dict          (for batch_runner.py)
     TOOLSET_REQUIREMENTS: dict         (for cli.py, doctor.py)
@@ -20,7 +25,9 @@ Public API (signatures preserved from the original 2,400-line version):
     check_tool_availability(quiet) -> tuple
 """
 
+import os
 import json
+import re
 import asyncio
 import logging
 import threading
@@ -28,7 +35,7 @@ import time
 from typing import Dict, Any, List, Optional, Tuple
 
 from tools.registry import discover_builtin_tools, registry
-from toolsets import get_internal_toolsets, resolve_toolset, validate_toolset
+from toolsets import resolve_toolset, validate_toolset
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +47,7 @@ logger = logging.getLogger(__name__)
 _tool_loop = None          # persistent loop for the main (CLI) thread
 _tool_loop_lock = threading.Lock()
 _worker_thread_local = threading.local()  # per-worker-thread persistent loops
+_ASYNC_TOOL_INTERRUPT_POLL_SECONDS = 0.1
 
 
 def _get_tool_loop():
@@ -79,6 +87,30 @@ def _get_worker_loop():
     return loop
 
 
+def _run_coroutine_interruptibly(loop: asyncio.AbstractEventLoop, coro):
+    """Run a tool coroutine while polling the current thread interrupt flag."""
+    task = asyncio.ensure_future(coro, loop=loop)
+    try:
+        while not task.done():
+            loop.run_until_complete(asyncio.wait({task}, timeout=_ASYNC_TOOL_INTERRUPT_POLL_SECONDS))
+            try:
+                from tools.interrupt import is_interrupted
+            except Exception:
+                interrupted = False
+            else:
+                interrupted = is_interrupted()
+            if interrupted:
+                task.cancel()
+                loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+                raise InterruptedError("Async tool interrupted")
+        return task.result()
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+        raise
+
+
 def _run_async(coro):
     """Run an async coroutine from a sync context.
 
@@ -97,9 +129,7 @@ def _run_async(coro):
     asyncio.run()'s create-and-destroy lifecycle.
 
     This is the single source of truth for sync->async bridging in tool
-    handlers. The RL paths (agent_loop.py, tool_context.py) also provide
-    outer thread-pool wrapping as defense-in-depth, but each handler is
-    self-protecting via this function.
+    handlers. Each handler is self-protecting via this function.
     """
     try:
         loop = asyncio.get_running_loop()
@@ -142,7 +172,28 @@ def _run_async(coro):
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         future = pool.submit(_run_in_worker)
         try:
-            return future.result(timeout=300)
+            started_at = time.monotonic()
+            while True:
+                try:
+                    return future.result(timeout=_ASYNC_TOOL_INTERRUPT_POLL_SECONDS)
+                except concurrent.futures.TimeoutError:
+                    try:
+                        from tools.interrupt import is_interrupted
+                    except Exception:
+                        interrupted = False
+                    else:
+                        interrupted = is_interrupted()
+                    if interrupted:
+                        if loop_ready.wait(timeout=1.0) and worker_loop is not None:
+                            try:
+                                for t in asyncio.all_tasks(worker_loop):
+                                    worker_loop.call_soon_threadsafe(t.cancel)
+                            except RuntimeError:
+                                pass
+                        raise InterruptedError("Async tool interrupted")
+                    if time.monotonic() - started_at < 300:
+                        continue
+                    raise
         except concurrent.futures.TimeoutError:
             # Cancel the coroutine inside its own loop so the worker thread
             # can wind down instead of running forever.
@@ -167,10 +218,10 @@ def _run_async(coro):
     # lifetime — preventing "Event loop is closed" on GC cleanup.
     if threading.current_thread() is not threading.main_thread():
         worker_loop = _get_worker_loop()
-        return worker_loop.run_until_complete(coro)
+        return _run_coroutine_interruptibly(worker_loop, coro)
 
     tool_loop = _get_tool_loop()
-    return tool_loop.run_until_complete(coro)
+    return _run_coroutine_interruptibly(tool_loop, coro)
 
 
 # =============================================================================
@@ -198,6 +249,12 @@ try:
     discover_plugins()
 except Exception as e:
     logger.debug("Plugin discovery failed: %s", e)
+
+try:
+    from dovie_extension import load_extension
+    load_extension().register_tools()
+except Exception as e:
+    logger.debug("Dovie extension tool registration failed: %s", e)
 
 
 # =============================================================================
@@ -230,15 +287,13 @@ _LEGACY_TOOLSET_MAP = {
         "browser_press", "browser_get_images",
         "browser_vision", "browser_console"
     ],
-    "cronjob_tools": ["cronjob"],
-    "rl_tools": [
-        "rl_list_environments", "rl_select_environment",
-        "rl_get_current_config", "rl_edit_config",
-        "rl_start_training", "rl_check_status",
-        "rl_stop_training", "rl_get_results",
-        "rl_list_runs", "rl_test_inference"
+    "cronjob_tools": [
+        "dovie_automation_task_create",
+        "dovie_automation_task_list",
+        "dovie_automation_task_update",
+        "dovie_automation_task_remove",
     ],
-    "file_tools": ["read_file", "parse_document", "write_file", "patch", "search_files"],
+    "file_tools": ["read_file", "write_file", "patch", "search_files"],
     "tts_tools": ["text_to_speech"],
 }
 
@@ -248,7 +303,8 @@ _LEGACY_TOOLSET_MAP = {
 # =============================================================================
 
 # Module-level memoization for get_tool_definitions(). Keyed on
-# (frozenset(enabled_toolsets), frozenset(disabled_toolsets), registry._generation).
+# (frozenset(enabled_toolsets), frozenset(enabled_tools),
+#  frozenset(disabled_toolsets), registry._generation).
 # Hot callers (gateway runner, AIAgent.__init__) invoke this on every turn
 # with quiet_mode=True; caching avoids ~7 ms of registry walking + schema
 # filtering + check_fn probing per call. Only active when quiet_mode=True
@@ -259,6 +315,14 @@ _LEGACY_TOOLSET_MAP = {
 # inner check_fn TTL cache in registry.py handles environment drift (Docker
 # daemon start/stop, env var changes, etc.) on a 30 s horizon.
 _tool_defs_cache: Dict[tuple, List[Dict[str, Any]]] = {}
+
+# Hard cap on memoized get_tool_definitions() results. A long-lived Gateway
+# process sees many distinct toolset/config fingerprints over its lifetime
+# (per-session toolset sets, config edits, kanban-task toggles); without a
+# bound the cache grows unboundedly. 8 comfortably covers the warm working
+# set (the handful of distinct platform/toolset combos a gateway actually
+# serves) while keeping the cap small. (#19251)
+_TOOL_DEFS_CACHE_MAX = 8
 
 
 def _clear_tool_defs_cache() -> None:
@@ -272,6 +336,7 @@ def get_tool_definitions(
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
     quiet_mode: bool = False,
+    enabled_tools: List[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Get tool definitions for model API calls with toolset-based filtering.
@@ -280,6 +345,9 @@ def get_tool_definitions(
 
     Args:
         enabled_toolsets: Only include tools from these toolsets.
+        enabled_tools: Exact tool-name allowlist. When provided, this takes
+            precedence over enabled_toolsets and does not expand sibling tools
+            from the same toolset.
         disabled_toolsets: Exclude tools from these toolsets (if enabled_toolsets is None).
         quiet_mode: Suppress status prints.
 
@@ -304,9 +372,11 @@ def get_tool_definitions(
             cfg_fp = None
         cache_key = (
             frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
+            frozenset(enabled_tools) if enabled_tools is not None else None,
             frozenset(disabled_toolsets) if disabled_toolsets else None,
             registry._generation,
             cfg_fp,
+            bool(os.environ.get("HERMES_KANBAN_TASK")),
         )
         cached = _tool_defs_cache.get(cache_key)
         if cached is not None:
@@ -318,7 +388,12 @@ def get_tool_definitions(
             # schemas are treated as read-only by all known callers.
             return list(cached)
 
-    result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode)
+    result = _compute_tool_definitions(
+        enabled_toolsets,
+        disabled_toolsets,
+        quiet_mode,
+        enabled_tools=enabled_tools,
+    )
     if quiet_mode:
         # Cache the freshly-computed list, but hand callers a shallow copy so
         # downstream mutations (e.g. run_agent appending memory/LCM tool
@@ -327,6 +402,11 @@ def get_tool_definitions(
         # agent inits and providers that enforce unique tool names
         # (DeepSeek, Xiaomi MiMo, Moonshot Kimi) reject the request with
         # HTTP 400. Mirrors the cache-hit path above. (issue #17335)
+        # Bound the cache with LRU eviction so a long-lived Gateway process
+        # doesn't accumulate entries unboundedly across the many distinct
+        # toolset/config fingerprints it sees over its lifetime (#19251).
+        if len(_tool_defs_cache) >= _TOOL_DEFS_CACHE_MAX:
+            _tool_defs_cache.pop(next(iter(_tool_defs_cache)))  # evict oldest
         _tool_defs_cache[cache_key] = result
         return list(result)
     return result
@@ -336,15 +416,36 @@ def _compute_tool_definitions(
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
     quiet_mode: bool = False,
+    enabled_tools: List[str] = None,
 ) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
     # Determine which tool names the caller wants
     tools_to_include: set = set()
 
-    internal_toolsets = get_internal_toolsets()
-
-    if enabled_toolsets is not None:
-        for toolset_name in enabled_toolsets:
+    if enabled_tools is not None:
+        tools_to_include = {
+            str(tool_name).strip()
+            for tool_name in enabled_tools
+            if str(tool_name).strip()
+        }
+        if not quiet_mode:
+            if tools_to_include:
+                print(
+                    "✅ Enabled exact tools: "
+                    + ", ".join(sorted(tools_to_include))
+                )
+            else:
+                print("✅ Enabled exact tools: none")
+    elif enabled_toolsets is not None:
+        effective_enabled_toolsets = list(enabled_toolsets)
+        if os.environ.get("HERMES_KANBAN_TASK") and "kanban" not in effective_enabled_toolsets:
+            # Dispatcher-spawned workers are scoped by HERMES_KANBAN_TASK and
+            # must always receive the lifecycle handoff tools. Assignee
+            # profiles may intentionally restrict their normal chat toolsets
+            # (for token/cost reasons), but that should not strip the kanban
+            # worker's completion/block/heartbeat surface.
+            effective_enabled_toolsets.append("kanban")
+        for toolset_name in effective_enabled_toolsets:
             if validate_toolset(toolset_name):
                 resolved = resolve_toolset(toolset_name)
                 tools_to_include.update(resolved)
@@ -359,9 +460,9 @@ def _compute_tool_definitions(
                 print(f"⚠️  Unknown toolset: {toolset_name}")
     else:
         # Default: start with everything
-        from toolsets import get_all_toolsets
+        from toolsets import get_all_toolsets, is_internal_toolset
         for ts_name in get_all_toolsets():
-            if ts_name in internal_toolsets:
+            if is_internal_toolset(ts_name):
                 continue
             tools_to_include.update(resolve_toolset(ts_name))
 
@@ -392,6 +493,15 @@ def _compute_tool_definitions(
 
     # Ask the registry for schemas (only returns tools whose check_fn passes)
     filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
+    return _finalize_tool_definitions(filtered_tools, quiet_mode=quiet_mode)
+
+
+def _finalize_tool_definitions(
+    filtered_tools: List[Dict[str, Any]],
+    *,
+    quiet_mode: bool = False,
+) -> List[Dict[str, Any]]:
+    """Apply dynamic schema adjustments and bookkeeping after name filtering."""
 
     # The set of tool names that actually passed check_fn filtering.
     # Use this (not tools_to_include) for any downstream schema that references
@@ -496,6 +606,48 @@ def _compute_tool_definitions(
 # so if something slips through, the LLM sees a sensible message.
 _AGENT_LOOP_TOOLS = {"todo", "memory", "session_search", "delegate_task"}
 _READ_SEARCH_TOOLS = {"read_file", "search_files"}
+
+
+# =========================================================================
+# Tool error sanitization
+# =========================================================================
+#
+# Tool exceptions can carry arbitrary text into the model's context as the
+# `tool` message content. json.dumps() handles quote/backslash escaping so a
+# raw injection of `</tool_call>` won't break message framing, but the model
+# still *reads* those tokens and they can confuse downstream tool-call
+# parsing or, in adversarial cases, nudge it toward role-confusion framing.
+#
+# This helper strips structural framing tokens (XML role tags, CDATA,
+# markdown code fences) and caps the message at a sane upper bound before it
+# becomes part of the conversation. It's defense-in-depth — the json layer
+# already prevents framing escape — but cheap and worth having.
+#
+# Ported from ironclaw#1639.
+_TOOL_ERROR_ROLE_TAG_RE = re.compile(
+    r'</?(?:tool_call|function_call|result|response|output|input|system|assistant|user)>',
+    re.IGNORECASE,
+)
+_TOOL_ERROR_FENCE_OPEN_RE = re.compile(r'^\s*```(?:json|xml|html|markdown)?\s*', re.MULTILINE)
+_TOOL_ERROR_FENCE_CLOSE_RE = re.compile(r'\s*```\s*$', re.MULTILINE)
+_TOOL_ERROR_CDATA_RE = re.compile(r'<!\[CDATA\[.*?\]\]>', re.DOTALL)
+_TOOL_ERROR_MAX_LEN = 2000
+
+
+def _sanitize_tool_error(error_msg: str) -> str:
+    """Strip structural framing tokens from a tool error before showing it to the model.
+
+    See _TOOL_ERROR_ROLE_TAG_RE docstring above for rationale.
+    """
+    if not error_msg:
+        return "[TOOL_ERROR] "
+    sanitized = _TOOL_ERROR_ROLE_TAG_RE.sub("", error_msg)
+    sanitized = _TOOL_ERROR_FENCE_OPEN_RE.sub("", sanitized)
+    sanitized = _TOOL_ERROR_FENCE_CLOSE_RE.sub("", sanitized)
+    sanitized = _TOOL_ERROR_CDATA_RE.sub("", sanitized)
+    if len(sanitized) > _TOOL_ERROR_MAX_LEN:
+        sanitized = sanitized[:_TOOL_ERROR_MAX_LEN - 3] + "..."
+    return f"[TOOL_ERROR] {sanitized}"
 
 
 # =========================================================================
@@ -706,8 +858,8 @@ def handle_function_call(
     session_id: Optional[str] = None,
     user_task: Optional[str] = None,
     enabled_tools: Optional[List[str]] = None,
-    parent_agent: Optional[Any] = None,
     skip_pre_tool_call_hook: bool = False,
+    parent_agent: Optional[Any] = None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -721,8 +873,6 @@ def handle_function_call(
                        execute_code uses this list to determine which sandbox
                        tools to generate.  Falls back to the process-global
                        ``_last_resolved_tool_names`` for backward compat.
-        parent_agent: The active AIAgent for registry tools that need the
-                      current run context, such as profile testing tools.
 
     Returns:
         Function result as a JSON string.
@@ -761,6 +911,20 @@ def handle_function_call(
             if block_message is not None:
                 return json.dumps({"error": block_message}, ensure_ascii=False)
 
+        # ACP/Zed edit approval runs before any file mutation.  The requester
+        # is bound via ContextVar only for ACP sessions, so CLI/gateway paths
+        # are unaffected when it is unset.
+        try:
+            from acp_adapter.edit_approval import maybe_require_edit_approval
+
+            edit_block_message = maybe_require_edit_approval(function_name, function_args)
+            if edit_block_message is not None:
+                return edit_block_message
+        except Exception as _edit_approval_err:
+            logger.debug("ACP edit approval guard error: %s", _edit_approval_err)
+            if function_name in {"write_file", "patch"}:
+                return json.dumps({"error": "Edit approval denied: approval guard failed"}, ensure_ascii=False)
+
         # Notify the read-loop tracker when a non-read/search tool runs,
         # so the *consecutive* counter resets (reads after other work are fine).
         if function_name not in _READ_SEARCH_TOOLS:
@@ -778,23 +942,22 @@ def handle_function_call(
         # to wrap every tool manually.  We use monotonic() so the value is
         # unaffected by wall-clock adjustments during the call.
         _dispatch_start = time.monotonic()
-        dispatch_kwargs = {"task_id": task_id}
-        if parent_agent is not None:
-            dispatch_kwargs["parent_agent"] = parent_agent
         if function_name == "execute_code":
             # Prefer the caller-provided list so subagents can't overwrite
             # the parent's tool set via the process-global.
             sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
             result = registry.dispatch(
                 function_name, function_args,
-                **dispatch_kwargs,
+                task_id=task_id,
                 enabled_tools=sandbox_enabled,
+                parent_agent=parent_agent,
             )
         else:
             result = registry.dispatch(
                 function_name, function_args,
-                **dispatch_kwargs,
+                task_id=task_id,
                 user_task=user_task,
+                parent_agent=parent_agent,
             )
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
 
@@ -843,7 +1006,7 @@ def handle_function_call(
     except Exception as e:
         error_msg = f"Error executing {function_name}: {str(e)}"
         logger.exception(error_msg)
-        return json.dumps({"error": error_msg}, ensure_ascii=False)
+        return json.dumps({"error": _sanitize_tool_error(error_msg)}, ensure_ascii=False)
 
 
 # =============================================================================

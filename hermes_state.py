@@ -25,11 +25,20 @@ from pathlib import Path
 
 from agent.memory_manager import sanitize_context
 from hermes_constants import get_hermes_home
-from hermes_state_messages import SessionDBMessageMixin
-from hermes_state_platform import SessionDBPlatformMixin
-from hermes_state_runs import ACTIVE_RUN_STATUSES, SessionDBRunMixin
-from hermes_state_search import SessionDBSearchMixin
-from typing import Any, Callable, Dict, List, Optional, TypeVar
+from hermes_state_agent_profiles import SessionDBAgentProfileMixin
+from hermes_state_branch import SessionDBBranchMixin
+from hermes_state_member_chat import SessionDBMemberChatMixin
+from hermes_state_participants import SessionDBParticipantMixin
+from hermes_state_runs import SessionDBRunMixin
+from hermes_state_team_capabilities import SessionDBTeamCapabilityMixin
+from hermes_team_mission.state.session_mixin import SessionDBTeamMissionMixin
+from hermes_state_team_registry import SessionDBTeamRegistryMixin
+from hermes_team_mission.state.schema import compact_team_mission_event_json_storage
+from hermes_team_mission.state.schema import reconcile_team_mission_node_primary_key
+from hermes_team_mission.state.schema import team_mission_deferred_index_sql
+from hermes_team_mission.state.schema import team_mission_schema_sql
+from hermes_team_mission.state.maintenance import run_team_mission_startup_maintenance
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +46,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 26
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -204,6 +213,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     end_reason TEXT,
     message_count INTEGER DEFAULT 0,
     tool_call_count INTEGER DEFAULT 0,
+    preview TEXT DEFAULT '',
+    last_active REAL,
     input_tokens INTEGER DEFAULT 0,
     output_tokens INTEGER DEFAULT 0,
     cache_read_tokens INTEGER DEFAULT 0,
@@ -218,12 +229,76 @@ CREATE TABLE IF NOT EXISTS sessions (
     cost_source TEXT,
     pricing_version TEXT,
     title TEXT,
+    display_title TEXT DEFAULT '',
+    display_title_source TEXT DEFAULT '',
     api_call_count INTEGER DEFAULT 0,
     handoff_state TEXT,
     handoff_platform TEXT,
     handoff_error TEXT,
+    rewind_count INTEGER NOT NULL DEFAULT 0,
     transient INTEGER DEFAULT 0,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
+);
+
+-- Control-plane denormalized session index. One row per user-visible session.
+-- Status fields are a WRITE-TIME projection so the sidebar read path is a single
+-- indexed query (no recursive CTE / live merge / per-session approval / per-profile
+-- fan-out). It is a projection of the source of truth (sessions + runs + team
+-- mission events) and can always be rebuilt via reconcile_session_index().
+CREATE TABLE IF NOT EXISTS session_index (
+    session_id TEXT PRIMARY KEY,
+    owner_agent_profile_id TEXT NOT NULL DEFAULT '',
+    owner_profile_version_id TEXT NOT NULL DEFAULT '',
+    runtime_scope_key TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    preview TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'unknown',
+    transient INTEGER NOT NULL DEFAULT 0,
+    session_kind TEXT NOT NULL DEFAULT 'hermes_session',
+    status TEXT NOT NULL DEFAULT 'idle',
+    running INTEGER NOT NULL DEFAULT 0,
+    waiting_approval INTEGER NOT NULL DEFAULT 0,
+    active_run_id TEXT NOT NULL DEFAULT '',
+    active_runtime_session_id TEXT NOT NULL DEFAULT '',
+    pending_approval_count INTEGER NOT NULL DEFAULT 0,
+    team_id TEXT NOT NULL DEFAULT '',
+    mission_id TEXT NOT NULL DEFAULT '',
+    conversation_id TEXT NOT NULL DEFAULT '',
+    message_count INTEGER NOT NULL DEFAULT 0,
+    started_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    last_activity REAL
+);
+
+CREATE TABLE IF NOT EXISTS member_chat_runs (
+    run_id TEXT PRIMARY KEY,
+    conversation_session_id TEXT NOT NULL DEFAULT '',
+    member_id TEXT NOT NULL DEFAULT '',
+    agent_profile_id TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    -- Frontend's pre-reserved optimistic run_id on the conversation session.
+    -- Mirrored frames are stamped with this id so the frontend's existing
+    -- "运行中" state on the conversation settles the moment terminal arrives —
+    -- without it, mirror frames carry a fresh id the frontend never registered.
+    optimistic_run_id TEXT NOT NULL DEFAULT '',
+    relayed INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS conversation_participants (
+    conversation_session_id TEXT NOT NULL,
+    participant_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    member_id TEXT NOT NULL DEFAULT '',
+    agent_profile_id TEXT NOT NULL DEFAULT '',
+    agent_profile_version_id TEXT NOT NULL DEFAULT '',
+    runtime_scope_key TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    avatar TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (conversation_session_id, participant_id)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -242,7 +317,35 @@ CREATE TABLE IF NOT EXISTS messages (
     reasoning_details TEXT,
     codex_reasoning_items TEXT,
     codex_message_items TEXT,
-    metadata_json TEXT
+    platform_message_id TEXT,
+    metadata_json TEXT,
+    active INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS session_lineage (
+    session_id TEXT PRIMARY KEY,
+    parent_session_id TEXT,
+    root_session_id TEXT NOT NULL,
+    branch_from_message_row_id INTEGER,
+    branch_from_turn_id TEXT,
+    branch_from_run_id TEXT,
+    branch_from_client_message_id TEXT,
+    branch_origin TEXT NOT NULL,
+    branch_mode TEXT NOT NULL,
+    branch_depth INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id),
+    FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
+);
+
+CREATE TABLE IF NOT EXISTS session_branch_requests (
+    idempotency_key TEXT PRIMARY KEY,
+    source_session_id TEXT NOT NULL,
+    branch_fingerprint TEXT NOT NULL,
+    result_session_id TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (source_session_id) REFERENCES sessions(id),
+    FOREIGN KEY (result_session_id) REFERENCES sessions(id)
 );
 
 CREATE TABLE IF NOT EXISTS state_meta (
@@ -295,19 +398,189 @@ CREATE TABLE IF NOT EXISTS run_event_archives (
     metadata_json TEXT
 );
 
+CREATE TABLE IF NOT EXISTS agent_teams (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    avatar_json TEXT,
+    description TEXT,
+    lead_agent_profile_id TEXT,
+    default_mode TEXT NOT NULL,
+    policy_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_team_members (
+    id TEXT PRIMARY KEY,
+    team_id TEXT NOT NULL REFERENCES agent_teams(id) ON DELETE CASCADE,
+    agent_profile_id TEXT NOT NULL,
+    agent_profile_version_id TEXT,
+    profile_name TEXT,
+    profile_avatar TEXT,
+    role TEXT NOT NULL,
+    capability_tags_json TEXT NOT NULL,
+    auto_assignable INTEGER NOT NULL,
+    max_concurrent_nodes INTEGER NOT NULL,
+    permission_mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(team_id, agent_profile_id)
+);
+
+CREATE TABLE IF NOT EXISTS agent_profiles (
+    id TEXT PRIMARY KEY,
+    slug TEXT NOT NULL,
+    name TEXT NOT NULL,
+    avatar TEXT,
+    description TEXT,
+    category TEXT,
+    tags_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    is_system_default INTEGER NOT NULL,
+    hermes_profile_name TEXT,
+    hermes_home_path TEXT NOT NULL,
+    default_model TEXT,
+    default_provider TEXT,
+    default_permission_mode TEXT,
+    default_toolsets_json TEXT NOT NULL,
+    recommended_skills_json TEXT NOT NULL DEFAULT '[]',
+    platform_base_toolsets_initialized INTEGER NOT NULL,
+    current_version_id TEXT,
+    current_version_number INTEGER NOT NULL,
+    source_kind TEXT,
+    public_profile_id TEXT,
+    public_version_id TEXT,
+    public_content_hash TEXT,
+    metadata_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    last_used_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS agent_profile_drafts (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    draft_kind TEXT NOT NULL,
+    base_agent_profile_id TEXT,
+    base_version_id TEXT,
+    target_agent_profile_id TEXT,
+    source_session_id TEXT,
+    source_agent_profile_id TEXT,
+    source_run_id TEXT,
+    source_turn_id TEXT,
+    source_client_message_id TEXT,
+    workspace_id TEXT,
+    name TEXT NOT NULL,
+    avatar TEXT,
+    description TEXT,
+    category TEXT,
+    tags_json TEXT NOT NULL,
+    architecture_template_id TEXT,
+    recommended_toolsets_json TEXT NOT NULL,
+    recommended_skills_json TEXT NOT NULL,
+    skill_creation_plans_json TEXT NOT NULL,
+    missing_capabilities_json TEXT NOT NULL,
+    default_model TEXT,
+    default_provider TEXT,
+    default_permission_mode TEXT,
+    files_json TEXT NOT NULL,
+    runtime_prepared_at REAL,
+    published_agent_profile_id TEXT,
+    published_version_id TEXT,
+    metadata_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    published_at REAL
+);
+""" + team_mission_schema_sql() + """
+CREATE TABLE IF NOT EXISTS team_capability_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    team_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    source_digest TEXT NOT NULL,
+    source_packet_digest TEXT NOT NULL,
+    team_profile_json TEXT NOT NULL,
+    member_profiles_json TEXT NOT NULL,
+    capability_axes_json TEXT NOT NULL,
+    assignment_policy_json TEXT NOT NULL,
+    evidence_refs_json TEXT NOT NULL,
+    stale_reason TEXT,
+    generated_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(team_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS team_capability_snapshot_bindings (
+    binding_id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
+    conversation_id TEXT,
+    snapshot_id TEXT NOT NULL REFERENCES team_capability_snapshots(snapshot_id) ON DELETE CASCADE,
+    snapshot_version INTEGER NOT NULL,
+    source_digest TEXT NOT NULL,
+    pinned_at REAL NOT NULL,
+    UNIQUE(mission_id)
+);
+
 """
 
-SCHEMA_INDEX_SQL = """
-CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
-CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
-CREATE INDEX IF NOT EXISTS idx_runs_session_status ON runs(session_id, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_runs_scope_status ON runs(runtime_scope_key, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_run_events_session_seq ON run_events(session_id, seq);
-CREATE INDEX IF NOT EXISTS idx_run_events_scope_seq ON run_events(runtime_scope_key, session_id, seq);
-CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, id);
-CREATE INDEX IF NOT EXISTS idx_run_event_archives_session ON run_event_archives(session_id, archived_at DESC);
+# Indexes must be created after _reconcile_columns() runs. SQLite parses index
+# definitions immediately; if an existing table is missing an indexed column,
+# CREATE INDEX fails before the reconciler can add that column.
+DEFERRED_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_sessions_source
+    ON sessions(source);
+CREATE INDEX IF NOT EXISTS idx_sessions_parent
+    ON sessions(parent_session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_started
+    ON sessions(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_effective_last_active
+    ON sessions(COALESCE(last_active, started_at) DESC, started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_session_index_order
+    ON session_index(updated_at DESC, started_at DESC, session_id DESC);
+CREATE INDEX IF NOT EXISTS idx_session_index_profile
+    ON session_index(owner_agent_profile_id, owner_profile_version_id);
+CREATE INDEX IF NOT EXISTS idx_messages_session
+    ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_messages_session_active
+    ON messages(session_id, active, timestamp);
+CREATE INDEX IF NOT EXISTS idx_session_lineage_parent
+    ON session_lineage(parent_session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_lineage_root
+    ON session_lineage(root_session_id, branch_depth, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_lineage_branch_point
+    ON session_lineage(branch_from_message_row_id);
+CREATE INDEX IF NOT EXISTS idx_runs_session_status
+    ON runs(session_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_scope_status
+    ON runs(runtime_scope_key, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_events_session_seq
+    ON run_events(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_events_scope_seq
+    ON run_events(runtime_scope_key, session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_events_run
+    ON run_events(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_run_event_archives_session
+    ON run_event_archives(session_id, archived_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_teams_status_updated
+    ON agent_teams(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_team_members_team_id
+    ON agent_team_members(team_id, role, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_agent_profiles_status_updated
+    ON agent_profiles(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_profile_drafts_status_updated
+    ON agent_profile_drafts(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_profile_drafts_source
+    ON agent_profile_drafts(source_session_id, source_agent_profile_id, updated_at DESC);
+""" + team_mission_deferred_index_sql() + """
+CREATE INDEX IF NOT EXISTS idx_team_capability_snapshots_team
+    ON team_capability_snapshots(team_id, version DESC);
+CREATE INDEX IF NOT EXISTS idx_team_capability_snapshot_bindings_mission
+    ON team_capability_snapshot_bindings(mission_id);
+CREATE INDEX IF NOT EXISTS idx_team_capability_snapshot_bindings_conversation
+    ON team_capability_snapshot_bindings(conversation_id);
 """
 
 FTS_SQL = """
@@ -366,7 +639,7 @@ END;
 """
 
 
-class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, SessionDBPlatformMixin):
+class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBMemberChatMixin, SessionDBParticipantMixin, SessionDBRunMixin, SessionDBBranchMixin):
     """
     SQLite-backed session storage with FTS5 search.
 
@@ -386,7 +659,7 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
     _WRITE_MAX_RETRIES = 15
     _WRITE_RETRY_MIN_S = 0.020   # 20ms
     _WRITE_RETRY_MAX_S = 0.150   # 150ms
-    # Attempt a PASSIVE WAL checkpoint every N successful writes.
+    # Attempt a TRUNCATE WAL checkpoint every N successful writes.
     _CHECKPOINT_EVERY_N_WRITES = 50
 
     def __init__(self, db_path: Path = None):
@@ -412,8 +685,33 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
             self._conn.row_factory = sqlite3.Row
             apply_wal_with_fallback(self._conn, db_label="state.db")
             self._conn.execute("PRAGMA foreign_keys=ON")
+            # 增量自动回收:删除产生的空闲页进入 freelist 并被后续写入复用,文件不再
+            # 无限膨胀(团队任务的流式 delta「删了不回收」曾把 state.db 撑到 2.5GB、
+            # 61% 空洞,连 15 行的会话列表查询都被拖到 ~1.8s)。对新库立即生效;已有的
+            # NONE 模式库需 VACUUM 一次切换(运维侧已处理)。必须在建表前设置。
+            try:
+                self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            except Exception:
+                pass
 
             self._init_schema()
+            run_team_mission_startup_maintenance(self, logger)
+            try:
+                repaired_fk_rows = self.repair_orphaned_foreign_key_rows()
+                if repaired_fk_rows:
+                    logger.info(
+                        "repaired %d orphaned state foreign-key row(s)",
+                        repaired_fk_rows,
+                    )
+            except Exception as repair_fk_exc:
+                logger.warning(
+                    "orphaned state foreign-key repair skipped: %s",
+                    repair_fk_exc,
+                )
+            try:
+                self._reclaim_freelist_on_startup()
+            except Exception as reclaim_exc:
+                logger.warning("state.db freelist reclaim skipped: %s", reclaim_exc)
         except Exception as exc:
             # Capture the cause so /resume and friends can surface WHY the
             # session DB is unavailable instead of a bare "Session database
@@ -484,18 +782,47 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
             "database is locked after max retries"
         )
 
-    def _try_wal_checkpoint(self) -> None:
-        """Best-effort PASSIVE WAL checkpoint.  Never blocks, never raises.
+    def _reclaim_freelist_on_startup(self) -> None:
+        """启动时把删除留下的空闲页增量还给操作系统,防止 state.db 膨胀。
 
-        Flushes committed WAL frames back into the main DB file for any
-        frames that no other connection currently needs.  Keeps the WAL
-        from growing unbounded when many processes hold persistent
+        仅对 ``auto_vacuum=INCREMENTAL`` 的库有效(NONE 模式下
+        ``incremental_vacuum`` 是 no-op)。限制单次回收页数,避免积压很多时
+        长时间卡住启动;日常空闲页很少,通常是毫秒级。
+        """
+        MIN_FREE_PAGES = 2560      # ~10MB 以下不值得回收
+        MAX_PAGES = 50000          # 单次最多回收 ~200MB,避免积压时卡启动
+        try:
+            free_pages = int(self._conn.execute("PRAGMA freelist_count").fetchone()[0])
+        except Exception:
+            return
+        if free_pages < MIN_FREE_PAGES:
+            return
+        pages = min(free_pages, MAX_PAGES)
+        with self._lock:
+            self._conn.execute(f"PRAGMA incremental_vacuum({pages})")
+        logger.info(
+            "state.db incremental_vacuum reclaimed up to %d free page(s) (freelist was %d)",
+            pages, free_pages,
+        )
+
+    def _try_wal_checkpoint(self) -> None:
+        """Best-effort TRUNCATE WAL checkpoint.  Never raises.
+
+        Flushes committed WAL frames back into the main DB file and
+        truncates the WAL file to zero bytes.  Keeps the WAL from
+        growing unbounded when many processes hold persistent
         connections.
+
+        PASSIVE checkpoint never truncates the WAL file; it leaves the file
+        at its high-water mark until an explicit TRUNCATE checkpoint runs.
+        This method is already off the hot write path and protected by
+        ``self._lock``, so a short TRUNCATE checkpoint is the right tradeoff
+        for long-lived desktop/gateway processes.
         """
         try:
             with self._lock:
                 result = self._conn.execute(
-                    "PRAGMA wal_checkpoint(PASSIVE)"
+                    "PRAGMA wal_checkpoint(TRUNCATE)"
                 ).fetchone()
                 if result and result[1] > 0:
                     logger.debug(
@@ -508,13 +835,13 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
     def close(self):
         """Close the database connection.
 
-        Attempts a PASSIVE WAL checkpoint first so that exiting processes
-        help keep the WAL file from growing unbounded.
+        Attempts a TRUNCATE WAL checkpoint first so that exiting processes
+        help shrink the WAL file.
         """
         with self._lock:
             if self._conn:
                 try:
-                    self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 except Exception:
                     pass
                 self._conn.close()
@@ -607,41 +934,155 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
                             "reconcile %s.%s: %s", table_name, col_name, exc,
                         )
 
-    def _backfill_run_event_scope_keys(self, cursor: sqlite3.Cursor) -> None:
-        """Populate runtime_scope_key for event rows created before the column existed."""
-        try:
-            rows = cursor.execute(
-                """
-                SELECT id, session_id, payload_json, event_json
-                FROM run_events
-                WHERE runtime_scope_key IS NULL OR runtime_scope_key = ''
-                """
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return
+    def _backfill_session_list_summaries(self, cursor: sqlite3.Cursor) -> None:
+        """Populate denormalized list fields from active message rows.
+
+        This is a one-time compatibility path for databases created before
+        ``sessions.preview`` and ``sessions.last_active`` existed. New writes
+        keep these fields current, so list endpoints do not need to aggregate
+        over the messages table on every sidebar refresh.
+        """
+        cursor.execute(
+            """
+            UPDATE sessions
+            SET
+                message_count = (
+                    SELECT COUNT(1)
+                    FROM messages m
+                    WHERE m.session_id = sessions.id
+                      AND m.active = 1
+                ),
+                preview = COALESCE((
+                    SELECT CASE
+                        WHEN LENGTH(raw.preview_raw) > 60 THEN SUBSTR(raw.preview_raw, 1, 60) || '...'
+                        ELSE raw.preview_raw
+                    END
+                    FROM (
+                        SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63) AS preview_raw
+                        FROM messages m
+                        WHERE m.session_id = sessions.id
+                          AND m.active = 1
+                          AND m.role = 'user'
+                          AND m.content IS NOT NULL
+                        ORDER BY m.timestamp, m.id
+                        LIMIT 1
+                    ) raw
+                ), ''),
+                last_active = (
+                    SELECT MAX(m.timestamp)
+                    FROM messages m
+                    WHERE m.session_id = sessions.id
+                      AND m.active = 1
+                )
+            """
+        )
+        rows = cursor.execute(
+            """
+            SELECT
+                s.id,
+                s.display_title_source,
+                m.content AS first_user_content
+            FROM sessions s
+            LEFT JOIN messages m
+              ON m.id = (
+                  SELECT m2.id
+                  FROM messages m2
+                  WHERE m2.session_id = s.id
+                    AND m2.active = 1
+                    AND m2.role = 'user'
+                    AND m2.content IS NOT NULL
+                  ORDER BY m2.timestamp, m2.id
+                  LIMIT 1
+              )
+            """
+        ).fetchall()
         for row in rows:
-            event = {}
-            payload = {}
-            try:
-                event = json.loads(row["event_json"] or "{}")
-            except Exception:
-                event = {}
-            try:
-                payload = json.loads(row["payload_json"] or "{}")
-            except Exception:
-                payload = {}
-            scope = str(
-                (event if isinstance(event, dict) else {}).get("runtime_scope_key")
-                or (payload if isinstance(payload, dict) else {}).get("runtime_scope_key")
-                or row["session_id"]
-                or ""
-            ).strip()
-            if not scope:
+            if str(row["display_title_source"] or "") == "user":
+                continue
+            display_title = self._message_display_title_text(row["first_user_content"])
+            cursor.execute(
+                """
+                UPDATE sessions
+                SET display_title = ?,
+                    display_title_source = CASE
+                        WHEN ? != '' THEN 'first_user_message'
+                        ELSE ''
+                    END
+                WHERE id = ?
+                """,
+                (display_title, display_title, row["id"]),
+            )
+
+    def _migrate_agent_profile_versions_to_latest_profiles(self, cursor: sqlite3.Cursor) -> None:
+        """Fold the removed profile version table into latest profile rows."""
+
+        tables = cursor.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'agent_profile_versions'
+            """
+        ).fetchall()
+        if not tables:
+            return
+        rows = cursor.execute(
+            """
+            SELECT *
+            FROM agent_profile_versions
+            ORDER BY agent_profile_id ASC, version_number DESC, published_at DESC, id ASC
+            """
+        ).fetchall()
+        seen_profile_ids: set[str] = set()
+        for version in rows:
+            profile_id = str(version["agent_profile_id"] or "").strip()
+            if not profile_id or profile_id in seen_profile_ids:
+                continue
+            seen_profile_ids.add(profile_id)
+            profile = cursor.execute(
+                "SELECT * FROM agent_profiles WHERE id = ?",
+                (profile_id,),
+            ).fetchone()
+            if profile is None:
                 continue
             cursor.execute(
-                "UPDATE run_events SET runtime_scope_key = ? WHERE id = ?",
-                (scope, row["id"]),
+                """
+                UPDATE agent_profiles
+                SET
+                    name = COALESCE(NULLIF(?, ''), name),
+                    avatar = COALESCE(NULLIF(?, ''), avatar),
+                    description = COALESCE(NULLIF(?, ''), description),
+                    category = COALESCE(NULLIF(?, ''), category),
+                    tags_json = COALESCE(NULLIF(?, ''), tags_json),
+                    default_model = COALESCE(NULLIF(?, ''), default_model),
+                    default_provider = COALESCE(NULLIF(?, ''), default_provider),
+                    default_permission_mode = COALESCE(NULLIF(?, ''), default_permission_mode),
+                    default_toolsets_json = COALESCE(NULLIF(?, ''), default_toolsets_json),
+                    recommended_skills_json = COALESCE(NULLIF(?, ''), recommended_skills_json),
+                    current_version_id = COALESCE(NULLIF(?, ''), current_version_id),
+                    current_version_number = CASE WHEN ? > 0 THEN ? ELSE current_version_number END,
+                    updated_at = CASE WHEN ? > updated_at THEN ? ELSE updated_at END
+                WHERE id = ?
+                """,
+                (
+                    version["name"] or "",
+                    version["avatar"] or "",
+                    version["description"] or "",
+                    version["category"] or "",
+                    version["tags_json"] or "",
+                    version["default_model"] or "",
+                    version["default_provider"] or "",
+                    version["default_permission_mode"] or "",
+                    version["default_toolsets_json"] or "",
+                    version["recommended_skills_json"] or "",
+                    version["id"] or "",
+                    int(version["version_number"] or 0),
+                    int(version["version_number"] or 0),
+                    float(version["published_at"] or 0),
+                    float(version["published_at"] or 0),
+                    profile_id,
+                ),
             )
+        cursor.execute("DROP TABLE IF EXISTS agent_profile_versions")
 
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
@@ -666,13 +1107,25 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
         # migration was skipped (e.g. due to version renumbering), the
         # column gets created here.
         self._reconcile_columns(cursor)
+        reconcile_team_mission_node_primary_key(cursor)
 
-        # Index DDL must run after column reconciliation. Existing tables
-        # created by older Hermes versions may be missing newly declared
-        # columns even when CREATE TABLE IF NOT EXISTS succeeds.
-        self._backfill_run_event_scope_keys(cursor)
-        cursor.executescript(SCHEMA_INDEX_SQL)
-        self._ensure_active_run_unique_index(cursor)
+        # Indexes that reference reconciler-added columns must be created
+        # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL
+        # makes the initial executescript fail on legacy DBs (the index's
+        # WHERE clause references a column that doesn't exist yet).
+        try:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_platform_msg_id "
+                "ON messages(session_id, platform_message_id) "
+                "WHERE platform_message_id IS NOT NULL"
+            )
+        except sqlite3.OperationalError as exc:
+            logger.debug("idx_messages_platform_msg_id create skipped: %s", exc)
+
+        try:
+            cursor.executescript(DEFERRED_INDEX_SQL)
+        except sqlite3.OperationalError as exc:
+            logger.debug("deferred message indexes create skipped: %s", exc)
 
         # ── Schema version bookkeeping ─────────────────────────────────
         # Bump to current so future data migrations (if any) can gate on
@@ -680,6 +1133,7 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
         cursor.execute("SELECT version FROM schema_version LIMIT 1")
         row = cursor.fetchone()
         if row is None:
+            self._backfill_session_list_summaries(cursor)
             cursor.execute(
                 "INSERT INTO schema_version (version) VALUES (?)",
                 (SCHEMA_VERSION,),
@@ -751,6 +1205,17 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
                     "COALESCE(tool_calls, '') "
                     "FROM messages"
                 )
+            if current_version < 14:
+                try:
+                    cursor.execute("UPDATE messages SET active = 1 WHERE active IS NULL")
+                except sqlite3.OperationalError:
+                    pass
+            if current_version < 18:
+                self._backfill_session_list_summaries(cursor)
+            if current_version < 20:
+                self._migrate_agent_profile_versions_to_latest_profiles(cursor)
+            if current_version < 24:
+                compact_team_mission_event_json_storage(cursor, logger)
             if current_version < SCHEMA_VERSION:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
@@ -779,61 +1244,6 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
             cursor.executescript(FTS_TRIGRAM_SQL)
 
         self._conn.commit()
-
-    def _ensure_active_run_unique_index(self, cursor: sqlite3.Cursor) -> None:
-        """Enforce at most one non-terminal run per stored session."""
-        quoted_statuses = ",".join(
-            "'" + status.replace("'", "''") + "'"
-            for status in sorted(ACTIVE_RUN_STATUSES)
-        )
-        duplicates = cursor.execute(
-            f"""
-            SELECT session_id
-            FROM runs
-            WHERE status IN ({quoted_statuses})
-            GROUP BY session_id
-            HAVING COUNT(*) > 1
-            """
-        ).fetchall()
-        for row in duplicates:
-            session_id = row["session_id"] if isinstance(row, sqlite3.Row) else row[0]
-            active_rows = cursor.execute(
-                f"""
-                SELECT run_id
-                FROM runs
-                WHERE session_id = ?
-                  AND status IN ({quoted_statuses})
-                ORDER BY updated_at DESC, started_at DESC
-                """,
-                (session_id,),
-            ).fetchall()
-            keep = active_rows[0]["run_id"] if isinstance(active_rows[0], sqlite3.Row) else active_rows[0][0]
-            stale = [
-                r["run_id"] if isinstance(r, sqlite3.Row) else r[0]
-                for r in active_rows[1:]
-            ]
-            if stale:
-                placeholders = ",".join("?" for _ in stale)
-                cursor.execute(
-                    f"""
-                    UPDATE runs
-                    SET status = 'failed',
-                        completed_at = COALESCE(completed_at, updated_at),
-                        error = COALESCE(NULLIF(error, ''), ?)
-                    WHERE run_id IN ({placeholders})
-                    """,
-                    (
-                        f"superseded by active run constraint; kept active run {keep}",
-                        *stale,
-                    ),
-                )
-        cursor.execute(
-            f"""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_active_per_session
-            ON runs(session_id)
-            WHERE status IN ({quoted_statuses})
-            """
-        )
 
     # =========================================================================
     # Session lifecycle
@@ -874,6 +1284,7 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
         """Create a new session record. Returns the session_id."""
         self._insert_session_row(session_id, source, **kwargs)
         return session_id
+
     def end_session(self, session_id: str, end_reason: str) -> None:
         """Mark a session as ended.
 
@@ -900,6 +1311,67 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
                 (session_id,),
             )
         self._execute_write(_do)
+
+    def repair_orphaned_foreign_key_rows(self) -> int:
+        """Repair non-authoritative index/cache rows left dangling by old builds.
+
+        The canonical owners are ``sessions``, ``team_missions`` and
+        ``team_capability_snapshots``.  Lineage/idempotency/snapshot binding
+        rows only index those owners, so deleting or orphaning invalid rows is
+        the only valid recovery.  This keeps ``PRAGMA foreign_key_check`` clean
+        without inventing placeholder parent records.
+        """
+
+        def affected(cursor: sqlite3.Cursor) -> int:
+            return max(0, int(cursor.rowcount or 0))
+
+        def _do(conn):
+            repaired = 0
+            repaired += affected(conn.execute(
+                """
+                DELETE FROM session_lineage
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM sessions s WHERE s.id = session_lineage.session_id
+                )
+                """
+            ))
+            repaired += affected(conn.execute(
+                """
+                UPDATE session_lineage
+                SET parent_session_id = NULL
+                WHERE parent_session_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sessions s WHERE s.id = session_lineage.parent_session_id
+                  )
+                """
+            ))
+            repaired += affected(conn.execute(
+                """
+                DELETE FROM session_branch_requests
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM sessions s WHERE s.id = session_branch_requests.source_session_id
+                )
+                   OR NOT EXISTS (
+                    SELECT 1 FROM sessions s WHERE s.id = session_branch_requests.result_session_id
+                )
+                """
+            ))
+            repaired += affected(conn.execute(
+                """
+                DELETE FROM team_capability_snapshot_bindings
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM team_missions m
+                    WHERE m.mission_id = team_capability_snapshot_bindings.mission_id
+                )
+                   OR NOT EXISTS (
+                    SELECT 1 FROM team_capability_snapshots s
+                    WHERE s.snapshot_id = team_capability_snapshot_bindings.snapshot_id
+                )
+                """
+            ))
+            return repaired
+
+        return self._execute_write(_do)
 
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
         """Store the full assembled system prompt snapshot."""
@@ -1172,14 +1644,23 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
 
         return cleaned
 
-    def set_session_title(self, session_id: str, title: str) -> bool:
+    def set_session_title(self, session_id: str, title: str, *, title_source: str = "user") -> bool:
         """Set or update a session's title.
 
         Returns True if session was found and title was set.
         Raises ValueError if title is already in use by another session,
         or if the title fails validation (too long, invalid characters).
         Empty/whitespace-only strings are normalized to None (clearing the title).
+
+        ``title`` remains the legacy unique Hermes title used by CLI resume and
+        platform integrations. ``display_title`` is the non-unique product title
+        Dovie shows in history. Auto-generated summary titles are no longer a
+        valid write source; ``title_source="auto"`` is ignored so canonical
+        titles cannot regress behind first-user-message display titles.
         """
+        normalized_source = str(title_source or "user").strip().lower() or "user"
+        if normalized_source == "auto":
+            return False
         title = self.sanitize_title(title)
         def _do(conn):
             if title:
@@ -1194,8 +1675,14 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
                         f"Title '{title}' is already in use by session {conflict['id']}"
                     )
             cursor = conn.execute(
-                "UPDATE sessions SET title = ? WHERE id = ?",
-                (title, session_id),
+                """
+                UPDATE sessions
+                SET title = ?,
+                    display_title = COALESCE(?, ''),
+                    display_title_source = ?
+                WHERE id = ?
+                """,
+                (title, title or "", normalized_source, session_id),
             )
             return cursor.rowcount
         rowcount = self._execute_write(_do)
@@ -1325,10 +1812,11 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
         exclude_sources: List[str] = None,
         limit: int = 20,
         offset: int = 0,
-        page_cursor: Optional[Dict[str, Any]] = None,
         include_children: bool = False,
         project_compression_tips: bool = True,
         order_by_last_active: bool = False,
+        page_cursor: Optional[Dict[str, Any]] = None,
+        id_query: str = None,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview (first user message) and last active timestamp.
 
@@ -1336,7 +1824,8 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
         message_count, preview (first 60 chars of first user message),
         last_active (timestamp of last message).
 
-        Uses a single query with correlated subqueries instead of N+2 queries.
+        Reads denormalized list fields maintained on the ``sessions`` row;
+        transcript bodies are loaded only by detail/history APIs.
 
         By default, child sessions (subagent runs, compression continuations)
         are excluded.  Pass ``include_children=True`` to include them.
@@ -1357,31 +1846,29 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
         a recursive CTE that walks compression-continuation edges, so LIMIT
         and OFFSET still apply efficiently.
 
-        ``page_cursor`` enables keyset pagination for user-facing clients.
-        When ``order_by_last_active`` is true the cursor must contain
-        ``effective_last_active``, ``started_at`` and ``id`` from the last row
-        in the previous page. Offset pagination remains supported for legacy
-        callers and tests, but keyset pagination is the preferred production
-        path because it is stable as new sessions arrive.
+        ``page_cursor`` is a keyset cursor emitted on each returned row as
+        ``_page_cursor``. It keeps pagination stable while conversations are
+        sorted by ``effective_last_active DESC, started_at DESC, id DESC``.
         """
         where_clauses = []
         params = []
-        page_cursor = page_cursor if isinstance(page_cursor, dict) else {}
 
         if not include_children:
-            # Show root sessions and branch sessions (whose parent ended with
-            # end_reason='branched' before the child was created), while still
-            # hiding sub-agent runs and compression continuations (which also
-            # carry a parent_session_id but were spawned while the parent was
-            # still live — i.e., started_at < parent.ended_at).
+            # Show root sessions and explicit user branches, while still
+            # hiding sub-agent runs and compression continuations. Modern
+            # non-destructive branches live in session_lineage and do not use
+            # sessions.parent_session_id for transcript replay. The legacy
+            # end_reason='branched' predicate is retained for old CLI rows.
             where_clauses.append(
                 "(s.parent_session_id IS NULL"
+                " OR EXISTS (SELECT 1 FROM session_lineage l"
+                "            WHERE l.session_id = s.id"
+                "            AND l.branch_origin = 'user_message_action')"
                 " OR EXISTS (SELECT 1 FROM sessions p"
                 "            WHERE p.id = s.parent_session_id"
                 "            AND p.end_reason = 'branched'"
                 "            AND s.started_at >= p.ended_at))"
             )
-        where_clauses.append("COALESCE(s.transient, 0) = 0")
 
         if source:
             where_clauses.append("s.source = ?")
@@ -1391,25 +1878,44 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
             where_clauses.append(f"s.source NOT IN ({placeholders})")
             params.extend(exclude_sources)
 
+        id_needle = (id_query or "").strip().lower()
+        id_like_pattern = (
+            "%"
+            + id_needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            + "%"
+            if id_needle
+            else ""
+        )
+
+        def _cursor_number(key: str) -> float:
+            if not page_cursor:
+                return 0.0
+            try:
+                return float(page_cursor.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _cursor_id() -> str:
+            if not page_cursor:
+                return ""
+            value = page_cursor.get("id")
+            return str(value) if value is not None else ""
+
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         if order_by_last_active:
             outer_where_clauses = list(where_clauses)
             outer_params = list(params)
-            try:
-                cursor_effective_last_active = float(page_cursor.get("effective_last_active"))
-                cursor_started_at = float(page_cursor.get("started_at"))
-                cursor_id = str(page_cursor.get("id") or "").strip()
-            except (TypeError, ValueError):
-                cursor_effective_last_active = None
-                cursor_started_at = None
-                cursor_id = ""
-            if cursor_effective_last_active is not None and cursor_started_at is not None and cursor_id:
+            cursor_id = _cursor_id()
+            if cursor_id:
+                effective_last_active_expr = "COALESCE(cm.effective_last_active, COALESCE(s.last_active, s.started_at))"
+                cursor_effective_last_active = _cursor_number("effective_last_active")
+                cursor_started_at = _cursor_number("started_at")
                 outer_where_clauses.append(
-                    "("
-                    "COALESCE(cm.effective_last_active, s.started_at) < ?"
-                    " OR (COALESCE(cm.effective_last_active, s.started_at) = ? AND s.started_at < ?)"
-                    " OR (COALESCE(cm.effective_last_active, s.started_at) = ? AND s.started_at = ? AND s.id < ?)"
-                    ")"
+                    f"""(
+                        {effective_last_active_expr} < ?
+                        OR ({effective_last_active_expr} = ? AND s.started_at < ?)
+                        OR ({effective_last_active_expr} = ? AND s.started_at = ? AND s.id < ?)
+                    )"""
                 )
                 outer_params.extend(
                     [
@@ -1421,6 +1927,13 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
                         cursor_id,
                     ]
                 )
+            if id_needle:
+                outer_where_clauses.append(
+                    "EXISTS (SELECT 1 FROM chain cq "
+                    "WHERE cq.root_id = s.id "
+                    "AND LOWER(cq.cur_id) LIKE ? ESCAPE '\\')"
+                )
+                outer_params.append(id_like_pattern)
             outer_where_sql = (
                 f"WHERE {' AND '.join(outer_where_clauses)}"
                 if outer_where_clauses
@@ -1428,9 +1941,9 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
             )
             # Compute effective_last_active by walking each surfaced session's
             # compression-continuation chain forward in SQL and taking the MAX
-            # timestamp across the chain. This lets us ORDER BY + LIMIT at SQL
-            # level instead of fetching every row and sorting in Python, while
-            # still surfacing old compression roots whose live tip is fresh.
+            # denormalized session activity timestamp across the chain. This
+            # keeps ORDER BY + LIMIT in SQL without aggregating transcript rows,
+            # while still surfacing old compression roots whose live tip is fresh.
             #
             # The CTE seeds from rows the outer WHERE admits (roots + branch
             # children), then recursively joins forward through
@@ -1451,88 +1964,69 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
                 chain_max AS (
                     SELECT
                         root_id,
-                        MAX(COALESCE(
-                            (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = cur_id),
-                            (SELECT started_at FROM sessions ss WHERE ss.id = cur_id)
-                        )) AS effective_last_active
-                    FROM chain
+                        MAX(COALESCE(ss.last_active, ss.started_at)) AS effective_last_active
+                    FROM chain c
+                    JOIN sessions ss ON ss.id = c.cur_id
                     GROUP BY root_id
                 )
                 SELECT s.*,
-                    COALESCE(
-                        (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
-                         FROM messages m
-                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
-                         ORDER BY m.timestamp, m.id LIMIT 1),
-                        ''
-                    ) AS _preview_raw,
-                    COALESCE(
-                        (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
-                        s.started_at
-                    ) AS last_active,
-                    COALESCE(cm.effective_last_active, s.started_at) AS _effective_last_active
+                    COALESCE(s.preview, '') AS _preview_summary,
+                    COALESCE(s.last_active, s.started_at) AS _last_active_summary,
+                    COALESCE(cm.effective_last_active, COALESCE(s.last_active, s.started_at)) AS _effective_last_active
                 FROM sessions s
                 LEFT JOIN chain_max cm ON cm.root_id = s.id
                 {outer_where_sql}
                 ORDER BY _effective_last_active DESC, s.started_at DESC, s.id DESC
                 LIMIT ? OFFSET ?
             """
-            # WHERE params apply to the CTE seed and the outer select. The
-            # cursor predicate only belongs to the outer select because the CTE
-            # still needs to walk every admitted root's continuation chain.
+            # WHERE params apply twice (CTE seed + outer select).
             params = params + outer_params + [limit, offset]
         else:
-            try:
-                cursor_started_at = float(page_cursor.get("started_at"))
-                cursor_id = str(page_cursor.get("id") or "").strip()
-            except (TypeError, ValueError):
-                cursor_started_at = None
-                cursor_id = ""
-            if cursor_started_at is not None and cursor_id:
-                where_clauses.append("(s.started_at < ? OR (s.started_at = ? AND s.id < ?))")
-                params.extend([cursor_started_at, cursor_started_at, cursor_id])
-                where_sql = f"WHERE {' AND '.join(where_clauses)}"
+            outer_where_clauses = list(where_clauses)
+            outer_params = list(params)
+            cursor_id = _cursor_id()
+            if cursor_id:
+                cursor_started_at = _cursor_number("started_at")
+                outer_where_clauses.append(
+                    "(s.started_at < ? OR (s.started_at = ? AND s.id < ?))"
+                )
+                outer_params.extend([cursor_started_at, cursor_started_at, cursor_id])
+            if id_needle:
+                outer_where_clauses.append("LOWER(s.id) LIKE ? ESCAPE '\\'")
+                outer_params.append(id_like_pattern)
+            outer_where_sql = (
+                f"WHERE {' AND '.join(outer_where_clauses)}"
+                if outer_where_clauses
+                else ""
+            )
             query = f"""
                 SELECT s.*,
-                    COALESCE(
-                        (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
-                         FROM messages m
-                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
-                         ORDER BY m.timestamp, m.id LIMIT 1),
-                        ''
-                    ) AS _preview_raw,
-                    COALESCE(
-                        (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
-                        s.started_at
-                    ) AS last_active
+                    COALESCE(s.preview, '') AS _preview_summary,
+                    COALESCE(s.last_active, s.started_at) AS _last_active_summary
                 FROM sessions s
-                {where_sql}
-                ORDER BY s.started_at DESC
+                {outer_where_sql}
+                ORDER BY s.started_at DESC, s.id DESC
                 LIMIT ? OFFSET ?
             """
-            params.extend([limit, offset])
+            params = outer_params + [limit, offset]
         with self._lock:
             cursor = self._conn.execute(query, params)
             rows = cursor.fetchall()
         sessions = []
         for row in rows:
             s = dict(row)
-            effective_last_active = s.pop(
-                "_effective_last_active",
-                s.get("last_active") or s.get("started_at") or 0,
-            )
+            s["preview"] = str(s.pop("_preview_summary", s.get("preview") or "") or "")
+            last_active = s.pop("_last_active_summary", None)
+            if last_active is not None:
+                s["last_active"] = last_active
+            effective_last_active = s.pop("_effective_last_active", None)
+            if effective_last_active is None:
+                effective_last_active = s.get("last_active") or s.get("started_at") or 0
             s["_page_cursor"] = {
                 "effective_last_active": effective_last_active,
                 "started_at": s.get("started_at") or 0,
                 "id": s.get("id") or "",
             }
-            # Build the preview from the raw substring
-            raw = s.pop("_preview_raw", "").strip()
-            if raw:
-                text = raw[:60]
-                s["preview"] = text + ("..." if len(raw) > 60 else "")
-            else:
-                s["preview"] = ""
             sessions.append(s)
 
         # Project compression roots forward to their tips. Each row whose
@@ -1560,8 +2054,9 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
                 merged = dict(s)
                 for key in (
                     "id", "ended_at", "end_reason", "message_count",
-                    "tool_call_count", "title", "last_active", "preview",
-                    "model", "system_prompt",
+                    "tool_call_count", "title", "display_title",
+                    "display_title_source", "last_active", "preview", "model",
+                    "system_prompt",
                 ):
                     if key in tip_row:
                         merged[key] = tip_row[key]
@@ -1571,6 +2066,407 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
 
         return sessions
 
+    # ------------------------------------------------------------------
+    # Control-plane session_index (write-time projection; single-query read)
+    # ------------------------------------------------------------------
+    _SESSION_INDEX_COLUMNS = (
+        "session_id", "owner_agent_profile_id", "owner_profile_version_id",
+        "runtime_scope_key", "title", "preview", "source", "transient",
+        "session_kind", "status", "running", "waiting_approval", "active_run_id",
+        "active_runtime_session_id", "pending_approval_count", "team_id",
+        "mission_id", "conversation_id", "message_count", "started_at",
+        "updated_at", "last_activity",
+    )
+
+    @staticmethod
+    def _session_index_row_to_item(row: sqlite3.Row) -> Dict[str, Any]:
+        item = {key: row[key] for key in row.keys()}
+        for flag in ("transient", "running", "waiting_approval"):
+            item[flag] = bool(item.get(flag))
+        item["_page_cursor"] = {
+            "updated_at": row["updated_at"],
+            "started_at": row["started_at"],
+            "session_id": row["session_id"],
+        }
+        return item
+
+    def upsert_session_index(
+        self,
+        *,
+        session_id: str,
+        owner_agent_profile_id: str = "",
+        owner_profile_version_id: str = "",
+        runtime_scope_key: str = "",
+        title: str = "",
+        preview: str = "",
+        source: str = "unknown",
+        transient: bool = False,
+        session_kind: str = "hermes_session",
+        status: str = "idle",
+        running: bool = False,
+        waiting_approval: bool = False,
+        active_run_id: str = "",
+        active_runtime_session_id: str = "",
+        pending_approval_count: int = 0,
+        team_id: str = "",
+        mission_id: str = "",
+        conversation_id: str = "",
+        message_count: int = 0,
+        started_at: Optional[float] = None,
+        updated_at: Optional[float] = None,
+        last_activity: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Full upsert of a control-plane session_index row (idempotent by id)."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id required for upsert_session_index")
+        now = time.time()
+        started = float(started_at if started_at is not None else now)
+        updated = float(updated_at if updated_at is not None else now)
+        values = {
+            "session_id": sid,
+            "owner_agent_profile_id": str(owner_agent_profile_id or ""),
+            "owner_profile_version_id": str(owner_profile_version_id or ""),
+            "runtime_scope_key": str(runtime_scope_key or ""),
+            "title": str(title or ""),
+            "preview": str(preview or ""),
+            "source": str(source or "unknown"),
+            "transient": 1 if transient else 0,
+            "session_kind": str(session_kind or "hermes_session"),
+            "status": str(status or "idle"),
+            "running": 1 if running else 0,
+            "waiting_approval": 1 if waiting_approval else 0,
+            "active_run_id": str(active_run_id or ""),
+            "active_runtime_session_id": str(active_runtime_session_id or ""),
+            "pending_approval_count": int(pending_approval_count or 0),
+            "team_id": str(team_id or ""),
+            "mission_id": str(mission_id or ""),
+            "conversation_id": str(conversation_id or ""),
+            "message_count": int(message_count or 0),
+            "started_at": started,
+            "updated_at": updated,
+            "last_activity": last_activity,
+        }
+        cols = list(values.keys())
+        placeholders = ", ".join(f":{c}" for c in cols)
+        update_cols = [c for c in cols if c != "session_id"]
+        set_clause = ", ".join(f"{c}=excluded.{c}" for c in update_cols)
+
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            conn.execute(
+                f"INSERT INTO session_index ({', '.join(cols)}) VALUES ({placeholders}) "
+                f"ON CONFLICT(session_id) DO UPDATE SET {set_clause}",
+                values,
+            )
+            return values
+
+        return self._execute_write(_do)
+
+    def delete_session_index(self, session_id: str) -> int:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return 0
+
+        def _do(conn: sqlite3.Connection) -> int:
+            return int(conn.execute(
+                "DELETE FROM session_index WHERE session_id = ?", (sid,)
+            ).rowcount or 0)
+
+        return self._execute_write(_do)
+
+    def _repair_session_index_terminal_active_runs_locked(self, conn: sqlite3.Connection) -> int:
+        """Clear stale sidebar state whose recorded active run is already terminal.
+
+        Team mission rows need a narrower rule than regular chat rows: worker
+        and leader runs can finish while the mission is still active.  Only clear
+        a team row from terminal run state when it has no active mission binding
+        or the bound mission itself is terminal.
+        """
+        try:
+            return int(conn.execute(
+                """
+                UPDATE session_index
+                   SET running = 0, status = 'idle', waiting_approval = 0,
+                       active_run_id = '', active_runtime_session_id = '',
+                       pending_approval_count = 0
+                 WHERE active_run_id != ''
+                   AND active_run_id IN (
+                       SELECT run_id FROM runs
+                        WHERE LOWER(COALESCE(status,'')) IN
+                              ('completed','failed','cancelled','canceled','interrupted')
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM runs active_runs
+                        WHERE active_runs.session_id = session_index.session_id
+                          AND active_runs.run_id != session_index.active_run_id
+                          AND LOWER(COALESCE(active_runs.status,'')) IN
+                              ('queued','starting','running','waiting_approval','cancelling','finalizing')
+                   )
+                   AND (
+                       session_kind != 'team_mission'
+                       OR COALESCE(mission_id, '') = ''
+                       OR mission_id IN (
+                           SELECT mission_id FROM team_missions
+                            WHERE LOWER(COALESCE(status,'')) IN
+                                  ('completed','failed','cancelled','canceled','interrupted')
+                       )
+                   )
+                """
+            ).rowcount or 0)
+        except sqlite3.OperationalError:
+            return 0
+
+    def list_session_index(
+        self,
+        *,
+        limit: int = 200,
+        cursor: Optional[Dict[str, Any]] = None,
+        include_transient: bool = False,
+    ) -> Dict[str, Any]:
+        """Single indexed read for the sidebar: keyset-paginated, newest first.
+
+        No recursive CTE, no live merge, no per-session approval lookup, no
+        per-profile fan-out — the status fields are already projected at write
+        time. Ordering: updated_at DESC, started_at DESC, session_id DESC.
+        """
+        capped = max(1, min(int(limit or 200), 200))
+        where = []
+        params: List[Any] = []
+        if not include_transient:
+            where.append("si.transient = 0")
+        if isinstance(cursor, dict) and cursor.get("session_id"):
+            cu = float(cursor.get("updated_at") or 0)
+            cs = float(cursor.get("started_at") or 0)
+            ci = str(cursor.get("session_id") or "")
+            where.append(
+                "(si.updated_at < ? OR (si.updated_at = ? AND si.started_at < ?) "
+                "OR (si.updated_at = ? AND si.started_at = ? AND si.session_id < ?))"
+            )
+            params.extend([cu, cu, cs, cu, cs, ci])
+        # Conversation-architecture refactor (P2): pull team display context
+        # (team name / avatar / leader profile / conversation objective) in the
+        # same query so the sidebar can render team rows from this single read,
+        # without the supplementary loadTeamConversationSidebarSessions stream
+        # and the mergeSidebarSessionsById heuristic. LEFT JOINs so plain chat
+        # rows (no team_id) are unaffected.
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        sql = (
+            "SELECT si.*, "
+            "       at.name AS team_name, "
+            "       at.avatar_json AS team_avatar_json, "
+            "       at.lead_agent_profile_id AS team_lead_profile_id, "
+            "       ap.name AS team_lead_profile_name, "
+            "       ap.avatar AS team_lead_profile_avatar, "
+            "       tmc.objective AS team_conversation_objective, "
+            "       tmc.workspace_id AS team_conversation_workspace_id, "
+            "       tmc.workspace_path AS team_conversation_workspace_path, "
+            "       tmc.active_mission_id AS team_conversation_active_mission_id "
+            "  FROM session_index si "
+            "  LEFT JOIN agent_teams at ON at.id = si.team_id "
+            "  LEFT JOIN agent_profiles ap ON ap.id = at.lead_agent_profile_id "
+            "  LEFT JOIN team_mission_conversations tmc ON tmc.conversation_id = si.conversation_id"
+            + where_sql +
+            " ORDER BY si.updated_at DESC, si.started_at DESC, si.session_id DESC LIMIT ?"
+        )
+        params.append(capped + 1)
+        with self._lock:
+            self._repair_session_index_terminal_active_runs_locked(self._conn)
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
+        has_more = len(rows) > capped
+        page = rows[:capped]
+        items = [self._session_index_row_to_item(r) for r in page]
+        next_cursor = items[-1]["_page_cursor"] if (has_more and items) else None
+        return {
+            "sessions": items,
+            "pageInfo": {"hasMore": has_more, "nextCursor": next_cursor},
+        }
+
+    def reconcile_session_index(
+        self,
+        *,
+        exclude_sources: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Backfill/repair the index from the source of truth (sessions table).
+
+        Upserts the static/display fields for every non-excluded session,
+        preserving any live status fields already projected by write-time hooks
+        (only inserts defaults for brand-new rows). Safe to run on startup and
+        periodically; the index is always rebuildable from this.
+        """
+        excluded = tuple(exclude_sources if exclude_sources is not None else ("tool", "cron"))
+        placeholders = ", ".join("?" for _ in excluded) if excluded else ""
+        # Team-mission member-node runtime sessions (id like "team:...:node:...")
+        # are data plane, never user-facing — they must not surface in the sidebar.
+        # Mirrors the frontend isTeamMissionInternalRuntimeSessionId rule. Their
+        # delegate_task / sub-agent children carry their OWN fresh id (the member
+        # node session is their parent_session_id) and must be excluded too, or
+        # every team task that runs delegate_task leaks worker chatter into the
+        # sidebar as unattributed `tui` sessions (parent's node session never
+        # surfaces, the child does — confusing the user with "Get latest GitHub
+        # stats" / empty "新会话" rows that don't belong to any conversation).
+        team_internal_clause = (
+            "NOT (id LIKE 'team:%' AND id LIKE '%:node:%') "
+            "AND NOT (COALESCE(parent_session_id,'') LIKE 'team:%:node:%') "
+            # Group-chat member-chat worker sessions (id like 'memberchat:%')
+            # are data plane: the worker runs in its own session, its reply is
+            # relayed into the team conversation session by
+            # _project_member_chat_run_event. The worker session itself must
+            # never surface as a sidebar row.
+            "AND NOT (id LIKE 'memberchat:%')"
+        )
+        # Suppress regular delegate_task / sub-agent children too — they have a
+        # non-empty parent_session_id pointing at the user-visible conversation
+        # that spawned them, but no row in session_lineage (only user-issued
+        # /branch writes that). Compression-continuation children DO have a
+        # non-empty parent, but the parent always has `end_reason = 'compression'`
+        # by the time the child takes over the chat. So: hide anything with a
+        # parent whose parent isn't a compression handoff and isn't in the
+        # lineage table.  Mirrors the user's mental model — they never asked for
+        # the subagent's chat to be its own sidebar row.
+        subagent_clause = (
+            "NOT ("
+            "  COALESCE(parent_session_id,'') != ''"
+            "  AND NOT EXISTS (SELECT 1 FROM session_lineage l WHERE l.session_id = sessions.id)"
+            "  AND EXISTS ("
+            "    SELECT 1 FROM sessions p"
+            "    WHERE p.id = sessions.parent_session_id"
+            "    AND COALESCE(p.end_reason,'') NOT IN ('compression', 'compression_split')"
+            "  )"
+            ")"
+        )
+        where = [team_internal_clause, subagent_clause]
+        params: List[Any] = []
+        if excluded:
+            where.append(f"COALESCE(source,'') NOT IN ({placeholders})")
+            params.extend(excluded)
+        select_sql = (
+            "SELECT id, source, title, display_title, preview, started_at, "
+            "last_active, message_count, transient FROM sessions WHERE "
+            + " AND ".join(where)
+        )
+
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            # Purge any team-internal node sessions that a prior reconcile leaked,
+            # plus their delegate_task / sub-agent children (id is a fresh tui id
+            # whose parent_session_id points at the team node session).
+            conn.execute(
+                "DELETE FROM session_index "
+                "WHERE session_id LIKE 'team:%' AND session_id LIKE '%:node:%'"
+            )
+            conn.execute(
+                "DELETE FROM session_index "
+                "WHERE session_id IN ("
+                " SELECT id FROM sessions "
+                " WHERE COALESCE(parent_session_id,'') LIKE 'team:%:node:%'"
+                ")"
+            )
+            # Purge any group-chat member-chat worker sessions that a prior
+            # session.create projected before the filter existed. The worker
+            # session is data plane; the reply is relayed into the team
+            # conversation by _project_member_chat_run_event.
+            conn.execute(
+                "DELETE FROM session_index WHERE session_id LIKE 'memberchat:%'"
+            )
+            # Purge non-team delegate_task subagent children — same predicate
+            # as the SELECT subagent_clause above. A previous reconcile may have
+            # projected them before this filter existed.
+            conn.execute(
+                "DELETE FROM session_index "
+                "WHERE session_id IN ("
+                " SELECT s.id FROM sessions s"
+                " WHERE COALESCE(s.parent_session_id,'') != ''"
+                " AND NOT EXISTS (SELECT 1 FROM session_lineage l WHERE l.session_id = s.id)"
+                " AND EXISTS ("
+                "   SELECT 1 FROM sessions p"
+                "   WHERE p.id = s.parent_session_id"
+                "   AND COALESCE(p.end_reason,'') NOT IN ('compression', 'compression_split')"
+                " )"
+                ")"
+            )
+            rows = conn.execute(select_sql, tuple(params)).fetchall()
+            upserted = 0
+            for row in rows:
+                started = float(row["started_at"] or 0)
+                updated = float(row["last_active"] or row["started_at"] or 0)
+                title = str(row["display_title"] or row["title"] or "")
+                # Insert defaults for new rows; on conflict refresh only the
+                # static/display fields, never the live status projection.
+                conn.execute(
+                    """
+                    INSERT INTO session_index (
+                        session_id, title, preview, source, transient,
+                        message_count, started_at, updated_at, last_activity
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        title=excluded.title,
+                        preview=excluded.preview,
+                        source=excluded.source,
+                        transient=excluded.transient,
+                        message_count=excluded.message_count
+                    """,
+                    (
+                        str(row["id"]),
+                        title,
+                        str(row["preview"] or ""),
+                        str(row["source"] or "unknown"),
+                        1 if row["transient"] else 0,
+                        int(row["message_count"] or 0),
+                        started,
+                        updated,
+                        updated,
+                    ),
+                )
+                upserted += 1
+            # Heal team-mission conversation rows whose mission is already terminal
+            # but whose status projection is still "running"/waiting (e.g. a cancel
+            # that bypassed the graph reducer) — otherwise the sidebar shows a
+            # finished team task as running after restart.
+            conn.execute(
+                """
+                UPDATE session_index
+                   SET running = 0, status = 'idle', waiting_approval = 0,
+                       active_run_id = '', active_runtime_session_id = '',
+                       pending_approval_count = 0
+                 WHERE session_kind = 'team_mission'
+                   AND (running = 1 OR waiting_approval = 1 OR status != 'idle'
+                        OR active_run_id != '' OR active_runtime_session_id != '')
+                   AND mission_id IN (
+                       SELECT mission_id FROM team_missions
+                        WHERE LOWER(COALESCE(status,'')) IN
+                              ('completed','failed','cancelled','canceled','interrupted')
+                   )
+                """
+            )
+            # Heal plan-rejection rows produced by older builds: the graph nodes
+            # were cancelled and the mission went back to draft, but the sidebar
+            # projection stayed waiting_approval forever because no terminal
+            # reducer/event fired. Draft missions with no active/approval nodes
+            # are idle, not approval-blocked.
+            conn.execute(
+                """
+                UPDATE session_index
+                   SET running = 0, status = 'idle', waiting_approval = 0,
+                       active_run_id = '', active_runtime_session_id = '',
+                       pending_approval_count = 0
+                 WHERE session_kind = 'team_mission'
+                   AND waiting_approval = 1
+                   AND mission_id IN (
+                       SELECT mission_id FROM team_missions
+                        WHERE LOWER(COALESCE(status,'')) IN ('draft', 'idle')
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM team_mission_nodes n
+                        WHERE n.mission_id = session_index.mission_id
+                          AND LOWER(COALESCE(n.status,'')) IN
+                              ('waiting_approval','running','starting')
+                   )
+                """
+            )
+            self._repair_session_index_terminal_active_runs_locked(conn)
+            return {"reconciled": upserted}
+
+        return self._execute_write(_do)
+
     def _get_session_rich_row(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a single session with the same enriched columns as
         ``list_sessions_rich`` (preview + last_active). Returns None if the
@@ -1578,17 +2474,8 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
         """
         query = """
             SELECT s.*,
-                COALESCE(
-                    (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
-                     FROM messages m
-                     WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
-                     ORDER BY m.timestamp, m.id LIMIT 1),
-                    ''
-                ) AS _preview_raw,
-                COALESCE(
-                    (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
-                    s.started_at
-                ) AS last_active
+                COALESCE(s.preview, '') AS _preview_summary,
+                COALESCE(s.last_active, s.started_at) AS _last_active_summary
             FROM sessions s
             WHERE s.id = ?
         """
@@ -1598,13 +2485,1896 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
         if not row:
             return None
         s = dict(row)
-        raw = s.pop("_preview_raw", "").strip()
-        if raw:
-            text = raw[:60]
-            s["preview"] = text + ("..." if len(raw) > 60 else "")
-        else:
-            s["preview"] = ""
+        s["preview"] = str(s.pop("_preview_summary", s.get("preview") or "") or "")
+        s["last_active"] = s.pop("_last_active_summary", s.get("last_active") or s.get("started_at") or 0)
         return s
+
+    # =========================================================================
+    # Message storage
+    # =========================================================================
+
+    # Sentinel prefix used to distinguish JSON-encoded structured content
+    # (multimodal messages: lists of parts like text + image_url) from plain
+    # string content. The NUL byte is not legal in normal text, so this
+    # cannot collide with real user content.
+    _CONTENT_JSON_PREFIX = "\x00json:"
+
+    @classmethod
+    def _encode_content(cls, content: Any) -> Any:
+        """Serialize structured (list/dict) message content for sqlite.
+
+        sqlite3 can only bind ``str``, ``bytes``, ``int``, ``float``, and ``None``
+        to query parameters. Multimodal messages have ``content`` as a list of
+        parts (``[{"type": "text", ...}, {"type": "image_url", ...}]``), which
+        raises ``ProgrammingError: Error binding parameter N: type 'list' is
+        not supported`` when bound directly.
+
+        Returns the value unchanged when it's already a safe scalar, or a
+        sentinel-prefixed JSON string for lists/dicts. Paired with
+        :meth:`_decode_content` on read.
+        """
+        if content is None or isinstance(content, (str, bytes, int, float)):
+            return content
+        try:
+            return cls._CONTENT_JSON_PREFIX + json.dumps(content)
+        except (TypeError, ValueError):
+            # Last-resort fallback: stringify so persistence never fails.
+            return str(content)
+
+    @classmethod
+    def _decode_content(cls, content: Any) -> Any:
+        """Reverse :meth:`_encode_content`; returns scalars unchanged."""
+        if isinstance(content, str) and content.startswith(cls._CONTENT_JSON_PREFIX):
+            try:
+                return json.loads(content[len(cls._CONTENT_JSON_PREFIX):])
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(
+                    "Failed to decode JSON-encoded message content; "
+                    "returning raw string"
+                )
+                return content
+        return content
+
+    @classmethod
+    def _message_preview_text(cls, content: Any, limit: int = 60) -> str:
+        """Return the compact user-facing preview stored on ``sessions``."""
+        decoded = cls._decode_content(content)
+        if isinstance(decoded, list):
+            parts: list[str] = []
+            for item in decoded:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text") or item.get("content") or ""))
+                else:
+                    parts.append(str(item or ""))
+            preview = " ".join(part for part in parts if part).strip()
+            if not preview and decoded:
+                preview = "[multimodal content]"
+        elif isinstance(decoded, dict):
+            preview = str(decoded.get("text") or decoded.get("content") or "").strip()
+        else:
+            preview = str(decoded or "").strip()
+        preview = " ".join(preview.split())
+        if len(preview) > limit:
+            return preview[:limit] + "..."
+        return preview
+
+    @classmethod
+    def _message_display_title_text(cls, content: Any, limit: int = 100) -> str:
+        """Return a deterministic product title derived from the first user message."""
+        decoded = cls._decode_content(content)
+        if isinstance(decoded, list):
+            parts: list[str] = []
+            for item in decoded:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text") or item.get("content") or ""))
+                else:
+                    parts.append(str(item or ""))
+            title = " ".join(part for part in parts if part).strip()
+            if not title and decoded:
+                title = "[multimodal content]"
+        elif isinstance(decoded, dict):
+            title = str(decoded.get("text") or decoded.get("content") or "").strip()
+        else:
+            title = str(decoded or "").strip()
+        title = " ".join(title.split())
+        if len(title) > limit:
+            return title[:limit].rstrip()
+        return title
+
+    def _rebuild_session_list_summary(self, conn: sqlite3.Connection, session_id: str) -> None:
+        """Recompute list summary fields after active-message set changes."""
+        row = conn.execute(
+            """
+            SELECT content
+            FROM messages
+            WHERE session_id = ?
+              AND active = 1
+              AND role = 'user'
+              AND content IS NOT NULL
+            ORDER BY timestamp, id
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+        first_user_content = row["content"] if row else None
+        preview = self._message_preview_text(first_user_content)
+        display_title = self._message_display_title_text(first_user_content)
+        conn.execute(
+            """
+            UPDATE sessions
+            SET
+                message_count = (
+                    SELECT COUNT(1)
+                    FROM messages m
+                    WHERE m.session_id = sessions.id
+                      AND m.active = 1
+                ),
+                preview = ?,
+                display_title = CASE
+                    WHEN COALESCE(display_title_source, '') = 'user' THEN COALESCE(display_title, '')
+                    ELSE ?
+                END,
+                display_title_source = CASE
+                    WHEN COALESCE(display_title_source, '') = 'user' THEN 'user'
+                    WHEN ? != '' THEN 'first_user_message'
+                    ELSE ''
+                END,
+                last_active = (
+                    SELECT MAX(m.timestamp)
+                    FROM messages m
+                    WHERE m.session_id = sessions.id
+                      AND m.active = 1
+                )
+            WHERE id = ?
+            """,
+            (preview, display_title, display_title, session_id),
+        )
+
+    def append_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str = None,
+        tool_name: str = None,
+        tool_calls: Any = None,
+        tool_call_id: str = None,
+        token_count: int = None,
+        finish_reason: str = None,
+        reasoning: str = None,
+        reasoning_content: str = None,
+        reasoning_details: Any = None,
+        codex_reasoning_items: Any = None,
+        codex_message_items: Any = None,
+        platform_message_id: str = None,
+        metadata: Any = None,
+    ) -> int:
+        """
+        Append a message to a session. Returns the message row ID.
+
+        Also increments the session's message_count (and tool_call_count
+        if role is 'tool' or tool_calls is present).
+
+        ``platform_message_id`` is the external messaging platform's own
+        message ID (e.g. Telegram update_id, Yuanbao msg_id).  It is
+        independent of the SQLite autoincrement primary key and is used by
+        platform-specific flows like yuanbao's recall guard to redact a
+        message by its platform-side identifier.
+        """
+        # Serialize structured fields to JSON before entering the write txn
+        reasoning_details_json = (
+            json.dumps(reasoning_details)
+            if reasoning_details else None
+        )
+        codex_items_json = (
+            json.dumps(codex_reasoning_items)
+            if codex_reasoning_items else None
+        )
+        codex_message_items_json = (
+            json.dumps(codex_message_items)
+            if codex_message_items else None
+        )
+        tool_calls_json = json.dumps(tool_calls) if tool_calls else None
+        metadata_json = json.dumps(metadata) if metadata else None
+        # Multimodal content (list of parts) must be JSON-encoded: sqlite3
+        # cannot bind list/dict parameters directly.
+        stored_content = self._encode_content(content)
+
+        # Pre-compute tool call count
+        num_tool_calls = 0
+        if tool_calls is not None:
+            num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
+        message_timestamp = time.time()
+        preview = self._message_preview_text(content) if role == "user" else ""
+        display_title = self._message_display_title_text(content) if role == "user" else ""
+
+        def _do(conn):
+            cursor = conn.execute(
+                """INSERT INTO messages (session_id, role, content, tool_call_id,
+                   tool_calls, tool_name, timestamp, token_count, finish_reason,
+                   reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
+                   codex_message_items, platform_message_id, metadata_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id,
+                    role,
+                    stored_content,
+                    tool_call_id,
+                    tool_calls_json,
+                    tool_name,
+                    message_timestamp,
+                    token_count,
+                    finish_reason,
+                    reasoning,
+                    reasoning_content,
+                    reasoning_details_json,
+                    codex_items_json,
+                    codex_message_items_json,
+                    platform_message_id,
+                    metadata_json,
+                ),
+            )
+            msg_id = cursor.lastrowid
+
+            # Update counters
+            if num_tool_calls > 0:
+                conn.execute(
+                    """UPDATE sessions SET message_count = message_count + 1,
+                       tool_call_count = tool_call_count + ?,
+                       preview = CASE
+                           WHEN ? != '' AND COALESCE(preview, '') = '' THEN ?
+                           ELSE COALESCE(preview, '')
+                       END,
+                       display_title = CASE
+                           WHEN ? != '' AND COALESCE(display_title, '') = '' THEN ?
+                           ELSE COALESCE(display_title, '')
+                       END,
+                       display_title_source = CASE
+                           WHEN ? != '' AND COALESCE(display_title_source, '') = '' THEN 'first_user_message'
+                           ELSE COALESCE(display_title_source, '')
+                       END,
+                       last_active = ?
+                       WHERE id = ?""",
+                    (
+                        num_tool_calls,
+                        preview,
+                        preview,
+                        display_title,
+                        display_title,
+                        display_title,
+                        message_timestamp,
+                        session_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """UPDATE sessions SET message_count = message_count + 1,
+                       preview = CASE
+                           WHEN ? != '' AND COALESCE(preview, '') = '' THEN ?
+                           ELSE COALESCE(preview, '')
+                       END,
+                       display_title = CASE
+                           WHEN ? != '' AND COALESCE(display_title, '') = '' THEN ?
+                           ELSE COALESCE(display_title, '')
+                       END,
+                       display_title_source = CASE
+                           WHEN ? != '' AND COALESCE(display_title_source, '') = '' THEN 'first_user_message'
+                           ELSE COALESCE(display_title_source, '')
+                       END,
+                       last_active = ?
+                       WHERE id = ?""",
+                    (
+                        preview,
+                        preview,
+                        display_title,
+                        display_title,
+                        display_title,
+                        message_timestamp,
+                        session_id,
+                    ),
+                )
+            # Keep the control-plane sidebar index (session_index) in lock-step
+            # with the sessions row we just updated. The sidebar reads
+            # ``session_index.title`` / ``preview`` — NOT ``sessions.display_title``
+            # — so without this the first user message's title (written into
+            # ``sessions.display_title`` by the CASE above) never reaches the
+            # sidebar: ``reconcile_session_index`` is gated behind a process-level
+            # one-shot ``_SESSION_INDEX_RECONCILED`` flag, so the only other
+            # writer (session.create) projects an empty title at creation time
+            # and nothing refreshes it afterwards. New chats stayed on the
+            # "新会话" placeholder until a full process restart. Mirror the
+            # canonical values straight from the sessions row (which already
+            # honours the first_user_message / user-rename precedence) so the
+            # two tables can't diverge. UPDATE-only: a transient session with
+            # no index row is a no-op. Best-effort: an absent session_index
+            # table (legacy worker db) must not fail the message append.
+            try:
+                conn.execute(
+                    """
+                    UPDATE session_index
+                       SET title = (
+                               SELECT COALESCE(NULLIF(s.display_title, ''),
+                                               NULLIF(s.title, ''), '')
+                                 FROM sessions s WHERE s.id = ?
+                           ),
+                           preview = (
+                               SELECT COALESCE(s.preview, '')
+                                 FROM sessions s WHERE s.id = ?
+                           ),
+                           message_count = (
+                               SELECT COALESCE(s.message_count, 0)
+                                 FROM sessions s WHERE s.id = ?
+                           ),
+                           updated_at = MAX(COALESCE(updated_at, 0), ?),
+                           last_activity = MAX(COALESCE(last_activity, 0), ?)
+                     WHERE session_id = ?
+                    """,
+                    (
+                        session_id,
+                        session_id,
+                        session_id,
+                        message_timestamp,
+                        message_timestamp,
+                        session_id,
+                    ),
+                )
+            except sqlite3.OperationalError:
+                pass
+            return msg_id
+
+        return self._execute_write(_do)
+
+    def replace_messages(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        """Atomically replace every message for a session.
+
+        Used by transcript-rewrite flows such as /retry, /undo, and /compress.
+        The delete + reinsert sequence must commit as one transaction so a
+        mid-rewrite failure does not leave SQLite with a partial transcript.
+        """
+
+        def _do(conn):
+            conn.execute(
+                "DELETE FROM messages WHERE session_id = ?", (session_id,)
+            )
+            conn.execute(
+                "UPDATE sessions SET message_count = 0, tool_call_count = 0, preview = '', last_active = NULL WHERE id = ?",
+                (session_id,),
+            )
+
+            now_ts = time.time()
+            total_messages = 0
+            total_tool_calls = 0
+            first_user_preview = ""
+            first_user_display_title = ""
+            last_message_ts = None
+            for msg in messages:
+                role = msg.get("role", "unknown")
+                tool_calls = msg.get("tool_calls")
+                message_ts = now_ts
+                reasoning_details = msg.get("reasoning_details") if role == "assistant" else None
+                codex_reasoning_items = (
+                    msg.get("codex_reasoning_items") if role == "assistant" else None
+                )
+                codex_message_items = (
+                    msg.get("codex_message_items") if role == "assistant" else None
+                )
+
+                reasoning_details_json = (
+                    json.dumps(reasoning_details) if reasoning_details else None
+                )
+                codex_items_json = (
+                    json.dumps(codex_reasoning_items) if codex_reasoning_items else None
+                )
+                codex_message_items_json = (
+                    json.dumps(codex_message_items) if codex_message_items else None
+                )
+                tool_calls_json = json.dumps(tool_calls) if tool_calls else None
+                metadata_json = json.dumps(msg.get("metadata")) if msg.get("metadata") else None
+                # Accept either `platform_message_id` (new explicit name) or
+                # `message_id` (yuanbao's existing convention on message dicts).
+                platform_msg_id = (
+                    msg.get("platform_message_id") or msg.get("message_id")
+                )
+
+                conn.execute(
+                    """INSERT INTO messages (session_id, role, content, tool_call_id,
+                       tool_calls, tool_name, timestamp, token_count, finish_reason,
+                       reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
+                       codex_message_items, platform_message_id, metadata_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id,
+                        role,
+                        self._encode_content(msg.get("content")),
+                        msg.get("tool_call_id"),
+                        tool_calls_json,
+                        msg.get("tool_name"),
+                        message_ts,
+                        msg.get("token_count"),
+                        msg.get("finish_reason"),
+                        msg.get("reasoning") if role == "assistant" else None,
+                        msg.get("reasoning_content") if role == "assistant" else None,
+                        reasoning_details_json,
+                        codex_items_json,
+                        codex_message_items_json,
+                        platform_msg_id,
+                        metadata_json,
+                    ),
+                )
+                total_messages += 1
+                if role == "user" and not first_user_preview:
+                    first_user_preview = self._message_preview_text(msg.get("content"))
+                    first_user_display_title = self._message_display_title_text(msg.get("content"))
+                last_message_ts = message_ts
+                if tool_calls is not None:
+                    total_tool_calls += (
+                        len(tool_calls) if isinstance(tool_calls, list) else 1
+                    )
+                now_ts += 1e-6
+
+            conn.execute(
+                """
+                UPDATE sessions
+                SET message_count = ?,
+                    tool_call_count = ?,
+                    preview = ?,
+                    display_title = CASE
+                        WHEN COALESCE(display_title_source, '') = 'user' THEN COALESCE(display_title, '')
+                        ELSE ?
+                    END,
+                    display_title_source = CASE
+                        WHEN COALESCE(display_title_source, '') = 'user' THEN 'user'
+                        WHEN ? != '' THEN 'first_user_message'
+                        ELSE ''
+                    END,
+                    last_active = ?
+                WHERE id = ?
+                """,
+                (
+                    total_messages,
+                    total_tool_calls,
+                    first_user_preview,
+                    first_user_display_title,
+                    first_user_display_title,
+                    last_message_ts,
+                    session_id,
+                ),
+            )
+
+        self._execute_write(_do)
+
+    def get_messages(
+        self,
+        session_id: str,
+        include_inactive: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Load messages for a session, ordered by insertion order.
+
+        Soft-deleted rewind rows are hidden by default and remain available via
+        ``include_inactive=True`` for audit/debug views.
+        """
+        active_clause = "" if include_inactive else " AND active = 1"
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT * FROM messages WHERE session_id = ?"
+                f"{active_clause} ORDER BY id",
+                (session_id,),
+            )
+            rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            msg = dict(row)
+            if "content" in msg:
+                msg["content"] = self._decode_content(msg["content"])
+            if msg.get("tool_calls"):
+                try:
+                    msg["tool_calls"] = json.loads(msg["tool_calls"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize tool_calls in get_messages, falling back to []")
+                    msg["tool_calls"] = []
+            if msg.get("metadata_json"):
+                try:
+                    msg["metadata"] = json.loads(msg["metadata_json"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize metadata_json in get_messages, falling back to None")
+                    msg["metadata"] = None
+            result.append(msg)
+        return result
+
+    @staticmethod
+    def _merge_message_metadata(current: Any, patch: Dict[str, Any]) -> Dict[str, Any]:
+        base = dict(current) if isinstance(current, dict) else {}
+        for key, value in patch.items():
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                base[key] = SessionDB._merge_message_metadata(base[key], value)
+            else:
+                base[key] = value
+        return base
+
+    @staticmethod
+    def _metadata_matches_turn(metadata: Any, *, run_id: str, turn_id: str, client_message_id: str) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        return any(
+            expected and str(metadata.get(key) or "").strip() == expected
+            for key, expected in (
+                ("run_id", run_id),
+                ("turn_id", turn_id),
+                ("client_message_id", client_message_id),
+            )
+        )
+
+    def merge_message_metadata(
+        self,
+        session_id: str,
+        metadata: Dict[str, Any],
+        *,
+        message_id: str | int | None = None,
+        role: str | None = None,
+        run_id: str | None = None,
+        turn_id: str | None = None,
+        client_message_id: str | None = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Merge metadata into a stored message and return the updated message."""
+        if not isinstance(metadata, dict) or not metadata:
+            return None
+        target_role = str(role or "").strip()
+        target_run_id = str(run_id or "").strip()
+        target_turn_id = str(turn_id or "").strip()
+        target_client_message_id = str(client_message_id or "").strip()
+        target_message_id = str(message_id or "").strip()
+
+        def _row_metadata(row) -> Dict[str, Any]:
+            raw = row["metadata_json"]
+            if not raw:
+                return {}
+            try:
+                value = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Failed to deserialize message metadata for merge")
+                return {}
+            return value if isinstance(value, dict) else {}
+
+        def _select_target_row(conn):
+            if target_message_id:
+                try:
+                    numeric_message_id = int(target_message_id)
+                except (TypeError, ValueError):
+                    numeric_message_id = None
+                if numeric_message_id is not None:
+                    row = conn.execute(
+                        "SELECT * FROM messages WHERE id = ? AND session_id = ?",
+                        (numeric_message_id, session_id),
+                    ).fetchone()
+                    if row is not None:
+                        return row
+
+            if not (target_run_id or target_turn_id or target_client_message_id):
+                return None
+
+            active_clause = "AND role = ?" if target_role else ""
+            params: list[Any] = [session_id]
+            if target_role:
+                params.append(target_role)
+            rows = conn.execute(
+                "SELECT * FROM messages WHERE session_id = ? "
+                f"{active_clause} "
+                "AND metadata_json IS NOT NULL ORDER BY id DESC",
+                tuple(params),
+            ).fetchall()
+            for row in rows:
+                if self._metadata_matches_turn(
+                    _row_metadata(row),
+                    run_id=target_run_id,
+                    turn_id=target_turn_id,
+                    client_message_id=target_client_message_id,
+                ):
+                    return row
+            return None
+
+        def _do(conn):
+            row = _select_target_row(conn)
+            if row is None:
+                return None
+            next_metadata = self._merge_message_metadata(_row_metadata(row), metadata)
+            conn.execute(
+                "UPDATE messages SET metadata_json = ? WHERE id = ?",
+                (
+                    json.dumps(next_metadata, ensure_ascii=False),
+                    row["id"],
+                ),
+            )
+            updated = dict(row)
+            updated["metadata_json"] = json.dumps(next_metadata, ensure_ascii=False)
+            return self._message_row_as_conversation(
+                updated,
+                include_storage_metadata=True,
+            )
+
+        return self._execute_write(_do)
+
+    def get_messages_around(
+        self,
+        session_id: str,
+        around_message_id: int,
+        window: int = 5,
+        include_inactive: bool = False,
+    ) -> Dict[str, Any]:
+        """Load a window of messages anchored on a specific message id.
+
+        Returns a dict with:
+          - ``window``: up to ``window`` messages before the anchor, the anchor
+            itself, and up to ``window`` messages after, ordered by id ascending.
+          - ``messages_before``: count of messages strictly before the anchor
+            still in the session (== window unless we hit the start).
+          - ``messages_after``: count of messages strictly after the anchor
+            still in the session (== window unless we hit the end).
+
+        Used by ``session_search`` for both the discovery shape (anchored on the
+        FTS5 match) and the scroll shape (anchored on any message id). The
+        ``messages_before`` / ``messages_after`` counts let the caller detect
+        session boundaries: when either is less than ``window``, the agent has
+        reached one end of the session.
+
+        Returns an empty window when ``around_message_id`` is not a real id in
+        ``session_id`` — callers decide how to surface that.
+        """
+        if window < 0:
+            window = 0
+        active_clause = "" if include_inactive else " AND active = 1"
+        with self._lock:
+            # Confirm the anchor exists in this session.
+            anchor_exists = self._conn.execute(
+                "SELECT 1 FROM messages WHERE id = ? AND session_id = ?"
+                f"{active_clause} LIMIT 1",
+                (around_message_id, session_id),
+            ).fetchone()
+            if not anchor_exists:
+                return {"window": [], "messages_before": 0, "messages_after": 0}
+
+            # Two queries: anchor + before (DESC, take window+1), and after
+            # (ASC, take window). Final order is id ASC.
+            before_rows = self._conn.execute(
+                "SELECT * FROM messages "
+                "WHERE session_id = ? AND id <= ? "
+                f"{active_clause} "
+                "ORDER BY id DESC LIMIT ?",
+                (session_id, around_message_id, window + 1),
+            ).fetchall()
+            after_rows = self._conn.execute(
+                "SELECT * FROM messages "
+                "WHERE session_id = ? AND id > ? "
+                f"{active_clause} "
+                "ORDER BY id ASC LIMIT ?",
+                (session_id, around_message_id, window),
+            ).fetchall()
+
+        # before_rows is DESC; reverse so it's ASC, then concatenate after_rows.
+        rows = list(reversed(before_rows)) + list(after_rows)
+        result = []
+        for row in rows:
+            msg = dict(row)
+            if "content" in msg:
+                msg["content"] = self._decode_content(msg["content"])
+            if msg.get("tool_calls"):
+                try:
+                    msg["tool_calls"] = json.loads(msg["tool_calls"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(
+                        "Failed to deserialize tool_calls in get_messages_around, falling back to []"
+                    )
+                    msg["tool_calls"] = []
+            result.append(msg)
+
+        # before_rows includes the anchor itself; subtract 1 for the count of
+        # messages strictly before the anchor in the returned slice.
+        messages_before = max(0, len(before_rows) - 1)
+        messages_after = len(after_rows)
+        return {
+            "window": result,
+            "messages_before": messages_before,
+            "messages_after": messages_after,
+        }
+
+    def get_anchored_view(
+        self,
+        session_id: str,
+        around_message_id: int,
+        window: int = 5,
+        bookend: int = 3,
+        keep_roles: Optional[Tuple[str, ...]] = ("user", "assistant"),
+        include_inactive: bool = False,
+    ) -> Dict[str, Any]:
+        """Return an anchored window plus session bookends.
+
+        Built on top of ``get_messages_around``. Three slices:
+
+          - ``window``: messages immediately surrounding the anchor. Filtered
+            to ``keep_roles`` (tool-response noise dropped by default), EXCEPT
+            the anchor itself is always preserved regardless of role.
+          - ``bookend_start``: first ``bookend`` user/assistant messages of the
+            session — but only those whose id is strictly before the window's
+            first message id. Empty when the window already overlaps the
+            session head. Empty-content messages (tool-call-only assistant
+            turns) are skipped so they don't crowd out actual prose openings.
+          - ``bookend_end``: last ``bookend`` user/assistant messages of the
+            session, same non-overlap rule at the tail.
+
+        Bookends let an FTS5 hit anywhere in a long session yield the goal
+        (opening) and the resolution (closing) on a single call — without
+        loading the whole transcript.
+
+        Returns ``{"window": [], "messages_before": 0, "messages_after": 0,
+        "bookend_start": [], "bookend_end": []}`` when the anchor isn't in
+        the session.
+
+        ``keep_roles=None`` disables role filtering (raw window + raw
+        bookends).
+        """
+        if bookend < 0:
+            bookend = 0
+
+        # Reuse the primitive — handles anchor-existence, content decoding,
+        # tool_calls deserialisation, and boundary counts.
+        primitive = self.get_messages_around(
+            session_id,
+            around_message_id,
+            window=window,
+            include_inactive=include_inactive,
+        )
+        window_rows = primitive["window"]
+        if not window_rows:
+            return {
+                "window": [],
+                "messages_before": 0,
+                "messages_after": 0,
+                "bookend_start": [],
+                "bookend_end": [],
+            }
+
+        # Apply role filter to the window, but never drop the anchor itself.
+        if keep_roles is not None:
+            keep_set = set(keep_roles)
+            filtered_window = [
+                m for m in window_rows
+                if m.get("id") == around_message_id or m.get("role") in keep_set
+            ]
+        else:
+            filtered_window = window_rows
+
+        window_min_id = window_rows[0]["id"]
+        window_max_id = window_rows[-1]["id"]
+
+        # Fetch bookends only when there's room outside the window. SQL filters
+        # by id range, role, and non-empty content — tool-call-only assistant
+        # turns (content='' with tool_calls populated) are excluded so they
+        # don't crowd out actual prose openings/closings.
+        bookend_start_rows: List[Any] = []
+        bookend_end_rows: List[Any] = []
+        if bookend > 0:
+            with self._lock:
+                active_clause = "" if include_inactive else " AND active = 1"
+                role_clause = ""
+                role_params: list = []
+                if keep_roles is not None:
+                    role_placeholders = ",".join("?" for _ in keep_roles)
+                    role_clause = f" AND role IN ({role_placeholders})"
+                    role_params = list(keep_roles)
+
+                bookend_start_rows = self._conn.execute(
+                    f"SELECT * FROM messages "
+                    f"WHERE session_id = ? AND id < ?{active_clause}{role_clause} "
+                    f"AND length(content) > 0 "
+                    f"ORDER BY id ASC LIMIT ?",
+                    (session_id, window_min_id, *role_params, bookend),
+                ).fetchall()
+
+                bookend_end_rows = self._conn.execute(
+                    f"SELECT * FROM messages "
+                    f"WHERE session_id = ? AND id > ?{active_clause}{role_clause} "
+                    f"AND length(content) > 0 "
+                    f"ORDER BY id DESC LIMIT ?",
+                    (session_id, window_max_id, *role_params, bookend),
+                ).fetchall()
+                # End rows came back DESC for the LIMIT cap; flip to ASC.
+                bookend_end_rows = list(reversed(bookend_end_rows))
+
+        def _hydrate(row) -> Dict[str, Any]:
+            msg = dict(row)
+            if "content" in msg:
+                msg["content"] = self._decode_content(msg["content"])
+            if msg.get("tool_calls"):
+                try:
+                    msg["tool_calls"] = json.loads(msg["tool_calls"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(
+                        "Failed to deserialize tool_calls in get_anchored_view, falling back to []"
+                    )
+                    msg["tool_calls"] = []
+            return msg
+
+        return {
+            "window": filtered_window,
+            "messages_before": primitive["messages_before"],
+            "messages_after": primitive["messages_after"],
+            "bookend_start": [_hydrate(r) for r in bookend_start_rows],
+            "bookend_end": [_hydrate(r) for r in bookend_end_rows],
+        }
+
+    def resolve_resume_session_id(self, session_id: str) -> str:
+        """Redirect a resume target to the descendant session that holds the messages.
+
+        Context compression ends the current session and forks a new child session
+        (linked via ``parent_session_id``). The flush cursor is reset, so the
+        child is where new messages actually land — the parent ends up with
+        ``message_count = 0`` rows unless messages had already been flushed to
+        it before compression. See #15000.
+
+        This helper walks ``parent_session_id`` forward from ``session_id`` and
+        returns the first descendant in the chain that has at least one message
+        row. If the original session already has messages, or no descendant
+        has any, the original ``session_id`` is returned unchanged.
+
+        The chain is always walked via the child whose ``started_at`` is
+        latest; that matches the single-chain shape that compression creates.
+        A depth cap (32) guards against accidental loops in malformed data.
+        """
+        if not session_id:
+            return session_id
+
+        # Follow the compression-continuation chain forward to the live tip
+        # FIRST. Auto-compression ends the current session and forks a
+        # continuation child, but a long-lived parent keeps its own flushed
+        # message rows — so the empty-head walk below never redirects it, and
+        # resuming the parent id reloads the pre-compression transcript while
+        # the turns generated *after* compression (and their responses) sit in
+        # the continuation. ``get_compression_tip`` is lineage-aware: it only
+        # follows children whose parent ended with ``end_reason='compression'``
+        # (created after the parent was ended), so delegation / branch children
+        # never hijack the resume. This is the fix for the desktop "I came back
+        # and the reply isn't there" report on large sessions.
+        try:
+            tip = self.get_compression_tip(session_id)
+        except Exception:
+            tip = session_id
+        if tip and tip != session_id:
+            session_id = tip
+
+        with self._lock:
+            # If this session already has messages, nothing to redirect.
+            try:
+                row = self._conn.execute(
+                    "SELECT 1 FROM messages WHERE session_id = ? AND active = 1 LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+            except Exception:
+                return session_id
+            if row is not None:
+                return session_id
+
+            # Walk descendants: at each step, pick the most-recently-started
+                # child session; stop once we find one with messages.
+            current = session_id
+            seen = {current}
+            for _ in range(32):
+                try:
+                    child_row = self._conn.execute(
+                        "SELECT id FROM sessions "
+                        "WHERE parent_session_id = ? "
+                        "ORDER BY started_at DESC, id DESC LIMIT 1",
+                        (current,),
+                    ).fetchone()
+                except Exception:
+                    return session_id
+                if child_row is None:
+                    return session_id
+                child_id = child_row["id"] if hasattr(child_row, "keys") else child_row[0]
+                if not child_id or child_id in seen:
+                    return session_id
+                seen.add(child_id)
+                try:
+                    msg_row = self._conn.execute(
+                        "SELECT 1 FROM messages WHERE session_id = ? AND active = 1 LIMIT 1",
+                        (child_id,),
+                    ).fetchone()
+                except Exception:
+                    return session_id
+                if msg_row is not None:
+                    return child_id
+                current = child_id
+        return session_id
+
+    def _message_row_as_conversation(
+        self,
+        row,
+        *,
+        include_storage_metadata: bool = False,
+    ) -> Dict[str, Any]:
+        content = self._decode_content(row["content"])
+        if row["role"] in {"user", "assistant"} and isinstance(content, str):
+            content = sanitize_context(content).strip()
+        msg = {"role": row["role"], "content": content}
+        if include_storage_metadata:
+            msg["message_id"] = str(row["id"])
+            msg["timestamp"] = row["timestamp"]
+        elif row["platform_message_id"]:
+            # Surface the platform-side message id (e.g. yuanbao msg_id,
+            # telegram update_id) so platform-specific flows like recall
+            # can match by external identifier instead of having to fall
+            # back to content-match heuristics.  Exposed as ``message_id``
+            # for backward compatibility with the JSONL transcript shape.
+            msg["message_id"] = row["platform_message_id"]
+        if row["tool_call_id"]:
+            msg["tool_call_id"] = row["tool_call_id"]
+        if row["tool_name"]:
+            msg["tool_name"] = row["tool_name"]
+        if row["tool_calls"]:
+            try:
+                msg["tool_calls"] = json.loads(row["tool_calls"])
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Failed to deserialize tool_calls in conversation replay, falling back to []")
+                msg["tool_calls"] = []
+        if row["role"] == "assistant":
+            if row["finish_reason"]:
+                msg["finish_reason"] = row["finish_reason"]
+            if row["reasoning"]:
+                msg["reasoning"] = row["reasoning"]
+            if row["reasoning_content"] is not None:
+                msg["reasoning_content"] = row["reasoning_content"]
+            if row["reasoning_details"]:
+                try:
+                    msg["reasoning_details"] = json.loads(row["reasoning_details"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize reasoning_details, falling back to None")
+                    msg["reasoning_details"] = None
+            if row["codex_reasoning_items"]:
+                try:
+                    msg["codex_reasoning_items"] = json.loads(row["codex_reasoning_items"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize codex_reasoning_items, falling back to None")
+                    msg["codex_reasoning_items"] = None
+            if row["codex_message_items"]:
+                try:
+                    msg["codex_message_items"] = json.loads(row["codex_message_items"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize codex_message_items, falling back to None")
+                    msg["codex_message_items"] = None
+        if row["metadata_json"]:
+            try:
+                msg["metadata"] = json.loads(row["metadata_json"])
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Failed to deserialize message metadata, falling back to None")
+                msg["metadata"] = None
+        return msg
+
+    def _conversation_message_columns(self) -> str:
+        return (
+            "id, session_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, "
+            "finish_reason, reasoning, reasoning_content, reasoning_details, "
+            "codex_reasoning_items, codex_message_items, platform_message_id, metadata_json"
+        )
+
+    @staticmethod
+    def _message_row_turn_metadata(row) -> Dict[str, str]:
+        try:
+            raw_metadata = row["metadata_json"]
+        except (KeyError, IndexError):
+            return {}
+        if not raw_metadata:
+            return {}
+        try:
+            metadata = json.loads(raw_metadata)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Failed to deserialize message metadata for turn expansion")
+            return {}
+        if not isinstance(metadata, dict):
+            return {}
+
+        identity: Dict[str, str] = {}
+        for key in ("turn_id", "run_id", "client_message_id"):
+            value = metadata.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                identity[key] = text
+        return identity
+
+    def _expand_message_page_rows_to_turn_boundaries(
+        self,
+        rows: List[Any],
+        *,
+        session_ids: List[str],
+        columns: str,
+        include_inactive: bool = False,
+    ) -> List[Any]:
+        if not rows:
+            return rows
+
+        selected_identity_values: Dict[str, set[str]] = {
+            "turn_id": set(),
+            "run_id": set(),
+            "client_message_id": set(),
+        }
+        for row in rows:
+            identity = self._message_row_turn_metadata(row)
+            for key, value in identity.items():
+                selected_identity_values[key].add(value)
+
+        if not any(selected_identity_values.values()):
+            return rows
+
+        placeholders = ",".join("?" for _ in session_ids)
+        active_clause = "" if include_inactive else " AND active = 1"
+        candidate_rows = self._conn.execute(
+            f"SELECT {columns} FROM messages "
+            f"WHERE session_id IN ({placeholders}) AND metadata_json IS NOT NULL "
+            f"{active_clause} "
+            "ORDER BY id",
+            tuple(session_ids),
+        ).fetchall()
+
+        rows_by_id = {int(row["id"]): row for row in rows}
+        matched_min_id_by_session: Dict[str, int] = {}
+        matched_user_sessions: set[str] = set()
+
+        for row in candidate_rows:
+            identity = self._message_row_turn_metadata(row)
+            if not any(
+                value in selected_identity_values[key]
+                for key, value in identity.items()
+                if key in selected_identity_values
+            ):
+                continue
+
+            row_id = int(row["id"])
+            rows_by_id[row_id] = row
+            row_session_id = str(row["session_id"])
+            current_min = matched_min_id_by_session.get(row_session_id)
+            if current_min is None or row_id < current_min:
+                matched_min_id_by_session[row_session_id] = row_id
+            if row["role"] == "user":
+                matched_user_sessions.add(row_session_id)
+
+        for row_session_id, first_matched_id in matched_min_id_by_session.items():
+            if row_session_id in matched_user_sessions:
+                continue
+            previous_user = self._conn.execute(
+                f"SELECT {columns} FROM messages "
+                "WHERE session_id = ? AND role = 'user' AND id < ? "
+                f"{active_clause} "
+                "ORDER BY id DESC LIMIT 1",
+                (row_session_id, first_matched_id),
+            ).fetchone()
+            if previous_user is not None:
+                rows_by_id[int(previous_user["id"])] = previous_user
+
+        return [rows_by_id[row_id] for row_id in sorted(rows_by_id)]
+
+    def _has_messages_on_page_side(
+        self,
+        session_ids: List[str],
+        *,
+        row_id: Optional[int],
+        side: str,
+        include_inactive: bool = False,
+    ) -> bool:
+        if row_id is None:
+            return False
+        placeholders = ",".join("?" for _ in session_ids)
+        operator = "<" if side == "before" else ">"
+        active_clause = "" if include_inactive else " AND active = 1"
+        row = self._conn.execute(
+            f"SELECT 1 FROM messages "
+            f"WHERE session_id IN ({placeholders}) AND id {operator} ? "
+            f"{active_clause} "
+            "LIMIT 1",
+            tuple(session_ids) + (row_id,),
+        ).fetchone()
+        return row is not None
+
+    def get_messages_as_conversation(
+        self,
+        session_id: str,
+        include_ancestors: bool = False,
+        include_storage_metadata: bool = False,
+        include_inactive: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """
+        Load messages in the OpenAI conversation format (role + content dicts).
+        Used by the gateway to restore conversation history.
+        """
+        session_ids = [session_id]
+        if include_ancestors:
+            session_ids = self._session_lineage_root_to_tip(session_id)
+
+        active_clause = "" if include_inactive else " AND active = 1"
+        with self._lock:
+            placeholders = ",".join("?" for _ in session_ids)
+            rows = self._conn.execute(
+                f"SELECT {self._conversation_message_columns()} "
+                f"FROM messages WHERE session_id IN ({placeholders})"
+                f"{active_clause} ORDER BY id",
+                tuple(session_ids),
+            ).fetchall()
+
+        messages = []
+        for row in rows:
+            msg = self._message_row_as_conversation(
+                row,
+                include_storage_metadata=include_storage_metadata,
+            )
+            if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
+                continue
+            messages.append(msg)
+        return messages
+
+    def get_messages_page_as_conversation(
+        self,
+        session_id: str,
+        direction: str = "tail",
+        cursor_id: Optional[int] = None,
+        limit: int = 50,
+        include_ancestors: bool = False,
+        include_inactive: bool = False,
+    ) -> Dict[str, Any]:
+        """Load one stable page of conversation messages with storage cursors.
+
+        ``direction`` accepts:
+          - ``tail``: newest ``limit`` messages, returned oldest-to-newest.
+          - ``before``: ``limit`` messages older than ``cursor_id``.
+          - ``after``: ``limit`` messages newer than ``cursor_id``.
+
+        Cursors are SQLite message row ids.  The returned messages include a
+        string ``message_id`` based on that row id so clients can dedupe pages
+        without relying on mutable text content.
+        """
+        try:
+            page_limit = int(limit)
+        except (TypeError, ValueError):
+            page_limit = 50
+        page_limit = max(1, min(page_limit, 500))
+
+        session_ids = [session_id]
+        if include_ancestors:
+            session_ids = self._session_lineage_root_to_tip(session_id)
+
+        normalized_direction = str(direction or "tail").lower()
+        if normalized_direction not in {"tail", "before", "after"}:
+            normalized_direction = "tail"
+
+        with self._lock:
+            placeholders = ",".join("?" for _ in session_ids)
+            base_params: Tuple[Any, ...] = tuple(session_ids)
+            active_clause = "" if include_inactive else " AND active = 1"
+            total_count = self._conn.execute(
+                f"SELECT COUNT(*) FROM messages WHERE session_id IN ({placeholders})"
+                f"{active_clause}",
+                base_params,
+            ).fetchone()[0]
+
+            columns = self._conversation_message_columns()
+            if normalized_direction == "before" and cursor_id is not None:
+                rows = self._conn.execute(
+                    f"SELECT {columns} FROM messages "
+                    f"WHERE session_id IN ({placeholders}) AND id < ? "
+                    f"{active_clause} "
+                    "ORDER BY id DESC LIMIT ?",
+                    base_params + (cursor_id, page_limit + 1),
+                ).fetchall()
+                has_more_before = len(rows) > page_limit
+                selected_rows = list(reversed(rows[:page_limit]))
+                has_more_after = bool(selected_rows)
+            elif normalized_direction == "after" and cursor_id is not None:
+                rows = self._conn.execute(
+                    f"SELECT {columns} FROM messages "
+                    f"WHERE session_id IN ({placeholders}) AND id > ? "
+                    f"{active_clause} "
+                    "ORDER BY id ASC LIMIT ?",
+                    base_params + (cursor_id, page_limit + 1),
+                ).fetchall()
+                has_more_after = len(rows) > page_limit
+                selected_rows = list(rows[:page_limit])
+                has_more_before = bool(selected_rows)
+            else:
+                rows = self._conn.execute(
+                    f"SELECT {columns} FROM messages "
+                    f"WHERE session_id IN ({placeholders}) "
+                    f"{active_clause} "
+                    "ORDER BY id DESC LIMIT ?",
+                    base_params + (page_limit + 1,),
+                ).fetchall()
+                has_more_before = len(rows) > page_limit
+                selected_rows = list(reversed(rows[:page_limit]))
+                has_more_after = False
+
+            selected_rows = self._expand_message_page_rows_to_turn_boundaries(
+                selected_rows,
+                session_ids=session_ids,
+                columns=columns,
+                include_inactive=include_inactive,
+            )
+            first_id = int(selected_rows[0]["id"]) if selected_rows else None
+            last_id = int(selected_rows[-1]["id"]) if selected_rows else None
+            has_more_before = self._has_messages_on_page_side(
+                session_ids,
+                row_id=first_id,
+                side="before",
+                include_inactive=include_inactive,
+            )
+            has_more_after = self._has_messages_on_page_side(
+                session_ids,
+                row_id=last_id,
+                side="after",
+                include_inactive=include_inactive,
+            )
+
+        messages = []
+        for row in selected_rows:
+            msg = self._message_row_as_conversation(
+                row,
+                include_storage_metadata=True,
+            )
+            if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
+                continue
+            messages.append(msg)
+
+        return {
+            "messages": messages,
+            "pageInfo": {
+                "prev_cursor_id": first_id if has_more_before else None,
+                "next_cursor_id": last_id if has_more_after else None,
+                "hasMoreBefore": has_more_before,
+                "hasMoreAfter": has_more_after,
+                "totalCount": int(total_count or 0),
+            },
+        }
+
+    def _session_lineage_root_to_tip(self, session_id: str) -> List[str]:
+        if not session_id:
+            return [session_id]
+
+        with self._lock:
+            return self._replayable_lineage_root_to_tip_conn(self._conn, session_id)
+
+    @staticmethod
+    def _is_duplicate_replayed_user_message(messages: List[Dict[str, Any]], msg: Dict[str, Any]) -> bool:
+        if msg.get("role") != "user":
+            return False
+        content = msg.get("content")
+        if not isinstance(content, str) or not content:
+            return False
+        for prev in reversed(messages):
+            if prev.get("role") == "user" and prev.get("content") == content:
+                return True
+            if prev.get("role") == "assistant" and (prev.get("content") or prev.get("tool_calls")):
+                return False
+        return False
+
+    # =========================================================================
+    # Rewind (soft-delete)
+    # =========================================================================
+
+    def rewind_to_message(
+        self,
+        session_id: str,
+        target_message_id: int,
+    ) -> Dict[str, Any]:
+        """Soft-delete the target user message and every following row.
+
+        The rows remain on disk with ``active=0`` for audit/debug views. Normal
+        transcript reads, search, resume and pagination ignore inactive rows by
+        default. The target row is included in the soft-delete so callers can
+        prefill it into the composer without duplicating it in the replayed
+        context.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM messages WHERE id = ? AND session_id = ?",
+                (target_message_id, session_id),
+            ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"message {target_message_id} not found in session {session_id}"
+            )
+
+        target_row = dict(row)
+        if target_row.get("role") != "user":
+            raise ValueError(
+                "rewind target must be a 'user' message "
+                f"(got role={target_row.get('role')!r}, id={target_message_id})"
+            )
+        target_row["content"] = self._decode_content(target_row.get("content"))
+
+        def _do(conn):
+            cursor = conn.execute(
+                "SELECT id FROM messages "
+                "WHERE session_id = ? AND id >= ? AND active = 1",
+                (session_id, target_message_id),
+            )
+            ids = [int(r[0]) for r in cursor.fetchall()]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                conn.execute(
+                    f"UPDATE messages SET active = 0 WHERE id IN ({placeholders})",
+                    ids,
+                )
+            conn.execute(
+                "UPDATE sessions "
+                "SET rewind_count = COALESCE(rewind_count, 0) + 1 "
+                "WHERE id = ?",
+                (session_id,),
+            )
+            self._rebuild_session_list_summary(conn, session_id)
+            return ids
+
+        rewound_ids = self._execute_write(_do)
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(id) FROM messages WHERE session_id = ? AND active = 1",
+                (session_id,),
+            ).fetchone()
+        new_head_id = row[0] if row and row[0] is not None else None
+
+        return {
+            "rewound_count": len(rewound_ids),
+            "target_message": target_row,
+            "new_head_id": new_head_id,
+        }
+
+    def restore_rewound(self, session_id: str, since_message_id: int) -> int:
+        """Restore inactive rows from ``since_message_id`` onward."""
+
+        def _do(conn):
+            cursor = conn.execute(
+                "SELECT id FROM messages "
+                "WHERE session_id = ? AND id >= ? AND active = 0",
+                (session_id, since_message_id),
+            )
+            ids = [int(r[0]) for r in cursor.fetchall()]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                conn.execute(
+                    f"UPDATE messages SET active = 1 WHERE id IN ({placeholders})",
+                    ids,
+                )
+            self._rebuild_session_list_summary(conn, session_id)
+            return len(ids)
+
+        return self._execute_write(_do)
+
+    def list_recent_user_messages(
+        self,
+        session_id: str,
+        limit: int = 20,
+        include_inactive: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return recent user messages newest-first for undo/rewind selection."""
+        try:
+            bounded_limit = max(1, min(int(limit), 500))
+        except (TypeError, ValueError):
+            bounded_limit = 20
+        active_clause = "" if include_inactive else " AND active = 1"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, timestamp, content FROM messages "
+                "WHERE session_id = ? AND role = 'user'"
+                f"{active_clause} "
+                "ORDER BY id DESC LIMIT ?",
+                (session_id, bounded_limit),
+            ).fetchall()
+
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            decoded = self._decode_content(row["content"])
+            if isinstance(decoded, list):
+                text_parts = [
+                    part.get("text", "")
+                    for part in decoded
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ]
+                preview = " ".join(part for part in text_parts if part).strip()
+                if not preview:
+                    preview = "[multimodal content]"
+            elif isinstance(decoded, str):
+                preview = decoded
+            else:
+                preview = ""
+            preview = " ".join(preview.split())
+            if len(preview) > 80:
+                preview = preview[:77] + "..."
+            result.append(
+                {
+                    "id": row["id"],
+                    "timestamp": row["timestamp"],
+                    "preview": preview,
+                }
+            )
+        return result
+
+    # =========================================================================
+    # Search
+    # =========================================================================
+
+    @staticmethod
+    def _sanitize_fts5_query(query: str) -> str:
+        """Sanitize user input for safe use in FTS5 MATCH queries.
+
+        FTS5 has its own query syntax where characters like ``"``, ``(``, ``)``,
+        ``+``, ``*``, ``{``, ``}`` and bare boolean operators (``AND``, ``OR``,
+        ``NOT``) have special meaning.  Passing raw user input directly to
+        MATCH can cause ``sqlite3.OperationalError``.
+
+        Strategy:
+        - Preserve properly paired quoted phrases (``"exact phrase"``)
+        - Strip unmatched FTS5-special characters that would cause errors
+        - Wrap unquoted hyphenated and dotted terms in quotes so FTS5
+          matches them as exact phrases instead of splitting on the
+          hyphen/dot (e.g. ``chat-send``, ``P2.2``, ``my-app.config.ts``)
+        """
+        # Step 1: Extract balanced double-quoted phrases and protect them
+        # from further processing via numbered placeholders.
+        _quoted_parts: list = []
+
+        def _preserve_quoted(m: re.Match) -> str:
+            _quoted_parts.append(m.group(0))
+            return f"\x00Q{len(_quoted_parts) - 1}\x00"
+
+        sanitized = re.sub(r'"[^"]*"', _preserve_quoted, query)
+
+        # Step 2: Strip remaining (unmatched) FTS5-special characters
+        sanitized = re.sub(r'[+{}()\"^]', " ", sanitized)
+
+        # Step 3: Collapse repeated * (e.g. "***") into a single one,
+        # and remove leading * (prefix-only needs at least one char before *)
+        sanitized = re.sub(r"\*+", "*", sanitized)
+        sanitized = re.sub(r"(^|\s)\*", r"\1", sanitized)
+
+        # Step 4: Remove dangling boolean operators at start/end that would
+        # cause syntax errors (e.g. "hello AND" or "OR world")
+        sanitized = re.sub(r"(?i)^(AND|OR|NOT)\b\s*", "", sanitized.strip())
+        sanitized = re.sub(r"(?i)\s+(AND|OR|NOT)\s*$", "", sanitized.strip())
+
+        # Step 5: Wrap unquoted dotted and/or hyphenated terms in double
+        # quotes.  FTS5's tokenizer splits on dots and hyphens, turning
+        # ``chat-send`` into ``chat AND send`` and ``P2.2`` into ``p2 AND 2``.
+        # Quoting preserves phrase semantics.  A single pass avoids the
+        # double-quoting bug that would occur if dotted, hyphenated and underscored
+        # patterns were applied sequentially (e.g. ``my-app.config``).
+        sanitized = re.sub(r"\b(\w+(?:[._-]\w+)+)\b", r'"\1"', sanitized)
+
+        # Step 6: Restore preserved quoted phrases
+        for i, quoted in enumerate(_quoted_parts):
+            sanitized = sanitized.replace(f"\x00Q{i}\x00", quoted)
+
+        return sanitized.strip()
+
+
+    @staticmethod
+    def _is_cjk_codepoint(cp: int) -> bool:
+        return (0x4E00 <= cp <= 0x9FFF or    # CJK Unified Ideographs
+                0x3400 <= cp <= 0x4DBF or    # CJK Extension A
+                0x20000 <= cp <= 0x2A6DF or  # CJK Extension B
+                0x3000 <= cp <= 0x303F or    # CJK Symbols
+                0x3040 <= cp <= 0x309F or    # Hiragana
+                0x30A0 <= cp <= 0x30FF or    # Katakana
+                0xAC00 <= cp <= 0xD7AF)      # Hangul Syllables
+
+    @staticmethod
+    def _contains_cjk(text: str) -> bool:
+        """Check if text contains CJK (Chinese, Japanese, Korean) characters."""
+        for ch in text:
+            cp = ord(ch)
+            if (0x4E00 <= cp <= 0x9FFF or    # CJK Unified Ideographs
+                0x3400 <= cp <= 0x4DBF or    # CJK Extension A
+                0x20000 <= cp <= 0x2A6DF or  # CJK Extension B
+                0x3000 <= cp <= 0x303F or    # CJK Symbols
+                0x3040 <= cp <= 0x309F or    # Hiragana
+                0x30A0 <= cp <= 0x30FF or    # Katakana
+                0xAC00 <= cp <= 0xD7AF):     # Hangul Syllables
+                return True
+        return False
+
+    @classmethod
+    def _count_cjk(cls, text: str) -> int:
+        """Count CJK characters in text."""
+        return sum(1 for ch in text if cls._is_cjk_codepoint(ord(ch)))
+
+    def search_messages(
+        self,
+        query: str,
+        source_filter: List[str] = None,
+        exclude_sources: List[str] = None,
+        role_filter: List[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+        sort: str = None,
+        include_inactive: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """
+        Full-text search across session messages using FTS5.
+
+        Supports FTS5 query syntax:
+          - Simple keywords: "docker deployment"
+          - Phrases: '"exact phrase"'
+          - Boolean: "docker OR kubernetes", "python NOT java"
+          - Prefix: "deploy*"
+
+        Returns matching messages with session metadata, content snippet,
+        and surrounding context (1 message before and after the match).
+
+        ``sort`` controls temporal ordering:
+          - ``None`` (default): FTS5 BM25 relevance only. Time-neutral.
+          - ``"newest"``: order by message timestamp DESC, then by rank.
+          - ``"oldest"``: order by message timestamp ASC, then by rank.
+
+        The short-CJK LIKE fallback already orders by timestamp DESC and
+        ignores ``sort``. The trigram CJK path honours ``sort`` like the main
+        FTS5 path.
+        """
+        if not query or not query.strip():
+            return []
+
+        query = self._sanitize_fts5_query(query)
+        if not query:
+            return []
+
+        # Normalise sort. Anything not in the allowed set falls back to None
+        # (FTS5 rank-only) so callers can pass through user input without
+        # validation.
+        if isinstance(sort, str):
+            sort_norm = sort.strip().lower()
+            if sort_norm not in ("newest", "oldest"):
+                sort_norm = None
+        else:
+            sort_norm = None
+
+        # ORDER BY shared across the main FTS5 path and trigram CJK path.
+        # With sort set, timestamp is primary and rank is the tiebreaker.
+        if sort_norm == "newest":
+            order_by_sql = "ORDER BY m.timestamp DESC, rank"
+        elif sort_norm == "oldest":
+            order_by_sql = "ORDER BY m.timestamp ASC, rank"
+        else:
+            order_by_sql = "ORDER BY rank"
+
+        # Build WHERE clauses dynamically
+        where_clauses = ["messages_fts MATCH ?"]
+        params: list = [query]
+        if not include_inactive:
+            where_clauses.append("m.active = 1")
+
+        if source_filter is not None:
+            source_placeholders = ",".join("?" for _ in source_filter)
+            where_clauses.append(f"s.source IN ({source_placeholders})")
+            params.extend(source_filter)
+
+        if exclude_sources is not None:
+            exclude_placeholders = ",".join("?" for _ in exclude_sources)
+            where_clauses.append(f"s.source NOT IN ({exclude_placeholders})")
+            params.extend(exclude_sources)
+
+        if role_filter:
+            role_placeholders = ",".join("?" for _ in role_filter)
+            where_clauses.append(f"m.role IN ({role_placeholders})")
+            params.extend(role_filter)
+
+        where_sql = " AND ".join(where_clauses)
+        params.extend([limit, offset])
+
+        sql = f"""
+            SELECT
+                m.id,
+                m.session_id,
+                m.role,
+                snippet(messages_fts, 0, '>>>', '<<<', '...', 40) AS snippet,
+                m.content,
+                m.timestamp,
+                m.tool_name,
+                s.source,
+                s.model,
+                s.started_at AS session_started
+            FROM messages_fts
+            JOIN messages m ON m.id = messages_fts.rowid
+            JOIN sessions s ON s.id = m.session_id
+            WHERE {where_sql}
+            {order_by_sql}
+            LIMIT ? OFFSET ?
+        """
+
+        # CJK queries bypass the unicode61 FTS5 table.  The default tokenizer
+        # splits CJK characters into individual tokens, so "大别山项目" becomes
+        # "大 AND 别 AND 山 AND 项 AND 目" — producing false positives and
+        # missing exact phrase matches.
+        #
+        # For queries with 3+ CJK characters, we use the trigram FTS5 table
+        # (indexed substring matching with ranking and snippets).  For shorter
+        # CJK queries (1-2 chars), trigram can't match (it needs ≥9 UTF-8
+        # bytes = 3 CJK chars), so we fall back to LIKE.
+        is_cjk = self._contains_cjk(query)
+        if is_cjk:
+            raw_query = query.strip('"').strip()
+            cjk_count = self._count_cjk(raw_query)
+
+            # Per-token CJK length check (#20494): trigram needs >=3 CJK chars
+            # per token. A query like "广西 OR 桂林 OR 漓江" has cjk_count=6
+            # (>=3) but each individual token is only 2 chars — trigram returns 0.
+            # Route to LIKE when any non-operator CJK token is <3 CJK chars.
+            _tokens_for_check = [
+                t for t in raw_query.split()
+                if t.upper() not in {"AND", "OR", "NOT"} and self._contains_cjk(t)
+            ]
+            _any_short_cjk = any(
+                self._count_cjk(t) < 3 for t in _tokens_for_check
+            )
+
+            if cjk_count >= 3 and not _any_short_cjk:
+                # Trigram FTS5 path — quote each non-operator token to handle
+                # FTS5 special chars (%, *, etc.) while preserving boolean
+                # operators (AND, OR, NOT) for multi-term queries.
+                tokens = raw_query.split()
+                parts = []
+                for tok in tokens:
+                    if tok.upper() in {"AND", "OR", "NOT"}:
+                        parts.append(tok)
+                    else:
+                        parts.append('"' + tok.replace('"', '""') + '"')
+                trigram_query = " ".join(parts)
+                tri_where = ["messages_fts_trigram MATCH ?"]
+                tri_params: list = [trigram_query]
+                if not include_inactive:
+                    tri_where.append("m.active = 1")
+                if source_filter is not None:
+                    tri_where.append(f"s.source IN ({','.join('?' for _ in source_filter)})")
+                    tri_params.extend(source_filter)
+                if exclude_sources is not None:
+                    tri_where.append(f"s.source NOT IN ({','.join('?' for _ in exclude_sources)})")
+                    tri_params.extend(exclude_sources)
+                if role_filter:
+                    tri_where.append(f"m.role IN ({','.join('?' for _ in role_filter)})")
+                    tri_params.extend(role_filter)
+                tri_sql = f"""
+                    SELECT
+                        m.id,
+                        m.session_id,
+                        m.role,
+                        snippet(messages_fts_trigram, 0, '>>>', '<<<', '...', 40) AS snippet,
+                        m.content,
+                        m.timestamp,
+                        m.tool_name,
+                        s.source,
+                        s.model,
+                        s.started_at AS session_started
+                    FROM messages_fts_trigram
+                    JOIN messages m ON m.id = messages_fts_trigram.rowid
+                    JOIN sessions s ON s.id = m.session_id
+                    WHERE {' AND '.join(tri_where)}
+                    {order_by_sql}
+                    LIMIT ? OFFSET ?
+                """
+                tri_params.extend([limit, offset])
+                with self._lock:
+                    try:
+                        tri_cursor = self._conn.execute(tri_sql, tri_params)
+                    except sqlite3.OperationalError:
+                        matches = []
+                    else:
+                        matches = [dict(row) for row in tri_cursor.fetchall()]
+            else:
+                # Short / mixed CJK query: trigram cannot match tokens with
+                # <3 CJK chars. Fall back to LIKE substring search.
+                # For multi-token OR queries (e.g. "广西 OR 桂林 OR 漓江"),
+                # build one LIKE condition per non-operator token so each term
+                # is matched independently (#20494).
+                non_op_tokens = [
+                    t for t in raw_query.split()
+                    if t.upper() not in {"AND", "OR", "NOT"}
+                ] or [raw_query]
+                token_clauses = []
+                like_params: list = []
+                for tok in non_op_tokens:
+                    esc = tok.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    token_clauses.append(
+                        "(m.content LIKE ? ESCAPE '\\' OR m.tool_name LIKE ? ESCAPE '\\' OR m.tool_calls LIKE ? ESCAPE '\\')"
+                    )
+                    like_params += [f"%{esc}%", f"%{esc}%", f"%{esc}%"]
+                like_where = [f"({' OR '.join(token_clauses)})"]
+                if not include_inactive:
+                    like_where.append("m.active = 1")
+                if source_filter is not None:
+                    like_where.append(f"s.source IN ({','.join('?' for _ in source_filter)})")
+                    like_params.extend(source_filter)
+                if exclude_sources is not None:
+                    like_where.append(f"s.source NOT IN ({','.join('?' for _ in exclude_sources)})")
+                    like_params.extend(exclude_sources)
+                if role_filter:
+                    like_where.append(f"m.role IN ({','.join('?' for _ in role_filter)})")
+                    like_params.extend(role_filter)
+                like_sql = f"""
+                    SELECT m.id, m.session_id, m.role,
+                           substr(m.content,
+                                  max(1, instr(m.content, ?) - 40),
+                                  120) AS snippet,
+                           m.content, m.timestamp, m.tool_name,
+                           s.source, s.model, s.started_at AS session_started
+                    FROM messages m
+                    JOIN sessions s ON s.id = m.session_id
+                    WHERE {' AND '.join(like_where)}
+                    ORDER BY m.timestamp DESC
+                    LIMIT ? OFFSET ?
+                """
+                like_params.extend([limit, offset])
+                # instr() for snippet uses first search token
+                like_params = [non_op_tokens[0]] + like_params
+                with self._lock:
+                    like_cursor = self._conn.execute(like_sql, like_params)
+                    matches = [dict(row) for row in like_cursor.fetchall()]
+        else:
+            with self._lock:
+                try:
+                    cursor = self._conn.execute(sql, params)
+                except sqlite3.OperationalError:
+                    # FTS5 query syntax error despite sanitization — return empty
+                    return []
+                else:
+                    matches = [dict(row) for row in cursor.fetchall()]
+
+        # Add surrounding context (1 message before + after each match).
+        # Done outside the lock so we don't hold it across N sequential queries.
+        for match in matches:
+            try:
+                with self._lock:
+                    target_active_clause = "" if include_inactive else " AND active = 1"
+                    neighbor_active_clause = "" if include_inactive else " AND m.active = 1"
+                    ctx_cursor = self._conn.execute(
+                        f"""WITH target AS (
+                               SELECT session_id, timestamp, id
+                               FROM messages
+                               WHERE id = ?{target_active_clause}
+                           )
+                           SELECT role, content
+                           FROM (
+                               SELECT m.id, m.timestamp, m.role, m.content
+                               FROM messages m
+                               JOIN target t ON t.session_id = m.session_id
+                               WHERE (
+                                   (m.timestamp < t.timestamp)
+                                   OR (m.timestamp = t.timestamp AND m.id < t.id)
+                               )
+                               {neighbor_active_clause}
+                               ORDER BY m.timestamp DESC, m.id DESC
+                               LIMIT 1
+                           )
+                           UNION ALL
+                           SELECT role, content
+                           FROM messages
+                           WHERE id = ?{target_active_clause}
+                           UNION ALL
+                           SELECT role, content
+                           FROM (
+                               SELECT m.id, m.timestamp, m.role, m.content
+                               FROM messages m
+                               JOIN target t ON t.session_id = m.session_id
+                               WHERE (
+                                   (m.timestamp > t.timestamp)
+                                   OR (m.timestamp = t.timestamp AND m.id > t.id)
+                               )
+                               {neighbor_active_clause}
+                               ORDER BY m.timestamp ASC, m.id ASC
+                               LIMIT 1
+                           )""",
+                        (match["id"], match["id"]),
+                    )
+                    context_msgs = []
+                    for r in ctx_cursor.fetchall():
+                        raw = r["content"]
+                        decoded = self._decode_content(raw)
+                        # Multimodal context: render a compact text-only
+                        # summary for search previews.
+                        if isinstance(decoded, list):
+                            text_parts = [
+                                p.get("text", "") for p in decoded
+                                if isinstance(p, dict) and p.get("type") == "text"
+                            ]
+                            text = " ".join(t for t in text_parts if t).strip()
+                            preview = text or "[multimodal content]"
+                        elif isinstance(decoded, str):
+                            preview = decoded
+                        else:
+                            preview = ""
+                        context_msgs.append(
+                            {"role": r["role"], "content": preview[:200]}
+                        )
+                match["context"] = context_msgs
+            except Exception:
+                match["context"] = []
+
+        # Remove full content from result (snippet is enough, saves tokens)
+        for match in matches:
+            match.pop("content", None)
+
+        return matches
+
+    def search_sessions_by_id(
+        self,
+        query: str,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Search surfaced sessions by exact/prefix/substring session id.
+
+        Matching checks each surfaced row's id and projected compression root
+        id, while ``list_sessions_rich(id_query=...)`` pushes the candidate
+        filter into SQL so desktop/web search does not scan every session row.
+        """
+        needle = (query or "").strip().lower()
+        try:
+            bounded_limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            bounded_limit = 20
+        if not needle:
+            return []
+
+        candidates = self.list_sessions_rich(
+            limit=max(bounded_limit * 4, bounded_limit),
+            offset=0,
+            order_by_last_active=True,
+            id_query=needle,
+        )
+
+        def score(row: Dict[str, Any]) -> int:
+            ids = [str(row.get("id") or ""), str(row.get("_lineage_root_id") or "")]
+            normalized = [value.lower() for value in ids if value]
+            if any(value == needle for value in normalized):
+                return 0
+            if any(value.startswith(needle) for value in normalized):
+                return 1
+            return 2
+
+        ranked = sorted(
+            enumerate(candidates),
+            key=lambda item: (score(item[1]), item[0]),
+        )
+        return [row for _, row in ranked[:bounded_limit]]
+
+    def search_sessions(
+        self,
+        source: str = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List sessions, optionally filtered by source.
+
+        Returns rows with the denormalized ``last_active`` list field,
+        falling back to ``started_at``, ordered by most-recently-used first.
+        """
+        select_with_last_active = (
+            "SELECT s.*, COALESCE(s.last_active, s.started_at) AS _last_active_summary "
+            "FROM sessions s "
+        )
+        with self._lock:
+            if source:
+                cursor = self._conn.execute(
+                    f"{select_with_last_active}"
+                    "WHERE s.source = ? "
+                    "ORDER BY _last_active_summary DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
+                    (source, limit, offset),
+                )
+            else:
+                cursor = self._conn.execute(
+                    f"{select_with_last_active}"
+                    "ORDER BY _last_active_summary DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                )
+            rows = cursor.fetchall()
+        sessions = []
+        for row in rows:
+            session = dict(row)
+            session["last_active"] = session.pop(
+                "_last_active_summary",
+                session.get("last_active") or session.get("started_at") or 0,
+            )
+            sessions.append(session)
+        return sessions
 
     # =========================================================================
     # Utility
@@ -1663,7 +4433,7 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
                 "DELETE FROM messages WHERE session_id = ?", (session_id,)
             )
             conn.execute(
-                "UPDATE sessions SET message_count = 0, tool_call_count = 0 WHERE id = ?",
+                "UPDATE sessions SET message_count = 0, tool_call_count = 0, preview = '', last_active = NULL WHERE id = ?",
                 (session_id,),
             )
         self._execute_write(_do)
@@ -1672,21 +4442,15 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
     def _remove_session_files(sessions_dir: Optional[Path], session_id: str) -> None:
         """Remove on-disk transcript files for a session.
 
-        Cleans up ``{session_id}.json``, ``{session_id}.jsonl``,
-        Doxie/TUI ``session_{session_id}.json`` transcript files, and any
+        Cleans up ``{session_id}.json``, ``{session_id}.jsonl``, and any
         ``request_dump_{session_id}_*.json`` files left by the gateway.
         Silently skips files that don't exist and swallows OSError so a
         filesystem hiccup never blocks a DB operation.
         """
         if sessions_dir is None:
             return
-        for name in (
-            f"{session_id}.json",
-            f"{session_id}.jsonl",
-            f"session_{session_id}.json",
-            f"session_{session_id}.jsonl",
-        ):
-            p = sessions_dir / name
+        for suffix in (".json", ".jsonl"):
+            p = sessions_dir / f"{session_id}{suffix}"
             try:
                 p.unlink(missing_ok=True)
             except OSError:
@@ -1724,6 +4488,20 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
             conn.execute(
                 "UPDATE sessions SET parent_session_id = NULL "
                 "WHERE parent_session_id = ?",
+                (session_id,),
+            )
+            conn.execute(
+                "UPDATE session_lineage SET parent_session_id = NULL "
+                "WHERE parent_session_id = ?",
+                (session_id,),
+            )
+            conn.execute(
+                "DELETE FROM session_branch_requests "
+                "WHERE source_session_id = ? OR result_session_id = ?",
+                (session_id, session_id),
+            )
+            conn.execute(
+                "DELETE FROM session_lineage WHERE session_id = ?",
                 (session_id,),
             )
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
@@ -1777,6 +4555,22 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
                 f"WHERE parent_session_id IN ({placeholders})",
                 list(session_ids),
             )
+            conn.execute(
+                f"UPDATE session_lineage SET parent_session_id = NULL "
+                f"WHERE parent_session_id IN ({placeholders})",
+                list(session_ids),
+            )
+            conn.execute(
+                f"DELETE FROM session_branch_requests "
+                f"WHERE source_session_id IN ({placeholders}) "
+                f"OR result_session_id IN ({placeholders})",
+                list(session_ids) + list(session_ids),
+            )
+            conn.execute(
+                f"DELETE FROM session_lineage "
+                f"WHERE session_id IN ({placeholders})",
+                list(session_ids),
+            )
 
             for sid in session_ids:
                 conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
@@ -1789,3 +4583,745 @@ class SessionDB(SessionDBRunMixin, SessionDBMessageMixin, SessionDBSearchMixin, 
         for sid in removed_ids:
             self._remove_session_files(sessions_dir, sid)
         return count
+
+    # ── Meta key/value (for scheduler bookkeeping) ──
+
+    def get_meta(self, key: str) -> Optional[str]:
+        """Read a value from the state_meta key/value store."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM state_meta WHERE key = ?", (key,)
+            ).fetchone()
+        if row is None:
+            return None
+        return row["value"] if isinstance(row, sqlite3.Row) else row[0]
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Write a value to the state_meta key/value store."""
+        def _do(conn):
+            conn.execute(
+                "INSERT INTO state_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+        self._execute_write(_do)
+
+    def apply_telegram_topic_migration(self) -> None:
+        """Create Telegram DM topic-mode tables on explicit /topic opt-in.
+
+        This migration is deliberately not part of automatic SessionDB startup
+        reconciliation. Operators must be able to upgrade Hermes, keep the old
+        Telegram bot behavior running, and only mutate topic-mode state when the
+        user executes /topic to opt into the feature.
+
+        Schema versions:
+          v1 — initial shape (no ON DELETE CASCADE on session_id FK)
+          v2 — session_id FK gets ON DELETE CASCADE so session pruning
+               automatically clears bindings.
+        """
+        def _do(conn):
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_dm_topic_mode (
+                    chat_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    activated_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    has_topics_enabled INTEGER,
+                    allows_users_to_create_topics INTEGER,
+                    capability_checked_at REAL,
+                    intro_message_id TEXT,
+                    pinned_message_id TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS telegram_dm_topic_bindings (
+                    chat_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    session_key TEXT NOT NULL,
+                    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    managed_mode TEXT NOT NULL DEFAULT 'auto',
+                    linked_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (chat_id, thread_id)
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_dm_topic_bindings_session
+                ON telegram_dm_topic_bindings(session_id);
+
+                CREATE INDEX IF NOT EXISTS idx_telegram_dm_topic_bindings_user
+                ON telegram_dm_topic_bindings(user_id, chat_id);
+                """
+            )
+
+            # v1 → v2: rebuild telegram_dm_topic_bindings if its session_id FK
+            # lacks ON DELETE CASCADE. SQLite can't ALTER a foreign key, so we
+            # rebuild the table. Only runs once per DB (version gate).
+            current = conn.execute(
+                "SELECT value FROM state_meta WHERE key = ?",
+                ("telegram_dm_topic_schema_version",),
+            ).fetchone()
+            current_version = int(current[0]) if current and str(current[0]).isdigit() else 0
+            if current_version < 2:
+                fk_rows = conn.execute(
+                    "PRAGMA foreign_key_list('telegram_dm_topic_bindings')"
+                ).fetchall()
+                needs_rebuild = any(
+                    row[2] == "sessions" and (row[6] or "") != "CASCADE"
+                    for row in fk_rows
+                )
+                if needs_rebuild:
+                    conn.executescript(
+                        """
+                        CREATE TABLE telegram_dm_topic_bindings_new (
+                            chat_id TEXT NOT NULL,
+                            thread_id TEXT NOT NULL,
+                            user_id TEXT NOT NULL,
+                            session_key TEXT NOT NULL,
+                            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                            managed_mode TEXT NOT NULL DEFAULT 'auto',
+                            linked_at REAL NOT NULL,
+                            updated_at REAL NOT NULL,
+                            PRIMARY KEY (chat_id, thread_id)
+                        );
+                        INSERT INTO telegram_dm_topic_bindings_new
+                            SELECT chat_id, thread_id, user_id, session_key,
+                                   session_id, managed_mode, linked_at, updated_at
+                            FROM telegram_dm_topic_bindings;
+                        DROP TABLE telegram_dm_topic_bindings;
+                        ALTER TABLE telegram_dm_topic_bindings_new
+                            RENAME TO telegram_dm_topic_bindings;
+                        CREATE UNIQUE INDEX idx_telegram_dm_topic_bindings_session
+                            ON telegram_dm_topic_bindings(session_id);
+                        CREATE INDEX idx_telegram_dm_topic_bindings_user
+                            ON telegram_dm_topic_bindings(user_id, chat_id);
+                        """
+                    )
+
+            conn.execute(
+                "INSERT INTO state_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("telegram_dm_topic_schema_version", "2"),
+            )
+        self._execute_write(_do)
+
+    def enable_telegram_topic_mode(
+        self,
+        *,
+        chat_id: str,
+        user_id: str,
+        has_topics_enabled: Optional[bool] = None,
+        allows_users_to_create_topics: Optional[bool] = None,
+    ) -> None:
+        """Enable Telegram DM topic mode for one private chat/user.
+
+        This method intentionally owns the explicit topic migration. Ordinary
+        SessionDB startup must not create these side tables.
+        """
+        self.apply_telegram_topic_migration()
+        now = time.time()
+
+        def _to_int(value: Optional[bool]) -> Optional[int]:
+            if value is None:
+                return None
+            return 1 if value else 0
+
+        def _do(conn):
+            conn.execute(
+                """
+                INSERT INTO telegram_dm_topic_mode (
+                    chat_id, user_id, enabled, activated_at, updated_at,
+                    has_topics_enabled, allows_users_to_create_topics,
+                    capability_checked_at
+                ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    enabled = 1,
+                    updated_at = excluded.updated_at,
+                    has_topics_enabled = excluded.has_topics_enabled,
+                    allows_users_to_create_topics = excluded.allows_users_to_create_topics,
+                    capability_checked_at = excluded.capability_checked_at
+                """,
+                (
+                    str(chat_id),
+                    str(user_id),
+                    now,
+                    now,
+                    _to_int(has_topics_enabled),
+                    _to_int(allows_users_to_create_topics),
+                    now,
+                ),
+            )
+        self._execute_write(_do)
+
+    def disable_telegram_topic_mode(
+        self,
+        *,
+        chat_id: str,
+        clear_bindings: bool = True,
+    ) -> None:
+        """Disable Telegram DM topic mode for one private chat.
+
+        When ``clear_bindings`` is True (default) the (chat_id, thread_id)
+        bindings for this chat are also cleared so re-enabling later
+        starts from a clean slate. Set to False if the operator wants to
+        preserve bindings for a later re-enable.
+
+        Never creates the topic-mode tables from scratch; if they don't
+        exist there is nothing to disable and the call is a no-op.
+        """
+        def _do(conn):
+            try:
+                conn.execute(
+                    "UPDATE telegram_dm_topic_mode SET enabled = 0, updated_at = ? "
+                    "WHERE chat_id = ?",
+                    (time.time(), str(chat_id)),
+                )
+                if clear_bindings:
+                    conn.execute(
+                        "DELETE FROM telegram_dm_topic_bindings WHERE chat_id = ?",
+                        (str(chat_id),),
+                    )
+            except sqlite3.OperationalError:
+                # Tables don't exist yet — nothing to disable.
+                return
+        self._execute_write(_do)
+
+    def is_telegram_topic_mode_enabled(self, *, chat_id: str, user_id: str) -> bool:
+        """Return whether Telegram DM topic mode is enabled for this chat/user."""
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    """
+                    SELECT enabled FROM telegram_dm_topic_mode
+                    WHERE chat_id = ? AND user_id = ?
+                    """,
+                    (str(chat_id), str(user_id)),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return False
+        if row is None:
+            return False
+        enabled = row["enabled"] if isinstance(row, sqlite3.Row) else row[0]
+        return bool(enabled)
+
+    def get_telegram_topic_binding(
+        self,
+        *,
+        chat_id: str,
+        thread_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the session binding for a Telegram DM topic, if present."""
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    """
+                    SELECT * FROM telegram_dm_topic_bindings
+                    WHERE chat_id = ? AND thread_id = ?
+                    """,
+                    (str(chat_id), str(thread_id)),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+        return dict(row) if row else None
+
+    def list_telegram_topic_bindings_for_chat(
+        self,
+        *,
+        chat_id: str,
+    ) -> List[Dict[str, Any]]:
+        """All Telegram DM topic bindings for one chat, newest first.
+
+        Read-only; returns [] if the bindings table doesn't exist yet
+        (does not trigger the topic-mode migration).
+        """
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT * FROM telegram_dm_topic_bindings "
+                    "WHERE chat_id = ? ORDER BY updated_at DESC",
+                    (str(chat_id),),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [dict(row) for row in rows]
+
+    def get_telegram_topic_binding_by_session(
+        self,
+        *,
+        session_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the Telegram DM topic binding for a given session_id, if present.
+
+        Uses the UNIQUE INDEX on telegram_dm_topic_bindings(session_id) for an
+        efficient reverse lookup. Returns None when the session has no binding or
+        the table does not exist yet.
+        """
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    """
+                    SELECT * FROM telegram_dm_topic_bindings
+                    WHERE session_id = ?
+                    """,
+                    (str(session_id),),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+        return dict(row) if row else None
+
+    def bind_telegram_topic(
+        self,
+        *,
+        chat_id: str,
+        thread_id: str,
+        user_id: str,
+        session_key: str,
+        session_id: str,
+        managed_mode: str = "auto",
+    ) -> None:
+        """Bind one Telegram DM topic thread to one Hermes session.
+
+        A Hermes session may only be linked to one Telegram topic in MVP.
+        Rebinding the same topic to the same session is idempotent; trying to
+        link the same session to a different topic raises ValueError.
+        """
+        self.apply_telegram_topic_migration()
+        now = time.time()
+        chat_id = str(chat_id)
+        thread_id = str(thread_id)
+        user_id = str(user_id)
+        session_key = str(session_key)
+        session_id = str(session_id)
+
+        def _do(conn):
+            existing_session = conn.execute(
+                """
+                SELECT chat_id, thread_id FROM telegram_dm_topic_bindings
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+            if existing_session is not None:
+                linked_chat = existing_session["chat_id"] if isinstance(existing_session, sqlite3.Row) else existing_session[0]
+                linked_thread = existing_session["thread_id"] if isinstance(existing_session, sqlite3.Row) else existing_session[1]
+                if str(linked_chat) != chat_id or str(linked_thread) != thread_id:
+                    raise ValueError("session is already linked to another Telegram topic")
+
+            conn.execute(
+                """
+                INSERT INTO telegram_dm_topic_bindings (
+                    chat_id, thread_id, user_id, session_key, session_id,
+                    managed_mode, linked_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, thread_id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    session_key = excluded.session_key,
+                    session_id = excluded.session_id,
+                    managed_mode = excluded.managed_mode,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    chat_id,
+                    thread_id,
+                    user_id,
+                    session_key,
+                    session_id,
+                    managed_mode,
+                    now,
+                    now,
+                ),
+            )
+        self._execute_write(_do)
+
+    def is_telegram_session_linked_to_topic(self, *, session_id: str) -> bool:
+        """Return True if a Hermes session is already bound to any Telegram DM topic.
+
+        Read-only: does NOT trigger the telegram-topic migration. If the
+        topic-mode tables have not been created yet (i.e. nobody has run
+        ``/topic`` in this profile), the session is by definition unbound
+        and we return False.
+        """
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    """
+                    SELECT 1 FROM telegram_dm_topic_bindings
+                    WHERE session_id = ?
+                    LIMIT 1
+                    """,
+                    (str(session_id),),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return False
+        return row is not None
+
+    def list_unlinked_telegram_sessions_for_user(
+        self,
+        *,
+        chat_id: str,
+        user_id: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """List previous Telegram sessions for this user that are not bound to a topic.
+
+        Read-only: does NOT trigger the telegram-topic migration. If the
+        topic-mode tables are absent, fall back to a simpler query that
+        just returns this user's Telegram sessions — there can't be any
+        bindings yet.
+        """
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    """
+                    SELECT s.*,
+                        COALESCE(s.preview, '') AS _preview_summary,
+                        COALESCE(s.last_active, s.started_at) AS _last_active_summary
+                    FROM sessions s
+                    WHERE s.source = 'telegram'
+                      AND s.user_id = ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM telegram_dm_topic_bindings b
+                          WHERE b.session_id = s.id
+                      )
+                    ORDER BY _last_active_summary DESC, s.started_at DESC
+                    LIMIT ?
+                    """,
+                    (str(user_id), int(limit)),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # telegram_dm_topic_bindings doesn't exist yet — no bindings
+                # means every telegram session for this user is "unlinked".
+                rows = self._conn.execute(
+                    """
+                    SELECT s.*,
+                        COALESCE(s.preview, '') AS _preview_summary,
+                        COALESCE(s.last_active, s.started_at) AS _last_active_summary
+                    FROM sessions s
+                    WHERE s.source = 'telegram'
+                      AND s.user_id = ?
+                    ORDER BY _last_active_summary DESC, s.started_at DESC
+                    LIMIT ?
+                    """,
+                    (str(user_id), int(limit)),
+                ).fetchall()
+
+        sessions: List[Dict[str, Any]] = []
+        for row in rows:
+            session = dict(row)
+            session["preview"] = str(session.pop("_preview_summary", session.get("preview") or "") or "")
+            session["last_active"] = session.pop(
+                "_last_active_summary",
+                session.get("last_active") or session.get("started_at") or 0,
+            )
+            sessions.append(session)
+        return sessions
+
+    # ── Space reclamation ──
+
+    def vacuum(self) -> None:
+        """Run VACUUM to reclaim disk space after large deletes.
+
+        SQLite does not shrink the database file when rows are deleted —
+        freed pages just get reused on the next insert. After a prune that
+        removed hundreds of sessions, the file stays bloated unless we
+        explicitly VACUUM.
+
+        VACUUM rewrites the entire DB, so it's expensive (seconds per
+        100MB) and cannot run inside a transaction. It also acquires an
+        exclusive lock, so callers must ensure no other writers are
+        active. Safe to call at startup before the gateway/CLI starts
+        serving traffic.
+        """
+        # VACUUM cannot be executed inside a transaction.
+        with self._lock:
+            # Best-effort WAL checkpoint first, then VACUUM.
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+            self._conn.execute("VACUUM")
+
+    def maybe_auto_prune_and_vacuum(
+        self,
+        retention_days: int = 90,
+        min_interval_hours: int = 24,
+        vacuum: bool = True,
+        sessions_dir: Optional[Path] = None,
+    ) -> Dict[str, Any]:
+        """Idempotent auto-maintenance: prune old sessions + optional VACUUM.
+
+        Records the last run timestamp in state_meta so subsequent calls
+        within ``min_interval_hours`` no-op. Designed to be called once at
+        startup from long-lived entrypoints (CLI, gateway, cron scheduler).
+
+        When *sessions_dir* is provided, on-disk transcript files
+        (``.json`` / ``.jsonl`` / ``request_dump_*``) for pruned sessions
+        are removed as part of the same sweep (issue #3015).
+
+        Never raises. On any failure, logs a warning and returns a dict
+        with ``"error"`` set.
+
+        Returns a dict with keys:
+          - ``"skipped"`` (bool) — true if within min_interval_hours of last run
+          - ``"pruned"`` (int)   — number of sessions deleted
+          - ``"vacuumed"`` (bool) — true if VACUUM ran
+          - ``"error"`` (str, optional) — present only on failure
+        """
+        result: Dict[str, Any] = {"skipped": False, "pruned": 0, "vacuumed": False}
+        try:
+            # Skip if another process/call did maintenance recently.
+            last_raw = self.get_meta("last_auto_prune")
+            now = time.time()
+            if last_raw:
+                try:
+                    last_ts = float(last_raw)
+                    if now - last_ts < min_interval_hours * 3600:
+                        result["skipped"] = True
+                        return result
+                except (TypeError, ValueError):
+                    pass  # corrupt meta; treat as no prior run
+
+            pruned = self.prune_sessions(
+                older_than_days=retention_days,
+                sessions_dir=sessions_dir,
+            )
+            result["pruned"] = pruned
+
+            # Only VACUUM if we actually freed rows — VACUUM on a tight DB
+            # is wasted I/O. Threshold keeps small DBs from paying the cost.
+            if vacuum and pruned > 0:
+                try:
+                    self.vacuum()
+                    result["vacuumed"] = True
+                except Exception as exc:
+                    logger.warning("state.db VACUUM failed: %s", exc)
+
+            # Record the attempt even if pruned == 0, so we don't retry
+            # every startup within the min_interval_hours window.
+            self.set_meta("last_auto_prune", str(now))
+
+            if pruned > 0:
+                logger.info(
+                    "state.db auto-maintenance: pruned %d session(s) older than %d days%s",
+                    pruned,
+                    retention_days,
+                    " + VACUUM" if result["vacuumed"] else "",
+                )
+        except Exception as exc:
+            # Maintenance must never block startup. Log and return error marker.
+            logger.warning("state.db auto-maintenance failed: %s", exc)
+            result["error"] = str(exc)
+
+        return result
+
+    def maybe_auto_compact_run_events(
+        self,
+        min_interval_hours: int = 24,
+        vacuum: bool = True,
+    ) -> Dict[str, Any]:
+        """Idempotent run-event maintenance for token-stream storage.
+
+        Live streaming emits token-sized events, but the durable run history
+        should keep terminal and structural events, not token replay rows.
+        This maintenance is separate from session pruning so desktop/profile
+        runtimes can reclaim old chunk rows even when session retention pruning
+        is disabled.
+        """
+        result: Dict[str, Any] = {
+            "skipped": False,
+            "deleted_events": 0,
+            "compacted_segments": 0,
+            "pruned_terminal_stream_events": 0,
+            "deduplicated_terminal_groups": 0,
+            "updated_events": 0,
+            "vacuumed": False,
+        }
+        try:
+            last_raw = self.get_meta("last_auto_run_event_compaction_v1")
+            now = time.time()
+            if last_raw:
+                try:
+                    last_ts = float(last_raw)
+                    if now - last_ts < min_interval_hours * 3600:
+                        result["skipped"] = True
+                        return result
+                except (TypeError, ValueError):
+                    pass
+
+            compacted = self.compact_run_events()
+            result.update({
+                "deleted_events": int(compacted.get("deleted_events") or 0),
+                "compacted_segments": int(compacted.get("compacted_segments") or 0),
+                "pruned_terminal_stream_events": int(compacted.get("pruned_terminal_stream_events") or 0),
+                "deduplicated_terminal_groups": int(compacted.get("deduplicated_terminal_groups") or 0),
+                "updated_events": int(compacted.get("updated_events") or 0),
+            })
+            if vacuum and result["deleted_events"] > 0:
+                try:
+                    self.vacuum()
+                    result["vacuumed"] = True
+                except Exception as exc:
+                    logger.warning("state.db run-event VACUUM failed: %s", exc)
+            self.set_meta("last_auto_run_event_compaction_v1", str(now))
+            if result["deleted_events"] > 0:
+                logger.info(
+                    "state.db run-event maintenance: compacted %d segment(s), deleted %d event row(s)%s",
+                    result["compacted_segments"],
+                    result["deleted_events"],
+                    " + VACUUM" if result["vacuumed"] else "",
+                )
+        except Exception as exc:
+            logger.warning("state.db run-event maintenance failed: %s", exc)
+            result["error"] = str(exc)
+        return result
+
+    # ── Handoff (cross-platform session transfer) ──────────────────────────
+    #
+    # State machine:
+    #   None       — no handoff in flight
+    #   "pending"  — CLI requested handoff, gateway hasn't picked it up yet
+    #   "running"  — gateway is processing (session switch + synthetic turn)
+    #   "completed"— gateway successfully delivered the synthetic turn
+    #   "failed"   — gateway hit an error; reason in handoff_error
+    #
+    # The CLI writes "pending" then poll-waits for terminal state. The gateway
+    # watcher transitions pending→running→{completed,failed}.
+
+    def request_handoff(self, session_id: str, platform: str) -> bool:
+        """Mark a session as pending handoff to the given platform.
+
+        Returns True if the row was found and not already in flight; False if
+        the session is already in a non-terminal handoff state.
+        """
+        def _do(conn):
+            cur = conn.execute(
+                "UPDATE sessions "
+                "SET handoff_state = 'pending', "
+                "    handoff_platform = ?, "
+                "    handoff_error = NULL "
+                "WHERE id = ? AND (handoff_state IS NULL "
+                "                  OR handoff_state IN ('completed', 'failed'))",
+                (platform, session_id),
+            )
+            return cur.rowcount > 0
+        return self._execute_write(_do)
+
+    def get_handoff_state(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Read the current handoff state for a session.
+
+        Returns ``{"state", "platform", "error"}`` or None if the session has
+        no handoff record.
+        """
+        try:
+            cur = self._conn.execute(
+                "SELECT handoff_state, handoff_platform, handoff_error "
+                "FROM sessions WHERE id = ?",
+                (session_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "state": row["handoff_state"],
+                "platform": row["handoff_platform"],
+                "error": row["handoff_error"],
+            }
+        except Exception:
+            return None
+
+    def list_pending_handoffs(self) -> List[Dict[str, Any]]:
+        """Return all sessions in handoff_state='pending', oldest first.
+
+        Used by the gateway's handoff watcher.
+        """
+        try:
+            cur = self._conn.execute(
+                "SELECT * FROM sessions "
+                "WHERE handoff_state = 'pending' "
+                "ORDER BY started_at ASC"
+            )
+            return [dict(r) for r in cur.fetchall()]
+        except Exception:
+            return []
+
+    def claim_handoff(self, session_id: str) -> bool:
+        """Atomically transition pending → running. Returns True if claimed."""
+        def _do(conn):
+            cur = conn.execute(
+                "UPDATE sessions SET handoff_state = 'running' "
+                "WHERE id = ? AND handoff_state = 'pending'",
+                (session_id,),
+            )
+            return cur.rowcount > 0
+        return self._execute_write(_do)
+
+    def complete_handoff(self, session_id: str) -> None:
+        """Mark a handoff as completed."""
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET handoff_state = 'completed', "
+                "handoff_error = NULL WHERE id = ?",
+                (session_id,),
+            )
+        self._execute_write(_do)
+
+    def fail_handoff(self, session_id: str, error: str) -> None:
+        """Mark a handoff as failed and record the reason."""
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET handoff_state = 'failed', "
+                "handoff_error = ? WHERE id = ?",
+                (error[:500], session_id),
+            )
+        self._execute_write(_do)
+
+
+# --- compression-lock backfill (in-process implementation) ---
+# Upstream `try_acquire_compression_lock` / `release_compression_lock`
+# live in commits that 3-way-merge poorly against dovie's session_index
+# work on hermes_state.py, so we SKIP'd them. But other absorbed
+# compression commits (notably 1fbf48d4a, 466345699, a77bc2c08) reference
+# these methods and tests/agent/test_compression_concurrent_fork.py
+# asserts that a held lock makes _compress_context skip.
+#
+# A SQLite-backed `compression_locks` table is overkill for dovie's
+# single-process desktop runtime — concurrent compaction on the same
+# session only happens when two threads inside the SAME process race,
+# never across processes. A thread-safe in-memory dict has identical
+# semantics for that case. If/when dovie deploys multi-process gateways,
+# absorb the upstream SQL-backed version.
+import threading as _compression_lock_threading
+_compression_locks: dict = {}
+_compression_locks_lock = _compression_lock_threading.Lock()
+
+
+def _backfilled_try_acquire_compression_lock(
+    self, session_id: str, holder: str, ttl_seconds: float = 300.0
+) -> bool:
+    if not session_id:
+        return False
+    now = time.time()
+    with _compression_locks_lock:
+        existing = _compression_locks.get(session_id)
+        if existing and existing["expires_at"] > now:
+            return existing["holder"] == holder
+        _compression_locks[session_id] = {
+            "holder": holder,
+            "expires_at": now + ttl_seconds,
+        }
+        return True
+
+
+def _backfilled_release_compression_lock(self, session_id: str, holder: str) -> None:
+    if not session_id:
+        return
+    with _compression_locks_lock:
+        existing = _compression_locks.get(session_id)
+        if existing and existing["holder"] == holder:
+            del _compression_locks[session_id]
+
+
+SessionDB.try_acquire_compression_lock = _backfilled_try_acquire_compression_lock
+SessionDB.release_compression_lock = _backfilled_release_compression_lock

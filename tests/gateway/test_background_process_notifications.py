@@ -32,6 +32,9 @@ class _FakeRegistry:
             return self._sessions.pop(0)
         return None
 
+    def is_completion_consumed(self, session_id):
+        return False
+
 
 def _build_runner(monkeypatch, tmp_path, mode: str) -> GatewayRunner:
     """Create a GatewayRunner with a fake config for the given mode."""
@@ -269,15 +272,124 @@ async def test_inject_watch_notification_routes_from_session_store_origin(monkey
 
     await runner._inject_watch_notification("[SYSTEM: Background process matched]", evt)
 
+    adapter.handle_message.assert_not_awaited()
+    adapter.send.assert_awaited_once_with(
+        "-100",
+        "[SYSTEM: Background process matched]",
+        metadata={"thread_id": "42"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_notification_carries_message_id_reply_anchor(monkeypatch, tmp_path):
+    """notify_on_complete injection carries the triggering message_id so the
+    synthetic event can be reply-anchored back into a Telegram DM topic.
+
+    Without an anchor, Telegram private-chat topic sends fall back to the main
+    chat (see _thread_kwargs_for_send / telegram_dm_topic_reply_fallback)."""
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(
+        output_buffer="SMOKE_OK\n", exited=True, exit_code=0, command="sleep 1",
+    )]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    watcher = {
+        "session_id": "proc_anchor",
+        "check_interval": 0,
+        "session_key": "agent:main:telegram:dm:123:24296",
+        "platform": "telegram",
+        "chat_id": "123",
+        "thread_id": "24296",
+        "message_id": "555",
+        "notify_on_complete": True,
+    }
+    await runner._run_process_watcher(watcher)
+
     adapter.handle_message.assert_awaited_once()
     synth_event = adapter.handle_message.await_args.args[0]
     assert synth_event.internal is True
-    assert synth_event.source.platform == Platform.TELEGRAM
-    assert synth_event.source.chat_id == "-100"
-    assert synth_event.source.chat_type == "group"
-    assert synth_event.source.thread_id == "42"
-    assert synth_event.source.user_id == "123"
-    assert synth_event.source.user_name == "Emiliyan"
+    assert synth_event.message_id == "555"
+    assert synth_event.source.thread_id == "24296"
+
+
+@pytest.mark.asyncio
+async def test_agent_notification_no_message_id_is_tolerated(monkeypatch, tmp_path):
+    """A watcher dict without message_id (CLI spawn, pre-upgrade checkpoint)
+    still injects — message_id is simply None."""
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(
+        output_buffer="done\n", exited=True, exit_code=0, command="sleep 1",
+    )]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    watcher = {
+        "session_id": "proc_anchorless",
+        "check_interval": 0,
+        "session_key": "agent:main:telegram:dm:123:24296",
+        "platform": "telegram",
+        "chat_id": "123",
+        "thread_id": "24296",
+        "notify_on_complete": True,
+    }
+    await runner._run_process_watcher(watcher)
+
+    adapter.handle_message.assert_awaited_once()
+    synth_event = adapter.handle_message.await_args.args[0]
+    assert synth_event.message_id is None
+
+
+@pytest.mark.asyncio
+async def test_inject_watch_notification_carries_message_id_reply_anchor(monkeypatch, tmp_path):
+    from gateway.session import SessionSource
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+    runner.session_store._entries["agent:main:telegram:dm:123:24296"] = SimpleNamespace(
+        origin=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="123",
+            chat_type="dm",
+            thread_id="24296",
+            user_id="1",
+            user_name="Fabio",
+        )
+    )
+
+    evt = {
+        "session_id": "proc_watch",
+        "session_key": "agent:main:telegram:dm:123:24296",
+        "message_id": "777",
+    }
+
+    await runner._inject_watch_notification("[SYSTEM: Background process matched]", evt)
+
+    adapter.handle_message.assert_not_awaited()
+    adapter.send.assert_awaited_once_with(
+        "123",
+        "[SYSTEM: Background process matched]",
+        metadata={
+            "thread_id": "24296",
+            "telegram_dm_topic_reply_fallback": True,
+            "direct_messages_topic_id": "24296",
+            "telegram_reply_to_message_id": "777",
+        },
+    )
 
 
 def test_build_process_event_source_falls_back_to_session_key_chat_type(monkeypatch, tmp_path):
@@ -366,11 +478,13 @@ async def test_inject_watch_notification_ignores_foreground_event_source(monkeyp
 
     await runner._inject_watch_notification("[SYSTEM: watch match]", evt)
 
-    adapter.handle_message.assert_awaited_once()
-    synth_event = adapter.handle_message.await_args.args[0]
-    # Must route to thread 42 (process origin), NOT some other thread
-    assert synth_event.source.thread_id == "42"
-    assert synth_event.source.user_id == "proc_owner"
+    adapter.handle_message.assert_not_awaited()
+    # Must route to thread 42 (process origin), NOT some other thread.
+    adapter.send.assert_awaited_once_with(
+        "-100",
+        "[SYSTEM: watch match]",
+        metadata={"thread_id": "42"},
+    )
 
 
 def test_build_process_event_source_returns_none_for_empty_evt(monkeypatch, tmp_path):

@@ -26,28 +26,16 @@ from hermes_cli.main import (
 # ── Default config ──────────────────────────────────────────────────────────
 
 
-def test_title_generation_present_in_default_config():
-    """`title_generation` task must be defined in DEFAULT_CONFIG.
-
-    Regression for an existing gap: title_generator.py calls
-    ``call_llm(task="title_generation", ...)`` but the task was missing
-    from DEFAULT_CONFIG["auxiliary"], so the config-backed timeout/provider
-    overrides never worked for that task.
-    """
-    assert "title_generation" in DEFAULT_CONFIG["auxiliary"]
-    tg = DEFAULT_CONFIG["auxiliary"]["title_generation"]
-    assert tg["provider"] == "auto"
-    assert tg["model"] == ""
-    assert tg["timeout"] > 0
-    assert tg["extra_body"] == {}
+def test_title_generation_no_longer_appears_in_auxiliary_model_config():
+    """Session titles come from first user messages, not auxiliary LLM calls."""
+    assert "title_generation" not in DEFAULT_CONFIG["auxiliary"]
+    assert "title_generation" not in {key for key, _name, _desc in _AUX_TASKS}
 
 
-def test_session_search_defaults_include_extra_body_and_concurrency():
-    ss = DEFAULT_CONFIG["auxiliary"]["session_search"]
-    assert ss["provider"] == "auto"
-    assert ss["model"] == ""
-    assert ss["extra_body"] == {}
-    assert ss["max_concurrency"] == 3
+def test_session_search_no_longer_appears_in_auxiliary_model_config():
+    """session_search is a direct DB-backed tool, not an auxiliary LLM task."""
+    assert "session_search" not in DEFAULT_CONFIG["auxiliary"]
+    assert "session_search" not in {key for key, _name, _desc in _AUX_TASKS}
 
 
 def test_aux_tasks_keys_all_exist_in_default_config():

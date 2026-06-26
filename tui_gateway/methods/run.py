@@ -12,6 +12,12 @@ from tui_gateway.services.runtime_pool import (
     RuntimeLeaseError,
     acquire_runtime_lease,
 )
+from tui_gateway.services.subagent_snapshots import (
+    SUBAGENT_SNAPSHOT_EVENT_TYPES,
+    build_subagent_run_snapshots,
+    compact_subagent_detail_events,
+    filter_subagent_events,
+)
 
 _server = bind_server_globals(globals())
 
@@ -23,6 +29,13 @@ def _stored_session_id_from_params(params: dict) -> str:
         or params.get("session_id")
         or ""
     ).strip()
+
+
+def _run_db_for_stable_session(stored_session_id: str):
+    stable = str(stored_session_id or "").strip()
+    if stable and _is_control_plane_stable_session_id(stable):
+        return _db_for_stable_session(stable)
+    return _get_db()
 
 
 def _status_filters_from_params(params: dict) -> list[str]:
@@ -57,12 +70,7 @@ def _runtime_scope_key_from_params(params: dict, session: dict | None = None) ->
             return scope_key
         profile_id = str(profile.get("id") or "").strip()
         if profile_id:
-            version_id = str(
-                profile.get("agent_profile_version_id")
-                or profile.get("agentProfileVersionId")
-                or ""
-            ).strip()
-            return f"profile:{profile_id}:version:{version_id}" if version_id else f"profile:{profile_id}"
+            return f"profile:{profile_id}"
         hermes_home = str(profile.get("hermes_home") or "").strip()
         if hermes_home:
             digest = hashlib.sha1(hermes_home.encode("utf-8")).hexdigest()[:12]
@@ -78,7 +86,7 @@ def _mark_registered_run_failed(
     turn_id: str = "",
     message: str = "",
 ) -> None:
-    db = _get_db()
+    db = _run_db_for_stable_session(stored_session_id)
     if db is None or not run_id or not stored_session_id:
         return
     run_control.publish_run_terminal_event(
@@ -127,6 +135,7 @@ def _(rid, params: dict) -> dict:
         or params.get("controlPlaneReserved")
     )
     transient = bool(params.get("transient") or params.get("temporary") or params.get("ephemeral"))
+    run_db = _run_db_for_stable_session(target) if target else _get_db()
     if target and requested_run_id and not control_plane_reserved and not transient:
         reservation = run_control.create_run_if_session_idle(
             stored_session_id=target,
@@ -137,15 +146,37 @@ def _(rid, params: dict) -> dict:
                 "gateway_pid": os.getpid(),
                 "gateway_instance_id": _GATEWAY_INSTANCE_ID,
             },
-            db=_get_db(),
+            db=run_db,
         )
         conflict = reservation.get("conflict") if isinstance(reservation, dict) else None
         if isinstance(conflict, dict) and conflict:
+            metadata = conflict.get("metadata") if isinstance(conflict.get("metadata"), dict) else {}
+            logger.warning(
+                "[dovie-run-submit] session busy stored_session_id=%s requested_run_id=%s active_run_id=%s active_status=%s runtime_scope_key=%s runtime_session_id=%s gateway_pid=%s gateway_instance_id=%s",
+                target,
+                requested_run_id,
+                conflict.get("run_id") or "",
+                conflict.get("status") or "",
+                conflict.get("runtime_scope_key") or "",
+                conflict.get("runtime_session_id") or "",
+                metadata.get("gateway_pid") or "",
+                metadata.get("gateway_instance_id") or "",
+            )
             response = _err(rid, 4009, "session busy")
             response["error"]["data"] = {
                 "stored_session_id": target,
                 "active_run_id": conflict.get("run_id") or "",
                 "active_turn_id": conflict.get("turn_id") or "",
+                "active_status": conflict.get("status") or "",
+                "runtime_scope_key": conflict.get("runtime_scope_key") or "",
+                "runtime_session_id": conflict.get("runtime_session_id") or "",
+                "run_updated_at": conflict.get("updated_at") or 0,
+                "run_started_at": conflict.get("started_at") or 0,
+                "metadata": metadata,
+                "requested_run_id": requested_run_id,
+                "requested_turn_id": requested_turn_id,
+                "current_gateway_pid": os.getpid(),
+                "current_gateway_instance_id": _GATEWAY_INSTANCE_ID,
             }
             return response
         existing_run = reservation.get("run") if isinstance(reservation, dict) else None
@@ -197,7 +228,12 @@ def _(rid, params: dict) -> dict:
     if isinstance(result, dict):
         run_id = str(result.get("run_id") or params.get("client_run_id") or params.get("run_id") or "").strip()
         turn_id = str(result.get("turn_id") or params.get("turn_id") or "").strip()
-        if run_id and not bool((session or {}).get("transient") or transient):
+        status = str(result.get("status") or "").strip().lower()
+        if (
+            run_id
+            and status not in {"cancelled", "canceled", "failed", "interrupted", "completed", "complete"}
+            and not bool((session or {}).get("transient") or transient)
+        ):
             run_control.mark_run_started(
                 stored_session_id=stable_session_id,
                 runtime_session_id=sid,
@@ -208,7 +244,7 @@ def _(rid, params: dict) -> dict:
                     "gateway_pid": os.getpid(),
                     "gateway_instance_id": _GATEWAY_INSTANCE_ID,
                 },
-                db=_get_db(),
+                db=run_db,
             )
         result["runtime_scope_key"] = runtime_scope_key
     return response
@@ -237,6 +273,7 @@ def _(rid, params: dict) -> dict:
                 "transient": True,
             },
         )
+    run_db = _run_db_for_stable_session(target)
     reservation = run_control.create_run_if_session_idle(
         stored_session_id=target,
         run_id=requested_run_id,
@@ -247,15 +284,37 @@ def _(rid, params: dict) -> dict:
             "gateway_instance_id": _GATEWAY_INSTANCE_ID,
             "reserved_by": "control_plane",
         },
-        db=_get_db(),
+        db=run_db,
     )
     conflict = reservation.get("conflict") if isinstance(reservation, dict) else None
     if isinstance(conflict, dict) and conflict:
+        metadata = conflict.get("metadata") if isinstance(conflict.get("metadata"), dict) else {}
+        logger.warning(
+            "[dovie-run-reserve] session busy stored_session_id=%s requested_run_id=%s active_run_id=%s active_status=%s runtime_scope_key=%s runtime_session_id=%s gateway_pid=%s gateway_instance_id=%s",
+            target,
+            requested_run_id,
+            conflict.get("run_id") or "",
+            conflict.get("status") or "",
+            conflict.get("runtime_scope_key") or "",
+            conflict.get("runtime_session_id") or "",
+            metadata.get("gateway_pid") or "",
+            metadata.get("gateway_instance_id") or "",
+        )
         response = _err(rid, 4009, "session busy")
         response["error"]["data"] = {
             "stored_session_id": target,
             "active_run_id": conflict.get("run_id") or "",
             "active_turn_id": conflict.get("turn_id") or "",
+            "active_status": conflict.get("status") or "",
+            "runtime_scope_key": conflict.get("runtime_scope_key") or "",
+            "runtime_session_id": conflict.get("runtime_session_id") or "",
+            "run_updated_at": conflict.get("updated_at") or 0,
+            "run_started_at": conflict.get("started_at") or 0,
+            "metadata": metadata,
+            "requested_run_id": requested_run_id,
+            "requested_turn_id": requested_turn_id,
+            "current_gateway_pid": os.getpid(),
+            "current_gateway_instance_id": _GATEWAY_INSTANCE_ID,
         }
         return response
     run = reservation.get("run") if isinstance(reservation, dict) else None
@@ -278,7 +337,8 @@ def _(rid, params: dict) -> dict:
     stable_session_id = _stored_session_id_from_params(params)
     if not run_id or not stable_session_id:
         return _err(rid, 4006, "run_id and stored_session_id required")
-    state = run_control.get_run(run_id, db=_get_db()) or {}
+    run_db = _run_db_for_stable_session(stable_session_id)
+    state = run_control.get_run(run_id, db=run_db) or {}
     turn_id = str(params.get("turn_id") or params.get("turnId") or state.get("turn_id") or "").strip()
     runtime_scope_key = str(
         params.get("runtime_scope_key")
@@ -295,7 +355,7 @@ def _(rid, params: dict) -> dict:
         turn_id=turn_id,
         status="failed",
         message=message,
-        db=_get_db(),
+        db=run_db,
         owner_transport=current_transport(),
     )
     return _ok(
@@ -313,9 +373,23 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     run_id = str(params.get("run_id") or params.get("runId") or "").strip()
     if run_id:
-        state = run_control.get_run(run_id, db=_get_db())
+        db = _get_db()
+        state = run_control.get_run(run_id, db=db)
         if state is None:
             return _err(rid, 4040, "run not found")
+        if str(state.get("status") or "") in run_control.ACTIVE_RUN_STATUSES:
+            stable_session_id = str(
+                state.get("stored_session_id")
+                or state.get("session_id")
+                or ""
+            ).strip()
+            if stable_session_id:
+                run_control.session_status(
+                    stable_session_id,
+                    db=db,
+                    current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+                )
+                state = run_control.get_run(run_id, db=db) or state
         return _ok(rid, {"run": state})
 
     stable_session_id = str(
@@ -326,7 +400,15 @@ def _(rid, params: dict) -> dict:
     ).strip()
     if not stable_session_id:
         return _err(rid, 4006, "run_id or stored_session_id required")
-    return _ok(rid, run_control.session_status(stable_session_id, db=_get_db()))
+    db = _run_db_for_stable_session(stable_session_id)
+    return _ok(
+        rid,
+        run_control.session_status(
+            stable_session_id,
+            db=db,
+            current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+        ),
+    )
 
 
 @method("run.list")
@@ -336,12 +418,13 @@ def _(rid, params: dict) -> dict:
     statuses = _status_filters_from_params(params)
     if not stable_session_id and not runtime_scope_key and not statuses:
         return _err(rid, 4006, "stored_session_id, runtime_scope_key, or status required")
+    db = _run_db_for_stable_session(stable_session_id) if stable_session_id else _get_db()
     return _ok(
         rid,
         {
             "runs": run_control.list_runs(
                 stable_session_id,
-                db=_get_db(),
+                db=db,
                 runtime_scope_key=runtime_scope_key,
                 statuses=statuses,
                 limit=_bounded_limit(params.get("limit")),
@@ -356,9 +439,14 @@ def _(rid, params: dict) -> dict:
     stable_session_id = _stored_session_id_from_params(params)
     if not run_id and not stable_session_id:
         return _err(rid, 4006, "run_id or stored_session_id required")
+    runtime_session_id = str(params.get("runtime_session_id") or params.get("runtimeSessionId") or "").strip()
+    if not runtime_session_id and stable_session_id:
+        resolved_sid, _session = _resolve_runtime_session(stable_session_id)
+        runtime_session_id = resolved_sid or stable_session_id
     interrupt_params = {
         **params,
-        "session_id": stable_session_id or params.get("session_id") or "",
+        "session_id": runtime_session_id or stable_session_id or params.get("session_id") or "",
+        "stored_session_id": stable_session_id,
         "run_id": run_id,
         "completion_status": "cancelled",
     }
@@ -366,7 +454,7 @@ def _(rid, params: dict) -> dict:
     if isinstance(response, dict) and isinstance(response.get("result"), dict):
         response["result"]["status"] = "cancelled"
     if response.get("error") and run_id:
-        db = _get_db()
+        db = _run_db_for_stable_session(stable_session_id) if stable_session_id else _get_db()
         if db is not None:
             try:
                 state = run_control.get_run(run_id, db=db) or {}
@@ -413,21 +501,185 @@ def _(rid, params: dict) -> dict:
     runtime_scope_key = str(
         params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
     ).strip()
+    db = _run_db_for_stable_session(stable_session_id)
     subscription_id, replay = run_control.subscribe_session_with_id(
         stored_session_id=stable_session_id,
         transport=current_transport(),
         after_seq=after_seq,
         active_only=bool(params.get("active_only") or params.get("activeOnly")),
         runtime_scope_key=runtime_scope_key,
-        db=_get_db(),
+        db=db,
     )
+    last_seq = max([int(event.get("seq") or 0) for event in replay], default=after_seq)
     return _ok(
         rid,
         {
             "stored_session_id": stable_session_id,
             "subscription_id": subscription_id,
             "events": replay,
-            "last_event_seq": max([int(event.get("seq") or 0) for event in replay], default=after_seq),
+            "last_event_seq": last_seq,
+        },
+    )
+
+
+@method("run.events")
+def _(rid, params: dict) -> dict:
+    stable_session_id = str(
+        params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or params.get("session_id")
+        or ""
+    ).strip()
+    if not stable_session_id:
+        return _err(rid, 4006, "stored_session_id required")
+    try:
+        after_seq = int(params.get("after_seq") or params.get("afterSeq") or 0)
+    except (TypeError, ValueError):
+        after_seq = 0
+    runtime_scope_key = str(
+        params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
+    ).strip()
+    run_id = str(params.get("run_id") or params.get("runId") or "").strip()
+    db = _run_db_for_stable_session(stable_session_id)
+    run_control.session_status(
+        stable_session_id,
+        db=db,
+        current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+    )
+    _, events = run_control.subscribe_session_with_id(
+        stored_session_id=stable_session_id,
+        transport=None,
+        after_seq=after_seq,
+        active_only=bool(params.get("active_only") or params.get("activeOnly")),
+        runtime_scope_key=runtime_scope_key,
+        run_id=run_id,
+        limit=_bounded_limit(params.get("limit"), default=2000, maximum=5000),
+        db=db,
+    )
+    return _ok(
+        rid,
+        {
+            "stored_session_id": stable_session_id,
+            "events": events,
+            "last_event_seq": max([int(event.get("seq") or 0) for event in events], default=after_seq),
+        },
+    )
+
+
+def _list_filtered_run_events(
+    *,
+    stored_session_id: str,
+    after_seq: int = 0,
+    runtime_scope_key: str = "",
+    event_type_prefix: str = "",
+    event_types: tuple[str, ...] | list[str] | None = None,
+    payload_contains: str = "",
+    limit: int = 2000,
+) -> list[dict]:
+    db = _run_db_for_stable_session(stored_session_id) if stored_session_id else _get_db()
+    if db is None:
+        return []
+    list_filtered = getattr(db, "list_run_events_filtered", None)
+    if callable(list_filtered):
+        return list_filtered(
+            stored_session_id,
+            after_seq=after_seq,
+            runtime_scope_key=runtime_scope_key,
+            event_type_prefix=event_type_prefix,
+            event_types=event_types,
+            payload_contains=payload_contains,
+            limit=limit,
+        )
+    list_events = getattr(db, "list_run_events", None)
+    if not callable(list_events):
+        return []
+    events = list_events(
+        stored_session_id,
+        after_seq=after_seq,
+        runtime_scope_key=runtime_scope_key,
+        limit=limit,
+    )
+    normalized_types = {
+        str(item or "").strip()
+        for item in (event_types or ())
+        if str(item or "").strip()
+    }
+    prefix = str(event_type_prefix or "").strip()
+    out = []
+    for event in events:
+        event_type = str((event or {}).get("type") or "").strip()
+        if normalized_types and event_type not in normalized_types:
+            continue
+        if prefix and not event_type.startswith(prefix):
+            continue
+        out.append(event)
+    return out
+
+
+@method("subagent.runs.list")
+def _(rid, params: dict) -> dict:
+    stable_session_id = _stored_session_id_from_params(params)
+    if not stable_session_id:
+        return _err(rid, 4006, "stored_session_id required")
+    runtime_scope_key = str(
+        params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
+    ).strip()
+    try:
+        after_seq = int(params.get("after_seq") or params.get("afterSeq") or 0)
+    except (TypeError, ValueError):
+        after_seq = 0
+    limit = _bounded_limit(params.get("limit"), default=5000, maximum=20000)
+    events = _list_filtered_run_events(
+        stored_session_id=stable_session_id,
+        after_seq=after_seq,
+        runtime_scope_key=runtime_scope_key,
+        event_types=SUBAGENT_SNAPSHOT_EVENT_TYPES,
+        limit=limit,
+    )
+    runs = build_subagent_run_snapshots(events, stored_session_id=stable_session_id)
+    return _ok(
+        rid,
+        {
+            "stored_session_id": stable_session_id,
+            "runs": runs,
+            "last_event_seq": max([int(event.get("seq") or 0) for event in events], default=after_seq),
+        },
+    )
+
+
+@method("subagent.events.list")
+def _(rid, params: dict) -> dict:
+    stable_session_id = _stored_session_id_from_params(params)
+    if not stable_session_id:
+        return _err(rid, 4006, "stored_session_id required")
+    subagent_id = str(params.get("subagent_id") or params.get("subagentId") or "").strip()
+    if not subagent_id:
+        return _err(rid, 4006, "subagent_id required")
+    runtime_scope_key = str(
+        params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
+    ).strip()
+    try:
+        after_seq = int(params.get("after_seq") or params.get("afterSeq") or 0)
+    except (TypeError, ValueError):
+        after_seq = 0
+    limit = _bounded_limit(params.get("limit"), default=5000, maximum=20000)
+    events = _list_filtered_run_events(
+        stored_session_id=stable_session_id,
+        after_seq=after_seq,
+        runtime_scope_key=runtime_scope_key,
+        event_type_prefix="subagent.",
+        payload_contains=subagent_id,
+        limit=limit,
+    )
+    events = filter_subagent_events(events, subagent_id)
+    events = compact_subagent_detail_events(events)
+    return _ok(
+        rid,
+        {
+            "stored_session_id": stable_session_id,
+            "subagent_id": subagent_id,
+            "events": events,
+            "last_event_seq": max([int(event.get("seq") or 0) for event in events], default=after_seq),
         },
     )
 
@@ -453,13 +705,29 @@ def _(rid, params: dict) -> dict:
 
 @method("events.prune")
 def _(rid, params: dict) -> dict:
-    db = _get_db()
+    stable_session_id = _stored_session_id_from_params(params)
+    db = _run_db_for_stable_session(stable_session_id) if stable_session_id else _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5006)
-    stable_session_id = _stored_session_id_from_params(params)
     result = db.prune_run_events(
         session_id=stable_session_id,
         retention_days=int(params.get("retention_days") or params.get("retentionDays") or 14),
         max_events_per_session=int(params.get("max_events_per_session") or params.get("maxEventsPerSession") or 5000),
+    )
+    return _ok(rid, result)
+
+
+@method("events.compact")
+def _(rid, params: dict) -> dict:
+    stable_session_id = _stored_session_id_from_params(params)
+    db = _run_db_for_stable_session(stable_session_id) if stable_session_id else _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5006)
+    compact = getattr(db, "compact_run_events", None)
+    if not callable(compact):
+        return _err(rid, 5006, "run event compaction is not available")
+    result = compact(
+        session_id=stable_session_id,
+        vacuum=bool(params.get("vacuum")),
     )
     return _ok(rid, result)

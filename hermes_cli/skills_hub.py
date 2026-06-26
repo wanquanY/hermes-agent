@@ -23,6 +23,7 @@ from rich.table import Table
 # Lazy imports to avoid circular dependencies and slow startup.
 # tools.skills_hub and tools.skills_guard are imported inside functions.
 from hermes_constants import display_hermes_home
+from agent.skill_utils import is_excluded_skill_path
 
 _console = Console()
 
@@ -178,9 +179,12 @@ def _existing_categories() -> List[str]:
             # top level (no category); otherwise treat as a category bucket.
             if (entry / "SKILL.md").exists():
                 continue
-            # Has at least one nested SKILL.md?
+            # Has at least one nested SKILL.md (excluding dependency/cache dirs)?
             try:
-                if any(entry.rglob("SKILL.md")):
+                if any(
+                    not is_excluded_skill_path(p)
+                    for p in entry.rglob("SKILL.md")
+                ):
                     out.append(entry.name)
             except OSError:
                 continue
@@ -303,7 +307,7 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
     _PER_SOURCE_LIMIT = {
         "official": 200, "skills-sh": 200, "well-known": 50,
         "github": 200, "clawhub": 500, "claude-marketplace": 100,
-        "lobehub": 500,
+        "lobehub": 500, "browse-sh": 500,
     }
 
     with c.status("[bold]Fetching skills from registries..."):
@@ -319,12 +323,14 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
         c.print("[dim]No skills found in the Skills Hub.[/]\n")
         return
 
-    # Deduplicate by name, preferring higher trust
+    # Deduplicate by identifier, preferring higher trust.
+    # identifier is always unique per skill; name is not (browse-sh skills from different
+    # sites can share the same task name, e.g. "search-listings" on Airbnb and Booking.com).
     seen: dict = {}
     for r in all_results:
         rank = _TRUST_RANK.get(r.trust_level, 0)
-        if r.name not in seen or rank > _TRUST_RANK.get(seen[r.name].trust_level, 0):
-            seen[r.name] = r
+        if r.identifier not in seen or rank > _TRUST_RANK.get(seen[r.identifier].trust_level, 0):
+            seen[r.identifier] = r
     deduped = list(seen.values())
 
     # Sort: official first, then by trust level (desc), then alphabetically
@@ -612,6 +618,33 @@ def do_install(identifier: str, category: str = "", force: bool = False,
     c.print(f"[bold green]Installed:[/] {install_dir.relative_to(SKILLS_DIR)}")
     c.print(f"[dim]Files: {', '.join(bundle.files.keys())}[/]\n")
 
+    # Recipe detection: if the installed skill declares a
+    # metadata.hermes.recipe block, it is a runnable automation. Register it as
+    # a Suggested Cron Job rather than auto-scheduling — installing never
+    # silently creates a recurring job; the user accepts it via /suggestions.
+    # This is the single surface every automation proposal flows through.
+    try:
+        from tools.recipes import RecipeError, recipe_spec_for_installed, register_recipe_suggestion
+
+        try:
+            spec = recipe_spec_for_installed(bundle.name)
+        except RecipeError as _rec_err:
+            c.print(f"[yellow]Recipe block present but invalid:[/] {_rec_err}\n")
+            spec = None
+        if spec is not None:
+            registered = register_recipe_suggestion(spec)
+            if registered is not None:
+                c.print(
+                    f"[bold cyan]Recipe:[/] '{bundle.name}' is an automation "
+                    f"(schedule [bold]{spec.schedule}[/])."
+                )
+                c.print(
+                    "[dim]Added to your suggestions — run[/] [bold]/suggestions[/] "
+                    "[dim]to schedule or dismiss it.[/]\n"
+                )
+    except Exception:  # pragma: no cover - recipe detection is best-effort
+        pass
+
     if invalidate_cache:
         # Invalidate the skills prompt cache so the new skill appears immediately
         try:
@@ -684,7 +717,7 @@ def browse_skills(page: int = 1, page_size: int = 20, source: str = "all") -> di
     page_size = max(1, min(page_size, 100))
     _TRUST_RANK = {"builtin": 3, "trusted": 2, "community": 1}
     _PER_SOURCE_LIMIT = {"official": 100, "skills-sh": 100, "well-known": 25, "github": 100, "clawhub": 50,
-                         "claude-marketplace": 50, "lobehub": 50}
+                         "claude-marketplace": 50, "lobehub": 50, "browse-sh": 500}
     auth = GitHubAuth()
     sources = create_source_router(auth)
     all_results, _source_counts, _timed_out_ids = parallel_search_sources(
@@ -699,8 +732,8 @@ def browse_skills(page: int = 1, page_size: int = 20, source: str = "all") -> di
     seen: dict = {}
     for r in all_results:
         rank = _TRUST_RANK.get(r.trust_level, 0)
-        if r.name not in seen or rank > _TRUST_RANK.get(seen[r.name].trust_level, 0):
-            seen[r.name] = r
+        if r.identifier not in seen or rank > _TRUST_RANK.get(seen[r.identifier].trust_level, 0):
+            seen[r.identifier] = r
     deduped = list(seen.values())
     deduped.sort(key=lambda r: (-_TRUST_RANK.get(r.trust_level, 0), r.source != "official", r.name.lower()))
     total = len(deduped)
@@ -1038,6 +1071,216 @@ def do_reset(name: str, restore: bool = False,
         c.print("[dim]Use /reset to start a new session now, or --now to apply immediately (invalidates prompt cache).[/]\n")
 
 
+def do_list_modified(console: Optional[Console] = None,
+                     as_json: bool = False) -> None:
+    """List bundled skills the user has edited (which `hermes update` keeps)."""
+    from tools.skills_sync import list_user_modified_bundled_skills
+
+    c = console or _console
+    modified = list_user_modified_bundled_skills()
+
+    if as_json:
+        import json
+
+        c.print(json.dumps([m["name"] for m in modified]))
+        return
+
+    if not modified:
+        c.print("[dim]No user-modified bundled skills — everything tracks upstream.[/]\n")
+        return
+
+    c.print(f"\n[bold]{len(modified)} user-modified bundled skill(s)[/] "
+            "[dim](kept as-is by `hermes update`):[/]")
+    for entry in modified:
+        c.print(f"  [yellow]~[/] {entry['name']}")
+    c.print()
+    c.print("[dim]See changes:   hermes skills diff <name>[/]")
+    c.print("[dim]Resume updates: hermes skills reset <name>          (keep your copy, re-baseline)[/]")
+    c.print("[dim]Revert to stock: hermes skills reset <name> --restore[/]\n")
+
+
+def do_diff(name: str, console: Optional[Console] = None) -> None:
+    """Show how the user's copy of a bundled skill differs from the stock version."""
+    from tools.skills_sync import diff_bundled_skill
+
+    c = console or _console
+    result = diff_bundled_skill(name)
+
+    if not result["ok"]:
+        c.print(f"[bold red]Error:[/] {result['message']}\n")
+        return
+
+    if not result["modified"]:
+        c.print(f"[green]{result['message']}[/]\n")
+        return
+
+    c.print(f"\n[bold]{result['message']}[/]\n")
+    for entry in result["diffs"]:
+        status = entry["status"]
+        if status == "modified":
+            # Render the unified diff with light coloring.
+            for line in entry["diff"].splitlines():
+                if line.startswith("+") and not line.startswith("+++"):
+                    c.print(f"[green]{line}[/]")
+                elif line.startswith("-") and not line.startswith("---"):
+                    c.print(f"[red]{line}[/]")
+                elif line.startswith("@@"):
+                    c.print(f"[cyan]{line}[/]")
+                else:
+                    c.print(line, highlight=False)
+        elif status == "added":
+            c.print(f"[green]+ only in your copy:[/] {entry['path']}")
+        elif status == "removed":
+            c.print(f"[red]- only in stock:[/] {entry['path']}")
+        else:  # binary
+            c.print(f"[yellow]~ {entry['path']}:[/] binary file differs")
+    c.print()
+    c.print(f"[dim]Revert with: hermes skills reset {name} --restore[/]\n")
+
+
+def do_opt_out(remove: bool = False,
+               console: Optional[Console] = None,
+               skip_confirm: bool = False,
+               invalidate_cache: bool = True) -> None:
+    """Opt the active profile out of bundled-skill seeding.
+
+    Always writes the .no-bundled-skills marker (stop future seeding). With
+    ``remove``, also deletes already-present bundled skills that are pristine
+    (manifest-tracked AND unmodified); user-edited and non-bundled skills are
+    never touched.
+    """
+    from tools.skills_sync import (
+        set_bundled_skills_opt_out,
+        remove_pristine_bundled_skills,
+    )
+
+    c = console or _console
+
+    # Write the marker first (the always-safe part).
+    res = set_bundled_skills_opt_out(True)
+    if not res["ok"]:
+        c.print(f"[bold red]Error:[/] {res['message']}\n")
+        return
+    c.print(f"[bold green]{res['message']}[/]")
+    c.print(f"[dim]Marker: {res['marker']}[/]")
+
+    if not remove:
+        c.print("[dim]Existing skills on disk were left in place. "
+                "Re-run with --remove to also delete unmodified bundled skills.[/]\n")
+        return
+
+    # Destructive step: preview, confirm, then delete.
+    preview = remove_pristine_bundled_skills(dry_run=True)
+    candidates = preview["removed"]
+    kept = preview["skipped"]
+    if not candidates:
+        c.print("[dim]No pristine bundled skills to remove "
+                "(nothing tracked, or all are user-modified/local).[/]\n")
+        return
+
+    c.print(f"\n[bold]Will remove {len(candidates)} unmodified bundled skill(s):[/]")
+    c.print(f"[dim]{', '.join(candidates)}[/]")
+    if kept:
+        c.print(f"[dim]Keeping {len(kept)} (user-modified or non-bundled).[/]")
+
+    if not skip_confirm:
+        c.print("[dim]This deletes the on-disk copies. User-edited and "
+                "hub/local skills are NOT touched.[/]")
+        try:
+            answer = input("Confirm [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        if answer not in {"y", "yes"}:
+            c.print("[dim]Marker kept; no skills deleted.[/]\n")
+            return
+
+    result = remove_pristine_bundled_skills(dry_run=False)
+    c.print(f"[bold green]{result['message']}[/]")
+    if result["removed"]:
+        c.print(f"[dim]Removed: {', '.join(result['removed'])}[/]")
+    c.print()
+
+    if invalidate_cache:
+        try:
+            from agent.prompt_builder import clear_skills_system_prompt_cache
+            clear_skills_system_prompt_cache(clear_snapshot=True)
+        except Exception:
+            pass
+
+
+def do_opt_in(sync: bool = False,
+              console: Optional[Console] = None,
+              invalidate_cache: bool = True) -> None:
+    """Remove the opt-out marker so bundled-skill seeding resumes.
+
+    With ``sync``, immediately re-seed bundled skills instead of waiting for
+    the next ``hermes update``.
+    """
+    from tools.skills_sync import set_bundled_skills_opt_out, sync_skills
+
+    c = console or _console
+
+    res = set_bundled_skills_opt_out(False)
+    if not res["ok"]:
+        c.print(f"[bold red]Error:[/] {res['message']}\n")
+        return
+    c.print(f"[bold green]{res['message']}[/]")
+
+    if sync:
+        synced = sync_skills(quiet=True)
+        copied = len(synced.get("copied", []))
+        c.print(f"[dim]Re-seeded {copied} bundled skill(s).[/]")
+        if invalidate_cache:
+            try:
+                from agent.prompt_builder import clear_skills_system_prompt_cache
+                clear_skills_system_prompt_cache(clear_snapshot=True)
+            except Exception:
+                pass
+    c.print()
+
+
+def do_repair_official(name: str, restore: bool = False,
+                       console: Optional[Console] = None,
+                       skip_confirm: bool = False,
+                       invalidate_cache: bool = True) -> None:
+    """Backfill or restore official optional skills from repo source."""
+    from tools.skills_sync import restore_official_optional_skill
+
+    c = console or _console
+    if restore and not skip_confirm:
+        c.print(f"\n[bold]Restore official optional skill '{name}' from repo source?[/]")
+        c.print("[dim]Existing matching active copies will be moved to a restore backup before copying the official source.[/]")
+        try:
+            answer = input("Confirm [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        if answer not in {"y", "yes"}:
+            c.print("[dim]Cancelled.[/]\n")
+            return
+
+    result = restore_official_optional_skill(name, restore=restore)
+    if not result.get("ok"):
+        c.print(f"[bold red]Error:[/] {result.get('message', 'Repair failed')}\n")
+        return
+
+    c.print(f"[bold green]{result['message']}[/]")
+    if result.get("restored"):
+        c.print(f"[dim]Restored: {', '.join(result['restored'])}[/]")
+    if result.get("backfilled"):
+        c.print(f"[dim]Backfilled provenance: {', '.join(result['backfilled'])}[/]")
+    if result.get("backed_up"):
+        c.print(f"[dim]Backed up: {', '.join(result['backed_up'])}[/]")
+        c.print(f"[dim]Backup dir: {result.get('backup_dir')}[/]")
+    c.print()
+
+    if invalidate_cache:
+        try:
+            from agent.prompt_builder import clear_skills_system_prompt_cache
+            clear_skills_system_prompt_cache(clear_snapshot=True)
+        except Exception:
+            pass
+
+
 def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> None:
     """Manage taps (custom GitHub repo sources)."""
     from tools.skills_hub import TapsManager
@@ -1368,6 +1611,18 @@ def skills_command(args) -> None:
     elif action == "reset":
         do_reset(args.name, restore=getattr(args, "restore", False),
                  skip_confirm=getattr(args, "yes", False))
+    elif action == "list-modified":
+        do_list_modified(as_json=getattr(args, "json", False))
+    elif action == "diff":
+        do_diff(args.name)
+    elif action == "opt-out":
+        do_opt_out(remove=getattr(args, "remove", False),
+                   skip_confirm=getattr(args, "yes", False))
+    elif action == "opt-in":
+        do_opt_in(sync=getattr(args, "sync", False))
+    elif action == "repair-official":
+        do_repair_official(args.name, restore=getattr(args, "restore", False),
+                           skip_confirm=getattr(args, "yes", False))
     elif action == "publish":
         do_publish(
             args.skill_path,
@@ -1390,7 +1645,7 @@ def skills_command(args) -> None:
             return
         do_tap(tap_action, repo=repo)
     else:
-        _console.print("Usage: hermes skills [browse|search|install|inspect|list|check|update|audit|uninstall|reset|publish|snapshot|tap]\n")
+        _console.print("Usage: hermes skills [browse|search|install|inspect|list|list-modified|diff|check|update|audit|uninstall|reset|opt-out|opt-in|publish|snapshot|tap]\n")
         _console.print("Run 'hermes skills <command> --help' for details.\n")
 
 
@@ -1554,6 +1809,15 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
         do_reset(name, restore=restore, console=c, skip_confirm=True,
                  invalidate_cache=invalidate_cache)
 
+    elif action in {"list-modified", "modified"}:
+        do_list_modified(console=c, as_json="--json" in args)
+
+    elif action == "diff":
+        if not args:
+            c.print("[bold red]Usage:[/] /skills diff <name>\n")
+            return
+        do_diff(args[0], console=c)
+
     elif action == "publish":
         if not args:
             c.print("[bold red]Usage:[/] /skills publish <skill-path> [--to github] [--repo owner/repo]\n")
@@ -1611,6 +1875,8 @@ def _print_skills_help(console: Console) -> None:
         "  [cyan]update[/] [name]               Update hub skills with upstream changes\n"
         "  [cyan]audit[/] [name]                Re-scan hub skills for security\n"
         "  [cyan]uninstall[/] <name>            Remove a hub-installed skill\n"
+        "  [cyan]list-modified[/]               List bundled skills you've edited (kept by update)\n"
+        "  [cyan]diff[/] <name>                 Diff your copy of a bundled skill vs the stock version\n"
         "  [cyan]reset[/] <name> [--restore]    Reset bundled-skill tracking (fix 'user-modified' flag)\n"
         "  [cyan]publish[/] <path> --repo <r>   Publish a skill to GitHub via PR\n"
         "  [cyan]snapshot[/] export|import      Export/import skill configurations\n"

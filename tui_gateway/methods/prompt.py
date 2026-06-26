@@ -1,16 +1,121 @@
 # ruff: noqa: F401,F403,F405,F821,ARG001
 from __future__ import annotations
 
+import hashlib
 import json
+import sys
+import time
+from typing import Any
 
+from agent.dovie_diagnostics import emit_dovie_diagnostic
+from hermes_runtime_event_payloads import terminal_text_metadata
+from hermes_team_mission.state.conversation import normalize_team_mission_conversation_session
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
+from tui_gateway.services.prompt_attachments import submitted_attachments as _normalize_submitted_attachments
+from tui_gateway.services.prompt_attachments import submitted_image_paths as _normalize_submitted_image_paths
+from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
+from tui_gateway.services.toolset_scope import ensure_session_turn_toolsets
 from tui_gateway.services.voice import voice_tts_enabled
 
 _server = bind_server_globals(globals())
 
 
 # ── Methods: prompt ──────────────────────────────────────────────────
+
+
+def _attachment_path_helpers():
+    from tui_gateway.services.attachment_paths import (
+        IMAGE_EXTENSIONS,
+        detect_file_drop,
+        resolve_attachment_path,
+        split_path_input,
+    )
+
+    cli_mod = sys.modules.get("cli")
+    if cli_mod is not None:
+        return (
+            getattr(cli_mod, "_IMAGE_EXTENSIONS", IMAGE_EXTENSIONS),
+            getattr(cli_mod, "_detect_file_drop", detect_file_drop),
+            getattr(cli_mod, "_resolve_attachment_path", resolve_attachment_path),
+            getattr(cli_mod, "_split_path_input", split_path_input),
+        )
+
+    return (
+        IMAGE_EXTENSIONS,
+        detect_file_drop,
+        resolve_attachment_path,
+        split_path_input,
+    )
+
+
+def _log_prompt_stage(session: dict, sid: str, stage: str, **fields: Any) -> None:
+    run_id = str(session.get("active_run_id") or fields.pop("run_id", "") or "")
+    turn_id = str(session.get("active_turn_id") or fields.pop("turn_id", "") or "")
+    runtime_scope_key = str(
+        session.get("active_runtime_scope_key")
+        or session.get("runtime_scope_key")
+        or session.get("session_key")
+        or sid
+    )
+    if not run_id and not runtime_scope_key.startswith("team:"):
+        return
+    pairs = {
+        "stage": stage,
+        "sid": sid,
+        "stored_session_id": str(session.get("session_key") or sid),
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "runtime_scope_key": runtime_scope_key,
+        **fields,
+    }
+    emit_dovie_diagnostic("[dovie-prompt-stage]", pairs)
+
+
+def _text_probe(value: Any) -> dict[str, Any]:
+    text = str(value or "")
+    digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return {
+        "len": len(text),
+        "sha1": digest,
+        "preview": text[:80].replace("\n", "\\n"),
+    }
+
+
+def _payload_text(payload: dict | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("delta", "text", "snapshot", "output", "message"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def _apply_dovie_product_runtime_policy(agent: Any, raw_context: Any) -> None:
+    if agent is None or not isinstance(raw_context, dict):
+        return
+    team_mission = raw_context.get("team_mission") or raw_context.get("teamMission")
+    team_mission = team_mission if isinstance(team_mission, dict) else {}
+    setattr(
+        agent,
+        "_delegate_inherits_parent_tools",
+        bool(team_mission.get("delegate_inherits_parent_tools") or team_mission.get("delegateInheritsParentTools")),
+    )
+
+
+def _prompt_terminal_status_from_result(result: dict, raw: Any) -> str:
+    if result.get("interrupted"):
+        return "interrupted"
+    error = str(result.get("error") or "").strip()
+    if not error:
+        return "complete"
+    raw_text = str(raw or "").strip()
+    if not raw_text:
+        return "error"
+    if bool(result.get("failed")) and raw_text.lower().startswith(("error:", "failed:", "exception:")):
+        return "error"
+    return "complete"
 
 
 def _mark_prompt_run_failed(
@@ -21,7 +126,7 @@ def _mark_prompt_run_failed(
     turn_id: str = "",
     message: str = "",
 ) -> None:
-    db = _get_db()
+    db = _db_for_stable_session(stored_session_id)
     if db is None or not run_id or not stored_session_id:
         return
     run_control.publish_run_terminal_event(
@@ -34,6 +139,37 @@ def _mark_prompt_run_failed(
         db=db,
         owner_transport=current_transport(),
     )
+
+
+def _mark_prompt_run_cancelled(
+    *,
+    run_id: str,
+    stored_session_id: str,
+    runtime_scope_key: str,
+    turn_id: str = "",
+    message: str = "",
+) -> dict:
+    db = _db_for_stable_session(stored_session_id)
+    event = None
+    if db is not None and run_id and stored_session_id:
+        event = run_control.publish_run_terminal_event(
+            stored_session_id=stored_session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+            runtime_scope_key=runtime_scope_key or stored_session_id,
+            status="cancelled",
+            message=message or "cancelled before prompt start",
+            db=db,
+            owner_transport=current_transport(),
+        )
+    return {
+        "status": "cancelled",
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "stored_session_id": stored_session_id,
+        "runtime_scope_key": runtime_scope_key or stored_session_id,
+        "seq": int((event or {}).get("seq") or 0),
+    }
 
 
 def _fail_unavailable_runtime_agent(
@@ -63,6 +199,96 @@ def _fail_unavailable_runtime_agent(
             turn_id=turn_id,
             message=message,
         )
+
+
+class _MessageDeltaNormalizer:
+    """Normalizes agent stream callbacks into explicit Gateway text events.
+
+    The Gateway ABI is append-only for string stream callbacks.  Earlier
+    versions tried to infer cumulative/snapshot callbacks from text content,
+    but that is not a valid protocol: legitimate chunks can share a prefix with
+    prior output (for example later markdown labels beginning with the same
+    Chinese word as the response).  Any producer that needs snapshot semantics
+    must send an explicit structured callback instead of a bare string.
+    """
+
+    def __init__(self) -> None:
+        self.text = ""
+        self._pending_trailing_newlines = ""
+
+    @staticmethod
+    def _structured_value(value) -> dict:
+        if not isinstance(value, dict):
+            return {}
+        return value
+
+    @staticmethod
+    def _protocol_offset(value: str) -> int:
+        return len(str(value or "").encode("utf-16-le")) // 2
+
+    def feed(self, value) -> dict | None:
+        if value is None:
+            self.discard_pending_trailing_newlines()
+            return None
+        structured = self._structured_value(value)
+        mode = str(structured.get("mode") or "").strip().lower()
+        if structured:
+            raw_value = structured.get("delta") or structured.get("text") or structured.get("output")
+        else:
+            raw_value = value
+        incoming = str(raw_value or "")
+        if not incoming:
+            return None
+        if mode in {"snapshot", "replace", "cumulative"}:
+            return self.feed_snapshot(incoming)
+        if self._pending_trailing_newlines:
+            incoming = self._pending_trailing_newlines + incoming
+            self._pending_trailing_newlines = ""
+        visible = incoming.rstrip("\n")
+        self._pending_trailing_newlines = incoming[len(visible):]
+        incoming = visible
+        if not incoming:
+            return None
+        current = self.text
+        offset = self._protocol_offset(self.text)
+        self.text = current + incoming
+        return {
+            "mode": "append",
+            "text": incoming,
+            "delta": incoming,
+            "offset": offset,
+        }
+
+    def feed_snapshot(self, value: str) -> dict | None:
+        snapshot = str(value or "")
+        if not snapshot:
+            return None
+        if snapshot == self.text:
+            return None
+        if not snapshot.startswith(self.text):
+            return None
+        delta = snapshot[len(self.text):]
+        if not delta:
+            return None
+        offset = self._protocol_offset(self.text)
+        self.text = snapshot
+        self._pending_trailing_newlines = ""
+        return {
+            "mode": "append",
+            "text": delta,
+            "delta": delta,
+            "offset": offset,
+        }
+
+    def reconcile_final_text(self, value: str) -> dict | None:
+        return self.feed_snapshot(str(value or ""))
+
+    def discard_pending_trailing_newlines(self) -> None:
+        self._pending_trailing_newlines = ""
+
+    def reset(self) -> None:
+        self.text = ""
+        self._pending_trailing_newlines = ""
 
 
 @method("prompt.submit")
@@ -100,14 +326,21 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
     turn_id = str(params.get("turn_id") or uuid.uuid4().hex).strip()
     runtime_scope_key = str(params.get("runtime_scope_key") or params.get("runtimeScopeKey") or "").strip()
     client_message_id = str(params.get("client_message_id") or "").strip()
-    raw_doxie_context = params.get("doxie_product_context") or params.get("doxieProductContext") or ""
-    doxie_product_context = (
-        json.dumps(raw_doxie_context, ensure_ascii=False)
-        if isinstance(raw_doxie_context, (dict, list))
-        else str(raw_doxie_context or "").strip()
+    persist_user_message = str(
+        params.get("persist_user_message")
+        or params.get("persistUserMessage")
+        or params.get("transcript_text")
+        or params.get("transcriptText")
+        or ""
     )
-    submitted_images = _submitted_image_paths(params)
+    raw_dovie_context = params.get("dovie_product_context") or params.get("dovieProductContext") or ""
+    dovie_product_context = (
+        json.dumps(raw_dovie_context, ensure_ascii=False)
+        if isinstance(raw_dovie_context, (dict, list))
+        else str(raw_dovie_context or "").strip()
+    )
     submitted_attachments = _submitted_attachments(params)
+    submitted_images = _submitted_image_paths({"attachments": submitted_attachments})
     session, err = _sess_nowait(params, rid)
     if err:
         return err
@@ -138,6 +371,28 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
         except Exception as e:
             return _err(rid, 5004, str(e))
     with session["history_lock"]:
+        preinterrupted_run_id = str(session.get("interrupted_run_id") or "")
+        preinterrupted_turn_id = str(session.get("interrupted_turn_id") or "")
+        if (
+            (preinterrupted_run_id and preinterrupted_run_id == run_id)
+            or (preinterrupted_turn_id and preinterrupted_turn_id == turn_id)
+        ):
+            session["running"] = False
+            session["active_run_id"] = None
+            session["active_turn_id"] = None
+            session["pending_turn"] = None
+            session["run_updated_at"] = time.time()
+            return _ok(
+                rid,
+                _mark_prompt_run_cancelled(
+                    run_id=run_id,
+                    stored_session_id=stable_session_id,
+                    runtime_scope_key=effective_runtime_scope_key,
+                    turn_id=turn_id,
+                    message="cancelled before prompt start",
+                ),
+            )
+    with session["history_lock"]:
         if session.get("running"):
             if not session.get("transient"):
                 _mark_prompt_run_failed(
@@ -160,9 +415,10 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             "text": text,
             "attachments": submitted_attachments,
             "draft_text": str(params.get("draft_text") or text or ""),
+            "persist_user_message": persist_user_message,
             "model": requested_model,
             "model_descriptor": model_descriptor,
-            "doxie_product_context": doxie_product_context,
+            "dovie_product_context": dovie_product_context,
         }
         session["run_started_at"] = time.time()
         session["run_updated_at"] = session["run_started_at"]
@@ -176,6 +432,20 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 flush=True,
             )
         if not session.get("transient"):
+            db = _db_for_stable_session(stable_session_id)
+            if db is not None:
+                try:
+                    normalize_team_mission_conversation_session(
+                        db,
+                        session_id=stable_session_id,
+                        metadata={"dovie_product_context": dovie_product_context},
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "team mission conversation session normalization skipped sid=%s: %s",
+                        stable_session_id,
+                        exc,
+                    )
             run_control.mark_run_started(
                 stored_session_id=stable_session_id,
                 runtime_session_id=sid,
@@ -186,7 +456,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                     "gateway_pid": os.getpid(),
                     "gateway_instance_id": _GATEWAY_INSTANCE_ID,
                 },
-                db=_get_db(),
+                db=db,
             )
 
     if requested_model:
@@ -215,10 +485,25 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
     elif has_model_descriptor:
         _set_session_model_descriptor(session, model_descriptor, clear_if_empty=True)
 
-    _server._ensure_session_turn_toolsets(
-        sid,
-        session,
-        params.get("enabled_toolsets") or params.get("enabledToolsets"),
+    ensure_session_turn_toolsets(
+        sid=sid,
+        session=session,
+        requested_toolsets=params.get("enabled_toolsets") or params.get("enabledToolsets"),
+        load_enabled_toolsets=_load_enabled_toolsets,
+        emit_session_info=lambda event_sid, agent: _emit(
+            "session.info",
+            event_sid,
+            _session_info(agent, _sessions.get(event_sid)),
+        ),
+        requested_disabled_toolsets=params.get("disabled_toolsets") or params.get("disabledToolsets"),
+        load_disabled_toolsets=_load_disabled_toolsets,
+        toolset_scope=(
+            params.get("toolset_scope")
+            or params.get("toolsetScope")
+            or params.get("toolset_mode")
+            or params.get("toolsetMode")
+        ),
+        persist_session_id=None if session.get("transient") else stable_session_id,
     )
     _start_agent_build(sid, session)
 
@@ -258,7 +543,16 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 )
                 return
             try:
-                _ensure_agent_runtime_current(sid, session)
+                ensure_agent_runtime_current(
+                    sid=sid,
+                    session=session,
+                    resolve_model=_resolve_model,
+                    emit_session_info=lambda event_sid, agent: _emit(
+                        "session.info",
+                        event_sid,
+                        _session_info(agent, _sessions.get(event_sid)),
+                    ),
+                )
             except Exception as e:
                 _emit("error", sid, {"message": f"runtime auth rebind failed: {e}"})
                 with session["history_lock"]:
@@ -274,6 +568,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                     message=f"runtime auth rebind failed: {e}",
                 )
                 return
+            _apply_dovie_product_runtime_policy(session.get("agent"), raw_dovie_context)
             with session["history_lock"]:
                 if (
                     str(session.get("interrupted_run_id") or "") == run_id
@@ -288,13 +583,15 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 "client_message_id": client_message_id,
                 "attachments": submitted_attachments,
                 "draft_text": str(params.get("draft_text") or text or ""),
+                "persist_user_message": persist_user_message,
                 "model": requested_model,
                 "model_descriptor": model_descriptor,
-                "doxie_product_context": doxie_product_context,
+                "reasoning_config": _turn_reasoning_config(params),
+                "dovie_product_context": dovie_product_context,
             }
         finally:
             _leave_profile_context(profile_tokens)
-        _server._run_prompt_submit(rid, sid, session, text, submitted_images, turn_metadata)
+        _run_prompt_submit(rid, sid, session, text, submitted_images, turn_metadata)
 
     threading.Thread(target=run_after_agent_ready, daemon=True).start()
     return _ok(
@@ -312,74 +609,78 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
 
 
 def _submitted_attachments(params: dict) -> list[dict]:
-    raw_attachments = params.get("attachments")
-    if not isinstance(raw_attachments, list):
-        return []
-    attachments: list[dict] = []
-    for raw in raw_attachments:
-        if not isinstance(raw, dict):
-            continue
-        name = str(raw.get("name") or raw.get("fileName") or raw.get("file_name") or "").strip()
-        item = {
-            "id": str(raw.get("id") or raw.get("fileId") or raw.get("file_id") or "").strip(),
-            "name": name,
-            "fileName": name,
-            "mimeType": str(raw.get("mimeType") or raw.get("mime_type") or "").strip(),
-            "size": raw.get("size") or raw.get("sizeBytes") or raw.get("size_bytes") or 0,
-            "path": str(raw.get("path") or raw.get("localPath") or raw.get("local_path") or "").strip(),
-            "fileUrl": str(raw.get("fileUrl") or raw.get("file_url") or raw.get("remoteUrl") or raw.get("remote_url") or "").strip(),
-            "previewUrl": str(raw.get("previewUrl") or raw.get("preview_url") or raw.get("url") or "").strip(),
-            "kind": str(raw.get("kind") or "").strip(),
-        }
-        attachments.append({
-            k: v for k, v in item.items()
-            if v is not None and not (isinstance(v, str) and v == "")
-        })
-    return attachments
+    return _normalize_submitted_attachments(params)
 
 
 def _submitted_image_paths(params: dict) -> list[str]:
-    raw_attachments = params.get("attachments")
-    if not isinstance(raw_attachments, list):
-        return []
-    image_paths: list[str] = []
-    image_extensions = {
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".gif",
-        ".webp",
-        ".bmp",
-        ".tif",
-        ".tiff",
-        ".heic",
-        ".heif",
+    return _normalize_submitted_image_paths(params)
+
+
+def _turn_reasoning_config(params: dict) -> dict | None:
+    raw = params.get("reasoning_config")
+    if raw is None:
+        raw = params.get("reasoningConfig")
+    if not isinstance(raw, dict):
+        return None
+    config = dict(raw)
+    if config.get("enabled") is False:
+        return {"enabled": False}
+    effort = str(config.get("effort") or "").strip()
+    if effort:
+        return {"effort": effort}
+    return config or None
+
+
+def _turn_identity(metadata: dict | None) -> dict:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return {
+        key: str(metadata.get(key) or "").strip()
+        for key in ("run_id", "turn_id", "client_message_id")
+        if str(metadata.get(key) or "").strip()
     }
-    for raw in raw_attachments:
-        if not isinstance(raw, dict):
-            continue
-        raw_path = str(raw.get("path") or "").strip()
-        if not raw_path:
-            continue
-        mime_type = str(raw.get("mimeType") or raw.get("mime_type") or "").lower()
-        kind = str(raw.get("kind") or "").lower()
-        path = Path(raw_path).expanduser()
-        is_image = (
-            kind == "image"
-            or mime_type.startswith("image/")
-            or path.suffix.lower() in image_extensions
+
+
+def _turn_matches(candidate: dict, target: dict) -> bool:
+    if not candidate or not target:
+        return False
+    return any(
+        candidate.get(key) and target.get(key) and candidate.get(key) == target.get(key)
+        for key in ("run_id", "turn_id", "client_message_id")
+    )
+
+
+def _latest_assistant_message_id_for_turn(session_id: str, turn_metadata: dict | None) -> str:
+    target = _turn_identity(turn_metadata)
+    if not session_id or not target:
+        return ""
+    db = _db_for_stable_session(session_id)
+    if db is None:
+        return ""
+    try:
+        messages = db.get_messages_as_conversation(
+            session_id,
+            include_ancestors=False,
+            include_storage_metadata=True,
         )
-        if not is_image:
+    except Exception:
+        return ""
+
+    active_turn: dict = {}
+    latest_message_id = ""
+    for message in messages:
+        if not isinstance(message, dict):
             continue
-        if not path.is_file():
-            print(
-                f"[tui_gateway] prompt.submit skipped missing image attachment: {path}",
-                file=sys.stderr,
-                flush=True,
-            )
+        role = str(message.get("role") or "")
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        if role == "user":
+            active_turn = _turn_identity(metadata)
             continue
-        image_paths.append(str(path))
-    return image_paths
+        if role != "assistant":
+            continue
+        message_turn = _turn_identity(metadata) or active_turn
+        if _turn_matches(message_turn, target):
+            latest_message_id = str(message.get("message_id") or "").strip()
+    return latest_message_id
 
 
 def _run_prompt_submit(
@@ -399,6 +700,7 @@ def _run_prompt_submit(
         session["attached_images"] = []
     agent = session.get("agent")
     if agent is None:
+        _log_prompt_stage(session, sid, "agent-missing", run_id=turn_run_id, turn_id=turn_id)
         _fail_unavailable_runtime_agent(
             sid=sid,
             session=session,
@@ -406,7 +708,76 @@ def _run_prompt_submit(
             turn_id=turn_id,
         )
         return
+    _log_prompt_stage(
+        session,
+        sid,
+        "before-message-start",
+        run_id=turn_run_id,
+        turn_id=turn_id,
+        history_count=len(history),
+        image_count=len(images),
+        text_len=len(str(text or "")),
+    )
     _emit("message.start", sid)
+    _log_prompt_stage(session, sid, "after-message-start", run_id=turn_run_id, turn_id=turn_id)
+
+    def terminalize_if_still_active(reason: str) -> None:
+        if session.get("transient") or not turn_run_id:
+            return
+        stored_session_id = str(session.get("session_key") or sid)
+        db = _db_for_stable_session(stored_session_id)
+        if db is None:
+            return
+        try:
+            get_run = getattr(db, "get_run", None)
+            state = get_run(turn_run_id) if callable(get_run) else {}
+        except Exception as exc:
+            logger.warning(
+                "[dovie-prompt] terminal fallback state lookup failed sid=%s run_id=%s error=%s",
+                sid,
+                turn_run_id,
+                exc,
+            )
+            return
+        status = str(state.get("status") or "").strip()
+        if status not in run_control.ACTIVE_RUN_STATUSES:
+            return
+        # If the user (or main-side ``run.cancel``) interrupted this turn,
+        # the legacy interrupt path marked ``session["interrupted_run_id"]``
+        # to ``turn_run_id``. Surface the terminal as ``cancelled`` so the
+        # UI shows "已中断" instead of "运行失败" — the in-flight stream
+        # didn't fail; it was deliberately stopped.
+        with session["history_lock"]:
+            interrupted_run_id = str(session.get("interrupted_run_id") or "")
+        was_cancelled = bool(turn_run_id and interrupted_run_id == turn_run_id)
+        fallback_status = "cancelled" if was_cancelled else "failed"
+        logger.warning(
+            "[dovie-prompt] terminal fallback for active run sid=%s stored_session_id=%s "
+            "run_id=%s turn_id=%s status=%s fallback=%s reason=%s",
+            sid,
+            stored_session_id,
+            turn_run_id,
+            turn_id,
+            status,
+            fallback_status,
+            reason,
+        )
+        run_control.publish_run_terminal_event(
+            stored_session_id=stored_session_id,
+            run_id=turn_run_id,
+            turn_id=turn_id,
+            runtime_scope_key=str(
+                session.get("active_runtime_scope_key")
+                or session.get("runtime_scope_key")
+                or session.get("session_key")
+                or sid
+            ),
+            runtime_session_id=sid,
+            status=fallback_status,
+            message=reason,
+            db=db,
+            owner_transport=current_transport(),
+        )
 
     def is_turn_interrupted() -> bool:
         with session["history_lock"]:
@@ -444,24 +815,135 @@ def _run_prompt_submit(
                     )
             return stale
 
-    delivered_parts: list[str] = []
+    delta_normalizer = _MessageDeltaNormalizer()
+    message_segment_index = 0
 
-    def persist_interrupted_partial() -> None:
-        partial = "".join(delivered_parts).strip()
-        if not partial:
+    def current_client_message_id() -> str:
+        base = str(turn_id or turn_run_id or sid or "prompt-turn").strip()
+        return f"{base}:assistant-segment:{message_segment_index}"
+
+    def close_current_text_segment(reason: str = "stream_boundary") -> None:
+        nonlocal message_segment_index
+        current_text = str(delta_normalizer.text or "")
+        if not current_text:
+            delta_normalizer.reset()
             return
-        assistant_message = {"role": "assistant", "content": partial}
-        if turn_metadata:
-            assistant_message["metadata"] = {
-                "turn_id": turn_metadata.get("turn_id"),
-                "run_id": turn_metadata.get("run_id"),
+        _log_prompt_stage(
+            session,
+            sid,
+            "stream-text-segment-closed",
+            run_id=turn_run_id,
+            turn_id=turn_id,
+            reason=reason,
+            segment_index=message_segment_index,
+            accumulated_text_len=len(current_text),
+        )
+        message_segment_index += 1
+        delta_normalizer.reset()
+
+    def persist_interrupted_partial(base_messages: list[dict] | None = None) -> None:
+        # Captures the in-flight stream segment's accumulated text so an
+        # interrupt can still anchor a partial assistant reply against the
+        # user turn that triggered it. ``delta_normalizer.text`` is reset
+        # to '' every time a text segment completes (see _emit_text_
+        # message_complete around line 805), so for a turn that already
+        # streamed a clean text segment and then moved on to a tool call
+        # before the user cancelled, ``partial`` is empty even though
+        # there IS real assistant content to preserve — that content is
+        # in ``base_messages`` (the agent's full run_conversation
+        # return). The earlier ``if not partial: return`` short-circuit
+        # threw away the user's turn AND the streamed assistant text in
+        # that case, so the next turn loaded session messages that
+        # didn't include the cancelled turn at all — agent answered
+        # "what was my last message?" with the message BEFORE the
+        # cancelled one. Bug repro pattern:
+        #   1. user submits message
+        #   2. agent streams a text segment ("好的, 我来搜索...")
+        #   3. agent moves to a tool call (delta_normalizer.reset())
+        #   4. user terminates
+        #   5. next turn: agent has no record of (1)+(2)
+        partial = delta_normalizer.text.strip()
+
+        next_history = [
+            dict(message)
+            for message in (base_messages or [])
+            if isinstance(message, dict)
+        ]
+        if not next_history:
+            next_history = list(history)
+
+        # Nothing meaningful to write — neither a partial mid-segment
+        # text nor a passed-in base_messages snapshot exceeds the
+        # session's existing history. Skip without disturbing the
+        # session's history_version.
+        if not partial and len(next_history) <= len(history):
+            return
+
+        current_turn_id = str((turn_metadata or {}).get("turn_id") or "")
+        current_run_id = str((turn_metadata or {}).get("run_id") or "")
+
+        def is_current_user_message(message: dict) -> bool:
+            if message.get("role") != "user":
+                return False
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            if current_turn_id and str(metadata.get("turn_id") or "") == current_turn_id:
+                return True
+            if current_run_id and str(metadata.get("run_id") or "") == current_run_id:
+                return True
+            return message.get("content") == text
+
+        if not any(is_current_user_message(message) for message in next_history[len(history):]):
+            user_message = {"role": "user", "content": text}
+            if turn_metadata:
+                user_message["metadata"] = turn_metadata
+            next_history.append(user_message)
+
+        # Append the still-streaming partial assistant text only when
+        # there IS one. base_messages may already carry a finalized
+        # assistant message for the same content — skip the dup append
+        # in that case.
+        if partial:
+            # Mark this row as interrupted on TWO sides:
+            #   - ``finish_reason="interrupted"`` reaches the messages
+            #     table via append_message and surfaces to providers
+            #     that look at the previous assistant's finish_reason
+            #     when deciding whether the turn is still in flight.
+            #   - ``metadata.interrupted = True`` is the canonical
+            #     in-band marker the agent's own history-validation
+            #     paths check (see ``repair_message_sequence`` /
+            #     resume heuristics).
+            # Together they prevent the next turn's agent from treating
+            # the truncated row as a still-pending continuation and
+            # hammering memory_search to "find the rest" — the symptom
+            # reported as "after cancel, next message hangs in memory
+            # retrieval loops".
+            assistant_message = {
+                "role": "assistant",
+                "content": partial,
+                "finish_reason": "interrupted",
             }
-        next_history = list(history)
-        user_message = {"role": "user", "content": text}
-        if turn_metadata:
-            user_message["metadata"] = turn_metadata
-        next_history.append(user_message)
-        next_history.append(assistant_message)
+            interrupt_metadata: dict[str, Any] = {"interrupted": True}
+            if turn_metadata:
+                interrupt_metadata["turn_id"] = turn_metadata.get("turn_id")
+                interrupt_metadata["run_id"] = turn_metadata.get("run_id")
+            assistant_message["metadata"] = interrupt_metadata
+            last_message = next_history[-1] if next_history else {}
+            if (
+                isinstance(last_message, dict)
+                and last_message.get("role") == "assistant"
+                and not last_message.get("tool_calls")
+                and str(last_message.get("content") or "").strip() == partial
+            ):
+                # Already in history (agent's own loop persisted the
+                # partial as the turn closed) — make sure the marker
+                # propagates onto that existing row too.
+                last_message.setdefault("metadata", {})
+                if isinstance(last_message["metadata"], dict):
+                    last_message["metadata"].update(interrupt_metadata)
+                if not last_message.get("finish_reason"):
+                    last_message["finish_reason"] = "interrupted"
+            else:
+                next_history.append(assistant_message)
         with session["history_lock"]:
             if int(session.get("history_version", 0)) != history_version:
                 return
@@ -480,32 +962,55 @@ def _run_prompt_submit(
                 )
 
     def run():
+        worker_started_at = time.time()
         approval_token = None
         session_tokens = []
         profile_tokens = []
         goal_followup = None  # set by the post-turn goal hook below
+        post_turn_history = list(history)
+        terminal_attempted = False
         try:
+            _log_prompt_stage(
+                session,
+                sid,
+                "worker-entry",
+                run_id=turn_run_id,
+                turn_id=turn_id,
+            )
+            _log_prompt_stage(session, sid, "profile-context-enter-start", run_id=turn_run_id, turn_id=turn_id)
             profile_tokens = _enter_profile_context(
                 session.get("profile_context"),
                 apply_env=False,
             )
+            _log_prompt_stage(session, sid, "profile-context-enter-end", run_id=turn_run_id, turn_id=turn_id)
             from tools.approval import (
                 reset_current_session_key,
                 set_current_session_key,
             )
 
+            _log_prompt_stage(session, sid, "session-context-enter-start", run_id=turn_run_id, turn_id=turn_id)
             approval_token = set_current_session_key(session["session_key"])
             session_cwd = _session_cwd(session)
             session_tokens = _set_session_context(
                 session["session_key"],
                 terminal_cwd=session_cwd,
-                doxie_product_context=str((turn_metadata or {}).get("doxie_product_context") or ""),
+                dovie_product_context=str((turn_metadata or {}).get("dovie_product_context") or ""),
+            )
+            _log_prompt_stage(
+                session,
+                sid,
+                "session-context-enter-end",
+                run_id=turn_run_id,
+                turn_id=turn_id,
+                cwd=session_cwd,
             )
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
             prompt = text
+            clean_prompt = str((turn_metadata or {}).get("persist_user_message") or prompt or "")
 
             if isinstance(prompt, str) and "@" in prompt:
+                _log_prompt_stage(session, sid, "context-reference-preprocess-start", run_id=turn_run_id, turn_id=turn_id)
                 from agent.context_references import preprocess_context_references
                 from agent.model_metadata import get_model_context_length
 
@@ -535,6 +1040,46 @@ def _run_prompt_submit(
                     )
                     return
                 prompt = ctx.message
+                if not str((turn_metadata or {}).get("persist_user_message") or "").strip():
+                    clean_prompt = prompt
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "context-reference-preprocess-end",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    prompt_len=len(str(prompt or "")),
+                )
+
+            try:
+                _log_prompt_stage(session, sid, "attachment-enrichment-start", run_id=turn_run_id, turn_id=turn_id)
+                from dovie_extension.prompt_attachments import enrich_prompt_with_document_attachments
+
+                prompt = enrich_prompt_with_document_attachments(
+                    prompt,
+                    (turn_metadata or {}).get("attachments"),
+                )
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "attachment-enrichment-end",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    prompt_len=len(str(prompt or "")),
+                )
+            except Exception as exc:
+                print(
+                    f"[tui_gateway] document attachment prompt enrichment failed: {exc}",
+                    file=sys.stderr,
+                )
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "attachment-enrichment-error",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    error=str(exc),
+                )
 
             # Decide image routing per-turn based on active provider/model.
             # "native" → pass pixels to the main model as OpenAI-style content
@@ -544,6 +1089,14 @@ def _run_prompt_submit(
             run_message: Any = prompt
             if images:
                 try:
+                    _log_prompt_stage(
+                        session,
+                        sid,
+                        "image-routing-decision-start",
+                        run_id=turn_run_id,
+                        turn_id=turn_id,
+                        image_count=len(images),
+                    )
                     from agent.image_routing import (
                         decide_image_input_mode,
                         build_native_content_parts,
@@ -567,15 +1120,32 @@ def _run_prompt_submit(
                         _cfg,
                         supports_vision_override=_supports_vision,
                     )
+                    _log_prompt_stage(
+                        session,
+                        sid,
+                        "image-routing-decision-end",
+                        run_id=turn_run_id,
+                        turn_id=turn_id,
+                        mode=_mode,
+                    )
                 except Exception as _img_exc:
                     print(
                         f"[tui_gateway] image_routing decision failed, defaulting to text: {_img_exc}",
                         file=sys.stderr,
                     )
                     _mode = "text"
+                    _log_prompt_stage(
+                        session,
+                        sid,
+                        "image-routing-decision-error",
+                        run_id=turn_run_id,
+                        turn_id=turn_id,
+                        error=str(_img_exc),
+                    )
 
                 if _mode == "native":
                     try:
+                        _log_prompt_stage(session, sid, "native-image-build-start", run_id=turn_run_id, turn_id=turn_id)
                         _parts, _skipped = build_native_content_parts(
                             prompt,
                             images,
@@ -589,42 +1159,257 @@ def _run_prompt_submit(
                             run_message = _parts
                         else:
                             run_message = _enrich_with_attached_images(prompt, images)
+                        _log_prompt_stage(
+                            session,
+                            sid,
+                            "native-image-build-end",
+                            run_id=turn_run_id,
+                            turn_id=turn_id,
+                            skipped_count=len(_skipped or []),
+                            part_count=len(_parts or []),
+                        )
                     except Exception as _img_exc:
                         print(
                             f"[tui_gateway] native attach failed, falling back to text: {_img_exc}",
                             file=sys.stderr,
                         )
                         run_message = _enrich_with_attached_images(prompt, images)
+                        _log_prompt_stage(
+                            session,
+                            sid,
+                            "native-image-build-error",
+                            run_id=turn_run_id,
+                            turn_id=turn_id,
+                            error=str(_img_exc),
+                        )
                 else:
+                    _log_prompt_stage(session, sid, "text-image-enrichment-start", run_id=turn_run_id, turn_id=turn_id)
                     run_message = _enrich_with_attached_images(prompt, images)
+                    _log_prompt_stage(session, sid, "text-image-enrichment-end", run_id=turn_run_id, turn_id=turn_id)
+
+            _log_prompt_stage(
+                session,
+                sid,
+                "before-agent-run",
+                run_id=turn_run_id,
+                turn_id=turn_id,
+                run_message_type=type(run_message).__name__,
+                elapsed_ms=int((time.time() - worker_started_at) * 1000),
+            )
+            emit_dovie_diagnostic(
+                "[dovie-prompt]",
+                {
+                    "stage": "agent-run-start",
+                    "sid": sid,
+                    "stored_session_id": session.get("session_key") or sid,
+                    "run_id": turn_run_id,
+                    "turn_id": turn_id,
+                    "runtime_scope_key": session.get("runtime_scope_key") or "",
+                },
+            )
+            stream_delta_emitted = False
 
             def _stream(delta):
+                nonlocal stream_delta_emitted, message_segment_index
                 if is_turn_interrupted():
                     return
-                payload = {"text": delta}
-                if streamer and (r := streamer.feed(delta)) is not None:
+                if delta is None:
+                    close_current_text_segment("stream_callback_none")
+                    return
+                input_probe = _text_probe(delta)
+                payload = delta_normalizer.feed(delta)
+                output_probe = _text_probe(_payload_text(payload))
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "stream-callback-normalized",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    input_len=input_probe["len"],
+                    input_sha1=input_probe["sha1"],
+                    input_preview=input_probe["preview"],
+                    emitted=payload is not None,
+                    output_mode=str((payload or {}).get("mode") or ""),
+                    output_offset=(payload or {}).get("offset"),
+                    output_len=output_probe["len"],
+                    output_sha1=output_probe["sha1"],
+                    output_preview=output_probe["preview"],
+                    accumulated_text_len=len(str(delta_normalizer.text or "")),
+                )
+                if payload is None:
+                    return
+                payload["client_message_id"] = current_client_message_id()
+                payload["clientMessageId"] = payload["client_message_id"]
+                render_delta = payload.get("delta") or payload.get("text") or ""
+                if streamer and (r := streamer.feed(render_delta)) is not None:
                     payload["rendered"] = r
-                delivered_parts.append(str(delta))
                 _emit("message.delta", sid, payload)
+                stream_delta_emitted = True
 
+            active_context_missing = object()
+            previous_active_run_id = getattr(agent, "_hermes_active_run_id", active_context_missing)
+            previous_active_turn_id = getattr(agent, "_hermes_active_turn_id", active_context_missing)
+            previous_active_runtime_scope_key = getattr(agent, "_hermes_active_runtime_scope_key", active_context_missing)
+            previous_reasoning_config = getattr(agent, "reasoning_config", active_context_missing)
+            turn_reasoning_config = (
+                (turn_metadata or {}).get("reasoning_config")
+                if isinstance((turn_metadata or {}).get("reasoning_config"), dict)
+                else None
+            )
             try:
+                previous_stream_text_boundary_callback = session.get(
+                    "stream_text_boundary_callback",
+                    active_context_missing,
+                )
+                session["stream_text_boundary_callback"] = close_current_text_segment
+                previous_inject_tool_breaks = getattr(agent, "_stream_inject_tool_breaks", True)
+                agent._stream_inject_tool_breaks = False
+                agent._hermes_active_run_id = turn_run_id
+                agent._hermes_active_turn_id = turn_id
+                agent._hermes_active_runtime_scope_key = str(session.get("runtime_scope_key") or "")
+                if turn_reasoning_config is not None:
+                    agent.reasoning_config = dict(turn_reasoning_config)
+                _log_prompt_stage(session, sid, "agent-run-call-start", run_id=turn_run_id, turn_id=turn_id)
                 result = agent.run_conversation(
                     run_message,
                     conversation_history=list(history),
                     stream_callback=_stream,
+                    persist_user_message=clean_prompt,
                     turn_metadata=turn_metadata,
                 )
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "agent-run-call-end",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    result_type=type(result).__name__,
+                )
+                emit_dovie_diagnostic(
+                    "[dovie-prompt]",
+                    {
+                        "stage": "agent-run-returned",
+                        "sid": sid,
+                        "stored_session_id": session.get("session_key") or sid,
+                        "run_id": turn_run_id,
+                        "turn_id": turn_id,
+                        "result_type": type(result).__name__,
+                    },
+                )
             except TypeError as exc:
-                if "turn_metadata" not in str(exc):
+                if "turn_metadata" not in str(exc) and "persist_user_message" not in str(exc):
                     raise
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "agent-run-compat-fallback-start",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    error=str(exc),
+                )
                 result = agent.run_conversation(
                     run_message,
                     conversation_history=list(history),
                     stream_callback=_stream,
                 )
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "agent-run-compat-fallback-end",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    result_type=type(result).__name__,
+                )
+                emit_dovie_diagnostic(
+                    "[dovie-prompt]",
+                    {
+                        "stage": "agent-run-returned-compat",
+                        "sid": sid,
+                        "stored_session_id": session.get("session_key") or sid,
+                        "run_id": turn_run_id,
+                        "turn_id": turn_id,
+                        "result_type": type(result).__name__,
+                    },
+                )
+            finally:
+                if "previous_stream_text_boundary_callback" in locals():
+                    if previous_stream_text_boundary_callback is active_context_missing:
+                        session.pop("stream_text_boundary_callback", None)
+                    else:
+                        session["stream_text_boundary_callback"] = previous_stream_text_boundary_callback
+                if "previous_inject_tool_breaks" in locals():
+                    agent._stream_inject_tool_breaks = previous_inject_tool_breaks
+                if previous_active_run_id is active_context_missing:
+                    try:
+                        delattr(agent, "_hermes_active_run_id")
+                    except AttributeError:
+                        pass
+                else:
+                    agent._hermes_active_run_id = previous_active_run_id
+                if previous_active_turn_id is active_context_missing:
+                    try:
+                        delattr(agent, "_hermes_active_turn_id")
+                    except AttributeError:
+                        pass
+                else:
+                    agent._hermes_active_turn_id = previous_active_turn_id
+                if previous_active_runtime_scope_key is active_context_missing:
+                    try:
+                        delattr(agent, "_hermes_active_runtime_scope_key")
+                    except AttributeError:
+                        pass
+                else:
+                    agent._hermes_active_runtime_scope_key = previous_active_runtime_scope_key
+                if previous_reasoning_config is active_context_missing:
+                    try:
+                        delattr(agent, "reasoning_config")
+                    except AttributeError:
+                        pass
+                else:
+                    agent.reasoning_config = previous_reasoning_config
 
             if is_turn_interrupted():
-                persist_interrupted_partial()
+                result_messages = (
+                    result.get("messages")
+                    if isinstance(result, dict) and isinstance(result.get("messages"), list)
+                    else None
+                )
+                persist_interrupted_partial(result_messages)
+                # Emit a real ``message.complete`` for the cancelled turn
+                # so (a) the frontend sees a terminal status of
+                # ``cancelled`` immediately (not "失败" via the
+                # ``terminalize_if_still_active`` fallback), and (b) the
+                # partial assistant text persists into the messages table
+                # via record_event's normal reduction path — without
+                # this, the next turn loads the conversation with NO
+                # assistant message for the cancelled run and the agent
+                # answers as if the cancelled question was never asked.
+                partial_text = str(delta_normalizer.text or "")
+                interrupt_payload: dict[str, Any] = {
+                    "usage": _get_usage(agent),
+                    "status": "cancelled",
+                    "streamed": True,
+                    "text": partial_text,
+                    "client_message_id": current_client_message_id(),
+                    "clientMessageId": current_client_message_id(),
+                    # ``interrupted`` flags this row as a terminal-by-cancel
+                    # so the next turn's hydrate + provider-side message-
+                    # validation see a closed assistant turn, not a
+                    # half-streamed pending one (matches the
+                    # ``finish_reason="interrupted"`` + metadata flag
+                    # written into the messages table by
+                    # ``persist_interrupted_partial``).
+                    "interrupted": True,
+                    **terminal_text_metadata(partial_text, prefix="text"),
+                }
+                interrupt_message_id = _latest_assistant_message_id_for_turn(
+                    str(session.get("session_key") or sid),
+                    turn_metadata,
+                )
+                if interrupt_message_id:
+                    interrupt_payload["message_id"] = interrupt_message_id
+                _emit("message.complete", sid, interrupt_payload)
+                terminal_attempted = True
                 return
 
             last_reasoning = None
@@ -636,6 +1421,7 @@ def _run_prompt_submit(
                         if current_version == history_version:
                             session["history"] = result["messages"]
                             session["history_version"] = history_version + 1
+                            post_turn_history = list(session["history"])
                         else:
                             # History mutated externally during the turn
                             # (undo/compress/retry/rollback now guard on
@@ -667,11 +1453,7 @@ def _run_prompt_submit(
                 )
 
                 raw = result.get("final_response", "")
-                status = (
-                    "interrupted"
-                    if result.get("interrupted")
-                    else "error" if result.get("error") else "complete"
-                )
+                status = _prompt_terminal_status_from_result(result, raw)
                 # When the backend produced no visible response AND reported a
                 # real error (e.g. invalid model slug → provider 4xx), surface
                 # that error as the visible text instead of shipping an empty
@@ -691,15 +1473,102 @@ def _run_prompt_submit(
                 raw = str(result)
                 status = "complete"
 
-            payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+            interrupt_detail = ""
+            if (
+                status == "interrupted"
+                and isinstance(raw, str)
+                and raw.strip().startswith("Operation interrupted:")
+            ):
+                interrupt_detail = raw.strip()
+                raw = ""
+            raw_text = str(raw or "")
+            final_delta_mismatch = False
+            if raw_text:
+                current_stream_text = str(delta_normalizer.text or "")
+                should_emit_final_delta = not current_stream_text or (
+                    raw_text.startswith(current_stream_text)
+                    and len(raw_text) > len(current_stream_text)
+                )
+                raw_probe = _text_probe(raw_text)
+                stream_probe = _text_probe(current_stream_text)
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "final-response-reconciliation",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    raw_len=raw_probe["len"],
+                    raw_sha1=raw_probe["sha1"],
+                    raw_preview=raw_probe["preview"],
+                    streamed_len=stream_probe["len"],
+                    streamed_sha1=stream_probe["sha1"],
+                    streamed_preview=stream_probe["preview"],
+                    should_emit_final_delta=should_emit_final_delta,
+                    raw_startswith_stream=current_stream_text
+                    and raw_text.startswith(current_stream_text),
+                    stream_startswith_raw=current_stream_text.startswith(raw_text),
+                )
+                if should_emit_final_delta:
+                    final_delta_payload = delta_normalizer.reconcile_final_text(raw_text)
+                    if final_delta_payload is not None:
+                        render_delta = (
+                            final_delta_payload.get("delta")
+                            or final_delta_payload.get("text")
+                            or ""
+                        )
+                        if streamer and (r := streamer.feed(render_delta)) is not None:
+                            final_delta_payload["rendered"] = r
+                        final_delta_payload["source"] = "final_response_reconciliation"
+                        final_delta_payload["client_message_id"] = current_client_message_id()
+                        final_delta_payload["clientMessageId"] = final_delta_payload["client_message_id"]
+                        _emit("message.delta", sid, final_delta_payload)
+                        stream_delta_emitted = True
+                elif current_stream_text and raw_text != current_stream_text:
+                    final_delta_mismatch = True
+
+            payload = {
+                "usage": _get_usage(agent),
+                "status": status,
+                "streamed": stream_delta_emitted,
+                "text": raw_text,
+                "client_message_id": current_client_message_id(),
+                "clientMessageId": current_client_message_id(),
+                **terminal_text_metadata(raw_text, prefix="text"),
+            }
+            if interrupt_detail:
+                payload["interrupt_detail"] = interrupt_detail
+            if final_delta_mismatch:
+                payload["final_text_mismatch"] = True
             if last_reasoning:
-                payload["reasoning"] = last_reasoning
+                payload.update(terminal_text_metadata(last_reasoning, prefix="reasoning"))
+            if (
+                isinstance(result, dict)
+                and status == "complete"
+                and str(result.get("error") or "").strip()
+            ):
+                payload["nonfatal_error"] = str(result.get("error") or "").strip()
             if status_note:
                 payload["warning"] = status_note
-            rendered = render_message(raw, cols)
-            if rendered:
-                payload["rendered"] = rendered
+            message_id = _latest_assistant_message_id_for_turn(
+                str(session.get("session_key") or sid),
+                turn_metadata,
+            )
+            if message_id:
+                payload["message_id"] = message_id
+            emit_dovie_diagnostic(
+                "[dovie-prompt]",
+                {
+                    "stage": "message-complete-emit",
+                    "sid": sid,
+                    "stored_session_id": session.get("session_key") or sid,
+                    "run_id": turn_run_id,
+                    "turn_id": turn_id,
+                    "status": status,
+                    "text_len": len(raw) if isinstance(raw, str) else 0,
+                },
+            )
             _emit("message.complete", sid, payload)
+            terminal_attempted = True
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge
@@ -753,7 +1622,7 @@ def _run_prompt_submit(
                 if session.get("transient"):
                     session["pending_title"] = None
                 else:
-                    _pdb = _get_db()
+                    _pdb = _db_for_stable_session(session.get("session_key") or sid)
                     if _pdb:
                         _session_key = session.get("session_key") or sid
                         try:
@@ -770,27 +1639,6 @@ def _run_prompt_submit(
                         except Exception:
                             # Transient DB failure — keep pending_title for retry.
                             pass
-
-            if (
-                status == "complete"
-                and isinstance(raw, str)
-                and raw.strip()
-                and isinstance(text, str)
-                and text.strip()
-                and not session.get("transient")
-            ):
-                try:
-                    from agent.title_generator import maybe_auto_title
-
-                    maybe_auto_title(
-                        _get_db(),
-                        session.get("session_key") or sid,
-                        text,
-                        raw,
-                        session.get("history", []),
-                    )
-                except Exception:
-                    pass
 
             # CLI parity: when voice-mode TTS is on, speak the agent reply
             # (cli.py:_voice_speak_response).  Only the final text — tool
@@ -831,6 +1679,7 @@ def _run_prompt_submit(
                 f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True
             )
             _emit("error", sid, {"message": str(e)})
+            terminal_attempted = True
         finally:
             try:
                 if approval_token is not None:
@@ -846,6 +1695,10 @@ def _run_prompt_submit(
                     session["active_turn_id"] = None
                     session["pending_turn"] = None
                     session["run_updated_at"] = time.time()
+            if not terminal_attempted:
+                terminalize_if_still_active("prompt worker exited before terminal event was emitted")
+            else:
+                terminalize_if_still_active("prompt worker terminal event did not close active run")
 
         # Chain a goal-continuation turn if the judge said so. We do
         # this AFTER the finally releases session["running"], so the
@@ -878,7 +1731,7 @@ def _run_prompt_submit(
                 run_id=followup_run_id,
                 turn_id=followup_turn_id,
                 runtime_scope_key=followup_scope_key,
-                db=_get_db(),
+                db=_db_for_stable_session(stable_session_id),
             )
             if isinstance(reservation, dict) and reservation.get("conflict"):
                 with session["history_lock"]:
@@ -897,7 +1750,7 @@ def _run_prompt_submit(
                     "gateway_pid": os.getpid(),
                     "gateway_instance_id": _GATEWAY_INSTANCE_ID,
                 },
-                db=_get_db(),
+                db=_db_for_stable_session(stable_session_id),
             )
             try:
                 _run_prompt_submit(
@@ -921,6 +1774,7 @@ def _run_prompt_submit(
                     session["running"] = False
                     session["active_run_id"] = None
 
+    _log_prompt_stage(session, sid, "worker-dispatch", run_id=turn_run_id, turn_id=turn_id)
     threading.Thread(target=run, daemon=True).start()
 
 
@@ -973,23 +1827,23 @@ def _(rid, params: dict) -> dict:
     if not raw:
         return _err(rid, 4015, "path required")
     try:
-        from cli import (
-            _IMAGE_EXTENSIONS,
-            _detect_file_drop,
-            _resolve_attachment_path,
-            _split_path_input,
-        )
+        (
+            image_extensions,
+            detect_file_drop,
+            resolve_attachment_path,
+            split_path_input,
+        ) = _attachment_path_helpers()
 
-        dropped = _detect_file_drop(raw)
+        dropped = detect_file_drop(raw)
         if dropped:
             image_path = dropped["path"]
             remainder = dropped["remainder"]
         else:
-            path_token, remainder = _split_path_input(raw)
-            image_path = _resolve_attachment_path(path_token)
+            path_token, remainder = split_path_input(raw)
+            image_path = resolve_attachment_path(path_token)
             if image_path is None:
                 return _err(rid, 4016, f"image not found: {path_token}")
-        if image_path.suffix.lower() not in _IMAGE_EXTENSIONS:
+        if image_path.suffix.lower() not in image_extensions:
             return _err(rid, 4016, f"unsupported image: {image_path.name}")
         session.setdefault("attached_images", []).append(str(image_path))
         return _ok(
@@ -1013,10 +1867,9 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     try:
-        from cli import _detect_file_drop
-
         raw = str(params.get("text", "") or "")
-        dropped = _detect_file_drop(raw)
+        _, detect_file_drop, _, _ = _attachment_path_helpers()
+        dropped = detect_file_drop(raw)
         if not dropped:
             return _ok(rid, {"matched": False})
 
@@ -1100,112 +1953,13 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"task_id": task_id})
 
 
-# ── Methods: respond ─────────────────────────────────────────────────
+def has_pending_prompt(request_id: str) -> bool:
+    from tui_gateway.methods import prompt_respond
+
+    return prompt_respond.has_pending_prompt(request_id)
 
 
-def _respond(rid, params, key):
-    r = params.get("request_id", "")
-    entry = _pending.get(r)
-    if not entry:
-        return _err(rid, 4009, f"no pending {key} request")
-    _, ev = entry
-    _answers[r] = params.get(key, "")
-    ev.set()
-    return _ok(rid, {"status": "ok"})
+def resolve_approval_session_key(params: dict) -> str:
+    from tui_gateway.methods import prompt_respond
 
-
-@method("clarify.respond")
-def _(rid, params: dict) -> dict:
-    return _respond(rid, params, "answer")
-
-
-@method("sudo.respond")
-def _(rid, params: dict) -> dict:
-    return _respond(rid, params, "password")
-
-
-@method("secret.respond")
-def _(rid, params: dict) -> dict:
-    return _respond(rid, params, "value")
-
-
-@method("approval.respond")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    try:
-        from tools.approval import resolve_gateway_approval
-
-        return _ok(
-            rid,
-            {
-                "resolved": resolve_gateway_approval(
-                    session["session_key"],
-                    params.get("choice", "deny"),
-                    resolve_all=params.get("all", False),
-                )
-            },
-        )
-    except Exception as e:
-        return _err(rid, 5004, str(e))
-
-
-@method("approval.policy.get")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    try:
-        from tools.approval import is_session_yolo_enabled
-
-        yolo = is_session_yolo_enabled(session["session_key"])
-        return _ok(
-            rid,
-            {
-                "mode": "full_access" if yolo else "default",
-                "yolo": yolo,
-            },
-        )
-    except Exception as e:
-        return _err(rid, 5004, str(e))
-
-
-@method("approval.policy.set")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    mode = str(params.get("mode") or "default").strip().lower()
-    if mode not in {"default", "full_access"}:
-        return _err(rid, 4002, f"unknown approval policy mode: {mode}")
-    try:
-        from tools.approval import disable_session_yolo, enable_session_yolo
-
-        if mode == "full_access":
-            enable_session_yolo(session["session_key"])
-            yolo = True
-        else:
-            disable_session_yolo(session["session_key"])
-            yolo = False
-        return _ok(rid, {"mode": mode, "yolo": yolo})
-    except Exception as e:
-        return _err(rid, 5004, str(e))
-
-
-@method("approval.pending.list")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    try:
-        from tools.approval import list_gateway_approvals
-
-        return _ok(
-            rid,
-            {
-                "approvals": list_gateway_approvals(session["session_key"]),
-            },
-        )
-    except Exception as e:
-        return _err(rid, 5004, str(e))
+    return prompt_respond.resolve_approval_session_key(params)

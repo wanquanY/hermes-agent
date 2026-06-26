@@ -116,11 +116,21 @@ def _codex_curated_models() -> list[str]:
 # (grok-4, grok-4-0709, grok-4-fast{,-reasoning,-non-reasoning},
 #  grok-4-1-fast{,-reasoning,-non-reasoning}, grok-code-fast-1 → grok-4.3).
 _XAI_STATIC_FALLBACK: list[str] = [
+    "grok-4.3",
     "grok-4.20-0309-reasoning",
     "grok-4.20-0309-non-reasoning",
     "grok-4.20-multi-agent-0309",
-    "grok-4.3",
 ]
+
+
+_XAI_TOP_MODEL = "grok-4.3"
+
+
+def _xai_promote_top(ids: list[str]) -> list[str]:
+    """Pin the headline xAI model to the top of the curated list."""
+    if _XAI_TOP_MODEL in ids:
+        return [_XAI_TOP_MODEL] + [m for m in ids if m != _XAI_TOP_MODEL]
+    return ids
 
 
 def _xai_curated_models() -> list[str]:
@@ -142,7 +152,7 @@ def _xai_curated_models() -> list[str]:
         if isinstance(models, dict) and models:
             ids = [mid for mid in models.keys() if isinstance(mid, str)]
             if ids:
-                return sorted(ids)
+                return _xai_promote_top(sorted(ids))
     except Exception:
         # Any failure (missing file, malformed JSON, import error)
         # falls through to the static list.
@@ -190,6 +200,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gpt-4o-mini",
     ],
     "openai-codex": _codex_curated_models(),
+    "xai-oauth": _xai_curated_models(),
     "copilot-acp": [
         "copilot-acp",
     ],
@@ -918,6 +929,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("anthropic",      "Anthropic",                "Anthropic (Claude models — API key or Claude Code)"),
     ProviderEntry("openai-codex",   "OpenAI Codex",             "OpenAI Codex"),
     ProviderEntry("alibaba",        "Qwen Cloud",               "Qwen Cloud / DashScope Coding (Qwen + multi-provider)"),
+    ProviderEntry("xai-oauth",      "xAI Grok OAuth (SuperGrok Subscription)", "xAI Grok OAuth (SuperGrok Subscription)"),
     ProviderEntry("xiaomi",         "Xiaomi MiMo",              "Xiaomi MiMo (MiMo-V2.5 and V2 models — pro, omni, flash)"),
     ProviderEntry("tencent-tokenhub", "Tencent TokenHub",       "Tencent TokenHub (Hy3 Preview — direct API via tokenhub.tencentmaas.com)"),
     ProviderEntry("nvidia",         "NVIDIA NIM",               "NVIDIA NIM (Nemotron models — build.nvidia.com or local NIM)"),
@@ -1036,6 +1048,10 @@ _PROVIDER_ALIASES = {
     "amazon-bedrock": "bedrock",
     "amazon": "bedrock",
     "grok": "xai",
+    "grok-oauth": "xai-oauth",
+    "xai-oauth": "xai-oauth",
+    "x-ai-oauth": "xai-oauth",
+    "xai-grok-oauth": "xai-oauth",
     "x-ai": "xai",
     "x.ai": "xai",
     "nim": "nvidia",
@@ -2166,6 +2182,8 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         except Exception:
             access_token = None
         return get_codex_model_ids(access_token=access_token)
+    if normalized == "xai-oauth":
+        return list(_PROVIDER_MODELS.get("xai-oauth", _PROVIDER_MODELS.get("xai", [])))
     if normalized in {"copilot", "copilot-acp"}:
         try:
             live = _fetch_github_models(_resolve_copilot_catalog_api_key())
@@ -2186,6 +2204,12 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
                     return live
         except Exception:
             pass
+        # Live failed (or no creds). Fall back to the docs-hosted manifest
+        # — NOT the in-repo _PROVIDER_MODELS["nous"] snapshot — so newly
+        # added Portal models still surface without a Hermes release.
+        manifest_ids = get_curated_nous_model_ids()
+        if manifest_ids:
+            return manifest_ids
     if normalized == "stepfun":
         try:
             from hermes_cli.auth import resolve_api_key_provider_credentials
@@ -2291,6 +2315,206 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
     if normalized in _MODELS_DEV_PREFERRED:
         return _merge_with_models_dev(normalized, curated_static)
     return curated_static
+
+
+# ---------------------------------------------------------------------------
+# Generic disk cache for provider_model_ids() — keeps /model picker fast.
+# ---------------------------------------------------------------------------
+#
+# Without this layer, every /model picker open re-fetches every authed
+# provider's /v1/models endpoint. On a well-configured user (anthropic +
+# openai + copilot + gemini + huggingface + ...) that's 2+ seconds of cold
+# HTTP roundtrips just to render the provider list.
+#
+# Cache strategy:
+#   - One JSON file at $HERMES_HOME/provider_models_cache.json
+#   - Per-provider entries keyed by (provider, credential fingerprint)
+#   - Credential fingerprint = sha256 of env-var values that the provider
+#     normally reads. Swap your OPENAI_API_KEY and the entry invalidates.
+#   - 1h TTL by default. `force_refresh=True` skips the cache entirely
+#     and overwrites it on success.
+#   - Only NON-EMPTY results are cached. An empty/None response from a
+#     transient network error never gets pinned.
+#   - Cache file is best-effort. Any read/write error degrades silently
+#     to a live fetch — the picker keeps working.
+
+_PROVIDER_MODELS_CACHE_TTL = 3600  # 1h
+
+
+def _provider_models_cache_path() -> Path:
+    from hermes_constants import get_hermes_home
+    return get_hermes_home() / "provider_models_cache.json"
+
+
+def _credential_fingerprint(provider: str) -> str:
+    """Return a short hash representing the credentials that
+    ``provider_model_ids(provider)`` would see right now.
+
+    Rotating any of the relevant env vars invalidates the cached entry
+    for that provider. We hash AT LEAST the api-key + base-url env vars
+    declared in ``PROVIDER_REGISTRY``. For OAuth-backed providers
+    (codex, copilot, anthropic-via-claude-code, nous portal), the
+    relevant tokens live in ``$HERMES_HOME/auth.json`` and external
+    credential files. Rather than parse every shape, we additionally
+    fold the mtime of those files into the fingerprint so refreshes
+    after re-auth bust the cache.
+    """
+    import hashlib
+    import os as _os
+
+    parts: list[str] = []
+
+    # Env vars from PROVIDER_REGISTRY for this slug
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+        pcfg = PROVIDER_REGISTRY.get(provider)
+        if pcfg is not None:
+            for ev in getattr(pcfg, "api_key_env_vars", ()) or ():
+                parts.append(f"{ev}={_os.environ.get(ev, '')}")
+            bev = getattr(pcfg, "base_url_env_var", "") or ""
+            if bev:
+                parts.append(f"{bev}={_os.environ.get(bev, '')}")
+    except Exception:
+        pass
+
+    # OAuth / external-file mtimes that change on re-auth
+    try:
+        from hermes_constants import get_hermes_home
+        for rel in ("auth.json", "credentials.json"):
+            p = get_hermes_home() / rel
+            try:
+                parts.append(f"{rel}@{p.stat().st_mtime_ns}")
+            except FileNotFoundError:
+                parts.append(f"{rel}@missing")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # External well-known credential file locations
+    for path in (
+        _os.path.expanduser("~/.codex/auth.json"),
+        _os.path.expanduser("~/.claude/.credentials.json"),
+        _os.path.expanduser("~/.config/github-copilot/hosts.json"),
+        _os.path.expanduser("~/.minimax/credentials.json"),
+    ):
+        try:
+            mt = _os.stat(path).st_mtime_ns
+            parts.append(f"{path}@{mt}")
+        except FileNotFoundError:
+            parts.append(f"{path}@missing")
+        except Exception:
+            pass
+
+    blob = "|".join(parts).encode("utf-8", errors="replace")
+    # blake2b for cache-key fingerprinting only — not for credential storage.
+    # We never reverse this hash; collisions are harmless (worst case: cache
+    # miss → live re-fetch). Use blake2b instead of sha256 here because
+    # CodeQL's `py/weak-sensitive-data-hashing` rule flags sha256 over env
+    # vars whose names contain "API_KEY" / "TOKEN" even when the hash is
+    # used as an identity fingerprint, not for password storage. blake2b
+    # is a keyed-hash primitive and isn't flagged.
+    return hashlib.blake2b(blob, digest_size=8).hexdigest()
+
+
+def _load_provider_models_cache() -> dict:
+    """Return the full cache dict, or {} on any error."""
+    try:
+        path = _provider_models_cache_path()
+        if not path.exists():
+            return {}
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_provider_models_cache(data: dict) -> None:
+    """Persist the cache dict. Best-effort — silent on any error."""
+    try:
+        from utils import atomic_json_write
+        path = _provider_models_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json_write(path, data, indent=None)
+    except Exception:
+        pass
+
+
+def cached_provider_model_ids(
+    provider: Optional[str],
+    *,
+    force_refresh: bool = False,
+    ttl_seconds: int = _PROVIDER_MODELS_CACHE_TTL,
+) -> list[str]:
+    """Disk-cached wrapper around :func:`provider_model_ids`.
+
+    Hits the cache when fresh; otherwise calls the live function and
+    persists a non-empty result. Always returns a list (never None).
+    """
+    normalized = normalize_provider(provider) or (provider or "")
+    if not normalized:
+        return []
+
+    cache = _load_provider_models_cache()
+    fp = _credential_fingerprint(normalized)
+    entry = cache.get(normalized)
+    now = time.time()
+
+    if (
+        not force_refresh
+        and isinstance(entry, dict)
+        and entry.get("fp") == fp
+        and isinstance(entry.get("models"), list)
+        and entry["models"]
+        and (now - float(entry.get("at", 0))) < ttl_seconds
+    ):
+        return list(entry["models"])
+
+    # Cache miss / stale / forced refresh — call the live path.
+    live = provider_model_ids(normalized, force_refresh=force_refresh)
+    if live:
+        cache[normalized] = {
+            "fp": fp,
+            "at": now,
+            "models": list(live),
+        }
+        _save_provider_models_cache(cache)
+        return list(live)
+
+    # Live fetch returned nothing. If we have a stale entry with the
+    # SAME fingerprint, prefer it over an empty result — stale data
+    # beats no data when the network is flaky.
+    if (
+        isinstance(entry, dict)
+        and entry.get("fp") == fp
+        and isinstance(entry.get("models"), list)
+        and entry["models"]
+    ):
+        return list(entry["models"])
+    return list(live or [])
+
+
+def clear_provider_models_cache(provider: Optional[str] = None) -> None:
+    """Drop a single provider's cache entry, or wipe the whole cache.
+
+    ``provider=None`` wipes everything; otherwise only that provider's
+    entry is removed. Used by ``/model --refresh`` and
+    ``hermes model --refresh``.
+    """
+    try:
+        if provider is None:
+            path = _provider_models_cache_path()
+            if path.exists():
+                path.unlink()
+            return
+        cache = _load_provider_models_cache()
+        normalized = normalize_provider(provider) or provider or ""
+        if normalized in cache:
+            del cache[normalized]
+            _save_provider_models_cache(cache)
+    except Exception:
+        pass
 
 
 def _fetch_anthropic_models(timeout: float = 5.0) -> Optional[list[str]]:
@@ -2507,6 +2731,7 @@ def _is_github_models_base_url(base_url: Optional[str]) -> bool:
     return (
         normalized.startswith(COPILOT_BASE_URL)
         or normalized.startswith("https://models.github.ai/inference")
+        or normalized.startswith("https://models.inference.ai.azure.com")
     )
 
 
@@ -3444,14 +3669,14 @@ def validate_requested_model(
             "message": message,
         }
 
-    # OpenAI Codex has its own catalog path; /v1/models probing is not the right validation path.
-    if normalized == "openai-codex":
+    # Providers with non-standard catalog validation — /v1/models probing is not the right path.
+    if normalized in {"openai-codex", "xai-oauth"}:
         try:
-            codex_models = provider_model_ids("openai-codex")
+            catalog_models = provider_model_ids(normalized)
         except Exception:
-            codex_models = []
-        if codex_models:
-            if requested_for_lookup in set(codex_models):
+            catalog_models = []
+        if catalog_models:
+            if requested_for_lookup in set(catalog_models):
                 return {
                     "accepted": True,
                     "persist": True,
@@ -3459,7 +3684,7 @@ def validate_requested_model(
                     "message": None,
                 }
             # Auto-correct if the top match is very similar (e.g. typo)
-            auto = get_close_matches(requested_for_lookup, codex_models, n=1, cutoff=0.9)
+            auto = get_close_matches(requested_for_lookup, catalog_models, n=1, cutoff=0.9)
             if auto:
                 return {
                     "accepted": True,
@@ -3468,17 +3693,18 @@ def validate_requested_model(
                     "corrected_model": auto[0],
                     "message": f"Auto-corrected `{requested}` → `{auto[0]}`",
                 }
-            suggestions = get_close_matches(requested_for_lookup, codex_models, n=3, cutoff=0.5)
+            suggestions = get_close_matches(requested_for_lookup, catalog_models, n=3, cutoff=0.5)
             suggestion_text = ""
             if suggestions:
                 suggestion_text = "\n  Similar models: " + ", ".join(f"`{s}`" for s in suggestions)
+            provider_label = "OpenAI Codex" if normalized == "openai-codex" else "xAI Grok OAuth (SuperGrok Subscription)"
             return {
                 "accepted": True,
                 "persist": True,
                 "recognized": False,
                 "message": (
-                    f"Note: `{requested}` was not found in the OpenAI Codex model listing. "
-                    "It may still work if your ChatGPT/Codex account has access to a newer or hidden model ID."
+                    f"Note: `{requested}` was not found in the {provider_label} model listing. "
+                    "It may still work if your account has access to a newer or hidden model ID."
                     f"{suggestion_text}"
                 ),
             }
@@ -3702,13 +3928,12 @@ def validate_requested_model(
 
     # Static-catalog fallback: when the /models probe was unreachable,
     # validate against the curated list from provider_model_ids() — same
-    # pattern as the openai-codex and minimax branches above.  This fixes
-    # /model switches in the gateway for providers like opencode-go and
-    # opencode-zen whose /models endpoint returns 404 against the HTML
-    # marketing site.  Without this block, validate_requested_model would
-    # reject every model on such providers, switch_model() would return
-    # success=False, and the gateway would never write to
-    # _session_model_overrides.
+    # pattern as the openai-codex and minimax branches above.  This keeps
+    # /model switches working in the gateway for providers whose /models
+    # endpoint is temporarily unreachable or returns a non-JSON payload.
+    # Without this block, validate_requested_model would reject every model
+    # on such providers, switch_model() would return success=False, and
+    # the gateway would never write to _session_model_overrides.
     provider_label = _PROVIDER_LABELS.get(normalized, normalized)
     try:
         catalog_models = provider_model_ids(normalized)

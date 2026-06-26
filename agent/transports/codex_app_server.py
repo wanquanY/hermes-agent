@@ -30,6 +30,26 @@ from typing import Any, Callable, Optional
 MIN_CODEX_VERSION = (0, 125, 0)
 
 
+def _kanban_writable_root(spawn_env: dict[str, str]) -> str:
+    """Return the narrow Kanban board root for Codex workspace-write workers."""
+    legacy_db = spawn_env.get("HERMES_KANBAN_DB", "").strip()
+    if legacy_db:
+        return os.path.dirname(legacy_db)
+
+    explicit_root = spawn_env.get("HERMES_KANBAN_ROOT", "").strip()
+    if explicit_root:
+        return explicit_root
+
+    kanban_home = spawn_env.get("HERMES_KANBAN_HOME", "").strip() or spawn_env.get(
+        "HERMES_HOME",
+        os.path.expanduser("~/.hermes"),
+    )
+    board = spawn_env.get("HERMES_KANBAN_BOARD", "").strip()
+    if board and board != "default":
+        return os.path.join(kanban_home, "kanban", "boards", board)
+    return kanban_home
+
+
 @dataclass
 class CodexAppServerError(RuntimeError):
     """Raised on JSON-RPC errors from the app-server."""
@@ -74,12 +94,32 @@ class CodexAppServerClient:
         env: Optional[dict[str, str]] = None,
     ) -> None:
         self._codex_bin = codex_bin
-        cmd = [codex_bin, "app-server"] + list(extra_args or [])
         spawn_env = os.environ.copy()
         if env:
             spawn_env.update(env)
         if codex_home:
             spawn_env["CODEX_HOME"] = codex_home
+
+        app_server_args = list(extra_args or [])
+        # Kanban workers must be able to write their handoff/status back to
+        # the board DB, which lives outside the per-task workspace. Keep the
+        # Codex sandbox on, but add the Kanban root as the only extra writable
+        # root. Without this, codex-runtime workers finish their actual work
+        # but crash/block when kanban_complete/kanban_block writes SQLite.
+        if spawn_env.get("HERMES_KANBAN_TASK"):
+            kanban_root = _kanban_writable_root(spawn_env)
+            app_server_args.extend(
+                [
+                    "-c",
+                    'sandbox_mode="workspace-write"',
+                    "-c",
+                    f'sandbox_workspace_write.writable_roots=["{kanban_root}"]',
+                    "-c",
+                    "sandbox_workspace_write.network_access=false",
+                ]
+            )
+
+        cmd = [codex_bin, "app-server"] + app_server_args
         # Codex emits tracing to stderr; default WARN keeps it quiet for users.
         spawn_env.setdefault("RUST_LOG", "warn")
 

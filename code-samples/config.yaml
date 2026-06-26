@@ -1,0 +1,13 @@
+app:
+  name: code-samples
+  environment: development
+  debug: true
+
+server:
+  host: 127.0.0.1
+  port: 3000
+
+features:
+  - editor-test
+  - syntax-highlight
+  - file-search

@@ -39,7 +39,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from hermes_constants import get_hermes_home, display_hermes_home
+from hermes_constants import ensure_directory_path, get_hermes_home, display_hermes_home
 from typing import Dict, Any, Optional, Tuple
 
 from utils import atomic_replace, is_truthy_value
@@ -132,6 +132,80 @@ def _containing_skills_root(skill_path: Path) -> Path:
         except (ValueError, OSError):
             continue
     return SKILLS_DIR
+
+
+def _is_path_redirect(path: Path) -> bool:
+    """True when ``path`` is a symlink or (on Windows) a directory junction.
+
+    Either form lets a poisoned skills tree redirect a subsequent
+    ``shutil.rmtree`` to content outside the skills root. ``is_junction``
+    only exists on Python 3.12+ Windows; gate with ``hasattr``.
+    """
+    try:
+        return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+    except OSError:
+        return False
+
+
+def _validate_delete_target(skill_dir: Path) -> Optional[str]:
+    """Last-line guard before ``shutil.rmtree(skill_dir)`` in ``_delete_skill``.
+
+    ``_find_skill`` already restricts ``skill_dir`` to a real ``SKILL.md``
+    parent discovered by walking the skills roots, so the agent cannot inject
+    an arbitrary path the way Kilo Code's HTTP endpoint could (their issue
+    #11227: a built-in-skill sentinel resolved to the server cwd and a
+    recursive delete wiped the user's entire working directory). This is the
+    matching defense-in-depth for our agent-facing ``skill_manage`` delete
+    path: even if discovery or a poisoned tree hands us a bad directory, never
+    recursively delete
+
+      1. a path that is not strictly *inside* one of the known skills roots,
+      2. a skills root itself (would wipe every installed skill), or
+      3. a directory reached via a symlink / junction (``rmtree`` would follow
+         it into content outside the skills tree).
+
+    Returns an error string to refuse on, or ``None`` when the delete is safe.
+    """
+    from agent.skill_utils import get_all_skills_dirs
+
+    # (3) Reject symlink/junction redirects on the skill directory itself.
+    if _is_path_redirect(skill_dir):
+        return (
+            f"Refusing to delete '{skill_dir}': the skill directory is a "
+            f"symlink/junction. Remove the link target manually if intended."
+        )
+
+    try:
+        resolved = skill_dir.resolve()
+    except OSError as exc:
+        return f"Refusing to delete '{skill_dir}': could not resolve path ({exc})."
+
+    roots = []
+    for root in get_all_skills_dirs():
+        try:
+            roots.append(root.resolve())
+        except OSError:
+            continue
+
+    for root in roots:
+        # (2) Never rmtree a skills root itself.
+        if resolved == root:
+            return (
+                f"Refusing to delete '{skill_dir}': resolves to the skills root "
+                f"itself, which would remove every installed skill."
+            )
+        # (1) Must be strictly inside a known root.
+        try:
+            rel = resolved.relative_to(root)
+        except ValueError:
+            continue
+        if rel.parts:  # at least one component below the root
+            return None
+
+    return (
+        f"Refusing to delete '{skill_dir}': path does not resolve inside any "
+        f"known skills root."
+    )
 
 
 def _pinned_guard(name: str) -> Optional[str]:
@@ -283,12 +357,12 @@ def _find_skill(name: str) -> Optional[Dict[str, Any]]:
     external dirs configured via skills.external_dirs.  Returns
     {"path": Path} or None.
     """
-    from agent.skill_utils import EXCLUDED_SKILL_DIRS, get_all_skills_dirs
+    from agent.skill_utils import get_all_skills_dirs, is_excluded_skill_path
     for skills_dir in get_all_skills_dirs():
         if not skills_dir.exists():
             continue
         for skill_md in skills_dir.rglob("SKILL.md"):
-            if any(part in EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+            if is_excluded_skill_path(skill_md):
                 continue
             if skill_md.parent.name == name:
                 return {"path": skill_md.parent}
@@ -307,9 +381,18 @@ def _validate_file_path(file_path: str) -> Optional[str]:
 
     normalized = Path(file_path)
 
-    # Prevent path traversal
+    # Prevent path traversal (checked before any allow-listing so the SKILL.md
+    # exception below can never be reached by a traversal-laden path).
     if has_traversal_component(file_path):
         return "Path traversal ('..') is not allowed."
+
+    # SKILL.md is the canonical skill file and lives at the skill root, not
+    # under an allowed subdirectory. Accept its two natural spellings —
+    # 'SKILL.md' and '<skill-name>/SKILL.md' — so callers can target the main
+    # file. The traversal guard above still applies, so this can't escape.
+    if normalized.parts and normalized.name == "SKILL.md":
+        if len(normalized.parts) == 1 or len(normalized.parts) == 2:
+            return None
 
     # Must be under an allowed subdirectory
     if not normalized.parts or normalized.parts[0] not in ALLOWED_SUBDIRS:
@@ -347,7 +430,7 @@ def _atomic_write_text(file_path: Path, content: str, encoding: str = "utf-8") -
         content: Content to write
         encoding: Text encoding (default: utf-8)
     """
-    file_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_directory_path(file_path.parent)
     fd, temp_path = tempfile.mkstemp(
         dir=str(file_path.parent),
         prefix=f".{file_path.name}.tmp.",
@@ -380,6 +463,13 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     err = _validate_category(category)
     if err:
         return {"success": False, "error": err}
+    try:
+        from tools.dovie_skill_categories import validate_dovie_skill_category
+        err = validate_dovie_skill_category(category)
+        if err:
+            return {"success": False, "error": err}
+    except Exception as exc:
+        return {"success": False, "error": f"Dovie skill category validation failed: {exc}"}
 
     # Validate content
     err = _validate_frontmatter(content)
@@ -400,7 +490,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
 
     # Create the skill directory
     skill_dir = _resolve_skill_dir(name, category)
-    skill_dir.mkdir(parents=True, exist_ok=True)
+    ensure_directory_path(skill_dir)
 
     # Write SKILL.md atomically
     skill_md = skill_dir / "SKILL.md"
@@ -594,6 +684,12 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
 
     skill_dir = existing["path"]
     skills_root = _containing_skills_root(skill_dir)
+
+    # Defense-in-depth before the recursive delete (port of Kilo Code #11240).
+    unsafe = _validate_delete_target(skill_dir)
+    if unsafe:
+        return {"success": False, "error": unsafe}
+
     shutil.rmtree(skill_dir)
 
     # Clean up empty category directories (don't remove the skills root itself)
@@ -642,7 +738,7 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     target, err = _resolve_skill_target(existing["path"], file_path)
     if err:
         return {"success": False, "error": err}
-    target.parent.mkdir(parents=True, exist_ok=True)
+    ensure_directory_path(target.parent)
     # Back up for rollback
     original_content = target.read_text(encoding="utf-8") if target.exists() else None
     _atomic_write_text(target, file_content)
@@ -873,7 +969,9 @@ SKILL_MANAGE_SCHEMA = {
                 "description": (
                     "Optional category/domain for organizing the skill (e.g., 'devops', "
                     "'data-science', 'mlops'). Creates a subdirectory grouping. "
-                    "Only used with 'create'."
+                    "Only used with 'create'. In Dovie runtimes this is required "
+                    "and must be one of the Dovie skill category slugs returned "
+                    "by design_agent_profile(inspect_context)."
                 )
             },
             "file_path": {

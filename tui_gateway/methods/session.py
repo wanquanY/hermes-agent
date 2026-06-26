@@ -5,12 +5,24 @@ import base64
 import json
 import queue
 
+from dovie_extension.display_transcript import (
+    sanitize_session_list_item,
+    sanitize_transcript_messages,
+)
+from hermes_state_participants import agent_participant_id, user_participant_id
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
+from tui_gateway.services.workspace import (
+    bind_session_workspace as _bind_session_workspace,
+    normalize_session_cwd as _normalize_session_cwd,
+    workspace_for_session as _workspace_for_session,
+    workspace_from_params as _workspace_from_params,
+)
 
 _server = bind_server_globals(globals())
 _interrupt_work_queue: queue.SimpleQueue = queue.SimpleQueue()
 _agent_interrupt_work_queue: queue.SimpleQueue = queue.SimpleQueue()
+_INTERNAL_SESSION_LIST_SOURCES = ("tool", "cron")
 
 
 def _interrupt_trace(message: str) -> None:
@@ -81,10 +93,132 @@ def _requested_runtime_scope_key(params: dict | None = None) -> str:
     ).strip()
 
 
+def _requested_agent_profile_id(params: dict | None = None) -> str:
+    return str(
+        (params or {}).get("agent_profile_id")
+        or (params or {}).get("agentProfileId")
+        or ""
+    ).strip()
+
+
+def _requested_profile_version_id(params: dict | None = None) -> str:
+    return str(
+        (params or {}).get("agent_profile_version_id")
+        or (params or {}).get("agentProfileVersionId")
+        or ""
+    ).strip()
+
+
+def _requested_created_by_user_id(params: dict | None = None) -> str:
+    return str(
+        (params or {}).get("created_by_user_id")
+        or (params or {}).get("createdByUserId")
+        or (params or {}).get("created_by")
+        or (params or {}).get("createdBy")
+        or (params or {}).get("user_id")
+        or (params or {}).get("userId")
+        or ""
+    ).strip()
+
+
+def _upsert_session_create_conversation_participants(
+    db,
+    *,
+    session_id: str,
+    params: dict,
+    runtime_scope_key: str,
+) -> None:
+    upsert = getattr(db, "upsert_conversation_participant", None)
+    if not callable(upsert):
+        return
+    profile_id = _requested_agent_profile_id(params)
+    scope = str(runtime_scope_key or "").strip()
+    if not profile_id and scope.startswith("profile:"):
+        profile_id = scope.split("profile:", 1)[1].strip()
+    user_id = _requested_created_by_user_id(params)
+    upsert(
+        conversation_session_id=session_id,
+        participant_id=user_participant_id(user_id),
+        role="user",
+        metadata={"source": "session.create"},
+    )
+    upsert(
+        conversation_session_id=session_id,
+        participant_id=agent_participant_id(profile_id),
+        role="agent",
+        agent_profile_id=profile_id,
+        agent_profile_version_id=_requested_profile_version_id(params),
+        runtime_scope_key=scope or (f"profile:{profile_id}" if profile_id else ""),
+        display_name=str(
+            params.get("agent_profile_name")
+            or params.get("agentProfileName")
+            or params.get("profile_name")
+            or params.get("profileName")
+            or ""
+        ).strip(),
+        metadata={"source": "session.create"},
+    )
+
+
+def _project_session_index_on_create(
+    db, session_id: str, params: dict, runtime_scope_key: str, transient: bool
+) -> None:
+    """Persist the owning agent profile into the control-plane session_index at
+    create time. This is the keystone of the single-query sidebar read: the
+    session->profile association was previously known only client-side (forcing
+    the per-profile fan-out). Best-effort; never breaks session creation."""
+    upsert = getattr(db, "upsert_session_index", None)
+    if not callable(upsert):
+        return
+    # Group-chat member-chat worker sessions are data plane — the worker runs
+    # in its own session and its reply is relayed into the team conversation
+    # by hermes_state_member_chat. The worker session must NEVER appear as a
+    # sidebar row, even before reconcile_session_index has a chance to purge.
+    if str(session_id or "").startswith("memberchat:"):
+        return
+    profile_id = _requested_agent_profile_id(params)
+    scope = str(runtime_scope_key or "")
+    if not profile_id and scope.startswith("profile:"):
+        profile_id = scope.split("profile:", 1)[1].strip()
+    try:
+        upsert(
+            session_id=session_id,
+            owner_agent_profile_id=profile_id,
+            owner_profile_version_id=_requested_profile_version_id(params),
+            runtime_scope_key=scope,
+            source="tui",
+            transient=bool(transient),
+            session_kind="hermes_session",
+        )
+    except Exception:
+        pass
+
+
+def _requested_tool_progress_mode(params: dict | None = None) -> str:
+    raw = (
+        (params or {}).get("tool_progress_mode")
+        or (params or {}).get("toolProgressMode")
+        or (params or {}).get("tool_progress")
+        or (params or {}).get("toolProgress")
+    )
+    if raw is False:
+        return "off"
+    if raw is True:
+        return "all"
+    mode = str(raw or "").strip().lower()
+    if mode in {"off", "new", "all", "verbose"}:
+        return mode
+    return _load_tool_progress_mode()
+
+
 def _session_run_snapshot(runtime_sid: str, session: dict | None, db=None) -> dict:
     session = session or {}
     stable_session_id = str(session.get("session_key") or runtime_sid or "")
-    control_state = run_control.session_status(stable_session_id, db=db)
+    control_state = run_control.session_status(
+        stable_session_id,
+        db=db,
+        current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+    )
     running = bool(session.get("running") or control_state.get("running"))
     return {
         "running": running,
@@ -99,12 +233,19 @@ def _session_run_snapshot(runtime_sid: str, session: dict | None, db=None) -> di
 
 
 def _live_sessions_by_stored_key() -> dict[str, tuple[str, dict]]:
-    try:
-        snapshot = list(_sessions.items())
-    except RuntimeError:
+    with _sessions_lock:
         snapshot = list(_sessions.items())
     live: dict[str, tuple[str, dict]] = {}
     for sid, session in snapshot:
+        # Skip sessions whose teardown chokepoint has already run. Otherwise
+        # the active-list count would monotonically grow until gateway
+        # restart, as zombie rows accumulate between _finalize_session
+        # marking them and the next idle-reap actually popping them.
+        # Ported from upstream ae94ed172 review-driven fix; keys on
+        # _finalized only (NOT on a stdio sentinel) so a standalone
+        # `hermes --tui` session stays visible.
+        if (session or {}).get("_finalized"):
+            continue
         key = str((session or {}).get("session_key") or "")
         if not key:
             continue
@@ -128,6 +269,43 @@ def _live_sessions_by_stored_key() -> dict[str, tuple[str, dict]]:
     return live
 
 
+def _find_live_session_by_key(session_key: str) -> tuple[str, dict] | None:
+    key = str(session_key or "").strip()
+    if not key:
+        return None
+    with _sessions_lock:
+        snapshot = list(_sessions.items())
+    candidates = [
+        (sid, session)
+        for sid, session in snapshot
+        if not (session or {}).get("_finalized")
+        and str((session or {}).get("session_key") or "") == key
+    ]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda item: (
+            bool((item[1] or {}).get("running")),
+            float((item[1] or {}).get("run_updated_at") or 0),
+            float((item[1] or {}).get("run_started_at") or 0),
+        ),
+        reverse=True,
+    )
+    return candidates[0]
+
+
+def _live_scope_matches(session: dict, runtime_scope_key: str) -> bool:
+    requested = str(runtime_scope_key or "").strip()
+    if not requested:
+        return True
+    live_scope = str(
+        session.get("runtime_scope_key")
+        or session.get("active_runtime_scope_key")
+        or ""
+    ).strip()
+    return not live_scope or live_scope == requested
+
+
 def _is_empty_stored_conversation(row: dict) -> bool:
     """Return true only when a rich session row is explicitly content-empty.
 
@@ -144,6 +322,81 @@ def _is_empty_stored_conversation(row: dict) -> bool:
         and not (row.get("title") or "").strip()
         and not (row.get("preview") or "").strip()
     )
+
+
+def _is_team_mission_internal_session_row(
+    db,
+    row: dict,
+    team_run_session_ids: set[str] | None = None,
+) -> bool:
+    session_ids = {
+        str(row.get("id") or "").strip(),
+        str(row.get("stored_session_id") or row.get("storedSessionId") or "").strip(),
+        str(row.get("session_id") or row.get("sessionId") or "").strip(),
+    }
+    session_ids.discard("")
+    for session_id in session_ids:
+        if session_id.startswith("team:") and ":node:" in session_id:
+            return True
+        if team_run_session_ids is not None and session_id in team_run_session_ids:
+            return True
+    runtime_scope_key = str(
+        row.get("runtime_scope_key")
+        or row.get("runtimeScopeKey")
+        or ""
+    ).strip()
+    if runtime_scope_key.startswith("team:") and ":node:" in runtime_scope_key:
+        return True
+    if team_run_session_ids is None:
+        is_run_session = getattr(db, "is_team_mission_run_session", None)
+        if callable(is_run_session) and any(is_run_session(session_id) for session_id in session_ids):
+            return True
+    return False
+
+
+def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str] | None = None) -> dict | None:
+    """Overlay Hermes team-conversation identity onto its backing session row."""
+
+    session_id = str(row.get("id") or "").strip()
+    getter = getattr(db, "get_team_mission_conversation_by_session", None)
+    conversation = getter(session_id) if callable(getter) and session_id else {}
+    if conversation:
+        conversation_id = str(conversation.get("conversation_id") or "").strip()
+        stable_session_id = str(conversation.get("stable_session_id") or row.get("id") or "").strip()
+        if not conversation_id or not stable_session_id:
+            return None
+        updated_at = conversation.get("updated_at") or row.get("last_active") or row.get("started_at") or 0
+        created_at = conversation.get("created_at") or row.get("started_at") or updated_at
+        return {
+            **row,
+            "id": stable_session_id,
+            "stored_session_id": stable_session_id,
+            "session_id": stable_session_id,
+            "session_kind": "team_mission",
+            "source": "team_mission",
+            "conversation_id": conversation_id,
+            "team_id": str(conversation.get("team_id") or "").strip(),
+            "active_mission_id": str(conversation.get("active_mission_id") or "").strip(),
+            "mission_id": str(conversation.get("active_mission_id") or "").strip(),
+            "status": str(conversation.get("status") or "").strip(),
+            "title": str(conversation.get("title") or row.get("title") or "").strip(),
+            "display_title": str(conversation.get("display_title") or conversation.get("title") or row.get("display_title") or row.get("preview") or "").strip(),
+            "display_title_source": str(conversation.get("display_title_source") or "first_user_message").strip(),
+            "preview": str(conversation.get("objective") or row.get("preview") or "").strip(),
+            "workspace": {
+                "id": str(conversation.get("workspace_id") or "").strip(),
+                "path": str(conversation.get("workspace_path") or "").strip(),
+                "kind": "local",
+            },
+            "started_at": created_at,
+            "updated_at": updated_at,
+        }
+
+    if _is_team_mission_internal_session_row(db, row, team_run_session_ids):
+        return None
+    if (row.get("source") or "").strip().lower() == "team_mission":
+        return None
+    return row
 
 
 def _request_agent_interrupt_async(sid: str, agent) -> None:
@@ -169,6 +422,107 @@ def _request_agent_interrupt_async(sid: str, agent) -> None:
             )
 
     _schedule_agent_interrupt_work(run_interrupt)
+
+
+def _safe_subagent_attr(agent, name: str, fallback=None):
+    try:
+        value = getattr(agent, name, fallback)
+    except Exception:
+        return fallback
+    return value if value is not None else fallback
+
+
+def _active_child_agents(agent) -> list:
+    if agent is None:
+        return []
+    lock = _safe_subagent_attr(agent, "_active_children_lock")
+    try:
+        if lock:
+            with lock:
+                return list(_safe_subagent_attr(agent, "_active_children", []) or [])
+        return list(_safe_subagent_attr(agent, "_active_children", []) or [])
+    except Exception:
+        return []
+
+
+def _iter_active_subagent_agents(agent, seen: set[int] | None = None):
+    seen = seen or set()
+    for child in _active_child_agents(agent):
+        marker = id(child)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        yield child
+        yield from _iter_active_subagent_agents(child, seen)
+
+
+def _subagent_task_index(child) -> int:
+    value = _safe_subagent_attr(child, "_subagent_task_index", None)
+    if isinstance(value, int):
+        return max(0, value)
+    subagent_id = str(_safe_subagent_attr(child, "_subagent_id", "") or "")
+    parts = subagent_id.split("-")
+    if len(parts) >= 3 and parts[0] == "sa":
+        try:
+            return max(0, int(parts[1]))
+        except (TypeError, ValueError):
+            pass
+    return 0
+
+
+def _emit_interrupted_subagent_completions(
+    *,
+    sid: str,
+    session: dict,
+    interrupted_run_id: str,
+    interrupted_turn_id: str,
+    completion_status: str,
+) -> None:
+    agent = session.get("agent")
+    emitted: set[str] = set()
+    status = str(completion_status or "interrupted").strip().lower() or "interrupted"
+    if status in {"cancelled", "canceled"}:
+        status = "cancelled"
+    elif status not in {"interrupted", "failed", "timeout"}:
+        status = "interrupted"
+    timestamp = time.time()
+    for child in _iter_active_subagent_agents(agent):
+        subagent_id = str(_safe_subagent_attr(child, "_subagent_id", "") or "").strip()
+        if not subagent_id or subagent_id in emitted:
+            continue
+        emitted.add(subagent_id)
+        task_index = _subagent_task_index(child)
+        task_count = _safe_subagent_attr(child, "_subagent_task_count", None)
+        try:
+            task_count = max(1, int(task_count or 1))
+        except (TypeError, ValueError):
+            task_count = 1
+        delegate_call_id = str(_safe_subagent_attr(child, "_subagent_delegate_call_id", "") or "").strip()
+        toolsets = _safe_subagent_attr(child, "_subagent_toolsets", None)
+        if not isinstance(toolsets, list):
+            toolsets = []
+        payload = {
+            "subagent_id": subagent_id,
+            "parent_id": str(_safe_subagent_attr(child, "_parent_subagent_id", "") or ""),
+            "depth": int(_safe_subagent_attr(child, "_subagent_tui_depth", 0) or 0),
+            "task_index": task_index,
+            "task_count": task_count,
+            "goal": str(_safe_subagent_attr(child, "_subagent_goal", "") or ""),
+            "dispatch_message": str(_safe_subagent_attr(child, "_subagent_goal", "") or ""),
+            "agent_name": str(_safe_subagent_attr(child, "_subagent_name", "") or ""),
+            "model": str(_safe_subagent_attr(child, "model", "") or ""),
+            "role": str(_safe_subagent_attr(child, "_delegate_role", "") or "leaf"),
+            "toolsets": [str(item) for item in toolsets],
+            "status": status,
+            "summary": "任务已终止",
+            "run_id": interrupted_run_id,
+            "turn_id": interrupted_turn_id,
+            "timestamp": timestamp,
+        }
+        if delegate_call_id:
+            payload["delegate_call_id"] = delegate_call_id
+            payload["tool_call_id"] = delegate_call_id
+        _emit("subagent.complete", sid, payload)
 
 
 def _request_session_interrupt_side_effects_async(
@@ -201,16 +555,19 @@ def _request_session_interrupt_side_effects_async(
                 f"sid={sid} run_id={interrupted_run_id or '-'} turn_id={interrupted_turn_id or '-'}",
             )
             _request_agent_interrupt_async(sid, session.get("agent"))
-            # Scope pending prompt release to THIS session. A global
-            # _clear_pending() would collaterally cancel clarify/sudo/secret
-            # prompts on unrelated sessions sharing the same gateway process.
-            _clear_pending(sid)
             try:
                 from tools.approval import resolve_gateway_approval
 
                 resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
             except Exception:
                 pass
+            _emit_interrupted_subagent_completions(
+                sid=sid,
+                session=session,
+                interrupted_run_id=interrupted_run_id,
+                interrupted_turn_id=interrupted_turn_id,
+                completion_status=completion_status,
+            )
             _emit(
                 "message.complete",
                 sid,
@@ -286,7 +643,10 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
             limit=limit,
             include_ancestors=True,
         )
-        return _history_to_messages(page.get("messages") or []), _message_page_info(page.get("pageInfo"))
+        return (
+            sanitize_transcript_messages(_history_to_messages(page.get("messages") or [])),
+            _message_page_info(page.get("pageInfo")),
+        )
     try:
         display_history = db.get_messages_as_conversation(
             session_id,
@@ -298,7 +658,7 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
             session_id,
             include_ancestors=True,
         )
-    messages = _history_to_messages(display_history)
+    messages = sanitize_transcript_messages(_history_to_messages(display_history))
     page_info = {
         "prevCursor": "",
         "nextCursor": "",
@@ -307,6 +667,73 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
         "totalCount": len(messages),
     }
     return messages, page_info
+
+
+def _display_history_conversation(db, session_id: str) -> list[dict]:
+    try:
+        return db.get_messages_as_conversation(
+            session_id,
+            include_ancestors=True,
+            include_storage_metadata=True,
+        )
+    except TypeError:
+        return db.get_messages_as_conversation(
+            session_id,
+            include_ancestors=True,
+        )
+
+
+def _page_live_history(history: list[dict], hydrate: str, limit: int) -> tuple[list[dict], dict]:
+    mode = hydrate if hydrate in {"full", "tail", "none"} else "full"
+    total = len(history)
+    if mode == "none":
+        page = []
+    elif mode == "tail" and total > limit:
+        page = history[-limit:]
+    else:
+        page = history
+    return page, {
+        "prevCursor": "",
+        "nextCursor": "",
+        "hasMoreBefore": mode == "tail" and total > len(page),
+        "hasMoreAfter": False,
+        "totalCount": total,
+    }
+
+
+def _live_session_payload(
+    sid: str,
+    target: str,
+    session: dict,
+    *,
+    cols: int,
+    cwd: str,
+    workspace: dict,
+    runtime_scope_key: str,
+    hydrate: str,
+    message_limit: int,
+    db=None,
+) -> dict:
+    with session["history_lock"]:
+        session["cols"] = cols
+        session["transport"] = current_transport() or session.get("transport") or _stdio_transport
+        session["cwd"] = cwd
+        session["workspace"] = workspace
+        if runtime_scope_key:
+            session["runtime_scope_key"] = runtime_scope_key
+        history = list(session.get("display_history_prefix") or []) + list(
+            session.get("history") or []
+        )
+    page, page_info = _page_live_history(history, hydrate, message_limit)
+    return {
+        "session_id": sid,
+        "resumed": target,
+        "message_count": page_info.get("totalCount") or len(page),
+        "messages": sanitize_transcript_messages(_history_to_messages(page)),
+        "messagePageInfo": page_info,
+        "info": _session_info(session.get("agent"), session),
+        **_session_run_snapshot(sid, session, db=db),
+    }
 
 
 @method("session.create")
@@ -323,6 +750,33 @@ def _(rid, params: dict) -> dict:
     )
     tool_progress_mode = _requested_tool_progress_mode(params)
     runtime_scope_key = _requested_runtime_scope_key(params)
+    agent_context_mode = _agent_context_mode_from_params(params)
+    # Seed history + create-time title: a client may open a session pre-populated
+    # with a transcript and/or a title (classic TUI restore, dashboard import).
+    seed_history = _coerce_seed_history(params.get("messages"))
+    create_title = str(params.get("title") or "").strip()
+    # Per-session model/effort/fast override shipped by the desktop composer on
+    # session.create. Built INTO the agent (see _make_agent honoring
+    # session["model_override"]) so the session starts on its own model without
+    # a post-build /model switch. Never a global config write.
+    create_model = str(params.get("model") or "").strip()
+    session_model_override = (
+        {"model": create_model, "provider": str(params.get("provider") or "").strip() or None}
+        if create_model
+        else None
+    )
+    create_reasoning_override = None
+    if _effort := str(params.get("reasoning_effort") or "").strip():
+        try:
+            from hermes_constants import parse_reasoning_effort
+
+            create_reasoning_override = parse_reasoning_effort(_effort)
+        except Exception:
+            create_reasoning_override = None
+    create_service_tier_override = "priority" if params.get("fast") else None
+    # Opt-in eager teardown on transport disconnect (dovie sidecar / dashboard
+    # embed). Consumed by _close_sessions_for_transport on the reaper path.
+    close_on_disconnect = is_truthy_value(params.get("close_on_disconnect", False))
     try:
         cwd = _normalize_session_cwd(params.get("cwd"))
         workspace = _workspace_from_params(params, cwd)
@@ -339,12 +793,25 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None and control_plane_only:
         return _db_unavailable_error(rid, code=5000)
-    model = _resolve_model()
+    # Honor the desktop composer's per-session model pick for the projected row
+    # + control-plane response, instead of the global config default. The
+    # control-plane session.create paints the conversation before any runtime
+    # agent exists, so without this the row/sidebar/return briefly show the
+    # global model until the first turn's switch lands. Falls back to the
+    # global model when the client made no pick.
+    model = create_model or _resolve_model()
     if db is not None:
         try:
             db.create_session(key, source="tui", model=model, transient=transient)
+            _upsert_session_create_conversation_participants(
+                db,
+                session_id=key,
+                params=params,
+                runtime_scope_key=runtime_scope_key,
+            )
         except Exception as exc:
             return _err(rid, 5000, f"session create failed: {exc}")
+        _project_session_index_on_create(db, key, params, runtime_scope_key, transient)
 
     if control_plane_only:
         return _ok(
@@ -368,7 +835,7 @@ def _(rid, params: dict) -> dict:
     _enable_gateway_prompts()
     ready = threading.Event()
 
-    _sessions[sid] = {
+    session_record = {
         "agent": None,
         "agent_error": None,
         "agent_ready": ready,
@@ -376,12 +843,17 @@ def _(rid, params: dict) -> dict:
         "cols": cols,
         "cwd": cwd,
         "edit_snapshots": {},
-        "history": [],
+        "history": seed_history,
         "history_lock": threading.Lock(),
         "history_version": 0,
         "image_counter": 0,
-        "pending_title": None,
+        "pending_title": create_title or None,
+        "model_override": session_model_override,
+        "create_reasoning_override": create_reasoning_override,
+        "create_service_tier_override": create_service_tier_override,
+        "close_on_disconnect": close_on_disconnect,
         "profile_context": _profile_context_for_params(params),
+        "agent_context_mode": agent_context_mode,
         "runtime_scope_key": runtime_scope_key,
         "running": False,
         "active_run_id": None,
@@ -403,14 +875,17 @@ def _(rid, params: dict) -> dict:
         "transient": transient,
         "workspace": workspace,
     }
+    with _sessions_lock:
+        _sessions[sid] = session_record
 
     if not control_plane_only:
         # Legacy TUI compatibility: return the lightweight session first, then
-        # build the AIAgent shortly after response flush. Doxie/new run.*
+        # build the AIAgent shortly after response flush. Dovie/new run.*
         # callers should pass control_plane_only/defer_agent_build and let
         # run.submit lazily attach the runtime.
         def _deferred_build() -> None:
-            session = _sessions.get(sid)
+            with _sessions_lock:
+                session = _sessions.get(sid)
             if session is not None:
                 _start_agent_build(sid, session)
 
@@ -418,13 +893,29 @@ def _(rid, params: dict) -> dict:
         build_timer.daemon = True
         build_timer.start()
 
+    with _sessions_lock:
+        session = _sessions.get(sid)
     return _ok(
         rid,
         {
             "session_id": sid,
             "stored_session_id": key,
+            "message_count": len(seed_history),
+            "messages": _history_to_messages(seed_history),
             "info": {
-                "model": _resolve_model(),
+                # Reflect the per-session model override (desktop composer pick)
+                # immediately so the client doesn't briefly clobber its sticky
+                # pick with the global default before the build's session.info.
+                "model": (
+                    session_model_override.get("model")
+                    if session_model_override
+                    else _resolve_model()
+                ),
+                **(
+                    {"provider": session_model_override["provider"]}
+                    if session_model_override and session_model_override.get("provider")
+                    else {}
+                ),
                 "tools": {},
                 "skills": {},
                 "cwd": cwd,
@@ -447,11 +938,17 @@ def _(rid, params: dict) -> dict:
         # user-facing surface — CLI, TUI, all gateway platforms (including new
         # ones not enumerated here), ACP adapter clients, webhook sessions,
         # custom `HERMES_SESSION_SOURCE` values, and older installs with
-        # different source labels. We deny-list only the noisy internal
-        # sources (``tool`` sub-agent runs) rather than allow-listing a
-        # fixed set of platform names that goes stale whenever a new
-        # platform is added or a user names their own source.
-        deny = frozenset({"tool"})
+        # different source labels. We deny-list only noisy internal runtime
+        # sources rather than allow-listing a fixed set of platform names
+        # that goes stale whenever a new platform is added or a user names
+        # their own source.
+        #
+        # ``tool`` rows are sub-agent runs. ``cron`` rows are scheduler
+        # execution contexts; Dovie current-session/new-session result
+        # bindings project their user-visible output into the target
+        # conversation, so surfacing the raw cron session creates duplicate
+        # sidebar conversations that begin with the internal cron prompt.
+        deny = _INTERNAL_SESSION_LIST_SOURCES
 
         limit = _bounded_page_limit(params.get("limit"), default=200, maximum=200)
         cursor = _decode_page_cursor(params.get("cursor"))
@@ -468,25 +965,46 @@ def _(rid, params: dict) -> dict:
         ]
         has_more = len(rows) > limit
         page_rows = rows[:limit]
+        team_run_session_ids = set()
+        team_run_session_ids_getter = getattr(db, "team_mission_run_session_ids", None)
+        if callable(team_run_session_ids_getter):
+            team_run_session_ids = team_run_session_ids_getter([
+                str(s.get("id") or "").strip()
+                for s in page_rows
+                if str(s.get("id") or "").strip()
+            ])
         live_by_key = _live_sessions_by_stored_key()
         session_items = []
         for s in page_rows:
+            s = _team_mission_session_list_item(db, s, team_run_session_ids)
+            if s is None:
+                continue
             live_sid, live_session = live_by_key.get(s["id"], ("", None))
             live_state = _session_run_snapshot(live_sid, live_session, db=db)
             if not live_sid and _is_empty_stored_conversation(s):
                 continue
             session_items.append(
-                {
+                sanitize_session_list_item({
                     "id": s["id"],
                     "title": s.get("title") or "",
+                    "display_title": s.get("display_title") or "",
+                    "displayTitle": s.get("display_title") or "",
+                    "display_title_source": s.get("display_title_source") or "",
+                    "displayTitleSource": s.get("display_title_source") or "",
                     "preview": s.get("preview") or "",
                     "started_at": s.get("started_at") or 0,
-                    "updated_at": s.get("last_active") or s.get("started_at") or 0,
+                    "updated_at": s.get("updated_at") or s.get("last_active") or s.get("started_at") or 0,
                     "message_count": s.get("message_count") or 0,
                     "source": s.get("source") or "",
-                    "workspace": _stored_workspace(s["id"]),
+                    "workspace": s.get("workspace") or _stored_workspace(s["id"]),
+                    "session_kind": s.get("session_kind") or "",
+                    "conversation_id": s.get("conversation_id") or "",
+                    "team_id": s.get("team_id") or "",
+                    "active_mission_id": s.get("active_mission_id") or "",
+                    "mission_id": s.get("mission_id") or "",
+                    "status": s.get("status") or "",
                     **live_state,
-                }
+                })
             )
         next_cursor = ""
         if has_more and page_rows:
@@ -510,12 +1028,206 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5006, str(e))
 
 
+def _is_hidden_empty_index_draft(row: dict) -> bool:
+    """A composer-paint placeholder the sidebar must NOT show.
+
+    Control-plane ``session.create`` projects a session_index row for every new
+    chat the moment the composer opens — before the user has typed anything — so
+    the row appears with an empty title (rendered as "新会话"), zero messages,
+    and no preview. These accumulate and re-appear on every launch (deleting them
+    is futile; the next new-chat route re-creates one). ``session.list`` already
+    hides such rows via ``_is_empty_stored_conversation``; mirror that here so the
+    single-query ``session.index.list`` sidebar read is consistent. Keep the row
+    when it is live (running / has an active run or runtime session) — that is a
+    brand-new chat mid-first-turn whose content has not been persisted yet.
+    """
+    if not _is_empty_stored_conversation(row):
+        return False
+    if (
+        row.get("running")
+        or str(row.get("active_run_id") or "").strip()
+        or str(row.get("active_runtime_session_id") or "").strip()
+    ):
+        return False
+    return True
+
+
+def _session_index_list_item(row: dict) -> dict:
+    """Map a control-plane session_index row to the desktop session list shape.
+
+    Field emission is scoped to ``session_kind``: only team mission rows
+    ship the mission-lifecycle fields (``conversation_id`` / ``team_id``
+    / ``mission_id`` / ``active_mission_id``). Plain chat sessions used
+    to receive these as empty strings — frontend then had to coerce
+    them, normalizers fell through and started reading
+    ``session.status`` into ``missionStatus``, and the running-indicator
+    OR'd six fields across kinds. Emitting nothing means downstream
+    can rely on field presence to distinguish a "no mission" plain
+    chat from a "mission cleared" team conversation. The desktop has
+    been updated to treat absent fields the same as empty.
+    """
+    session_kind = row.get("session_kind") or "hermes_session"
+    is_team_mission_row = session_kind == "team_mission" or bool(row.get("team_id"))
+    item = {
+        "id": row.get("session_id") or "",
+        "title": row.get("title") or "",
+        "display_title": row.get("title") or "",
+        "displayTitle": row.get("title") or "",
+        "preview": row.get("preview") or "",
+        "started_at": row.get("started_at") or 0,
+        "updated_at": row.get("updated_at") or row.get("started_at") or 0,
+        "message_count": row.get("message_count") or 0,
+        "source": row.get("source") or "",
+        "transient": bool(row.get("transient")),
+        "session_kind": session_kind,
+        "agentProfileId": row.get("owner_agent_profile_id") or "",
+        "agent_profile_id": row.get("owner_agent_profile_id") or "",
+        "agentProfileVersionId": row.get("owner_profile_version_id") or "",
+        "runtimeScopeKey": row.get("runtime_scope_key") or "",
+        "runtime_scope_key": row.get("runtime_scope_key") or "",
+        "status": row.get("status") or "",
+        "running": bool(row.get("running")),
+        "waiting_approval": bool(row.get("waiting_approval")),
+        "pending_approval_count": row.get("pending_approval_count") or 0,
+        "active_run_id": row.get("active_run_id") or "",
+        "active_runtime_session_id": row.get("active_runtime_session_id") or "",
+    }
+    if is_team_mission_row:
+        item["conversation_id"] = row.get("conversation_id") or ""
+        item["team_id"] = row.get("team_id") or ""
+        item["mission_id"] = row.get("mission_id") or ""
+        item["active_mission_id"] = row.get("mission_id") or ""
+    # Conversation-architecture refactor (P2): team display context joined in
+    # at read time. Only emit when present so plain-chat rows stay clean.
+    if row.get("team_id"):
+        team_name = row.get("team_name") or ""
+        team_avatar = _safe_json_decode(row.get("team_avatar_json"))
+        lead_profile_id = row.get("team_lead_profile_id") or ""
+        lead_profile_name = row.get("team_lead_profile_name") or ""
+        lead_profile_avatar = row.get("team_lead_profile_avatar") or ""
+        team_block = {
+            "id": row.get("team_id") or "",
+            "name": team_name,
+        }
+        if team_avatar is not None:
+            team_block["avatar"] = team_avatar
+        if lead_profile_id:
+            team_block["lead_agent_profile_id"] = lead_profile_id
+            team_block["leadAgentProfileId"] = lead_profile_id
+        item["team"] = team_block
+        if team_name:
+            item["team_name"] = team_name
+            item["teamName"] = team_name
+        if lead_profile_name:
+            item["lead_profile_name"] = lead_profile_name
+            item["leadProfileName"] = lead_profile_name
+        if lead_profile_avatar:
+            item["lead_profile_avatar"] = lead_profile_avatar
+            item["leadProfileAvatar"] = lead_profile_avatar
+    if row.get("conversation_id"):
+        objective = row.get("team_conversation_objective") or ""
+        workspace_id = row.get("team_conversation_workspace_id") or ""
+        workspace_path = row.get("team_conversation_workspace_path") or ""
+        active_mission_id = row.get("team_conversation_active_mission_id") or ""
+        if objective:
+            item["objective"] = objective
+        if workspace_id:
+            item["workspace_id"] = workspace_id
+            item["workspaceId"] = workspace_id
+        if workspace_path:
+            item["workspace_path"] = workspace_path
+            item["workspacePath"] = workspace_path
+        if active_mission_id and not item.get("active_mission_id"):
+            item["active_mission_id"] = active_mission_id
+    return item
+
+
+def _safe_json_decode(value):
+    if not value:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        import json
+        return json.loads(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+_SESSION_INDEX_RECONCILED = False
+
+
+def _ensure_session_index_reconciled(db) -> None:
+    """One-time backfill of the control-plane index from the source of truth
+    (sessions table) per gateway process, on first sidebar read. Idempotent and
+    preserves any live status already projected by write-time hooks."""
+    global _SESSION_INDEX_RECONCILED
+    if _SESSION_INDEX_RECONCILED:
+        return
+    reconcile = getattr(db, "reconcile_session_index", None)
+    if callable(reconcile):
+        try:
+            reconcile()
+        except Exception:
+            pass
+    _SESSION_INDEX_RECONCILED = True
+
+
+@method("session.index.list")
+def _(rid, params: dict) -> dict:
+    """Single-query sidebar read from the control-plane session_index.
+
+    Replaces the per-profile fan-out of expensive session.list / activity calls
+    with one indexed, keyset-paginated read (status is projected at write time).
+    """
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5006)
+    lister = getattr(db, "list_session_index", None)
+    if not callable(lister):
+        return _err(rid, 5006, "session_index unavailable")
+    try:
+        _ensure_session_index_reconciled(db)
+        limit = _bounded_page_limit(params.get("limit"), default=200, maximum=200)
+        cursor = _decode_page_cursor(params.get("cursor"))
+        include_transient = is_truthy_value(
+            params.get("include_transient")
+            if params.get("include_transient") is not None
+            else params.get("includeTransient")
+        )
+        result = lister(
+            limit=limit,
+            cursor=cursor or None,
+            include_transient=include_transient,
+        )
+        items = [
+            sanitize_session_list_item(_session_index_list_item(row))
+            for row in (result.get("sessions") or [])
+            if not _is_hidden_empty_index_draft(row)
+        ]
+        page = result.get("pageInfo") or {}
+        next_cursor = _encode_page_cursor(page.get("nextCursor")) if page.get("nextCursor") else ""
+        return _ok(
+            rid,
+            {
+                "sessions": items,
+                "pageInfo": {
+                    "nextCursor": next_cursor,
+                    "hasMore": bool(page.get("hasMore")),
+                },
+            },
+        )
+    except Exception as e:
+        return _err(rid, 5006, str(e))
+
+
 @method("session.most_recent")
 def _(rid, params: dict) -> dict:
     """Return the most recent human-facing session id, or ``None``.
 
-    Mirrors ``session.list``'s deny-list behaviour (drops ``tool``
-    sub-agent rows).  Used by TUI auto-resume when
+    Mirrors ``session.list``'s deny-list behaviour (drops internal
+    runtime rows such as sub-agent and cron execution sessions). Used by
+    TUI auto-resume when
     ``display.tui_auto_resume_recent`` is on; the field is also handy
     for any CLI tooling that wants "latest session" without paginating
     the full list.
@@ -529,7 +1241,7 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _ok(rid, {"session_id": None})
     try:
-        deny = frozenset({"tool"})
+        deny = frozenset(_INTERNAL_SESSION_LIST_SOURCES)
         # Over-fetch by a generous bounded amount so heavy sub-agent
         # users (lots of recent ``tool`` rows) don't get a false
         # "no eligible session" answer.  ``session.list`` uses a
@@ -544,6 +1256,7 @@ def _(rid, params: dict) -> dict:
                 {
                     "session_id": row.get("id"),
                     "title": row.get("title") or "",
+                    "display_title": row.get("display_title") or "",
                     "started_at": row.get("started_at") or 0,
                     "source": row.get("source") or "",
                 },
@@ -554,14 +1267,49 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"session_id": None})
 
 
+def _participant_view_for_resume(
+    *,
+    stored_session_id: str,
+    agent_context_mode: str,
+    params: dict | None = None,
+) -> str:
+    """Return the participant_id the resuming runtime should hydrate its
+    conversation history under.
+
+    - team-leader runtime over a team conversation session → ``"leader"``
+      (so leader sees its own assistant turns vs. other members' as
+      observed user-side speech)
+    - member-chat worker session → its ``member_id`` (member-chat sessions
+      also materialize this view at write-time via
+      sync_member_chat_conversation_view, so this lookup is mostly a
+      belt-and-braces for any re-hydration paths)
+    - all other sessions (plain chat, single-participant) → ``""`` and no
+      projection is applied
+
+    Caller passes the resolved agent_context_mode so we don't re-derive.
+    """
+    target = str(stored_session_id or "").strip()
+    mode = str(agent_context_mode or "").strip().lower()
+    if mode == "team_leader":
+        return "leader"
+    if target.startswith("memberchat:"):
+        # memberchat:<conv>:<member_id>
+        rest = target[len("memberchat:"):]
+        # split off conv prefix (which itself may contain ':' segments)
+        # — the member id is the last colon-delimited segment.
+        if ":" in rest:
+            return rest.rsplit(":", 1)[-1].strip()
+    return ""
+
+
 @method("session.resume")
 def _(rid, params: dict) -> dict:
     target = params.get("session_id", "")
     if not target:
         return _err(rid, 4006, "session_id required")
-    db = _get_db()
+    db = _db_for_stable_session(target)
     if db is None:
-        return _db_unavailable_error(rid, code=5000)
+        return _err(rid, 4007, "session not found")
     found = db.get_session(target)
     if not found:
         found = db.get_session_by_title(target)
@@ -569,6 +1317,22 @@ def _(rid, params: dict) -> dict:
             target = found["id"]
         else:
             return _err(rid, 4007, "session not found")
+    # Context compression ends the current SessionDB session and forks a
+    # continuation child that holds the post-compression turns (agent.session_id
+    # rotates — see _sync_session_key_after_compress). Resuming the parent id
+    # would reload the stale pre-compression transcript AND miss the live
+    # session, which is keyed on the continuation tip. Re-anchor to the tip so
+    # history loading, the live-session lookup, and the rebuilt agent all target
+    # the session that actually holds the messages (#15000). Skipped for lazy
+    # watch windows, which attach to the exact branch they were opened on.
+    if found and not is_truthy_value(params.get("lazy", False)):
+        try:
+            tip = db.resolve_resume_session_id(target)
+        except Exception:
+            tip = target
+        if tip and tip != target:
+            target = tip
+            found = db.get_session(target) or found
     existing_workspace = _stored_workspace(target)
     raw_cwd = params.get("cwd") or (existing_workspace or {}).get("cwd")
     workspace_params = params
@@ -587,8 +1351,6 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as exc:
         return _err(rid, 5012, f"workspace bind failed: {exc}")
-    sid = uuid.uuid4().hex[:8]
-    _enable_gateway_prompts()
     hydrate = str(params.get("hydrate") or "full").strip().lower()
     runtime_scope_key = _requested_runtime_scope_key(params)
     message_limit = _bounded_page_limit(
@@ -597,78 +1359,135 @@ def _(rid, params: dict) -> dict:
         maximum=200,
     )
     try:
-        db.reopen_session(target)
-        history = db.get_messages_as_conversation(target)
-        messages, message_page_info = _display_history_page(db, target, hydrate, message_limit)
-        live_sid, live_session = _resolve_runtime_session(target)
-        if live_session is not None:
-            live_runtime_scope_key = str(
-                live_session.get("runtime_scope_key")
-                or live_session.get("active_runtime_scope_key")
-                or ""
-            ).strip()
-            if (
-                params.get("_runtime_attach")
-                and runtime_scope_key
-                and live_runtime_scope_key
-                and live_runtime_scope_key != runtime_scope_key
-            ):
-                live_session = None
-            else:
-                live_session["transport"] = (
-                    current_transport()
-                    or live_session.get("transport")
-                    or _stdio_transport
-                )
-                live_session["cwd"] = cwd
-                live_session["workspace"] = workspace
-                if runtime_scope_key:
-                    live_session["runtime_scope_key"] = runtime_scope_key
-                live_state = _session_run_snapshot(live_sid, live_session, db=db)
+        cols = int(params.get("cols", 80))
+    except (TypeError, ValueError):
+        cols = 80
+    with _session_resume_lock:
+        live = _find_live_session_by_key(target)
+        if live is not None:
+            live_sid, live_session = live
+            if not (params.get("_runtime_attach") and not _live_scope_matches(live_session, runtime_scope_key)):
                 return _ok(
                     rid,
-                    {
-                        "session_id": live_sid,
-                        "resumed": target,
-                        "message_count": message_page_info.get("totalCount") or len(messages),
-                        "messages": messages,
-                        "messagePageInfo": message_page_info,
-                        "info": _session_info(live_session.get("agent"), live_session),
-                        **live_state,
-                    },
+                    _live_session_payload(
+                        live_sid,
+                        target,
+                        live_session,
+                        cols=cols,
+                        cwd=cwd,
+                        workspace=workspace,
+                        runtime_scope_key=runtime_scope_key,
+                        hydrate=hydrate,
+                        message_limit=message_limit,
+                        db=db,
+                    ),
                 )
+
+    sid = uuid.uuid4().hex[:8]
+    _enable_gateway_prompts()
+    try:
+        db.reopen_session(target)
+        history = db.get_messages_as_conversation(target)
+        # P1 participant-view projection: when this runtime is hydrating a
+        # MULTI-PARTICIPANT conversation (the team leader reading a team
+        # conversation that also contains member-chat mirrored replies, or
+        # any other participant view), project the shared message log into
+        # first-person view so the LLM doesn't conflate other participants'
+        # assistant turns with its own. Single-participant chats pass
+        # `viewer=""` and the projection is a no-op.
+        agent_context_mode = _agent_context_mode_from_params(params)
+        viewer_participant_id = _participant_view_for_resume(
+            stored_session_id=target,
+            agent_context_mode=agent_context_mode,
+            params=params,
+        )
+        if viewer_participant_id:
+            from hermes_state_member_chat import project_messages_for_viewer
+            history = project_messages_for_viewer(history, viewer_participant_id)
+        display_history = _display_history_conversation(db, target)
+        display_history_prefix = display_history[
+            : max(0, len(display_history) - len(history))
+        ]
+        messages, message_page_info = _display_history_page(db, target, hydrate, message_limit)
         profile_context = _profile_context_for_params(params)
         profile_tokens = _enter_profile_context(profile_context)
         tokens = _set_session_context(target, terminal_cwd=cwd)
         try:
             try:
-                agent = _make_agent(sid, target, session_id=target, cwd=cwd)
+                agent = _make_agent(
+                    sid,
+                    target,
+                    session_id=target,
+                    cwd=cwd,
+                    agent_context_mode=agent_context_mode,
+                )
             except TypeError as exc:
-                if "unexpected keyword argument 'cwd'" not in str(exc):
+                if "unexpected keyword argument" not in str(exc):
                     raise
-                agent = _make_agent(sid, target, session_id=target)
+                try:
+                    agent = _make_agent(
+                        sid,
+                        target,
+                        session_id=target,
+                        agent_context_mode=agent_context_mode,
+                    )
+                except TypeError as nested_exc:
+                    if "unexpected keyword argument" not in str(nested_exc):
+                        raise
+                    agent = _make_agent(sid, target, session_id=target)
         finally:
             _clear_session_context(tokens)
             _leave_profile_context(profile_tokens)
+    except Exception as e:
+        return _err(rid, 5000, f"resume failed: {e}")
+
+    with _session_resume_lock:
+        live = _find_live_session_by_key(target)
+        if live is not None:
+            live_sid, live_session = live
+            if not (params.get("_runtime_attach") and not _live_scope_matches(live_session, runtime_scope_key)):
+                try:
+                    if hasattr(agent, "close"):
+                        agent.close()
+                except Exception:
+                    pass
+                return _ok(
+                    rid,
+                    _live_session_payload(
+                        live_sid,
+                        target,
+                        live_session,
+                        cols=cols,
+                        cwd=cwd,
+                        workspace=workspace,
+                        runtime_scope_key=runtime_scope_key,
+                        hydrate=hydrate,
+                        message_limit=message_limit,
+                        db=db,
+                    ),
+                )
         try:
             _init_session(
                 sid,
                 target,
                 agent,
                 history,
-                cols=int(params.get("cols", 80)),
+                cols=cols,
                 cwd=cwd,
-                workspace=workspace,
-                profile_context=profile_context,
-            )
+                    workspace=workspace,
+                    profile_context=profile_context,
+                    agent_context_mode=agent_context_mode,
+                )
         except TypeError as exc:
             if "unexpected keyword argument" not in str(exc):
                 raise
-            _init_session(sid, target, agent, history, cols=int(params.get("cols", 80)))
-        if sid in _sessions:
-            _sessions[sid]["runtime_scope_key"] = runtime_scope_key
-    except Exception as e:
-        return _err(rid, 5000, f"resume failed: {e}")
+            _init_session(sid, target, agent, history, cols=cols)
+        with _sessions_lock:
+            if sid in _sessions:
+                _sessions[sid]["runtime_scope_key"] = runtime_scope_key
+                _sessions[sid]["display_history_prefix"] = display_history_prefix
+    with _sessions_lock:
+        session = _sessions.get(sid)
     return _ok(
         rid,
         {
@@ -678,11 +1497,11 @@ def _(rid, params: dict) -> dict:
             "messages": messages,
             "messagePageInfo": message_page_info,
             "info": (
-                _session_info(agent, _sessions.get(sid))
-                if _sessions.get(sid) is not None
+                _session_info(agent, session)
+                if session is not None
                 else _session_info(agent)
             ),
-            **_session_run_snapshot(sid, _sessions.get(sid), db=db),
+            **_session_run_snapshot(sid, session, db=db),
         },
     )
 
@@ -704,7 +1523,11 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5036)
-    run_state = run_control.session_status(target, db=db)
+    run_state = run_control.session_status(
+        target,
+        db=db,
+        current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+    )
     if run_state.get("running"):
         return _err(rid, 4023, "cannot delete a session with an active run")
     # Block deletion of any session currently bound to a live TUI session
@@ -715,7 +1538,8 @@ def _(rid, params: dict) -> dict:
     # dictionary changed size during iteration``.  If even the snapshot
     # raises, fail closed (refuse the delete) rather than fail open.
     try:
-        snapshot = list(_sessions.values())
+        with _sessions_lock:
+            snapshot = list(_sessions.values())
     except Exception as e:
         return _err(rid, 5036, f"could not enumerate active sessions: {e}")
     active = {s.get("session_key") for s in snapshot if s.get("session_key")}
@@ -727,37 +1551,95 @@ def _(rid, params: dict) -> dict:
     except Exception as e:
         return _err(rid, 5036, f"delete failed: {e}")
     if not deleted:
+        # The sessions row is gone but session_index may still carry an
+        # orphan — typical for a session whose creation flow failed mid-way
+        # (e.g. a model-switch error terminates the run before any message
+        # is persisted; session_index already saw the session create event,
+        # the sessions table never received any inserts). The sidebar reads
+        # session_index, so the orphan reappears on every refresh and the
+        # user can never delete it. Same pattern as the team-conversation
+        # orphan case fixed earlier. Sweep the index row too and report
+        # success so the client treats it as deleted (it IS deleted — the
+        # only state that survived was the index row).
+        index_removed = 0
+        if hasattr(db, "delete_session_index"):
+            try:
+                index_removed = int(db.delete_session_index(target) or 0)
+            except Exception:
+                logger.debug(
+                    "session.delete: session_index cleanup failed", exc_info=True
+                )
+        if index_removed > 0:
+            return _ok(rid, {"deleted": target, "via": "session_index_cleanup"})
         return _err(rid, 4007, "session not found")
+    # Also sweep session_index whenever the sessions row was removed — the
+    # write path normally keeps them in sync, but a crashed projector / older
+    # row created before session_index existed would otherwise leave a stale
+    # index entry pointing at the now-missing session.
+    if hasattr(db, "delete_session_index"):
+        try:
+            db.delete_session_index(target)
+        except Exception:
+            logger.debug(
+                "session.delete: session_index post-sweep failed", exc_info=True
+            )
     return _ok(rid, {"deleted": target})
 
 
 @method("session.title")
 def _(rid, params: dict) -> dict:
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5007)
-    key = session["session_key"]
+    requested = str(
+        params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or params.get("session_id")
+        or ""
+    ).strip()
+    if not requested:
+        return _err(rid, 4006, "session_id required")
+
+    _runtime_sid, session = _resolve_runtime_session(requested)
+    key = str((session or {}).get("session_key") or requested).strip()
+    title = (params.get("title", "") or "").strip() if "title" in params else None
+    if title is not None and not title:
+        return _err(rid, 4021, "title required")
+
+    if not session:
+        try:
+            stored_row = db.get_session(key)
+            if not stored_row:
+                by_title = db.get_session_by_title(key)
+                if by_title:
+                    key = str(by_title.get("id") or key)
+                    stored_row = by_title
+            if not stored_row:
+                return _err(rid, 4007, "session not found")
+        except Exception as e:
+            return _err(rid, 5007, str(e))
+
     if "title" not in params:
-        fallback = session.get("pending_title") or ""
+        fallback = (session or {}).get("pending_title") or ""
         try:
             resolved_title = db.get_session_title(key) or ""
             if fallback:
                 if db.set_session_title(key, fallback):
-                    session["pending_title"] = None
+                    if session:
+                        session["pending_title"] = None
                     resolved_title = fallback
                 else:
                     existing_row = db.get_session(key)
                     existing_title = ((existing_row or {}).get("title") or "").strip()
                     if existing_title == fallback:
-                        session["pending_title"] = None
+                        if session:
+                            session["pending_title"] = None
                         resolved_title = fallback
                     elif not resolved_title:
                         resolved_title = fallback
             elif resolved_title:
-                session["pending_title"] = None
+                if session:
+                    session["pending_title"] = None
         except Exception:
             resolved_title = fallback
         return _ok(
@@ -767,18 +1649,17 @@ def _(rid, params: dict) -> dict:
                 "session_key": key,
             },
         )
-    title = (params.get("title", "") or "").strip()
-    if not title:
-        return _err(rid, 4021, "title required")
     try:
         if db.set_session_title(key, title):
-            session["pending_title"] = None
+            if session:
+                session["pending_title"] = None
             return _ok(rid, {"pending": False, "title": title})
         # rowcount == 0 can mean "same value" as well as "missing row".
         # Queue only when the session row truly does not exist yet.
         existing_row = db.get_session(key)
         if existing_row:
-            session["pending_title"] = None
+            if session:
+                session["pending_title"] = None
             return _ok(
                 rid,
                 {
@@ -786,6 +1667,8 @@ def _(rid, params: dict) -> dict:
                     "title": (existing_row.get("title") or title),
                 },
             )
+        if not session:
+            return _err(rid, 4007, "session not found")
         session["pending_title"] = title
         return _ok(rid, {"pending": True, "title": title})
     except ValueError as e:
@@ -917,277 +1800,6 @@ def _(rid, params: dict) -> dict:
     )
 
 
-@method("session.history")
-def _(rid, params: dict) -> dict:
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
-    history = list(session.get("history", []))
-    db = _get_db()
-    if db is not None and session.get("session_key"):
-        try:
-            history = db.get_messages_as_conversation(
-                session["session_key"], include_ancestors=True
-            )
-        except Exception:
-            pass
-    return _ok(
-        rid,
-        {
-            "count": len(history),
-            "messages": _history_to_messages(history),
-        },
-    )
-
-
-@method("session.messages")
-def _(rid, params: dict) -> dict:
-    target = str(params.get("session_id") or "").strip()
-    if not target:
-        return _err(rid, 4006, "session_id required")
-    db = _get_db()
-    if db is None:
-        return _db_unavailable_error(rid, code=5000)
-    found = db.get_session(target)
-    if not found:
-        found = db.get_session_by_title(target)
-        if found:
-            target = found["id"]
-        else:
-            return _err(rid, 4007, "session not found")
-    cursor = _decode_page_cursor(params.get("cursor"))
-    cursor_id = cursor.get("id")
-    try:
-        cursor_id = int(cursor_id) if cursor_id is not None else None
-    except (TypeError, ValueError):
-        cursor_id = None
-    try:
-        page = db.get_messages_page_as_conversation(
-            target,
-            direction=str(params.get("direction") or "tail"),
-            cursor_id=cursor_id,
-            limit=_bounded_page_limit(params.get("limit"), default=50, maximum=200),
-            include_ancestors=bool(params.get("include_ancestors", params.get("includeAncestors", True))),
-        )
-    except Exception as exc:
-        return _err(rid, 5000, f"messages page failed: {exc}")
-    include_run_events = bool(params.get("include_run_events", params.get("includeRunEvents", False)))
-    run_events = []
-    if include_run_events:
-        try:
-            list_run_events = getattr(db, "list_run_events", None)
-            if callable(list_run_events):
-                run_events = list_run_events(
-                    target,
-                    runtime_scope_key=_requested_runtime_scope_key(params),
-                    limit=_bounded_page_limit(params.get("run_events_limit", params.get("runEventsLimit")), default=2000, maximum=5000),
-                )
-        except Exception as exc:
-            return _err(rid, 5000, f"run event page failed: {exc}")
-    return _ok(
-        rid,
-        {
-            "session_id": target,
-            "messages": _history_to_messages(page.get("messages") or []),
-            "runEvents": run_events,
-            "pageInfo": _message_page_info(page.get("pageInfo")),
-        },
-    )
-
-
-@method("session.undo")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    # Reject during an in-flight turn.  If we mutated history while
-    # the agent thread is running, prompt.submit's post-run history
-    # write would either clobber the undo (version matches) or
-    # silently drop the agent's output (version mismatch, see below).
-    # Neither is what the user wants — make them /interrupt first.
-    if session.get("running"):
-        return _err(
-            rid, 4009, "session busy — /interrupt the current turn before /undo"
-        )
-    removed = 0
-    with session["history_lock"]:
-        history = session.get("history", [])
-        while history and history[-1].get("role") in {"assistant", "tool"}:
-            history.pop()
-            removed += 1
-        if history and history[-1].get("role") == "user":
-            history.pop()
-            removed += 1
-        if removed:
-            session["history_version"] = int(session.get("history_version", 0)) + 1
-    return _ok(rid, {"removed": removed})
-
-
-def _message_turn_id(message: dict) -> str:
-    metadata = message.get("metadata")
-    if isinstance(metadata, dict):
-        return str(metadata.get("turn_id") or "")
-    return ""
-
-
-def _draft_from_turn_message(message: dict | None, pending_turn: dict | None = None) -> dict:
-    metadata = message.get("metadata") if isinstance(message, dict) else {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-    pending_turn = pending_turn if isinstance(pending_turn, dict) else {}
-    text = (
-        metadata.get("draft_text")
-        or pending_turn.get("draft_text")
-        or (message or {}).get("content")
-        or pending_turn.get("text")
-        or ""
-    )
-    return {
-        "turnId": str(metadata.get("turn_id") or pending_turn.get("turn_id") or ""),
-        "text": str(text or ""),
-        "attachments": (
-            metadata.get("attachments")
-            if isinstance(metadata.get("attachments"), list)
-            else pending_turn.get("attachments") if isinstance(pending_turn.get("attachments"), list) else []
-        ),
-        "model": str(metadata.get("model") or pending_turn.get("model") or ""),
-    }
-
-
-def _rewrite_live_and_persisted_history(session: dict, history: list[dict]) -> None:
-    session_key = str(session.get("session_key") or "")
-    db = _get_db()
-    if db is not None and session_key:
-        db.replace_messages(session_key, history)
-    session["history"] = history
-    session["history_version"] = int(session.get("history_version", 0)) + 1
-    agent = session.get("agent")
-    if agent is not None:
-        try:
-            agent._session_messages = history
-        except Exception:
-            pass
-        try:
-            agent._last_flushed_db_idx = len(history)
-        except Exception:
-            pass
-
-
-@method("session.recall_turn")
-def _(rid, params: dict) -> dict:
-    sid = params.get("session_id", "")
-    turn_id = str(params.get("turn_id") or "").strip()
-    if not turn_id:
-        return _err(rid, 4006, "turn_id required")
-    session, err = _sess(params, rid)
-    if err:
-        return err
-
-    interrupted = False
-    agent_to_interrupt = None
-    with session["history_lock"]:
-        active_turn_id = str(session.get("active_turn_id") or "")
-        if session.get("running") and active_turn_id and active_turn_id != turn_id:
-            return _err(rid, 4009, "session busy with a different turn")
-        if session.get("running") and active_turn_id == turn_id:
-            interrupted = True
-            session["interrupted_run_id"] = str(session.get("active_run_id") or "")
-            session["interrupted_turn_id"] = turn_id
-            session["interrupt_seq"] = int(session.get("interrupt_seq") or 0) + 1
-            session.setdefault("recalled_turn_ids", set()).add(turn_id)
-            agent_to_interrupt = session.get("agent")
-
-    if agent_to_interrupt is not None and hasattr(agent_to_interrupt, "interrupt"):
-        try:
-            agent_to_interrupt.interrupt()
-        except Exception:
-            pass
-
-    with session["history_lock"]:
-        history = list(session.get("history") or [])
-        pending_turn = session.get("pending_turn")
-        target_idx = None
-        for idx, message in enumerate(history):
-            if isinstance(message, dict) and _message_turn_id(message) == turn_id and message.get("role") == "user":
-                target_idx = idx
-                break
-        if target_idx is None:
-            if isinstance(pending_turn, dict) and str(pending_turn.get("turn_id") or "") == turn_id:
-                draft = _draft_from_turn_message(None, pending_turn)
-                session.setdefault("recalled_turn_ids", set()).add(turn_id)
-                session["running"] = False
-                session["active_run_id"] = None
-                session["active_turn_id"] = None
-                session["pending_turn"] = None
-                session["run_updated_at"] = time.time()
-                messages = _history_to_messages(history)
-                _emit("session.recalled", sid, {
-                    "turn_id": turn_id,
-                    "removed_messages": 0,
-                    "draft": draft,
-                    "messages": messages,
-                })
-                _emit("message.complete", sid, {"text": "", "status": "interrupted", "turn_id": turn_id})
-                return _ok(rid, {
-                    "status": "recalled",
-                    "session_id": sid,
-                    "stored_session_id": str(session.get("session_key") or ""),
-                    "turn_id": turn_id,
-                    "interrupted": interrupted,
-                    "removed_messages": 0,
-                    "draft": draft,
-                    "messages": messages,
-                    "memory_retract": {
-                        "status": "unsupported",
-                        "warnings": ["Memory provider turn-level retraction is not implemented yet."],
-                    },
-                })
-            return _err(rid, 4019, "turn not found or already recalled")
-
-        remove_end = len(history)
-        for idx in range(target_idx + 1, len(history)):
-            message = history[idx]
-            if isinstance(message, dict) and message.get("role") == "user":
-                remove_end = idx
-                break
-        target_message = history[target_idx]
-        draft = _draft_from_turn_message(target_message, pending_turn)
-        next_history = history[:target_idx] + history[remove_end:]
-        removed = remove_end - target_idx
-        _rewrite_live_and_persisted_history(session, next_history)
-        session.setdefault("recalled_turn_ids", set()).add(turn_id)
-        if active_turn_id == turn_id or str(session.get("active_turn_id") or "") == turn_id:
-            session["running"] = False
-            session["active_run_id"] = None
-            session["active_turn_id"] = None
-            session["pending_turn"] = None
-            session["run_updated_at"] = time.time()
-        messages = _history_to_messages(next_history)
-
-    _emit("session.recalled", sid, {
-        "turn_id": turn_id,
-        "removed_messages": removed,
-        "draft": draft,
-        "messages": messages,
-    })
-    if interrupted:
-        _emit("message.complete", sid, {"text": "", "status": "interrupted", "turn_id": turn_id})
-    return _ok(rid, {
-        "status": "recalled",
-        "session_id": sid,
-        "stored_session_id": str(session.get("session_key") or ""),
-        "turn_id": turn_id,
-        "interrupted": interrupted,
-        "removed_messages": removed,
-        "draft": draft,
-        "messages": messages,
-        "memory_retract": {
-            "status": "unsupported",
-            "warnings": ["Memory provider turn-level retraction is not implemented yet."],
-        },
-    })
-
-
 @method("session.compress")
 def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
@@ -1289,23 +1901,52 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
-    import time as _time
 
-    filename = os.path.abspath(
-        f"hermes_conversation_{_time.strftime('%Y%m%d_%H%M%S')}.json"
-    )
+    agent = session["agent"]
+    # Mirror the classic CLI /save: snapshot under the Hermes profile home
+    # (~/.hermes/sessions/saved/) rather than the project/workspace CWD, and
+    # include the system prompt so the export matches the dashboard save.
+    saved_dir = get_hermes_home() / "sessions" / "saved"
     try:
-        with open(filename, "w", encoding="utf-8") as f:
+        saved_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return _err(rid, 5011, f"failed to create save directory {saved_dir}: {e}")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = saved_dir / f"hermes_conversation_{timestamp}.json"
+
+    with session["history_lock"]:
+        messages = list(session.get("history", []))
+
+    session_id = getattr(agent, "session_id", None) or session.get("session_key") or ""
+    # Prefer the agent's session_start datetime (matches the classic CLI export);
+    # fall back to the gateway session's created_at timestamp.
+    agent_start = getattr(agent, "session_start", None)
+    if isinstance(agent_start, datetime):
+        session_start = agent_start.isoformat()
+    else:
+        created_at = session.get("created_at")
+        session_start = (
+            datetime.fromtimestamp(created_at).isoformat()
+            if isinstance(created_at, (int, float))
+            else ""
+        )
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(
                 {
-                    "model": getattr(session["agent"], "model", ""),
-                    "messages": session.get("history", []),
+                    "model": getattr(agent, "model", ""),
+                    "session_id": session_id,
+                    "session_start": session_start,
+                    "system_prompt": getattr(agent, "_cached_system_prompt", "") or "",
+                    "messages": messages,
                 },
                 f,
                 indent=2,
                 ensure_ascii=False,
             )
-        return _ok(rid, {"file": filename})
+        return _ok(rid, {"file": str(path)})
     except Exception as e:
         return _err(rid, 5011, str(e))
 
@@ -1314,16 +1955,19 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     sid = params.get("session_id", "")
     runtime_sid = sid
-    session = _sessions.pop(runtime_sid, None)
+    with _sessions_lock:
+        session = _sessions.pop(runtime_sid, None)
     if not session and sid:
         try:
-            snapshot = list(_sessions.items())
+            with _sessions_lock:
+                snapshot = list(_sessions.items())
         except Exception:
             snapshot = []
         for candidate_sid, candidate in snapshot:
             if candidate.get("session_key") == sid:
                 runtime_sid = candidate_sid
-                session = _sessions.pop(candidate_sid, None)
+                with _sessions_lock:
+                    session = _sessions.pop(candidate_sid, None)
                 break
     if not session:
         return _ok(rid, {"closed": False})
@@ -1354,408 +1998,3 @@ def _(rid, params: dict) -> dict:
             "stored_session_id": session.get("session_key") or sid,
         },
     )
-
-
-@method("session.branch")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    db = _get_db()
-    if db is None:
-        return _db_unavailable_error(rid, code=5008)
-    old_key = session["session_key"]
-    with session["history_lock"]:
-        history = [dict(msg) for msg in session.get("history", [])]
-    if not history:
-        return _err(rid, 4008, "nothing to branch — send a message first")
-    new_key = _new_session_key()
-    branch_name = params.get("name", "")
-    try:
-        if branch_name:
-            title = branch_name
-        else:
-            current = db.get_session_title(old_key) or "branch"
-            title = (
-                db.get_next_title_in_lineage(current)
-                if hasattr(db, "get_next_title_in_lineage")
-                else f"{current} (branch)"
-            )
-        db.create_session(
-            new_key, source="tui", model=_resolve_model(), parent_session_id=old_key
-        )
-        for msg in history:
-            db.append_message(
-                session_id=new_key,
-                role=msg.get("role", "user"),
-                content=msg.get("content"),
-            )
-        db.set_session_title(new_key, title)
-    except Exception as e:
-        return _err(rid, 5008, f"branch failed: {e}")
-    new_sid = uuid.uuid4().hex[:8]
-    try:
-        cwd = _session_cwd(session)
-        workspace = _workspace_from_params(
-            {"workspace": session.get("workspace") or {}},
-            cwd,
-        )
-        workspace = _bind_session_workspace(
-            session_id=new_key,
-            cwd=cwd,
-            workspace=workspace,
-        )
-        tokens = _set_session_context(new_key, terminal_cwd=cwd)
-        try:
-            agent = _make_agent(
-                new_sid,
-                new_key,
-                session_id=new_key,
-                cwd=cwd,
-            )
-        finally:
-            _clear_session_context(tokens)
-        _init_session(
-            new_sid,
-            new_key,
-            agent,
-            list(history),
-            cols=session.get("cols", 80),
-            cwd=cwd,
-            workspace=workspace,
-        )
-    except Exception as e:
-        return _err(rid, 5000, f"agent init failed on branch: {e}")
-    return _ok(rid, {"session_id": new_sid, "title": title, "parent": old_key})
-
-
-@method("session.interrupt")
-def _(rid, params: dict) -> dict:
-    sid = params.get("session_id", "")
-    requested_run_id = str(params.get("run_id") or params.get("runId") or "").strip()
-    requested_turn_id = str(params.get("turn_id") or params.get("turnId") or "").strip()
-    completion_status = str(
-        params.get("completion_status") or params.get("completionStatus") or "interrupted"
-    ).strip() or "interrupted"
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
-    interrupted_run_id = ""
-    interrupted_turn_id = ""
-    interrupt_seq = 0
-    should_interrupt_agent = False
-    should_clear_current = False
-    with session["history_lock"]:
-        active_run_id = str(session.get("active_run_id") or "")
-        active_turn_id = str(session.get("active_turn_id") or "")
-        interrupted_run_id = requested_run_id or active_run_id
-        interrupted_turn_id = requested_turn_id or active_turn_id
-        interrupts_current_run = bool(interrupted_run_id and active_run_id == interrupted_run_id)
-        interrupts_current_turn = bool(interrupted_turn_id and active_turn_id == interrupted_turn_id)
-        has_active_target = bool(active_run_id or active_turn_id)
-        has_requested_target = bool(requested_run_id or requested_turn_id)
-        should_clear_current = interrupts_current_run or interrupts_current_turn
-        should_interrupt_agent = (
-            should_clear_current
-            or (has_requested_target and not has_active_target)
-            or (not has_requested_target and has_active_target)
-        )
-        session["interrupted_run_id"] = interrupted_run_id
-        session["interrupted_turn_id"] = interrupted_turn_id
-        session["interrupt_seq"] = int(session.get("interrupt_seq") or 0) + 1
-        interrupt_seq = int(session.get("interrupt_seq") or 0)
-        if should_clear_current:
-            session["running"] = False
-            session["active_run_id"] = None
-            session["active_turn_id"] = None
-            session["run_updated_at"] = time.time()
-    _interrupt_trace(
-        "[hermes] [tui_gateway] [interrupt-trace] session.interrupt.state "
-        f"sid={sid} requested_run_id={requested_run_id or '-'} requested_turn_id={requested_turn_id or '-'} "
-        f"active_run_id={active_run_id or '-'} active_turn_id={active_turn_id or '-'} "
-        f"interrupted_run_id={interrupted_run_id or '-'} interrupted_turn_id={interrupted_turn_id or '-'} "
-        f"should_clear_current={should_clear_current} should_interrupt_agent={should_interrupt_agent} seq={interrupt_seq}",
-    )
-    _interrupt_trace(
-        f"[hermes] [tui_gateway] session.interrupt sid={sid} run_id={interrupted_run_id or '-'} turn_id={interrupted_turn_id or '-'} seq={interrupt_seq}",
-    )
-    _request_session_interrupt_side_effects_async(
-        sid=sid,
-        session=session,
-        should_interrupt_agent=should_interrupt_agent,
-        interrupted_run_id=interrupted_run_id,
-        interrupted_turn_id=interrupted_turn_id,
-        completion_status=completion_status,
-    )
-    _interrupt_trace(
-        "[hermes] [tui_gateway] [interrupt-trace] session.interrupt.return "
-        f"sid={sid} run_id={interrupted_run_id or '-'} turn_id={interrupted_turn_id or '-'}",
-    )
-    return _ok(
-        rid,
-        {
-            "status": "interrupted",
-            "run_id": interrupted_run_id,
-            "turn_id": interrupted_turn_id,
-        },
-    )
-
-
-# ── Delegation: subagent tree observability + controls ───────────────
-# Powers the TUI's /agents overlay (see ui-tui/src/components/agentsOverlay).
-# The registry lives in tools/delegate_tool — these handlers are thin
-# translators between JSON-RPC and the Python API.
-
-
-@method("delegation.status")
-def _(rid, params: dict) -> dict:
-    from tools.delegate_tool import (
-        is_spawn_paused,
-        list_active_subagents,
-        _get_max_concurrent_children,
-        _get_max_spawn_depth,
-    )
-
-    return _ok(
-        rid,
-        {
-            "active": list_active_subagents(),
-            "paused": is_spawn_paused(),
-            "max_spawn_depth": _get_max_spawn_depth(),
-            "max_concurrent_children": _get_max_concurrent_children(),
-        },
-    )
-
-
-@method("delegation.pause")
-def _(rid, params: dict) -> dict:
-    from tools.delegate_tool import set_spawn_paused
-
-    paused = bool(params.get("paused", True))
-    return _ok(rid, {"paused": set_spawn_paused(paused)})
-
-
-@method("subagent.interrupt")
-def _(rid, params: dict) -> dict:
-    from tools.delegate_tool import interrupt_subagent
-
-    subagent_id = str(params.get("subagent_id") or "").strip()
-    if not subagent_id:
-        return _err(rid, 4000, "subagent_id required")
-    ok = interrupt_subagent(subagent_id)
-    return _ok(rid, {"found": ok, "subagent_id": subagent_id})
-
-
-# ── Spawn-tree snapshots: TUI-written, disk-persisted ────────────────
-# The TUI is the source of truth for subagent state (it assembles payloads
-# from the event stream).  On turn-complete it posts the final tree here;
-# /replay and /replay-diff fetch past snapshots by session_id + filename.
-#
-# Layout:  $HERMES_HOME/spawn-trees/<session_id>/<timestamp>.json
-# Each file contains { session_id, started_at, finished_at, subagents: [...] }.
-
-
-def _spawn_trees_root():
-    from pathlib import Path as _P
-    from hermes_constants import get_hermes_home
-
-    root = get_hermes_home() / "spawn-trees"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def _spawn_tree_session_dir(session_id: str):
-    safe = (
-        "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id) or "unknown"
-    )
-    d = _spawn_trees_root() / safe
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-# Per-session append-only index of lightweight snapshot metadata.  Read by
-# `spawn_tree.list` so scanning doesn't require reading every full snapshot
-# file (Copilot review on #14045).  One JSON object per line.
-_SPAWN_TREE_INDEX = "_index.jsonl"
-
-
-def _append_spawn_tree_index(session_dir, entry: dict) -> None:
-    try:
-        with (session_dir / _SPAWN_TREE_INDEX).open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except OSError as exc:
-        # Index is a cache — losing a line just means list() falls back
-        # to a directory scan for that entry.  Never block the save.
-        logger.debug("spawn_tree index append failed: %s", exc)
-
-
-def _read_spawn_tree_index(session_dir) -> list[dict]:
-    index_path = session_dir / _SPAWN_TREE_INDEX
-    if not index_path.exists():
-        return []
-    out: list[dict] = []
-    try:
-        with index_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    out.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        return []
-    return out
-
-
-@method("spawn_tree.save")
-def _(rid, params: dict) -> dict:
-    session_id = str(params.get("session_id") or "").strip()
-    subagents = params.get("subagents") or []
-    if not isinstance(subagents, list) or not subagents:
-        return _err(rid, 4000, "subagents list required")
-
-    from datetime import datetime
-
-    started_at = params.get("started_at")
-    finished_at = params.get("finished_at") or time.time()
-    label = str(params.get("label") or "")
-    ts = datetime.utcfromtimestamp(float(finished_at)).strftime("%Y%m%dT%H%M%S")
-    fname = f"{ts}.json"
-    d = _spawn_tree_session_dir(session_id or "default")
-    path = d / fname
-    try:
-        payload = {
-            "session_id": session_id,
-            "started_at": float(started_at) if started_at else None,
-            "finished_at": float(finished_at),
-            "label": label,
-            "subagents": subagents,
-        }
-        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    except OSError as exc:
-        return _err(rid, 5000, f"spawn_tree.save failed: {exc}")
-
-    _append_spawn_tree_index(
-        d,
-        {
-            "path": str(path),
-            "session_id": session_id,
-            "started_at": payload["started_at"],
-            "finished_at": payload["finished_at"],
-            "label": label,
-            "count": len(subagents),
-        },
-    )
-
-    return _ok(rid, {"path": str(path), "session_id": session_id})
-
-
-@method("spawn_tree.list")
-def _(rid, params: dict) -> dict:
-    session_id = str(params.get("session_id") or "").strip()
-    limit = int(params.get("limit") or 50)
-    cross_session = bool(params.get("cross_session"))
-
-    if cross_session:
-        root = _spawn_trees_root()
-        roots = [p for p in root.iterdir() if p.is_dir()]
-    else:
-        roots = [_spawn_tree_session_dir(session_id or "default")]
-
-    entries: list[dict] = []
-    for d in roots:
-        indexed = _read_spawn_tree_index(d)
-        if indexed:
-            # Skip index entries whose snapshot file was manually deleted.
-            entries.extend(
-                e for e in indexed if (p := e.get("path")) and Path(p).exists()
-            )
-            continue
-
-        # Fallback for legacy (pre-index) sessions: full scan.  O(N) reads
-        # but only runs once per session until the next save writes the index.
-        for p in d.glob("*.json"):
-            if p.name == _SPAWN_TREE_INDEX:
-                continue
-            try:
-                stat = p.stat()
-                try:
-                    raw = json.loads(p.read_text(encoding="utf-8"))
-                except Exception:
-                    raw = {}
-                subagents = raw.get("subagents") or []
-                entries.append(
-                    {
-                        "path": str(p),
-                        "session_id": raw.get("session_id") or d.name,
-                        "finished_at": raw.get("finished_at") or stat.st_mtime,
-                        "started_at": raw.get("started_at"),
-                        "label": raw.get("label") or "",
-                        "count": len(subagents) if isinstance(subagents, list) else 0,
-                    }
-                )
-            except OSError:
-                continue
-
-    entries.sort(key=lambda e: e.get("finished_at") or 0, reverse=True)
-    return _ok(rid, {"entries": entries[:limit]})
-
-
-@method("spawn_tree.load")
-def _(rid, params: dict) -> dict:
-    from pathlib import Path
-
-    raw_path = str(params.get("path") or "").strip()
-    if not raw_path:
-        return _err(rid, 4000, "path required")
-
-    # Reject paths escaping the spawn-trees root.
-    root = _spawn_trees_root().resolve()
-    try:
-        resolved = Path(raw_path).resolve()
-        resolved.relative_to(root)
-    except (ValueError, OSError) as exc:
-        return _err(rid, 4030, f"path outside spawn-trees root: {exc}")
-
-    try:
-        payload = json.loads(resolved.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return _err(rid, 5000, f"spawn_tree.load failed: {exc}")
-
-    return _ok(rid, payload)
-
-
-@method("session.steer")
-def _(rid, params: dict) -> dict:
-    """Inject a user message into the next tool result without interrupting.
-
-    Mirrors AIAgent.steer(). Safe to call while a turn is running — the text
-    lands on the last tool result of the next tool batch and the model sees
-    it on its next iteration. No interrupt, no new user turn, no role
-    alternation violation.
-    """
-    text = (params.get("text") or "").strip()
-    if not text:
-        return _err(rid, 4002, "text is required")
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
-    agent = session.get("agent")
-    if agent is None or not hasattr(agent, "steer"):
-        return _err(rid, 4010, "agent does not support steer")
-    try:
-        accepted = agent.steer(text)
-    except Exception as exc:
-        return _err(rid, 5000, f"steer failed: {exc}")
-    return _ok(rid, {"status": "queued" if accepted else "rejected", "text": text})
-
-
-@method("terminal.resize")
-def _(rid, params: dict) -> dict:
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
-    session["cols"] = int(params.get("cols", 80))
-    return _ok(rid, {"cols": session["cols"]})

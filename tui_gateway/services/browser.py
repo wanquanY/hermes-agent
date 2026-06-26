@@ -74,17 +74,17 @@ def failure_messages(url: str, port: int, system: str) -> list[str]:
 
     command = manual_chrome_debug_command(port, system)
     hint = (
-        ["Start Chrome with remote debugging, then retry /browser connect:", command]
+        ["Start a Chromium-family browser with remote debugging, then retry /browser connect:", command]
         if command
         else [
-            "No Chrome/Chromium executable was found in this environment.",
-            f"Install one or start Chrome with --remote-debugging-port={port}, then retry /browser connect.",
+            "No supported Chromium-family browser executable was found in this environment.",
+            f"Install one or start a Chromium-family browser with --remote-debugging-port={port}, then retry /browser connect.",
         ]
     )
     return [
-        f"Chrome is not reachable at {url}.",
+        f"Chromium-family browser is not reachable at {url}.",
         *hint,
-        "Browser not connected — start Chrome with remote debugging and retry /browser connect",
+        "Browser not connected — start a Chromium-family browser with remote debugging and retry /browser connect",
     ]
 
 
@@ -145,7 +145,7 @@ def connect_browser_cdp(
                 from hermes_cli.browser_connect import try_launch_chrome_debug
 
                 announce(
-                    "Chrome isn't running with remote debugging — attempting to launch..."
+                    "Chromium-family browser isn't running with remote debugging — attempting to launch..."
                 )
 
                 if try_launch_chrome_debug(port, system):
@@ -156,7 +156,7 @@ def connect_browser_cdp(
                             break
 
                 if ok:
-                    announce(f"Chrome launched and listening on port {port}")
+                    announce(f"Chromium-family browser launched and listening on port {port}")
                 else:
                     for line in failure_messages(url, port, system)[1:]:
                         announce(line, level="error")
@@ -164,7 +164,7 @@ def connect_browser_cdp(
             elif not ok:
                 raise BrowserGatewayError(5031, f"could not reach browser CDP at {url}")
             elif is_default_local_cdp(parsed):
-                announce(f"Chrome is already listening on port {port}")
+                announce(f"Chromium-family browser is already listening on port {port}")
 
         normalized = normalize_cdp_url(parsed)
 

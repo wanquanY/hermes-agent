@@ -17,6 +17,8 @@ Usage in tools:
 import logging
 import os
 import threading
+from collections.abc import Callable
+from typing import TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ if _DEBUG_INTERRUPT:
 # Set of thread idents that have been interrupted.
 _interrupted_threads: set[int] = set()
 _lock = threading.Lock()
+_T = TypeVar("_T")
 
 
 def set_interrupt(active: bool, thread_id: int | None = None) -> None:
@@ -68,6 +71,44 @@ def is_interrupted() -> bool:
     tid = threading.current_thread().ident
     with _lock:
         return tid in _interrupted_threads
+
+
+def run_blocking_interruptibly(
+    fn: Callable[[], _T],
+    *,
+    interrupted_message: str = "Interrupted",
+    poll_interval: float = 0.1,
+) -> _T:
+    """Run a bounded blocking call while the caller thread polls interruption.
+
+    This is for tools that call a sync SDK or urllib-style API without a native
+    cancellation hook.  The worker thread may finish later, so callers should use
+    it only around calls with their own timeout.
+    """
+    if is_interrupted():
+        raise InterruptedError(interrupted_message)
+
+    done = threading.Event()
+    result: dict[str, object] = {}
+
+    def _target() -> None:
+        try:
+            result["value"] = fn()
+        except BaseException as exc:  # propagate after the caller observes completion
+            result["error"] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_target, name="interruptible-blocking-call", daemon=True)
+    thread.start()
+
+    while not done.wait(max(0.01, poll_interval)):
+        if is_interrupted():
+            raise InterruptedError(interrupted_message)
+
+    if "error" in result:
+        raise result["error"]  # type: ignore[misc]
+    return result.get("value")  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------

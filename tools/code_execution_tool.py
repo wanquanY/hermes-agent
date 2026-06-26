@@ -932,7 +932,7 @@ def _execute_remote(
         )
         tz = os.getenv("HERMES_TIMEZONE", "").strip()
         if tz:
-            env_prefix += f" TZ={tz}"
+            env_prefix += f" TZ={shlex.quote(tz)}"
 
         # Execute the script on the remote backend
         logger.info("Executing code on %s backend (task %s)...",
@@ -1247,6 +1247,7 @@ def execute_code(
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
             preexec_fn=None if _IS_WINDOWS else os.setsid,
+            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
         )
 
         # --- Poll loop: watch for exit, timeout, and interrupt ---
@@ -1577,6 +1578,7 @@ def _is_usable_python(python_path: str) -> bool:
              "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"],
             timeout=5,
             capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
         )
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError):
@@ -1631,17 +1633,20 @@ def _resolve_child_cwd(mode: str, staging_dir: str) -> str:
 
     - ``strict``: the staging tmpdir (today's behavior).
     - ``project``: the session's TERMINAL_CWD (same as the terminal tool), or
-      ``os.getcwd()`` if TERMINAL_CWD is unset or doesn't point at a real dir.
-      Falls back to the staging tmpdir as a last resort so we never invoke
-      Popen with a nonexistent cwd.
+      Dovie's configured workspace root when running under the Dovie gateway.
+      Non-Dovie callers keep the legacy process-cwd fallback. Falls back to the
+      staging tmpdir as a last resort so we never invoke Popen with a nonexistent
+      cwd.
     """
     if mode != "project":
         return staging_dir
-    raw = _session_env("TERMINAL_CWD", "").strip()
+    raw = _session_env("TERMINAL_CWD", "").strip() or os.getenv("DOVIE_WORKSPACE_ROOT", "").strip()
     if raw:
         expanded = os.path.expanduser(raw)
         if os.path.isdir(expanded):
             return expanded
+    if os.getenv("DOVIE_PROCESS_ROLE") == "hermes-worker":
+        return staging_dir
     here = os.getcwd()
     if os.path.isdir(here):
         return here

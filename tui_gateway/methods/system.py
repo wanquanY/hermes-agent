@@ -9,6 +9,241 @@ _server = bind_server_globals(globals())
 # ── Methods: tools & system ──────────────────────────────────────────
 
 
+@method("gateway.capabilities")
+def _(rid, params: dict) -> dict:
+    from dovie_extension.manifest import gateway_capabilities
+
+    return _ok(rid, gateway_capabilities())
+
+
+def _profile_runtime_scope_from_params(params: dict) -> dict:
+    agent_profile_id = str(
+        params.get("agent_profile_id")
+        or params.get("agentProfileId")
+        or params.get("profile_id")
+        or params.get("profileId")
+        or ""
+    ).strip()
+    agent_profile_version_id = str(
+        params.get("agent_profile_version_id")
+        or params.get("agentProfileVersionId")
+        or params.get("version_id")
+        or params.get("versionId")
+        or ""
+    ).strip()
+    draft_id = str(
+        params.get("agent_profile_draft_id")
+        or params.get("agentProfileDraftId")
+        or params.get("draft_id")
+        or params.get("draftId")
+        or ""
+    ).strip()
+    explicit_scope = str(
+        params.get("runtime_scope_key")
+        or params.get("runtimeScopeKey")
+        or ""
+    ).strip()
+    if explicit_scope:
+        runtime_scope_key = explicit_scope
+    elif draft_id:
+        runtime_scope_key = f"draft:{draft_id}"
+    elif agent_profile_id:
+        runtime_scope_key = f"profile:{agent_profile_id}"
+    else:
+        runtime_scope_key = "profile:agent-default"
+    return {
+        "agent_profile_id": agent_profile_id,
+        "agent_profile_version_id": agent_profile_version_id,
+        "agent_profile_draft_id": draft_id,
+        "runtime_scope_key": runtime_scope_key,
+        "transient": bool(draft_id or str(runtime_scope_key).startswith("draft:")),
+    }
+
+
+@method("profile.prepare_runtime")
+def _(rid, params: dict) -> dict:
+    """Normalize the Dovie profile runtime scope before a worker is used.
+
+    Dovie owns profile metadata and filesystem preparation. Hermes owns the
+    stable Gateway ABI for profile-scoped runtime identity. This control-plane
+    method gives clients a side-effect-light contract check that does not build
+    an agent or touch model/tool state.
+    """
+    scope = _profile_runtime_scope_from_params(params or {})
+    return _ok(
+        rid,
+        {
+            "status": "prepared",
+            "prepared": True,
+            **scope,
+        },
+    )
+
+
+@method("runtime.ensure")
+def _(rid, params: dict) -> dict:
+    """Phase 6 stub: kept for frontend compatibility.
+
+    The legacy worker pre-warm path (spawning a sub-sidecar) is gone.
+    The new ``WorkerSupervisor`` spawns workers lazily on the first
+    ``run.submit`` for a scope, so ``runtime.ensure`` has no real work
+    to do — just acknowledge the scope and return ready=True. Frontend
+    runtime readiness machinery (``DesktopSessionRuntime`` etc.) still
+    calls this method on session attach as a liveness check."""
+    scope = _profile_runtime_scope_from_params(params or {})
+    return _ok(
+        rid,
+        {
+            "status": "ready",
+            "ready": True,
+            **scope,
+        },
+    )
+
+
+@method("runtime.status")
+def _(rid, params: dict) -> dict:
+    """Return lightweight gateway runtime diagnostics without building an agent."""
+    try:
+        from gateway.status import read_runtime_status
+
+        state = read_runtime_status()
+        if not isinstance(state, dict):
+            state = {}
+    except Exception as exc:
+        state = {}
+        error = str(exc)
+    else:
+        error = ""
+    try:
+        from tui_gateway.services.worker_runtime import worker_supervisor
+
+        runtime_proxy = worker_supervisor().snapshot()
+    except Exception as exc:
+        runtime_proxy = {"error": str(exc)}
+    return _ok(
+        rid,
+        {
+            "status": str(state.get("gateway_state") or state.get("status") or "unknown"),
+            "runtime": state,
+            "runtime_proxy": runtime_proxy,
+            "available": bool(state),
+            **({"error": error} if error else {}),
+        },
+    )
+
+
+@method("runtime.state.inspect")
+def _(rid, params: dict) -> dict:
+    try:
+        from tui_gateway.services.runtime_state import inspect_runtime_state
+
+        payload = params or {}
+        return _ok(rid, inspect_runtime_state(
+            hermes_home_root=payload.get("hermes_home_root") or payload.get("hermesHomeRoot"),
+        ))
+    except Exception as exc:
+        return _err(rid, 5022, f"runtime state inspect failed: {exc}")
+
+
+@method("runtime.state.prune_empty")
+def _(rid, params: dict) -> dict:
+    try:
+        from tui_gateway.services.runtime_state import prune_empty_runtime_state
+
+        payload = params or {}
+        return _ok(rid, prune_empty_runtime_state(
+            hermes_home_root=payload.get("hermes_home_root") or payload.get("hermesHomeRoot"),
+            dry_run=payload.get("dry_run", payload.get("dryRun", True)),
+        ))
+    except Exception as exc:
+        return _err(rid, 5023, f"runtime state prune failed: {exc}")
+
+
+@method("runtime.state.merge_profile_runtime")
+def _(rid, params: dict) -> dict:
+    try:
+        from tui_gateway.services.runtime_state import merge_profile_runtime_state
+
+        payload = params or {}
+        return _ok(rid, merge_profile_runtime_state(
+            hermes_home_root=payload.get("hermes_home_root") or payload.get("hermesHomeRoot"),
+            profiles_root=payload.get("profiles_root") or payload.get("profilesRoot"),
+        ))
+    except Exception as exc:
+        return _err(rid, 5024, f"profile runtime state merge failed: {exc}")
+
+
+@method("profile.runtime.session_exists")
+def _(rid, params: dict) -> dict:
+    try:
+        from tui_gateway.services.runtime_state import profile_runtime_session_exists
+
+        result = profile_runtime_session_exists(
+            session_id=str(
+                (params or {}).get("session_id")
+                or (params or {}).get("sessionId")
+                or ""
+            ),
+            hermes_home_path=(
+                (params or {}).get("hermes_home_path")
+                or (params or {}).get("hermesHomePath")
+                or ""
+            ),
+            runtime_scope_key=str(
+                (params or {}).get("runtime_scope_key")
+                or (params or {}).get("runtimeScopeKey")
+                or ""
+            ),
+        )
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 4006, str(exc))
+    except PermissionError as exc:
+        return _err(rid, 4030, str(exc))
+    except Exception as exc:
+        return _err(rid, 5025, f"profile runtime session check failed: {exc}")
+
+
+@method("team_mission.workspace.rebase_paths")
+def _(rid, params: dict) -> dict:
+    try:
+        from tui_gateway.services.runtime_state import rebase_team_mission_workspace_paths
+
+        result = rebase_team_mission_workspace_paths(
+            old_path=str((params or {}).get("old_path") or (params or {}).get("oldPath") or ""),
+            new_path=str((params or {}).get("new_path") or (params or {}).get("newPath") or ""),
+            db=_get_db(),
+        )
+        return _ok(rid, result)
+    except Exception as exc:
+        return _err(rid, 5026, f"team mission workspace path rebase failed: {exc}")
+
+
+@method("storage.stats")
+def _(rid, params: dict) -> dict:
+    """Return read-only Hermes storage diagnostics."""
+    try:
+        from tui_gateway.services.storage_stats import collect_storage_stats
+
+        include_file_sizes = params.get("include_registered_file_sizes")
+        if include_file_sizes is None:
+            include_file_sizes = params.get("includeRegisteredFileSizes")
+        if include_file_sizes is None:
+            include_file_sizes = "true"
+        result = collect_storage_stats(
+            include_registered_file_sizes=str(include_file_sizes).strip().lower() not in {"0", "false", "no"},
+            registered_file_limit=int(
+                params.get("registered_file_limit")
+                or params.get("registeredFileLimit")
+                or 10_000
+            ),
+        )
+        return _ok(rid, result)
+    except Exception as exc:
+        return _err(rid, 5021, f"storage stats failed: {exc}")
+
+
 @method("process.stop")
 def _(rid, params: dict) -> dict:
     try:
@@ -67,8 +302,25 @@ def _(rid, params: dict) -> dict:
         discover_mcp_tools()
         if session:
             agent = session["agent"]
-            if hasattr(agent, "refresh_tools"):
-                agent.refresh_tools()
+            # Rebuild the cached agent's tool snapshot so the current session
+            # picks up added/removed MCP tools without `/new`. The agent
+            # snapshots tools once at build and never re-reads the registry, so
+            # an explicit rebuild — re-resolving enabled toolsets so a server
+            # the user just enabled this session is actually picked up — is
+            # required. Mirrors gateway/run.py::_execute_mcp_reload.
+            try:
+                from tools.mcp_tool import refresh_agent_mcp_tools
+
+                refresh_agent_mcp_tools(
+                    agent,
+                    enabled_override=_load_enabled_toolsets(),
+                    quiet_mode=True,
+                )
+            except Exception as _exc:
+                logger.warning(
+                    "Failed to refresh cached agent tools after /reload-mcp: %s",
+                    _exc,
+                )
             _emit("session.info", params.get("session_id", ""), _session_info(agent, session))
 
         # Honor `always=true` by persisting the opt-out to config.
@@ -110,7 +362,6 @@ _TUI_HIDDEN: frozenset[str] = frozenset(
     {
         "sethome",
         "set-home",
-        "update",
         "commands",
         "approve",
         "deny",
@@ -120,7 +371,11 @@ _TUI_HIDDEN: frozenset[str] = frozenset(
 _TUI_EXTRA: list[tuple[str, str, str]] = [
     ("/compact", "Toggle compact display mode", "TUI"),
     ("/logs", "Show recent gateway log lines", "TUI"),
-    ("/mouse", "Toggle mouse/wheel tracking [on|off|toggle]", "TUI"),
+    (
+        "/mouse",
+        "Set mouse tracking preset [on|off|toggle|wheel|buttons|all]",
+        "TUI",
+    ),
 ]
 
 # Commands that queue messages onto _pending_input in the CLI.
@@ -134,6 +389,8 @@ _PENDING_INPUT_COMMANDS: frozenset[str] = frozenset(
         "steer",
         "plan",
         "goal",
+        "undo",
+        "rewind",
     }
 )
 
@@ -312,6 +569,128 @@ def _resolve_name(name: str) -> str:
         return r.name if r else name
     except Exception:
         return name
+
+
+def _prefill_text_from_content(content) -> str:
+    if isinstance(content, list):
+        parts = [
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        return "\n".join(text for text in parts if text)
+    return content if isinstance(content, str) else ""
+
+
+def _dispatch_rewind_command(rid, session: dict | None, name: str, arg: str) -> dict:
+    label = "undo" if name == "undo" else "rewind"
+    if not session:
+        return _err(rid, 4001, f"no active session to {label}")
+    if session.get("running"):
+        return _err(
+            rid,
+            4009,
+            f"session busy — /interrupt the current turn before /{label}",
+        )
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5008)
+    session_key = str(session.get("session_key") or "")
+    if not session_key:
+        return _err(rid, 4001, f"no session key for {label}")
+
+    count = 1
+    arg_text = (arg or "").strip()
+    if arg_text:
+        try:
+            count = int(arg_text.split()[0])
+        except (ValueError, IndexError):
+            return _err(
+                rid,
+                4004,
+                f"{label}: invalid count {arg_text!r} — use /{label} or /{label} N",
+            )
+    count = max(count, 1)
+
+    try:
+        recents = db.list_recent_user_messages(session_key, limit=max(count, 10))
+    except Exception as exc:
+        return _err(rid, 5008, f"{label}: failed to load history: {exc}")
+    if not recents:
+        return _err(rid, 4018, f"no user messages to {label}")
+
+    target_index = min(count - 1, len(recents) - 1)
+    target_id = recents[target_index]["id"]
+    try:
+        result = db.rewind_to_message(session_key, target_id)
+    except ValueError as exc:
+        return _err(rid, 4004, f"{label}: {exc}")
+    except Exception as exc:
+        return _err(rid, 5008, f"{label}: {exc}")
+
+    try:
+        active_history = db.get_messages_as_conversation(
+            session_key,
+            include_ancestors=False,
+        )
+    except Exception:
+        active_history = []
+    history_lock = session.get("history_lock")
+    if history_lock is None:
+        return _err(rid, 5008, f"{label}: session history lock unavailable")
+    with history_lock:
+        session["history"] = list(active_history)
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+
+    agent = session.get("agent")
+    if agent is not None:
+        memory_manager = getattr(agent, "_memory_manager", None)
+        if memory_manager is not None:
+            try:
+                memory_manager.on_session_switch(
+                    session_key,
+                    parent_session_id="",
+                    reset=False,
+                    rewound=True,
+                )
+            except Exception:
+                pass
+        for attr in ("_invalidate_system_prompt",):
+            fn = getattr(agent, attr, None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:
+                    pass
+        try:
+            agent._session_messages = list(active_history)
+        except Exception:
+            pass
+        try:
+            agent._last_flushed_db_idx = len(active_history)
+        except Exception:
+            pass
+        try:
+            agent._cached_system_prompt = None
+        except Exception:
+            pass
+
+    target_message = result.get("target_message") or {}
+    target_text = _prefill_text_from_content(target_message.get("content"))
+    rewound_count = int(result.get("rewound_count") or 0)
+    turns = target_index + 1
+    if label == "undo":
+        turn_word = "turn" if turns == 1 else "turns"
+        notice = (
+            f"↶ Undid {turns} {turn_word} ({rewound_count} message(s)). "
+            "Edit and resubmit, or send a new message."
+        )
+    else:
+        notice = (
+            f"↶ Rewound {rewound_count} message(s). "
+            "Edit and resubmit, or send a new message."
+        )
+    return _ok(rid, {"type": "prefill", "message": target_text, "notice": notice})
 
 
 @method("command.dispatch")
@@ -518,6 +897,9 @@ def _(rid, params: dict) -> dict:
             rid,
             {"type": "send", "notice": notice, "message": state.goal},
         )
+
+    if name in {"undo", "rewind"}:
+        return _dispatch_rewind_command(rid, session, name, arg)
 
     if name in {"snapshot", "snap"}:
         subcommand = arg.split(maxsplit=1)[0].lower() if arg else ""

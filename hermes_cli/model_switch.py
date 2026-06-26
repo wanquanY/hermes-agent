@@ -294,31 +294,50 @@ class CustomAutoResult:
 # Flag parsing
 # ---------------------------------------------------------------------------
 
-def parse_model_flags(raw_args: str) -> tuple[str, str, bool]:
-    """Parse --provider and --global flags from /model command args.
+def parse_model_flags(raw_args: str) -> tuple[str, str, bool, bool, bool]:
+    """Parse --provider, --global, --session, and --refresh flags from /model command args.
 
-    Returns (model_input, explicit_provider, is_global).
+    Returns ``(model_input, explicit_provider, is_global, force_refresh, is_session)``.
+
+    ``is_global`` and ``is_session`` are independent flag presences; the
+    *effective* persistence decision is resolved by
+    :func:`resolve_persist_behavior` so the config-gated default
+    (``model.persist_switch_by_default``) is applied in one place.
 
     Examples::
 
-        "sonnet"                         -> ("sonnet", "", False)
-        "sonnet --global"                -> ("sonnet", "", True)
-        "sonnet --provider anthropic"    -> ("sonnet", "anthropic", False)
-        "--provider my-ollama"           -> ("", "my-ollama", False)
-        "sonnet --provider anthropic --global" -> ("sonnet", "anthropic", True)
+        "sonnet"                         -> ("sonnet", "", False, False, False)
+        "sonnet --global"                -> ("sonnet", "", True, False, False)
+        "sonnet --session"               -> ("sonnet", "", False, False, True)
+        "sonnet --provider anthropic"    -> ("sonnet", "anthropic", False, False, False)
+        "--provider my-ollama"           -> ("", "my-ollama", False, False, False)
+        "--refresh"                      -> ("", "", False, True, False)
+        "sonnet --provider anthropic --global" -> ("sonnet", "anthropic", True, False, False)
     """
     is_global = False
     explicit_provider = ""
+    force_refresh = False
+    is_session = False
 
     # Normalize Unicode dashes (Telegram/iOS auto-converts -- to em/en dash)
     # A single Unicode dash before a flag keyword becomes "--"
     import re as _re
-    raw_args = _re.sub(r'[\u2012\u2013\u2014\u2015](provider|global)', r'--\1', raw_args)
+    raw_args = _re.sub(r'[\u2012\u2013\u2014\u2015](provider|global|session|refresh)', r'--\1', raw_args)
 
     # Extract --global
     if "--global" in raw_args:
         is_global = True
         raw_args = raw_args.replace("--global", "").strip()
+
+    # Extract --session (explicit session-only; overrides the persist default)
+    if "--session" in raw_args:
+        is_session = True
+        raw_args = raw_args.replace("--session", "").strip()
+
+    # Extract --refresh (bust the model picker disk cache before listing)
+    if "--refresh" in raw_args:
+        force_refresh = True
+        raw_args = raw_args.replace("--refresh", "").strip()
 
     # Extract --provider <name>
     parts = raw_args.split()
@@ -333,7 +352,37 @@ def parse_model_flags(raw_args: str) -> tuple[str, str, bool]:
             i += 1
 
     model_input = " ".join(filtered).strip()
-    return (model_input, explicit_provider, is_global)
+    return (model_input, explicit_provider, is_global, force_refresh, is_session)
+
+
+def resolve_persist_behavior(is_global: bool, is_session: bool) -> bool:
+    """Decide whether a ``/model`` switch should persist to ``config.yaml``.
+
+    Resolution order:
+
+    1. ``--session`` explicitly opts out → ``False`` (this session only).
+    2. ``--global`` explicitly opts in → ``True``.
+    3. Otherwise defer to ``model.persist_switch_by_default`` in
+       ``config.yaml`` (defaults to ``True``, so a plain ``/model <name>``
+       survives across sessions — the behavior users expect).
+
+    The config read is defensive: on a fresh install ``model`` may be a
+    flat string rather than a dict, in which case the built-in default
+    (``True``) applies.
+    """
+    if is_session:
+        return False
+    if is_global:
+        return True
+    try:
+        from hermes_cli.config import load_config
+
+        model_cfg = load_config().get("model")
+        if isinstance(model_cfg, dict):
+            return bool(model_cfg.get("persist_switch_by_default", True))
+    except Exception:
+        pass
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1087,6 +1136,7 @@ def list_authenticated_providers(
     from hermes_cli.models import (
         OPENROUTER_MODELS, _PROVIDER_MODELS,
         _MODELS_DEV_PREFERRED, _merge_with_models_dev, provider_model_ids,
+        cached_provider_model_ids,
         get_curated_nous_model_ids,
     )
 
@@ -1240,20 +1290,22 @@ def list_authenticated_providers(
             try:
                 from hermes_cli.auth import _load_auth_store
                 store = _load_auth_store()
-                if store and hermes_id in store.get("credential_pool", {}):
+                if store and store.get("credential_pool", {}).get(hermes_id):
                     has_creds = True
             except Exception:
                 pass
         if not has_creds:
             continue
 
-        # Use curated list, falling back to models.dev if no curated list.
-        # For preferred providers, merge models.dev entries into the curated
-        # catalog so newly released models (e.g. mimo-v2.5-pro on opencode-go)
-        # show up in the picker without requiring a Hermes release.
-        model_ids = curated.get(hermes_id, [])
-        if hermes_id in _MODELS_DEV_PREFERRED:
-            model_ids = _merge_with_models_dev(hermes_id, model_ids)
+        # Unified pathway: route through cached_provider_model_ids() so the
+        # /model picker sees the SAME list `hermes model` would build, with
+        # disk caching to keep the picker open snappy. Falls back to the
+        # curated static list when the live fetcher returns nothing.
+        model_ids = cached_provider_model_ids(hermes_id)
+        if not model_ids:
+            model_ids = curated.get(hermes_id, [])
+            if hermes_id in _MODELS_DEV_PREFERRED:
+                model_ids = _merge_with_models_dev(hermes_id, model_ids)
         total = len(model_ids)
         top = model_ids[:max_models]
 
@@ -1359,25 +1411,27 @@ def list_authenticated_providers(
             # matches what the user's authenticated Codex/Copilot backend
             # actually serves — including ChatGPT-Pro-only Codex slugs
             # (e.g. gpt-5.3-codex-spark) that aren't in the static curated
-            # catalog. ``provider_model_ids()`` falls back to the curated
-            # list when the live endpoint is unreachable, so this is safe
-            # for unauthenticated and offline cases too.
-            model_ids = provider_model_ids(hermes_slug)
+            # catalog. ``cached_provider_model_ids()`` falls back to the
+            # curated list when the live endpoint is unreachable, so this
+            # is safe for unauthenticated and offline cases too.
+            model_ids = cached_provider_model_ids(hermes_slug)
         # For aws_sdk providers (bedrock), use live discovery so the list
         # reflects the active region (eu.*, ap.*) not the static us.* list.
         elif overlay.auth_type == "aws_sdk":
             try:
-                from agent.bedrock_adapter import bedrock_model_ids_or_none
-                _ids = bedrock_model_ids_or_none()
-                model_ids = _ids if _ids is not None else (curated.get(hermes_slug, []) or curated.get(pid, []))
+                _ids = cached_provider_model_ids(hermes_slug)
+                model_ids = _ids if _ids else (curated.get(hermes_slug, []) or curated.get(pid, []))
             except Exception:
                 model_ids = curated.get(hermes_slug, []) or curated.get(pid, [])
         else:
-            # Use curated list — look up by Hermes slug, fall back to overlay key
-            model_ids = curated.get(hermes_slug, []) or curated.get(pid, [])
-            # Merge with models.dev for preferred providers (same rationale as above).
-            if hermes_slug in _MODELS_DEV_PREFERRED:
-                model_ids = _merge_with_models_dev(hermes_slug, model_ids)
+            # Unified pathway — see Section 1 rationale. Fall back to the
+            # curated dict (with models.dev merge for preferred providers)
+            # when the live fetcher comes up empty.
+            model_ids = cached_provider_model_ids(hermes_slug)
+            if not model_ids:
+                model_ids = curated.get(hermes_slug, []) or curated.get(pid, [])
+                if hermes_slug in _MODELS_DEV_PREFERRED:
+                    model_ids = _merge_with_models_dev(hermes_slug, model_ids)
         total = len(model_ids)
         top = model_ids[:max_models]
 
@@ -1444,13 +1498,15 @@ def list_authenticated_providers(
         # region (eu.*, us.*, ap.*) instead of the hardcoded us.* static list.
         if _cp_config and getattr(_cp_config, "auth_type", "") == "aws_sdk":
             try:
-                from agent.bedrock_adapter import bedrock_model_ids_or_none
-                _ids = bedrock_model_ids_or_none()
-                _cp_model_ids = _ids if _ids is not None else curated.get(_cp.slug, [])
+                _ids = cached_provider_model_ids(_cp.slug)
+                _cp_model_ids = _ids if _ids else curated.get(_cp.slug, [])
             except Exception:
                 _cp_model_ids = curated.get(_cp.slug, [])
         else:
-            _cp_model_ids = curated.get(_cp.slug, [])
+            # Unified pathway — same as sections 1 and 2.
+            _cp_model_ids = cached_provider_model_ids(_cp.slug)
+            if not _cp_model_ids:
+                _cp_model_ids = curated.get(_cp.slug, [])
         _cp_total = len(_cp_model_ids)
         _cp_top = _cp_model_ids[:max_models]
 
@@ -1696,7 +1752,26 @@ def list_authenticated_providers(
                 continue
             # Live model discovery from custom provider endpoints (matches
             # Section 3 behavior for user ``providers:`` entries).
-            if api_url and api_key:
+            # Also probes when no api_key is set (e.g. local llama.cpp /
+            # Ollama servers) — the /models endpoint often works without
+            # auth.  The CLI's _model_flow_named_custom always probes, so
+            # the Telegram/Discord picker should do the same for parity.
+            # Live-discovery policy:
+            # - With an api_key, the user has explicitly opted into the
+            #   endpoint and live /models is the source of truth — replace
+            #   the (possibly partial) ``models:`` subset configured for
+            #   context-length overrides with the full live catalog.
+            #   This is the Bifrost / aggregator-gateway case.
+            # - Without an api_key but with an explicit ``models:`` list
+            #   (or top-level ``model:``), the user is narrowing a public
+            #   endpoint to a specific subset (e.g. ollama.com /v1/models
+            #   returns 35 models but the user only wants 4). Preserve the
+            #   explicit list and skip live discovery.
+            # - Without an api_key AND no explicit models, fall through to
+            #   live discovery so bare-endpoint custom providers (local
+            #   llama.cpp / Ollama servers) still appear populated.
+            should_probe = bool(api_url) and (bool(api_key) or not grp["models"])
+            if should_probe:
                 try:
                     from hermes_cli.models import fetch_api_models
 
@@ -1709,7 +1784,10 @@ def list_authenticated_providers(
             results.append({
                 "slug": slug,
                 "name": grp["name"],
-                "is_current": slug == current_provider,
+                "is_current": slug == current_provider or (
+                    bool(current_base_url)
+                    and _grp_url_norm == current_base_url.strip().rstrip("/").lower()
+                ),
                 "is_user_defined": True,
                 "models": grp["models"],
                 "total_models": len(grp["models"]),

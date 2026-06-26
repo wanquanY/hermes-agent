@@ -12,12 +12,20 @@ from tui_gateway.services.transcript_messages import (
 )
 
 
-DOXIE_STRUCTURED_RESULT_TOOLS = {
+DOVIE_STRUCTURED_RESULT_TOOLS = {
     "design_agent_profile",
     "create_agent_profile_draft",
     "create_agent_profile_revision_draft",
-    "doxie_agent_profile_create_draft",
+    "dovie_agent_profile_create_draft",
     "test_agent_profile",
+    "dovie_automation_task_create",
+    "dovie_automation_task_list",
+    "dovie_automation_task_update",
+    "dovie_automation_task_remove",
+    "team_mission_start_task",
+    "team_mission_node_create",
+    "team_mission_edge_create",
+    "team_mission_plan_complete",
 }
 
 
@@ -68,8 +76,8 @@ def _tool_summary(name: str, result: str, duration_s: float | None) -> str | Non
     return f"{text}{suffix}" if text else None
 
 
-def _doxie_structured_tool_result(name: str, result: str) -> dict | None:
-    if name not in DOXIE_STRUCTURED_RESULT_TOOLS:
+def _dovie_structured_tool_result(name: str, result: str) -> dict | None:
+    if name not in DOVIE_STRUCTURED_RESULT_TOOLS:
         return None
     try:
         data = json.loads(result)
@@ -77,10 +85,85 @@ def _doxie_structured_tool_result(name: str, result: str) -> dict | None:
         return None
     if not isinstance(data, dict):
         return None
-    event_name = data.get("doxie_event")
+    event_name = data.get("dovie_event")
     if name == "test_agent_profile":
         if event_name != "agent_profile_test_completed":
             return None
+        return data
+    if name == "dovie_automation_task_create":
+        if event_name != "automation_job_created":
+            return None
+        job = data.get("job")
+        return data if isinstance(job, dict) else None
+    if name == "dovie_automation_task_list":
+        if event_name != "automation_job_listed":
+            return None
+        return data if isinstance(data.get("jobs"), list) else None
+    if name == "dovie_automation_task_update":
+        if event_name != "automation_job_updated":
+            return None
+        return data if isinstance(data.get("job"), dict) else None
+    if name == "dovie_automation_task_remove":
+        if event_name != "automation_job_removed":
+            return None
+        return data if isinstance(data.get("job"), dict) else None
+    if name == "team_mission_start_task":
+        control = data.get("hermes_control")
+        if not isinstance(control, dict):
+            return None
+        if control.get("kind") != "team_mission_started":
+            return None
+        mission_id = str(data.get("mission_id") or "").strip()
+        conversation_id = str(data.get("conversation_id") or "").strip()
+        if not mission_id or not conversation_id:
+            return None
+        return {
+            "dovie_event": "team_mission_started",
+            "mission_id": mission_id,
+            "conversation_id": conversation_id,
+            "task_id": str(data.get("task_id") or "").strip(),
+            "node": data.get("node") if isinstance(data.get("node"), dict) else {},
+            "run": data.get("run") if isinstance(data.get("run"), dict) else {},
+            "graph_summary": data.get("graph_summary") if isinstance(data.get("graph_summary"), dict) else {},
+            "submission_status": str(data.get("submission_status") or "").strip(),
+            "task_status": str(data.get("task_status") or control.get("mission_status") or "").strip(),
+            "await_final_deliverable": bool(data.get("await_final_deliverable") or control.get("await_final_deliverable")),
+        }
+    if name == "team_mission_node_create":
+        node = data.get("node")
+        if not isinstance(node, dict):
+            return None
+        return {
+            "dovie_event": "team_mission_node_created",
+            "success": bool(data.get("success")),
+            "mission_id": str(data.get("mission_id") or "").strip(),
+            "node": node,
+            "graph_summary": data.get("graph_summary") if isinstance(data.get("graph_summary"), dict) else {},
+        }
+    if name == "team_mission_edge_create":
+        edge = data.get("edge")
+        if not isinstance(edge, dict):
+            return None
+        return {
+            "dovie_event": "team_mission_edge_created",
+            "success": bool(data.get("success")),
+            "mission_id": str(data.get("mission_id") or "").strip(),
+            "edge": edge,
+            "graph_summary": data.get("graph_summary") if isinstance(data.get("graph_summary"), dict) else {},
+        }
+    if name == "team_mission_plan_complete":
+        if not data.get("mission_id"):
+            return None
+        return {
+            "dovie_event": "team_mission_plan_completed",
+            "success": bool(data.get("success")),
+            "mission_id": str(data.get("mission_id") or "").strip(),
+            "mission_status": str(data.get("mission_status") or "").strip(),
+            "approval_requests": data.get("approval_requests") if isinstance(data.get("approval_requests"), list) else [],
+            "auto_start_ready_nodes": bool(data.get("auto_start_ready_nodes")),
+            "graph_summary": data.get("graph_summary") if isinstance(data.get("graph_summary"), dict) else {},
+        }
+    if name == "design_agent_profile" and event_name == "agent_profile_design_context":
         return data
     if event_name not in {
         "agent_profile_draft_requested",
@@ -93,7 +176,7 @@ def _doxie_structured_tool_result(name: str, result: str) -> dict | None:
     if not isinstance(draft, dict):
         return None
     event = {
-        "doxie_event": event_name,
+        "dovie_event": event_name,
         "draft": draft,
     }
     operation = data.get("operation")
@@ -123,20 +206,47 @@ class GatewayToolEventBridge:
         emit: Callable[[str, str, dict | None], Any],
         tool_progress_enabled: Callable[[str], bool],
         session_cwd: Callable[[dict], str],
+        session_verbose: Callable[[str], bool] | None = None,
         tool_context: Callable[[str, dict], str] = default_tool_context,
         tool_args_payload: Callable[[dict | None], dict] = default_tool_args_payload,
+        tool_args_text: Callable[[dict], str] | None = None,
+        tool_result_text: Callable[[object], str] | None = None,
+        before_tool_boundary: Callable[[str, str], Any] | None = None,
+        thinking_event: str = "agent.musing",
     ) -> None:
         self._sessions = sessions
         self._emit = emit
         self._tool_progress_enabled = tool_progress_enabled
         self._session_cwd = session_cwd
+        self._session_verbose = session_verbose or (lambda _sid: False)
         self._tool_context = tool_context
         self._tool_args_payload = tool_args_payload
+        self._tool_args_text = tool_args_text
+        self._tool_result_text = tool_result_text
+        self._before_tool_boundary = before_tool_boundary
+        self._thinking_event = thinking_event
+
+    def _notify_tool_boundary(self, sid: str, event_type: str) -> None:
+        if self._before_tool_boundary is None:
+            return
+        try:
+            self._before_tool_boundary(sid, event_type)
+        except Exception:
+            pass
+
+    def on_tool_generating(self, sid: str, name: str | None) -> None:
+        session = self._sessions.get(sid)
+        if session_interrupted(session):
+            return
+        self._notify_tool_boundary(sid, "tool.generating")
+        if self._tool_progress_enabled(sid):
+            self._emit("tool.generating", sid, {"name": name})
 
     def on_tool_start(self, sid: str, tool_call_id: str, name: str, args: dict) -> None:
         session = self._sessions.get(sid)
         if session_interrupted(session):
             return
+        self._notify_tool_boundary(sid, "tool.start")
         enabled = self._tool_progress_enabled(sid)
         if session is not None:
             try:
@@ -149,16 +259,27 @@ class GatewayToolEventBridge:
                 pass
             session.setdefault("tool_started_at", {})[tool_call_id] = time.time()
         if enabled:
-            self._emit(
-                "tool.start",
-                sid,
-                {
-                    "tool_id": tool_call_id,
-                    "name": name,
-                    "context": self._tool_context(name, args),
-                    "arguments": self._tool_args_payload(args),
-                },
-            )
+            payload = {
+                "tool_id": tool_call_id,
+                "name": name,
+                "context": self._tool_context(name, args),
+                "arguments": self._tool_args_payload(args),
+            }
+            if self._session_verbose(sid) and self._tool_args_text:
+                args_text = self._tool_args_text(args)
+                if args_text:
+                    payload["args_text"] = args_text
+            self._emit("tool.start", sid, payload)
+            if name == "test_agent_profile":
+                self._emit(
+                    "agent_profile_test.start",
+                    sid,
+                    {
+                        "tool_id": tool_call_id,
+                        "name": name,
+                        "arguments": self._tool_args_payload(args),
+                    },
+                )
 
     def on_tool_complete(self, sid: str, tool_call_id: str, name: str, args: dict, result: str) -> None:
         session = self._sessions.get(sid)
@@ -181,9 +302,13 @@ class GatewayToolEventBridge:
         summary = _tool_summary(name, result, duration_s)
         if summary:
             payload["summary"] = summary
-        doxie_result = _doxie_structured_tool_result(name, result)
-        if doxie_result:
-            payload["result"] = doxie_result
+        if self._tool_result_text:
+            result_text = self._tool_result_text(result)
+            if result_text:
+                payload["result_text"] = result_text
+        dovie_result = _dovie_structured_tool_result(name, result)
+        if dovie_result:
+            payload["result"] = dovie_result
         if name == "todo":
             try:
                 data = json.loads(result)
@@ -206,8 +331,10 @@ class GatewayToolEventBridge:
         except Exception:
             pass
         enabled = self._tool_progress_enabled(sid)
-        if enabled or payload.get("inline_diff") or doxie_result:
+        if enabled or payload.get("inline_diff") or dovie_result:
             self._emit("tool.complete", sid, payload)
+            if name == "test_agent_profile":
+                self._emit("agent_profile_test.complete", sid, payload)
         self.emit_artifacts_from_tool_complete(sid, tool_call_id, name, args, result)
 
     def emit_artifacts_from_tool_complete(
@@ -253,21 +380,52 @@ class GatewayToolEventBridge:
         _args: dict | None = None,
         **kwargs,
     ) -> None:
-        if session_interrupted(self._sessions.get(sid)) or not self._tool_progress_enabled(sid):
+        session = self._sessions.get(sid)
+        if session_interrupted(session) or not self._tool_progress_enabled(sid):
             return
         if event_type == "tool.started" and name:
+            self._emit("tool.progress", sid, {"name": name, "preview": preview or ""})
             return
         if event_type == "reasoning.available" and preview:
-            self._emit("reasoning.available", sid, {"text": str(preview)})
+            payload: dict[str, object] = {"text": str(preview)}
+            if self._session_verbose(sid):
+                payload["verbose"] = True
+            self._emit("reasoning.available", sid, payload)
             return
         if not event_type.startswith("subagent."):
             return
+        pending_turn = session.get("pending_turn") if isinstance(session, dict) else {}
+        pending_turn = pending_turn if isinstance(pending_turn, dict) else {}
         payload = {
-            "goal": str(kwargs.get("goal") or ""),
-            "task_count": int(kwargs.get("task_count") or 1),
-            "task_index": int(kwargs.get("task_index") or 0),
+            key: value
+            for key, value in {
+                "goal": str(kwargs.get("goal") or ""),
+                "task_count": int(kwargs.get("task_count") or 1),
+                "task_index": int(kwargs.get("task_index") or 0),
+                "run_id": str((session or {}).get("active_run_id") or ""),
+                "turn_id": str((session or {}).get("active_turn_id") or ""),
+                "client_message_id": str(pending_turn.get("client_message_id") or ""),
+            }.items()
+            if value != ""
         }
-        for field in ("subagent_id", "parent_id", "model", "status", "summary"):
+        for field in (
+            "subagent_id",
+            "parent_id",
+            "model",
+            "provider",
+            "status",
+            "summary",
+            "role",
+            "context",
+            "dispatch_message",
+            "delegate_call_id",
+            "tool_call_id",
+            "tool_id",
+            "agent_profile_id",
+            "agent_profile_version_id",
+            "agent_name",
+            "agent_avatar",
+        ):
             if kwargs.get(field):
                 payload[field] = str(kwargs[field])
         if kwargs.get("depth") is not None:
@@ -295,13 +453,54 @@ class GatewayToolEventBridge:
             payload["output_tail"] = list(kwargs["output_tail"])
         if name:
             payload["tool_name"] = str(name)
+        if _args:
+            payload["arguments"] = self._tool_args_payload(_args)
         if preview:
             payload["text"] = str(preview)
         if kwargs.get("duration_seconds") is not None:
             payload["duration_seconds"] = float(kwargs["duration_seconds"])
+        raw_result = kwargs.get("result")
+        if event_type == "subagent.tool" and raw_result is not None:
+            result_str = raw_result if isinstance(raw_result, str) else str(raw_result)
+            summary = _tool_summary(str(name or ""), result_str, payload.get("duration_seconds"))
+            if summary:
+                payload["summary"] = summary
+            if self._tool_result_text:
+                result_text = self._tool_result_text(result_str)
+                if result_text:
+                    payload["result_text"] = result_text
+            dovie_result = _dovie_structured_tool_result(str(name or ""), result_str)
+            if dovie_result:
+                payload["result"] = dovie_result
+            try:
+                from agent.display import render_edit_diff_with_delta
+
+                rendered: list[str] = []
+                if render_edit_diff_with_delta(
+                    str(name or ""),
+                    result_str,
+                    function_args=_args,
+                    snapshot=None,
+                    print_fn=rendered.append,
+                ):
+                    payload["inline_diff"] = "\n".join(rendered)
+            except Exception:
+                pass
         if preview and event_type == "subagent.tool":
             payload["tool_preview"] = str(preview)
             payload["text"] = str(preview)
+        if name == "test_agent_profile":
+            mapped_type = {
+                "subagent.output_delta": "agent_profile_test.output_delta",
+                "subagent.reasoning_delta": "agent_profile_test.thinking",
+                "subagent.thinking": "agent_profile_test.thinking",
+                "subagent.tool": "agent_profile_test.tool",
+                "subagent.progress": "agent_profile_test.progress",
+                "subagent.complete": "agent_profile_test.complete",
+            }.get(event_type)
+            if mapped_type:
+                self._emit(mapped_type, sid, payload)
+                return
         self._emit(event_type, sid, payload)
 
     def agent_callbacks(
@@ -319,11 +518,16 @@ class GatewayToolEventBridge:
             "tool_progress_callback": lambda event_type, name=None, preview=None, args=None, **kwargs: self.on_tool_progress(
                 sid, event_type, name, preview, args, **kwargs
             ),
-            "tool_gen_callback": lambda name: self._tool_progress_enabled(sid)
-            and self._emit("tool.generating", sid, {"name": name}),
-            "thinking_callback": lambda text: self._emit("agent.musing", sid, {"text": text}),
+            "tool_gen_callback": lambda name: self.on_tool_generating(sid, name),
+            "thinking_callback": lambda text: self._emit(self._thinking_event, sid, {"text": text}),
             "reasoning_callback": lambda text: self._emit(
-                "reasoning.delta", sid, {"text": text, "source": "provider_reasoning"}
+                "reasoning.delta",
+                sid,
+                {
+                    "text": text,
+                    "source": "provider_reasoning",
+                    **({"verbose": True} if self._session_verbose(sid) else {}),
+                },
             ),
             "status_callback": lambda kind, text=None: status_update(
                 sid, str(kind), None if text is None else str(text)

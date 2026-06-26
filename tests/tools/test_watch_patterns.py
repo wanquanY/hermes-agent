@@ -13,6 +13,7 @@ Covers:
 import json
 import queue
 import time
+from types import SimpleNamespace
 import pytest
 from unittest.mock import patch
 
@@ -421,6 +422,181 @@ class TestMutualExclusion:
         )
         assert resolved == ["ERROR"]
         assert note == ""
+
+
+class TestTerminalNotificationRouting:
+    def test_watch_patterns_do_not_bind_stale_env_without_context(
+        self, monkeypatch, tmp_path
+    ):
+        """Gateway watch routing must not trust process-global env fallback."""
+        from gateway.session_context import _UNSET, _VAR_MAP
+        from tools import terminal_tool as terminal_module
+        from tools.process_registry import process_registry
+
+        for var in _VAR_MAP.values():
+            var.set(_UNSET)
+
+        monkeypatch.setenv("HERMES_SESSION_KEY", "agent:main:telegram:dm:wrong")
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+        monkeypatch.setenv("TERMINAL_ENV", "local")
+        monkeypatch.setattr(terminal_module, "_start_cleanup_thread", lambda: None)
+        monkeypatch.setattr(
+            terminal_module,
+            "_resolve_container_task_id",
+            lambda task_id: "default",
+        )
+        monkeypatch.setattr(
+            terminal_module,
+            "_get_env_config",
+            lambda: {
+                "env_type": "local",
+                "docker_image": "",
+                "singularity_image": "",
+                "modal_image": "",
+                "daytona_image": "",
+                "cwd": str(tmp_path),
+                "timeout": 30,
+                "local_persistent": False,
+                "host_cwd": None,
+            },
+        )
+        monkeypatch.setattr(
+            terminal_module,
+            "_active_environments",
+            {"default": SimpleNamespace(env={})},
+        )
+        monkeypatch.setattr(terminal_module, "_last_activity", {})
+
+        captured = {}
+
+        def fake_spawn_local(
+            command,
+            cwd=None,
+            task_id="",
+            session_key="",
+            env_vars=None,
+            use_pty=False,
+        ):
+            session = ProcessSession(
+                id="proc_route_test",
+                command=command,
+                task_id=task_id,
+                session_key=session_key,
+                cwd=cwd,
+                started_at=time.time(),
+            )
+            captured["initial_session_key"] = session_key
+            captured["session"] = session
+            return session
+
+        monkeypatch.setattr(process_registry, "spawn_local", fake_spawn_local)
+
+        raw = terminal_module.terminal_tool(
+            "echo ready",
+            background=True,
+            watch_patterns=["ready"],
+            force=True,
+            workdir=str(tmp_path),
+        )
+
+        result = json.loads(raw)
+        session = captured["session"]
+        assert result["watch_patterns"] == ["ready"]
+        assert captured["initial_session_key"] == "agent:main:telegram:dm:wrong"
+        assert session.session_key == ""
+        assert session.watcher_platform == ""
+        assert session.watcher_chat_id == ""
+
+    def test_watch_patterns_bind_current_context(self, monkeypatch, tmp_path):
+        """When ContextVar routing exists, watch notifications keep that owner."""
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools import terminal_tool as terminal_module
+        from tools.process_registry import process_registry
+
+        monkeypatch.setenv("HERMES_SESSION_KEY", "agent:main:telegram:dm:wrong")
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+        monkeypatch.setenv("TERMINAL_ENV", "local")
+        monkeypatch.setattr(terminal_module, "_start_cleanup_thread", lambda: None)
+        monkeypatch.setattr(
+            terminal_module,
+            "_resolve_container_task_id",
+            lambda task_id: "default",
+        )
+        monkeypatch.setattr(
+            terminal_module,
+            "_get_env_config",
+            lambda: {
+                "env_type": "local",
+                "docker_image": "",
+                "singularity_image": "",
+                "modal_image": "",
+                "daytona_image": "",
+                "cwd": str(tmp_path),
+                "timeout": 30,
+                "local_persistent": False,
+                "host_cwd": None,
+            },
+        )
+        monkeypatch.setattr(
+            terminal_module,
+            "_active_environments",
+            {"default": SimpleNamespace(env={})},
+        )
+        monkeypatch.setattr(terminal_module, "_last_activity", {})
+
+        captured = {}
+
+        def fake_spawn_local(
+            command,
+            cwd=None,
+            task_id="",
+            session_key="",
+            env_vars=None,
+            use_pty=False,
+        ):
+            session = ProcessSession(
+                id="proc_context_route_test",
+                command=command,
+                task_id=task_id,
+                session_key=session_key,
+                cwd=cwd,
+                started_at=time.time(),
+            )
+            captured["session"] = session
+            return session
+
+        monkeypatch.setattr(process_registry, "spawn_local", fake_spawn_local)
+
+        tokens = set_session_vars(
+            platform="tui",
+            chat_id="right-chat",
+            thread_id="right-thread",
+            user_id="right-user",
+            user_name="Kai",
+            session_key="agent:main:tui:dm:right-chat:right-thread",
+            message_id="msg-1",
+        )
+        try:
+            raw = terminal_module.terminal_tool(
+                "echo ready",
+                background=True,
+                watch_patterns=["ready"],
+                force=True,
+                workdir=str(tmp_path),
+            )
+        finally:
+            clear_session_vars(tokens)
+
+        result = json.loads(raw)
+        session = captured["session"]
+        assert result["watch_patterns"] == ["ready"]
+        assert session.session_key == "agent:main:tui:dm:right-chat:right-thread"
+        assert session.watcher_platform == "tui"
+        assert session.watcher_chat_id == "right-chat"
+        assert session.watcher_thread_id == "right-thread"
+        assert session.watcher_user_id == "right-user"
+        assert session.watcher_user_name == "Kai"
+        assert session.watcher_message_id == "msg-1"
 
 
 # =========================================================================

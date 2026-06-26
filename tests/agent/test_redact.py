@@ -144,6 +144,48 @@ class TestAuthHeaders:
         result = redact_sensitive_text(text)
         assert "mytoken12345" not in result
 
+    def test_basic_auth_credentials_masked(self):
+        # base64 of "user:longpassword1234" — leaks user:pass if not redacted.
+        text = "Authorization: Basic dXNlcjpsb25ncGFzc3dvcmQxMjM0"
+        result = redact_sensitive_text(text)
+        assert "Authorization: Basic" in result
+        assert "dXNlcjpsb25ncGFzc3dvcmQxMjM0" not in result
+
+    def test_token_scheme_masked(self):
+        text = "Authorization: token opaque-credential-1234567890"
+        result = redact_sensitive_text(text)
+        assert "Authorization: token" in result
+        assert "opaque-credential" not in result
+
+    def test_proxy_authorization_masked(self):
+        text = "Proxy-Authorization: Basic dXNlcjpzdXBlcnNlY3JldDEyMzQ="
+        result = redact_sensitive_text(text)
+        assert "dXNlcjpzdXBlcnNlY3JldDEyMzQ=" not in result
+
+    def test_authorization_prose_unchanged(self):
+        # "authorization" without a colon-delimited value is plain prose.
+        text = "the authorization model is fully open"
+        assert redact_sensitive_text(text) == text
+
+
+class TestApiKeyHeaders:
+    def test_x_api_key_header_masked(self):
+        text = "x-api-key: opaque-provider-key-1234567890"
+        result = redact_sensitive_text(text)
+        assert "x-api-key:" in result
+        assert "opaque-provider-key" not in result
+
+    def test_x_api_key_in_curl_command_masked(self):
+        text = 'curl -H "x-api-key: sk-local-VERYsecret-999888" https://api.example.com'
+        result = redact_sensitive_text(text)
+        assert "VERYsecret" not in result
+        assert "https://api.example.com" in result
+
+    def test_api_key_header_masked(self):
+        text = "api-key: anotherOpaqueSecret1234567"
+        result = redact_sensitive_text(text)
+        assert "anotherOpaqueSecret" not in result
+
 
 class TestTelegramTokens:
     def test_bot_token(self):
@@ -511,3 +553,29 @@ class TestFormBodyRedaction:
         text = "first=1\nsecond=2"
         # Should pass through (still subject to other redactors)
         assert "first=1" in redact_sensitive_text(text)
+
+
+class TestXaiToken:
+    KEY = "xai-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstu"
+
+    def test_bare_token_masked(self):
+        result = redact_sensitive_text(f"using key {self.KEY}", force=True)
+        assert self.KEY not in result
+        assert "xai-AB" in result
+
+    def test_env_assignment_masked(self):
+        result = redact_sensitive_text(f"XAI_API_KEY={self.KEY}", force=True)
+        assert self.KEY not in result
+
+    def test_too_short_not_masked(self):
+        short = "xai-tooshort"
+        result = redact_sensitive_text(f"text {short} here", force=True)
+        assert short in result
+
+    def test_company_name_not_masked(self):
+        result = redact_sensitive_text("xai is a company", force=True)
+        assert result == "xai is a company"
+
+    def test_prefix_visible_in_masked_output(self):
+        result = redact_sensitive_text(self.KEY, force=True)
+        assert result.startswith("xai-AB")

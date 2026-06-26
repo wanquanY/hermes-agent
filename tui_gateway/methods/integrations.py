@@ -553,17 +553,17 @@ def _failure_messages(url: str, port: int, system: str) -> list[str]:
 
     command = manual_chrome_debug_command(port, system)
     hint = (
-        ["Start Chrome with remote debugging, then retry /browser connect:", command]
+        ["Start a Chromium-family browser with remote debugging, then retry /browser connect:", command]
         if command
         else [
-            "No Chrome/Chromium executable was found in this environment.",
-            f"Install one or start Chrome with --remote-debugging-port={port}, then retry /browser connect.",
+            "No supported Chromium-family browser executable was found in this environment.",
+            f"Install one or start a Chromium-family browser with --remote-debugging-port={port}, then retry /browser connect.",
         ]
     )
     return [
-        f"Chrome is not reachable at {url}.",
+        f"Chromium-family browser is not reachable at {url}.",
         *hint,
-        "Browser not connected — start Chrome with remote debugging and retry /browser connect",
+        "Browser not connected — start a Chromium-family browser with remote debugging and retry /browser connect",
     ]
 
 
@@ -706,7 +706,7 @@ def _browser_connect(rid, params: dict) -> dict:
                 from hermes_cli.browser_connect import try_launch_chrome_debug
 
                 announce(
-                    "Chrome isn't running with remote debugging — attempting to launch..."
+                    "Chromium-family browser isn't running with remote debugging — attempting to launch..."
                 )
 
                 if try_launch_chrome_debug(port, system):
@@ -717,7 +717,7 @@ def _browser_connect(rid, params: dict) -> dict:
                             break
 
                 if ok:
-                    announce(f"Chrome launched and listening on port {port}")
+                    announce(f"Chromium-family browser launched and listening on port {port}")
                 else:
                     for line in _failure_messages(url, port, system)[1:]:
                         announce(line, level="error")
@@ -727,7 +727,7 @@ def _browser_connect(rid, params: dict) -> dict:
             elif not ok:
                 return _err(rid, 5031, f"could not reach browser CDP at {url}")
             elif _is_default_local_cdp(parsed):
-                announce(f"Chrome is already listening on port {port}")
+                announce(f"Chromium-family browser is already listening on port {port}")
 
         normalized = _normalize_cdp_url(parsed)
 
@@ -1040,7 +1040,7 @@ def _(rid, params: dict) -> dict:
 @method("cron.manage")
 def _(rid, params: dict) -> dict:
     try:
-        from tui_gateway.services.doxie_cron_jobs import manage_cron
+        from tui_gateway.services.dovie_cron_jobs import manage_cron
 
         return _ok(rid, manage_cron(params))
     except Exception as e:
@@ -1070,10 +1070,32 @@ def _clear_skill_prompt_cache() -> None:
         pass
 
 
-def _sync_skill_module_paths_to_active_home() -> None:
-    """Keep legacy skill modules aligned with the active Doxie profile home.
+def _invalidate_live_agent_skill_prompts() -> int:
+    """Force existing sessions to rebuild skill-aware system prompts."""
+    try:
+        from agent.system_prompt import invalidate_system_prompt
+    except Exception:
+        return 0
 
-    The gateway can serve many Doxie profile/draft scopes in one process. Some
+    count = 0
+    for session in list(_sessions.values()):
+        if not isinstance(session, dict):
+            continue
+        agent = session.get("agent")
+        if agent is None:
+            continue
+        try:
+            invalidate_system_prompt(agent)
+            count += 1
+        except Exception:
+            pass
+    return count
+
+
+def _sync_skill_module_paths_to_active_home() -> None:
+    """Keep legacy skill modules aligned with the active Dovie profile home.
+
+    The gateway can serve many Dovie profile/draft scopes in one process. Some
     older skill modules cache paths such as SKILLS_DIR at import time, so an
     already-imported module must be realigned after server.py enters the
     request profile context.
@@ -1498,10 +1520,12 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     try:
         _sync_skill_module_paths_to_active_home()
+        _clear_skill_prompt_cache()
 
         from agent.skill_commands import reload_skills
 
         result = reload_skills()
+        invalidated_prompt_sessions = _invalidate_live_agent_skill_prompts()
         added = result.get("added") or []
         removed = result.get("removed") or []
         total = int(result.get("total") or 0)
@@ -1516,6 +1540,13 @@ def _(rid, params: dict) -> dict:
             lines.append("Removed skills:")
             lines.extend(f"  - {item.get('name', '')}" for item in removed)
         lines.append(f"{total} skill(s) available")
-        return _ok(rid, {"output": "\n".join(lines), "result": result})
+        return _ok(
+            rid,
+            {
+                "output": "\n".join(lines),
+                "result": result,
+                "invalidated_prompt_sessions": invalidated_prompt_sessions,
+            },
+        )
     except Exception as e:
         return _err(rid, 5025, str(e))

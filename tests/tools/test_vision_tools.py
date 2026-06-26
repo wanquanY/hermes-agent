@@ -16,6 +16,8 @@ from tools.vision_tools import (
     _determine_mime_type,
     _image_to_base64_data_url,
     _resize_image_for_vision,
+    _image_exceeds_dimension,
+    _EMBED_MAX_DIMENSION,
     _is_image_size_error,
     _MAX_BASE64_BYTES,
     _RESIZE_TARGET_BYTES,
@@ -884,10 +886,83 @@ class TestResizeImageForVision:
         with patch("tools.vision_tools._image_to_base64_data_url") as mock_b64:
             # Simulate a large base64 result
             mock_b64.return_value = "data:image/png;base64," + "A" * 200
-            with patch.dict("sys.modules", {"PIL": None, "PIL.Image": None}):
-                result = _resize_image_for_vision(path, max_base64_bytes=100)
-                # Should return the original (oversized) data url
-                assert len(result) > 100
+            with patch("tools.lazy_deps.ensure", side_effect=RuntimeError("disabled")):
+                with patch.dict("sys.modules", {"PIL": None, "PIL.Image": None}):
+                    result = _resize_image_for_vision(path, max_base64_bytes=100)
+                    # Should return the original (oversized) data url
+                    assert len(result) > 100
+
+    def test_resize_enforces_max_dimension_when_bytes_are_small(self, tmp_path):
+        """Tall small-byte images should still be resized for provider pixel caps."""
+        try:
+            from PIL import Image
+        except ImportError:
+            pytest.skip("Pillow not installed")
+        img = Image.new("RGB", (120, _EMBED_MAX_DIMENSION + 600), (40, 40, 40))
+        path = tmp_path / "tall.png"
+        img.save(path, "PNG")
+
+        result = _resize_image_for_vision(
+            path,
+            mime_type="image/png",
+            max_base64_bytes=_RESIZE_TARGET_BYTES,
+            max_dimension=_EMBED_MAX_DIMENSION,
+        )
+
+        import base64
+        from io import BytesIO
+
+        raw = base64.b64decode(result.split(",", 1)[1])
+        resized = Image.open(BytesIO(raw))
+        assert max(resized.size) <= _EMBED_MAX_DIMENSION
+
+
+# ---------------------------------------------------------------------------
+# _image_exceeds_dimension — proactive embed-time pixel cap detector
+# ---------------------------------------------------------------------------
+
+
+class TestImageExceedsDimension:
+    def test_tall_small_byte_image_flagged(self, tmp_path):
+        try:
+            from PIL import Image
+        except ImportError:
+            pytest.skip("Pillow not installed")
+        img = Image.new("RGB", (1200, _EMBED_MAX_DIMENSION + 100), (40, 40, 40))
+        path = tmp_path / "tall.png"
+        img.save(path, "PNG")
+        assert _image_exceeds_dimension(path, _EMBED_MAX_DIMENSION) is True
+
+    def test_small_image_not_flagged(self, tmp_path):
+        try:
+            from PIL import Image
+        except ImportError:
+            pytest.skip("Pillow not installed")
+        img = Image.new("RGB", (800, 600), (10, 200, 10))
+        path = tmp_path / "small.png"
+        img.save(path, "PNG")
+        assert _image_exceeds_dimension(path, _EMBED_MAX_DIMENSION) is False
+
+    def test_exactly_at_cap_not_flagged(self, tmp_path):
+        try:
+            from PIL import Image
+        except ImportError:
+            pytest.skip("Pillow not installed")
+        img = Image.new("RGB", (_EMBED_MAX_DIMENSION, 10), (1, 2, 3))
+        path = tmp_path / "edge.png"
+        img.save(path, "PNG")
+        assert _image_exceeds_dimension(path, _EMBED_MAX_DIMENSION) is False
+
+    def test_missing_pillow_returns_false(self, tmp_path):
+        path = tmp_path / "x.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+        with patch.dict("sys.modules", {"PIL": None, "PIL.Image": None}):
+            assert _image_exceeds_dimension(path, _EMBED_MAX_DIMENSION) is False
+
+    def test_corrupt_file_returns_false(self, tmp_path):
+        path = tmp_path / "corrupt.png"
+        path.write_bytes(b"not an image at all")
+        assert _image_exceeds_dimension(path, _EMBED_MAX_DIMENSION) is False
 
 
 # ---------------------------------------------------------------------------
@@ -909,6 +984,11 @@ class TestIsImageSizeError:
 
     def test_exceeds_limit(self):
         assert _is_image_size_error(Exception("Image exceeds maximum size"))
+
+    def test_dimension_cap_message(self):
+        assert _is_image_size_error(
+            Exception("image dimensions exceed max allowed size: 8000 pixels")
+        )
 
     def test_unrelated_error(self):
         assert not _is_image_size_error(Exception("Connection refused"))

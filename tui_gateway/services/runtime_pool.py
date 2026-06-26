@@ -37,6 +37,30 @@ def _is_execution_runtime(session: dict[str, Any]) -> bool:
     return session.get("agent") is not None or session.get("agent_ready") is not None
 
 
+def _context_mode_from_params(params: dict[str, Any] | None) -> str:
+    raw = (
+        (params or {}).get("agent_context_mode")
+        or (params or {}).get("agentContextMode")
+        or (params or {}).get("runtime_context_mode")
+        or (params or {}).get("runtimeContextMode")
+        or ""
+    )
+    mode = str(raw or "").strip().lower().replace("-", "_")
+    if mode in {"team_leader", "leader_conversation"}:
+        return "team_leader"
+    if mode in {"profile", "profile_conversation", "default"}:
+        return "profile"
+    return ""
+
+
+def _context_mode_matches(session: dict[str, Any], params: dict[str, Any]) -> bool:
+    expected = _context_mode_from_params(params)
+    if not expected:
+        return True
+    current = _context_mode_from_params(session)
+    return not current or current == expected
+
+
 def acquire_runtime_lease(
     *,
     rid: str,
@@ -76,7 +100,10 @@ def acquire_runtime_lease(
             or session.get("active_runtime_scope_key")
             or ""
         ).strip()
-        if not expected_scope or not current_scope or current_scope == expected_scope:
+        if (
+            (not expected_scope or not current_scope or current_scope == expected_scope)
+            and _context_mode_matches(session, params)
+        ):
             session["transport"] = transport or session.get("transport") or fallback_transport
             return RuntimeLease(runtime_session_id=sid, session=session, reused=True)
 

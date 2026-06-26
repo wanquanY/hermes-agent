@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 
 from tui_gateway import server
 from tui_gateway.methods import session as session_methods
@@ -42,9 +43,9 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
             "method": "session.messages",
             "params": {
                 "session_id": "stored-session",
-                "doxie_profile": {
+                "dovie_profile": {
                     "hermesHomePath": str(profile_home),
-                    "env": {"DOXIE_TEST_PROFILE_ENV": "must-not-leak"},
+                    "env": {"DOVIE_TEST_PROFILE_ENV": "must-not-leak"},
                 },
             },
         }
@@ -53,4 +54,44 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
     assert "error" not in resp
     assert resp["result"]["messages"] == [{"role": "user", "text": "hello"}]
     assert seen["home"] == str(profile_home.resolve())
-    assert os.environ.get("DOXIE_TEST_PROFILE_ENV") is None
+    assert os.environ.get("DOVIE_TEST_PROFILE_ENV") is None
+
+
+def test_control_plane_db_selection_uses_process_home_for_active_and_default(monkeypatch, tmp_path):
+    """Profile context must not move control-plane DB reads out of process home."""
+
+    process_home = tmp_path / "process-home"
+    profile_home = tmp_path / "profile-home"
+    seen: dict[str, str] = {}
+
+    def fake_get_session_db_for_home(**kwargs):
+        seen["active_home"] = str(kwargs["active_home"])
+        seen["default_home"] = str(kwargs["default_home"])
+        return SimpleNamespace(
+            db=object(),
+            default_db=kwargs["default_db"],
+            default_error=kwargs["default_error"],
+        )
+
+    monkeypatch.setattr(server, "_hermes_home", process_home)
+    monkeypatch.setattr(server, "_db", object())
+    monkeypatch.setattr(server, "_db_error", None)
+    monkeypatch.setattr(server, "_get_session_db_for_home", fake_get_session_db_for_home)
+
+    token = server._enter_profile_context(
+        server._profile_context_for_params({
+            "dovie_profile": {
+                "id": "agent-default",
+                "hermesHomePath": str(profile_home),
+            },
+        })
+    )
+    try:
+        server._get_db()
+    finally:
+        server._leave_profile_context(token)
+
+    assert seen == {
+        "active_home": str(process_home.resolve()),
+        "default_home": str(process_home.resolve()),
+    }

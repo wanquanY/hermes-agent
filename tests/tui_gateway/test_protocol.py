@@ -84,6 +84,121 @@ def test_write_json_broken_pipe(server):
     assert server.write_json({"x": 1}) is False
 
 
+def test_message_delta_normalizer_holds_trailing_newlines_until_more_text():
+    from tui_gateway.methods.prompt import _MessageDeltaNormalizer
+
+    normalizer = _MessageDeltaNormalizer()
+
+    assert normalizer.feed("让我继续读取") == {
+        "mode": "append",
+        "text": "让我继续读取",
+        "delta": "让我继续读取",
+        "offset": 0,
+    }
+    assert normalizer.feed("。\n\n") == {
+        "mode": "append",
+        "text": "。",
+        "delta": "。",
+        "offset": 6,
+    }
+    assert normalizer.feed("下一段") == {
+        "mode": "append",
+        "text": "\n\n下一段",
+        "delta": "\n\n下一段",
+        "offset": 7,
+    }
+
+
+def test_message_delta_normalizer_discards_trailing_newlines_on_tool_boundary():
+    from tui_gateway.methods.prompt import _MessageDeltaNormalizer
+
+    normalizer = _MessageDeltaNormalizer()
+
+    assert normalizer.feed("让我继续读取。\n\n") == {
+        "mode": "append",
+        "text": "让我继续读取。",
+        "delta": "让我继续读取。",
+        "offset": 0,
+    }
+    assert normalizer.feed(None) is None
+    assert normalizer.feed("工具后正文") == {
+        "mode": "append",
+        "text": "工具后正文",
+        "delta": "工具后正文",
+        "offset": 7,
+    }
+
+
+def test_message_delta_normalizer_preserves_append_chunk_matching_prior_prefix():
+    from tui_gateway.methods.prompt import _MessageDeltaNormalizer
+
+    normalizer = _MessageDeltaNormalizer()
+
+    assert normalizer.feed("文件已创建完成。") == {
+        "mode": "append",
+        "text": "文件已创建完成。",
+        "delta": "文件已创建完成。",
+        "offset": 0,
+    }
+    assert normalizer.feed("\n- **") == {
+        "mode": "append",
+        "text": "\n- **",
+        "delta": "\n- **",
+        "offset": 8,
+    }
+    assert normalizer.feed("文件名**") == {
+        "mode": "append",
+        "text": "文件名**",
+        "delta": "文件名**",
+        "offset": 13,
+    }
+    assert normalizer.text == "文件已创建完成。\n- **文件名**"
+
+
+def test_message_delta_normalizer_accepts_explicit_snapshot_only():
+    from tui_gateway.methods.prompt import _MessageDeltaNormalizer
+
+    normalizer = _MessageDeltaNormalizer()
+
+    assert normalizer.feed("你好") == {
+        "mode": "append",
+        "text": "你好",
+        "delta": "你好",
+        "offset": 0,
+    }
+    assert normalizer.feed({"mode": "snapshot", "text": "你好，世界"}) == {
+        "mode": "append",
+        "text": "，世界",
+        "delta": "，世界",
+        "offset": 2,
+    }
+
+
+def test_message_delta_normalizer_offsets_use_utf16_code_units():
+    from tui_gateway.methods.prompt import _MessageDeltaNormalizer
+
+    normalizer = _MessageDeltaNormalizer()
+
+    assert normalizer.feed("📋") == {
+        "mode": "append",
+        "text": "📋",
+        "delta": "📋",
+        "offset": 0,
+    }
+    assert normalizer.feed(" 表格") == {
+        "mode": "append",
+        "text": " 表格",
+        "delta": " 表格",
+        "offset": 2,
+    }
+    assert normalizer.feed({"mode": "snapshot", "text": "📋 表格✅"}) == {
+        "mode": "append",
+        "text": "✅",
+        "delta": "✅",
+        "offset": 5,
+    }
+
+
 def test_write_json_closed_stream_returns_false(server):
     """ValueError ('I/O on closed file') used to bubble up; treat as gone."""
 
@@ -233,6 +348,30 @@ def test_emit_without_payload(capture):
     assert "payload" not in json.loads(buf.getvalue())["params"]
 
 
+def test_emit_realtime_frame_includes_stable_run_metadata(capture):
+    server, buf = capture
+    server._sessions["runtime-meta"] = {
+        "session_key": "stored-meta",
+        "active_run_id": "run-meta",
+        "active_turn_id": "turn-meta",
+        "active_runtime_scope_key": "scope-meta",
+        "transport": None,
+    }
+
+    server._emit("message.delta", "runtime-meta", {"text": "hi"})
+    params = json.loads(buf.getvalue())["params"]
+
+    assert params["session_id"] == "runtime-meta"
+    assert params["runtime_session_id"] == "runtime-meta"
+    assert params["stored_session_id"] == "stored-meta"
+    assert params["run_id"] == "run-meta"
+    assert params["turn_id"] == "turn-meta"
+    assert params["runtime_scope_key"] == "scope-meta"
+    assert isinstance(params["seq"], int)
+    assert params["seq"] > 0
+    assert params["payload"]["text"] == "hi"
+
+
 # ── Blocking prompt round-trip ───────────────────────────────────────
 
 
@@ -344,7 +483,7 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
     assert resp["result"]["messages"] == [
         {"role": "user", "text": "hello"},
         {"role": "assistant", "text": "yo"},
-        {"role": "tool", "name": "tool", "context": ""},
+        {"role": "tool", "name": "tool", "context": "", "result_text": "searched"},
     ]
 
 
@@ -394,6 +533,180 @@ def test_session_resume_reuses_live_running_runtime(server, monkeypatch):
     make_agent.assert_not_called()
 
 
+def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server, monkeypatch):
+    class _DB:
+        def __init__(self):
+            self.replaced = None
+
+        def get_session(self, sid):
+            return {"id": sid} if sid == "stored-1" else None
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def get_messages_as_conversation(
+            self,
+            _sid,
+            include_ancestors=False,
+            include_storage_metadata=False,
+        ):
+            return [
+                {
+                    "role": "user",
+                    "content": "hidden attachment context",
+                    "metadata": {
+                        "turn_id": "turn-1",
+                        "draft_text": "请读这个文件",
+                        "attachments": [
+                            {
+                                "name": "spec.pdf",
+                                "path": "/tmp/spec.pdf",
+                                "mimeType": "application/pdf",
+                                "size": 123,
+                                "kind": "file",
+                            },
+                        ],
+                    },
+                },
+                {"role": "assistant", "content": "ok", "metadata": {"turn_id": "turn-1"}},
+                {
+                    "role": "user",
+                    "content": "next",
+                    "metadata": {"turn_id": "turn-2", "draft_text": "下一条"},
+                },
+            ]
+
+        def replace_messages(self, sid, messages):
+            self.replaced = (sid, messages)
+
+    db = _DB()
+    make_agent = MagicMock()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_make_agent", make_agent)
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "session.recall_turn",
+            "params": {"session_id": "stored-1", "turn_id": "turn-1"},
+        }
+    )
+
+    assert "error" not in resp
+    make_agent.assert_not_called()
+    assert db.replaced is not None
+    assert db.replaced[0] == "stored-1"
+    assert [message["metadata"]["turn_id"] for message in db.replaced[1]] == ["turn-2"]
+    assert resp["result"]["stored_session_id"] == "stored-1"
+    assert resp["result"]["removed_messages"] == 2
+    assert resp["result"]["draft"]["text"] == "请读这个文件"
+    assert resp["result"]["draft"]["attachments"][0]["name"] == "spec.pdf"
+    assert resp["result"]["messages"] == [
+        {
+            "role": "user",
+            "text": "next",
+            "metadata": {"turn_id": "turn-2", "draft_text": "下一条"},
+        },
+    ]
+
+
+def test_session_recall_turn_matches_stored_client_message_id(server, monkeypatch):
+    class _DB:
+        def __init__(self):
+            self.replaced = None
+
+        def get_session(self, sid):
+            return {"id": sid} if sid == "stored-1" else None
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def get_messages_as_conversation(
+            self,
+            _sid,
+            include_ancestors=False,
+            include_storage_metadata=False,
+        ):
+            return [
+                {
+                    "role": "user",
+                    "content": "hidden attachment context",
+                    "metadata": {
+                        "turn_id": "turn-canonical",
+                        "run_id": "run-canonical",
+                        "client_message_id": "client-msg-1",
+                        "draft_text": "恢复这个草稿",
+                    },
+                },
+                {"role": "assistant", "content": "ok", "metadata": {"turn_id": "turn-canonical"}},
+            ]
+
+        def replace_messages(self, sid, messages):
+            self.replaced = (sid, messages)
+
+    db = _DB()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_make_agent", MagicMock())
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "session.recall_turn",
+            "params": {
+                "session_id": "stored-1",
+                "turn_id": "turn-local",
+                "client_message_id": "client-msg-1",
+            },
+        }
+    )
+
+    assert "error" not in resp
+    assert db.replaced == ("stored-1", [])
+    assert resp["result"]["turn_id"] == "turn-local"
+    assert resp["result"]["draft"]["text"] == "恢复这个草稿"
+
+
+def test_session_recall_turn_matches_live_pending_run_id(server, monkeypatch):
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    live_agent = MagicMock()
+    server._sessions["runtime-live"] = {
+        "agent": live_agent,
+        "session_key": "stored-live",
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": True,
+        "active_run_id": "run-canonical",
+        "active_turn_id": "turn-canonical",
+        "pending_turn": {
+            "turn_id": "turn-canonical",
+            "run_id": "run-canonical",
+            "client_message_id": "client-msg-1",
+            "draft_text": "恢复 pending 草稿",
+        },
+        "run_started_at": 10,
+        "run_updated_at": 20,
+    }
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "session.recall_turn",
+            "params": {
+                "session_id": "runtime-live",
+                "turn_id": "turn-local",
+                "run_id": "run-canonical",
+                "client_message_id": "client-msg-1",
+            },
+        }
+    )
+
+    assert "error" not in resp
+    assert resp["result"]["draft"]["text"] == "恢复 pending 草稿"
+    assert server._sessions["runtime-live"]["running"] is False
+    assert server._sessions["runtime-live"]["pending_turn"] is None
+    live_agent.interrupt.assert_called_once()
+
+
 def test_session_status_returns_machine_readable_run_state(server):
     agent = MagicMock(model="gpt-test", provider="test-provider")
     agent.context_compressor = None
@@ -423,6 +736,120 @@ def test_session_status_returns_machine_readable_run_state(server):
     assert resp["result"]["active_run_id"] == "run-status"
     assert resp["result"]["run_started_at"] == 11
     assert resp["result"]["run_updated_at"] == 22
+
+
+def test_session_create_control_plane_only_accepts_tool_progress_mode(server, monkeypatch):
+    import importlib
+
+    importlib.reload(importlib.import_module("tui_gateway.methods.session"))
+
+    class _DB:
+        def __init__(self):
+            self.created = []
+
+        def create_session(self, session_id, source, model, transient=False):
+            self.created.append(
+                {
+                    "session_id": session_id,
+                    "source": source,
+                    "model": model,
+                    "transient": transient,
+                }
+            )
+
+    db = _DB()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_resolve_model", lambda: "gpt-test")
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "session.create",
+            "params": {
+                "control_plane_only": True,
+                "toolProgressMode": "verbose",
+                "transient": True,
+            },
+        }
+    )
+
+    assert "error" not in resp
+    assert resp["result"]["session_id"] == resp["result"]["stored_session_id"]
+    assert resp["result"]["info"]["control_plane_only"] is True
+    assert resp["result"]["info"]["lazy"] is True
+    assert resp["result"]["info"]["transient"] is True
+    assert db.created == [
+        {
+            "session_id": resp["result"]["stored_session_id"],
+            "source": "tui",
+            "model": "gpt-test",
+            "transient": True,
+        }
+    ]
+
+
+def test_approval_control_plane_methods_accept_stored_session_id(server, monkeypatch):
+    import importlib
+
+    importlib.reload(importlib.import_module("tui_gateway.methods.prompt"))
+
+    class _DB:
+        def get_session(self, session_id):
+            return {"id": session_id} if session_id == "stored-approval" else None
+
+    yolo_sessions = set()
+    approval_mod = types.SimpleNamespace(
+        is_session_yolo_enabled=lambda session_id: session_id in yolo_sessions,
+        enable_session_yolo=lambda session_id: yolo_sessions.add(session_id),
+        disable_session_yolo=lambda session_id: yolo_sessions.discard(session_id),
+        list_gateway_approvals=lambda session_id: [{"session_id": session_id}],
+        resolve_gateway_approval=lambda session_id, choice, resolve_all=False: {
+            "session_id": session_id,
+            "choice": choice,
+            "all": resolve_all,
+        },
+    )
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setitem(sys.modules, "tools.approval", approval_mod)
+
+    pending = server.handle_request(
+        {
+            "id": "pending",
+            "method": "approval.pending.list",
+            "params": {"session_id": "stored-approval"},
+        }
+    )
+    before = server.handle_request(
+        {
+            "id": "before",
+            "method": "approval.policy.get",
+            "params": {"stored_session_id": "stored-approval"},
+        }
+    )
+    updated = server.handle_request(
+        {
+            "id": "set",
+            "method": "approval.policy.set",
+            "params": {"session_id": "stored-approval", "mode": "full_access"},
+        }
+    )
+    after = server.handle_request(
+        {
+            "id": "after",
+            "method": "approval.policy.get",
+            "params": {"session_id": "stored-approval"},
+        }
+    )
+
+    assert "error" not in pending
+    assert pending["result"]["approvals"] == [{"session_id": "stored-approval"}]
+    assert "error" not in before
+    assert before["result"] == {"mode": "default", "yolo": False}
+    assert "error" not in updated
+    assert updated["result"] == {"mode": "full_access", "yolo": True}
+    assert "error" not in after
+    assert after["result"] == {"mode": "full_access", "yolo": True}
 
 
 def test_run_control_replays_events_and_tracks_status(capture):
@@ -474,6 +901,164 @@ def test_run_control_replays_events_and_tracks_status(capture):
     assert done["result"]["run"]["status"] == "completed"
 
 
+def test_terminal_event_releases_live_session_before_client_delivery(capture, monkeypatch):
+    server, _buf = capture
+    entered_write = threading.Event()
+    release_write = threading.Event()
+    observed_events = []
+    write_released = []
+
+    def _blocking_write_json(obj):
+        observed_events.append(obj)
+        params = obj.get("params") or {}
+        if obj.get("method") == "event" and params.get("type") == "message.complete":
+            entered_write.set()
+            write_released.append(release_write.wait(timeout=2))
+        return True
+
+    agent = MagicMock(model="gpt-test", provider="test-provider")
+    agent.context_compressor = None
+    server._sessions["runtime-terminal"] = {
+        "agent": agent,
+        "session_key": "stored-terminal",
+        "running": True,
+        "active_run_id": "run-terminal",
+        "active_turn_id": "turn-terminal",
+        "run_started_at": 11,
+        "run_updated_at": 22,
+        "history": [],
+        "history_lock": threading.Lock(),
+    }
+    monkeypatch.setattr(server, "write_json", _blocking_write_json)
+
+    emitter = threading.Thread(
+        target=server._emit,
+        args=(
+            "message.complete",
+            "runtime-terminal",
+            {
+                "run_id": "run-terminal",
+                "turn_id": "turn-terminal",
+                "status": "complete",
+            },
+        ),
+    )
+    emitter.start()
+
+    assert entered_write.wait(timeout=2)
+    try:
+        status = server.handle_request(
+            {
+                "id": "terminal-status",
+                "method": "session.status",
+                "params": {"stored_session_id": "stored-terminal"},
+            }
+        )
+    finally:
+        release_write.set()
+    emitter.join(timeout=2)
+
+    assert not emitter.is_alive()
+    assert observed_events
+    assert write_released == [True]
+    assert "error" not in status
+    assert status["result"]["running"] is False
+    assert status["result"]["active_run_id"] == ""
+    assert status["result"]["active_turn_id"] == ""
+
+
+def test_terminal_event_releases_live_session_before_subscription_delivery(capture):
+    server, _buf = capture
+    from tui_gateway.services import run_control
+
+    observed_statuses = []
+
+    class _StatusCheckingTransport:
+        def write(self, obj):
+            params = obj.get("params") or {}
+            if obj.get("method") == "event" and params.get("type") == "message.complete":
+                observed_statuses.append(
+                    server.handle_request(
+                        {
+                            "id": "subscriber-status",
+                            "method": "session.status",
+                            "params": {"stored_session_id": "stored-subscriber"},
+                        }
+                    )
+                )
+            return True
+
+    agent = MagicMock(model="gpt-test", provider="test-provider")
+    agent.context_compressor = None
+    server._sessions["runtime-subscriber"] = {
+        "agent": agent,
+        "session_key": "stored-subscriber",
+        "running": True,
+        "active_run_id": "run-subscriber",
+        "active_turn_id": "turn-subscriber",
+        "run_started_at": 11,
+        "run_updated_at": 22,
+        "history": [],
+        "history_lock": threading.Lock(),
+    }
+    subscription_id, _replay = run_control.subscribe_session_with_id(
+        stored_session_id="stored-subscriber",
+        transport=_StatusCheckingTransport(),
+    )
+
+    try:
+        server._emit(
+            "message.complete",
+            "runtime-subscriber",
+            {
+                "run_id": "run-subscriber",
+                "turn_id": "turn-subscriber",
+                "status": "complete",
+            },
+        )
+    finally:
+        run_control.unsubscribe_session(subscription_id=subscription_id)
+
+    assert len(observed_statuses) == 1
+    assert "error" not in observed_statuses[0]
+    assert observed_statuses[0]["result"]["running"] is False
+    assert observed_statuses[0]["result"]["active_run_id"] == ""
+    assert observed_statuses[0]["result"]["active_turn_id"] == ""
+
+
+def test_run_control_control_events_do_not_mark_session_busy(capture):
+    server, _buf = capture
+    agent = MagicMock(model="gpt-test", provider="test-provider")
+    agent.context_compressor = None
+    server._sessions["runtime-control"] = {
+        "agent": agent,
+        "session_key": "stored-control",
+        "running": False,
+        "history": [],
+        "history_lock": threading.Lock(),
+    }
+
+    server._emit(
+        "mission.approval.requested",
+        "runtime-control",
+        {
+            "run_id": "team-mission:mission-1:conversation:plan",
+            "mission_id": "mission-1",
+        },
+    )
+    status = server.handle_request(
+        {
+            "id": "control-status",
+            "method": "session.status",
+            "params": {"stored_session_id": "stored-control"},
+        }
+    )
+
+    assert "error" not in status
+    assert status["result"]["running"] is False
+    assert status["result"]["active_run_id"] == ""
+
+
 def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
     class _RunDB:
         def get_session_run_status(self, _session_id):
@@ -511,6 +1096,134 @@ def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
     assert resp["error"]["data"]["active_run_id"] == "run-active"
 
 
+def test_run_submit_preserves_prestart_cancelled_run(server, monkeypatch):
+    session = {
+        "agent": MagicMock(model="gpt-test", provider="test-provider"),
+        "session_key": "stored-prestart-cancel",
+        "running": False,
+        "active_run_id": "",
+        "active_turn_id": "",
+        "history": [],
+        "history_lock": threading.Lock(),
+    }
+    server._sessions["runtime-prestart-cancel"] = session
+    monkeypatch.setattr(
+        server,
+        "_start_agent_build",
+        MagicMock(side_effect=AssertionError("pre-cancelled submit must not start agent")),
+    )
+    monkeypatch.setattr(
+        server,
+        "_run_prompt_submit",
+        MagicMock(side_effect=AssertionError("pre-cancelled submit must not run prompt")),
+    )
+
+    cancelled = server.handle_request(
+        {
+            "id": "cancel",
+            "method": "run.cancel",
+            "params": {
+                "stored_session_id": "stored-prestart-cancel",
+                "run_id": "run-prestart-cancel",
+                "turn_id": "turn-prestart-cancel",
+                "runtime_scope_key": "profile:agent-default",
+            },
+        }
+    )
+    submitted = server.handle_request(
+        {
+            "id": "submit",
+            "method": "run.submit",
+            "params": {
+                "stored_session_id": "stored-prestart-cancel",
+                "run_id": "run-prestart-cancel",
+                "turn_id": "turn-prestart-cancel",
+                "text": "hello",
+                "runtime_scope_key": "profile:agent-default",
+                "_control_plane_reserved": True,
+            },
+        }
+    )
+
+    assert "error" not in cancelled
+    assert "error" not in submitted
+    assert submitted["result"]["status"] == "cancelled"
+    assert submitted["result"]["run_id"] == "run-prestart-cancel"
+    assert session["running"] is False
+    assert session["active_run_id"] is None
+    assert server._start_agent_build.call_count == 0
+    assert server._run_prompt_submit.call_count == 0
+
+
+def test_run_submit_extracts_image_paths_from_prompt_attachments(server, monkeypatch, tmp_path):
+    from tui_gateway.methods import prompt as prompt_methods
+
+    image_path = tmp_path / "screen.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    session = {
+        "agent": MagicMock(model="gpt-test", provider="test-provider"),
+        "session_key": "stored-image-submit",
+        "running": False,
+        "active_run_id": "",
+        "active_turn_id": "",
+        "history": [],
+        "history_lock": threading.Lock(),
+    }
+    server._sessions["runtime-image-submit"] = session
+    submitted = {}
+
+    def fake_run_prompt_submit(rid, sid, target_session, text, submitted_images, turn_metadata):
+        submitted.update({
+            "rid": rid,
+            "sid": sid,
+            "session": target_session,
+            "text": text,
+            "submitted_images": submitted_images,
+            "turn_metadata": turn_metadata,
+        })
+
+    monkeypatch.setattr(prompt_methods, "_start_agent_build", MagicMock())
+    monkeypatch.setattr(prompt_methods, "_wait_agent", MagicMock(return_value=None))
+    monkeypatch.setattr(prompt_methods, "_run_prompt_submit", fake_run_prompt_submit)
+    monkeypatch.setattr(prompt_methods, "ensure_agent_runtime_current", MagicMock())
+    monkeypatch.setattr(prompt_methods, "_apply_dovie_product_runtime_policy", MagicMock())
+
+    resp = server.handle_request(
+        {
+            "id": "submit-image",
+            "method": "run.submit",
+            "params": {
+                "stored_session_id": "stored-image-submit",
+                "run_id": "run-image",
+                "turn_id": "turn-image",
+                "text": "分析图片",
+                "attachments": [
+                    {
+                        "name": "screen.png",
+                        "path": str(image_path),
+                        "mimeType": "image/png",
+                        "kind": "image",
+                    },
+                    {
+                        "name": "notes.txt",
+                        "path": str(tmp_path / "notes.txt"),
+                        "mimeType": "text/plain",
+                        "kind": "file",
+                    },
+                ],
+            },
+        }
+    )
+
+    assert "error" not in resp
+    deadline = time.time() + 2
+    while not submitted and time.time() < deadline:
+        time.sleep(0.01)
+    assert submitted["submitted_images"] == [str(image_path)]
+    assert submitted["turn_metadata"]["attachments"][0]["path"] == str(image_path)
+    assert submitted["turn_metadata"]["attachments"][0]["kind"] == "image"
+
+
 def test_events_subscribe_returns_subscription_id_and_unsubscribes(capture):
     server, _buf = capture
     token = server.bind_transport(server._stdio_transport)
@@ -536,6 +1249,51 @@ def test_events_subscribe_returns_subscription_id_and_unsubscribes(capture):
 
     assert subscription_id
     assert unsubscribed["result"]["removed"] == 1
+
+
+def test_run_events_replays_without_creating_subscription(server, monkeypatch):
+    from tui_gateway.services import run_control
+
+    class _RunDB:
+        def list_run_events(self, session_id, *, after_seq=0, active_only=False, runtime_scope_key="", run_id="", limit=2000):
+            assert session_id == "stored-run-events"
+            assert after_seq == 1
+            assert active_only is False
+            assert runtime_scope_key == "profile:agent-a"
+            assert run_id == "run-a"
+            assert limit == 321
+            return [
+                {
+                    "type": "message.delta",
+                    "stored_session_id": session_id,
+                    "run_id": "run-a",
+                    "runtime_scope_key": runtime_scope_key,
+                    "seq": 2,
+                    "payload": {"text": "hello"},
+                }
+            ]
+
+    monkeypatch.setattr(server, "_get_db", lambda: _RunDB())
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "run.events",
+            "params": {
+                "stored_session_id": "stored-run-events",
+                "after_seq": 1,
+                "runtime_scope_key": "profile:agent-a",
+                "run_id": "run-a",
+                "limit": 321,
+            },
+        }
+    )
+
+    assert "error" not in resp
+    assert resp["result"]["stored_session_id"] == "stored-run-events"
+    assert resp["result"]["last_event_seq"] == 2
+    assert resp["result"]["events"][0]["run_id"] == "run-a"
+    assert run_control._subscriptions_by_id == {}
 
 
 def test_run_list_accepts_runtime_scope_and_status_filters(server, monkeypatch):
@@ -727,7 +1485,10 @@ def test_slash_exec_plugin_handler_error_returns_output(server):
     assert worker.calls == []
 
 
-@pytest.mark.parametrize("cmd", ["retry", "queue hello", "q hello", "steer fix the test", "plan"])
+@pytest.mark.parametrize(
+    "cmd",
+    ["retry", "queue hello", "q hello", "steer fix the test", "plan", "undo", "rewind"],
+)
 def test_slash_exec_rejects_pending_input_commands(server, cmd):
     """slash.exec must reject commands that use _pending_input in the CLI."""
     sid = "test-session"
@@ -900,7 +1661,7 @@ def test_skills_list_returns_structured_items_without_market_router(server):
     assert resp["result"]["items"][0]["source_type"] == "builtin"
 
 
-def test_skills_list_realigns_cached_skill_modules_to_doxie_profile_home(server, tmp_path):
+def test_skills_list_realigns_cached_skill_modules_to_dovie_profile_home(server, tmp_path):
     profile_home = tmp_path / "draft-home"
     stale_home = tmp_path / "stale-home"
     skill_dir = profile_home / "skills" / "productivity" / "draft-skill"
@@ -952,7 +1713,7 @@ def test_skills_list_realigns_cached_skill_modules_to_doxie_profile_home(server,
             "id": "skills-list-scoped",
             "method": "skills.list",
             "params": {
-                "doxie_profile": {
+                "dovie_profile": {
                     "id": "draft:one",
                     "runtimeScopeKey": "draft:one",
                     "hermesHomePath": str(profile_home),

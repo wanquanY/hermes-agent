@@ -30,6 +30,15 @@ def _session_env(name: str, default: str = "") -> str:
         return os.getenv(name, default)
 
 
+def _default_workspace_cwd() -> str:
+    cwd = os.getenv("DOVIE_WORKSPACE_ROOT", "").strip()
+    if cwd:
+        return cwd
+    if os.getenv("DOVIE_PROCESS_ROLE") == "hermes-worker":
+        raise RuntimeError("Dovie workspace root is not configured")
+    return os.getcwd()
+
+
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
 # ---------------------------------------------------------------------------
@@ -86,6 +95,63 @@ _BLOCKED_DEVICE_PATHS = frozenset({
     "/dev/fd/0", "/dev/fd/1", "/dev/fd/2",
 })
 
+# ── Backfilled from upstream/main:tools/file_tools.py ───────────────────────
+# Worktree-cwd discipline helpers — referenced by absorbed P0/P1 commits
+# (file-tools harden patches) but their defining commits aren't on the
+# absorption list. Without them `read_file` / `write_file` raise NameError
+# the moment any path-anchoring code runs.
+_TERMINAL_CWD_SENTINELS = frozenset({"", ".", "./", "auto", "cwd"})
+
+
+def _sentinel_free_abs_cwd(raw: str | None) -> str | None:
+    """Normalize a cwd candidate to an absolute, sentinel-free anchor."""
+    raw = str(raw or "").strip()
+    if raw.lower() in _TERMINAL_CWD_SENTINELS:
+        return None
+    expanded = os.path.expanduser(raw)
+    if not os.path.isabs(expanded):
+        return None
+    return expanded
+
+
+def _configured_terminal_cwd() -> str | None:
+    return _sentinel_free_abs_cwd(os.environ.get("TERMINAL_CWD"))
+
+
+def _registered_task_cwd_override(task_id: str = "default") -> str | None:
+    """Return a registered cwd override for the raw task id, when available."""
+    try:
+        from tools.terminal_tool import resolve_task_overrides
+
+        overrides = resolve_task_overrides(task_id)
+    except Exception:
+        return None
+    return _sentinel_free_abs_cwd(overrides.get("cwd"))
+
+
+def _authoritative_workspace_root(task_id: str = "default") -> str | None:
+    """Best-effort absolute workspace root for divergence checks."""
+    live = _get_live_tracking_cwd(task_id)
+    if live:
+        return live
+    registered = _registered_task_cwd_override(task_id)
+    if registered:
+        return registered
+    return _configured_terminal_cwd()
+
+
+def _resolve_base_dir(task_id: str = "default") -> Path:
+    """Return the ABSOLUTE base directory for resolving relative paths."""
+    root = _authoritative_workspace_root(task_id)
+    if root:
+        base = Path(root).expanduser()
+    else:
+        base = Path(os.getcwd())
+    if not base.is_absolute():
+        base = Path(os.getcwd()) / base
+    return base.resolve()
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 def _resolve_path(filepath: str, task_id: str = "default") -> Path:
     """Resolve a path relative to TERMINAL_CWD (the worktree base directory)
@@ -129,26 +195,64 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path:
     """Resolve *filepath* against the task's live terminal cwd when possible."""
     p = Path(filepath).expanduser()
     if not p.is_absolute():
-        base = _get_live_tracking_cwd(task_id) or _session_env("TERMINAL_CWD", os.getcwd())
+        default_cwd = _default_workspace_cwd()
+        base = _get_live_tracking_cwd(task_id) or _session_env("TERMINAL_CWD", default_cwd) or default_cwd
         p = Path(base) / p
     return p.resolve()
 
 
-def _is_blocked_device(filepath: str) -> bool:
-    """Return True if the path would hang the process (infinite output or blocking input).
-
-    Uses the *literal* path — no symlink resolution — because the model
-    specifies paths directly and realpath follows symlinks all the way
-    through (e.g. /dev/stdin → /proc/self/fd/0 → /dev/pts/0), defeating
-    the check.
-    """
-    normalized = os.path.expanduser(filepath)
+def _is_blocked_device_path(path: str) -> bool:
+    """Return True for concrete device/fd paths that can hang reads."""
+    normalized = os.path.normpath(os.path.expanduser(path))
     if normalized in _BLOCKED_DEVICE_PATHS:
         return True
-    # /proc/self/fd/0-2 and /proc/<pid>/fd/0-2 are Linux aliases for stdio
     if normalized.startswith("/proc/") and normalized.endswith(
         ("/fd/0", "/fd/1", "/fd/2")
     ):
+        return True
+    if normalized.startswith("/proc/") and normalized.endswith(
+        ("/environ", "/cmdline", "/maps")
+    ):
+        return True
+    return False
+
+
+def _is_blocked_device(filepath: str, base_dir: str | Path | None = None) -> bool:
+    """Return True if the path would hang the process (infinite output or blocking input).
+
+    Check the literal path first so aliases like /dev/stdin are caught before
+    they resolve to terminal-specific paths. Then check each symlink hop before
+    the final resolved path so aliases to devices cannot bypass the guard.
+    """
+    expanded = os.path.expanduser(filepath)
+    if base_dir is not None and not os.path.isabs(expanded):
+        expanded = os.path.join(os.fspath(base_dir), expanded)
+    normalized = os.path.normpath(expanded)
+    if _is_blocked_device_path(normalized):
+        return True
+
+    seen: set[str] = set()
+    current = normalized
+    for _ in range(20):
+        try:
+            target = os.readlink(current)
+        except OSError:
+            break
+        if not os.path.isabs(target):
+            target = os.path.join(os.path.dirname(current), target)
+        target = os.path.normpath(target)
+        if _is_blocked_device_path(target):
+            return True
+        if target in seen:
+            break
+        seen.add(target)
+        current = target
+
+    try:
+        resolved = os.path.normpath(os.path.realpath(normalized))
+    except (OSError, ValueError):
+        return False
+    if _is_blocked_device_path(resolved):
         return True
     return False
 
@@ -160,6 +264,29 @@ _SENSITIVE_PATH_PREFIXES = (
     "/private/etc/", "/private/var/",
 )
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
+
+_hermes_config_resolved: str | None = None
+_hermes_config_resolved_loaded = False
+
+
+def _get_hermes_config_resolved() -> str | None:
+    """Return the resolved Hermes config path, cached for this process."""
+    global _hermes_config_resolved, _hermes_config_resolved_loaded
+    if _hermes_config_resolved_loaded:
+        return _hermes_config_resolved
+    _hermes_config_resolved_loaded = True
+    try:
+        from hermes_cli.config import get_config_path
+
+        _hermes_config_resolved = str(get_config_path().resolve())
+    except Exception:
+        try:
+            _hermes_config_resolved = str(
+                Path("~/.hermes/config.yaml").expanduser().resolve()
+            )
+        except Exception:
+            _hermes_config_resolved = None
+    return _hermes_config_resolved
 
 
 def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:
@@ -178,6 +305,13 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
             return _err
     if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
         return _err
+    hermes_config = _get_hermes_config_resolved()
+    if hermes_config and (resolved == hermes_config or normalized == hermes_config):
+        return (
+            f"Refusing to write to Hermes config file: {filepath}\n"
+            "Agent cannot modify security-sensitive configuration. "
+            "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead."
+        )
     return None
 
 
@@ -307,6 +441,49 @@ def _is_internal_file_status_text(content: str) -> bool:
             len(stripped) <= 2 * len(_READ_DEDUP_STATUS_MESSAGE):
         return True
     return False
+
+
+def _looks_like_read_file_line_numbered_content(content: str) -> bool:
+    """Return True for content dominated by read_file's ``LINE_NUM|CONTENT`` display.
+
+    ``read_file`` intentionally returns line-numbered text to the model. If
+    that display format is echoed into ``write_file``, config/source files are
+    silently corrupted with prefixes like `` 1|``.  We reject writes where the
+    non-empty lines are mostly consecutive read_file-style numbered lines, while
+    allowing sparse literal pipe content such as a single ``1|value`` line.
+    """
+    if not isinstance(content, str):
+        return False
+
+    lines = [line for line in content.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+
+    numbered: list[int] = []
+    for line in lines:
+        stripped = line.lstrip()
+        prefix, sep, _rest = stripped.partition("|")
+        if sep and prefix.isdigit():
+            numbered.append(int(prefix))
+
+    if len(numbered) < 2:
+        return False
+    if len(numbered) / len(lines) < 0.6:
+        return False
+
+    consecutive_pairs = sum(
+        1 for prev, current in zip(numbered, numbered[1:])
+        if current == prev + 1
+    )
+    return consecutive_pairs >= len(numbered) - 1
+
+
+def _is_internal_file_tool_content(content: str) -> bool:
+    """Return True when content is file-tool display text, not intended file bytes."""
+    return (
+        _is_internal_file_status_text(content)
+        or _looks_like_read_file_line_numbered_content(content)
+    )
 
 
 def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
@@ -459,7 +636,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         # ── Device path guard ─────────────────────────────────────────
         # Block paths that would hang the process (infinite output,
         # blocking on input).  Pure path check — no I/O.
-        if _is_blocked_device(path):
+        device_base = None if Path(path).expanduser().is_absolute() else _resolve_base_dir(task_id)
+        if _is_blocked_device(path, base_dir=device_base):
             return json.dumps({
                 "error": (
                     f"Cannot read '{path}': this is a device file that would "
@@ -802,10 +980,11 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
     sensitive_err = _check_sensitive_path(path, task_id)
     if sensitive_err:
         return tool_error(sensitive_err)
-    if _is_internal_file_status_text(content):
+    if _is_internal_file_tool_content(content):
         return tool_error(
-            "Refusing to write internal read_file status text as file content. "
-            "Re-read the file or reconstruct the intended file contents before writing."
+            "Refusing to write internal read_file display text as file content. "
+            "Strip read_file line-number prefixes or reconstruct the intended "
+            "file contents before writing."
         )
     try:
         # Resolve once for the registry lock + stale check.  Failures here

@@ -10,10 +10,66 @@ from gateway.platforms.base import (
     GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE,
     MessageEvent,
     MessageType,
+    cache_audio_from_bytes,
+    cache_image_from_bytes,
+    cache_video_from_bytes,
     safe_url_for_log,
     utf16_len,
+    validate_inbound_media_size,
+    _log_safe_path,
     _prefix_within_utf16_limit,
 )
+
+
+class TestInboundMediaSizeCap:
+    """gateway.max_inbound_media_bytes caps inbound media buffered into RAM (#13145)."""
+
+    _PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 64
+
+    def test_default_cap_is_128_mib(self, monkeypatch):
+        # No config override -> default. Patch loader to return empty config.
+        import gateway.platforms.base as base
+        monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: base.DEFAULT_INBOUND_MEDIA_MAX_BYTES)
+        assert base.DEFAULT_INBOUND_MEDIA_MAX_BYTES == 128 * 1024 * 1024
+
+    def test_image_bytes_rejected_when_oversized(self, monkeypatch):
+        import gateway.platforms.base as base
+        monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: 16)
+        with pytest.raises(ValueError, match="Inbound image payload is too large"):
+            cache_image_from_bytes(self._PNG, ext=".png")
+
+    def test_audio_bytes_rejected_when_oversized(self, monkeypatch):
+        import gateway.platforms.base as base
+        monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: 4)
+        with pytest.raises(ValueError, match="Inbound audio payload is too large"):
+            cache_audio_from_bytes(b"x" * 8, ext=".ogg")
+
+    def test_video_bytes_rejected_when_oversized(self, monkeypatch):
+        # Video was the gap in the original report — verify it's covered.
+        import gateway.platforms.base as base
+        monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: 4)
+        with pytest.raises(ValueError, match="Inbound video payload is too large"):
+            cache_video_from_bytes(b"x" * 8, ext=".mp4")
+
+    def test_legit_image_accepted_under_cap(self, monkeypatch):
+        import gateway.platforms.base as base
+        monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: 128 * 1024 * 1024)
+        path = cache_image_from_bytes(self._PNG, ext=".png")
+        assert os.path.exists(path)
+        assert os.path.getsize(path) == len(self._PNG)
+
+    def test_cap_of_zero_disables_check(self, monkeypatch):
+        import gateway.platforms.base as base
+        monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: 0)
+        # A would-be-oversized video passes through when the cap is disabled.
+        path = cache_video_from_bytes(b"x" * 5000, ext=".mp4")
+        assert os.path.exists(path)
+
+    def test_validate_helper_respects_explicit_max_bytes(self):
+        # max_bytes arg overrides the configured cap.
+        validate_inbound_media_size(100, media_type="image", max_bytes=200)  # ok
+        with pytest.raises(ValueError, match="too large"):
+            validate_inbound_media_size(300, media_type="image", max_bytes=200)
 
 
 class TestSecretCaptureGuidance:
@@ -359,6 +415,72 @@ class TestExtractMedia:
         # Both directives stripped from cleaned text
         assert "[[audio_as_voice]]" not in cleaned
         assert "[[as_document]]" not in cleaned
+
+
+class TestMediaDeliveryPathValidation:
+    def _patch_roots(self, monkeypatch, *roots):
+        monkeypatch.setattr(
+            "gateway.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
+            tuple(roots),
+        )
+
+    def test_allows_existing_file_inside_safe_root(self, tmp_path, monkeypatch):
+        root = tmp_path / "media-cache"
+        media_file = root / "voice.ogg"
+        media_file.parent.mkdir(parents=True)
+        media_file.write_bytes(b"OggS")
+        self._patch_roots(monkeypatch, root)
+
+        assert BasePlatformAdapter.validate_media_delivery_path(str(media_file)) == str(media_file.resolve())
+
+    def test_rejects_existing_file_outside_safe_root(self, tmp_path, monkeypatch):
+        root = tmp_path / "media-cache"
+        root.mkdir()
+        secret = tmp_path / "secrets.txt"
+        secret.write_text("not for upload")
+        self._patch_roots(monkeypatch, root)
+
+        assert BasePlatformAdapter.validate_media_delivery_path(str(secret)) is None
+
+    def test_rejects_symlink_escape_from_safe_root(self, tmp_path, monkeypatch):
+        root = tmp_path / "media-cache"
+        root.mkdir()
+        secret = tmp_path / "outside.png"
+        secret.write_bytes(b"secret")
+        link = root / "safe-looking.png"
+        try:
+            link.symlink_to(secret)
+        except OSError:
+            pytest.skip("symlink creation is unavailable")
+        self._patch_roots(monkeypatch, root)
+
+        assert BasePlatformAdapter.validate_media_delivery_path(str(link)) is None
+
+    def test_filter_keeps_safe_media_and_drops_unsafe(self, tmp_path, monkeypatch):
+        root = tmp_path / "media-cache"
+        safe = root / "speech.ogg"
+        unsafe = tmp_path / "outside.ogg"
+        safe.parent.mkdir(parents=True)
+        safe.write_bytes(b"OggS")
+        unsafe.write_bytes(b"OggS")
+        self._patch_roots(monkeypatch, root)
+
+        filtered = BasePlatformAdapter.filter_media_delivery_paths([
+            (str(unsafe), False),
+            (str(safe), True),
+        ])
+
+        assert filtered == [(str(safe.resolve()), True)]
+
+    def test_allows_operator_configured_extra_root(self, tmp_path, monkeypatch):
+        extra_root = tmp_path / "operator-media"
+        media_file = extra_root / "report.pdf"
+        media_file.parent.mkdir(parents=True)
+        media_file.write_bytes(b"%PDF-1.4")
+        self._patch_roots(monkeypatch)
+        monkeypatch.setenv("HERMES_MEDIA_ALLOW_DIRS", str(extra_root))
+
+        assert BasePlatformAdapter.validate_media_delivery_path(str(media_file)) == str(media_file.resolve())
 
 
 # ---------------------------------------------------------------------------
@@ -728,4 +850,3 @@ class TestProxyKwargsForAiohttp:
             sess_kw, req_kw = proxy_kwargs_for_aiohttp("http://proxy:8080")
             assert sess_kw == {}
             assert req_kw == {"proxy": "http://proxy:8080"}
-

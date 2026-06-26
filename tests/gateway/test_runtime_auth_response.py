@@ -8,7 +8,7 @@ def test_runtime_auth_failure_response_is_user_safe_when_final_response_contains
         "❌ Runtime token has expired or was revoked",
     )
 
-    assert response == "⚠️ Doxie runtime 登录凭证已过期，正在刷新本地运行时。请稍后再试一次。"
+    assert response == "⚠️ Dovie runtime 登录凭证已过期，正在刷新本地运行时。请稍后再试一次。"
     assert "HTTP 401" not in response
 
 
@@ -24,4 +24,4 @@ def test_runtime_auth_failure_response_is_user_safe_when_error_only():
         "",
     )
 
-    assert response == "⚠️ Doxie runtime 登录凭证已过期，正在刷新本地运行时。请稍后再试一次。"
+    assert response == "⚠️ Dovie runtime 登录凭证已过期，正在刷新本地运行时。请稍后再试一次。"

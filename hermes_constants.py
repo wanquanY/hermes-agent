@@ -4,32 +4,42 @@ Import-safe module with no dependencies — can be imported from anywhere
 without risk of circular imports.
 """
 
-import contextvars
 import os
+import sysconfig
+import time
+import uuid
+from contextvars import ContextVar, Token
 from pathlib import Path
 
 
 _profile_fallback_warned: bool = False
-_hermes_home_override: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "hermes_home_override",
-    default=None,
+_UNSET = object()
+_HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
+    "_HERMES_HOME_OVERRIDE", default=_UNSET
 )
 
 
-def set_hermes_home_override(value: str | os.PathLike[str] | None):
-    """Bind HERMES_HOME to the current execution context.
+def set_hermes_home_override(path: str | Path | None) -> Token:
+    """Set a context-local Hermes home override and return its reset token.
 
-    Long-lived gateway processes can host multiple isolated Hermes profiles.
-    Environment variables are process-global and therefore unsafe for concurrent
-    sessions, so gateway code uses this context-local override while preserving
-    the historical HERMES_HOME fallback for CLI and subprocess entrypoints.
+    This is for in-process, per-task scoping.  It deliberately does not mutate
+    ``os.environ`` because that is shared by every thread in the process.
     """
-    normalized = str(value or "").strip() or None
-    return _hermes_home_override.set(normalized)
+    value: str | object = _UNSET if path is None else str(path)
+    return _HERMES_HOME_OVERRIDE.set(value)
 
 
-def reset_hermes_home_override(token) -> None:
-    _hermes_home_override.reset(token)
+def reset_hermes_home_override(token: Token) -> None:
+    """Restore the previous context-local Hermes home override."""
+    _HERMES_HOME_OVERRIDE.reset(token)
+
+
+def get_hermes_home_override() -> str | None:
+    """Return the active context-local Hermes home override, if any."""
+    override = _HERMES_HOME_OVERRIDE.get()
+    if override is _UNSET or not override:
+        return None
+    return str(override)
 
 
 def get_hermes_home() -> Path:
@@ -48,7 +58,7 @@ def get_hermes_home() -> Path:
     template in ``hermes_cli/gateway.py`` and the kanban dispatcher in
     ``hermes_cli/kanban_db.py``).  See https://github.com/NousResearch/hermes-agent/issues/18594.
     """
-    override = _hermes_home_override.get()
+    override = get_hermes_home_override()
     if override:
         return Path(override)
 
@@ -132,6 +142,23 @@ def get_default_hermes_root() -> Path:
     return env_path
 
 
+def _get_packaged_data_dir(name: str) -> Path | None:
+    """Return an installed data-files directory if one exists.
+
+    Used to discover bundled skills/optional-skills when Hermes is installed
+    from a wheel that emitted them via setuptools data_files.
+    """
+    candidates = []
+    for scheme in ("data", "purelib", "platlib"):
+        raw = sysconfig.get_path(scheme)
+        if raw:
+            candidates.append(Path(raw) / name)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def get_optional_skills_dir(default: Path | None = None) -> Path:
     """Return the optional-skills directory, honoring package-manager wrappers.
 
@@ -141,9 +168,32 @@ def get_optional_skills_dir(default: Path | None = None) -> Path:
     override = os.getenv("HERMES_OPTIONAL_SKILLS", "").strip()
     if override:
         return Path(override)
+    packaged = _get_packaged_data_dir("optional-skills")
+    if packaged is not None:
+        return packaged
     if default is not None:
         return default
     return get_hermes_home() / "optional-skills"
+
+
+def get_bundled_skills_dir(default: Path | None = None) -> Path:
+    """Return the bundled skills directory for source and packaged installs.
+
+    Resolution order:
+        1. ``HERMES_BUNDLED_SKILLS`` env var (Nix wrapper / explicit override)
+        2. Wheel-installed ``<sysconfig data>/skills`` (pip install path)
+        3. Caller-supplied ``default`` (typically the source-checkout path)
+        4. ``<HERMES_HOME>/skills`` last-resort
+    """
+    override = os.getenv("HERMES_BUNDLED_SKILLS", "").strip()
+    if override:
+        return Path(override)
+    packaged = _get_packaged_data_dir("skills")
+    if packaged is not None:
+        return packaged
+    if default is not None:
+        return default
+    return get_hermes_home() / "skills"
 
 
 def get_hermes_dir(new_subpath: str, old_name: str) -> Path:
@@ -187,6 +237,26 @@ def display_hermes_home() -> str:
         return str(home)
 
 
+def secure_parent_dir(path: Path) -> None:
+    """Chmod ``0o700`` on the parent directory of *path*, but only if safe.
+
+    Refuses to chmod ``/`` or any top-level directory (resolved parent with
+    fewer than 3 parts, i.e. ``/`` or any direct child like ``/usr``) to
+    prevent catastrophic host bricking when ``HERMES_HOME`` or other path
+    env vars resolve to an unexpected location.
+
+    See https://github.com/NousResearch/hermes-agent/issues/25821.
+    """
+    parent = path.parent.resolve()
+    # Refuse root and its direct children (/usr, /home, /var, /tmp, …).
+    if parent == Path("/") or len(parent.parts) < 3:
+        return
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+
+
 def get_subprocess_home() -> str | None:
     """Return a per-profile HOME directory for subprocesses, or None.
 
@@ -204,7 +274,7 @@ def get_subprocess_home() -> str | None:
     Activation is directory-based: if the ``home/`` subdirectory doesn't
     exist, returns ``None`` and behavior is unchanged.
     """
-    hermes_home = os.getenv("HERMES_HOME")
+    hermes_home = get_hermes_home_override() or os.getenv("HERMES_HOME")
     if not hermes_home:
         return None
     profile_home = os.path.join(hermes_home, "home")
@@ -313,6 +383,34 @@ def get_skills_dir() -> Path:
     return get_hermes_home() / "skills"
 
 
+def ensure_directory_path(path: str | Path) -> Path:
+    """Ensure *path* and every parent component are directories.
+
+    ``Path.mkdir(parents=True, exist_ok=True)`` still raises ``FileExistsError``
+    when any path component already exists as a non-directory. Hermes profile
+    homes are long-lived user data, so recover by moving the invalid filesystem
+    node aside instead of deleting it.
+    """
+    target = Path(path)
+    current = Path(target.anchor) if target.is_absolute() else Path()
+    parts = target.parts[1:] if target.is_absolute() else target.parts
+    for part in parts:
+        current = current / part
+        try:
+            current.mkdir()
+            continue
+        except FileExistsError:
+            pass
+        if current.is_dir():
+            continue
+        backup = current.with_name(
+            f"{current.name}.invalid-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+        )
+        current.rename(backup)
+        current.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 
 def get_env_path() -> Path:
     """Return the path to the ``.env`` file under HERMES_HOME."""
@@ -362,6 +460,14 @@ def apply_ipv4_preference(force: bool = False) -> None:
 
     _ipv4_getaddrinfo._hermes_ipv4_patched = True  # type: ignore[attr-defined]
     socket.getaddrinfo = _ipv4_getaddrinfo  # type: ignore[assignment]
+
+
+# ─── Streaming Response Constants ────────────────────────────────────────────
+
+# Response ID for partial stream stubs used during error recovery
+PARTIAL_STREAM_STUB_ID = "partial-stream-stub"
+
+FINISH_REASON_LENGTH = "length"
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"

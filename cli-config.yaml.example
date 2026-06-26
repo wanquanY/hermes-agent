@@ -30,6 +30,7 @@ model:
   #   "ollama-cloud" - Ollama Cloud (requires: OLLAMA_API_KEY — https://ollama.com/settings)
   #   "kilocode"     - KiloCode gateway (requires: KILOCODE_API_KEY)
   #   "ai-gateway"   - Vercel AI Gateway (requires: AI_GATEWAY_API_KEY)
+  #   "azure-foundry" - Microsoft Foundry / Azure OpenAI (API key or Entra ID)
   #   "lmstudio"     - LM Studio local server (optional: LM_API_KEY, defaults to http://127.0.0.1:1234/v1)
   #
   # Local servers (LM Studio, Ollama, vLLM, llama.cpp):
@@ -44,6 +45,14 @@ model:
   # API configuration (falls back to OPENROUTER_API_KEY env var)
   # api_key: "your-key-here"  # Uncomment to set here instead of .env
   base_url: "https://openrouter.ai/api/v1"
+
+  # Azure Foundry keyless auth example:
+  # provider: "azure-foundry"
+  # base_url: "https://<resource>.openai.azure.com/openai/v1"
+  # auth_mode: "entra_id"      # DefaultAzureCredential: az login, managed identity, workload identity, etc.
+  # default: "gpt-4o"          # Deployment/model name
+  # entra:
+  #   scope: "https://ai.azure.com/.default"  # Optional; this is the default.
 
   # ── Token limits — two settings, easy to confuse ──────────────────────────
   #
@@ -63,6 +72,20 @@ model:
   #   Set only if you want to deliberately limit individual response length.
   #
 # max_tokens: 8192
+
+  # ── Custom request headers (optional) ─────────────────────────────────────
+  #
+  # default_headers: extra HTTP headers sent on every request to an
+  #   OpenAI-compatible endpoint. User values take precedence over the
+  #   provider/SDK defaults, so this is the supported way to override the
+  #   OpenAI Python SDK's identifying headers (User-Agent: OpenAI/Python ...,
+  #   X-Stainless-*) when a custom provider sits behind a gateway/WAF that
+  #   rejects them — e.g. an upstream that returns "502 Upstream access
+  #   forbidden" for the SDK default User-Agent but accepts a plain one.
+  #   Applies on the OpenAI wire only (not native Anthropic / Bedrock).
+  #
+  # default_headers:
+  #   User-Agent: "curl/8.7.1"
 
 # Named provider overrides (optional)
 # Use this for per-provider request timeouts, non-stream stale timeouts,
@@ -457,7 +480,7 @@ prompt_caching:
 # Two stores: MEMORY.md (agent's notes) and USER.md (user profile).
 # Character limits keep the memory small and focused. The agent manages
 # pruning -- when at the limit, it must consolidate or replace entries.
-# Disabled by default in batch_runner and RL environments.
+# Disabled by default in batch_runner.
 #
 memory:
   # Agent's personal notes: environment facts, conventions, things learned
@@ -715,10 +738,9 @@ platform_toolsets:
 #   todo         - todo (in-memory task planning, no deps)
 #   tts          - text_to_speech  (Edge TTS free, or ELEVENLABS/OPENAI/MINIMAX/MISTRAL key)
 #   cronjob      - cronjob (create/list/update/pause/resume/run/remove scheduled tasks)
-#   rl           - rl_list_environments, rl_start_training, etc. (requires TINKER_API_KEY)
 #
 # PRESETS (curated bundles):
-#   hermes-cli       - All of the above except rl + send_message
+#   hermes-cli       - All of the above except send_message
 #   hermes-telegram  - terminal, file, web, vision, image_gen, tts, browser,
 #                      skills, todo, cronjob, send_message
 #   hermes-discord   - Same as hermes-telegram
@@ -744,7 +766,6 @@ platform_toolsets:
 #   session_search - Search and recall past conversations (FTS5 + Gemini Flash summarization)
 #   tts          - Text-to-speech (Edge TTS free, ElevenLabs, OpenAI, MiniMax, Mistral)
 #   cronjob      - Schedule and manage automated tasks (CLI-only)
-#   rl           - RL training tools (Tinker-Atropos)
 #
 # Composite toolsets:
 #   debugging    - terminal + web + file (for troubleshooting)
@@ -775,6 +796,10 @@ platform_toolsets:
 # Optional per-server settings:
 #   timeout: tool call timeout in seconds (default: 120)
 #   connect_timeout: initial connection timeout (default: 60)
+#   keepalive_interval: liveness ping cadence in seconds (default: 180).
+#     Lower it below the server's session TTL for servers that expire idle
+#     sessions quickly (e.g. Unreal Engine editor MCP, ~15s), otherwise idle
+#     tool calls hit an expired session and pay a slow reconnect. Floored at 5s.
 #
 # mcp_servers:
 #   time:
