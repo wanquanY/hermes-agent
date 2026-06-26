@@ -150,8 +150,8 @@ def _proxy_run_submit_via_worker(submit_params: dict) -> dict:
     ``primary_dispatch`` is the new equivalent — it handles the same
     JSON-RPC request shape, intercepts run.submit / prompt.submit
     when a scope is set, and routes through ``WorkerSupervisor``.
-    Worker events still flow back through ``record_event`` and the
-    member-chat mirror block surfaces them on the conversation session.
+    Worker events still flow back through ``record_event``; RunContext keeps
+    user-visible events addressed to the conversation session.
 
     Returns:
       {"ok": True}              — primary_dispatch claimed the request
@@ -1503,8 +1503,8 @@ def _(rid, params: dict) -> dict:
             })
     if is_group_chat:
         # C: @-member group chat. Cancel the worker run on its memberchat
-        # session; the mirror block will relay a cancelled terminal frame
-        # into the conv session so the optimistic run on conv settles too.
+        # session. Legacy registry lookup is still used here only to find
+        # the worker run while P2/P5 cleanup drains compatibility state.
         worker_run_id = str(member_chat_run.get("run_id") or "").strip()
         worker_stored_session_id = str(member_chat_run.get("conversation_session_id") or "").strip()
         # The worker actually runs against `memberchat:<conv>:<member>`, not the

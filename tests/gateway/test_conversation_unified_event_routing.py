@@ -8,10 +8,9 @@ team leader, @member) is:
     ``stored_session_id == conversation_session_id``.
 
 Regular, leader, and @member workers now publish user-visible events
-to the conversation session. Legacy @member mirror behavior is still
-covered while PR-E keeps that code physically present, but new @member
-submits rely on RunContext + conversation-session storage instead of
-``memberchat:*`` worker sessions or ``member_chat_runs`` registration.
+to the conversation session through RunContext + conversation-session
+storage instead of ``memberchat:*`` worker sessions or
+``member_chat_runs`` registration.
 
 See:
 - docs/Hermes/V0.9.5/conversation-architecture-redesign.md  (north star)
@@ -200,13 +199,15 @@ def test_team_leader_message_complete_persists_on_conversation_session(tmp_path:
     assert events[0]["payload"]["text"] == "leader reply"
 
 
-# ── case 3: @member chat WITH registration (current happy path) ────────
+# ── case 3: @member chat WITH legacy registration ──────────────────────
 
 
-def test_member_chat_with_registration_mirrors_to_conversation(tmp_path: Path):
-    """Established baseline (commit 2d18ef24d and earlier already test
-    this via tests/test_member_chat_relay.py). Repeated here as part of
-    the unified contract suite so all three cases sit side by side.
+def test_member_chat_with_registration_routes_by_run_context(tmp_path: Path):
+    """A legacy registration row must not be required for delivery.
+
+    P2-PR-E removes the member-chat event mirror. If an in-flight worker still
+    has a compatibility registration row, RunContext remains the routing source
+    of truth and stores the event directly in the conversation session.
     """
     db = _new_db(tmp_path)
     db.create_session(CONV_SESSION, source="team_mission", transient=False)
@@ -244,13 +245,15 @@ def test_member_chat_with_registration_mirrors_to_conversation(tmp_path: Path):
             "payload": {"text": "member reply (registered)", "status": "complete"},
         },
         db=db,
+        run_context=_member_run_context(),
     )
 
     events = _events_for_session(db, CONV_SESSION)
     assert any(e["type"] == "message.complete" for e in events)
     msg = next(e for e in events if e["type"] == "message.complete")
     assert msg["payload"]["text"] == "member reply (registered)"
-    assert msg["payload"].get("participant_id") == "member-alice"
+    assert msg["frame"].get("participant_id") == member_participant_id("member-alice")
+    assert msg["payload"]["run_context"]["participant_id"] == member_participant_id("member-alice")
 
 
 # ── case 4: @member chat WITHOUT registration — the bug ────────────────
@@ -266,12 +269,12 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
 
     PR-C makes this naturally true: the worker runs on the conversation
     session and record_event applies RunContext before persistence. This
-    test no longer depends on the P0 payload fallback or on mirror lookup.
+    test depends on direct RunContext routing rather than legacy synthesis.
 
     What the contract does NOT specify:
-    - The mechanism (registry lookup, payload-based fallback, RunContext)
+    - The mechanism (registry lookup, payload inspection, RunContext)
     - The exact run_id namespacing on the conversation side
-    - Whether deltas are mirrored frame-for-frame or only the terminal
+    - Whether deltas or only terminal frames are published
 
     What it DOES specify:
     - At least one event with the same text MUST exist in the

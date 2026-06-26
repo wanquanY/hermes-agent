@@ -1,16 +1,12 @@
-"""Decoupled group-chat — registry + participant-view projection.
+"""Decoupled group-chat compatibility registry + participant-view projection.
 
-A member @-chat is NOT a mission node. The worker runs on its own session
-(so leader and members run concurrently, each owning a session-busy lock
-and an independent runtime process); every event the worker emits gets
-mirrored frame-for-frame into the team conversation session by the
-run_control.record_event mirror block — that layer can both broadcast the
-mirrored frame to the conversation's live subscribers AND persist it via
-the normal append_run_event path.
+A member @-chat is NOT a mission node. P2 RunContext routes user-visible
+worker events directly to the team conversation session. The legacy
+``member_chat_runs`` registry remains only as a one-release compatibility
+surface for mission spawn/recall callers and in-flight workers.
 
 This module owns:
-  - the run → conversation routing table (register a member-chat run, look
-    it up at mirror time)
+  - the deprecated run-to-conversation compatibility table
   - the participant-view projection (how the team conversation's shared
     message log looks from a given participant's first-person perspective:
     that participant's own assistant turns stay assistant, every other
@@ -52,10 +48,9 @@ def _is_viewer_own_assistant(message: Dict[str, Any], viewer: str) -> bool:
 
     Heuristic by viewer kind:
       - viewer == LEADER: the leader writes directly into the conv session
-        with NO ``team_mission.member_id`` and (importantly) NOT through the
-        member-chat mirror, so any assistant row that lacks a member_id and
-        whose ``kind`` is neither ``member_chat`` nor ``leader_mirror`` is
-        leader-authored.
+        with NO ``team_mission.member_id``, so any assistant row that lacks a
+        member_id and whose ``kind`` is neither ``member_chat`` nor
+        ``leader_mirror`` is leader-authored.
       - viewer == <member_id>: any row whose
         ``metadata.team_mission.member_id`` matches.
     """
@@ -72,7 +67,7 @@ def _is_viewer_own_assistant(message: Dict[str, Any], viewer: str) -> bool:
 
 def _should_skip_for_viewer(message: Dict[str, Any], viewer: str) -> bool:
     """Skip rules independent of role — rows the viewer should not see at
-    all (own mirror that already exists locally, in-flight @-request the
+    all (own reply that already exists locally, in-flight @-request the
     worker will receive via run.submit text)."""
     meta = _coerce_metadata(message.get("metadata"))
     # Never re-project a row WE wrote as a view (avoid speaker-prefix
@@ -199,9 +194,8 @@ def project_message_for_viewer(
 ) -> Optional[Dict[str, Any]]:
     """Single-message convenience for callers that don't care about
     tool-pairing (e.g. sync_member_chat_conversation_view, which works on
-    write-time rows that never carry tool_calls — leader/member assistant
-    REPLIES into the conv are plain text mirror frames). Delegates to the
-    stateful walker via a one-element list."""
+    write-time rows that never carry tool_calls). Delegates to the stateful
+    walker via a one-element list."""
     projected = project_messages_for_viewer([message], viewer_participant_id)
     return projected[0] if projected else None
 
@@ -218,6 +212,12 @@ class SessionDBMemberChatMixin:
         display_name: str = "",
         optimistic_run_id: str = "",
     ) -> None:
+        """Deprecated P2-PR-E compatibility write for legacy member-chat runs.
+
+        RunContext-based routing no longer reads this table for event delivery.
+        Keep this helper until mission node spawn and in-flight workers no longer
+        need the one-release compatibility registry.
+        """
         run_id = _text(run_id)
         if not run_id:
             return
@@ -247,6 +247,11 @@ class SessionDBMemberChatMixin:
         self._execute_write(_do)
 
     def get_member_chat_run(self, run_id: str) -> Dict[str, Any]:
+        """Deprecated P2-PR-E compatibility lookup for legacy callers.
+
+        Event routing must use RunContext. This remains for one release cycle so
+        mission node spawn and in-flight workers can drain before P5 cleanup.
+        """
         run_id = _text(run_id)
         if not run_id:
             return {}
@@ -264,10 +269,12 @@ class SessionDBMemberChatMixin:
         return {k: row[i] for i, k in enumerate(keys)}
 
     def find_member_chat_run_by_optimistic_run_id(self, optimistic_run_id: str) -> Dict[str, Any]:
-        """Reverse-lookup the worker run from the frontend's pre-reserved
-        optimistic run_id (the one stamped onto mirrored frames so the
-        sidebar settles cleanly). Used by recall to find the worker run that
-        must be cancelled when the user retracts a group-chat turn."""
+        """Deprecated P2-PR-E reverse lookup for legacy recall paths.
+
+        RunContext-based routing makes ``member_chat_runs`` obsolete. This
+        helper stays until mission node spawn/recall callers move off the
+        compatibility registry in the planned cleanup.
+        """
         optimistic_run_id = _text(optimistic_run_id)
         if not optimistic_run_id:
             return {}
@@ -286,11 +293,12 @@ class SessionDBMemberChatMixin:
         return {k: row[i] for i, k in enumerate(keys)}
 
     def list_member_chat_runs_for_conversation(self, conversation_session_id: str) -> "list[Dict[str, Any]]":
-        """All member-chat runs that mirrored into this conversation. Used by
-        recall to know which member-chat view sessions need to be synced
-        (their materialized view rows of the recalled messages must also be
-        deactivated, otherwise the next time the user @-mentions that member
-        the worker would still see the retracted message)."""
+        """Deprecated P2-PR-E compatibility list for legacy recall paths.
+
+        RunContext-based event routing no longer uses ``member_chat_runs``.
+        Keep this until mission node spawn/recall callers leave the one-release
+        compatibility registry.
+        """
         conversation_session_id = _text(conversation_session_id)
         if not conversation_session_id:
             return []
@@ -369,8 +377,8 @@ class SessionDBMemberChatMixin:
 
         Role remap (from this member's first-person perspective):
           - source user messages → ``role=user``, content unchanged
-          - this member's OWN past replies (mirrored back into the
-            conversation by the member-chat mirror) → ``role=assistant``
+          - this member's OWN past replies in the conversation
+            → ``role=assistant``
           - everyone else (leader, other members, unattributed assistants)
             → ``role=user`` with a ``[<speaker> 在群聊里说] <content>``
             prefix, so the LLM treats them as observed group-chat speech
@@ -378,9 +386,9 @@ class SessionDBMemberChatMixin:
 
         Skip rules:
           - tool messages / empty content
-          - source messages already mirrored (tracked by source message id
+          - source messages already materialized (tracked by source message id
             stamped in metadata.member_chat_view.source_message_id)
-          - this member's OWN ``kind=member_chat`` mirrors AND
+          - this member's OWN ``kind=member_chat`` rows AND
             ``kind=member_chat_user`` current request — the worker already
             has those locally (its own past assistant turns and the in-
             flight user prompt arrive through `text=` on run.submit).

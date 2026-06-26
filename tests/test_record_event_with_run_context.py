@@ -9,7 +9,6 @@ import pytest
 from hermes_state import SessionDB
 from hermes_team_mission.domain.run_context import RunContext
 from tui_gateway.run_worker import EventFrame
-from tui_gateway.services import run_control
 from tui_gateway.services.run_control import record_event
 from tui_gateway.services.worker_frame_router import WorkerFrameRouter
 
@@ -99,43 +98,6 @@ def test_record_event_without_run_context_unchanged_legacy_path(tmp_path: Path):
     assert conv_events == []
     assert legacy_events[0]["stored_session_id"] == "legacy-session"
     assert "run_context" not in (legacy_events[0].get("payload") or {})
-
-
-def test_mirror_noops_when_run_context_already_routed(monkeypatch):
-    diagnostics: list[tuple[str, dict[str, Any]]] = []
-    monkeypatch.setattr(
-        run_control,
-        "_diagnostic_warning",
-        lambda label, **fields: diagnostics.append((label, fields)),
-    )
-
-    class _NoLookupDB:
-        db_path = "fake.db"
-
-        def get_member_chat_run(self, _run_id: str) -> dict[str, Any]:
-            raise AssertionError("mirror lookup should be skipped for routed RunContext events")
-
-    run_control._mirror_member_chat_frame_if_registered(  # noqa: SLF001
-        run_id="run-1",
-        source_frame={
-            "type": "message.delta",
-            "session_id": "conv-X",
-            "stored_session_id": "conv-X",
-            "run_id": "run-1",
-            "turn_id": "turn-1",
-            "seq": 1,
-            "payload": {
-                "delta": "hi",
-                "mode": "append",
-                "run_context": _run_context().to_payload(),
-            },
-        },
-        owner_transport=None,
-        skip_owner_transport=False,
-        db=_NoLookupDB(),
-    )
-
-    assert diagnostics == []
 
 
 @pytest.mark.asyncio

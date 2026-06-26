@@ -270,16 +270,18 @@ CREATE TABLE IF NOT EXISTS session_index (
     last_activity REAL
 );
 
+-- DEPRECATED (P2-PR-E, 2026-06-27): RunContext-based event routing
+-- (Conversation Runtime Protocol P2) makes this table obsolete.
+-- Kept for one release cycle to avoid in-flight worker breakage;
+-- physical drop ships in P5 cleanup.
 CREATE TABLE IF NOT EXISTS member_chat_runs (
     run_id TEXT PRIMARY KEY,
     conversation_session_id TEXT NOT NULL DEFAULT '',
     member_id TEXT NOT NULL DEFAULT '',
     agent_profile_id TEXT NOT NULL DEFAULT '',
     display_name TEXT NOT NULL DEFAULT '',
-    -- Frontend's pre-reserved optimistic run_id on the conversation session.
-    -- Mirrored frames are stamped with this id so the frontend's existing
-    -- "运行中" state on the conversation settles the moment terminal arrives —
-    -- without it, mirror frames carry a fresh id the frontend never registered.
+    -- Deprecated legacy optimistic run_id reserved by the frontend before P2
+    -- RunContext made direct conversation-session routing the source of truth.
     optimistic_run_id TEXT NOT NULL DEFAULT '',
     relayed INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL DEFAULT 0
@@ -2308,10 +2310,9 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             "NOT (id LIKE 'team:%' AND id LIKE '%:node:%') "
             "AND NOT (COALESCE(parent_session_id,'') LIKE 'team:%:node:%') "
             # Group-chat member-chat worker sessions (id like 'memberchat:%')
-            # are data plane: the worker runs in its own session, its reply is
-            # relayed into the team conversation session by
-            # _project_member_chat_run_event. The worker session itself must
-            # never surface as a sidebar row.
+            # are data plane compatibility sessions. RunContext routes visible
+            # events into the team conversation session, so the worker session
+            # itself must never surface as a sidebar row.
             "AND NOT (id LIKE 'memberchat:%')"
         )
         # Suppress regular delegate_task / sub-agent children too — they have a
@@ -2362,8 +2363,8 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             )
             # Purge any group-chat member-chat worker sessions that a prior
             # session.create projected before the filter existed. The worker
-            # session is data plane; the reply is relayed into the team
-            # conversation by _project_member_chat_run_event.
+            # session is data plane compatibility state; RunContext routes the
+            # visible reply into the team conversation.
             conn.execute(
                 "DELETE FROM session_index WHERE session_id LIKE 'memberchat:%'"
             )
