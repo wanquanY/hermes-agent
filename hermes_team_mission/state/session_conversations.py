@@ -110,6 +110,14 @@ class SessionDBTeamMissionConversationMixin:
                     update_title,
                 ),
             )
+            if _text(active_mission_id):
+                self._add_mission_to_conversation_on_conn(
+                    conn,
+                    conversation_id=conversation_id,
+                    mission_id=_text(active_mission_id),
+                    status="active",
+                    now=update_updated,
+                )
             return self._team_mission_conversation_from_row(conn.execute(
                 "SELECT * FROM team_mission_conversations WHERE conversation_id = ?",
                 (conversation_id,),

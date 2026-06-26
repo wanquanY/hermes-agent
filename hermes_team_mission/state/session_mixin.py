@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .conversation_missions import SessionDBConversationMissionMixin
 from .session_context import SessionDBTeamMissionContextMixin
 from .session_conversations import SessionDBTeamMissionConversationMixin
 from .session_events import SessionDBTeamMissionEventMixin
@@ -10,6 +11,7 @@ from .session_views import SessionDBTeamMissionViewMixin
 
 
 class SessionDBTeamMissionMixin(
+    SessionDBConversationMissionMixin,
     SessionDBTeamMissionRowsMixin,
     SessionDBTeamMissionConversationMixin,
     SessionDBTeamMissionGraphMixin,

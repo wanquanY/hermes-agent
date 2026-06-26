@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from typing import Any
 
 
@@ -21,6 +22,16 @@ CREATE TABLE IF NOT EXISTS team_mission_conversations (
     metadata_json TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS conversation_missions (
+    conversation_id TEXT NOT NULL,
+    mission_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    added_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (conversation_id, mission_id)
 );
 
 CREATE TABLE IF NOT EXISTS team_missions (
@@ -177,6 +188,10 @@ CREATE INDEX IF NOT EXISTS idx_team_mission_conversations_team
     ON team_mission_conversations(team_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_conversations_workspace
     ON team_mission_conversations(workspace_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversation_missions_conv
+    ON conversation_missions (conversation_id, status);
+CREATE INDEX IF NOT EXISTS idx_conversation_missions_mission
+    ON conversation_missions (mission_id, status);
 CREATE INDEX IF NOT EXISTS idx_team_missions_conversation
     ON team_missions(conversation_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_team_missions_status_updated
@@ -306,6 +321,37 @@ def reconcile_team_mission_node_primary_key(cursor: sqlite3.Cursor) -> None:
         "ON team_mission_nodes(mission_id, created_at ASC)"
     )
     cursor.execute("PRAGMA foreign_keys=ON")
+
+
+def migrate_active_mission_id_to_conversation_missions(cursor: sqlite3.Cursor) -> None:
+    """Backfill the P3 conversation-mission join table from legacy 1:1 rows."""
+
+    try:
+        rows = cursor.execute(
+            """
+            SELECT conversation_id, active_mission_id, created_at
+            FROM team_mission_conversations
+            WHERE COALESCE(active_mission_id, '') != ''
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+    now = time.time()
+    for row in rows:
+        conversation_id = str(_row_value(row, "conversation_id", 0, "") or "").strip()
+        mission_id = str(_row_value(row, "active_mission_id", 1, "") or "").strip()
+        if not conversation_id or not mission_id:
+            continue
+        added_at = float(_row_value(row, "created_at", 2, 0) or now)
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO conversation_missions (
+                conversation_id, mission_id, status, added_at, updated_at, metadata_json
+            )
+            VALUES (?, ?, 'active', ?, ?, '')
+            """,
+            (conversation_id, mission_id, added_at, now),
+        )
 
 
 def compact_team_mission_event_json_storage(cursor: sqlite3.Cursor, logger: Any) -> None:

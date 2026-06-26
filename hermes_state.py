@@ -34,6 +34,7 @@ from hermes_state_team_capabilities import SessionDBTeamCapabilityMixin
 from hermes_team_mission.state.session_mixin import SessionDBTeamMissionMixin
 from hermes_state_team_registry import SessionDBTeamRegistryMixin
 from hermes_team_mission.state.schema import compact_team_mission_event_json_storage
+from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
 from hermes_team_mission.state.schema import reconcile_team_mission_node_primary_key
 from hermes_team_mission.state.schema import team_mission_deferred_index_sql
 from hermes_team_mission.state.schema import team_mission_schema_sql
@@ -1110,6 +1111,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         # column gets created here.
         self._reconcile_columns(cursor)
         reconcile_team_mission_node_primary_key(cursor)
+        migrate_active_mission_id_to_conversation_missions(cursor)
 
         # Indexes that reference reconciler-added columns must be created
         # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL
