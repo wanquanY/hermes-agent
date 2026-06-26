@@ -5840,10 +5840,9 @@ def _recall_setup_team_conversation(monkeypatch, tmp_path: Path):
     return db, calls, server
 
 
-def test_recall_turn_path_C_group_chat_cancels_worker_and_syncs_view(monkeypatch, tmp_path: Path):
-    """C path: @-member turn. Recall must (a) cancel the worker run on its
-    memberchat: session, (b) defer to session.recall_turn for the conv, and
-    (c) sync the deactivation into the member-chat view session."""
+def test_recall_turn_member_chat_cancels_conversation_run_and_syncs_legacy_view(monkeypatch, tmp_path: Path):
+    """PR-C path: @-member turns run on the conversation session. Recall must
+    cancel run_id on that session while still retracting any legacy view rows."""
     db, calls, server = _recall_setup_team_conversation(monkeypatch, tmp_path)
 
     # Seed conv messages: a user @-request + a mirrored member reply.
@@ -5879,11 +5878,10 @@ def test_recall_turn_path_C_group_chat_cancels_worker_and_syncs_view(monkeypatch
 
     assert "error" not in resp, resp
     result = resp["result"]
-    assert result["cascade_type"] == "C"
-    # Worker run cancelled on its memberchat: session, NOT on the conv session.
+    assert result["cascade_type"] == "A"
     assert calls["run_cancel"] == [{
-        "run_id": "worker-run-1",
-        "stored_session_id": "memberchat:conv-1:member-bob",
+        "run_id": "team-member-run-A",
+        "stored_session_id": "team-session-1",
         "reason": "Recalled by user.",
     }]
     assert calls["team_mission_cancel"] == []
@@ -5944,6 +5942,56 @@ def test_recall_turn_path_B_leader_mission_cancels_mission(monkeypatch, tmp_path
         "reason": "Recalled by user.",
     }]
     # B path doesn't double-cancel via run.cancel — team_mission.cancel covers it.
+    assert calls["run_cancel"] == []
+
+
+def test_recall_turn_path_B_resolves_mission_from_run_binding(monkeypatch, tmp_path: Path):
+    db, calls, server = _recall_setup_team_conversation(monkeypatch, tmp_path)
+    db.upsert_team_mission(
+        mission_id="mission-X",
+        conversation_id="conv-1",
+        team_id="team-1",
+        title="x",
+        objective="x",
+        mode="supervised_mission",
+        status="running",
+        leader_session_id="team-session-1",
+    )
+    db.upsert_run(
+        run_id="team-leader-run-B",
+        session_id="team-session-1",
+        runtime_scope_key="team:conv-1:leader-conversation",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-X",
+        node_id="root",
+        run_id="team-leader-run-B",
+        session_id="team-session-1",
+        runtime_scope_key="team:conv-1:leader-conversation",
+        role="leader",
+    )
+    db.append_message(
+        "team-session-1", role="user", content="启动任务",
+        metadata={"turn_id": "team-leader-turn-B"},
+    )
+
+    resp = server._methods["team_mission.conversation.recall_turn"](1, {
+        "conversation_id": "conv-1",
+        "conversation_session_id": "team-session-1",
+        "turn_id": "team-leader-turn-B",
+        "run_id": "team-leader-run-B",
+    })
+
+    assert "error" not in resp, resp
+    result = resp["result"]
+    assert result["cascade_type"] == "B"
+    assert result["cancelled"]["mission_ids"] == ["mission-X"]
+    assert calls["team_mission_cancel"] == [{
+        "mission_id": "mission-X",
+        "canceled_by": "user",
+        "reason": "Recalled by user.",
+    }]
     assert calls["run_cancel"] == []
 
 

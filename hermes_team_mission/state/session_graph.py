@@ -922,6 +922,22 @@ class SessionDBTeamMissionGraphMixin:
         bindings = [binding for binding in graph.get("run_bindings", []) if isinstance(binding, dict)]
         canceled_at = time.time()
 
+        def _mark_conversation_mission_cancelled() -> None:
+            conversation_id = _text(mission.get("conversation_id"))
+            if not conversation_id:
+                return
+            if self.set_conversation_mission_status(
+                conversation_id=conversation_id,
+                mission_id=mission_id,
+                status="cancelled",
+            ):
+                return
+            self.add_mission_to_conversation(
+                conversation_id=conversation_id,
+                mission_id=mission_id,
+                status="cancelled",
+            )
+
         # Safety reaper: re-read the *current* run status for EVERY run bound to
         # this mission (not just a stale graph snapshot) and force any run that
         # is not already terminal to a terminal status in the control-plane DB.
@@ -963,6 +979,8 @@ class SessionDBTeamMissionGraphMixin:
             # Mission is already terminal, but we still return (and have just
             # reaped) any runs that were left non-terminal so the gateway can
             # terminate the live worker runs and clear the zombie state.
+            if mission_status in {"cancelled", "canceled"}:
+                _mark_conversation_mission_cancelled()
             self.update_session_index_for_mission(
                 mission_id, status="idle", running=False, waiting_approval=False,
             )
@@ -1050,6 +1068,7 @@ class SessionDBTeamMissionGraphMixin:
         self.upsert_team_mission(
             mission_id=mission_id,
             team_id=str(mission.get("team_id") or ""),
+            conversation_id=str(mission.get("conversation_id") or ""),
             title=str(mission.get("title") or ""),
             objective=str(mission.get("objective") or ""),
             workspace_id=str(mission.get("workspace_id") or ""),
@@ -1062,6 +1081,7 @@ class SessionDBTeamMissionGraphMixin:
                 **cancellation_metadata,
             },
         )
+        _mark_conversation_mission_cancelled()
         # Cancel does NOT go through reduce_team_mission_graph, so project the now-
         # terminal status onto the conversation's session_index here — otherwise the
         # sidebar keeps showing the cancelled mission as "running" after restart.

@@ -1365,14 +1365,22 @@ def _recall_collect_conv_message_ids(db, *, conversation_session_id: str, turn_i
 def _recall_mission_id_from_run(db, *, run_id: str, params: dict, mission: dict | None) -> str:
     """Resolve the mission id (if any) this recall should cascade-cancel.
 
-    Order: explicit param > leader run's persisted state (db.runs metadata) >
-    the resolved mission context. Returns ``""`` for non-mission turns (A/C
-    paths), in which case the caller skips ``team_mission.cancel`` and only
-    runs ``run.cancel``.
+    Order: explicit param > canonical team_mission_run_bindings > persisted
+    run state > resolved active mission context. Returns ``""`` for non-mission
+    turns, in which case the caller skips ``team_mission.cancel`` and directly
+    cancels ``run_id`` on the conversation session.
     """
     explicit = str(params.get("mission_id") or params.get("missionId") or "").strip()
     if explicit:
         return explicit
+    if run_id:
+        try:
+            binding = db.get_team_mission_run_binding(run_id) or {}
+        except Exception:
+            binding = {}
+        mid = str(binding.get("mission_id") or binding.get("missionId") or "").strip()
+        if mid:
+            return mid
     if mission and isinstance(mission, dict):
         mid = str(mission.get("mission_id") or "").strip()
         if mid:
@@ -1401,13 +1409,10 @@ def _(rid, params: dict) -> dict:
     counterpart of ``session.recall_turn``. Cascades cancellation for any
     derived execution the turn triggered:
 
-      A) leader direct reply           → run.cancel(leader run)
+      A) direct conversation run       → run.cancel(run_id on conv session)
       B) leader-triggered team mission → team_mission.cancel(mission_id)
                                          (this internally cancels every
-                                         worker run + binding) + run.cancel
-                                         on the optimistic leader run
-      C) @-member group chat           → run.cancel on the worker run found
-                                         via member_chat_runs
+                                         worker run + binding)
 
     Then defers to ``session.recall_turn`` on the conversation session to
     soft-delete (active=0) the user message and every subsequent assistant
@@ -1435,24 +1440,16 @@ def _(rid, params: dict) -> dict:
     ).strip()
     reason = str(params.get("reason") or "").strip() or "Recalled by user."
 
-    # Identify the cascade type. Try member-chat first because the optimistic
-    # run id was stamped onto a worker run by _submit_message_to_member.
-    member_chat_run = (
-        db.find_member_chat_run_by_optimistic_run_id(optimistic_run_id)
-        if optimistic_run_id else {}
-    )
-    is_group_chat = bool(member_chat_run)
+    # PR-C moved member workers onto the conversation session and stopped
+    # registering member_chat_runs. The cancel target is therefore canonical:
+    # run_id + conversation_session_id, unless the run is bound to a mission.
     _member_chat_diagnostic(
-        "recall-lookup",
+        "recall-cancel-target",
         db=str(getattr(db, "db_path", "") or ""),
         conversation_id=conversation_id,
         conversation_session_id=conversation_session_id,
         optimistic_run_id=optimistic_run_id,
         turn_id=turn_id,
-        member_chat_run_found=is_group_chat,
-        worker_run_id=str((member_chat_run or {}).get("run_id") or ""),
-        member_id=str((member_chat_run or {}).get("member_id") or ""),
-        registered_conversation_session_id=str((member_chat_run or {}).get("conversation_session_id") or ""),
     )
 
     # Mission identity (only meaningful for B; ignored for A/C).
@@ -1467,7 +1464,7 @@ def _(rid, params: dict) -> dict:
         db,
         run_id=optimistic_run_id,
         params=params,
-        mission=resolved_mission if not is_group_chat else {},
+        mission=resolved_mission,
     )
 
     cancelled_mission_ids: list[str] = []
@@ -1476,7 +1473,7 @@ def _(rid, params: dict) -> dict:
 
     # Step 1 — cascade cancel BEFORE we soft-delete messages, so any in-flight
     # event the worker is about to emit gets its terminal frame first.
-    if mission_id and not is_group_chat:
+    if mission_id:
         # B: leader-triggered mission. team_mission.cancel takes care of every
         # node + binding + worker run cascade — we don't reimplement that.
         try:
@@ -1501,51 +1498,10 @@ def _(rid, params: dict) -> dict:
                 "mission_id": mission_id,
                 "message": str(response.get("error", {}).get("message") or "team_mission.cancel failed"),
             })
-    if is_group_chat:
-        # C: @-member group chat. Cancel the worker run on its memberchat
-        # session. Legacy registry lookup is still used here only to find
-        # the worker run while P2/P5 cleanup drains compatibility state.
-        worker_run_id = str(member_chat_run.get("run_id") or "").strip()
-        worker_stored_session_id = str(member_chat_run.get("conversation_session_id") or "").strip()
-        # The worker actually runs against `memberchat:<conv>:<member>`, not the
-        # team conv session. Derive it from member_id and conversation_id.
-        member_id = str(member_chat_run.get("member_id") or "").strip()
-        if conversation_id and member_id:
-            worker_session_id = _member_chat_session_id(conversation_id, member_id)
-        else:
-            worker_session_id = worker_stored_session_id
-        _member_chat_diagnostic(
-            "recall-worker-cancel-target",
-            db=str(getattr(db, "db_path", "") or ""),
-            conversation_id=conversation_id,
-            conversation_session_id=conversation_session_id,
-            optimistic_run_id=optimistic_run_id,
-            worker_run_id=worker_run_id,
-            worker_session_id=worker_session_id,
-            member_id=member_id,
-        )
-        if worker_run_id and worker_session_id:
-            try:
-                cancel_resp = _methods["run.cancel"](rid, {
-                    "run_id": worker_run_id,
-                    "stored_session_id": worker_session_id,
-                    "reason": reason,
-                })
-            except Exception as exc:
-                cancel_resp = {"error": {"code": 5000, "message": str(exc)}}
-            if isinstance(cancel_resp, dict) and not cancel_resp.get("error"):
-                cancelled_run_ids.append({
-                    "run_id": worker_run_id,
-                    "stored_session_id": worker_session_id,
-                    "status": "cancelled",
-                })
-            else:
-                cancel_errors.append({
-                    "run_id": worker_run_id,
-                    "message": str((cancel_resp or {}).get("error", {}).get("message") or "worker run.cancel failed"),
-                })
-    if not mission_id and not is_group_chat and optimistic_run_id:
-        # A: leader direct reply. Cancel the leader run on the conv session.
+    if not mission_id and optimistic_run_id:
+        # A: direct leader/member conversation run. PR-C makes the conversation
+        # session the stored session for both surfaces, so no memberchat lookup
+        # or fallback target is needed.
         try:
             cancel_resp = _methods["run.cancel"](rid, {
                 "run_id": optimistic_run_id,
@@ -1648,7 +1604,7 @@ def _(rid, params: dict) -> dict:
             "runs": cancelled_run_ids,
             "errors": cancel_errors,
         },
-        "cascade_type": "B" if cancelled_mission_ids else ("C" if is_group_chat else "A"),
+        "cascade_type": "B" if cancelled_mission_ids else "A",
     })
 
 
