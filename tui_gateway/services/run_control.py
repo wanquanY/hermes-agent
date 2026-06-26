@@ -1528,8 +1528,75 @@ def _mirror_member_chat_frame_if_registered(
         or source_scope.startswith("member-chat:")
         or str(source_team_mission.get("kind") or "").strip() == "member_chat"
     )
-    lookup = _db_method(db, "get_member_chat_run")
-    if not lookup:
+    # ── DB ROUTING FIX (2026-06-27) ──────────────────────────────────────
+    # Worker events for a member-chat run can come back through ANY profile
+    # DB connection (e.g. ui-ux/state.db) depending on which profile
+    # context the gateway happens to be in when the worker emits the
+    # frame. But the member_chat_runs registration is ALWAYS written to
+    # control DB. So we must look up in control DB first, falling back
+    # to whatever DB was passed in only if control DB is unavailable or
+    # the row truly doesn't exist there either.
+    #
+    # Symptom of NOT doing this: register-written db=dovie/state.db
+    # (control), worker-event-db-route db=dovie/profiles/ui-ux/state.db
+    # (some random profile), mirror-lookup-miss every event because
+    # the lookup ran on ui-ux/state.db where the register was never
+    # written. User sees "运行中" forever and no streaming content —
+    # only the final message.complete persists (via the P0-Commit2
+    # payload-based fallback).
+    lookup_dbs: list[Any] = []
+    control_db = None
+    try:
+        from hermes_team_mission.runtime.profile_scope import (  # type: ignore[import-not-found]
+            team_mission_control_db as _team_mission_control_db_for_mirror,
+        )
+        control_db = _team_mission_control_db_for_mirror()
+    except Exception:
+        control_db = None
+    if control_db is not None and control_db is not db:
+        lookup_dbs.append(("control", control_db))
+    lookup_dbs.append(("passed", db))
+    registration: Any = None
+    lookup_db_used = None
+    lookup_errors: list[str] = []
+    for _label, _candidate_db in lookup_dbs:
+        if _candidate_db is None:
+            continue
+        candidate_lookup = _db_method(_candidate_db, "get_member_chat_run")
+        if not candidate_lookup:
+            continue
+        try:
+            _result = candidate_lookup(run_id)
+        except Exception as exc:
+            lookup_errors.append(f"{_label}:{exc}")
+            continue
+        if isinstance(_result, dict) and _result:
+            registration = _result
+            lookup_db_used = _label
+            break
+    # ── DIAGNOSTIC: which DB satisfied the lookup ───────────────────────
+    # When the fix is working, we expect lookup_db_used='control' for the
+    # bug-case (worker events on a per-profile DB). Old behaviour was
+    # always 'passed' (the per-profile DB) and would miss.
+    if registration is not None and is_member_chat_candidate:
+        print(
+            f"[member-leader-history-debug] mirror_lookup_route "
+            f"used_db={lookup_db_used} passed_db_path={_db_label(db)} "
+            f"control_db_path={_db_label(control_db) if control_db is not None else '<none>'} "
+            f"source_run_id={run_id} source_seq={int(source_frame.get('seq') or 0)} "
+            f"event_type={str(source_frame.get('type') or '')}"
+        )
+    if registration is None and is_member_chat_candidate and lookup_errors:
+        _diagnostic_warning(
+            "member-chat-diagnostic-mirror-lookup-error",
+            db=_db_label(db),
+            event_type=str(source_frame.get("type") or ""),
+            source_run_id=run_id,
+            source_session_id=source_session_id,
+            runtime_scope_key=source_scope,
+            errors=";".join(lookup_errors[:3]),
+        )
+    if registration is None and not any(_db_method(_d, "get_member_chat_run") for _, _d in lookup_dbs if _d is not None):
         if is_member_chat_candidate:
             _diagnostic_warning(
                 "member-chat-diagnostic-mirror-no-lookup-method",
@@ -1538,20 +1605,6 @@ def _mirror_member_chat_frame_if_registered(
                 source_run_id=run_id,
                 source_session_id=source_session_id,
                 runtime_scope_key=source_scope,
-            )
-        return
-    try:
-        registration = lookup(run_id)
-    except Exception as exc:
-        if is_member_chat_candidate:
-            _diagnostic_warning(
-                "member-chat-diagnostic-mirror-lookup-error",
-                db=_db_label(db),
-                event_type=str(source_frame.get("type") or ""),
-                source_run_id=run_id,
-                source_session_id=source_session_id,
-                runtime_scope_key=source_scope,
-                error=str(exc),
             )
         return
     if not isinstance(registration, dict) or not registration:
