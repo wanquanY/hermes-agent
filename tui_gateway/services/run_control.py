@@ -18,7 +18,7 @@ import time
 import uuid
 from collections import defaultdict, deque
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from hermes_runtime_event_payloads import primary_deliverable_text
 from agent.dovie_diagnostics import emit_dovie_diagnostic
@@ -34,6 +34,9 @@ from tui_gateway.services.run_control_events import (
     terminal_delivery_identity as _terminal_delivery_identity,
 )
 from tui_gateway.transport import Transport
+
+if TYPE_CHECKING:
+    from hermes_team_mission.domain.run_context import RunContext
 
 try:
     from hermes_state_runs import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES
@@ -1027,15 +1030,33 @@ def next_event_seq(stored_session_id: str, fallback_seq: int = 0, db: Any = None
         return next_seq
 
 
+def _apply_run_context_to_frame(
+    frame: dict[str, Any],
+    run_context: "RunContext | None",
+) -> dict[str, Any]:
+    if run_context is None:
+        return frame
+    payload = frame.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+        frame["payload"] = payload
+    frame["stored_session_id"] = run_context.conversation_session_id
+    if not str(frame.get("participant_id") or "").strip():
+        frame["participant_id"] = run_context.participant_id
+    payload["run_context"] = run_context.to_payload()
+    return frame
+
+
 def record_event(
     params: dict[str, Any],
     owner_transport: Transport | None = None,
     skip_owner_transport: bool = False,
     db: Any = None,
     persist: bool = True,
+    run_context: "RunContext | None" = None,
 ) -> list[Transport]:
     """Persist an event frame and return live subscriber transports to notify."""
-    frame = dict(params)
+    frame = _apply_run_context_to_frame(dict(params), run_context)
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     stable = _stable_session_id(frame)
     run_id = _event_run_id(frame)
@@ -1553,6 +1574,16 @@ def _mirror_member_chat_frame_if_registered(
     source_session_id = str(
         source_frame.get("stored_session_id") or source_frame.get("session_id") or ""
     ).strip()
+    run_context_payload = source_payload.get("run_context")
+    if isinstance(run_context_payload, str):
+        try:
+            run_context_payload = json.loads(run_context_payload)
+        except Exception:
+            run_context_payload = {}
+    if isinstance(run_context_payload, dict):
+        routed_session_id = str(run_context_payload.get("conversation_session_id") or "").strip()
+        if routed_session_id and routed_session_id == source_session_id:
+            return
     source_scope = str(
         source_frame.get("runtime_scope_key")
         or source_payload.get("runtime_scope_key")
@@ -1848,6 +1879,7 @@ def publish_recorded_event(
     db: Any = None,
     before_deliver: Callable[[], None] | None = None,
     persist: bool = True,
+    run_context: "RunContext | None" = None,
 ) -> list[Transport]:
     """Persist an event and deliver it to live event subscribers.
 
@@ -1861,18 +1893,20 @@ def publish_recorded_event(
     delivery path for the exact same event frame. Passing ``owner_transport``
     alone is diagnostic context; it must not suppress an explicit subscription.
     """
+    publish_params = _apply_run_context_to_frame(dict(params), run_context)
     subscribers = record_event(
-        params,
+        publish_params,
         owner_transport=owner_transport,
         skip_owner_transport=skip_owner_transport,
         db=db,
         persist=persist,
+        run_context=run_context,
     )
     if before_deliver is not None:
         before_deliver()
     delivered: list[Transport] = []
     for transport in subscribers:
-        event_for_transport = _event_for_live_subscription_delivery(transport, params)
+        event_for_transport = _event_for_live_subscription_delivery(transport, publish_params)
         if event_for_transport is None:
             delivered.append(transport)
             continue

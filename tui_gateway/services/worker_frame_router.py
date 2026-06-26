@@ -61,6 +61,7 @@ class RunInfo:
     scope_key: str
     stored_session_id: str
     turn_id: str
+    run_context_json: Any = ""
 
 
 @dataclass
@@ -109,6 +110,7 @@ class WorkerFrameRouter:
         run_id: str,
         stored_session_id: str,
         turn_id: str = "",
+        run_context_json: Any = "",
     ) -> None:
         run_id = str(run_id or "").strip()
         if not run_id:
@@ -118,6 +120,7 @@ class WorkerFrameRouter:
                 scope_key=str(scope_key or ""),
                 stored_session_id=str(stored_session_id or ""),
                 turn_id=str(turn_id or ""),
+                run_context_json=run_context_json,
             )
         if str(scope_key or "").startswith("member-chat:"):
             _log.warning(
@@ -161,8 +164,12 @@ class WorkerFrameRouter:
         + persist it. ``params`` is the same dict the legacy ws bridge
         used to put on the wire."""
         params = frame.params if isinstance(frame.params, dict) else {}
+        run_context = self._run_context_for_event(params)
         try:
-            self._publish_event(params)
+            if run_context is None:
+                self._publish_event(params)
+            else:
+                self._publish_event(params, run_context=run_context)
         except Exception:
             _log.exception(
                 "[worker-router] publish_event failed scope=%s type=%s",
@@ -357,6 +364,27 @@ class WorkerFrameRouter:
         if len(candidates) == 1:
             return candidates[0]
         return ""
+
+    def _run_context_for_event(self, params: dict[str, Any]) -> Any:
+        payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+        run_id = str(params.get("run_id") or payload.get("run_id") or "").strip()
+        if not run_id:
+            return None
+        with self._lock:
+            info = self._runs.get(run_id)
+        if info is None or not info.run_context_json:
+            return None
+        try:
+            from hermes_team_mission.domain.run_context import RunContext
+
+            return RunContext.from_payload(info.run_context_json)
+        except Exception as exc:
+            _log.warning(
+                "[worker-router] run_context_json parse failed run_id=%s: %s",
+                run_id,
+                exc,
+            )
+            return None
 
 
 def _level_for(name: str) -> int:

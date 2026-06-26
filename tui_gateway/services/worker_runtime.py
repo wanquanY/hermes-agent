@@ -101,7 +101,7 @@ def worker_frame_router() -> WorkerFrameRouter:
                 async def send(self, scope_key: str, frame):
                     return await worker_supervisor().send(scope_key, frame)
 
-            def _publish_event_with_db(params: dict):
+            def _publish_event_with_db(params: dict, *, run_context=None):
                 # The MAIN side is the canonical persistence point for
                 # worker-relayed events. The worker's wrapped
                 # ``publish_recorded_event`` (see
@@ -137,8 +137,10 @@ def worker_frame_router() -> WorkerFrameRouter:
                 # the canonical event in that case rather than
                 # dropping subscribers, so live delivery is safe.
                 stable = ""
+                if run_context is not None:
+                    stable = str(getattr(run_context, "conversation_session_id", "") or "").strip()
                 if isinstance(params, dict):
-                    stable = str(
+                    stable = stable or str(
                         params.get("stored_session_id")
                         or params.get("session_id")
                         or ""
@@ -169,7 +171,7 @@ def worker_frame_router() -> WorkerFrameRouter:
                             seq=int(params.get("seq") or 0),
                         )
                 return run_control.publish_recorded_event(
-                    params, db=db, persist=True,
+                    params, db=db, persist=True, run_context=run_context,
                 )
 
             def _publish_run_terminal_with_db(**kwargs):
@@ -461,12 +463,15 @@ async def _dispatch_prompt_submit(
         )
         return True
 
-    router.record_run_start(
-        scope_key=scope.runtime_scope_key,
-        run_id=run_id,
-        stored_session_id=stored_session_id,
-        turn_id=turn_id,
-    )
+    run_start_kwargs = {
+        "scope_key": scope.runtime_scope_key,
+        "run_id": run_id,
+        "stored_session_id": stored_session_id,
+        "turn_id": turn_id,
+    }
+    if params.get("run_context_json") is not None:
+        run_start_kwargs["run_context_json"] = params.get("run_context_json")
+    router.record_run_start(**run_start_kwargs)
 
     frame_params = {
         k: v for k, v in params.items()
