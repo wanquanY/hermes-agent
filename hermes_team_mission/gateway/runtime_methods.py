@@ -318,16 +318,6 @@ def _submit_message_to_member(
 
     # 3. NOW it is safe to record the user's @-message into the shared
     # conversation transcript. The conv session row exists, FK satisfied.
-    # ── DIAGNOSTIC: count messages BEFORE/AFTER this append so we can SEE
-    #    whether the user's @-message actually lands and persists.
-    _diag_before = 0
-    try:
-        _msgs = db.get_messages(conversation_session_id) if hasattr(db, "get_messages") else []
-        _diag_before = len(_msgs) if isinstance(_msgs, list) else 0
-    except Exception:
-        _diag_before = -1
-    _append_ok = False
-    _append_err = ""
     try:
         db.append_message(
             conversation_session_id,
@@ -340,22 +330,10 @@ def _submit_message_to_member(
                 "display_name": display_name,
             }},
         )
-        _append_ok = True
-    except Exception as _exc:
-        _append_err = str(_exc)
-    _diag_after = 0
-    try:
-        _msgs2 = db.get_messages(conversation_session_id) if hasattr(db, "get_messages") else []
-        _diag_after = len(_msgs2) if isinstance(_msgs2, list) else 0
     except Exception:
-        _diag_after = -1
-    print(
-        f"[member-leader-history-debug] member_submit append_user_message "
-        f"conv_session={conversation_session_id} target_member={target_member_id} "
-        f"text_preview='{text[:40]}' append_ok={_append_ok} "
-        f"before_count={_diag_before} after_count={_diag_after} "
-        f"err='{_append_err[:80]}'"
-    )
+        # Should not happen post-ensure, but the original try/except is
+        # preserved so an unexpected DB error doesn't abort the submit.
+        pass
 
     # 4. Create the member's runtime session (plain; never projected to
     # session_index → never in the sidebar; never a team conversation).
@@ -677,36 +655,6 @@ def _(rid, params: dict) -> dict:
             session_id=conversation_session_id,
             require=True,
         )
-        # ── DIAGNOSTIC: leader submit entering ensure_team_mission_conversation
-        # This is THE path where leader replies overwrite the conv title
-        # set by the first @member message. Count messages too so we can
-        # see if anything happens to the transcript across this call.
-        try:
-            _diag_msgs = db.get_messages(conversation_session_id) if hasattr(db, "get_messages") else []
-            _diag_count = len(_diag_msgs) if isinstance(_diag_msgs, list) else 0
-            print(
-                f"[member-leader-history-debug] leader_submit pre-ensure "
-                f"conv_session={conversation_session_id} "
-                f"text_preview='{text[:40]}' messages_in_transcript={_diag_count}"
-            )
-            if isinstance(_diag_msgs, list) and _diag_count > 0:
-                for _i, _m in enumerate(_diag_msgs[:6]):
-                    _role = str(_m.get("role") or "")
-                    _c = str(_m.get("content") or "")[:40]
-                    _meta = _m.get("metadata") or {}
-                    _kind = ""
-                    if isinstance(_meta, str):
-                        try:
-                            _meta = json.loads(_meta)
-                        except Exception:
-                            _meta = {}
-                    if isinstance(_meta, dict):
-                        _tm = _meta.get("team_mission") or {}
-                        if isinstance(_tm, dict):
-                            _kind = str(_tm.get("kind") or "")
-                    print(f"[member-leader-history-debug]   transcript[{_i}] role={_role} kind={_kind} content='{_c}'")
-        except Exception as _diag_exc:
-            print(f"[member-leader-history-debug] leader_submit pre-ensure diag-error: {_diag_exc}")
         conversation_title = _conversation_title_from_submit(db, params, text)
         conversation = db.ensure_team_mission_conversation(
             conversation_id=conversation_id,

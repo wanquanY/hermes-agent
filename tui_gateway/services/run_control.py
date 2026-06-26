@@ -1574,18 +1574,6 @@ def _mirror_member_chat_frame_if_registered(
             registration = _result
             lookup_db_used = _label
             break
-    # ── DIAGNOSTIC: which DB satisfied the lookup ───────────────────────
-    # When the fix is working, we expect lookup_db_used='control' for the
-    # bug-case (worker events on a per-profile DB). Old behaviour was
-    # always 'passed' (the per-profile DB) and would miss.
-    if registration is not None and is_member_chat_candidate:
-        print(
-            f"[member-leader-history-debug] mirror_lookup_route "
-            f"used_db={lookup_db_used} passed_db_path={_db_label(db)} "
-            f"control_db_path={_db_label(control_db) if control_db is not None else '<none>'} "
-            f"source_run_id={run_id} source_seq={int(source_frame.get('seq') or 0)} "
-            f"event_type={str(source_frame.get('type') or '')}"
-        )
     if registration is None and is_member_chat_candidate and lookup_errors:
         _diagnostic_warning(
             "member-chat-diagnostic-mirror-lookup-error",
@@ -1780,36 +1768,12 @@ def _mirror_member_chat_frame_if_registered(
                 reply_text = str(value).strip()
                 break
         if reply_text:
-            # ── DIAGNOSTIC: count BEFORE/AFTER so we can SEE the assistant
-            #    message actually landing in the conv messages table.
-            _diag_before = -1
-            try:
-                getter = _db_method(db, "get_messages")
-                if getter:
-                    _diag_msgs = getter(conversation_session_id)
-                    _diag_before = len(_diag_msgs) if isinstance(_diag_msgs, list) else -1
-            except Exception:
-                _diag_before = -1
             try:
                 appender(
                     conversation_session_id,
                     role="assistant",
                     content=reply_text,
                     metadata={"team_mission": member_identity},
-                )
-                _diag_after = -1
-                try:
-                    getter = _db_method(db, "get_messages")
-                    if getter:
-                        _diag_msgs2 = getter(conversation_session_id)
-                        _diag_after = len(_diag_msgs2) if isinstance(_diag_msgs2, list) else -1
-                except Exception:
-                    _diag_after = -1
-                print(
-                    f"[member-leader-history-debug] mirror_append_assistant "
-                    f"conv_session={conversation_session_id} "
-                    f"reply_preview='{reply_text[:40]}' "
-                    f"before_count={_diag_before} after_count={_diag_after}"
                 )
                 _diagnostic_warning(
                     "member-chat-diagnostic-assistant-message-persisted",
