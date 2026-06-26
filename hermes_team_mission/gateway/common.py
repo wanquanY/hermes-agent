@@ -1295,8 +1295,11 @@ def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
     node_running = bool(active_node_run)
     mission_running = bool(active_node_count) or mission_status in _TEAM_MISSION_ACTIVE_STATUSES
     terminal = mission_status in _TEAM_MISSION_TERMINAL_STATUSES
-    running = has_active_mission if callable(has_active_mission_fn) else bool(
-        leader_running or node_running or (mission_running and not terminal)
+    observed_runtime = bool(leader_running or node_running or mission_running)
+    running = (
+        observed_runtime and not terminal and has_active_mission
+        if callable(has_active_mission_fn)
+        else bool(observed_runtime and not terminal)
     )
     waiting_approval = approval_waiting or mission_status == "waiting_approval"
     active_run_id = str(run_state.get("active_run_id") or "") if leader_running else str(active_node_run.get("run_id") or "")

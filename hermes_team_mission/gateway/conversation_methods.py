@@ -502,6 +502,8 @@ def _(rid, params: dict) -> dict:
 
 @method("team_mission.conversation.list")
 def _(rid, params: dict) -> dict:
+    """Superseded by enriched session.list per P4; kept for ABI compatibility."""
+
     db = _get_db()
     if db is None:
         return _ok(rid, {"conversations": []})

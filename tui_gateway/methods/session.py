@@ -324,6 +324,51 @@ def _is_empty_stored_conversation(row: dict) -> bool:
     )
 
 
+def _latest_active_conversation_mission_projection(
+    db,
+    conversation_id: str,
+    *,
+    fallback_active_mission_id: str = "",
+) -> dict:
+    """Return the sidebar mission projection for a team conversation."""
+
+    cid = str(conversation_id or "").strip()
+    if not cid:
+        return {
+            "active_mission_id": str(fallback_active_mission_id or "").strip(),
+            "mission_status": "",
+        }
+    active = []
+    lister = getattr(db, "list_conversation_missions", None)
+    if callable(lister):
+        try:
+            active = lister(cid, status="active") or []
+        except TypeError:
+            active = lister(conversation_id=cid, status="active") or []
+        except Exception:
+            active = []
+    active = [mission for mission in active if isinstance(mission, dict)]
+    active.sort(
+        key=lambda mission: (
+            float(mission.get("updated_at") or 0),
+            float(mission.get("added_at") or 0),
+            str(mission.get("mission_id") or ""),
+        ),
+        reverse=True,
+    )
+    latest = active[0] if active else {}
+    active_mission_id = str(
+        latest.get("mission_id")
+        or fallback_active_mission_id
+        or ""
+    ).strip()
+    mission_status = str(latest.get("status") or "").strip()
+    return {
+        "active_mission_id": active_mission_id,
+        "mission_status": mission_status,
+    }
+
+
 def _is_team_mission_internal_session_row(
     db,
     row: dict,
@@ -369,6 +414,11 @@ def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str
         created_at = conversation.get("created_at") or row.get("started_at") or updated_at
         has_active_mission = getattr(db, "has_active_mission", None)
         running = bool(has_active_mission(conversation_id)) if callable(has_active_mission) else bool(row.get("running"))
+        mission_projection = _latest_active_conversation_mission_projection(
+            db,
+            conversation_id,
+            fallback_active_mission_id=str(conversation.get("active_mission_id") or "").strip(),
+        )
         return {
             **row,
             "id": stable_session_id,
@@ -378,8 +428,10 @@ def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str
             "source": "team_mission",
             "conversation_id": conversation_id,
             "team_id": str(conversation.get("team_id") or "").strip(),
-            "active_mission_id": str(conversation.get("active_mission_id") or "").strip(),
-            "mission_id": str(conversation.get("active_mission_id") or "").strip(),
+            "team_conversation_title": str(conversation.get("title") or "").strip(),
+            "active_mission_id": mission_projection["active_mission_id"],
+            "mission_id": mission_projection["active_mission_id"],
+            "mission_status": mission_projection["mission_status"],
             "status": str(conversation.get("status") or "").strip(),
             "running": running,
             "title": str(conversation.get("title") or row.get("title") or "").strip(),
@@ -1004,8 +1056,10 @@ def _(rid, params: dict) -> dict:
                     "session_kind": s.get("session_kind") or "",
                     "conversation_id": s.get("conversation_id") or "",
                     "team_id": s.get("team_id") or "",
+                    "team_conversation_title": s.get("team_conversation_title") or "",
                     "active_mission_id": s.get("active_mission_id") or "",
                     "mission_id": s.get("mission_id") or "",
+                    "mission_status": s.get("mission_status") or "",
                     "status": s.get("status") or "",
                     **live_state,
                     "running": running,
@@ -1060,19 +1114,18 @@ def _is_hidden_empty_index_draft(row: dict) -> bool:
 def _session_index_list_item(row: dict) -> dict:
     """Map a control-plane session_index row to the desktop session list shape.
 
-    Field emission is scoped to ``session_kind``: only team mission rows
-    ship the mission-lifecycle fields (``conversation_id`` / ``team_id``
-    / ``mission_id`` / ``active_mission_id``). Plain chat sessions used
-    to receive these as empty strings — frontend then had to coerce
-    them, normalizers fell through and started reading
-    ``session.status`` into ``missionStatus``, and the running-indicator
-    OR'd six fields across kinds. Emitting nothing means downstream
-    can rely on field presence to distinguish a "no mission" plain
-    chat from a "mission cleared" team conversation. The desktop has
-    been updated to treat absent fields the same as empty.
+    P4 keeps the team sidebar shape single-source by always emitting the
+    team-metadata keys. Plain chat sessions receive empty values while team
+    rows receive the joined conversation and latest-active-mission projection.
     """
     session_kind = row.get("session_kind") or "hermes_session"
     is_team_mission_row = session_kind == "team_mission" or bool(row.get("team_id"))
+    active_mission_id = (
+        row.get("active_mission_id")
+        or row.get("team_conversation_active_mission_id")
+        or row.get("mission_id")
+        or ""
+    )
     item = {
         "id": row.get("session_id") or "",
         "title": row.get("title") or "",
@@ -1096,12 +1149,16 @@ def _session_index_list_item(row: dict) -> dict:
         "pending_approval_count": row.get("pending_approval_count") or 0,
         "active_run_id": row.get("active_run_id") or "",
         "active_runtime_session_id": row.get("active_runtime_session_id") or "",
+        "conversation_id": row.get("conversation_id") or "",
+        "team_id": row.get("team_id") or "",
+        "team_conversation_title": row.get("team_conversation_title") or "",
+        "mission_id": row.get("mission_id") or active_mission_id or "",
+        "active_mission_id": active_mission_id,
+        "mission_status": row.get("mission_status") or "",
     }
     if is_team_mission_row:
-        item["conversation_id"] = row.get("conversation_id") or ""
-        item["team_id"] = row.get("team_id") or ""
-        item["mission_id"] = row.get("mission_id") or ""
-        item["active_mission_id"] = row.get("mission_id") or ""
+        if active_mission_id:
+            item["mission_id"] = active_mission_id
     # Conversation-architecture refactor (P2): team display context joined in
     # at read time. Only emit when present so plain-chat rows stay clean.
     if row.get("team_id"):
