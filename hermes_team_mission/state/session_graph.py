@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 # ruff: noqa: F401,F403,F405
+from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS
+from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS
+from hermes_state_runs import orphaned_active_run_decision
+
 from .session_common import *
 
 
@@ -1092,54 +1096,130 @@ class SessionDBTeamMissionGraphMixin:
             "graph": self.get_team_mission_graph(mission_id),
         }
 
-    def reap_terminal_mission_runs(self, mission_id: str) -> int:
-        """Force any still-active run bound to an already-terminal mission to a
-        terminal status. Stale-run watchdog: a member-node run can be left
-        'running' in the control-plane DB after its mission reached a terminal
-        state (cancel race, completion without a node terminal event, or a run
-        that stalled while its gateway stayed alive — none of which the
-        orphaned-run recovery catches, since it only fails runs of a DEAD
-        gateway). Scoped to terminal missions, so it never touches a slow or
-        approval-waiting run of an active mission. Idempotent; returns the count
-        reaped. Call it when a mission is observed (subscribe/status)."""
-        mission_id = _text(mission_id)
-        if not mission_id or not hasattr(self, "upsert_run"):
+    def reap_terminal_mission_runs(
+        self,
+        mission_id: str = "",
+        *,
+        stale_after_seconds: float = DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS,
+        owner_dead_grace_seconds: float = DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS,
+    ) -> int:
+        """Reap only run-level orphans.
+
+        Mission-bound runs are reaped only when their own mission is terminal.
+        Legacy/direct runs without a mission binding use the normal active-run
+        orphan stale decision, and only when their conversation has no active
+        mission. The ``mission_id`` argument is a trigger hint retained for
+        existing callers; the decision is per run.
+        """
+        trigger_mission_id = _text(mission_id)
+        if not hasattr(self, "upsert_run"):
             return 0
+        now = time.time()
         with self._lock:
-            mission_row = self._conn.execute(
-                "SELECT status FROM team_missions WHERE mission_id = ?",
-                (mission_id,),
-            ).fetchone()
-            if mission_row is None:
-                return 0
-            if _text(_row_value(mission_row, "status", "")).lower() not in _TERMINAL_MISSION_STATUSES:
-                return 0
-            binding_rows = self._conn.execute(
+            rows = self._conn.execute(
                 """
-                SELECT run_id, session_id, runtime_scope_key, runtime_session_id
-                FROM team_mission_run_bindings
-                WHERE mission_id = ?
+                SELECT
+                    r.*,
+                    b.mission_id AS binding_mission_id,
+                    b.session_id AS binding_session_id,
+                    b.runtime_scope_key AS binding_runtime_scope_key,
+                    b.runtime_session_id AS binding_runtime_session_id,
+                    b.metadata_json AS binding_metadata_json,
+                    m.status AS mission_status,
+                    m.conversation_id AS mission_conversation_id
+                FROM runs r
+                LEFT JOIN team_mission_run_bindings b ON b.run_id = r.run_id
+                LEFT JOIN team_missions m ON m.mission_id = b.mission_id
+                WHERE r.status = 'running'
+                ORDER BY r.updated_at DESC, r.started_at DESC
                 """,
-                (mission_id,),
             ).fetchall()
+
+        def _mission_row_for_run(run_mission_id: str) -> sqlite3.Row | None:
+            if not run_mission_id:
+                return None
+            with self._lock:
+                return self._conn.execute(
+                    "SELECT status, conversation_id FROM team_missions WHERE mission_id = ?",
+                    (run_mission_id,),
+                ).fetchone()
+
+        def _conversation_id_for_legacy_run(run: dict[str, Any]) -> str:
+            metadata = run.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            conversation_id = _text(metadata.get("conversation_id") or metadata.get("conversationId"))
+            if conversation_id:
+                return conversation_id
+            session_id = _text(run.get("session_id"))
+            if not session_id:
+                return ""
+            with self._lock:
+                row = self._conn.execute(
+                    """
+                    SELECT conversation_id
+                    FROM team_mission_conversations
+                    WHERE stable_session_id = ? OR conversation_id = ?
+                    LIMIT 1
+                    """,
+                    (session_id, session_id),
+                ).fetchone()
+            return _text(_row_value(row, "conversation_id", "")) or session_id
+
         reaped = 0
-        for row in binding_rows:
+        for row in rows:
             run_id = _text(_row_value(row, "run_id", ""))
             if not run_id:
                 continue
-            run = self.get_run(run_id) if hasattr(self, "get_run") else None
-            if not run or _text(run.get("status")).lower() in _TERMINAL_RUN_STATUSES:
+            run_metadata = _json_loads(_row_value(row, "metadata_json", ""), {})
+            if not isinstance(run_metadata, dict):
+                run_metadata = {}
+            run = dict(row)
+            run["metadata"] = run_metadata
+            if _text(run.get("status")).lower() != "running":
                 continue
+            run_mission_id = (
+                _text(_row_value(row, "binding_mission_id", ""))
+                or _text(run_metadata.get("mission_id") or run_metadata.get("missionId"))
+            )
+            mission_status = _text(_row_value(row, "mission_status", "")).lower()
+            if run_mission_id:
+                if not mission_status:
+                    mission_row = _mission_row_for_run(run_mission_id)
+                    mission_status = _text(_row_value(mission_row, "status", "")).lower()
+                if mission_status not in _TERMINAL_MISSION_STATUSES:
+                    continue
+                reap_reason = "terminal_mission_stale_run"
+                error = f"runtime run reaped: bound team mission {run_mission_id} already terminal"
+            else:
+                conversation_id = _conversation_id_for_legacy_run(run)
+                if conversation_id and self.has_active_mission(conversation_id):
+                    continue
+                should_reap, stale_decision = orphaned_active_run_decision(
+                    row,
+                    now=now,
+                    live_runtime_session_ids=set(),
+                    stale_after_seconds=stale_after_seconds,
+                    owner_dead_grace_seconds=owner_dead_grace_seconds,
+                )
+                if not should_reap:
+                    continue
+                reap_reason = f"legacy_run_without_mission:{stale_decision}"
+                error = "runtime run reaped: no active mission owns stale legacy run"
             self.upsert_run(
                 run_id=run_id,
-                session_id=_text(run.get("session_id")) or _text(_row_value(row, "session_id", "")),
-                runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(_row_value(row, "runtime_scope_key", "")),
+                session_id=_text(run.get("session_id")) or _text(_row_value(row, "binding_session_id", "")),
+                runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(_row_value(row, "binding_runtime_scope_key", "")),
                 turn_id=_text(run.get("turn_id")),
-                runtime_session_id=_text(run.get("runtime_session_id")) or _text(_row_value(row, "runtime_session_id", "")),
+                runtime_session_id=_text(run.get("runtime_session_id")) or _text(_row_value(row, "binding_runtime_session_id", "")),
                 status="interrupted",
-                completed_at=time.time(),
-                error="runtime run reaped: bound team mission already terminal",
-                metadata={**dict(run.get("metadata") or {}), "reaped_reason": "terminal_mission_stale_run"},
+                completed_at=now,
+                error=error,
+                metadata={
+                    **dict(run_metadata),
+                    "reaped_reason": reap_reason,
+                    **({"reaped_mission_id": run_mission_id} if run_mission_id else {}),
+                    **({"reaper_trigger_mission_id": trigger_mission_id} if trigger_mission_id else {}),
+                },
             )
             reaped += 1
         return reaped
@@ -1341,4 +1421,3 @@ class SessionDBTeamMissionGraphMixin:
             if _event_has_deliverable_text(event_type, payload):
                 return True
         return False
-
