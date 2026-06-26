@@ -243,6 +243,79 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_primary_dispatch_injects_session_workspace_context(monkeypatch, tmp_path) -> None:
+    transport = _RecordingTransport()
+    sent_frames: list = []
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+
+    class _FakeSupervisor:
+        async def ensure(self, scope):
+            return None
+
+        async def send(self, scope_key, frame):
+            sent_frames.append((scope_key, frame))
+            return True
+
+    class _FakeRouter:
+        def record_run_start(self, **kwargs):
+            pass
+
+        def forget_run(self, run_id):
+            pass
+
+    def _workspace_context(session_id, params):
+        assert session_id == "sess-1"
+        assert params["stored_session_id"] == "sess-1"
+        return {
+            "cwd": str(workspace_root),
+            "workspace": {
+                "id": "workspace-1",
+                "name": "Workspace One",
+                "path": str(workspace_root),
+                "kind": "local",
+            },
+            "source": "session_workspace_binding",
+        }
+
+    monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: _FakeSupervisor())
+    monkeypatch.setattr(worker_runtime, "worker_frame_router", lambda: _FakeRouter())
+    monkeypatch.setattr(worker_runtime, "session_workspace_run_context", _workspace_context)
+
+    handled = await worker_runtime.primary_dispatch(_scoped_prompt_submit(), transport)
+
+    assert handled is True
+    _scope_key, frame = sent_frames[0]
+    assert frame.params["cwd"] == str(workspace_root)
+    assert frame.params["workspace"]["id"] == "workspace-1"
+    assert "stored_session_id" not in frame.params
+
+
+@pytest.mark.asyncio
+async def test_primary_dispatch_rejects_invalid_session_workspace(monkeypatch) -> None:
+    transport = _RecordingTransport()
+
+    class _Supervisor:
+        async def ensure(self, scope):
+            raise AssertionError("supervisor must not start for invalid workspace")
+
+    monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: _Supervisor())
+    monkeypatch.setattr(
+        worker_runtime,
+        "session_workspace_run_context",
+        lambda _session_id, _params: (_ for _ in ()).throw(
+            ValueError("cwd does not exist or is not a directory: /missing")
+        ),
+    )
+
+    handled = await worker_runtime.primary_dispatch(_scoped_prompt_submit(), transport)
+
+    assert handled is True
+    assert transport.written[0]["error"]["code"] == 4002
+    assert "/missing" in transport.written[0]["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_primary_dispatch_acks_error_when_send_fails(monkeypatch) -> None:
     transport = _RecordingTransport()
     forgot: list[str] = []

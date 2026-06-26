@@ -1165,7 +1165,7 @@ def test_complete_plan_approval_gate_inherits_leader_owner(tmp_path: Path):
     # The LIVE mission.approval.requested event payload must also carry the resolved
     # leader assignee so the frontend renders the real leader on the approval node
     # immediately, instead of the generic "Leader" placeholder until a graph reload.
-    from hermes_team_mission_modes import TeamMissionNodeSpec, TeamMissionStrategyActions
+    from hermes_team_mission.domain.modes import TeamMissionNodeSpec, TeamMissionStrategyActions
 
     actions = TeamMissionStrategyActions(
         nodes=(TeamMissionNodeSpec(node_id="m1::approval", kind="approval_gate", title="审批任务图"),),

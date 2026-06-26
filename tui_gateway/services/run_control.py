@@ -22,6 +22,17 @@ from typing import Any
 
 from hermes_runtime_event_payloads import primary_deliverable_text
 from agent.dovie_diagnostics import emit_dovie_diagnostic
+from tui_gateway.services.run_control_events import (
+    delta_event_for_subscription as _delta_event_for_subscription,
+    event_run_id as _event_run_id,
+    event_runtime_scope_key as _event_runtime_scope_key,
+    event_turn_id as _event_turn_id,
+    payload_status as _payload_status,
+    remember_terminal_delivery as _remember_direct_terminal_delivery,
+    stable_session_id as _stable_session_id,
+    stream_text_delta as _stream_text_delta,
+    terminal_delivery_identity as _terminal_delivery_identity,
+)
 from tui_gateway.transport import Transport
 
 try:
@@ -251,101 +262,6 @@ def _dispatch_team_mission_ready_scheduler(
         logger.warning("failed to schedule Team Mission ready nodes", exc_info=True)
 
 
-def _stable_session_id(params: dict[str, Any]) -> str:
-    return str(
-        params.get("stored_session_id")
-        or params.get("storedSessionId")
-        or params.get("session_id")
-        or params.get("sessionId")
-        or ""
-    ).strip()
-
-
-def _event_run_id(params: dict[str, Any]) -> str:
-    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-    return str(params.get("run_id") or payload.get("run_id") or "").strip()
-
-
-def _event_turn_id(params: dict[str, Any]) -> str:
-    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-    return str(params.get("turn_id") or payload.get("turn_id") or "").strip()
-
-
-def _event_runtime_scope_key(params: dict[str, Any]) -> str:
-    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-    return str(
-        params.get("runtime_scope_key")
-        or payload.get("runtime_scope_key")
-        or ""
-    ).strip()
-
-
-def _stream_text_delta(event: dict[str, Any]) -> str:
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    for key in ("delta", "text", "output"):
-        value = payload.get(key)
-        if isinstance(value, str):
-            return value
-    return ""
-
-
-def _terminal_delivery_identity(event: dict[str, Any]) -> tuple[Any, ...] | None:
-    event_type = str(event.get("type") or "").strip()
-    if event_type not in {"message.complete", "error", "session.interrupted", "session.recalled"}:
-        return None
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    source_seq = (
-        event.get("source_seq")
-        or event.get("sourceSeq")
-        or payload.get("source_seq")
-        or payload.get("sourceSeq")
-        or event.get("seq")
-        or payload.get("seq")
-    )
-    try:
-        normalized_seq = int(source_seq or 0)
-    except (TypeError, ValueError):
-        normalized_seq = 0
-    return (
-        event_type,
-        _event_run_id(event),
-        _event_turn_id(event),
-        _event_runtime_scope_key(event),
-        normalized_seq,
-    )
-
-
-def _remember_direct_terminal_delivery(subscription: dict[str, Any], event: dict[str, Any]) -> None:
-    identity = _terminal_delivery_identity(event)
-    if not identity:
-        return
-    identities = subscription.get("direct_terminal_identities")
-    if not isinstance(identities, set):
-        identities = set(identities or ())
-        subscription["direct_terminal_identities"] = identities
-    identities.add(identity)
-    if len(identities) > 2000:
-        for value in list(identities)[: len(identities) - 2000]:
-            identities.discard(value)
-
-
-def _was_terminal_delivered_directly(subscription: dict[str, Any], event: dict[str, Any]) -> bool:
-    identity = _terminal_delivery_identity(event)
-    if not identity:
-        return False
-    identities = subscription.get("direct_terminal_identities")
-    return isinstance(identities, set) and identity in identities
-
-
-def _delta_event_for_subscription(
-    subscription: dict[str, Any],
-    event: dict[str, Any],
-) -> dict[str, Any] | None:
-    if _was_terminal_delivered_directly(subscription, event):
-        return None
-    return event
-
-
 def _remember_subscription_delivery(
     subscription: dict[str, Any],
     event: dict[str, Any],
@@ -359,7 +275,7 @@ def _remember_subscription_delivery(
     if seq > 0:
         subscription["last_seq"] = max(int(subscription.get("last_seq") or 0), seq)
     _remember_subscription_run(subscription, event)
-    if direct:
+    if direct or _terminal_delivery_identity(event):
         _remember_direct_terminal_delivery(subscription, event)
 
 
@@ -528,7 +444,7 @@ def _deliver_team_mission_events(mission_id: str, events: list[dict[str, Any]]) 
                 continue
             if seq > delivered_seq + 1:
                 # OUT-OF-ORDER live notify. notify_team_mission_event_listeners fires
-                # OUTSIDE the seq-assignment lock (hermes_team_mission_event_log.append_
+                # OUTSIDE the seq-assignment lock (hermes_team_mission.state.event_log.append_
                 # team_mission_event), so concurrent member-node appends deliver here
                 # scrambled. Do NOT deliver this event or advance the cursor past the
                 # gap: the in-order subscription poller backfills the skipped seqs from
@@ -560,7 +476,7 @@ def _on_team_mission_event_appended(mission_id: str, event: dict[str, Any]) -> N
 
 
 try:
-    from hermes_team_mission_event_log import register_team_mission_event_listener
+    from hermes_team_mission.state.event_log import register_team_mission_event_listener
 
     register_team_mission_event_listener(_on_team_mission_event_appended)
 except Exception:  # pragma: no cover - keeps run control importable in mocked tests.
@@ -619,17 +535,6 @@ def _normalize_team_mission_deliverable_terminal_event(
 
 def _event_opens_active_run(event_type: str) -> bool:
     return str(event_type or "").strip() in _RUN_OPENING_EVENT_TYPES
-
-
-def _payload_status(status: str) -> str:
-    normalized = str(status or "").strip().lower()
-    if normalized in {"failed", "error"}:
-        return "error"
-    if normalized in {"cancelled", "canceled"}:
-        return "cancelled"
-    if normalized == "interrupted":
-        return "interrupted"
-    return "complete"
 
 
 def _active_run_ids_for_session(stable: str, db: Any = None) -> set[str]:
@@ -1379,7 +1284,7 @@ def record_event(
                         scheduler_mission_id = str(binding.get("mission_id") or "").strip()
                 if scheduler_mission_id:
                     try:
-                        from hermes_team_mission_conversation_utils import mirror_event_to_conversation
+                        from hermes_team_mission.runtime.conversation_mirror import mirror_event_to_conversation
 
                         mirrored = mirror_event_to_conversation(
                             db,

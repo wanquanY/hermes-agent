@@ -40,10 +40,13 @@ def _is_registry_register_call(node: ast.AST) -> bool:
 
 
 def _module_registers_tools(module_path: Path) -> bool:
-    """Return True when the module contains a top-level ``registry.register(...)`` call.
+    """Return True when the module should be imported during builtin discovery.
 
-    Only inspects module-body statements so that helper modules which happen
-    to call ``registry.register()`` inside a function are not picked up.
+    Tool modules are normally self-registering via top-level
+    ``registry.register(...)`` calls. Some package-owned tool implementations
+    are exposed through thin loader adapters under ``tools/`` so discovery can
+    keep scanning one directory without forcing domain code to live there. Those
+    adapters opt in with ``TOOL_LOADER_MODULE = True``.
     """
     try:
         source = module_path.read_text(encoding="utf-8")
@@ -51,7 +54,27 @@ def _module_registers_tools(module_path: Path) -> bool:
     except (OSError, SyntaxError):
         return False
 
-    return any(_is_registry_register_call(stmt) for stmt in tree.body)
+    for stmt in tree.body:
+        if _is_registry_register_call(stmt):
+            return True
+        if isinstance(stmt, ast.Assign):
+            for target in stmt.targets:
+                if (
+                    isinstance(target, ast.Name)
+                    and target.id == "TOOL_LOADER_MODULE"
+                    and isinstance(stmt.value, ast.Constant)
+                    and stmt.value.value is True
+                ):
+                    return True
+        if (
+            isinstance(stmt, ast.AnnAssign)
+            and isinstance(stmt.target, ast.Name)
+            and stmt.target.id == "TOOL_LOADER_MODULE"
+            and isinstance(stmt.value, ast.Constant)
+            and stmt.value.value is True
+        ):
+            return True
+    return False
 
 
 def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:

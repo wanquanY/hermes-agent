@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.team_mission_gateway_test_support import team_mission_gateway, team_mission_history_gateway
+
 
 class _MemoryTransport:
     def __init__(self):
@@ -50,7 +52,7 @@ def test_team_mission_conversation_runtime_session_ids_gateway_is_lightweight(mo
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
 
@@ -154,7 +156,7 @@ def test_team_capability_gateway_get_refresh_and_bind(monkeypatch, tmp_path: Pat
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -200,7 +202,7 @@ def test_team_capability_gateway_builds_snapshot_from_registry_team_id(monkeypat
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -245,7 +247,7 @@ def test_team_capability_gateway_builds_snapshot_from_registry_team_id(monkeypat
 def test_team_mission_leader_node_toolsets_are_surface_scoped():
     import importlib
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
 
     # Planning toolset is intentionally write-graph + ask-user + read-only-workspace.
     # See _start_toolsets: clarify and file_readonly belong in the same exact set.
@@ -264,7 +266,7 @@ def test_team_mission_leader_node_toolsets_are_surface_scoped():
 def test_team_mission_worker_toolsets_follow_current_member_profile(monkeypatch):
     import importlib
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     monkeypatch.setattr(team_mission, "_load_enabled_toolsets", lambda: ["hermes-cli"], raising=False)
     params = {}
     mission = {
@@ -300,7 +302,7 @@ def test_team_mission_worker_toolsets_follow_current_member_profile(monkeypatch)
 def test_team_mission_node_profile_params_accept_dovie_member_fields():
     import importlib
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     params = {}
     mission = {
         "metadata": {
@@ -340,7 +342,7 @@ def test_team_profile_get_resolves_conversation_registry_without_active_mission(
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -372,9 +374,9 @@ def test_leader_team_profile_tool_resolves_conversation_registry(monkeypatch, tm
 
     from hermes_state import SessionDB
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
-    leader_tools = importlib.import_module("tools.team_mission_leader_tools")
-    profile_tools = importlib.import_module("tools.team_mission_profile_tools")
+    team_mission = team_mission_gateway()
+    leader_tools = importlib.import_module("hermes_team_mission.tools.leader")
+    profile_tools = importlib.import_module("hermes_team_mission.tools.profile")
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -413,7 +415,7 @@ def test_team_mission_gateway_methods_create_graph_and_replay_events(monkeypatch
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -506,7 +508,7 @@ def test_team_mission_create_rejects_autonomous_override_for_supervised_team(mon
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -537,7 +539,7 @@ def test_team_mission_graph_returns_conversation_graph_when_conversation_id_is_p
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -599,7 +601,7 @@ def test_team_mission_graph_rejects_mission_from_another_conversation(
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -640,7 +642,7 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(mo
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -712,7 +714,7 @@ def test_team_mission_message_submit_derives_conversation_title_from_first_user_
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     workspace = _workspace_payload(tmp_path)
@@ -771,7 +773,7 @@ def test_team_mission_message_submit_rejects_session_id_as_conversation_identity
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
 
@@ -796,7 +798,7 @@ def test_team_mission_message_submit_conversation_only_does_not_bind_previous_ac
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
@@ -888,7 +890,7 @@ def test_team_conversation_detail_returns_registry_team_members(monkeypatch, tmp
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     db.upsert_agent_profile(
@@ -956,7 +958,7 @@ def test_team_mission_node_create_requires_existing_mission(monkeypatch, tmp_pat
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -983,7 +985,7 @@ def test_team_conversation_resolve_returns_empty_when_conversation_is_missing(mo
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
 
@@ -1002,7 +1004,7 @@ def test_team_mission_create_records_user_task_in_stable_team_session(monkeypatc
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -1059,7 +1061,7 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     image_path = tmp_path / "screen.png"
     image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -1166,7 +1168,7 @@ def test_team_mission_message_submit_direct_reply_disables_tools_and_reasoning(m
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     submitted = {}
@@ -1216,7 +1218,7 @@ def test_team_mission_message_submit_explicit_start_task_overrides_negated_direc
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -1276,7 +1278,7 @@ def test_team_mission_message_submit_registers_worker_runtime_session_shell(monk
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     control_home = tmp_path / "control"
     profile_home = tmp_path / "profile"
     control_home.mkdir()
@@ -1342,7 +1344,7 @@ def test_team_mission_message_submit_forwards_leader_profile_context(monkeypatch
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     leader_member = {
@@ -1413,7 +1415,7 @@ def test_team_mission_message_submit_keeps_team_scope_out_of_profile_owner_check
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     submitted = {}
@@ -1462,7 +1464,7 @@ def test_team_mission_message_submit_allows_control_plane_outer_call_to_owner_ru
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     monkeypatch.delenv("DOVIE_HERMES_RUNTIME_SCOPE_KEY", raising=False)
@@ -1512,7 +1514,7 @@ def test_team_mission_conversation_ensure_keeps_team_scope_out_of_profile_owner_
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     monkeypatch.setenv("DOVIE_HERMES_RUNTIME_SCOPE_KEY", "profile:agent-default")
@@ -1543,7 +1545,7 @@ def test_team_mission_conversation_ensure_uses_conversation_scope_for_bound_miss
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -1596,7 +1598,7 @@ def test_team_mission_message_submit_rejects_wrong_owner_runtime_scope(monkeypat
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.initialize_team_mission_from_strategy(
@@ -1639,7 +1641,7 @@ def test_team_mission_message_submit_rejects_profile_scope_as_team_execution_sco
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     monkeypatch.setenv("DOVIE_HERMES_RUNTIME_SCOPE_KEY", "team:conversation-1:leader-conversation")
@@ -1675,7 +1677,7 @@ def test_team_mission_message_submit_merges_requested_leader_conversation_toolse
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.initialize_team_mission_from_strategy(
@@ -1744,7 +1746,7 @@ def test_team_mission_member_node_start_keeps_delegation_available(monkeypatch, 
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.initialize_team_mission_from_strategy(
@@ -1813,7 +1815,7 @@ def test_team_mission_message_submit_does_not_inject_other_conversation_memory(m
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -1891,7 +1893,7 @@ def test_team_mission_conversation_ensure_creates_missing_stable_session(monkeyp
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -1936,7 +1938,7 @@ def test_team_mission_conversation_ensure_can_repair_session_without_graph(monke
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
 
@@ -1961,7 +1963,7 @@ def test_archived_team_history_is_readable_but_team_writes_are_rejected(monkeypa
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     _seed_registry_team(db, tmp_path)
@@ -2028,7 +2030,7 @@ def test_team_mission_conversation_rename_gateway_updates_canonical_state(monkey
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -2063,7 +2065,7 @@ def test_team_mission_conversation_delete_gateway_blocks_active_leader_run(monke
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -2101,7 +2103,7 @@ def test_team_mission_conversation_delete_gateway_removes_canonical_conversation
     from tui_gateway.services.persistence import gateway_store
     from tui_gateway.services.workspaces import bind_session_workspace, session_workspace_binding
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     monkeypatch.setattr(team_mission, "get_hermes_home", lambda: str(tmp_path / "hermes-home"))
@@ -2198,7 +2200,7 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
     from tools.registry import registry
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -2354,7 +2356,7 @@ def test_team_mission_plan_approve_uses_requested_mission_native_graph(monkeypat
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -2438,7 +2440,7 @@ def test_team_mission_plan_approve_starts_ready_worker_with_runtime_projection(m
     from tui_gateway import server
     from tui_gateway.services import run_control
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     workspace_path = tmp_path / "workspace"
@@ -2571,7 +2573,7 @@ def test_team_mission_direct_root_task_activation_replaces_draft_objective(monke
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -2951,11 +2953,11 @@ def test_team_mission_synthesis_mirror_streams_to_conversation_subscriber(tmp_pa
 
 def test_team_mission_tools_use_control_plane_db_inside_profile_worker(monkeypatch, tmp_path: Path):
     from hermes_state import SessionDB
-    from hermes_team_mission_profile_tools import gateway_call
-    from tui_gateway.methods import team_mission
+    from hermes_team_mission.runtime.profile_scope import gateway_call
     from tools import team_mission_leader_tools, team_mission_planning_tools
     from tui_gateway import server
 
+    team_mission = team_mission_gateway()
     control_home = tmp_path / "control-home"
     profile_home = tmp_path / "profile-home"
     control_home.mkdir()
@@ -2983,7 +2985,7 @@ def test_team_mission_node_start_prebinds_run_before_fast_synthesis_events(monke
     from tui_gateway import server
     from tui_gateway.services import run_control
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
@@ -3152,7 +3154,7 @@ def test_team_mission_synthesis_failed_complete_with_text_still_mirrors_delivera
 
 def test_final_deliverable_recovery_does_not_rewrite_legacy_snapshot_mirror_events(tmp_path: Path):
     from hermes_state import SessionDB
-    from hermes_team_mission_conversation_utils import recover_final_deliverable_messages
+    from hermes_team_mission.runtime.conversation_mirror import recover_final_deliverable_messages
 
     db = SessionDB(tmp_path / "state.db")
     db.create_session("team-session-1", source="team_mission", transient=False)
@@ -3260,6 +3262,10 @@ def test_final_deliverable_recovery_does_not_rewrite_legacy_snapshot_mirror_even
     # Terminal-run retention prunes replay-redundant stream deltas from the
     # durable run_events log. Recovery must therefore use the source run or
     # complete payload, not rewrite/keep old legacy snapshot mirror deltas.
+    deliverable = db.latest_team_mission_deliverable_for_run("run-synthesis")
+    assert deliverable["source"] == "legacy_imported"
+    assert deliverable["summary"] == "最终汇总交付内容"
+    assert db.team_mission_run_has_deliverable("run-synthesis") is True
     delta_events = [
         event
         for event in db.list_run_events("team-session-1")
@@ -3276,7 +3282,7 @@ def test_team_mission_cancel_marks_graph_and_cancels_active_runs(monkeypatch, tm
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -3364,7 +3370,7 @@ def test_team_mission_cancel_reaps_zombie_run_on_already_terminal_mission(monkey
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     # Mission already terminal, but the scheduler started a member node run
@@ -3944,7 +3950,7 @@ def test_team_mission_plan_approval_event_is_mirrored_to_stable_team_session(mon
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.initialize_team_mission_from_strategy(
@@ -4008,7 +4014,7 @@ def test_team_mission_gateway_rejects_invalid_manual_graph(monkeypatch, tmp_path
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_registry_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -4038,7 +4044,7 @@ def test_team_mission_subscribe_replays_and_streams_mission_events(monkeypatch, 
     from tui_gateway import server
     from tui_gateway.services import run_control
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.initialize_team_mission_from_strategy(
@@ -4145,7 +4151,7 @@ def test_team_mission_subscribe_replay_is_byte_paged(monkeypatch, tmp_path: Path
     from tui_gateway import server
     from tui_gateway.services import run_control
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.initialize_team_mission_from_strategy(
@@ -4220,7 +4226,7 @@ def test_team_mission_subscribe_streams_conversation_status_projection(monkeypat
     from tui_gateway import server
     from tui_gateway.services import run_control
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -4318,8 +4324,8 @@ def test_team_mission_node_history_reads_runtime_from_hermes_store(monkeypatch, 
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
-    team_mission_history = importlib.import_module("tui_gateway.methods.team_mission_history")
+    team_mission = team_mission_gateway()
+    team_mission_history = team_mission_history_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     monkeypatch.setattr(team_mission_history, "_get_db", lambda: db)
@@ -4404,8 +4410,8 @@ def test_team_mission_node_history_filters_stream_chunks(monkeypatch, tmp_path: 
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
-    team_mission_history = importlib.import_module("tui_gateway.methods.team_mission_history")
+    team_mission = team_mission_gateway()
+    team_mission_history = team_mission_history_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     monkeypatch.setattr(team_mission_history, "_get_db", lambda: db)
@@ -4486,8 +4492,8 @@ def test_team_mission_node_history_resolves_active_conversation_mission(monkeypa
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
-    team_mission_history = importlib.import_module("tui_gateway.methods.team_mission_history")
+    team_mission = team_mission_gateway()
+    team_mission_history = team_mission_history_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     monkeypatch.setattr(team_mission_history, "_get_db", lambda: db)
@@ -4562,7 +4568,7 @@ def test_team_mission_node_history_keeps_transcript_readable_when_graph_is_missi
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission_history = importlib.import_module("tui_gateway.methods.team_mission_history")
+    team_mission_history = team_mission_history_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission_history, "_get_db", lambda: db)
 
@@ -4600,7 +4606,7 @@ def test_team_mission_planner_methods_mutate_graph_and_emit_events(monkeypatch, 
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.initialize_team_mission_from_strategy(
@@ -4721,7 +4727,7 @@ def test_team_mission_node_start_reuses_run_submit_and_binds_worker_run(monkeypa
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.initialize_team_mission_from_strategy(
@@ -4806,7 +4812,7 @@ def test_team_mission_node_start_registers_worker_runtime_session_shell(monkeypa
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     control_home = tmp_path / "control"
     profile_home = tmp_path / "profile"
     control_home.mkdir()
@@ -4879,7 +4885,7 @@ def test_team_mission_node_start_forwards_assignee_profile_context(monkeypatch, 
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     worker_member = {
@@ -5017,7 +5023,7 @@ def test_team_mission_schedule_ready_starts_only_dependency_ready_nodes(monkeypa
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -5091,7 +5097,7 @@ def test_team_mission_schedule_ready_marks_claimed_node_blocked_when_start_fails
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -5131,7 +5137,7 @@ def test_team_mission_schedule_ready_skips_autonomous_high_risk_nodes(monkeypatc
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -5185,7 +5191,7 @@ def test_team_mission_schedule_ready_respects_policy_parallel_capacity(monkeypat
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -5243,7 +5249,7 @@ def test_team_mission_schedule_ready_scopes_to_active_task(monkeypatch, tmp_path
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -5297,7 +5303,7 @@ def test_team_mission_schedule_ready_caps_policy_parallel_limit_at_five(monkeypa
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -5343,7 +5349,7 @@ def test_team_mission_schedule_ready_starts_auto_created_verifier(monkeypatch, t
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -5389,7 +5395,7 @@ def test_team_mission_terminal_event_auto_starts_unblocked_child_node(monkeypatc
     from tui_gateway import server
     from tui_gateway.services import run_control
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -5484,7 +5490,7 @@ def test_team_mission_node_start_injects_leader_memory_pack(monkeypatch, tmp_pat
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -5563,7 +5569,7 @@ def test_team_mission_memory_gateway_methods(monkeypatch, tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -5610,7 +5616,7 @@ def test_team_mission_terminal_event_auto_starts_verifier_finalizer(monkeypatch,
     from tui_gateway import server
     from tui_gateway.services import run_control
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission(
@@ -5689,7 +5695,7 @@ def _recall_setup_team_conversation(monkeypatch, tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
 

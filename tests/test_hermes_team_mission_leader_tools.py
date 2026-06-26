@@ -2,6 +2,8 @@ import importlib
 import json
 from types import SimpleNamespace
 
+from tests.team_mission_gateway_test_support import team_mission_gateway
+
 
 def _seed_team(db, tmp_path):
     db.upsert_agent_profile(
@@ -37,7 +39,7 @@ def test_start_task_does_not_inherit_non_planning_conversation_mode(monkeypatch,
     from tools.registry import registry
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     _seed_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)

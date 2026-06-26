@@ -5,7 +5,7 @@ import uuid
 import sqlite3
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
-from hermes_team_mission_profile_tools import team_mission_control_db as _profile_registry_control_db
+from hermes_team_mission.runtime.profile_scope import team_mission_control_db as _profile_registry_control_db
 from tui_gateway.methods._shared import bind_server_globals
 
 _server = bind_server_globals(globals())
@@ -52,6 +52,77 @@ def _raw(params: dict, key: str) -> dict:
     return params.get(key) if isinstance(params.get(key), dict) else params
 
 
+def _profile_metadata(raw: dict) -> dict:
+    metadata = _object(raw.get("metadata"))
+    template_install = _object(
+        raw.get("template_install")
+        or raw.get("templateInstall")
+        or metadata.get("templateInstall")
+    )
+    template_id = _text(
+        raw.get("template_id")
+        or raw.get("templateId")
+        or template_install.get("templateId")
+        or template_install.get("template_id")
+    )
+    if template_id:
+        metadata["templateInstall"] = {
+            **template_install,
+            "templateId": template_id,
+            "templateVersion": _text(
+                raw.get("template_version")
+                or raw.get("templateVersion")
+                or template_install.get("templateVersion")
+                or template_install.get("template_version")
+            ),
+            "source": _text(raw.get("template_source") or raw.get("templateSource") or template_install.get("source")),
+            "installedAt": (
+                raw.get("template_installed_at")
+                or raw.get("templateInstalledAt")
+                or template_install.get("installedAt")
+                or template_install.get("installed_at")
+                or ""
+            ),
+        }
+    market_install = _object(
+        raw.get("market_install")
+        or raw.get("marketInstall")
+        or metadata.get("marketInstall")
+    )
+    public_profile_id = _text(
+        raw.get("public_profile_id")
+        or raw.get("publicProfileId")
+        or market_install.get("publicProfileId")
+        or market_install.get("public_profile_id")
+    )
+    if public_profile_id:
+        metadata["marketInstall"] = {
+            **market_install,
+            "publicProfileId": public_profile_id,
+            "publicVersionId": _text(
+                raw.get("public_version_id")
+                or raw.get("publicVersionId")
+                or market_install.get("publicVersionId")
+                or market_install.get("public_version_id")
+            ),
+            "contentHash": _text(
+                raw.get("public_content_hash")
+                or raw.get("publicContentHash")
+                or market_install.get("contentHash")
+                or market_install.get("content_hash")
+            ),
+            "installedAt": (
+                raw.get("market_installed_at")
+                or raw.get("marketInstalledAt")
+                or market_install.get("installedAt")
+                or market_install.get("installed_at")
+                or ""
+            ),
+            "source": _text(raw.get("source_kind") or raw.get("sourceKind") or market_install.get("source")),
+        }
+    return metadata
+
+
 def _projection(params: dict | None, *, default: str = "summary") -> str:
     value = _text((params or {}).get("projection") or (params or {}).get("view") or default).lower()
     return value if value in {"summary", "detail", "raw"} else default
@@ -95,6 +166,15 @@ def _profile_summary(profile: dict) -> dict:
         "runtimeHomePath",
         "runtime_scope_key",
         "runtimeScopeKey",
+        "source_kind",
+        "sourceKind",
+        "public_profile_id",
+        "publicProfileId",
+        "public_version_id",
+        "publicVersionId",
+        "public_content_hash",
+        "publicContentHash",
+        "metadata",
         "created_at",
         "createdAt",
         "updated_at",
@@ -148,7 +228,7 @@ def _profile_payload(params: dict) -> dict:
         "public_profile_id": _text(raw.get("public_profile_id") or raw.get("publicProfileId")),
         "public_version_id": _text(raw.get("public_version_id") or raw.get("publicVersionId")),
         "public_content_hash": _text(raw.get("public_content_hash") or raw.get("publicContentHash")),
-        "metadata": _object(raw.get("metadata")),
+        "metadata": _profile_metadata(raw),
         "created_at": raw.get("created_at") or raw.get("createdAt"),
         "updated_at": raw.get("updated_at") or raw.get("updatedAt"),
         "last_used_at": raw.get("last_used_at") or raw.get("lastUsedAt"),

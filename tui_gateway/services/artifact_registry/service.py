@@ -146,6 +146,57 @@ def record_artifacts_from_tool_complete(
     return payloads
 
 
+def register_artifact(
+    *,
+    session_id: str,
+    path: str,
+    cwd: str,
+    workspace: dict[str, Any] | None,
+    title: str = "",
+    mime_type: str = "",
+    artifact_id: str = "",
+    origin: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        raise ValueError("session_id required")
+    cwd = normalize_session_cwd(cwd)
+    workspace_payload = _workspace_payload(workspace, cwd)
+    workspace_path = normalize_session_cwd(workspace_payload["path"])
+    artifact_path = resolve_artifact_path(path, cwd)
+    if not is_path_inside(artifact_path, workspace_path):
+        raise ValueError("artifact path must be inside workspace")
+    if not os.path.isfile(artifact_path):
+        raise ValueError("artifact path must be a file")
+    stat = os.stat(artifact_path)
+    persisted_workspace = bind_session_workspace(
+        session_id=session_id,
+        cwd=cwd,
+        workspace=workspace_payload,
+    )
+    mime = str(mime_type or "").strip() or mimetypes.guess_type(artifact_path)[0] or "application/octet-stream"
+    record = ArtifactRecord(
+        id=str(artifact_id or "").strip() or _artifact_id(persisted_workspace["id"], artifact_path),
+        workspace_id=persisted_workspace["id"],
+        path=artifact_path,
+        relative_path=_relative_artifact_path(artifact_path, workspace_path),
+        title=str(title or "").strip() or os.path.basename(artifact_path),
+        mime_type=mime,
+        size_bytes=int(stat.st_size),
+        workspace=persisted_workspace,
+        origin={
+            "event": "desktop.register",
+            **dict(origin or {}),
+        },
+    )
+    persisted = get_gateway_state_store().upsert_artifact(
+        artifact=record.to_payload(),
+        session_id=session_id,
+    )
+    persisted["workspace"] = persisted_workspace
+    return persisted
+
+
 def list_artifacts(
     *,
     session_id: str | None = None,
@@ -159,6 +210,24 @@ def list_artifacts(
         session_id=session_id,
         workspace_id=workspace_id,
         limit=limit,
+    )
+
+
+def delete_artifact(
+    *,
+    session_id: str,
+    artifact_id: str = "",
+    path: str = "",
+    workspace_id: str = "",
+) -> dict[str, Any]:
+    store = get_gateway_state_store(create_if_missing=False)
+    if store is None:
+        return {"deleted": False, "artifact": None}
+    return store.delete_artifact(
+        session_id=session_id,
+        artifact_id=artifact_id,
+        path=path,
+        workspace_id=workspace_id,
     )
 
 

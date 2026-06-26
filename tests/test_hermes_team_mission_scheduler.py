@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from hermes_state import SessionDB
-from hermes_team_mission_failure import REASON_PROVIDER_RATE_LIMITED
-from tui_gateway.services.team_mission_scheduler import TeamMissionReadyScheduler
+from hermes_team_mission.runtime.failure import REASON_PROVIDER_RATE_LIMITED
+from hermes_team_mission.runtime.scheduler import TeamMissionReadyScheduler
 
 
 def _create_ready_mission(tmp_path: Path) -> SessionDB:

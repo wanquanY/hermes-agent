@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hermes_team_mission_failure import classify_team_mission_failure
+from hermes_team_mission.runtime.failure import classify_team_mission_failure
 from hermes_state import SessionDB
 
 
@@ -146,6 +146,7 @@ def test_team_mission_clean_exit_without_required_handoff_blocks_as_protocol_vio
     )
 
     node = db.get_team_mission_node("mission-failure", "node-worker")
+    deliverable = db.latest_team_mission_deliverable_for_run("run-worker")
     blocked_events = [
         event for event in db.list_team_mission_events("mission-failure")
         if event.get("payload", {}).get("source_event_type") == "mission.node.blocked"
@@ -153,6 +154,10 @@ def test_team_mission_clean_exit_without_required_handoff_blocks_as_protocol_vio
 
     assert node["status"] == "blocked"
     assert node["metadata"]["last_run_reason_code"] == "protocol_violation"
+    assert deliverable["source"] == "missing"
+    assert deliverable["status"] == "blocked"
+    assert deliverable["payload"]["required_tool"] == "team_mission_submit_deliverable"
+    assert db.team_mission_run_has_deliverable("run-worker") is False
     assert blocked_events
     assert blocked_events[0]["payload"]["kind"] == "node.blocked"
     assert blocked_events[0]["payload"]["reason_code"] == "protocol_violation"

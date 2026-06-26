@@ -1245,7 +1245,7 @@ DoXie 不应该：
 4. `team_mission.plan.complete`
 5. graph mutation 写入 Hermes Team Mission graph。
 6. graph mutation 通过绑定的 Leader run 追加 `mission.*` 事件。
-7. `tools/team_mission_planning_tools.py` 暴露内部 `team_mission_planning` toolset：
+7. `tools/team_mission_planning_tools.py` 作为 loader adapter，`hermes_team_mission/tools/planning.py` 暴露内部 `team_mission_planning` toolset：
    - `team_mission_node_create`
    - `team_mission_edge_create`
    - `team_mission_plan_complete`
@@ -1297,7 +1297,7 @@ DoXie 不应该：
 7. Worker prompt 注入 Memory Slice。
 8. memory reference/invalidation events。
 9. `team_mission.message.submit` 为稳定 Leader conversation 构建产品上下文，并在 Leader 显式调用 `team_mission_start_task` 时创建新 mission。
-10. `tools/team_mission_leader_tools.py` 暴露内部 `team_mission_leader` toolset：
+10. `tools/team_mission_leader_tools.py` 作为 loader adapter，`hermes_team_mission/tools/leader.py` 暴露内部 `team_mission_leader` toolset：
     - `team_mission_status`
     - `team_mission_team_profile`
     - `team_mission_start_task`
@@ -1323,12 +1323,14 @@ DoXie 不应该：
 本批 staged 代码已经把 Team Mission 从“Kanban projection + DoXie prompt contract”推进为 Hermes 原生 runtime 的第一版：
 
 1. State 层：
-   - `hermes_state_team_missions.py`
+   - `hermes_team_mission/state/session_mixin.py`
+   - `hermes_team_mission/state/session_*.py`
    - `hermes_state_team_capabilities.py`
    - `hermes_state.py` schema version `16`
    - mission graph、conversation、run binding、artifact、memory、capability snapshot 均进入 Hermes state.db。
 2. Gateway 层：
-   - `tui_gateway/methods/team_mission.py`
+   - `tui_gateway/methods/team_mission.py` 兼容加载入口
+   - `hermes_team_mission/gateway/*.py`
    - `team_mission.conversation.*`
    - `team_mission.message.submit`
    - `team_mission.node.*`
@@ -1366,7 +1368,7 @@ DoXie 不应该：
    - `root`、`approval_gate`、`verifier`、`synthesis` 是 Leader-owned control nodes；无有效负责人时默认归属 Leader。
    - 无效 `assignee_member_id` 不允许进入 graph。planning tools 遇到不存在 member 必须拒绝，内部 upsert 遇到历史无效值必须丢弃并按默认负责人规则解析。
 3. Team profile tools：
-   - 新增 `hermes_team_mission_profile_tools.py` 和 `tools/team_mission_profile_tools.py`。
+   - 新增 `hermes_team_mission/tools/profile.py`，`tools/team_mission_profile_tools.py` 只保留 loader adapter。
    - `team_mission_team_profile` 读取并压缩 capability snapshot，Leader 不再通过 prompt 内联团队成员画像、profile id 或 member id 清单。
    - `team_mission_leader` 是 Leader 基础 toolset；`team_mission_planning` 只在 planning / change-request 阶段叠加。
 4. Active run 修复：

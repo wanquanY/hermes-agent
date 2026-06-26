@@ -57,8 +57,8 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
     assert os.environ.get("DOVIE_TEST_PROFILE_ENV") is None
 
 
-def test_profile_db_selection_uses_process_home_as_default(monkeypatch, tmp_path):
-    """A request-scoped profile home must not redefine the process default DB."""
+def test_control_plane_db_selection_uses_process_home_for_active_and_default(monkeypatch, tmp_path):
+    """Profile context must not move control-plane DB reads out of process home."""
 
     process_home = tmp_path / "process-home"
     profile_home = tmp_path / "profile-home"
@@ -92,6 +92,6 @@ def test_profile_db_selection_uses_process_home_as_default(monkeypatch, tmp_path
         server._leave_profile_context(token)
 
     assert seen == {
-        "active_home": str(profile_home.resolve()),
+        "active_home": str(process_home.resolve()),
         "default_home": str(process_home.resolve()),
     }

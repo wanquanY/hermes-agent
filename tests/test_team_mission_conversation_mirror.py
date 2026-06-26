@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from tests.team_mission_gateway_test_support import team_mission_gateway
+
 
 class _MemoryTransport:
     def __init__(self):
@@ -413,7 +415,7 @@ def test_conversation_resolve_recovers_legacy_empty_final_deliverable_message(
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
@@ -507,7 +509,7 @@ def test_final_deliverable_complete_prefers_source_markdown_over_polluted_mirror
     tmp_path: Path,
 ):
     from hermes_state import SessionDB
-    from hermes_team_mission_conversation_utils import mirror_event_to_conversation
+    from hermes_team_mission.runtime.conversation_mirror import mirror_event_to_conversation
 
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(
@@ -620,7 +622,7 @@ def test_final_deliverable_complete_prefers_source_markdown_over_polluted_mirror
 
 def test_final_deliverable_rebuild_preserves_repeated_markdown_chunks(tmp_path: Path):
     from hermes_state import SessionDB
-    from hermes_team_mission_conversation_utils import mirror_event_to_conversation
+    from hermes_team_mission.runtime.conversation_mirror import mirror_event_to_conversation
 
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(
@@ -704,7 +706,7 @@ def test_conversation_resolve_recovers_final_message_without_rewriting_stream_hi
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
@@ -837,7 +839,7 @@ def test_conversation_projection_exposes_final_deliverable_artifacts_to_list_and
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     artifact_refs = [
@@ -945,7 +947,7 @@ def test_conversation_list_recovers_completed_mission_with_active_mirror_run(
     from tui_gateway import server
     from tui_gateway.services import run_control
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -375,43 +376,75 @@ class GatewayStateStore:
         now = time.time()
         origin_json = json.dumps(artifact.get("origin") or {}, ensure_ascii=False)
         with self._lock, self._connect() as conn:
-            conn.execute(
+            existing = conn.execute(
                 """
-                INSERT INTO gateway_artifacts
-                    (id, workspace_id, path, relative_path, title, mime_type,
-                     size_bytes, origin_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(workspace_id, path) DO UPDATE SET
-                    title = excluded.title,
-                    mime_type = excluded.mime_type,
-                    size_bytes = excluded.size_bytes,
-                    origin_json = excluded.origin_json,
-                    updated_at = excluded.updated_at
+                SELECT id, created_at
+                FROM gateway_artifacts
+                WHERE id = ?
+                   OR (workspace_id = ? AND path = ?)
+                ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END
+                LIMIT 1
                 """,
-                (
-                    artifact["id"],
-                    artifact["workspace_id"],
-                    artifact["path"],
-                    artifact["relative_path"],
-                    artifact["title"],
-                    artifact["mime_type"],
-                    int(artifact.get("size_bytes") or 0),
-                    origin_json,
-                    now,
-                    now,
-                ),
-            )
+                (artifact["id"], artifact["workspace_id"], artifact["path"], artifact["id"]),
+            ).fetchone()
+            artifact_id = str(existing["id"] if existing else artifact["id"])
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE gateway_artifacts
+                    SET workspace_id = ?,
+                        path = ?,
+                        relative_path = ?,
+                        title = ?,
+                        mime_type = ?,
+                        size_bytes = ?,
+                        origin_json = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        artifact["workspace_id"],
+                        artifact["path"],
+                        artifact["relative_path"],
+                        artifact["title"],
+                        artifact["mime_type"],
+                        int(artifact.get("size_bytes") or 0),
+                        origin_json,
+                        now,
+                        artifact_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO gateway_artifacts
+                        (id, workspace_id, path, relative_path, title, mime_type,
+                         size_bytes, origin_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        artifact_id,
+                        artifact["workspace_id"],
+                        artifact["path"],
+                        artifact["relative_path"],
+                        artifact["title"],
+                        artifact["mime_type"],
+                        int(artifact.get("size_bytes") or 0),
+                        origin_json,
+                        now,
+                        now,
+                    ),
+                )
             row = conn.execute(
                 """
                 SELECT a.*, w.name AS workspace_name, w.path AS workspace_path,
                        w.kind AS workspace_kind
                 FROM gateway_artifacts a
                 JOIN gateway_workspaces w ON w.id = a.workspace_id
-                WHERE a.workspace_id = ? AND a.path = ?
+                WHERE a.id = ?
                 """,
-                (artifact["workspace_id"], artifact["path"]),
+                (artifact_id,),
             ).fetchone()
-            artifact_id = row["id"] if row else artifact["id"]
             conn.execute(
                 """
                 INSERT INTO gateway_session_artifacts
@@ -468,6 +501,83 @@ class GatewayStateStore:
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [self._artifact_row_to_payload(row) for row in rows]
+
+    def delete_artifact(
+        self,
+        *,
+        session_id: str,
+        artifact_id: str = "",
+        path: str = "",
+        workspace_id: str = "",
+    ) -> dict[str, Any]:
+        normalized_session_id = str(session_id or "").strip()
+        normalized_artifact_id = str(artifact_id or "").strip()
+        normalized_path = os.path.abspath(os.path.expanduser(str(path or "").strip())) if str(path or "").strip() else ""
+        normalized_workspace_id = str(workspace_id or "").strip()
+        if not normalized_session_id:
+            raise ValueError("session_id required")
+        if not normalized_artifact_id and not normalized_path:
+            raise ValueError("artifact_id or path required")
+
+        clauses = ["sa.session_id = ?"]
+        params: list[Any] = [normalized_session_id]
+        if normalized_artifact_id and normalized_path:
+            clauses.append("(a.id = ? OR a.path = ?)")
+            params.extend([normalized_artifact_id, normalized_path])
+        elif normalized_artifact_id:
+            clauses.append("a.id = ?")
+            params.append(normalized_artifact_id)
+        else:
+            clauses.append("a.path = ?")
+            params.append(normalized_path)
+        if normalized_workspace_id:
+            clauses.append("a.workspace_id = ?")
+            params.append(normalized_workspace_id)
+
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT a.*, w.name AS workspace_name, w.path AS workspace_path,
+                       w.kind AS workspace_kind
+                FROM gateway_session_artifacts sa
+                JOIN gateway_artifacts a ON a.id = sa.artifact_id
+                JOIN gateway_workspaces w ON w.id = a.workspace_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY sa.last_seen_at DESC
+                LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+            if row is None:
+                return {"deleted": False, "artifact": None, "deleted_artifacts": 0, "deleted_artifact_links": 0}
+
+            artifact = self._artifact_row_to_payload(row)
+            deleted_links = int(
+                conn.execute(
+                    """
+                    DELETE FROM gateway_session_artifacts
+                    WHERE session_id = ? AND artifact_id = ?
+                    """,
+                    (normalized_session_id, row["id"]),
+                ).rowcount
+                or 0
+            )
+            remaining = conn.execute(
+                "SELECT artifact_id FROM gateway_session_artifacts WHERE artifact_id = ? LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+            deleted_artifacts = 0
+            if remaining is None:
+                deleted_artifacts = int(
+                    conn.execute("DELETE FROM gateway_artifacts WHERE id = ?", (row["id"],)).rowcount
+                    or 0
+                )
+        return {
+            "deleted": bool(deleted_links),
+            "artifact": artifact,
+            "deleted_artifacts": deleted_artifacts,
+            "deleted_artifact_links": deleted_links,
+        }
 
     def delete_session_artifacts(self, session_ids: list[str]) -> dict[str, Any]:
         normalized = [str(session_id or "").strip() for session_id in session_ids]
@@ -725,7 +835,53 @@ class GatewayStateStore:
             "path": workspace_path,
             "kind": workspace_kind,
         }
+        artifact_path = str(payload.get("path") or "")
+        mime_type = str(payload.get("mime_type") or "application/octet-stream")
+        size_bytes = int(payload.get("size_bytes") or 0)
+        artifact_file = Path(artifact_path) if artifact_path else None
+        try:
+            stat = artifact_file.stat() if artifact_file else None
+        except OSError:
+            stat = None
+        if stat is not None and artifact_file is not None and artifact_file.is_file():
+            size_bytes = int(stat.st_size)
+            payload["availability"] = "available"
+            payload["updated_at"] = max(float(payload.get("updated_at") or 0), float(stat.st_mtime))
+        else:
+            payload["availability"] = "missing"
+        payload["relativePath"] = payload.get("relative_path") or ""
+        payload["mime"] = mime_type
+        payload["mimeType"] = mime_type
+        payload["kind"] = GatewayStateStore._artifact_kind(mime_type)
+        payload["size"] = size_bytes
+        payload["size_bytes"] = size_bytes
+        payload["sizeBytes"] = size_bytes
+        payload["workspacePayload"] = payload["workspace"]
+        payload["workspace_payload"] = payload["workspace"]
+        origin = payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
+        produced_by_run_id = str(
+            origin.get("run_id")
+            or origin.get("runId")
+            or origin.get("produced_by_run_id")
+            or origin.get("producedByRunId")
+            or ""
+        )
+        payload["produced_by_run_id"] = produced_by_run_id
+        payload["producedByRunId"] = produced_by_run_id
         return payload
+
+    @staticmethod
+    def _artifact_kind(mime_type: str) -> str:
+        mime_type = str(mime_type or "").lower()
+        if mime_type.startswith("image/"):
+            return "image"
+        if mime_type.startswith("video/"):
+            return "video"
+        if mime_type.startswith("audio/"):
+            return "audio"
+        if mime_type.startswith("text/") or mime_type in {"application/json", "application/xml"}:
+            return "text"
+        return "file"
 
 
 _DEFAULT_STORES: dict[str, GatewayStateStore] = {}

@@ -8,6 +8,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from hermes_runtime_event_payloads import primary_deliverable_text
+from hermes_team_mission.runtime.run_event_retention import should_preserve_terminal_stream_row
 
 logger = logging.getLogger(__name__)
 
@@ -1948,6 +1949,7 @@ class SessionDBRunMixin:
                 """,
                 (stable, normalized_run_id, *normalized_types),
             ).fetchall()
+            rows = [row for row in rows if not should_preserve_terminal_stream_row(conn, row)]
             if not rows:
                 return {"deleted_events": 0, "event_types": list(normalized_types)}
             self._archive_run_event_rows(conn, rows, reason="terminal_run_stream_events")
@@ -1959,11 +1961,11 @@ class SessionDBRunMixin:
             conn.execute(
                 """
                 UPDATE runs
-                SET last_seq = (
+                SET last_seq = MAX(COALESCE(last_seq, 0), (
                     SELECT COALESCE(MAX(seq), 0)
                     FROM run_events
                     WHERE run_id = ?
-                )
+                ))
                 WHERE run_id = ?
                 """,
                 (normalized_run_id, normalized_run_id),
@@ -2031,6 +2033,7 @@ class SessionDBRunMixin:
                     """,
                     tuple(prune_params),
                 ).fetchall()
+                rows_to_delete = [row for row in rows_to_delete if not should_preserve_terminal_stream_row(conn, row)]
                 if not rows_to_delete:
                     return
                 self._archive_run_event_rows(conn, rows_to_delete, reason="terminal_run_stream_events")
@@ -2246,11 +2249,11 @@ class SessionDBRunMixin:
                 conn.execute(
                     """
                     UPDATE runs
-                    SET last_seq = (
+                    SET last_seq = MAX(COALESCE(last_seq, 0), (
                         SELECT COALESCE(MAX(seq), 0)
                         FROM run_events
                         WHERE run_id = ?
-                    )
+                    ))
                     WHERE run_id = ?
                     """,
                     (run_id, run_id),

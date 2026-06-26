@@ -219,6 +219,48 @@ def test_append_run_event_terminal_prunes_message_delta_rows(tmp_path: Path):
     assert archive["last_seq"] == 2
 
 
+def test_append_run_event_preserves_team_mission_final_deliverable_mirror_delta(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    payload = {
+        "mode": "append",
+        "text": "final report",
+        "delta": "final report",
+        "team_mission_conversation_mirror": True,
+        "team_mission_final_deliverable": True,
+        "mission_id": "mission-1",
+        "source_run_id": "run-synthesis",
+    }
+    db.append_run_event(
+        "team-session-1",
+        {
+            "type": "message.delta",
+            "run_id": "team-mission:mission-1:conversation:run-synthesis",
+            "turn_id": "turn-synthesis",
+            "seq": 1,
+            "payload": payload,
+        },
+    )
+    db.append_run_event(
+        "team-session-1",
+        {
+            "type": "message.complete",
+            "run_id": "team-mission:mission-1:conversation:run-synthesis",
+            "turn_id": "turn-synthesis",
+            "seq": 2,
+            "payload": {**payload, "status": "complete"},
+        },
+    )
+
+    events = db.list_run_events("team-session-1")
+    archive = db._conn.execute(  # noqa: SLF001 - storage contract assertion.
+        "SELECT reason, event_count, first_seq, last_seq FROM run_event_archives"
+    ).fetchone()
+
+    assert [event["type"] for event in events] == ["message.delta", "message.complete"]
+    assert events[0]["payload"]["text"] == "final report"
+    assert archive is None
+
+
 def test_reconcile_heals_stuck_running_regular_session_with_terminal_run(tmp_path: Path):
     """Pre-fix builds left regular sessions stuck at `running=1` after the
     streaming append_run_event projection gap. The boot-time reconcile sweeps

@@ -10,17 +10,29 @@ from dovie_extension import load_extension
 
 METHOD_MODULES = (
     "session",
+    "session_history",
+    "session_interrupt",
+    "session_runtime_controls",
+    "live_session",
     "session_branch",
     "conversation_activity",
     "conversation_render_snapshot",
     "prompt",
+    "prompt_respond",
     "run",
     "team_registry",
     "profile_registry",
-    "team_mission",
-    "team_mission_history",
+    "hermes_team_mission.gateway.common",
+    "hermes_team_mission.gateway.conversation_methods",
+    "hermes_team_mission.gateway.runtime_methods",
+    "hermes_team_mission.gateway.memory_methods",
+    "hermes_team_mission.gateway.history_methods",
     "config",
+    "setup",
     "system",
+    "process",
+    "handoff",
+    "billing",
     "paste",
     "complete",
     "model",
@@ -35,7 +47,7 @@ METHOD_MODULES = (
 
 def register_method_modules(target: dict[str, Any]) -> None:
     for module in METHOD_MODULES:
-        name = f"tui_gateway.methods.{module}"
+        name = module if "." in module else f"tui_gateway.methods.{module}"
         if name in sys.modules:
             importlib.reload(sys.modules[name])
         else:

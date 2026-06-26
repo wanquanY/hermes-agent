@@ -133,6 +133,93 @@ def _(rid, params: dict) -> dict:
     )
 
 
+@method("runtime.state.inspect")
+def _(rid, params: dict) -> dict:
+    try:
+        from tui_gateway.services.runtime_state import inspect_runtime_state
+
+        payload = params or {}
+        return _ok(rid, inspect_runtime_state(
+            hermes_home_root=payload.get("hermes_home_root") or payload.get("hermesHomeRoot"),
+        ))
+    except Exception as exc:
+        return _err(rid, 5022, f"runtime state inspect failed: {exc}")
+
+
+@method("runtime.state.prune_empty")
+def _(rid, params: dict) -> dict:
+    try:
+        from tui_gateway.services.runtime_state import prune_empty_runtime_state
+
+        payload = params or {}
+        return _ok(rid, prune_empty_runtime_state(
+            hermes_home_root=payload.get("hermes_home_root") or payload.get("hermesHomeRoot"),
+            dry_run=payload.get("dry_run", payload.get("dryRun", True)),
+        ))
+    except Exception as exc:
+        return _err(rid, 5023, f"runtime state prune failed: {exc}")
+
+
+@method("runtime.state.merge_profile_runtime")
+def _(rid, params: dict) -> dict:
+    try:
+        from tui_gateway.services.runtime_state import merge_profile_runtime_state
+
+        payload = params or {}
+        return _ok(rid, merge_profile_runtime_state(
+            hermes_home_root=payload.get("hermes_home_root") or payload.get("hermesHomeRoot"),
+            profiles_root=payload.get("profiles_root") or payload.get("profilesRoot"),
+        ))
+    except Exception as exc:
+        return _err(rid, 5024, f"profile runtime state merge failed: {exc}")
+
+
+@method("profile.runtime.session_exists")
+def _(rid, params: dict) -> dict:
+    try:
+        from tui_gateway.services.runtime_state import profile_runtime_session_exists
+
+        result = profile_runtime_session_exists(
+            session_id=str(
+                (params or {}).get("session_id")
+                or (params or {}).get("sessionId")
+                or ""
+            ),
+            hermes_home_path=(
+                (params or {}).get("hermes_home_path")
+                or (params or {}).get("hermesHomePath")
+                or ""
+            ),
+            runtime_scope_key=str(
+                (params or {}).get("runtime_scope_key")
+                or (params or {}).get("runtimeScopeKey")
+                or ""
+            ),
+        )
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 4006, str(exc))
+    except PermissionError as exc:
+        return _err(rid, 4030, str(exc))
+    except Exception as exc:
+        return _err(rid, 5025, f"profile runtime session check failed: {exc}")
+
+
+@method("team_mission.workspace.rebase_paths")
+def _(rid, params: dict) -> dict:
+    try:
+        from tui_gateway.services.runtime_state import rebase_team_mission_workspace_paths
+
+        result = rebase_team_mission_workspace_paths(
+            old_path=str((params or {}).get("old_path") or (params or {}).get("oldPath") or ""),
+            new_path=str((params or {}).get("new_path") or (params or {}).get("newPath") or ""),
+            db=_get_db(),
+        )
+        return _ok(rid, result)
+    except Exception as exc:
+        return _err(rid, 5026, f"team mission workspace path rebase failed: {exc}")
+
+
 @method("storage.stats")
 def _(rid, params: dict) -> dict:
     """Return read-only Hermes storage diagnostics."""

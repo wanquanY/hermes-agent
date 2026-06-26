@@ -5237,7 +5237,9 @@ def test_prompt_submit_persists_interrupted_partial_after_tool_flush(monkeypatch
         {
             "role": "assistant",
             "content": "partial after tool",
+            "finish_reason": "interrupted",
             "metadata": {
+                "interrupted": True,
                 "turn_id": "turn-tool",
                 "run_id": "run-tool",
             },

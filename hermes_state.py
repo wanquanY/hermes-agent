@@ -31,11 +31,13 @@ from hermes_state_member_chat import SessionDBMemberChatMixin
 from hermes_state_participants import SessionDBParticipantMixin
 from hermes_state_runs import SessionDBRunMixin
 from hermes_state_team_capabilities import SessionDBTeamCapabilityMixin
-from hermes_state_team_missions import SessionDBTeamMissionMixin
+from hermes_team_mission.state.session_mixin import SessionDBTeamMissionMixin
 from hermes_state_team_registry import SessionDBTeamRegistryMixin
-from hermes_team_mission_conversation_state import prune_empty_team_mission_conversations
-from hermes_team_mission_conversation_state import repair_placeholder_team_mission_conversation_titles
-from hermes_team_mission_conversation_state import repair_legacy_team_mission_conversation_sessions
+from hermes_team_mission.state.schema import compact_team_mission_event_json_storage
+from hermes_team_mission.state.schema import reconcile_team_mission_node_primary_key
+from hermes_team_mission.state.schema import team_mission_deferred_index_sql
+from hermes_team_mission.state.schema import team_mission_schema_sql
+from hermes_team_mission.state.maintenance import run_team_mission_startup_maintenance
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -492,170 +494,7 @@ CREATE TABLE IF NOT EXISTS agent_profile_drafts (
     updated_at REAL NOT NULL,
     published_at REAL
 );
-
-CREATE TABLE IF NOT EXISTS team_mission_conversations (
-    conversation_id TEXT PRIMARY KEY,
-    team_id TEXT,
-    stable_session_id TEXT NOT NULL UNIQUE,
-    title TEXT NOT NULL,
-    objective TEXT,
-    workspace_id TEXT,
-    workspace_path TEXT,
-    status TEXT NOT NULL,
-    active_mission_id TEXT,
-    created_by_user_id TEXT,
-    metadata_json TEXT,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS team_missions (
-    mission_id TEXT PRIMARY KEY,
-    conversation_id TEXT,
-    team_id TEXT,
-    title TEXT NOT NULL,
-    objective TEXT,
-    workspace_id TEXT,
-    workspace_path TEXT,
-    mode TEXT NOT NULL,
-    status TEXT NOT NULL,
-    leader_session_id TEXT,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL,
-    completed_at REAL,
-    metadata_json TEXT
-);
-
-CREATE TABLE IF NOT EXISTS team_mission_nodes (
-    node_id TEXT NOT NULL,
-    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
-    kind TEXT NOT NULL,
-    title TEXT NOT NULL,
-    objective TEXT,
-    status TEXT NOT NULL,
-    assignee_profile_id TEXT,
-    assignee_profile_version_id TEXT,
-    canonical_node_id TEXT,
-    task_frame_id TEXT,
-    runtime_stable_session_id TEXT,
-    runtime_session_id TEXT,
-    runtime_scope_key TEXT,
-    output_contract_json TEXT,
-    metadata_json TEXT,
-    position_x REAL NOT NULL DEFAULT 0,
-    position_y REAL NOT NULL DEFAULT 0,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL,
-    PRIMARY KEY (mission_id, node_id)
-);
-
-CREATE TABLE IF NOT EXISTS team_mission_edges (
-    edge_id TEXT PRIMARY KEY,
-    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
-    from_node_id TEXT NOT NULL,
-    to_node_id TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    metadata_json TEXT,
-    created_at REAL NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS team_mission_run_bindings (
-    run_id TEXT PRIMARY KEY,
-    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
-    node_id TEXT,
-    session_id TEXT NOT NULL,
-    runtime_session_id TEXT,
-    runtime_scope_key TEXT,
-    role TEXT NOT NULL,
-    metadata_json TEXT,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS team_mission_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
-    seq INTEGER NOT NULL,
-    event_type TEXT NOT NULL,
-    source_event_type TEXT,
-    source_run_id TEXT,
-    source_session_id TEXT,
-    source_seq INTEGER DEFAULT 0,
-    dedupe_key TEXT NOT NULL,
-    timestamp REAL NOT NULL,
-    payload_json TEXT,
-    source_event_json TEXT,
-    event_json TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    UNIQUE(mission_id, seq),
-    UNIQUE(mission_id, dedupe_key)
-);
-
-CREATE TABLE IF NOT EXISTS team_mission_artifacts (
-    artifact_id TEXT PRIMARY KEY,
-    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
-    node_id TEXT,
-    run_id TEXT,
-    tool_call_id TEXT,
-    kind TEXT NOT NULL,
-    title TEXT NOT NULL,
-    uri TEXT NOT NULL,
-    mime_type TEXT,
-    metadata_json TEXT,
-    created_at REAL NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS team_mission_deliverables (
-    deliverable_id TEXT PRIMARY KEY,
-    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
-    node_id TEXT NOT NULL,
-    run_id TEXT NOT NULL,
-    task_id TEXT,
-    status TEXT NOT NULL,
-    result TEXT,
-    summary TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    artifact_refs_json TEXT,
-    next_context_json TEXT,
-    output_contract_json TEXT,
-    source TEXT NOT NULL,
-    confidence REAL NOT NULL,
-    visibility TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS team_mission_memory_items (
-    id TEXT PRIMARY KEY,
-    team_id TEXT NOT NULL,
-    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
-    conversation_session_id TEXT NOT NULL,
-    task_id TEXT,
-    scope TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    content TEXT NOT NULL,
-    structured_payload_json TEXT,
-    source_node_ids_json TEXT,
-    source_run_ids_json TEXT,
-    artifact_refs_json TEXT,
-    workspace_refs_json TEXT,
-    confidence REAL NOT NULL,
-    visibility TEXT NOT NULL,
-    status TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL,
-    invalidated_at REAL
-);
-
-CREATE TABLE IF NOT EXISTS team_mission_memory_edges (
-    id TEXT PRIMARY KEY,
-    from_memory_id TEXT NOT NULL,
-    to_memory_id TEXT,
-    relation TEXT NOT NULL,
-    metadata_json TEXT,
-    created_at REAL NOT NULL
-);
-
+""" + team_mission_schema_sql() + """
 CREATE TABLE IF NOT EXISTS team_capability_snapshots (
     snapshot_id TEXT PRIMARY KEY,
     team_id TEXT NOT NULL,
@@ -735,42 +574,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_profile_drafts_status_updated
     ON agent_profile_drafts(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_profile_drafts_source
     ON agent_profile_drafts(source_session_id, source_agent_profile_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_conversations_team
-    ON team_mission_conversations(team_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_conversations_workspace
-    ON team_mission_conversations(workspace_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_missions_conversation
-    ON team_missions(conversation_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_missions_status_updated
-    ON team_missions(status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_nodes_mission
-    ON team_mission_nodes(mission_id, created_at ASC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_edges_mission
-    ON team_mission_edges(mission_id, created_at ASC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_run_bindings_mission
-    ON team_mission_run_bindings(mission_id, node_id, created_at ASC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_run_bindings_session
-    ON team_mission_run_bindings(session_id, run_id);
-CREATE INDEX IF NOT EXISTS idx_team_mission_events_mission_seq
-    ON team_mission_events(mission_id, seq ASC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_events_source_run
-    ON team_mission_events(source_run_id, source_seq);
-CREATE INDEX IF NOT EXISTS idx_team_mission_artifacts_mission
-    ON team_mission_artifacts(mission_id, node_id, created_at ASC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_deliverables_mission
-    ON team_mission_deliverables(mission_id, node_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_deliverables_run
-    ON team_mission_deliverables(run_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_mission
-    ON team_mission_memory_items(mission_id, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_conversation
-    ON team_mission_memory_items(conversation_session_id, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_team
-    ON team_mission_memory_items(team_id, scope, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_memory_edges_from
-    ON team_mission_memory_edges(from_memory_id, relation, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_memory_edges_to
-    ON team_mission_memory_edges(to_memory_id, relation, created_at DESC);
+""" + team_mission_deferred_index_sql() + """
 CREATE INDEX IF NOT EXISTS idx_team_capability_snapshots_team
     ON team_capability_snapshots(team_id, version DESC);
 CREATE INDEX IF NOT EXISTS idx_team_capability_snapshot_bindings_mission
@@ -891,42 +695,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 pass
 
             self._init_schema()
-            try:
-                repaired = repair_legacy_team_mission_conversation_sessions(self)
-                if repaired:
-                    logger.info(
-                        "repaired %d legacy Team Mission conversation session(s)",
-                        repaired,
-                    )
-            except Exception as repair_exc:
-                logger.warning(
-                    "legacy Team Mission conversation session repair skipped: %s",
-                    repair_exc,
-                )
-            try:
-                retitled = repair_placeholder_team_mission_conversation_titles(self)
-                if retitled:
-                    logger.info(
-                        "retitled %d placeholder Team Mission conversation(s)",
-                        retitled,
-                    )
-            except Exception as retitle_exc:
-                logger.warning(
-                    "placeholder Team Mission conversation title repair skipped: %s",
-                    retitle_exc,
-                )
-            try:
-                pruned = prune_empty_team_mission_conversations(self)
-                if pruned:
-                    logger.info(
-                        "pruned %d empty Team Mission conversation shell(s)",
-                        pruned,
-                    )
-            except Exception as prune_exc:
-                logger.warning(
-                    "empty Team Mission conversation shell prune skipped: %s",
-                    prune_exc,
-                )
+            run_team_mission_startup_maintenance(self, logger)
             try:
                 repaired_fk_rows = self.repair_orphaned_foreign_key_rows()
                 if repaired_fk_rows:
@@ -1165,87 +934,6 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                             "reconcile %s.%s: %s", table_name, col_name, exc,
                         )
 
-    def _reconcile_team_mission_node_primary_key(self, cursor: sqlite3.Cursor) -> None:
-        """Ensure Team Mission nodes are keyed by mission and node.
-
-        A Team Mission conversation can contain multiple missions, and planners
-        may reuse local node ids such as ``root`` or ``worker`` in each mission.
-        The durable identity is therefore ``(mission_id, node_id)``.  Older
-        databases used a global ``node_id`` primary key, which made later
-        missions overwrite earlier graph nodes.
-        """
-        try:
-            rows = cursor.execute('PRAGMA table_info("team_mission_nodes")').fetchall()
-        except sqlite3.OperationalError:
-            return
-        pk_columns = [
-            (row["name"] if isinstance(row, sqlite3.Row) else row[1])
-            for row in sorted(
-                rows,
-                key=lambda item: item["pk"] if isinstance(item, sqlite3.Row) else item[5],
-            )
-            if (row["pk"] if isinstance(row, sqlite3.Row) else row[5])
-        ]
-        if pk_columns == ["mission_id", "node_id"]:
-            return
-
-        cursor.execute("PRAGMA foreign_keys=OFF")
-        cursor.execute("DROP INDEX IF EXISTS idx_team_mission_nodes_mission")
-        cursor.execute("ALTER TABLE team_mission_nodes RENAME TO team_mission_nodes_legacy_pk")
-        cursor.execute(
-            """
-            CREATE TABLE team_mission_nodes (
-                node_id TEXT NOT NULL,
-                mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
-                kind TEXT NOT NULL,
-                title TEXT NOT NULL,
-                objective TEXT,
-                status TEXT NOT NULL,
-                assignee_profile_id TEXT,
-                assignee_profile_version_id TEXT,
-                canonical_node_id TEXT,
-                task_frame_id TEXT,
-                runtime_stable_session_id TEXT,
-                runtime_session_id TEXT,
-                runtime_scope_key TEXT,
-                output_contract_json TEXT,
-                metadata_json TEXT,
-                position_x REAL NOT NULL DEFAULT 0,
-                position_y REAL NOT NULL DEFAULT 0,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                PRIMARY KEY (mission_id, node_id)
-            )
-            """
-        )
-        cursor.execute(
-            """
-            INSERT OR REPLACE INTO team_mission_nodes (
-                node_id, mission_id, kind, title, objective, status,
-                assignee_profile_id, assignee_profile_version_id,
-                canonical_node_id, task_frame_id, runtime_stable_session_id,
-                runtime_session_id, runtime_scope_key,
-                output_contract_json, metadata_json, position_x, position_y,
-                created_at, updated_at
-            )
-            SELECT
-                node_id, mission_id, kind, title, objective, status,
-                assignee_profile_id, assignee_profile_version_id,
-                canonical_node_id, task_frame_id, runtime_stable_session_id,
-                runtime_session_id, runtime_scope_key,
-                output_contract_json, metadata_json, position_x, position_y,
-                created_at, updated_at
-            FROM team_mission_nodes_legacy_pk
-            ORDER BY updated_at ASC, created_at ASC
-            """
-        )
-        cursor.execute("DROP TABLE team_mission_nodes_legacy_pk")
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_team_mission_nodes_mission "
-            "ON team_mission_nodes(mission_id, created_at ASC)"
-        )
-        cursor.execute("PRAGMA foreign_keys=ON")
-
     def _backfill_session_list_summaries(self, cursor: sqlite3.Cursor) -> None:
         """Populate denormalized list fields from active message rows.
 
@@ -1396,27 +1084,6 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             )
         cursor.execute("DROP TABLE IF EXISTS agent_profile_versions")
 
-    def _compact_team_mission_event_json_storage(self, cursor: sqlite3.Cursor) -> None:
-        """Clear duplicate JSON copies from team_mission_events.
-
-        ``event_json`` is the canonical replay payload.  ``payload_json`` and
-        ``source_event_json`` are legacy denormalized copies that multiplied
-        every streamed Team Mission delta.  Scalar query columns remain intact,
-        so clearing those duplicate JSON columns preserves replay semantics.
-        """
-        try:
-            cursor.execute(
-                """
-                UPDATE team_mission_events
-                SET payload_json = '',
-                    source_event_json = ''
-                WHERE COALESCE(payload_json, '') != ''
-                   OR COALESCE(source_event_json, '') != ''
-                """
-            )
-        except sqlite3.OperationalError as exc:
-            logger.debug("team_mission_events JSON storage compaction skipped: %s", exc)
-
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -1440,7 +1107,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         # migration was skipped (e.g. due to version renumbering), the
         # column gets created here.
         self._reconcile_columns(cursor)
-        self._reconcile_team_mission_node_primary_key(cursor)
+        reconcile_team_mission_node_primary_key(cursor)
 
         # Indexes that reference reconciler-added columns must be created
         # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL
@@ -1548,7 +1215,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             if current_version < 20:
                 self._migrate_agent_profile_versions_to_latest_profiles(cursor)
             if current_version < 24:
-                self._compact_team_mission_event_json_storage(cursor)
+                compact_team_mission_event_json_storage(cursor, logger)
             if current_version < SCHEMA_VERSION:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",

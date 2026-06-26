@@ -20,12 +20,14 @@ from tui_gateway.methods.session import (
     _normalize_session_cwd,
     _ok,
     _resolve_runtime_session,
-    _session_active_turn_matches_recall_target,
     _session_cwd,
     _set_session_context,
     _stored_workspace,
     _workspace_from_params,
     method,
+)
+from tui_gateway.methods.session_history import (
+    _session_active_turn_matches_recall_target,
 )
 
 

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from hermes_state import SessionDB
-from hermes_team_mission_modes import (
+from hermes_team_mission.domain.modes import (
     MODE_AUTONOMOUS_MISSION,
     MODE_DISCUSSION,
     MODE_MANUAL_GRAPH,

@@ -9,6 +9,7 @@ from .service import (
     normalize_session_cwd,
     session_cwd,
     session_workspace_binding,
+    session_workspace_run_context,
     workspace_for_session,
     workspace_from_params,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "normalize_session_cwd",
     "session_cwd",
     "session_workspace_binding",
+    "session_workspace_run_context",
     "workspace_for_session",
     "workspace_from_params",
 ]

@@ -183,7 +183,7 @@ async def main_async(args: argparse.Namespace) -> None:
     from tui_gateway import server as tui_gateway_server  # noqa: F401 - registers gateway methods
     from tui_gateway import ws as tui_gateway_ws
     from tui_gateway.services.dovie_cron_runtime import start_cron_ticker, stop_cron_ticker
-    from tui_gateway.services.team_mission_approval_observer import install as _install_team_mission_approval_observer
+    from hermes_team_mission.runtime.approval_observer import install as _install_team_mission_approval_observer
 
     # Bridge in-process approval/clarify state changes to team_mission.
     # conversation.status events so the sidebar reflects waiting_approval

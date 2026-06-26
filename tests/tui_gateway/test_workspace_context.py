@@ -1,7 +1,12 @@
 import pytest
 
 from tui_gateway.services.session_info import session_info
-from tui_gateway.services.workspace import normalize_session_cwd, workspace_from_params
+from tui_gateway.services.workspace import (
+    bind_session_workspace,
+    normalize_session_cwd,
+    session_workspace_run_context,
+    workspace_from_params,
+)
 
 
 def test_normalize_session_cwd_rejects_missing_path(tmp_path):
@@ -95,6 +100,66 @@ def test_workspace_from_params_rejects_cwd_outside_workspace(tmp_path):
             {"workspace": {"path": str(workspace_root)}},
             str(outside),
         )
+
+
+def test_session_workspace_run_context_uses_persisted_binding(tmp_path):
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    bind_session_workspace(
+        session_id="stored-session-1",
+        cwd=str(workspace_root),
+        workspace={
+            "id": "workspace-1",
+            "name": "Workspace One",
+            "path": str(workspace_root),
+            "kind": "local",
+        },
+    )
+
+    context = session_workspace_run_context("stored-session-1")
+
+    assert context["source"] == "session_workspace_binding"
+    assert context["cwd"] == str(workspace_root)
+    assert context["workspace"]["id"] == "workspace-1"
+    assert context["workspace"]["path"] == str(workspace_root)
+
+
+def test_session_workspace_run_context_prefers_explicit_params(tmp_path):
+    stored_root = tmp_path / "stored"
+    explicit_root = tmp_path / "explicit"
+    stored_root.mkdir()
+    explicit_root.mkdir()
+    bind_session_workspace(
+        session_id="stored-session-1",
+        cwd=str(stored_root),
+        workspace={
+            "id": "stored-workspace",
+            "name": "Stored",
+            "path": str(stored_root),
+            "kind": "local",
+        },
+    )
+
+    context = session_workspace_run_context(
+        "stored-session-1",
+        {
+            "cwd": str(explicit_root),
+            "workspace": {
+                "id": "explicit-workspace",
+                "name": "Explicit",
+                "path": str(explicit_root),
+                "kind": "local",
+            },
+        },
+    )
+
+    assert context["source"] == "params"
+    assert context["cwd"] == str(explicit_root)
+    assert context["workspace"]["id"] == "explicit-workspace"
+
+
+def test_session_workspace_run_context_returns_empty_without_context():
+    assert session_workspace_run_context("missing-session") == {}
 
 
 def test_session_info_uses_agent_session_cwd_without_process_cwd(tmp_path, monkeypatch):

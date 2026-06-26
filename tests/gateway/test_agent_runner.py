@@ -104,3 +104,47 @@ def test_worker_session_defers_agent_build_until_prompt_submit(monkeypatch: pyte
     assert sessions[sid] is session
     assert session["agent"] is None
     assert starts == []
+
+
+def test_worker_session_restores_workspace_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from tui_gateway import server as _server
+    from tui_gateway.services import agent_runner
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    sessions: dict[str, dict] = {}
+    monkeypatch.setattr(_server, "_sessions", sessions)
+    monkeypatch.setattr(_server, "_sessions_lock", threading.Lock())
+    monkeypatch.setattr(_server, "_stdio_transport", _NoopTransport())
+    monkeypatch.setattr(_server, "_db_for_stable_session", lambda _sid: None)
+    monkeypatch.setattr(
+        agent_runner,
+        "session_workspace_run_context",
+        lambda _session_id, _params: {
+            "cwd": str(workspace_root),
+            "workspace": {
+                "id": "workspace-1",
+                "name": "Workspace One",
+                "path": str(workspace_root),
+                "kind": "local",
+            },
+            "source": "session_workspace_binding",
+        },
+    )
+
+    sid, session = _ensure_worker_session(
+        RunStartFrame(
+            run_id="run-1",
+            turn_id="turn-1",
+            stored_session_id="stored-session-1",
+            prompt="pwd",
+            params={"runtime_scope_key": "profile:test"},
+        )
+    )
+
+    assert sessions[sid] is session
+    assert session["cwd"] == str(workspace_root)
+    assert session["workspace"]["id"] == "workspace-1"

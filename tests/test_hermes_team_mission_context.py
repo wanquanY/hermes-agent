@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-import hermes_team_mission_context as context_module
-from hermes_team_mission_context import WORKER_CONTEXT_MAX_CHARS
-from hermes_team_mission_context import build_team_mission_worker_context
-from hermes_team_mission_context import team_mission_graph_summary
+import hermes_team_mission.context.worker_context as context_module
+from hermes_team_mission.context.worker_context import PRIOR_ATTEMPT_MAX_CHARS
+from hermes_team_mission.context.worker_context import RECENT_EVENT_MAX_CHARS
+from hermes_team_mission.context.worker_context import WORKER_CONTEXT_MAX_CHARS
+from hermes_team_mission.context.worker_context import build_team_mission_worker_context
+from hermes_team_mission.context.worker_context import prior_node_attempts
+from hermes_team_mission.context.worker_context import recent_node_events
+from hermes_team_mission.context.worker_context import team_mission_graph_summary
 from hermes_state import SessionDB
 
 
@@ -273,3 +277,64 @@ def test_worker_context_includes_prior_attempts_and_recent_events(tmp_path):
     assert "First attempt wrote the draft but missed validation." in context["text"]
     assert "Recent events:" in context["text"]
     assert "worker exited before validation finished" in context["text"]
+
+
+def test_worker_context_prior_attempts_and_recent_events_have_per_item_caps(monkeypatch, tmp_path):
+    db = SessionDB(tmp_path / "state.db")
+    long_attempt_summary = "attempt-" + ("a" * (PRIOR_ATTEMPT_MAX_CHARS + 500))
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Retry mission",
+        objective="Retry with bounded item payloads.",
+        status="running",
+        mode="supervised_mission",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-worker",
+        kind="worker",
+        title="Worker",
+        objective="Complete the worker task.",
+        status="running",
+    )
+    db.upsert_run(run_id="run-old", session_id="session-old", status="running")
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="node-worker",
+        run_id="run-old",
+        session_id="session-old",
+        runtime_scope_key="team:mission-1:node:node-worker",
+        role="worker",
+    )
+    monkeypatch.setattr(
+        db,
+        "latest_team_mission_deliverable_for_run",
+        lambda _run_id: {"status": "partial", "summary": long_attempt_summary},
+    )
+    monkeypatch.setattr(
+        db,
+        "list_team_mission_events",
+        lambda _mission_id, limit=500: [
+            {
+                "seq": 1,
+                "type": "message.complete",
+                "payload": {
+                    "kind": "node.failed",
+                    "node_id": "node-worker",
+                    "source_event_type": "message.complete",
+                    "source_payload": {"status": "error", "text": long_attempt_summary},
+                },
+            }
+        ],
+    )
+
+    prior = prior_node_attempts(db, "mission-1", "node-worker")
+    recent = recent_node_events(db, "mission-1", "node-worker")
+
+    assert len(prior) == 1
+    assert len(prior[0]["summary"]) <= PRIOR_ATTEMPT_MAX_CHARS
+    assert prior[0]["summary"].endswith(" ... [truncated]")
+    assert len(recent) == 1
+    assert len(recent[0]["summary"]) <= RECENT_EVENT_MAX_CHARS
+    assert recent[0]["summary"].endswith(" ... [truncated]")

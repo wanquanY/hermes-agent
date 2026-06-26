@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 
-from hermes_team_mission_profile_tools import team_mission_control_db as _team_registry_control_db
+from hermes_team_mission.runtime.profile_scope import team_mission_control_db as _team_registry_control_db
 from tui_gateway.methods._shared import bind_server_globals
 
 _server = bind_server_globals(globals())

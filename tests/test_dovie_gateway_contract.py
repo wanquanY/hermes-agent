@@ -9,6 +9,7 @@ import time
 from dovie_extension import DovieHermesExtension, load_extension
 from dovie_extension.gateway_methods import dovie_gateway_method_overrides
 from dovie_extension.manifest import gateway_capabilities as extension_gateway_capabilities
+from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway.dovie_gateway_contract import (
     REQUIRED_METHODS,
     gateway_capabilities,
@@ -155,7 +156,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert server._methods["prompt.submit"].__module__ == "tui_gateway.methods.prompt"
     assert server._methods["conversation.render_snapshot"].__module__ == "tui_gateway.methods.conversation_render_snapshot"
     assert server._methods["team_mission.conversation.render"].__module__ == "tui_gateway.methods.conversation_render_snapshot"
-    assert server._methods["team_mission.plan.approve"].__module__ == "tui_gateway.methods.team_mission"
+    assert server._methods["team_mission.plan.approve"].__module__ == "hermes_team_mission.gateway.runtime_methods"
     assert "model.set" in server._methods
     assert "model.options" in server._methods
     assert "toolsets.list" in server._methods
@@ -177,42 +178,53 @@ def test_extracted_gateway_methods_own_registered_handlers():
     assert server._methods["model.options"].__module__ == "tui_gateway.methods.model"
     assert server._methods["run.events"].__module__ == "tui_gateway.methods.run"
     assert server._methods["events.unsubscribe"].__module__ == "tui_gateway.methods.run"
-    assert server._methods["team_mission.create"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.graph"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.graph.reduce"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.events"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.subscribe"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_capability.snapshot.get"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_capability.snapshot.refresh"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_capability.snapshot.bind"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.team_profile.get"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.conversation.ensure"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.conversation.resolve"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.conversation.render"].__module__ == "tui_gateway.methods.conversation_render_snapshot"
-    assert server._methods["team_mission.conversation.list"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.conversation.runtime_session_ids"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.conversation.rename"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.conversation.delete"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.message.submit"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.cancel"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.node.create"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.edge.create"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.node.update"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.node.bind_run"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.node.history"].__module__ == "tui_gateway.methods.team_mission_history"
-    assert server._methods["team_mission.node.start"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.plan.complete"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.plan.approve"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.schedule.ready"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.memory.compile"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.memory.pack"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.memory.slice"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.memory.list"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.memory.update"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.memory.delete"].__module__ == "tui_gateway.methods.team_mission"
-    assert server._methods["team_mission.memory.events"].__module__ == "tui_gateway.methods.team_mission"
+    expected_team_mission_owners = {
+        "team_mission.create": "hermes_team_mission.gateway.conversation_methods",
+        "team_capability.snapshot.get": "hermes_team_mission.gateway.conversation_methods",
+        "team_capability.snapshot.refresh": "hermes_team_mission.gateway.conversation_methods",
+        "team_capability.snapshot.bind": "hermes_team_mission.gateway.conversation_methods",
+        "team_mission.team_profile.get": "hermes_team_mission.gateway.conversation_methods",
+        "team_mission.conversation.ensure": "hermes_team_mission.gateway.conversation_methods",
+        "team_mission.conversation.resolve": "hermes_team_mission.gateway.conversation_methods",
+        "team_mission.conversation.render": "tui_gateway.methods.conversation_render_snapshot",
+        "team_mission.conversation.list": "hermes_team_mission.gateway.conversation_methods",
+        "team_mission.conversation.runtime_session_ids": "hermes_team_mission.gateway.conversation_methods",
+        "team_mission.conversation.rename": "hermes_team_mission.gateway.conversation_methods",
+        "team_mission.conversation.delete": "hermes_team_mission.gateway.conversation_methods",
+        "team_mission.graph": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.graph.reduce": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.events": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.subscribe": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.message.submit": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.cancel": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.node.create": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.edge.create": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.node.update": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.node.bind_run": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.node.start": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.plan.complete": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.plan.approve": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.schedule.ready": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.node.history": "hermes_team_mission.gateway.history_methods",
+        "team_mission.memory.compile": "hermes_team_mission.gateway.memory_methods",
+        "team_mission.memory.pack": "hermes_team_mission.gateway.memory_methods",
+        "team_mission.memory.slice": "hermes_team_mission.gateway.memory_methods",
+        "team_mission.memory.list": "hermes_team_mission.gateway.memory_methods",
+        "team_mission.memory.update": "hermes_team_mission.gateway.memory_methods",
+        "team_mission.memory.delete": "hermes_team_mission.gateway.memory_methods",
+        "team_mission.memory.events": "hermes_team_mission.gateway.memory_methods",
+    }
+    for method_name, owner_module in expected_team_mission_owners.items():
+        assert server._methods[method_name].__module__ == owner_module
     assert server._methods["session.resume"].__module__ == "tui_gateway.methods.session"
     assert server._methods["session.branch"].__module__ == "tui_gateway.methods.session_branch"
+    assert server._methods["clarify.respond"].__module__ == "tui_gateway.methods.prompt_respond"
+    assert server._methods["sudo.respond"].__module__ == "tui_gateway.methods.prompt_respond"
+    assert server._methods["secret.respond"].__module__ == "tui_gateway.methods.prompt_respond"
+    assert server._methods["approval.respond"].__module__ == "tui_gateway.methods.prompt_respond"
+    assert server._methods["approval.policy.get"].__module__ == "tui_gateway.methods.prompt_respond"
+    assert server._methods["approval.policy.set"].__module__ == "tui_gateway.methods.prompt_respond"
+    assert server._methods["approval.pending.list"].__module__ == "tui_gateway.methods.prompt_respond"
     assert server._methods["config.show"].__module__ == "tui_gateway.methods.integrations"
     assert server._methods["skills.reload"].__module__ == "tui_gateway.methods.integrations"
     assert server._methods["profile.growth.summary"].__module__ == "tui_gateway.methods.profile_registry"
@@ -326,7 +338,7 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
     session_methods = importlib.import_module("tui_gateway.methods.session")
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     try:
         db.create_session(session_id="team-session-1", source="team_mission")
@@ -390,7 +402,7 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
     session_methods = importlib.import_module("tui_gateway.methods.session")
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     try:
         db.create_session(session_id="team-session-1", source="team_mission")
@@ -449,7 +461,7 @@ def test_conversation_render_snapshot_returns_active_team_structural_runtime_eve
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
     session_methods = importlib.import_module("tui_gateway.methods.session")
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     try:
         db.create_session(session_id="team-session-1", source="team_mission")
@@ -564,7 +576,7 @@ def test_conversation_render_snapshot_normalizes_duplicate_team_assistant_run_id
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
     session_methods = importlib.import_module("tui_gateway.methods.session")
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     try:
         db.create_session(session_id="team-session-1", source="team_mission")
@@ -653,7 +665,7 @@ def test_conversation_render_snapshot_normalizes_same_turn_team_assistant_tool_m
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
     session_methods = importlib.import_module("tui_gateway.methods.session")
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     try:
         db.create_session(session_id="team-session-1", source="team_mission")
@@ -1335,7 +1347,7 @@ def test_team_conversation_resolve_recovers_dead_gateway_active_run(tmp_path, mo
     from hermes_state import SessionDB
     from tui_gateway import server
 
-    team_mission = importlib.import_module("tui_gateway.methods.team_mission")
+    team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
     try:
         db.upsert_team_mission_conversation(

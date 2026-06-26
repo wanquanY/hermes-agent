@@ -77,9 +77,9 @@ codex/selective-upstream-client-sync-20260527
 
 当前新增能力：
 
-- Hermes state.db 增加 Team Mission 原生状态：conversation、mission、node、edge、run binding、artifact、team memory、capability snapshot。`hermes_state.py` schema version 提升到 `16`，并通过 `hermes_state_team_missions.py` / `hermes_state_team_capabilities.py` 拆分职责。
+- Hermes state.db 增加 Team Mission 原生状态：conversation、mission、node、edge、run binding、artifact、team memory、capability snapshot。`hermes_state.py` schema version 提升到 `16`，并通过 `hermes_team_mission/state/session_mixin.py` + `hermes_team_mission/state/session_*.py` / `hermes_state_team_capabilities.py` 拆分职责。
 - Dovie gateway contract 更新到 `2026-06-10`，新增 `team_mission.*`、`team_capability.snapshot.*` 和 `session.message_metadata.merge` 等 required methods。
-- TUI Gateway 新增 `tui_gateway/methods/team_mission.py`，覆盖 conversation ensure/resolve/list/rename/delete、message submit、graph/node/edge mutation、node run binding/start、schedule ready、memory pack/slice/list/update/delete/events、capability snapshot get/refresh/bind。
+- TUI Gateway 通过 `tui_gateway/methods/team_mission.py` 兼容加载入口注册 Team Mission RPC，实际实现位于 `hermes_team_mission/gateway/*.py`，覆盖 conversation ensure/resolve/list/rename/delete、message submit、graph/node/edge mutation、node run binding/start、schedule ready、memory pack/slice/list/update/delete/events、capability snapshot get/refresh/bind。
 - Team Mission runtime events 继续复用普通 `runs/run_events/messages`，通过 `team_mission_run_bindings` 聚合到 mission/node；`run_control` 支持 mission subscription，并对已合并存储的 stream delta 做实时差量投递。
 - 新增内部 toolsets：`team_mission_leader` 给稳定 Leader conversation 使用，`team_mission_planning` 给绑定到 planning run 的 Leader planner 使用；普通 worker 和普通聊天不会获得 graph mutation tools。
 - Kanban 仍作为 Hermes 内部调度器存在，但新增 `kanban_runtime_events.py` 和 scheduler bridge 后，Dovie 不需要读取 Kanban SQLite 作为 Team Mission 事实源。
@@ -95,7 +95,7 @@ codex/selective-upstream-client-sync-20260527
 - `team_mission.node.history`：新增 `tui_gateway/methods/team_mission_history.py` 与 `tui_gateway/services/team_mission_runtime_history.py`，按 mission/node/session 读取 run binding、messages、run events、tool events 和 artifacts，Dovie 不需要扫描 Kanban SQLite 或普通 session 猜节点历史。
 - canonical node kind：新增 `hermes_team_mission_node_kinds.py`，把专业分工标签归一化为 `worker` + metadata，把 `synthesizer` / `summary` 归一化为 `synthesis`，并明确 `root` / `approval_gate` / `verifier` / `synthesis` 是 Leader-owned control nodes。
 - assignee 校验：planning tools 对不存在的 `assignee_member_id` 直接拒绝；state upsert 遇到历史无效 member id 会丢弃并按默认负责人规则解析，避免 graph 中出现不可解析负责人。
-- Team profile tools：新增 `hermes_team_mission_profile_tools.py` 和 `tools/team_mission_profile_tools.py`，`team_mission_team_profile` 通过工具读取 capability snapshot，Leader prompt 不再内联团队成员画像、profile id 或 member id 清单。
+- Team profile tools：实际实现位于 `hermes_team_mission/tools/profile.py`，`tools/team_mission_profile_tools.py` 仅作为工具发现 loader adapter；`team_mission_team_profile` 通过工具读取 capability snapshot，Leader prompt 不再内联团队成员画像、profile id 或 member id 清单。
 - run 状态修复：`hermes_state_runs.py` 区分 ordinary runtime lifecycle events 与 `mission.*` control events；control-only event 保留在 `run_events` 中用于 replay，但不会让普通 session 误判为 active/busy。
 - toolset scope 持久化：`gateway_session_toolsets` 持久化非 exact 的 session toolset overrides，runtime rebuild 后能恢复 Leader conversation 工具面；`exact` scope 仍只用于本次控制平面权限边界。
 - scheduler 稳定性：ready-node 启动失败时节点进入 `blocked` 并记录 `start_error`，不再让调度异常吞掉 graph 状态。
@@ -205,7 +205,7 @@ Tag 计划：`prodv0.9.3`。该节点仍不是上游 full merge；它是 Dovie T
 | 子 agent 精确工具继承 | `tools/delegate_tool_access.py`, `model_tools.py`, `agent/agent_init.py` | 否 |
 | 子 agent run snapshot / detail API | `tui_gateway/services/subagent_snapshots.py`, `tui_gateway/methods/run.py`, `hermes_state_runs.py` | 否 |
 | Dovie sidecar 父进程生命周期 | `tui_gateway/dovie_sidecar.py`, `tui_gateway/services/runtime_proxy.py` | 否 |
-| Team Mission 原生运行时 | `tui_gateway/methods/team_mission.py`, `hermes_state_team_missions.py`, `hermes_state_team_capabilities.py`, `tools/team_mission_*_tools.py` | 否 |
+| Team Mission 原生运行时 | `tui_gateway/methods/team_mission.py`, `hermes_team_mission/gateway/*.py`, `hermes_team_mission/state/session_mixin.py`, `hermes_team_mission/state/session_*.py`, `hermes_state_team_capabilities.py`, `hermes_team_mission/tools/*.py`, `tools/team_mission_*_tools.py` loader adapters | 否 |
 | runtime-scoped control RPC | approval / cron / skills / tools proxy to runtime worker | 否 |
 | Dovie session sidebar filtering | `tui_gateway/methods/session.py` 隐藏 `tool` / `cron` 内部 runtime sessions | 否 |
 

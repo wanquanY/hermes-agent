@@ -92,7 +92,7 @@ def _db_from_arg(db: Any | None) -> Any:
     if db is not None:
         return db
     try:
-        from hermes_team_mission_profile_tools import team_mission_control_db
+        from hermes_team_mission.runtime.profile_scope import team_mission_control_db
 
         return team_mission_control_db()
     except Exception:

@@ -139,6 +139,15 @@ def test_profile_registry_gateway_crud_is_latest_only(monkeypatch, tmp_path: Pat
                 "currentVersionId": "snapshot-2",
                 "currentVersionNumber": 2,
                 "platformBaseToolsetsInitialized": True,
+                "sourceKind": "dovie-public-market",
+                "publicProfileId": "public-profile-1",
+                "publicVersionId": "public-version-2",
+                "publicContentHash": "sha256:abc",
+                "marketInstalledAt": "2026-06-14T04:00:00Z",
+                "templateId": "template-research",
+                "templateVersion": "1.2.0",
+                "templateSource": "system-template",
+                "templateInstalledAt": "2026-06-14T03:00:00Z",
             }
         },
     )
@@ -178,6 +187,13 @@ def test_profile_registry_gateway_crud_is_latest_only(monkeypatch, tmp_path: Pat
     assert list_response["result"]["profiles"][0]["agentProfileVersionId"] == "snapshot-2"
     assert list_response["result"]["profiles"][0]["runtimeScopeKey"] == "profile:agent-1"
     assert list_response["result"]["profiles"][0]["runtimeHomePath"].endswith("/profiles/research-agent")
+    assert list_response["result"]["profiles"][0]["sourceKind"] == "dovie-public-market"
+    assert list_response["result"]["profiles"][0]["publicProfileId"] == "public-profile-1"
+    assert list_response["result"]["profiles"][0]["publicVersionId"] == "public-version-2"
+    assert list_response["result"]["profiles"][0]["publicContentHash"] == "sha256:abc"
+    assert list_response["result"]["profiles"][0]["metadata"]["marketInstall"]["installedAt"] == "2026-06-14T04:00:00Z"
+    assert list_response["result"]["profiles"][0]["metadata"]["templateInstall"]["templateId"] == "template-research"
+    assert list_response["result"]["profiles"][0]["metadata"]["templateInstall"]["templateVersion"] == "1.2.0"
     assert "files" not in list_response["result"]["profiles"][0]
     assert growth_response["result"]["growth"]["dailyGrowth"]
     assert draft_response["result"]["draft"]["id"] == "draft-1"
@@ -186,7 +202,7 @@ def test_profile_registry_gateway_crud_is_latest_only(monkeypatch, tmp_path: Pat
 
 
 def test_team_mission_control_home_falls_back_to_hermes_home(monkeypatch, tmp_path: Path):
-    from hermes_team_mission_profile_tools import team_mission_control_home
+    from hermes_team_mission.runtime.profile_scope import team_mission_control_home
 
     monkeypatch.delenv("DOVIE_HERMES_CONTROL_HOME", raising=False)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "control-home"))

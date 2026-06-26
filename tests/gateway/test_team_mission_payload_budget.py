@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from hermes_state import SessionDB
-from hermes_team_mission_context import TOOL_ARGS_BUDGET_CHARS
+from hermes_team_mission.context.worker_context import TOOL_ARGS_BUDGET_CHARS
 from tools.registry import registry
 
 

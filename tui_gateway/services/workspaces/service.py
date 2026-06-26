@@ -159,6 +159,62 @@ def session_workspace_binding(session_id: str) -> dict[str, Any] | None:
     }
 
 
+def _explicit_workspace_run_context(params: dict[str, Any]) -> dict[str, Any]:
+    raw_workspace = params.get("workspace") if isinstance(params.get("workspace"), dict) else {}
+    raw_cwd = _first_text(
+        params.get("cwd"),
+        raw_workspace.get("cwd"),
+        raw_workspace.get("path"),
+        raw_workspace.get("workspace_path"),
+        raw_workspace.get("workspacePath"),
+    )
+    if not raw_cwd:
+        return {}
+    cwd = normalize_session_cwd(raw_cwd)
+    workspace = workspace_from_params(params, cwd)
+    return {"cwd": cwd, "workspace": workspace, "source": "params"}
+
+
+def _binding_workspace_run_context(session_id: str) -> dict[str, Any]:
+    binding = session_workspace_binding(session_id)
+    if not binding:
+        return {}
+    raw_workspace = binding.get("workspace") if isinstance(binding.get("workspace"), dict) else {}
+    raw_cwd = _first_text(
+        binding.get("cwd"),
+        binding.get("workspace_path"),
+        raw_workspace.get("cwd"),
+        raw_workspace.get("path"),
+    )
+    if not raw_cwd:
+        return {}
+    cwd = normalize_session_cwd(raw_cwd)
+    workspace = workspace_from_params({"workspace": raw_workspace}, cwd)
+    return {"cwd": cwd, "workspace": workspace, "source": "session_workspace_binding"}
+
+
+def session_workspace_run_context(
+    session_id: str,
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve the executable cwd/workspace context for a stored session.
+
+    The run-worker process has its own in-memory ``_sessions`` table, so the
+    gateway must carry the stored session workspace contract across the process
+    boundary explicitly. Prefer an explicit run payload, then fall back to the
+    durable ``workspace.session`` binding written by ``session.create`` /
+    ``session.resume``.
+    """
+    normalized_params = params if isinstance(params, dict) else {}
+    explicit = _explicit_workspace_run_context(normalized_params)
+    if explicit:
+        return explicit
+    session_id = _text(session_id)
+    if not session_id:
+        return {}
+    return _binding_workspace_run_context(session_id)
+
+
 def list_session_workspace_bindings(limit: int = 200) -> list[dict[str, Any]]:
     store = get_gateway_state_store(create_if_missing=False)
     if store is None:

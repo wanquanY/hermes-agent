@@ -43,6 +43,7 @@ import uuid
 from typing import Any, Optional
 
 from tui_gateway.run_worker import RunStartFrame
+from tui_gateway.services.workspace import session_workspace_run_context
 
 _log = logging.getLogger(__name__)
 
@@ -123,8 +124,13 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
     runtime_sid = uuid.uuid4().hex[:8]
     params = frame.params if isinstance(frame.params, dict) else {}
 
-    cwd = str(params.get("cwd") or "").strip() or None
-    workspace = params.get("workspace") if isinstance(params.get("workspace"), dict) else {}
+    workspace_context = session_workspace_run_context(frame.stored_session_id, params)
+    cwd = str(workspace_context.get("cwd") or "").strip() or None
+    workspace = (
+        workspace_context.get("workspace")
+        if isinstance(workspace_context.get("workspace"), dict)
+        else {}
+    )
     runtime_scope_key = str(
         params.get("runtime_scope_key")
         or params.get("runtimeScopeKey")

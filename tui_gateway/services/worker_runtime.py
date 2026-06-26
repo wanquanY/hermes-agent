@@ -41,6 +41,7 @@ from tui_gateway.services.runtime_proxy import (
     RuntimeScope,
     runtime_scope_from_request,
 )
+from tui_gateway.services.workspace import session_workspace_run_context
 from tui_gateway.services.worker_frame_router import WorkerFrameRouter
 from tui_gateway.services.worker_supervisor import WorkerSupervisor
 
@@ -409,6 +410,11 @@ async def _dispatch_prompt_submit(
         return True
 
     prompt_text = str(params.get("text") or "")
+    try:
+        workspace_context = session_workspace_run_context(stored_session_id, params)
+    except ValueError as exc:
+        await _ack_error(transport, rid, code=4002, message=str(exc))
+        return True
 
     supervisor = worker_supervisor()
     router = worker_frame_router()
@@ -433,6 +439,18 @@ async def _dispatch_prompt_submit(
         turn_id=turn_id,
     )
 
+    frame_params = {
+        k: v for k, v in params.items()
+        if k not in {
+            "text", "stored_session_id", "storedSessionId",
+            "session_id", "client_run_id", "run_id", "turn_id",
+            "cwd", "workspace",
+        }
+    }
+    if workspace_context:
+        frame_params["cwd"] = workspace_context["cwd"]
+        frame_params["workspace"] = workspace_context["workspace"]
+
     ok = await supervisor.send(
         scope.runtime_scope_key,
         RunStartFrame(
@@ -443,13 +461,7 @@ async def _dispatch_prompt_submit(
             # Strip params we either already lifted or that are too
             # large to send over the JSON-line pipe. The worker re-
             # resolves anything it needs from its own session state.
-            params={
-                k: v for k, v in params.items()
-                if k not in {
-                    "text", "stored_session_id", "storedSessionId",
-                    "session_id", "client_run_id", "run_id", "turn_id",
-                }
-            },
+            params=frame_params,
         ),
     )
     if not ok:
