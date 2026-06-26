@@ -7,20 +7,11 @@ team leader, @member) is:
     conversation's ``run_events`` table, addressable via
     ``stored_session_id == conversation_session_id``.
 
-Today the regular and leader cases hold by construction (worker session
-IS the conversation session). The @member case is fragile: the worker
-runs on ``memberchat:<conv>:<member>`` and a separate mirror path
-relays the event into the conversation session, but mirroring depends
-on a pre-registered row in ``member_chat_runs``. If the worker publishes
-before registration (real-world race), the mirror silently drops the
-frame and the user sees a blank page even though the worker completed.
-
-These tests lock the invariant. Test 3 (@member without prior
-registration) is RED on baseline (commit before P0-fallback lands) and
-turns GREEN once the P0 mirror band-aid (run_control fan-out via
-team_mission_conversations) is wired. Later phases (P2 RunContext)
-make the entire mirror path obsolete — by then these tests still pass
-because the invariant they express is conversation-kind agnostic.
+Regular, leader, and @member workers now publish user-visible events
+to the conversation session. Legacy @member mirror behavior is still
+covered while PR-E keeps that code physically present, but new @member
+submits rely on RunContext + conversation-session storage instead of
+``memberchat:*`` worker sessions or ``member_chat_runs`` registration.
 
 See:
 - docs/Hermes/V0.9.5/conversation-architecture-redesign.md  (north star)
@@ -34,11 +25,26 @@ import json
 from pathlib import Path
 
 from hermes_state import SessionDB
+from hermes_team_mission.domain.run_context import RunContext
+from hermes_team_mission.gateway import runtime_methods
+from hermes_state_participants import member_participant_id
 from tui_gateway.services.run_control import record_event
 
 
 CONV_SESSION = "conv-session-uuid"
 MEMBER_SESSION = "memberchat:conv-1:member-alice"
+
+
+def _member_run_context() -> RunContext:
+    return RunContext(
+        conversation_session_id=CONV_SESSION,
+        participant_id=member_participant_id("member-alice"),
+        activity_id="member_chat",
+        activity_kind="member_chat",
+        execution_scope_key="member-chat:conv-1:member-alice",
+        control_home="/tmp/hermes-member-alice",
+        execution_home="/tmp/hermes-member-alice",
+    )
 
 
 def _new_db(tmp_path: Path) -> SessionDB:
@@ -62,6 +68,65 @@ def _events_for_session(db: SessionDB, session_id: str) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def _memberchat_run_events(db: SessionDB) -> list[dict]:
+    rows = db._conn.execute(  # noqa: SLF001 - test introspection
+        "SELECT event_json FROM run_events WHERE session_id LIKE 'memberchat:%' ORDER BY seq"
+    ).fetchall()
+    return [json.loads(r["event_json"] or "{}") for r in rows]
+
+
+def _submit_member_once(monkeypatch, tmp_path: Path, db: SessionDB) -> dict:
+    captured: dict = {}
+
+    def fake_proxy_run_submit(params: dict) -> dict:
+        captured.update(params)
+        return {"ok": True}
+
+    monkeypatch.setattr(runtime_methods, "_proxy_run_submit_via_worker", fake_proxy_run_submit)
+    mission = {
+        "mission_id": "mission-1",
+        "team_id": "team-1",
+        "workspace_path": str(tmp_path),
+        "metadata": {
+            "members": [
+                {
+                    "member_id": "member-alice",
+                    "agent_profile_id": "profile-alice",
+                    "role": "member",
+                    "profile_name": "Alice",
+                    "dovie_profile": {
+                        "id": "profile-alice",
+                        "hermesHomePath": str(tmp_path / "alice-home"),
+                    },
+                }
+            ]
+        },
+    }
+    params = {
+        "team_id": "team-1",
+        "conversation_id": "conv-1",
+        "conversation_session_id": CONV_SESSION,
+        "client_run_id": "optimistic-member-run",
+        "turn_id": "turn-member-1",
+        "cwd": str(tmp_path),
+        "workspace": {"id": "ws-1", "path": str(tmp_path), "kind": "local"},
+    }
+    response = runtime_methods._submit_message_to_member(
+        "rid-member",
+        params,
+        db=db,
+        target_member_id="member-alice",
+        conversation_id="conv-1",
+        conversation_session_id=CONV_SESSION,
+        mission=mission,
+        text="@Alice please check this",
+    )
+
+    assert "error" not in response, response
+    assert captured
+    return captured
 
 
 # ── case 1: regular chat — worker session IS conversation session ──────
@@ -195,17 +260,13 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
     """The unified contract:
 
         Even when ``member_chat_runs`` has NO row for the worker's run
-        (registration race lost, or P2 has removed the registry table),
-        a ``message.complete`` event whose payload identifies the
-        member + conversation MUST still land in the conversation's
+        (the new submit path no longer writes one), a member worker's
+        ``message.complete`` event MUST still land in the conversation's
         ``run_events`` table.
 
-    The mirror path today queries member_chat_runs and silently drops
-    on miss (run_control.py:1446 'mirror-lookup-miss' diagnostic). This
-    test will be RED before P0-Commit2's fallback is wired, and GREEN
-    after. Later, when P2 RunContext eliminates the memberchat:* session
-    entirely, this test still passes because workers will publish
-    directly to the conversation session.
+    PR-C makes this naturally true: the worker runs on the conversation
+    session and record_event applies RunContext before persistence. This
+    test no longer depends on the P0 payload fallback or on mirror lookup.
 
     What the contract does NOT specify:
     - The mechanism (registry lookup, payload-based fallback, RunContext)
@@ -218,7 +279,6 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
     """
     db = _new_db(tmp_path)
     db.create_session(CONV_SESSION, source="team_mission", transient=False)
-    db.create_session(MEMBER_SESSION, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id="conv-1",
         team_id="team-1",
@@ -231,22 +291,18 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
         created_at=100,
         updated_at=200,
     )
-    # NOTE: intentionally NOT calling register_member_chat_run — simulating
-    # the registration-race that triggers the user-reported blank-page bug.
-    db.upsert_run(run_id="run-member-orphan", session_id=MEMBER_SESSION, status="running")
+    # NOTE: intentionally NOT calling register_member_chat_run. PR-C routes by
+    # RunContext + conversation-session storage, so there is no registry row.
+    db.upsert_run(run_id="run-member-orphan", session_id=CONV_SESSION, status="running")
 
     record_event(
         {
             "type": "message.complete",
-            "session_id": MEMBER_SESSION,
-            "stored_session_id": MEMBER_SESSION,
+            "session_id": CONV_SESSION,
+            "stored_session_id": CONV_SESSION,
             "run_id": "run-member-orphan",
             "turn_id": "t1",
             "seq": 1,
-            # The payload carries enough identity for any unification
-            # mechanism (mirror fallback OR RunContext) to address the
-            # conversation: a member_id (or participant_id) + a hint
-            # of which team conversation this belongs to.
             "payload": {
                 "text": "member reply (unregistered)",
                 "status": "complete",
@@ -261,6 +317,7 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
             },
         },
         db=db,
+        run_context=_member_run_context(),
     )
 
     events = _events_for_session(db, CONV_SESSION)
@@ -268,10 +325,10 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
     assert matching, (
         "INVARIANT VIOLATED: an @member worker's message.complete event with "
         "member_id + conversation_session_id in its payload reached "
-        "run_events[stored_session_id=memberchat:*] but NOT run_events"
-        "[stored_session_id=conv]. The conversation timeline will show no "
-        "member reply. See P0-Commit2 (mirror fallback) or P2 (RunContext) "
-        "for the fix. Current conversation events seen: "
+        "run_events[stored_session_id=conv]. The conversation timeline will "
+        "show no member reply. PR-C expects RunContext direct routing, not "
+        "member_chat_runs or memberchat:* mirror state. Current conversation "
+        "events seen: "
         f"{[(e['type'], e['payload'].get('text')) for e in events]}"
     )
 
@@ -279,34 +336,48 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
 # ── case 5: invariant — no visible events ever land in memberchat-only ─
 
 
-def test_memberchat_session_is_not_the_visible_event_truth(tmp_path: Path):
+def test_memberchat_session_is_not_the_visible_event_truth(monkeypatch, tmp_path: Path):
     """Reverse invariant: ``memberchat:*`` is an implementation detail.
     No code path should treat run_events[stored_session_id=memberchat:*]
     as the source of truth for what the user sees in the conversation
     timeline.
 
-    Currently the memberchat session DOES persist events (worker writes
-    them when it publishes — see test_member_chat_relay.py for the
-    mirror's source side). This test does not forbid that intermediate
-    write; it forbids using memberchat:* as the consumer-facing read
-    source.
-
-    When P2 lands and the memberchat:* session is removed entirely,
-    this test will still hold (vacuously — no memberchat events to
-    classify as visible).
+    PR-C removes memberchat:* from the new submit path entirely: the worker
+    spawn payload stores the conversation session id, and RunContext keeps
+    worker events addressed to that same conversation.
     """
-    # No active assertion today — this test reserves the name to enforce
-    # the principle as soon as P1/P2 introduce the conversation_kind
-    # field or the RunContext addresses the issue at the source.
-    #
-    # When P2 lands, replace this body with:
-    #
-    #   ev = _events_for_session(db, MEMBER_SESSION)
-    #   assert ev == [], (
-    #       "memberchat:* sessions must not carry visible events after P2 "
-    #       "RunContext — workers publish directly to conversation session"
-    #   )
-    #
-    # For now we leave it as a documented placeholder so the test file's
-    # 5-case structure makes the invariant set explicit at one glance.
-    assert True
+    db = _new_db(tmp_path)
+    captured = _submit_member_once(monkeypatch, tmp_path, db)
+    run_context = RunContext.from_payload(captured["run_context_json"])
+
+    for seq, frame in enumerate(
+        [
+            {
+                "type": "message.delta",
+                "payload": {"delta": "hello", "mode": "append"},
+            },
+            {
+                "type": "message.complete",
+                "payload": {"text": "member reply from PR-C path", "status": "complete"},
+            },
+        ],
+        start=1,
+    ):
+        record_event(
+            {
+                **frame,
+                "session_id": captured["session_id"],
+                "stored_session_id": captured["stored_session_id"],
+                "run_id": captured["run_id"],
+                "turn_id": captured["turn_id"],
+                "seq": seq,
+            },
+            db=db,
+            run_context=run_context,
+        )
+
+    assert _memberchat_run_events(db) == []
+    conv_events = _events_for_session(db, CONV_SESSION)
+    assert [event["type"] for event in conv_events] == ["message.delta", "message.complete"]
+    assert {event["frame"]["stored_session_id"] for event in conv_events} == {CONV_SESSION}
+    assert conv_events[-1]["payload"]["text"] == "member reply from PR-C path"

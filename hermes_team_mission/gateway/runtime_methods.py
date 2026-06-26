@@ -329,12 +329,11 @@ def _submit_message_to_member(
     # ensure_team_mission_conversation), THEN append the user message.
 
     # 1. Resolve workspace context (needed by ensure_team_mission_conversation).
-    stored_session_id = _member_chat_session_id(conversation_id, target_member_id)
     try:
         workspace_context = resolve_team_mission_workspace_context(
             params,
             mission=mission if isinstance(mission, dict) else {},
-            session_id=stored_session_id,
+            session_id=conversation_session_id,
             require=True,
         )
     except ValueError as exc:
@@ -385,10 +384,6 @@ def _submit_message_to_member(
         # preserved so an unexpected DB error doesn't abort the submit.
         pass
 
-    # 4. Create the member's runtime session (plain; never projected to
-    # session_index → never in the sidebar; never a team conversation).
-    if not db.get_session(stored_session_id):
-        db.create_session(stored_session_id, source="team_mission_member_chat", transient=False)
     member_run_home = _home_from_dovie_profile(dovie_profile)
     run_context = RunContext(
         conversation_session_id=conversation_session_id,
@@ -400,93 +395,25 @@ def _submit_message_to_member(
         execution_home=member_run_home,
     )
 
-    # 5. Materialize the team conversation as STRUCTURED chat history on the
-    #    member's session — not as a text transcript inlined into the prompt.
-    #    The worker hydrates this session's messages as its conversation
-    #    context; other participants' turns are tagged as observed user-side
-    #    speech ("[<speaker>] ..."), and the member's own past replies stay
-    #    as assistant turns. This way the LLM answers with its OWN SOUL.md
-    #    persona instead of mimicking the wording of past assistant turns
-    #    it sees in the transcript (which is what made every member answer
-    #    "I am Hermes Agent" when the prompt was stringly-injected).
-    try:
-        db.sync_member_chat_conversation_view(
-            conversation_session_id=conversation_session_id,
-            member_chat_session_id=stored_session_id,
-            member_id=target_member_id,
-        )
-    except Exception:
-        pass
-    runtime_session_error = _ensure_team_mission_runtime_session_shell(stored_session_id)
+    runtime_session_error = _ensure_team_mission_runtime_session_shell(conversation_session_id)
     if runtime_session_error:
         return _err(rid, 5008, runtime_session_error)
     if not isinstance(ensured_conversation, dict):
         ensured_conversation = {}
 
-    # 4. Self-heal stuck runs, then register the run for relay.
-    _clear_stuck_member_session_run(db, stored_session_id)
-    # The frontend pre-reserved an optimistic run_id on the CONVERSATION
-    # session before submitting (so its sidebar / composer show "运行中"
-    # immediately). We give the WORKER a fresh run_id — sharing the
-    # optimistic id with the worker would collide on runs.PRIMARY KEY across
-    # two sessions — and stash the optimistic id alongside the registry so
-    # the mirror block can re-stamp it onto the conversation-side frames.
-    # Result: when the worker's terminal frame mirrors over, it lands on the
-    # exact run_id the frontend is waiting on, and "运行中" settles cleanly.
+    # 4. The worker now runs on the conversation session itself. With no
+    # memberchat mirror registry to rewrite run ids, use the frontend's
+    # pre-reserved optimistic run id directly when present so terminal frames
+    # settle the same conversation-side run the UI is tracking.
     optimistic_run_id = str(params.get("client_run_id") or params.get("run_id") or "").strip()
-    run_id = uuid.uuid4().hex
+    run_id = optimistic_run_id or uuid.uuid4().hex
     turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
-    db.register_member_chat_run(
-        run_id=run_id,
-        conversation_session_id=conversation_session_id,
-        member_id=target_member_id,
-        agent_profile_id=agent_profile_id,
-        display_name=display_name,
-        optimistic_run_id=optimistic_run_id,
-    )
-    _member_chat_diagnostic(
-        "register-written",
-        db=str(getattr(db, "db_path", "") or ""),
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        stored_session_id=stored_session_id,
-        worker_run_id=run_id,
-        optimistic_run_id=optimistic_run_id,
-        turn_id=turn_id,
-        member_scope=member_scope,
-        target_member_id=target_member_id,
-        agent_profile_id=agent_profile_id,
-    )
-    try:
-        worker_registration = db.get_member_chat_run(run_id) if hasattr(db, "get_member_chat_run") else {}
-    except Exception as exc:
-        worker_registration = {"_read_error": str(exc)}
-    try:
-        optimistic_registration = (
-            db.find_member_chat_run_by_optimistic_run_id(optimistic_run_id)
-            if optimistic_run_id and hasattr(db, "find_member_chat_run_by_optimistic_run_id")
-            else {}
-        )
-    except Exception as exc:
-        optimistic_registration = {"_read_error": str(exc)}
-    _member_chat_diagnostic(
-        "register-readback",
-        db=str(getattr(db, "db_path", "") or ""),
-        worker_run_id=run_id,
-        optimistic_run_id=optimistic_run_id,
-        worker_lookup_found=bool(worker_registration and not worker_registration.get("_read_error")),
-        optimistic_lookup_found=bool(optimistic_registration and not optimistic_registration.get("_read_error")),
-        worker_lookup_session=str((worker_registration or {}).get("conversation_session_id") or ""),
-        optimistic_lookup_worker_run_id=str((optimistic_registration or {}).get("run_id") or ""),
-        worker_lookup_error=str((worker_registration or {}).get("_read_error") or ""),
-        optimistic_lookup_error=str((optimistic_registration or {}).get("_read_error") or ""),
-    )
 
     # 5. run.submit with CLEAN member params only — NOT {**params} (which carries
     #    the frontend's leader scope/profile and breaks the worker spawn).
     submit_params = {
-        "stored_session_id": stored_session_id,
-        "session_id": stored_session_id,
+        "stored_session_id": conversation_session_id,
+        "session_id": conversation_session_id,
         "client_run_id": run_id,
         "run_id": run_id,
         "turn_id": turn_id,
@@ -497,9 +424,8 @@ def _submit_message_to_member(
         "dovie_profile": dovie_profile,
         "cwd": workspace_context["cwd"],
         "workspace": workspace_context["workspace"],
-        # Plain user text — the worker appends it as a real user turn on its
-        # hydrated session history (which already mirrors the team conv via
-        # sync_member_chat_conversation_view). No prompt stringification.
+        # Plain user text — the worker appends it as a real user turn on the
+        # conversation session it now runs on. No prompt stringification.
         "text": text,
         "persist_user_message": "",
         "tool_progress_mode": "all",
@@ -515,7 +441,7 @@ def _submit_message_to_member(
         },
     }
     # Dispatch run.submit through the runtime-proxy path so the worker spawns
-    # on the member-chat scope and runs inside the member's profile home
+    # on the member-chat execution scope and runs inside the member's profile home
     # (HERMES_HOME=profiles/<member>). The in-process `_methods["run.submit"]`
     # path skips dispatch_method's `should_proxy_to_runtime` check, which is
     # why earlier attempts ran the prompt against the MAIN gateway's home —
@@ -526,7 +452,7 @@ def _submit_message_to_member(
         "worker-dispatch-returned",
         db=str(getattr(db, "db_path", "") or ""),
         conversation_session_id=conversation_session_id,
-        stored_session_id=stored_session_id,
+        stored_session_id=conversation_session_id,
         worker_run_id=run_id,
         optimistic_run_id=optimistic_run_id,
         turn_id=turn_id,
@@ -544,7 +470,7 @@ def _submit_message_to_member(
         # we can catch any caller still on the old path.
         run_control._diagnostic_warning(  # noqa: SLF001
             "member-chat-proxy-fallback-in-process",
-            stored_session_id=stored_session_id,
+            stored_session_id=conversation_session_id,
             member_scope=member_scope,
             reason=proxied.get("reason") or "",
         )
@@ -554,19 +480,18 @@ def _submit_message_to_member(
     # Dispatched async via the proxy path — synthesize a turn descriptor that
     # matches what the in-process path used to return (run_id, turn_id, etc.)
     # so the frontend's optimistic UI has the same payload shape.
-    conversation_run_id = optimistic_run_id or f"{_MEMBER_CHAT_RUN_PREFIX}:{run_id}"
+    conversation_run_id = run_id
     member_turn = {
-        # Conversation-side identity: this is the run id that mirrored frames
-        # use on the team conversation session. The worker run id remains an
-        # internal execution detail carried separately for diagnostics/cancel
-        # routing via member_chat_runs.
+        # Conversation-side identity: the worker now publishes directly to
+        # the conversation session via RunContext, so source and visible run
+        # ids are the same.
         "run_id": conversation_run_id,
         "worker_run_id": run_id,
         "source_run_id": run_id,
         "turn_id": turn_id,
         "stored_session_id": conversation_session_id,
         "session_id": conversation_session_id,
-        "worker_stored_session_id": stored_session_id,
+        "worker_stored_session_id": conversation_session_id,
         "runtime_scope_key": member_scope,
         "status": "streaming",
     }
@@ -575,7 +500,7 @@ def _submit_message_to_member(
         db=str(getattr(db, "db_path", "") or ""),
         conversation_id=conversation_id,
         conversation_session_id=conversation_session_id,
-        stored_session_id=stored_session_id,
+        stored_session_id=conversation_session_id,
         worker_run_id=run_id,
         optimistic_run_id=optimistic_run_id,
         turn_id=turn_id,
