@@ -1416,10 +1416,16 @@ class SessionDBTeamMissionConversationMixin:
         active_node_count = int(summary.get("active_node_count") or 0)
         if active_node_run and active_node_count <= 0:
             active_node_count = 1
-        # A conversation is running when any conversation_missions row is active.
-        # Run/node facts below still supply details, but they no longer decide the
-        # conversation-level boolean; one conversation can own multiple missions.
-        running = has_active_mission
+        # The sidebar "running" flag means runtime work is currently observed,
+        # not merely that a conversation still has a linked active mission row.
+        # - active_run / active_node_run: keeps subscribe-path projections running
+        #   while the run reducer has not yet marked the run terminal.
+        # - mission_terminal: terminal mission state wins over zombie running rows.
+        # - has_active_mission: scopes the observed run to an active conversation
+        #   mission link instead of any historical run binding.
+        mission_terminal = mission_status in _TERMINAL_MISSION_STATUSES
+        run_observed = bool(active_run) or bool(active_node_run)
+        running = run_observed and not mission_terminal and has_active_mission
         waiting_approval = bool(pending_approvals) or mission_status == "waiting_approval"
         projected_state = "waiting_approval" if waiting_approval else "running" if running else (
             "completed" if mission_status == "completed"
@@ -1531,6 +1537,7 @@ class SessionDBTeamMissionConversationMixin:
             return {}
         stable_session_id = _text(projection.get("stable_session_id"))
         source_type = _text(source_event.get("type"))
+        source_run_id = _text(source_event.get("run_id") or source_event.get("runId"))
         timestamp = float(source_event.get("timestamp") or time.time())
         payload = {
             "conversation_id": conversation_id,
@@ -1543,6 +1550,8 @@ class SessionDBTeamMissionConversationMixin:
             "activeMissionId": _text(projection.get("active_mission_id")) or mission_id,
             "source_event_type": source_type,
             "sourceEventType": source_type,
+            "source_run_id": source_run_id,
+            "sourceRunId": source_run_id,
             "source_seq": source_seq,
             "sourceSeq": source_seq,
             "team_mission_event_seq": projection_seq,
@@ -1558,6 +1567,8 @@ class SessionDBTeamMissionConversationMixin:
             "timestamp": timestamp,
             "mission_id": mission_id,
             "missionId": mission_id,
+            "source_run_id": source_run_id,
+            "sourceRunId": source_run_id,
             "conversation_id": conversation_id,
             "conversationId": conversation_id,
             "stable_session_id": stable_session_id,

@@ -54,6 +54,8 @@ except Exception:  # pragma: no cover - keeps gateway importable in mocked tests
 _MAX_EVENTS_PER_SESSION = 2000
 _POLL_INTERVAL_SECONDS = 0.25
 _TEAM_MISSION_RUNTIME_EVENT_TYPE = "team_mission.runtime.event"
+_TEAM_MISSION_CONVERSATION_STATUS_EVENT_TYPE = "team_mission.conversation.status"
+_TEAM_MISSION_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 _TEAM_MISSION_STATUS_SOURCE_EVENT_TYPES = {
     "message.start",
     "message.complete",
@@ -392,6 +394,7 @@ def _event_for_live_subscription_delivery(
         if event_for_transport is None:
             _reserve_subscription_delivery(subscription, event)
             return None
+        event_for_transport = _team_mission_live_status_event_for_subscription(subscription, event_for_transport)
         if not _reserve_subscription_delivery(subscription, event_for_transport):
             return None
         return event_for_transport
@@ -420,6 +423,67 @@ def _session_subscription_matches_event(
     if _is_team_mission_runtime_event(event):
         return False
     return _event_matches_subscription(subscription, event)
+
+
+def _team_mission_live_status_event_for_subscription(
+    subscription: dict[str, Any],
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    # Canonical replay keeps the reducer-after-write projection. Live subscribers
+    # need the source run to remain visible for the status frame emitted at the
+    # terminal event boundary, before the UI receives the follow-up idle state.
+    if str(event.get("type") or "").strip() != _TEAM_MISSION_CONVERSATION_STATUS_EVENT_TYPE:
+        return event
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    conversation = payload.get("conversation") if isinstance(payload.get("conversation"), dict) else {}
+    if not conversation or bool(conversation.get("running")):
+        return event
+    mission_status = str(conversation.get("mission_status") or payload.get("mission_status") or "").strip()
+    if mission_status in _TEAM_MISSION_TERMINAL_STATUSES:
+        return event
+    source_type = str(payload.get("source_event_type") or payload.get("sourceEventType") or "").strip()
+    if source_type != "message.complete":
+        return event
+    source_run_id = str(
+        event.get("source_run_id")
+        or event.get("sourceRunId")
+        or payload.get("source_run_id")
+        or payload.get("sourceRunId")
+        or ""
+    ).strip()
+    if not source_run_id:
+        return event
+    binding_getter = _db_method(subscription.get("db"), "get_team_mission_run_binding")
+    binding = binding_getter(source_run_id) if binding_getter is not None else {}
+    if not isinstance(binding, dict) or not binding:
+        return event
+    run_getter = _db_method(subscription.get("db"), "get_run")
+    run = run_getter(source_run_id) if run_getter is not None else {}
+    run = run if isinstance(run, dict) else {}
+
+    live_conversation = dict(conversation)
+    live_conversation["running"] = True
+    live_conversation["run_state"] = "running"
+    live_conversation["activity_state"] = "running"
+    live_conversation["active_run_id"] = source_run_id
+    live_conversation["active_turn_id"] = str(run.get("turn_id") or binding.get("turn_id") or "")
+    live_conversation["active_runtime_session_id"] = str(
+        run.get("runtime_session_id") or binding.get("runtime_session_id") or ""
+    )
+    live_conversation["runtime_scope_key"] = str(
+        run.get("runtime_scope_key") or binding.get("runtime_scope_key") or ""
+    )
+    live_conversation["run_started_at"] = run.get("started_at") or live_conversation.get("run_started_at") or 0
+    live_conversation["run_updated_at"] = run.get("updated_at") or live_conversation.get("run_updated_at") or 0
+    if int(live_conversation.get("active_node_count") or 0) <= 0:
+        live_conversation["active_node_count"] = 1
+
+    live_payload = dict(payload)
+    live_payload["conversation"] = live_conversation
+    live_payload["projection"] = live_conversation
+    live_event = dict(event)
+    live_event["payload"] = live_payload
+    return live_event
 
 
 def _deliver_team_mission_events(mission_id: str, events: list[dict[str, Any]]) -> None:
@@ -461,6 +525,7 @@ def _deliver_team_mission_events(mission_id: str, events: list[dict[str, Any]]) 
                 _reserve_subscription_delivery(subscription, event)
                 delivered_seq = seq
                 continue
+            event_for_transport = _team_mission_live_status_event_for_subscription(subscription, event_for_transport)
             if not _reserve_subscription_delivery(subscription, event_for_transport):
                 delivered_seq = max(delivered_seq, seq)
                 continue
