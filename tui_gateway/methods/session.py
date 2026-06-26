@@ -189,6 +189,7 @@ def _project_session_index_on_create(
             source="tui",
             transient=bool(transient),
             session_kind="hermes_session",
+            conversation_kind="direct",
         )
     except Exception:
         pass
@@ -425,6 +426,7 @@ def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str
             "stored_session_id": stable_session_id,
             "session_id": stable_session_id,
             "session_kind": "team_mission",
+            "conversation_kind": "team",
             "source": "team_mission",
             "conversation_id": conversation_id,
             "team_id": str(conversation.get("team_id") or "").strip(),
@@ -1054,6 +1056,7 @@ def _(rid, params: dict) -> dict:
                     "source": s.get("source") or "",
                     "workspace": s.get("workspace") or _stored_workspace(s["id"]),
                     "session_kind": s.get("session_kind") or "",
+                    "conversation_kind": s.get("conversation_kind") or "direct",
                     "conversation_id": s.get("conversation_id") or "",
                     "team_id": s.get("team_id") or "",
                     "team_conversation_title": s.get("team_conversation_title") or "",
@@ -1119,6 +1122,9 @@ def _session_index_list_item(row: dict) -> dict:
     rows receive the joined conversation and latest-active-mission projection.
     """
     session_kind = row.get("session_kind") or "hermes_session"
+    conversation_kind = row.get("conversation_kind") or (
+        "team" if session_kind == "team_mission" or row.get("team_id") else "direct"
+    )
     is_team_mission_row = session_kind == "team_mission" or bool(row.get("team_id"))
     active_mission_id = (
         row.get("active_mission_id")
@@ -1138,6 +1144,7 @@ def _session_index_list_item(row: dict) -> dict:
         "source": row.get("source") or "",
         "transient": bool(row.get("transient")),
         "session_kind": session_kind,
+        "conversation_kind": conversation_kind,
         "agentProfileId": row.get("owner_agent_profile_id") or "",
         "agent_profile_id": row.get("owner_agent_profile_id") or "",
         "agentProfileVersionId": row.get("owner_profile_version_id") or "",

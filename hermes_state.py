@@ -256,6 +256,7 @@ CREATE TABLE IF NOT EXISTS session_index (
     source TEXT NOT NULL DEFAULT 'unknown',
     transient INTEGER NOT NULL DEFAULT 0,
     session_kind TEXT NOT NULL DEFAULT 'hermes_session',
+    conversation_kind TEXT NOT NULL DEFAULT 'direct',
     status TEXT NOT NULL DEFAULT 'idle',
     running INTEGER NOT NULL DEFAULT 0,
     waiting_approval INTEGER NOT NULL DEFAULT 0,
@@ -1087,6 +1088,27 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             )
         cursor.execute("DROP TABLE IF EXISTS agent_profile_versions")
 
+    def _backfill_session_index_conversation_kind(self, cursor: sqlite3.Cursor) -> None:
+        """Normalize the explicit direct/team classification for sidebar rows."""
+
+        try:
+            cursor.execute(
+                """
+                UPDATE session_index
+                   SET conversation_kind = CASE
+                       WHEN COALESCE(source, '') = 'team_mission'
+                         OR COALESCE(session_kind, '') = 'team_mission'
+                       THEN 'team'
+                       ELSE 'direct'
+                   END
+                 WHERE COALESCE(conversation_kind, '') NOT IN ('direct', 'team')
+                    OR (COALESCE(source, '') = 'team_mission' AND conversation_kind != 'team')
+                    OR (COALESCE(session_kind, '') = 'team_mission' AND conversation_kind != 'team')
+                """
+            )
+        except sqlite3.OperationalError:
+            pass
+
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -1110,6 +1132,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         # migration was skipped (e.g. due to version renumbering), the
         # column gets created here.
         self._reconcile_columns(cursor)
+        self._backfill_session_index_conversation_kind(cursor)
         reconcile_team_mission_node_primary_key(cursor)
         migrate_active_mission_id_to_conversation_missions(cursor)
 
@@ -2076,10 +2099,10 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
     _SESSION_INDEX_COLUMNS = (
         "session_id", "owner_agent_profile_id", "owner_profile_version_id",
         "runtime_scope_key", "title", "preview", "source", "transient",
-        "session_kind", "status", "running", "waiting_approval", "active_run_id",
-        "active_runtime_session_id", "pending_approval_count", "team_id",
-        "mission_id", "conversation_id", "message_count", "started_at",
-        "updated_at", "last_activity",
+        "session_kind", "conversation_kind", "status", "running",
+        "waiting_approval", "active_run_id", "active_runtime_session_id",
+        "pending_approval_count", "team_id", "mission_id", "conversation_id",
+        "message_count", "started_at", "updated_at", "last_activity",
     )
 
     @staticmethod
@@ -2113,6 +2136,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         source: str = "unknown",
         transient: bool = False,
         session_kind: str = "hermes_session",
+        conversation_kind: Optional[str] = None,
         status: str = "idle",
         running: bool = False,
         waiting_approval: bool = False,
@@ -2134,6 +2158,15 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         now = time.time()
         started = float(started_at if started_at is not None else now)
         updated = float(updated_at if updated_at is not None else now)
+        normalized_source = str(source or "unknown")
+        normalized_session_kind = str(session_kind or "hermes_session")
+        normalized_conversation_kind = str(conversation_kind or "").strip().lower()
+        if normalized_conversation_kind not in {"direct", "team"}:
+            normalized_conversation_kind = (
+                "team"
+                if normalized_source == "team_mission" or normalized_session_kind == "team_mission"
+                else "direct"
+            )
         values = {
             "session_id": sid,
             "owner_agent_profile_id": str(owner_agent_profile_id or ""),
@@ -2141,9 +2174,10 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             "runtime_scope_key": str(runtime_scope_key or ""),
             "title": str(title or ""),
             "preview": str(preview or ""),
-            "source": str(source or "unknown"),
+            "source": normalized_source,
             "transient": 1 if transient else 0,
-            "session_kind": str(session_kind or "hermes_session"),
+            "session_kind": normalized_session_kind,
+            "conversation_kind": normalized_conversation_kind,
             "status": str(status or "idle"),
             "running": 1 if running else 0,
             "waiting_approval": 1 if waiting_approval else 0,
@@ -2426,13 +2460,15 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                     """
                     INSERT INTO session_index (
                         session_id, title, preview, source, transient,
-                        message_count, started_at, updated_at, last_activity
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        conversation_kind, message_count, started_at, updated_at,
+                        last_activity
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(session_id) DO UPDATE SET
                         title=excluded.title,
                         preview=excluded.preview,
                         source=excluded.source,
                         transient=excluded.transient,
+                        conversation_kind=excluded.conversation_kind,
                         message_count=excluded.message_count
                     """,
                     (
@@ -2441,6 +2477,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                         str(row["preview"] or ""),
                         str(row["source"] or "unknown"),
                         1 if row["transient"] else 0,
+                        "team" if str(row["source"] or "") == "team_mission" else "direct",
                         int(row["message_count"] or 0),
                         started,
                         updated,

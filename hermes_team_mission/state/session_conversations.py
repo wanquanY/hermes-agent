@@ -153,13 +153,14 @@ class SessionDBTeamMissionConversationMixin:
             conn.execute(
                 """
                 INSERT INTO session_index (
-                    session_id, title, source, session_kind, team_id,
+                    session_id, title, source, session_kind, conversation_kind, team_id,
                     conversation_id, mission_id, running, message_count, started_at, updated_at
-                ) VALUES (?, ?, 'team_mission', 'team_mission', ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, 'team_mission', 'team_mission', 'team', ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     title=excluded.title,
                     source=excluded.source,
                     session_kind=excluded.session_kind,
+                    conversation_kind=excluded.conversation_kind,
                     team_id=excluded.team_id,
                     conversation_id=excluded.conversation_id,
                     mission_id=excluded.mission_id,
