@@ -9,6 +9,60 @@ from .session_common import *
 
 
 class SessionDBTeamMissionGraphMixin:
+    def _linked_conversation_ids_for_mission(
+        self,
+        mission_id: str,
+        mission: Dict[str, Any] | None = None,
+    ) -> List[str]:
+        mission_id = _text(mission_id)
+        if not mission_id:
+            return []
+        candidates: list[str] = []
+
+        def _add(value: Any) -> None:
+            conversation_id = _text(value)
+            if conversation_id and conversation_id not in candidates:
+                candidates.append(conversation_id)
+
+        if isinstance(mission, dict):
+            _add(mission.get("conversation_id"))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT conversation_id
+                FROM team_mission_conversations
+                WHERE active_mission_id = ?
+                UNION
+                SELECT conversation_id
+                FROM conversation_missions
+                WHERE mission_id = ?
+                """,
+                (mission_id, mission_id),
+            ).fetchall()
+        for row in rows:
+            _add(row[0] if isinstance(row, tuple) else row["conversation_id"])
+        return candidates
+
+    def _set_linked_conversation_mission_status(
+        self,
+        *,
+        mission_id: str,
+        mission: Dict[str, Any] | None = None,
+        status: str,
+    ) -> None:
+        for conversation_id in self._linked_conversation_ids_for_mission(mission_id, mission):
+            if self.set_conversation_mission_status(
+                conversation_id=conversation_id,
+                mission_id=mission_id,
+                status=status,
+            ):
+                continue
+            self.add_mission_to_conversation(
+                conversation_id=conversation_id,
+                mission_id=mission_id,
+                status=status,
+            )
+
     def upsert_team_mission(
         self,
         *,
@@ -859,6 +913,11 @@ class SessionDBTeamMissionGraphMixin:
             leader_session_id=str(mission.get("leader_session_id") or ""),
             metadata=dict(mission.get("metadata") or {}),
         )
+        self._set_linked_conversation_mission_status(
+            mission_id=mission_id,
+            mission=mission,
+            status="cancelled",
+        )
         self.update_session_index_for_mission(
             mission_id, status="idle", running=False, waiting_approval=False,
         )
@@ -923,18 +982,9 @@ class SessionDBTeamMissionGraphMixin:
         canceled_at = time.time()
 
         def _mark_conversation_mission_cancelled() -> None:
-            conversation_id = _text(mission.get("conversation_id"))
-            if not conversation_id:
-                return
-            if self.set_conversation_mission_status(
-                conversation_id=conversation_id,
+            self._set_linked_conversation_mission_status(
                 mission_id=mission_id,
-                status="cancelled",
-            ):
-                return
-            self.add_mission_to_conversation(
-                conversation_id=conversation_id,
-                mission_id=mission_id,
+                mission=mission,
                 status="cancelled",
             )
 

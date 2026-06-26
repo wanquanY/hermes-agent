@@ -2485,6 +2485,46 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                     ),
                 )
                 upserted += 1
+            inactive_conversation_rows = conn.execute(
+                """
+                SELECT DISTINCT cm.conversation_id
+                  FROM conversation_missions cm
+                  JOIN team_missions tm ON tm.mission_id = cm.mission_id
+                 WHERE cm.status = 'active'
+                   AND LOWER(COALESCE(tm.status,'')) IN
+                       ('completed','failed','cancelled','canceled','interrupted','draft','idle')
+                """
+            ).fetchall()
+            if inactive_conversation_rows:
+                now = time.time()
+                conn.execute(
+                    """
+                    UPDATE conversation_missions
+                       SET status = CASE LOWER(COALESCE((
+                                SELECT tm.status
+                                  FROM team_missions tm
+                                 WHERE tm.mission_id = conversation_missions.mission_id
+                            ), ''))
+                            WHEN 'completed' THEN 'completed'
+                            WHEN 'failed' THEN 'failed'
+                            ELSE 'cancelled'
+                           END,
+                           updated_at = ?
+                     WHERE status = 'active'
+                       AND mission_id IN (
+                           SELECT mission_id
+                             FROM team_missions
+                            WHERE LOWER(COALESCE(status,'')) IN
+                                  ('completed','failed','cancelled','canceled','interrupted','draft','idle')
+                       )
+                    """,
+                    (now,),
+                )
+                for inactive_row in inactive_conversation_rows:
+                    self._sync_legacy_active_mission_id_on_conn(
+                        conn,
+                        inactive_row[0] if isinstance(inactive_row, tuple) else inactive_row["conversation_id"],
+                    )
             # Heal team-mission conversation rows whose mission is already terminal
             # but whose status projection is still "running"/waiting (e.g. a cancel
             # that bypassed the graph reducer) — otherwise the sidebar shows a
