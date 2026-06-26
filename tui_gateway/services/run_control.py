@@ -1302,12 +1302,36 @@ def record_event(
                 isinstance(saved, dict)
                 and saved.get("_persistence_disposition") in {"duplicate_terminal", "ignored_after_terminal"}
             ):
+                # Phase 23: duplicate persistence MUST NOT drop the live
+                # subscriber delivery. The legacy ``return []`` here was
+                # written for the era when the sub-sidecar's direct-relay
+                # ws bridge already delivered the event to the frontend
+                # AND record_event was invoked a second time at append
+                # time — so dropping subscribers prevented a double
+                # render. After Phase 6 there is no bridge fallback path
+                # and after Phase 15 the main side IS the canonical
+                # subscriber broadcaster; returning [] here means the
+                # SOLE delivery for that event is lost whenever the
+                # worker happens to have persisted the row first (a
+                # race the agent thread enters whenever it calls
+                # ``db.append_run_event`` directly from inside the
+                # worker process now that Phase 8b unified the DB).
+                # Skip the post-persist projection (the duplicate row
+                # is already in the table) but keep the subscriber
+                # broadcast list intact — the caller
+                # (``publish_recorded_event``) will hand the event to
+                # every transport in ``result``.
                 with _lock:
                     try:
                         _events_by_session[stable].remove(frame)
                     except (KeyError, ValueError):
                         pass
-                return []
+                logger.debug(
+                    "[doxie-run-control] record_event dup-but-delivering "
+                    "stable=%s run_id=%s seq=%s subscribers=%d",
+                    stable, run_id, frame.get("seq"), len(result),
+                )
+                return result
             if terminal_event:
                 _diagnostic_warning(
                     "terminal-event-persisted",
