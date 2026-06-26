@@ -103,6 +103,7 @@ DOVIE_GATEWAY_METHOD_OVERRIDES = frozenset(
         "team_mission.conversation.ensure",
         "team_mission.conversation.resolve",
         "team_mission.conversation.list",
+        "team_mission.conversation.participants",
         "team_mission.conversation.runtime_session_ids",
         "team_mission.conversation.rename",
         "team_mission.conversation.render",
