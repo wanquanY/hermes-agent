@@ -44,7 +44,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -274,6 +274,11 @@ CREATE TABLE IF NOT EXISTS member_chat_runs (
     member_id TEXT NOT NULL DEFAULT '',
     agent_profile_id TEXT NOT NULL DEFAULT '',
     display_name TEXT NOT NULL DEFAULT '',
+    -- Frontend's pre-reserved optimistic run_id on the conversation session.
+    -- Mirrored frames are stamped with this id so the frontend's existing
+    -- "运行中" state on the conversation settles the moment terminal arrives —
+    -- without it, mirror frames carry a fresh id the frontend never registered.
+    optimistic_run_id TEXT NOT NULL DEFAULT '',
     relayed INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL DEFAULT 0
 );
@@ -2537,20 +2542,40 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         where = []
         params: List[Any] = []
         if not include_transient:
-            where.append("transient = 0")
+            where.append("si.transient = 0")
         if isinstance(cursor, dict) and cursor.get("session_id"):
             cu = float(cursor.get("updated_at") or 0)
             cs = float(cursor.get("started_at") or 0)
             ci = str(cursor.get("session_id") or "")
             where.append(
-                "(updated_at < ? OR (updated_at = ? AND started_at < ?) "
-                "OR (updated_at = ? AND started_at = ? AND session_id < ?))"
+                "(si.updated_at < ? OR (si.updated_at = ? AND si.started_at < ?) "
+                "OR (si.updated_at = ? AND si.started_at = ? AND si.session_id < ?))"
             )
             params.extend([cu, cu, cs, cu, cs, ci])
+        # Conversation-architecture refactor (P2): pull team display context
+        # (team name / avatar / leader profile / conversation objective) in the
+        # same query so the sidebar can render team rows from this single read,
+        # without the supplementary loadTeamConversationSidebarSessions stream
+        # and the mergeSidebarSessionsById heuristic. LEFT JOINs so plain chat
+        # rows (no team_id) are unaffected.
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
         sql = (
-            "SELECT * FROM session_index" + where_sql +
-            " ORDER BY updated_at DESC, started_at DESC, session_id DESC LIMIT ?"
+            "SELECT si.*, "
+            "       at.name AS team_name, "
+            "       at.avatar_json AS team_avatar_json, "
+            "       at.lead_agent_profile_id AS team_lead_profile_id, "
+            "       ap.name AS team_lead_profile_name, "
+            "       ap.avatar AS team_lead_profile_avatar, "
+            "       tmc.objective AS team_conversation_objective, "
+            "       tmc.workspace_id AS team_conversation_workspace_id, "
+            "       tmc.workspace_path AS team_conversation_workspace_path, "
+            "       tmc.active_mission_id AS team_conversation_active_mission_id "
+            "  FROM session_index si "
+            "  LEFT JOIN agent_teams at ON at.id = si.team_id "
+            "  LEFT JOIN agent_profiles ap ON ap.id = at.lead_agent_profile_id "
+            "  LEFT JOIN team_mission_conversations tmc ON tmc.conversation_id = si.conversation_id"
+            + where_sql +
+            " ORDER BY si.updated_at DESC, si.started_at DESC, si.session_id DESC LIMIT ?"
         )
         params.append(capped + 1)
         with self._lock:
@@ -2590,7 +2615,13 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         # stats" / empty "新会话" rows that don't belong to any conversation).
         team_internal_clause = (
             "NOT (id LIKE 'team:%' AND id LIKE '%:node:%') "
-            "AND NOT (COALESCE(parent_session_id,'') LIKE 'team:%:node:%')"
+            "AND NOT (COALESCE(parent_session_id,'') LIKE 'team:%:node:%') "
+            # Group-chat member-chat worker sessions (id like 'memberchat:%')
+            # are data plane: the worker runs in its own session, its reply is
+            # relayed into the team conversation session by
+            # _project_member_chat_run_event. The worker session itself must
+            # never surface as a sidebar row.
+            "AND NOT (id LIKE 'memberchat:%')"
         )
         # Suppress regular delegate_task / sub-agent children too — they have a
         # non-empty parent_session_id pointing at the user-visible conversation
@@ -2637,6 +2668,13 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 " SELECT id FROM sessions "
                 " WHERE COALESCE(parent_session_id,'') LIKE 'team:%:node:%'"
                 ")"
+            )
+            # Purge any group-chat member-chat worker sessions that a prior
+            # session.create projected before the filter existed. The worker
+            # session is data plane; the reply is relayed into the team
+            # conversation by _project_member_chat_run_event.
+            conn.execute(
+                "DELETE FROM session_index WHERE session_id LIKE 'memberchat:%'"
             )
             # Purge non-team delegate_task subagent children — same predicate
             # as the SELECT subagent_clause above. A previous reconcile may have
@@ -3018,6 +3056,53 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                         session_id,
                     ),
                 )
+            # Keep the control-plane sidebar index (session_index) in lock-step
+            # with the sessions row we just updated. The sidebar reads
+            # ``session_index.title`` / ``preview`` — NOT ``sessions.display_title``
+            # — so without this the first user message's title (written into
+            # ``sessions.display_title`` by the CASE above) never reaches the
+            # sidebar: ``reconcile_session_index`` is gated behind a process-level
+            # one-shot ``_SESSION_INDEX_RECONCILED`` flag, so the only other
+            # writer (session.create) projects an empty title at creation time
+            # and nothing refreshes it afterwards. New chats stayed on the
+            # "新会话" placeholder until a full process restart. Mirror the
+            # canonical values straight from the sessions row (which already
+            # honours the first_user_message / user-rename precedence) so the
+            # two tables can't diverge. UPDATE-only: a transient session with
+            # no index row is a no-op. Best-effort: an absent session_index
+            # table (legacy worker db) must not fail the message append.
+            try:
+                conn.execute(
+                    """
+                    UPDATE session_index
+                       SET title = (
+                               SELECT COALESCE(NULLIF(s.display_title, ''),
+                                               NULLIF(s.title, ''), '')
+                                 FROM sessions s WHERE s.id = ?
+                           ),
+                           preview = (
+                               SELECT COALESCE(s.preview, '')
+                                 FROM sessions s WHERE s.id = ?
+                           ),
+                           message_count = (
+                               SELECT COALESCE(s.message_count, 0)
+                                 FROM sessions s WHERE s.id = ?
+                           ),
+                           updated_at = MAX(COALESCE(updated_at, 0), ?),
+                           last_activity = MAX(COALESCE(last_activity, 0), ?)
+                     WHERE session_id = ?
+                    """,
+                    (
+                        session_id,
+                        session_id,
+                        session_id,
+                        message_timestamp,
+                        message_timestamp,
+                        session_id,
+                    ),
+                )
+            except sqlite3.OperationalError:
+                pass
             return msg_id
 
         return self._execute_write(_do)
@@ -5323,14 +5408,16 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         """Idempotent run-event maintenance for token-stream storage.
 
         Live streaming emits token-sized events, but the durable run history
-        should keep coalesced replay segments. This maintenance is separate
-        from session pruning so desktop/profile runtimes can reclaim old
-        chunk rows even when session retention pruning is disabled.
+        should keep terminal and structural events, not token replay rows.
+        This maintenance is separate from session pruning so desktop/profile
+        runtimes can reclaim old chunk rows even when session retention pruning
+        is disabled.
         """
         result: Dict[str, Any] = {
             "skipped": False,
             "deleted_events": 0,
             "compacted_segments": 0,
+            "pruned_terminal_stream_events": 0,
             "deduplicated_terminal_groups": 0,
             "updated_events": 0,
             "vacuumed": False,
@@ -5351,6 +5438,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             result.update({
                 "deleted_events": int(compacted.get("deleted_events") or 0),
                 "compacted_segments": int(compacted.get("compacted_segments") or 0),
+                "pruned_terminal_stream_events": int(compacted.get("pruned_terminal_stream_events") or 0),
                 "deduplicated_terminal_groups": int(compacted.get("deduplicated_terminal_groups") or 0),
                 "updated_events": int(compacted.get("updated_events") or 0),
             })
