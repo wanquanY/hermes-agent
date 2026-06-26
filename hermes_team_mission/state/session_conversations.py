@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # ruff: noqa: F401,F403,F405
 from .session_common import *
+from hermes_state_participants import leader_participant_id, member_participant_id
 
 
 class SessionDBTeamMissionConversationMixin:
@@ -472,23 +473,14 @@ class SessionDBTeamMissionConversationMixin:
                 )
 
             self._execute_write(_bind)
-        try:
-            if resolved_stable_session_id and not self.get_session(resolved_stable_session_id):
-                self.create_session(resolved_stable_session_id, source="team_mission", transient=False)
-        except Exception:
-            pass
-        # Conversation-architecture refactor (P1): populate participants so the
-        # publish path can stamp events with a stable participant_id, and the
-        # frontend can drop the four-path nodeId->node->member->profile lookup.
-        try:
-            self._populate_team_conversation_participants(
-                conversation_session_id=resolved_stable_session_id,
-                team_id=_text(team_id or mission.get("team_id")),
-                conversation_id=resolved_conversation_id,
-                mission_id=resolved_mission_id,
-            )
-        except Exception:
-            pass
+        if resolved_stable_session_id and not self.get_session(resolved_stable_session_id):
+            self.create_session(resolved_stable_session_id, source="team_mission", transient=False)
+        self._populate_team_conversation_participants(
+            conversation_session_id=resolved_stable_session_id,
+            team_id=_text(team_id or mission.get("team_id")),
+            conversation_id=resolved_conversation_id,
+            mission_id=resolved_mission_id,
+        )
         return conversation
 
     def _populate_team_conversation_participants(
@@ -501,33 +493,14 @@ class SessionDBTeamMissionConversationMixin:
     ) -> None:
         if not conversation_session_id:
             return
-        upsert = getattr(self, "upsert_conversation_participant", None)
-        if not callable(upsert):
-            return
-        # The human user is always a participant.
-        upsert(
-            conversation_session_id=conversation_session_id,
-            participant_id="user",
-            role="user",
-            display_name="",
-        )
-        if not team_id:
-            return
-        # leader_scope is keyed to the conversation/mission (matches how the
-            # leader runtime is spawned in hermes_team_mission.gateway).
-        leader_scope_subject = conversation_id or mission_id or ""
+        leader_scope_subject = conversation_id or mission_id
+        leader_id = leader_participant_id(leader_scope_subject)
         leader_scope_key = (
             f"team:{leader_scope_subject}:leader-conversation"
             if leader_scope_subject
             else ""
         )
-        members = []
-        try:
-            lister = getattr(self, "list_agent_team_members", None)
-            if callable(lister):
-                members = lister(team_id) or []
-        except Exception:
-            members = []
+        members = self.list_agent_team_members(team_id) if team_id else []
         leader_upserted = False
         for member in members:
             if not isinstance(member, dict):
@@ -538,9 +511,9 @@ class SessionDBTeamMissionConversationMixin:
             display_name = str(member.get("name") or member.get("profile_name") or "").strip()
             avatar = str(member.get("avatar") or member.get("profile_avatar") or "").strip()
             if role == "lead":
-                upsert(
+                self.upsert_conversation_participant(
                     conversation_session_id=conversation_session_id,
-                    participant_id="leader",
+                    participant_id=leader_id,
                     role="leader",
                     member_id=member_id,
                     agent_profile_id=agent_profile_id,
@@ -550,31 +523,28 @@ class SessionDBTeamMissionConversationMixin:
                     avatar=avatar,
                 )
                 leader_upserted = True
-            else:
-                # Worker members: scope key is profile-default unless the row
-                # carries an override. Member runs use `profile:<profile_id>`
-                # in the gateway (see team_mission._submit_message_to_member).
-                member_scope = (
-                    str(member.get("runtime_scope_key") or "").strip()
-                    or (f"profile:{agent_profile_id}" if agent_profile_id else "")
-                )
-                upsert(
-                    conversation_session_id=conversation_session_id,
-                    participant_id=member_id or agent_profile_id,
-                    role="member",
-                    member_id=member_id,
-                    agent_profile_id=agent_profile_id,
-                    agent_profile_version_id=str(member.get("agent_profile_version_id") or ""),
-                    runtime_scope_key=member_scope,
-                    display_name=display_name,
-                    avatar=avatar,
-                )
-        # Fallback: even if the team has no explicit lead row, the leader scope
-        # exists and must resolve. Stamp a placeholder.
-        if not leader_upserted and leader_scope_key:
-            upsert(
+                continue
+            if not member_id:
+                continue
+            member_scope = (
+                str(member.get("runtime_scope_key") or "").strip()
+                or f"member-chat:{conversation_id or mission_id}:{member_id}"
+            )
+            self.upsert_conversation_participant(
                 conversation_session_id=conversation_session_id,
-                participant_id="leader",
+                participant_id=member_participant_id(member_id),
+                role="member",
+                member_id=member_id,
+                agent_profile_id=agent_profile_id,
+                agent_profile_version_id=str(member.get("agent_profile_version_id") or ""),
+                runtime_scope_key=member_scope,
+                display_name=display_name,
+                avatar=avatar,
+            )
+        if not leader_upserted:
+            self.upsert_conversation_participant(
+                conversation_session_id=conversation_session_id,
+                participant_id=leader_id,
                 role="leader",
                 runtime_scope_key=leader_scope_key,
             )

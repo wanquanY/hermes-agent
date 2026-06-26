@@ -21,7 +21,7 @@ def test_participant_upsert_list_and_get(tmp_path: Path):
 
     db.upsert_conversation_participant(
         conversation_session_id="conv",
-        participant_id="leader",
+        participant_id="leader:conv",
         role="leader",
         agent_profile_id="p-lead",
         runtime_scope_key="team:conv:leader-conversation",
@@ -29,20 +29,20 @@ def test_participant_upsert_list_and_get(tmp_path: Path):
     )
     db.upsert_conversation_participant(
         conversation_session_id="conv",
-        participant_id="m1",
+        participant_id="member:m1",
         role="member",
         member_id="m1",
         agent_profile_id="p-alice",
-        runtime_scope_key="team:conv:member:m1",
+        runtime_scope_key="member-chat:conv:m1",
         display_name="Alice",
     )
 
     participants = db.list_conversation_participants("conv")
-    assert {p["participant_id"] for p in participants} == {"leader", "m1"}
+    assert {p["participant_id"] for p in participants} == {"leader:conv", "member:m1"}
     # leader sorts ahead of plain members.
-    assert participants[0]["participant_id"] == "leader"
+    assert participants[0]["participant_id"] == "leader:conv"
 
-    alice = db.get_conversation_participant("conv", "m1")
+    alice = db.get_conversation_participant("conv", "member:m1")
     assert alice["display_name"] == "Alice"
     assert alice["role"] == "member"
     assert alice["agent_profile_id"] == "p-alice"
@@ -53,7 +53,8 @@ def test_participant_upsert_is_idempotent_and_preserves_display(tmp_path: Path):
     db.create_session("conv", source="team_mission", transient=False)
     db.upsert_conversation_participant(
         conversation_session_id="conv",
-        participant_id="m1",
+        participant_id="member:m1",
+        role="member",
         member_id="m1",
         display_name="Alice",
         agent_profile_id="p-alice",
@@ -61,12 +62,13 @@ def test_participant_upsert_is_idempotent_and_preserves_display(tmp_path: Path):
     # Re-upsert with an empty display_name must not wipe the existing one.
     db.upsert_conversation_participant(
         conversation_session_id="conv",
-        participant_id="m1",
+        participant_id="member:m1",
+        role="member",
         member_id="m1",
         agent_profile_id="p-alice-v2",
     )
     assert len(db.list_conversation_participants("conv")) == 1
-    row = db.get_conversation_participant("conv", "m1")
+    row = db.get_conversation_participant("conv", "member:m1")
     assert row["display_name"] == "Alice"
     assert row["agent_profile_id"] == "p-alice-v2"
 
@@ -75,22 +77,22 @@ def test_resolve_participant_for_run_priority(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.create_session("conv", source="team_mission", transient=False)
     db.upsert_conversation_participant(
-        conversation_session_id="conv", participant_id="leader", role="leader",
+        conversation_session_id="conv", participant_id="leader:conv", role="leader",
         agent_profile_id="p-lead", runtime_scope_key="team:conv:leader-conversation",
     )
     db.upsert_conversation_participant(
-        conversation_session_id="conv", participant_id="m1", role="member",
-        member_id="m1", agent_profile_id="p-alice", runtime_scope_key="team:conv:member:m1",
+        conversation_session_id="conv", participant_id="member:m1", role="member",
+        member_id="m1", agent_profile_id="p-alice", runtime_scope_key="member-chat:conv:m1",
     )
 
     # member_id is the most specific hint.
-    assert db.resolve_participant_id_for_run("conv", member_id="m1") == "m1"
+    assert db.resolve_participant_id_for_run("conv", member_id="m1") == "member:m1"
     # scope key resolves the running participant.
     assert db.resolve_participant_id_for_run(
         "conv", runtime_scope_key="team:conv:leader-conversation"
-    ) == "leader"
+    ) == "leader:conv"
     # profile id is unambiguous within a team.
-    assert db.resolve_participant_id_for_run("conv", agent_profile_id="p-alice") == "m1"
+    assert db.resolve_participant_id_for_run("conv", agent_profile_id="p-alice") == "member:m1"
     # nothing matches → empty, caller decides the fallback.
     assert db.resolve_participant_id_for_run("conv", agent_profile_id="ghost") == ""
     # unknown conversation → empty.
@@ -99,7 +101,7 @@ def test_resolve_participant_for_run_priority(tmp_path: Path):
 
 # ── P1: auto-population from team membership ─────────────────────────
 def test_team_conversation_populates_participants_from_team_membership(tmp_path: Path):
-    """ensure_team_mission_conversation upserts user/leader/members into the
+    """ensure_team_mission_conversation upserts leader/members into the
     participant table so the publish path has stable identities to stamp."""
     db = SessionDB(tmp_path / "state.db")
     # Build a team with one leader + one worker member.
@@ -122,22 +124,22 @@ def test_team_conversation_populates_participants_from_team_membership(tmp_path:
 
     participants = db.list_conversation_participants("team-session-1")
     by_id = {p["participant_id"]: p for p in participants}
-    assert set(by_id.keys()) == {"user", "leader", "m-alice"}
-    assert by_id["leader"]["role"] == "leader"
-    assert by_id["leader"]["runtime_scope_key"] == "team:conv-1:leader-conversation"
-    assert by_id["leader"]["display_name"] == "Lead"
-    assert by_id["m-alice"]["role"] == "member"
-    assert by_id["m-alice"]["agent_profile_id"] == "p-alice"
-    assert by_id["m-alice"]["runtime_scope_key"] == "profile:p-alice"
-    assert by_id["m-alice"]["display_name"] == "Alice"
+    assert set(by_id.keys()) == {"leader:conv-1", "member:m-alice"}
+    assert by_id["leader:conv-1"]["role"] == "leader"
+    assert by_id["leader:conv-1"]["runtime_scope_key"] == "team:conv-1:leader-conversation"
+    assert by_id["leader:conv-1"]["display_name"] == "Lead"
+    assert by_id["member:m-alice"]["role"] == "member"
+    assert by_id["member:m-alice"]["agent_profile_id"] == "p-alice"
+    assert by_id["member:m-alice"]["runtime_scope_key"] == "member-chat:conv-1:m-alice"
+    assert by_id["member:m-alice"]["display_name"] == "Alice"
 
-    # Resolver: leader scope key → leader; alice's profile id → m-alice.
+    # Resolver: leader scope key → leader; alice's profile id → member.
     assert db.resolve_participant_id_for_run(
         "team-session-1", runtime_scope_key="team:conv-1:leader-conversation"
-    ) == "leader"
+    ) == "leader:conv-1"
     assert db.resolve_participant_id_for_run(
         "team-session-1", agent_profile_id="p-alice"
-    ) == "m-alice"
+    ) == "member:m-alice"
 
 
 # ── P0: routing invariant ────────────────────────────────────────────
@@ -214,8 +216,8 @@ def test_record_event_stamps_participant_id_for_leader(tmp_path: Path):
     events = db.list_run_events("team-session-1", run_id="run-leader")
     assert events, "event was not persisted"
     stored = events[0]
-    assert stored.get("participant_id") == "leader"
-    assert (stored.get("payload") or {}).get("participant_id") == "leader"
+    assert stored.get("participant_id") == "leader:conv-1"
+    assert (stored.get("payload") or {}).get("participant_id") == "leader:conv-1"
 
 
 def test_record_event_stamps_participant_id_for_member_by_profile(tmp_path: Path):
@@ -251,7 +253,7 @@ def test_record_event_stamps_participant_id_for_member_by_profile(tmp_path: Path
 
     events = db.list_run_events("team-session-1", run_id="run-alice")
     assert events
-    assert events[0].get("participant_id") == "m-alice"
+    assert events[0].get("participant_id") == "member:m-alice"
 
 
 def test_record_event_with_no_hints_does_not_stamp(tmp_path: Path):

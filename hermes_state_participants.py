@@ -27,11 +27,30 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
-# Stable, well-known participant ids for the non-member roles. Member
-# participants use their team member_id as the participant_id so the identity
-# survives across missions and the @-mention path can address them directly.
-PARTICIPANT_USER = "user"
-PARTICIPANT_LEADER = "leader"
+DEFAULT_USER_ID = "default"
+DEFAULT_AGENT_ID = "default"
+
+
+def user_participant_id(user_id: str = "") -> str:
+    return f"user:{_text(user_id) or DEFAULT_USER_ID}"
+
+
+def leader_participant_id(conversation_id: str) -> str:
+    conversation_id = _text(conversation_id)
+    if not conversation_id:
+        raise ValueError("conversation_id required for leader participant")
+    return f"leader:{conversation_id}"
+
+
+def member_participant_id(member_id: str) -> str:
+    member_id = _text(member_id)
+    if not member_id:
+        raise ValueError("member_id required for member participant")
+    return f"member:{member_id}"
+
+
+def agent_participant_id(agent_profile_id: str = "") -> str:
+    return f"agent:{_text(agent_profile_id) or DEFAULT_AGENT_ID}"
 
 
 class SessionDBParticipantMixin:
@@ -41,7 +60,7 @@ class SessionDBParticipantMixin:
         *,
         conversation_session_id: str,
         participant_id: str,
-        role: str = "member",
+        role: str,
         member_id: str = "",
         agent_profile_id: str = "",
         agent_profile_version_id: str = "",
@@ -49,19 +68,20 @@ class SessionDBParticipantMixin:
         display_name: str = "",
         avatar: str = "",
         metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         conversation_session_id = _text(conversation_session_id)
         participant_id = _text(participant_id)
+        role = _text(role)
         if not conversation_session_id or not participant_id:
-            return
+            return {}
+        if not role:
+            raise ValueError("role required")
         metadata_json = ""
         if isinstance(metadata, dict) and metadata:
-            try:
-                metadata_json = json.dumps(metadata, ensure_ascii=False)
-            except (TypeError, ValueError):
-                metadata_json = ""
+            metadata_json = json.dumps(metadata, ensure_ascii=False)
+        now = time.time()
 
-        def _do(conn: sqlite3.Connection) -> None:
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
             conn.execute(
                 "INSERT INTO conversation_participants "
                 "(conversation_session_id, participant_id, role, member_id, "
@@ -69,24 +89,33 @@ class SessionDBParticipantMixin:
                 " display_name, avatar, metadata_json, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(conversation_session_id, participant_id) DO UPDATE SET "
-                "  role=excluded.role, "
-                "  member_id=excluded.member_id, "
-                "  agent_profile_id=excluded.agent_profile_id, "
-                "  agent_profile_version_id=excluded.agent_profile_version_id, "
-                "  runtime_scope_key=excluded.runtime_scope_key, "
-                "  display_name=CASE WHEN excluded.display_name != '' "
-                "                    THEN excluded.display_name ELSE "
-                "                    conversation_participants.display_name END, "
-                "  avatar=CASE WHEN excluded.avatar != '' THEN excluded.avatar "
-                "              ELSE conversation_participants.avatar END, "
-                "  metadata_json=CASE WHEN excluded.metadata_json != '' "
-                "                     THEN excluded.metadata_json ELSE "
-                "                     conversation_participants.metadata_json END, "
+                "  role=CASE WHEN excluded.role != '' THEN excluded.role "
+                "            ELSE conversation_participants.role END, "
+                "  member_id=CASE WHEN excluded.member_id != '' THEN excluded.member_id "
+                "                 ELSE conversation_participants.member_id END, "
+                "  agent_profile_id=CASE WHEN excluded.agent_profile_id != '' THEN excluded.agent_profile_id "
+                "                        ELSE conversation_participants.agent_profile_id END, "
+                "  agent_profile_version_id=CASE WHEN excluded.agent_profile_version_id != '' "
+                "                                THEN excluded.agent_profile_version_id "
+                "                                ELSE conversation_participants.agent_profile_version_id END, "
+                "  runtime_scope_key=CASE WHEN excluded.runtime_scope_key != '' THEN excluded.runtime_scope_key "
+                "                         ELSE conversation_participants.runtime_scope_key END, "
+                "  display_name=CASE WHEN conversation_participants.display_name = '' "
+                "                         AND excluded.display_name != '' "
+                "                    THEN excluded.display_name "
+                "                    ELSE conversation_participants.display_name END, "
+                "  avatar=CASE WHEN conversation_participants.avatar = '' "
+                "                   AND excluded.avatar != '' "
+                "              THEN excluded.avatar ELSE conversation_participants.avatar END, "
+                "  metadata_json=CASE WHEN conversation_participants.metadata_json = '' "
+                "                         AND excluded.metadata_json != '' "
+                "                    THEN excluded.metadata_json "
+                "                    ELSE conversation_participants.metadata_json END, "
                 "  updated_at=excluded.updated_at",
                 (
                     conversation_session_id,
                     participant_id,
-                    _text(role) or "member",
+                    role,
                     _text(member_id),
                     _text(agent_profile_id),
                     _text(agent_profile_version_id),
@@ -94,12 +123,18 @@ class SessionDBParticipantMixin:
                     _text(display_name),
                     _text(avatar),
                     metadata_json,
-                    time.time(),
-                    time.time(),
+                    now,
+                    now,
                 ),
             )
+            row = conn.execute(
+                "SELECT * FROM conversation_participants "
+                "WHERE conversation_session_id = ? AND participant_id = ?",
+                (conversation_session_id, participant_id),
+            ).fetchone()
+            return self._participant_row_to_dict(row) if row else {}
 
-        self._execute_write(_do)  # type: ignore[attr-defined]
+        return self._execute_write(_do)  # type: ignore[attr-defined]
 
     # ── read ─────────────────────────────────────────────────────────
     def list_conversation_participants(

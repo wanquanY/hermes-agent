@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .common import *
+from hermes_state_participants import member_participant_id
 
 
 _MEMBER_CHAT_RUN_PREFIX = "member-chat"
@@ -260,6 +261,19 @@ def _submit_message_to_member(
         or member.get("name")
         or ""
     ).strip()
+    try:
+        db.upsert_conversation_participant(
+            conversation_session_id=conversation_session_id,
+            participant_id=member_participant_id(target_member_id),
+            role="member",
+            member_id=target_member_id,
+            agent_profile_id=agent_profile_id,
+            agent_profile_version_id=str(profile_params.get("agent_profile_version_id") or ""),
+            runtime_scope_key=member_scope,
+            display_name=display_name,
+        )
+    except Exception as exc:
+        return _err(rid, 5008, f"conversation participant upsert failed: {exc}")
 
     # STEP ORDER FIX (2026-06-27): The original code did
     #   1. append_message(conv_session, role=user, ...)   ← FK FAIL: conv session row doesn't exist yet

@@ -9,6 +9,7 @@ from dovie_extension.display_transcript import (
     sanitize_session_list_item,
     sanitize_transcript_messages,
 )
+from hermes_state_participants import agent_participant_id, user_participant_id
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
 from tui_gateway.services.workspace import (
@@ -106,6 +107,57 @@ def _requested_profile_version_id(params: dict | None = None) -> str:
         or (params or {}).get("agentProfileVersionId")
         or ""
     ).strip()
+
+
+def _requested_created_by_user_id(params: dict | None = None) -> str:
+    return str(
+        (params or {}).get("created_by_user_id")
+        or (params or {}).get("createdByUserId")
+        or (params or {}).get("created_by")
+        or (params or {}).get("createdBy")
+        or (params or {}).get("user_id")
+        or (params or {}).get("userId")
+        or ""
+    ).strip()
+
+
+def _upsert_session_create_conversation_participants(
+    db,
+    *,
+    session_id: str,
+    params: dict,
+    runtime_scope_key: str,
+) -> None:
+    upsert = getattr(db, "upsert_conversation_participant", None)
+    if not callable(upsert):
+        return
+    profile_id = _requested_agent_profile_id(params)
+    scope = str(runtime_scope_key or "").strip()
+    if not profile_id and scope.startswith("profile:"):
+        profile_id = scope.split("profile:", 1)[1].strip()
+    user_id = _requested_created_by_user_id(params)
+    upsert(
+        conversation_session_id=session_id,
+        participant_id=user_participant_id(user_id),
+        role="user",
+        metadata={"source": "session.create"},
+    )
+    upsert(
+        conversation_session_id=session_id,
+        participant_id=agent_participant_id(profile_id),
+        role="agent",
+        agent_profile_id=profile_id,
+        agent_profile_version_id=_requested_profile_version_id(params),
+        runtime_scope_key=scope or (f"profile:{profile_id}" if profile_id else ""),
+        display_name=str(
+            params.get("agent_profile_name")
+            or params.get("agentProfileName")
+            or params.get("profile_name")
+            or params.get("profileName")
+            or ""
+        ).strip(),
+        metadata={"source": "session.create"},
+    )
 
 
 def _project_session_index_on_create(
@@ -751,6 +803,12 @@ def _(rid, params: dict) -> dict:
     if db is not None:
         try:
             db.create_session(key, source="tui", model=model, transient=transient)
+            _upsert_session_create_conversation_participants(
+                db,
+                session_id=key,
+                params=params,
+                runtime_scope_key=runtime_scope_key,
+            )
         except Exception as exc:
             return _err(rid, 5000, f"session create failed: {exc}")
         _project_session_index_on_create(db, key, params, runtime_scope_key, transient)
