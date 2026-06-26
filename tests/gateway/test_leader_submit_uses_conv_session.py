@@ -1,0 +1,219 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from hermes_state import SessionDB
+from hermes_team_mission.domain.run_context import RunContext
+from hermes_team_mission.gateway import runtime_methods
+from tests.team_mission_gateway_test_support import team_mission_gateway
+from tui_gateway.run_worker import EventFrame
+from tui_gateway.services.run_control import record_event
+from tui_gateway.services.worker_frame_router import WorkerFrameRouter
+
+
+CONVERSATION_ID = "conversation-1"
+CONVERSATION_SESSION_ID = "team-session-1"
+
+
+class _FakeSupervisor:
+    async def send(self, scope_key: str, frame: Any) -> bool:
+        return True
+
+
+def _workspace_payload(tmp_path: Path) -> dict[str, str]:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    return {"workspace_id": "workspace-1", "workspace_path": str(workspace)}
+
+
+def _workspace_kwargs(tmp_path: Path) -> dict[str, str]:
+    workspace = _workspace_payload(tmp_path)
+    return {"workspace_id": workspace["workspace_id"], "workspace_path": workspace["workspace_path"]}
+
+
+def _leader_member(tmp_path: Path) -> dict[str, Any]:
+    return {
+        "member_id": "leader",
+        "profile_id": "profile-leader",
+        "profile_version_id": "version-leader",
+        "role": "leader",
+        "runtime_scope_key": "profile:profile-leader:version:version-leader",
+        "dovie_profile": {
+            "id": "profile-leader",
+            "agentProfileVersionId": "version-leader",
+            "runtimeScopeKey": "profile:profile-leader:version:version-leader",
+            "hermesHomePath": str(tmp_path / "leader-home"),
+        },
+    }
+
+
+def _submit_leader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    mission_id: str = "",
+) -> tuple[SessionDB, dict[str, Any], dict[str, Any]]:
+    team_mission = team_mission_gateway()
+    db = SessionDB(tmp_path / "state.db")
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(runtime_methods, "_get_db", lambda: db)
+
+    def fake_proxy_run_submit(params: dict[str, Any]) -> dict[str, bool]:
+        captured.update(params)
+        return {"ok": True}
+
+    monkeypatch.setattr(runtime_methods, "_proxy_run_submit_via_worker", fake_proxy_run_submit)
+
+    params: dict[str, Any]
+    if mission_id:
+        leader = _leader_member(tmp_path)
+        db.initialize_team_mission_from_strategy(
+            mission_id=mission_id,
+            conversation_id=CONVERSATION_ID,
+            team_id="team-1",
+            title="监督执行",
+            objective="初始任务",
+            **_workspace_kwargs(tmp_path),
+            mode="supervised_mission",
+            leader_session_id=CONVERSATION_SESSION_ID,
+            metadata={"conversation_session_id": CONVERSATION_SESSION_ID},
+            members=[leader],
+        )
+        monkeypatch.setenv("DOVIE_HERMES_RUNTIME_SCOPE_KEY", leader["runtime_scope_key"])
+        params = {
+            "mission_id": mission_id,
+            "conversation_id": CONVERSATION_ID,
+            "conversation_session_id": CONVERSATION_SESSION_ID,
+            "team_id": "team-1",
+            "text": "Leader 查看当前任务进度",
+            "workspace": _workspace_payload(tmp_path),
+            "members": [leader],
+            "leader_runtime_scope_key": f"team:{mission_id}:leader-conversation",
+        }
+    else:
+        monkeypatch.setenv(
+            "DOVIE_HERMES_RUNTIME_SCOPE_KEY",
+            f"team:{CONVERSATION_ID}:leader-conversation",
+        )
+        params = {
+            "conversation_id": CONVERSATION_ID,
+            "conversation_session_id": CONVERSATION_SESSION_ID,
+            "team_id": "team-1",
+            "text": "Leader 直接回复一次",
+            "runtime_scope_key": f"team:{CONVERSATION_ID}:leader-conversation",
+            "workspace": _workspace_payload(tmp_path),
+        }
+
+    response = team_mission._methods["team_mission.message.submit"](  # noqa: SLF001
+        "rid-leader",
+        params,
+    )
+
+    assert "error" not in response, response
+    assert captured
+    return db, captured, response
+
+
+def _events_for_session(db: SessionDB, session_id: str) -> list[dict[str, Any]]:
+    rows = db._conn.execute(  # noqa: SLF001 - test introspection
+        "SELECT seq, event_type, run_id, runtime_scope_key, payload_json, event_json "
+        "FROM run_events WHERE session_id = ? ORDER BY seq",
+        (session_id,),
+    ).fetchall()
+    return [
+        {
+            "seq": row["seq"],
+            "type": row["event_type"],
+            "run_id": row["run_id"],
+            "scope": row["runtime_scope_key"],
+            "payload": json.loads(row["payload_json"] or "{}"),
+            "frame": json.loads(row["event_json"] or "{}"),
+        }
+        for row in rows
+    ]
+
+
+def test_leader_spawn_payload_carries_run_context_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _db, captured, _response = _submit_leader(monkeypatch, tmp_path)
+
+    run_context = RunContext.from_payload(captured["run_context_json"])
+
+    assert run_context.conversation_session_id == CONVERSATION_SESSION_ID
+    assert run_context.activity_kind in {"mission", "chat"}
+    assert run_context.activity_kind == "chat"
+    assert run_context.execution_scope_key == captured["runtime_scope_key"]
+
+
+def test_leader_spawn_stored_session_id_is_conv_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _db, captured, response = _submit_leader(monkeypatch, tmp_path)
+
+    assert captured["stored_session_id"] == CONVERSATION_SESSION_ID
+    assert captured["session_id"] == CONVERSATION_SESSION_ID
+    assert not captured["stored_session_id"].startswith("memberchat:")
+    assert response["result"]["leader_turn"]["stored_session_id"] == CONVERSATION_SESSION_ID
+
+
+@pytest.mark.asyncio
+async def test_leader_events_route_to_conv_via_run_context(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    db, captured, _response = _submit_leader(monkeypatch, tmp_path)
+
+    router = WorkerFrameRouter(
+        sender=_FakeSupervisor(),
+        publish_event=lambda params, run_context=None: record_event(
+            params,
+            db=db,
+            run_context=run_context,
+        ),
+        publish_run_terminal=lambda **_kwargs: {"published": True},
+    )
+    router.record_run_start(
+        scope_key=captured["runtime_scope_key"],
+        run_id=captured["run_id"],
+        stored_session_id=captured["stored_session_id"],
+        turn_id=captured["turn_id"],
+        run_context_json=captured["run_context_json"],
+    )
+
+    await router.on_event(
+        captured["runtime_scope_key"],
+        EventFrame(
+            params={
+                "type": "message.complete",
+                "session_id": "runtime-leader-conversation",
+                "stored_session_id": "runtime-leader-conversation",
+                "run_id": captured["run_id"],
+                "turn_id": captured["turn_id"],
+                "seq": 1,
+                "payload": {"text": "leader reply via worker router", "status": "complete"},
+            }
+        ),
+    )
+
+    conv_events = _events_for_session(db, CONVERSATION_SESSION_ID)
+    assert [event["type"] for event in conv_events] == ["message.complete"]
+    assert conv_events[0]["payload"]["text"] == "leader reply via worker router"
+    assert conv_events[0]["frame"]["stored_session_id"] == CONVERSATION_SESSION_ID
+    assert conv_events[0]["payload"]["run_context"]["conversation_session_id"] == CONVERSATION_SESSION_ID
+    assert _events_for_session(db, "runtime-leader-conversation") == []
+
+
+def test_leader_with_active_mission_sets_activity_kind_mission(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    _chat_db, chat_captured, _chat_response = _submit_leader(monkeypatch, tmp_path / "chat")
+    chat_context = RunContext.from_payload(chat_captured["run_context_json"])
+    assert chat_context.activity_kind == "chat"
+    assert chat_context.activity_id == "chat"
+
+    _mission_db, mission_captured, _mission_response = _submit_leader(
+        monkeypatch,
+        tmp_path / "mission",
+        mission_id="mission-1",
+    )
+    mission_context = RunContext.from_payload(mission_captured["run_context_json"])
+    assert mission_context.conversation_session_id == CONVERSATION_SESSION_ID
+    assert mission_context.activity_kind == "mission"
+    assert mission_context.activity_id == "mission-1"
