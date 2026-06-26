@@ -18,11 +18,14 @@ the prompt path drags in the full LLM stack."""
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from tui_gateway.run_worker import RunStartFrame
 from tui_gateway.services.agent_runner import (
     _NoopTransport,
+    _ensure_worker_session,
     setup_worker_environment,
 )
 
@@ -65,3 +68,39 @@ def test_run_start_frame_carries_all_fields_for_runner() -> None:
     assert frame.run_id
     assert frame.turn_id
     assert isinstance(frame.params, dict)
+
+
+def test_worker_session_defers_agent_build_until_prompt_submit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Worker bootstrap must not race prompt-level toolset overrides."""
+    from tui_gateway import server as _server
+
+    starts: list[tuple[str, dict]] = []
+    sessions: dict[str, dict] = {}
+    monkeypatch.setattr(_server, "_sessions", sessions)
+    monkeypatch.setattr(_server, "_sessions_lock", threading.Lock())
+    monkeypatch.setattr(_server, "_stdio_transport", _NoopTransport())
+    monkeypatch.setattr(_server, "_db_for_stable_session", lambda _sid: None)
+    monkeypatch.setattr(
+        _server,
+        "_start_agent_build",
+        lambda sid, session: starts.append((sid, session)),
+    )
+
+    sid, session = _ensure_worker_session(
+        RunStartFrame(
+            run_id="team-run-1",
+            turn_id="team-turn-1",
+            stored_session_id="team-session-team-conversation-1",
+            prompt="start team task",
+            params={
+                "runtime_scope_key": "team:team-conversation-1:leader-conversation",
+                "enabled_toolsets": ["team_mission_conversation_leader"],
+                "disabled_toolsets": ["delegation"],
+                "toolset_scope": "exact",
+            },
+        )
+    )
+
+    assert sessions[sid] is session
+    assert session["agent"] is None
+    assert starts == []

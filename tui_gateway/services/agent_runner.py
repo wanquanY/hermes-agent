@@ -12,7 +12,10 @@ hazard the Plan agent investigation surfaced
 2. ``_ensure_worker_session(frame)`` — materializes the
    ``_sessions[sid]`` record the legacy code path expects. The main
    sidecar's ``session.create`` only updates the main process's
-   ``_sessions`` dict; the worker has its own empty registry.
+   ``_sessions`` dict; the worker has its own empty registry. Agent
+   construction is deliberately left to ``_execute_prompt_submit`` so
+   turn-scoped toolset overrides can be applied before ``AIAgent`` is
+   built.
 3. ``run_agent(frame, cancel_event)`` — the ``AgentRunner`` itself.
    Sets up a cancel watcher, invokes ``_execute_prompt_submit``, and
    **blocks until the agent's background thread truly finishes**
@@ -109,9 +112,11 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
     frame's ``stored_session_id`` (the stable id the agent uses for
     DB row lookups).
 
-    After the record is registered, kick ``_start_agent_build`` so
-    the AIAgent gets constructed on a background thread. The actual
-    prompt invocation waits on ``agent_ready``.
+    The AIAgent build is intentionally NOT started here. The prompt
+    handler applies turn-scoped toolset overrides before calling
+    ``_start_agent_build``; starting the build in this worker bootstrap
+    path races that override and can expose the default tool surface to
+    team leader runs.
     """
     from tui_gateway import server as _server
 
@@ -227,7 +232,6 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
     with _server._sessions_lock:
         _server._sessions[runtime_sid] = session_record
 
-    _server._start_agent_build(runtime_sid, session_record)
     return runtime_sid, session_record
 
 
