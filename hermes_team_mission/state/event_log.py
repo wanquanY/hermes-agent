@@ -7,6 +7,7 @@ import time
 import logging
 from typing import Any, Dict, List
 
+from hermes_team_mission.domain.identities import canonical_node_id as _canonical_graph_node_id
 from hermes_team_mission.runtime.failure import classify_team_mission_failure
 
 
@@ -103,7 +104,7 @@ def _payload_edge(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
-def _canonical_node_id(source_event: Dict[str, Any], identity: Dict[str, str]) -> str:
+def _subject_node_id_from_event(source_event: Dict[str, Any], identity: Dict[str, str]) -> str:
     payload = event_payload(source_event)
     node = _payload_node(payload)
     return _first_text(
@@ -115,19 +116,6 @@ def _canonical_node_id(source_event: Dict[str, Any], identity: Dict[str, str]) -
         identity.get("node_id"),
         identity.get("nodeId"),
     )
-
-
-def _canonical_graph_node_id(mission_id: str, node_id: str) -> str:
-    mission_id = text(mission_id)
-    node_id = text(node_id)
-    if not node_id:
-        return ""
-    if mission_id and (
-        node_id.startswith(f"{mission_id}:")
-        or node_id.startswith(f"team-mission:{mission_id}:")
-    ):
-        return node_id
-    return f"{mission_id}:{node_id}" if mission_id else node_id
 
 
 def _canonical_subject(source_event: Dict[str, Any], identity: Dict[str, str]) -> Dict[str, Any]:
@@ -162,7 +150,7 @@ def _canonical_subject(source_event: Dict[str, Any], identity: Dict[str, str]) -
         identity.get("runtime_scope_key"),
         identity.get("runtimeScopeKey"),
     )
-    node_id = _canonical_node_id(source_event, identity)
+    node_id = _subject_node_id_from_event(source_event, identity)
     node_kind = _first_text(identity.get("node_kind"), identity.get("nodeKind"), payload.get("node_kind"), payload.get("nodeKind"))
     output_contract_format = _first_text(
         identity.get("output_contract_format"),

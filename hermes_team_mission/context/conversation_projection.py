@@ -3,20 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 from hermes_team_mission.context.artifact_refs import dedupe_artifact_refs as _dedupe_artifact_refs
+from hermes_team_mission.domain.identities import canonical_node_id
 from hermes_team_mission.domain.utils import text
 
 
 def _conversation_graph_node_id(mission_id: str, node_id: str) -> str:
-    mission_id = text(mission_id)
-    node_id = text(node_id)
-    if not node_id:
-        return ""
-    if mission_id and (
-        node_id.startswith(f"{mission_id}:")
-        or node_id.startswith(f"team-mission:{mission_id}:")
-    ):
-        return node_id
-    return f"{mission_id}:{node_id}" if mission_id else node_id
+    return canonical_node_id(mission_id, node_id)
 
 
 def dedupe_artifact_refs(artifacts: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
