@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -42,8 +43,10 @@ class MergeResult:
     total_profile_dbs: int
     merged_rows_per_table: dict[str, int]
     skipped_dbs: list[str]
+    failed_dbs: list[str]
     errors: list[str]
     backups: list[str]
+    conflicts: list[dict[str, object]]
 
     def to_json_dict(self) -> dict[str, object]:
         return {
@@ -52,7 +55,9 @@ class MergeResult:
             "merged_rows": dict(sorted(self.merged_rows_per_table.items())),
             "backups": list(self.backups),
             "skipped_dbs": list(self.skipped_dbs),
+            "failed_dbs": list(self.failed_dbs),
             "errors": list(self.errors),
+            "conflicts": list(self.conflicts),
         }
 
 
@@ -68,8 +73,10 @@ def merge_profile_dbs(
     total = len(profile_dbs)
     merged_rows: defaultdict[str, int] = defaultdict(int)
     skipped_dbs: list[str] = []
+    failed_dbs: list[str] = []
     errors: list[str] = []
     backups: list[str] = []
+    conflicts: list[dict[str, object]] = []
 
     root_db_path = root / "state.db"
     if not profile_dbs:
@@ -77,8 +84,10 @@ def merge_profile_dbs(
             total_profile_dbs=0,
             merged_rows_per_table={},
             skipped_dbs=[],
+            failed_dbs=[],
             errors=[],
             backups=[],
+            conflicts=[],
         )
     if not root_db_path.exists():
         message = f"root state.db does not exist: {root_db_path}"
@@ -86,8 +95,10 @@ def merge_profile_dbs(
             total_profile_dbs=total,
             merged_rows_per_table={},
             skipped_dbs=[str(path) for path in profile_dbs],
+            failed_dbs=[str(path) for path in profile_dbs],
             errors=[message],
             backups=[],
+            conflicts=[],
         )
 
     conn = sqlite3.connect(str(root_db_path))
@@ -108,7 +119,7 @@ def merge_profile_dbs(
                     snapshots = _snapshot_db_family(
                         profile_db, Path(snapshot_dir.name)
                     )
-                row_counts = _merge_one_profile_db(
+                row_counts, db_conflicts = _merge_one_profile_db(
                     conn,
                     root_db_path=root_db_path,
                     profile_db_path=profile_db,
@@ -120,14 +131,16 @@ def merge_profile_dbs(
                 if snapshot_dir is not None:
                     snapshot_dir.cleanup()
                 skipped_dbs.append(str(profile_db))
+                failed_dbs.append(str(profile_db))
                 errors.append(f"{profile_db}: {exc}")
                 continue
             for table_name, count in row_counts.items():
                 merged_rows[table_name] += count
+            conflicts.extend(db_conflicts)
             if backup and not dry_run:
-                backups.extend(
-                    str(path) for path in _materialize_snapshots(snapshots)
-                )
+                backups.extend(str(path) for path in _materialize_snapshots(snapshots))
+            if not dry_run:
+                backups.extend(str(path) for path in _retire_db_family(profile_db))
             if snapshot_dir is not None:
                 snapshot_dir.cleanup()
     finally:
@@ -137,8 +150,10 @@ def merge_profile_dbs(
         total_profile_dbs=total,
         merged_rows_per_table=dict(merged_rows),
         skipped_dbs=skipped_dbs,
+        failed_dbs=failed_dbs,
         errors=errors,
         backups=backups,
+        conflicts=conflicts,
     )
 
 
@@ -146,6 +161,7 @@ def _discover_profile_dbs(root: Path) -> list[Path]:
     candidates: list[Path] = []
     for parent in (root / "profiles", root / "drafts"):
         candidates.extend(parent.glob("*/state.db"))
+        candidates.extend(parent.glob("*/tui-gateway/state.db"))
     return sorted(path for path in candidates if path.is_file())
 
 
@@ -155,9 +171,9 @@ def _merge_one_profile_db(
     root_db_path: Path,
     profile_db_path: Path,
     dry_run: bool,
-) -> dict[str, int]:
+) -> tuple[dict[str, int], list[dict[str, object]]]:
     if profile_db_path.resolve() == root_db_path.resolve():
-        return {}
+        return {}, []
 
     conn.execute(
         "ATTACH DATABASE "
@@ -170,22 +186,34 @@ def _merge_one_profile_db(
         table_names = _sort_tables(root_tables & source_tables)
         if not table_names:
             _safe_detach(conn)
-            return {}
+            return {}, []
 
         conn.execute("BEGIN")
         row_counts: dict[str, int] = {}
+        conflicts: list[dict[str, object]] = []
         for table_name in table_names:
             columns = _common_insertable_columns(conn, table_name)
             if not columns or not _has_conflict_target(conn, "main", table_name):
                 continue
+            source_count = _count_source_rows(conn, table_name)
             inserted = _insert_or_ignore_table(conn, table_name, columns)
             if inserted:
                 row_counts[table_name] = inserted
+            conflict_count = max(source_count - inserted, 0)
+            if conflict_count:
+                conflicts.append(
+                    {
+                        "db": str(profile_db_path),
+                        "table": table_name,
+                        "count": conflict_count,
+                        "keys": _conflict_keys(conn, table_name, columns),
+                    }
+                )
         if dry_run:
             conn.rollback()
         else:
             conn.commit()
-        return row_counts
+        return row_counts, conflicts
     except Exception:
         _safe_rollback(conn)
         raise
@@ -284,6 +312,109 @@ def _insert_or_ignore_table(
     return max(cursor.rowcount or 0, 0)
 
 
+def _count_source_rows(conn: sqlite3.Connection, table_name: str) -> int:
+    table_sql = _quote_identifier(table_name)
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM {_quote_identifier(_SOURCE_ALIAS)}.{table_sql}"
+    ).fetchone()
+    return int(row[0] or 0)
+
+
+def _conflict_keys(
+    conn: sqlite3.Connection,
+    table_name: str,
+    insertable_columns: list[str],
+    *,
+    limit: int = 50,
+) -> list[dict[str, object]]:
+    identity_columns = _identity_columns(conn, "main", table_name, insertable_columns)
+    if not identity_columns:
+        return _source_rowids(conn, table_name, limit=limit)
+
+    table_sql = _quote_identifier(table_name)
+    join_sql = " AND ".join(
+        f"main_table.{_quote_identifier(column)} IS source_table.{_quote_identifier(column)}"
+        for column in identity_columns
+    )
+    select_sql = ", ".join(
+        f"source_table.{_quote_identifier(column)}" for column in identity_columns
+    )
+    rows = conn.execute(
+        f"""
+        SELECT {select_sql}
+          FROM {_quote_identifier(_SOURCE_ALIAS)}.{table_sql} AS source_table
+         WHERE EXISTS (
+               SELECT 1
+                 FROM main.{table_sql} AS main_table
+                WHERE {join_sql}
+         )
+         ORDER BY source_table.rowid
+         LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [
+        {column: row[index] for index, column in enumerate(identity_columns)}
+        for row in rows
+    ]
+
+
+def _identity_columns(
+    conn: sqlite3.Connection,
+    schema: str,
+    table_name: str,
+    insertable_columns: list[str],
+) -> list[str]:
+    insertable = set(insertable_columns)
+    rows = conn.execute(
+        f"PRAGMA {_quote_identifier(schema)}.table_xinfo({_quote_sql_literal(table_name)})"
+    ).fetchall()
+    pk_columns = [
+        (int(row[5] or 0), str(row[1]))
+        for row in rows
+        if int(row[5] or 0) > 0 and str(row[1]) in insertable
+    ]
+    if pk_columns:
+        return [name for _, name in sorted(pk_columns)]
+
+    index_rows = conn.execute(
+        f"PRAGMA {_quote_identifier(schema)}.index_list({_quote_sql_literal(table_name)})"
+    ).fetchall()
+    for index_row in index_rows:
+        if int(index_row[2] or 0) != 1:
+            continue
+        index_name = str(index_row[1])
+        column_rows = conn.execute(
+            f"PRAGMA {_quote_identifier(schema)}.index_info({_quote_sql_literal(index_name)})"
+        ).fetchall()
+        columns = [str(row[2]) for row in column_rows if row[2] is not None]
+        if columns and all(column in insertable for column in columns):
+            return columns
+    return []
+
+
+def _source_rowids(
+    conn: sqlite3.Connection,
+    table_name: str,
+    *,
+    limit: int,
+) -> list[dict[str, object]]:
+    table_sql = _quote_identifier(table_name)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT rowid
+              FROM {_quote_identifier(_SOURCE_ALIAS)}.{table_sql}
+             ORDER BY rowid
+             LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [{"rowid": row[0]} for row in rows]
+
+
 def _snapshot_db_family(db_path: Path, snapshot_dir: Path) -> list[tuple[Path, Path]]:
     snapshots: list[tuple[Path, Path]] = []
     for member in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
@@ -301,6 +432,17 @@ def _materialize_snapshots(snapshots: list[tuple[Path, Path]]) -> list[Path]:
     for original_path, snapshot_path in snapshots:
         backup_path = _unique_backup_path(original_path, timestamp)
         shutil.copy2(snapshot_path, backup_path)
+        backups.append(backup_path)
+    return backups
+
+
+def _retire_db_family(db_path: Path) -> list[Path]:
+    backups: list[Path] = []
+    for member in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
+        if not member.exists():
+            continue
+        backup_path = member.with_name(f"{member.name}.migrated-to-root.bak")
+        os.replace(member, backup_path)
         backups.append(backup_path)
     return backups
 

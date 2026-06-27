@@ -51,6 +51,10 @@ def _profile_db(root: Path, area: str, slug: str) -> Path:
     return root / area / slug / "state.db"
 
 
+def _tui_gateway_db(root: Path, area: str, slug: str) -> Path:
+    return root / area / slug / "tui-gateway" / "state.db"
+
+
 def _seed_session(db_path: Path, session_id: str) -> None:
     conn = _connect(db_path)
     conn.execute(
@@ -111,6 +115,19 @@ def test_merge_three_profile_dbs_each_with_sessions_inserts_all(tmp_path: Path):
     assert result.merged_rows_per_table["runs"] == 3
 
 
+def test_discovery_includes_tui_gateway_subdir(tmp_path: Path):
+    root_db = tmp_path / "state.db"
+    _connect(root_db).close()
+    _seed_session(_tui_gateway_db(tmp_path, "profiles", "alpha"), "s-alpha")
+    _seed_session(_tui_gateway_db(tmp_path, "drafts", "beta"), "s-beta")
+
+    result = merge_profile_dbs(tmp_path, backup=False)
+
+    assert result.total_profile_dbs == 2
+    assert result.errors == []
+    assert _session_ids(root_db) == ["s-alpha", "s-beta"]
+
+
 def test_merge_idempotent_second_run_no_duplicates(tmp_path: Path):
     root_db = tmp_path / "state.db"
     _connect(root_db).close()
@@ -125,7 +142,7 @@ def test_merge_idempotent_second_run_no_duplicates(tmp_path: Path):
     assert _count_rows(root_db, "messages") == 1
 
 
-def test_merge_handles_pk_conflict_via_insert_or_ignore(tmp_path: Path):
+def test_conflicts_are_reported_per_table(tmp_path: Path):
     root_db = tmp_path / "state.db"
     root = _connect(root_db)
     root.execute(
@@ -144,9 +161,18 @@ def test_merge_handles_pk_conflict_via_insert_or_ignore(tmp_path: Path):
         conn.close()
     assert row[0] == "root"
     assert "sessions" not in result.merged_rows_per_table
+    assert result.conflicts == [
+        {
+            "db": str(_profile_db(tmp_path, "profiles", "alpha")),
+            "table": "sessions",
+            "count": 1,
+            "keys": [{"id": "same"}],
+        }
+    ]
+    assert result.to_json_dict()["conflicts"] == result.conflicts
 
 
-def test_merge_backs_up_original_db_with_timestamp(tmp_path: Path):
+def test_successful_merge_renames_source_db(tmp_path: Path):
     root_db = tmp_path / "state.db"
     _connect(root_db).close()
     profile = _profile_db(tmp_path, "profiles", "alpha")
@@ -157,7 +183,8 @@ def test_merge_backs_up_original_db_with_timestamp(tmp_path: Path):
     result = merge_profile_dbs(tmp_path, backup=True)
 
     backup_paths = [Path(path) for path in result.backups]
-    assert profile.exists()
+    assert not profile.exists()
+    assert profile.with_name("state.db.migrated-to-root.bak").exists()
     assert any(
         path.name.startswith("state.db.merged-to-root.bak.")
         for path in backup_paths
@@ -173,7 +200,7 @@ def test_merge_backs_up_original_db_with_timestamp(tmp_path: Path):
     assert all(path.exists() for path in backup_paths)
 
 
-def test_merge_skips_corrupted_profile_db_with_error_logged(tmp_path: Path):
+def test_failed_merge_leaves_source_in_place(tmp_path: Path):
     root_db = tmp_path / "state.db"
     _connect(root_db).close()
     _seed_session(_profile_db(tmp_path, "profiles", "good"), "s-good")
@@ -185,8 +212,29 @@ def test_merge_skips_corrupted_profile_db_with_error_logged(tmp_path: Path):
 
     assert _session_ids(root_db) == ["s-good"]
     assert str(bad) in result.skipped_dbs
+    assert str(bad) in result.failed_dbs
+    assert bad.exists()
+    assert not bad.with_name("state.db.migrated-to-root.bak").exists()
+    assert not _profile_db(tmp_path, "profiles", "good").exists()
     assert result.errors
     assert "bad/state.db" in result.errors[0]
+
+
+def test_result_failed_dbs_list_is_complete(tmp_path: Path):
+    root_db = tmp_path / "state.db"
+    _connect(root_db).close()
+    bad_profile = _profile_db(tmp_path, "profiles", "bad")
+    bad_draft = _profile_db(tmp_path, "drafts", "bad")
+    for bad in (bad_profile, bad_draft):
+        bad.parent.mkdir(parents=True)
+        bad.write_bytes(b"not sqlite")
+
+    result = merge_profile_dbs(tmp_path, backup=False)
+
+    assert result.skipped_dbs == [str(bad_draft), str(bad_profile)]
+    assert result.failed_dbs == result.skipped_dbs
+    assert len(result.errors) == 2
+    assert result.to_json_dict()["failed_dbs"] == result.failed_dbs
 
 
 def test_merge_handles_empty_profile_dir(tmp_path: Path):
@@ -198,6 +246,7 @@ def test_merge_handles_empty_profile_dir(tmp_path: Path):
     assert result.merged_rows_per_table == {}
     assert result.backups == []
     assert result.errors == []
+    assert result.failed_dbs == []
 
 
 def test_dry_run_does_not_modify_root_or_backup(tmp_path: Path):
@@ -212,6 +261,7 @@ def test_dry_run_does_not_modify_root_or_backup(tmp_path: Path):
     assert result.backups == []
     assert _session_ids(root_db) == []
     assert not list(profile.parent.glob("state.db.merged-to-root.bak.*"))
+    assert not list(profile.parent.glob("state.db.migrated-to-root.bak"))
 
 
 def test_cli_outputs_valid_json_to_stdout(tmp_path: Path):
@@ -238,4 +288,6 @@ def test_cli_outputs_valid_json_to_stdout(tmp_path: Path):
     assert payload["total_dbs"] == 1
     assert payload["merged_rows"]["sessions"] == 1
     assert payload["backups"] == []
+    assert payload["failed_dbs"] == []
+    assert payload["conflicts"] == []
     assert completed.stderr == ""
