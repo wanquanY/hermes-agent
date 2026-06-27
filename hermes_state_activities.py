@@ -188,20 +188,27 @@ class ActivitiesMixin:
             completed_at=time.time(),
         )
 
-    def mark_activity_failed(self, activity_id, *, error_message) -> bool:
+    def mark_activity_failed(
+        self, activity_id, *, error_message, result_json=None
+    ) -> bool:
         """Shortcut: status=failed + result_summary=error + completed_at=now."""
         return self.update_activity_status(
             activity_id,
             "failed",
             result_summary=error_message,
+            result_json=result_json,
             completed_at=time.time(),
         )
 
-    def mark_activity_cancelled(self, activity_id) -> bool:
+    def mark_activity_cancelled(
+        self, activity_id, *, result_summary=None, result_json=None
+    ) -> bool:
         """Shortcut: status=cancelled + completed_at=now."""
         return self.update_activity_status(
             activity_id,
             "cancelled",
+            result_summary=result_summary,
+            result_json=result_json,
             completed_at=time.time(),
         )
 

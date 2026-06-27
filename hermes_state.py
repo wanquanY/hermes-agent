@@ -29,7 +29,7 @@ from hermes_state_activities import ActivitiesMixin
 from hermes_state_agent_profiles import SessionDBAgentProfileMixin
 from hermes_state_branch import SessionDBBranchMixin
 from hermes_state_member_chat import SessionDBMemberChatMixin
-from hermes_state_participants import SessionDBParticipantMixin
+from hermes_state_participants import ParticipantsMixin
 from hermes_state_runs import SessionDBRunMixin
 from hermes_state_team_capabilities import SessionDBTeamCapabilityMixin
 from hermes_team_mission.state.session_mixin import SessionDBTeamMissionMixin
@@ -658,7 +658,7 @@ END;
 """
 
 
-class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBMemberChatMixin, SessionDBParticipantMixin, ActivitiesMixin, SessionDBRunMixin, SessionDBBranchMixin):
+class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBMemberChatMixin, ParticipantsMixin, ActivitiesMixin, SessionDBRunMixin, SessionDBBranchMixin):
     """
     SQLite-backed session storage with FTS5 search.
 

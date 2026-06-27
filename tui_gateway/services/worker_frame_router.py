@@ -590,21 +590,39 @@ class WorkerFrameRouter:
                     result_json=result_json,
                 )
             elif status == "failed":
-                updated_ok = db.update_activity_status(
-                    activity_id,
-                    "failed",
-                    result_summary=result_summary or frame.message or "worker failed",
-                    result_json=result_json,
-                    completed_at=time.time(),
-                )
+                error_message = result_summary or frame.message or "worker failed"
+                mark_failed = getattr(db, "mark_activity_failed", None)
+                if callable(mark_failed):
+                    updated_ok = mark_failed(
+                        activity_id,
+                        error_message=error_message,
+                        result_json=result_json,
+                    )
+                else:
+                    updated_ok = db.update_activity_status(
+                        activity_id,
+                        "failed",
+                        result_summary=error_message,
+                        result_json=result_json,
+                        completed_at=time.time(),
+                    )
             elif status == "cancelled":
-                updated_ok = db.update_activity_status(
-                    activity_id,
-                    "cancelled",
-                    result_summary=result_summary or frame.message or "cancelled",
-                    result_json=result_json,
-                    completed_at=time.time(),
-                )
+                cancel_summary = result_summary or frame.message or "cancelled"
+                mark_cancelled = getattr(db, "mark_activity_cancelled", None)
+                if callable(mark_cancelled):
+                    updated_ok = mark_cancelled(
+                        activity_id,
+                        result_summary=cancel_summary,
+                        result_json=result_json,
+                    )
+                else:
+                    updated_ok = db.update_activity_status(
+                        activity_id,
+                        "cancelled",
+                        result_summary=cancel_summary,
+                        result_json=result_json,
+                        completed_at=time.time(),
+                    )
             updated = db.get_activity(activity_id) or activity
             persisted_status = str(updated.get("status") or status)
             event_result_summary = result_summary if updated_ok else str(updated.get("result_summary") or "")
