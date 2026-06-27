@@ -6,9 +6,6 @@ from hermes_state_participants import leader_participant_id, member_participant_
 from hermes_team_mission.domain.run_context import RunContext
 
 
-_MEMBER_CHAT_RUN_PREFIX = "member-chat"
-
-
 def _home_from_dovie_profile(dovie_profile: dict) -> str:
     if isinstance(dovie_profile, dict):
         home = str(
@@ -44,31 +41,8 @@ def _run_context_json(run_context: RunContext) -> str:
     return json.dumps(run_context.to_payload(), ensure_ascii=False)
 
 
-def _member_chat_diagnostic(label: str, **fields) -> None:
-    try:
-        run_control._diagnostic_warning(  # noqa: SLF001
-            f"member-chat-diagnostic-{label}",
-            **fields,
-        )
-    except Exception:
-        pass
-
-
 def _target_member_id_from_params(params: dict) -> str:
     return str(params.get("target_member_id") or params.get("targetMemberId") or "").strip()
-
-
-def _member_chat_session_id(conversation_id: str, member_id: str) -> str:
-    # Deliberately NOT prefixed with "team:" / "team-conversation-" — those
-    # patterns get mis-resolved to the leader-conversation runtime scope and get
-    # picked up as team conversations by the sidebar. This is a plain member-chat
-    # session id; the runtime scope is the member's profile scope, set separately.
-    conv = str(conversation_id or "").strip()
-    for prefix in ("team-session-team-conversation-", "team-conversation-", "team-"):
-        if conv.startswith(prefix):
-            conv = conv[len(prefix):]
-            break
-    return f"memberchat:{conv}:{str(member_id or '').strip()}"
 
 
 def _find_team_member_by_id(members: list[dict], member_id: str) -> dict:
@@ -448,19 +422,6 @@ def _submit_message_to_member(
     # the member's SOUL.md / memories / skills never loaded and every member
     # answered with the default "Hermes Agent" persona.
     proxied = _proxy_run_submit_via_worker(submit_params)
-    _member_chat_diagnostic(
-        "worker-dispatch-returned",
-        db=str(getattr(db, "db_path", "") or ""),
-        conversation_session_id=conversation_session_id,
-        stored_session_id=conversation_session_id,
-        worker_run_id=run_id,
-        optimistic_run_id=optimistic_run_id,
-        turn_id=turn_id,
-        member_scope=member_scope,
-        proxied_ok=bool(proxied.get("ok")),
-        proxied_error=str(proxied.get("error") or ""),
-        proxied_reason=str(proxied.get("reason") or ""),
-    )
     if proxied.get("error"):
         return _err(rid, 5020, proxied["error"])
     if not proxied.get("ok"):
@@ -495,21 +456,6 @@ def _submit_message_to_member(
         "runtime_scope_key": member_scope,
         "status": "streaming",
     }
-    _member_chat_diagnostic(
-        "submit-return",
-        db=str(getattr(db, "db_path", "") or ""),
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        stored_session_id=conversation_session_id,
-        worker_run_id=run_id,
-        optimistic_run_id=optimistic_run_id,
-        turn_id=turn_id,
-        member_scope=member_scope,
-        returned_leader_turn_run_id=str(member_turn.get("run_id") or ""),
-        returned_worker_run_id=str(member_turn.get("worker_run_id") or ""),
-        returned_leader_turn_session_id=str(member_turn.get("stored_session_id") or ""),
-        returned_worker_session_id=str(member_turn.get("worker_stored_session_id") or ""),
-    )
     # Use the conversation we just ensured (guaranteed to carry canonical
     # fields). For graph, fall back to the read model — it may be empty for
     # a brand-new conv with no mission, but that's fine: the frontend
@@ -1441,16 +1387,7 @@ def _(rid, params: dict) -> dict:
     reason = str(params.get("reason") or "").strip() or "Recalled by user."
 
     # PR-C moved member workers onto the conversation session and stopped
-    # registering member_chat_runs. The cancel target is therefore canonical:
     # run_id + conversation_session_id, unless the run is bound to a mission.
-    _member_chat_diagnostic(
-        "recall-cancel-target",
-        db=str(getattr(db, "db_path", "") or ""),
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        optimistic_run_id=optimistic_run_id,
-        turn_id=turn_id,
-    )
 
     # Mission identity (only meaningful for B; ignored for A/C).
     resolved_mission = {}
@@ -1556,22 +1493,26 @@ def _(rid, params: dict) -> dict:
     # Step 4 — sync member-chat view sessions: any worker that already
     # materialized rows pointing at the recalled conv messages must drop
     # those rows from its hydration view so its NEXT turn doesn't keep
-    # seeing retracted speech.
+    # seeing retracted speech. P5 removed the deprecated member_chat_runs
+    # registry; the authoritative source for member identities is now the
+    # conversation participant roster.
     view_retracted_total = 0
     view_retracted_by_session: dict[str, int] = {}
     if affected_source_ids:
         try:
-            mc_runs = db.list_member_chat_runs_for_conversation(conversation_session_id) or []
+            participants = db.list_conversation_participants(conversation_session_id) or []
         except Exception:
-            mc_runs = []
+            participants = []
         seen_view_sessions: set[str] = set()
-        for run in mc_runs:
-            if not isinstance(run, dict):
+        for participant in participants:
+            if not isinstance(participant, dict):
                 continue
-            mc_member_id = str(run.get("member_id") or "").strip()
+            if str(participant.get("role") or "").strip() != "member":
+                continue
+            mc_member_id = str(participant.get("member_id") or "").strip()
             if not mc_member_id or not conversation_id:
                 continue
-            view_session_id = _member_chat_session_id(conversation_id, mc_member_id)
+            view_session_id = f"memberchat:{conversation_id}:{mc_member_id}"
             if view_session_id in seen_view_sessions:
                 continue
             seen_view_sessions.add(view_session_id)

@@ -10,7 +10,7 @@ team leader, @member) is:
 Regular, leader, and @member workers now publish user-visible events
 to the conversation session through RunContext + conversation-session
 storage instead of ``memberchat:*`` worker sessions or
-``member_chat_runs`` registration.
+legacy run registries.
 
 See:
 - docs/Hermes/V0.9.5/conversation-architecture-redesign.md  (north star)
@@ -199,15 +199,15 @@ def test_team_leader_message_complete_persists_on_conversation_session(tmp_path:
     assert events[0]["payload"]["text"] == "leader reply"
 
 
-# ── case 3: @member chat WITH legacy registration ──────────────────────
+# ── case 3: @member chat with legacy session hints ──────────────────────
 
 
-def test_member_chat_with_registration_routes_by_run_context(tmp_path: Path):
-    """A legacy registration row must not be required for delivery.
+def test_member_chat_with_legacy_session_hints_routes_by_run_context(tmp_path: Path):
+    """Legacy memberchat session hints must not be required for delivery.
 
-    P2-PR-E removes the member-chat event mirror. If an in-flight worker still
-    has a compatibility registration row, RunContext remains the routing source
-    of truth and stores the event directly in the conversation session.
+    P5 removes the deprecated registry table. RunContext remains the routing
+    source of truth and stores the event directly in the conversation session
+    even if an old worker frame still carries memberchat session ids.
     """
     db = _new_db(tmp_path)
     db.create_session(CONV_SESSION, source="team_mission", transient=False)
@@ -224,14 +224,6 @@ def test_member_chat_with_registration_routes_by_run_context(tmp_path: Path):
         created_at=100,
         updated_at=200,
     )
-    db.register_member_chat_run(
-        run_id="run-member-1",
-        conversation_session_id=CONV_SESSION,
-        member_id="member-alice",
-        agent_profile_id="profile-alice",
-        display_name="Alice",
-        optimistic_run_id="",
-    )
     db.upsert_run(run_id="run-member-1", session_id=MEMBER_SESSION, status="running")
 
     record_event(
@@ -242,7 +234,7 @@ def test_member_chat_with_registration_routes_by_run_context(tmp_path: Path):
             "run_id": "run-member-1",
             "turn_id": "t1",
             "seq": 1,
-            "payload": {"text": "member reply (registered)", "status": "complete"},
+            "payload": {"text": "member reply (legacy hints)", "status": "complete"},
         },
         db=db,
         run_context=_member_run_context(),
@@ -251,7 +243,7 @@ def test_member_chat_with_registration_routes_by_run_context(tmp_path: Path):
     events = _events_for_session(db, CONV_SESSION)
     assert any(e["type"] == "message.complete" for e in events)
     msg = next(e for e in events if e["type"] == "message.complete")
-    assert msg["payload"]["text"] == "member reply (registered)"
+    assert msg["payload"]["text"] == "member reply (legacy hints)"
     assert msg["frame"].get("participant_id") == member_participant_id("member-alice")
     assert msg["payload"]["run_context"]["participant_id"] == member_participant_id("member-alice")
 

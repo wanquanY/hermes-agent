@@ -1,12 +1,9 @@
-"""Decoupled group-chat compatibility registry + participant-view projection.
+"""Team conversation participant-view projection.
 
 A member @-chat is NOT a mission node. P2 RunContext routes user-visible
-worker events directly to the team conversation session. The legacy
-``member_chat_runs`` registry remains only as a one-release compatibility
-surface for mission spawn/recall callers and in-flight workers.
+worker events directly to the team conversation session.
 
 This module owns:
-  - the deprecated run-to-conversation compatibility table
   - the participant-view projection (how the team conversation's shared
     message log looks from a given participant's first-person perspective:
     that participant's own assistant turns stay assistant, every other
@@ -18,7 +15,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
 from typing import Any, Dict, List, Optional
 
 
@@ -201,122 +197,6 @@ def project_message_for_viewer(
 
 
 class SessionDBMemberChatMixin:
-    # ── registry ─────────────────────────────────────────────────────
-    def register_member_chat_run(
-        self,
-        *,
-        run_id: str,
-        conversation_session_id: str,
-        member_id: str,
-        agent_profile_id: str = "",
-        display_name: str = "",
-        optimistic_run_id: str = "",
-    ) -> None:
-        """Deprecated P2-PR-E compatibility write for legacy member-chat runs.
-
-        RunContext-based routing no longer reads this table for event delivery.
-        Keep this helper until mission node spawn and in-flight workers no longer
-        need the one-release compatibility registry.
-        """
-        run_id = _text(run_id)
-        if not run_id:
-            return
-
-        def _do(conn: sqlite3.Connection) -> None:
-            conn.execute(
-                "INSERT INTO member_chat_runs "
-                "(run_id, conversation_session_id, member_id, agent_profile_id, display_name, optimistic_run_id, relayed, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 0, ?) "
-                "ON CONFLICT(run_id) DO UPDATE SET "
-                "conversation_session_id=excluded.conversation_session_id, "
-                "member_id=excluded.member_id, "
-                "agent_profile_id=excluded.agent_profile_id, "
-                "display_name=excluded.display_name, "
-                "optimistic_run_id=excluded.optimistic_run_id",
-                (
-                    run_id,
-                    _text(conversation_session_id),
-                    _text(member_id),
-                    _text(agent_profile_id),
-                    _text(display_name),
-                    _text(optimistic_run_id),
-                    time.time(),
-                ),
-            )
-
-        self._execute_write(_do)
-
-    def get_member_chat_run(self, run_id: str) -> Dict[str, Any]:
-        """Deprecated P2-PR-E compatibility lookup for legacy callers.
-
-        Event routing must use RunContext. This remains for one release cycle so
-        mission node spawn and in-flight workers can drain before P5 cleanup.
-        """
-        run_id = _text(run_id)
-        if not run_id:
-            return {}
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT run_id, conversation_session_id, member_id, agent_profile_id, display_name, optimistic_run_id, relayed "
-                "FROM member_chat_runs WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
-        if row is None:
-            return {}
-        keys = ["run_id", "conversation_session_id", "member_id", "agent_profile_id", "display_name", "optimistic_run_id", "relayed"]
-        if isinstance(row, sqlite3.Row):
-            return {k: row[k] for k in keys}
-        return {k: row[i] for i, k in enumerate(keys)}
-
-    def find_member_chat_run_by_optimistic_run_id(self, optimistic_run_id: str) -> Dict[str, Any]:
-        """Deprecated P2-PR-E reverse lookup for legacy recall paths.
-
-        RunContext-based routing makes ``member_chat_runs`` obsolete. This
-        helper stays until mission node spawn/recall callers move off the
-        compatibility registry in the planned cleanup.
-        """
-        optimistic_run_id = _text(optimistic_run_id)
-        if not optimistic_run_id:
-            return {}
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT run_id, conversation_session_id, member_id, agent_profile_id, display_name, optimistic_run_id, relayed "
-                "FROM member_chat_runs WHERE optimistic_run_id = ? "
-                "ORDER BY created_at DESC LIMIT 1",
-                (optimistic_run_id,),
-            ).fetchone()
-        if row is None:
-            return {}
-        keys = ["run_id", "conversation_session_id", "member_id", "agent_profile_id", "display_name", "optimistic_run_id", "relayed"]
-        if isinstance(row, sqlite3.Row):
-            return {k: row[k] for k in keys}
-        return {k: row[i] for i, k in enumerate(keys)}
-
-    def list_member_chat_runs_for_conversation(self, conversation_session_id: str) -> "list[Dict[str, Any]]":
-        """Deprecated P2-PR-E compatibility list for legacy recall paths.
-
-        RunContext-based event routing no longer uses ``member_chat_runs``.
-        Keep this until mission node spawn/recall callers leave the one-release
-        compatibility registry.
-        """
-        conversation_session_id = _text(conversation_session_id)
-        if not conversation_session_id:
-            return []
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT run_id, conversation_session_id, member_id, agent_profile_id, display_name, optimistic_run_id, relayed "
-                "FROM member_chat_runs WHERE conversation_session_id = ?",
-                (conversation_session_id,),
-            ).fetchall()
-        keys = ["run_id", "conversation_session_id", "member_id", "agent_profile_id", "display_name", "optimistic_run_id", "relayed"]
-        out = []
-        for row in rows:
-            if isinstance(row, sqlite3.Row):
-                out.append({k: row[k] for k in keys})
-            else:
-                out.append({k: row[i] for i, k in enumerate(keys)})
-        return out
-
     def recall_member_chat_view_messages(
         self,
         *,

@@ -47,7 +47,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -270,23 +270,6 @@ CREATE TABLE IF NOT EXISTS session_index (
     started_at REAL NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL DEFAULT 0,
     last_activity REAL
-);
-
--- DEPRECATED (P2-PR-E, 2026-06-27): RunContext-based event routing
--- (Conversation Runtime Protocol P2) makes this table obsolete.
--- Kept for one release cycle to avoid in-flight worker breakage;
--- physical drop ships in P5 cleanup.
-CREATE TABLE IF NOT EXISTS member_chat_runs (
-    run_id TEXT PRIMARY KEY,
-    conversation_session_id TEXT NOT NULL DEFAULT '',
-    member_id TEXT NOT NULL DEFAULT '',
-    agent_profile_id TEXT NOT NULL DEFAULT '',
-    display_name TEXT NOT NULL DEFAULT '',
-    -- Deprecated legacy optimistic run_id reserved by the frontend before P2
-    -- RunContext made direct conversation-session routing the source of truth.
-    optimistic_run_id TEXT NOT NULL DEFAULT '',
-    relayed INTEGER NOT NULL DEFAULT 0,
-    created_at REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS conversation_participants (
@@ -1088,6 +1071,14 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             )
         cursor.execute("DROP TABLE IF EXISTS agent_profile_versions")
 
+    def _drop_deprecated_member_chat_runs(self, cursor: sqlite3.Cursor) -> None:
+        """Physically remove the P2-P4 member-chat compatibility registry."""
+
+        try:
+            cursor.execute("DROP TABLE IF EXISTS member_chat_runs")
+        except sqlite3.OperationalError:
+            pass
+
     def _backfill_session_index_conversation_kind(self, cursor: sqlite3.Cursor) -> None:
         """Normalize the explicit direct/team classification for sidebar rows."""
 
@@ -1132,6 +1123,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         # migration was skipped (e.g. due to version renumbering), the
         # column gets created here.
         self._reconcile_columns(cursor)
+        self._drop_deprecated_member_chat_runs(cursor)
         self._backfill_session_index_conversation_kind(cursor)
         reconcile_team_mission_node_primary_key(cursor)
         migrate_active_mission_id_to_conversation_missions(cursor)

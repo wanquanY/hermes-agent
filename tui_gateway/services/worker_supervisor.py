@@ -268,16 +268,6 @@ class WorkerSupervisor:
             "[worker-supervisor] spawned run_worker pid=%s scope=%s",
             process.pid, scope.runtime_scope_key,
         )
-        if str(scope.runtime_scope_key or "").startswith("member-chat:"):
-            _log.warning(
-                "[dovie-run-control] member-chat-diagnostic-worker-spawn "
-                "pid=%s scope=%s hermes_home=%s control_home=%s agent_profile_id=%s",
-                process.pid,
-                scope.runtime_scope_key,
-                env.get("HERMES_HOME", ""),
-                env.get("DOVIE_HERMES_CONTROL_HOME", ""),
-                env.get("DOVIE_AGENT_PROFILE_ID", ""),
-            )
         return worker
 
     async def _read_loop(self, worker: RunWorker) -> None:

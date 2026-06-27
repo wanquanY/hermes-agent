@@ -151,25 +151,6 @@ def worker_frame_router() -> WorkerFrameRouter:
                         db = _server._db_for_stable_session(stable)
                     except Exception:
                         db = None
-                if isinstance(params, dict):
-                    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-                    runtime_scope_key = str(
-                        params.get("runtime_scope_key")
-                        or payload.get("runtime_scope_key")
-                        or ""
-                    ).strip()
-                    if stable.startswith("memberchat:") or runtime_scope_key.startswith("member-chat:"):
-                        run_control._diagnostic_warning(  # noqa: SLF001
-                            "member-chat-diagnostic-worker-event-db-route",
-                            db=str(getattr(db, "db_path", "") or ""),
-                            event_type=str(params.get("type") or ""),
-                            source_run_id=str(params.get("run_id") or payload.get("run_id") or ""),
-                            turn_id=str(params.get("turn_id") or payload.get("turn_id") or ""),
-                            stored_session_id=stable,
-                            runtime_session_id=str(params.get("session_id") or ""),
-                            runtime_scope_key=runtime_scope_key,
-                            seq=int(params.get("seq") or 0),
-                        )
                 return run_control.publish_recorded_event(
                     params, db=db, persist=True, run_context=run_context,
                 )
@@ -188,16 +169,6 @@ def worker_frame_router() -> WorkerFrameRouter:
                         db = None
                 if db is not None:
                     kwargs["db"] = db
-                if stable.startswith("memberchat:"):
-                    run_control._diagnostic_warning(  # noqa: SLF001
-                        "member-chat-diagnostic-worker-terminal-db-route",
-                        db=str(getattr(db, "db_path", "") or ""),
-                        source_run_id=str(kwargs.get("run_id") or ""),
-                        turn_id=str(kwargs.get("turn_id") or ""),
-                        stored_session_id=stable,
-                        runtime_session_id=str(kwargs.get("runtime_session_id") or ""),
-                        terminal_status=str(kwargs.get("terminal_status") or kwargs.get("status") or ""),
-                    )
                 # publish_run_terminal_event internally calls
                 # publish_recorded_event without exposing a persist
                 # flag; that call DOES persist on the main side, but

@@ -122,15 +122,6 @@ class WorkerFrameRouter:
                 turn_id=str(turn_id or ""),
                 run_context_json=run_context_json,
             )
-        if str(scope_key or "").startswith("member-chat:"):
-            _log.warning(
-                "[dovie-run-control] member-chat-diagnostic-router-record-run-start "
-                "scope=%s run_id=%s stored_session_id=%s turn_id=%s",
-                str(scope_key or ""),
-                run_id,
-                str(stored_session_id or ""),
-                str(turn_id or ""),
-            )
 
     def forget_run(self, run_id: str) -> None:
         run_id = str(run_id or "").strip()

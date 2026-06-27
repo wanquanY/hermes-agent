@@ -75,11 +75,12 @@ def _memberchat_session_ids(db: SessionDB) -> list[str]:
     return [str(row["id"]) for row in rows]
 
 
-def _member_chat_run_count(db: SessionDB) -> int:
+def _table_exists(db: SessionDB, table_name: str) -> bool:
     row = db._conn.execute(  # noqa: SLF001 - test introspection
-        "SELECT COUNT(*) AS count FROM member_chat_runs"
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
     ).fetchone()
-    return int(row["count"])
+    return row is not None
 
 
 def test_submit_does_not_create_memberchat_session(monkeypatch, tmp_path: Path):
@@ -88,10 +89,10 @@ def test_submit_does_not_create_memberchat_session(monkeypatch, tmp_path: Path):
     assert _memberchat_session_ids(db) == []
 
 
-def test_submit_does_not_register_member_chat_run(monkeypatch, tmp_path: Path):
+def test_submit_does_not_create_member_chat_runs_table(monkeypatch, tmp_path: Path):
     db, _captured, _response = _submit_member(monkeypatch, tmp_path)
 
-    assert _member_chat_run_count(db) == 0
+    assert not _table_exists(db, "member_chat_runs")
 
 
 def test_worker_spawn_uses_conversation_session_id(monkeypatch, tmp_path: Path):

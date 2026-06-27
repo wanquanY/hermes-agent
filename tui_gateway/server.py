@@ -530,7 +530,7 @@ def _is_control_plane_stable_session_id(stable_session_id: str) -> bool:
 def _get_control_plane_db(*, use_active_profile: bool = True):
     global _db, _db_error
     # Worker processes set DOVIE_HERMES_CONTROL_HOME at spawn so they can route
-    # control-plane reads/writes (run registry, session_index, member_chat_runs,
+    # control-plane reads/writes (run state, session_index,
     # team_mission_conversations) back to the SAME db the main gateway owns.
     # Without this, a worker spawned on a member-chat scope looks up its
     # stored_session_id in its OWN profile db, misses the row that the main

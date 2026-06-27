@@ -5797,14 +5797,16 @@ def _recall_setup_team_conversation(monkeypatch, tmp_path: Path):
         stable_session_id="team-session-1",
         title="团队会话",
     )
-    # Worker member registered (for the C path test)
-    db.register_member_chat_run(
-        run_id="worker-run-1",
+    from hermes_state_participants import member_participant_id
+
+    # Worker member present in the authoritative conversation roster.
+    db.upsert_conversation_participant(
         conversation_session_id="team-session-1",
+        participant_id=member_participant_id("member-bob"),
+        role="member",
         member_id="member-bob",
         agent_profile_id="profile-bob",
         display_name="Bob",
-        optimistic_run_id="team-member-run-A",
     )
 
     calls = {"team_mission_cancel": [], "run_cancel": [], "session_recall": []}
