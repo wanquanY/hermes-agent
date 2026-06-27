@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Union
 
@@ -45,6 +46,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Union
 # writes to stderr instead of the protocol pipe and the supervisor
 # never sees a single outbound frame.
 _real_stdout = sys.stdout
+_stdout_write_lock = threading.RLock()
 
 
 # ── Inbound frame types (main → worker) ──────────────────────────────
@@ -79,8 +81,19 @@ class ShutdownFrame:
     pass
 
 
+@dataclass(frozen=True)
+class DBRpcReplyFrame:
+    id: str
+    result: Any = None
+    error: Any = None
+
+
 IncomingFrame = Union[
-    RunStartFrame, RunCancelFrame, InteractiveResponseFrame, ShutdownFrame,
+    RunStartFrame,
+    RunCancelFrame,
+    InteractiveResponseFrame,
+    ShutdownFrame,
+    DBRpcReplyFrame,
 ]
 
 
@@ -122,8 +135,20 @@ class LogFrame:
     text: str
 
 
+@dataclass(frozen=True)
+class DBRpcRequestFrame:
+    id: str
+    method: str
+    params: Any = None
+    db_scope: dict[str, Any] = field(default_factory=dict)
+
+
 OutgoingFrame = Union[
-    EventFrame, InteractiveRequestFrame, RunTerminalFrame, LogFrame,
+    EventFrame,
+    InteractiveRequestFrame,
+    RunTerminalFrame,
+    LogFrame,
+    DBRpcRequestFrame,
 ]
 
 
@@ -173,6 +198,14 @@ def decode_incoming(line: str) -> IncomingFrame:
         raise FrameDecodeError("frame must be a JSON object")
     op = obj.get("op")
     if not isinstance(op, str):
+        if obj.get("jsonrpc") == "2.0" and "id" in obj and (
+            "result" in obj or "error" in obj
+        ):
+            return DBRpcReplyFrame(
+                id=str(obj.get("id") or ""),
+                result=obj.get("result"),
+                error=obj.get("error"),
+            )
         raise FrameDecodeError("frame missing string field 'op'")
 
     if op == "run.start":
@@ -224,6 +257,12 @@ def encode_incoming(frame: IncomingFrame) -> str:
         }
     elif isinstance(frame, ShutdownFrame):
         body = {"op": "shutdown"}
+    elif isinstance(frame, DBRpcReplyFrame):
+        body = {"jsonrpc": "2.0", "id": frame.id}
+        if frame.error is not None:
+            body["error"] = frame.error
+        else:
+            body["result"] = frame.result
     else:  # pragma: no cover — exhausted by Union
         raise TypeError(f"unknown incoming frame type: {type(frame)!r}")
     return json.dumps(body, ensure_ascii=False, separators=(",", ":"))
@@ -245,6 +284,14 @@ def decode_outgoing(line: str) -> OutgoingFrame:
         raise FrameDecodeError("frame must be a JSON object")
     op = obj.get("op")
     if not isinstance(op, str):
+        method = obj.get("method")
+        if obj.get("jsonrpc") == "2.0" and isinstance(method, str):
+            return DBRpcRequestFrame(
+                id=str(obj.get("id") or ""),
+                method=method,
+                params=obj.get("params"),
+                db_scope=_optional_mapping(obj, "db_scope"),
+            )
         raise FrameDecodeError("frame missing string field 'op'")
 
     if op == "event":
@@ -299,6 +346,15 @@ def encode_outgoing(frame: OutgoingFrame) -> str:
             body["message"] = frame.message
     elif isinstance(frame, LogFrame):
         body = {"op": "log", "level": frame.level, "text": frame.text}
+    elif isinstance(frame, DBRpcRequestFrame):
+        body = {
+            "jsonrpc": "2.0",
+            "id": frame.id,
+            "method": frame.method,
+            "params": frame.params,
+        }
+        if frame.db_scope:
+            body["db_scope"] = frame.db_scope
     else:  # pragma: no cover — exhausted by Union
         raise TypeError(f"unknown outgoing frame type: {type(frame)!r}")
     # ``ensure_ascii=False`` keeps non-ASCII frames compact (event
@@ -331,11 +387,13 @@ class WorkerProtocol:
         emit: Callable[[str], Awaitable[None]],
         handler: FrameHandler,
         on_decode_error: Optional[Callable[[FrameDecodeError, str], Awaitable[None]]] = None,
+        db_reply_handler: Optional[Callable[[dict[str, Any]], bool]] = None,
     ) -> None:
         self._lines_in = lines_in
         self._emit_raw = emit
         self._handler = handler
         self._on_decode_error = on_decode_error
+        self._db_reply_handler = db_reply_handler
         self._shutdown = asyncio.Event()
 
     async def emit(self, frame: OutgoingFrame) -> None:
@@ -383,6 +441,25 @@ class WorkerProtocol:
                 if isinstance(frame, ShutdownFrame):
                     self.request_shutdown()
                     return
+
+                if isinstance(frame, DBRpcReplyFrame):
+                    if self._db_reply_handler is not None:
+                        self._db_reply_handler(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": frame.id,
+                                **(
+                                    {"error": frame.error}
+                                    if frame.error is not None
+                                    else {"result": frame.result}
+                                ),
+                            }
+                        )
+                    else:
+                        await self.emit_log(
+                            "warn", f"db reply with no handler id={frame.id}"
+                        )
+                    continue
 
                 if isinstance(frame, RunStartFrame):
                     task = asyncio.create_task(self._handler(self, frame))
@@ -432,8 +509,14 @@ def _flush_stdout(payload: str) -> None:
     # Use the snapshot captured at module import — ``sys.stdout`` will
     # have been redirected to stderr by the time the agent runner has
     # imported ``tui_gateway.server``.
-    _real_stdout.write(payload)
-    _real_stdout.flush()
+    with _stdout_write_lock:
+        _real_stdout.write(payload)
+        _real_stdout.flush()
+
+
+class _StdoutJsonRpcWriter:
+    def write_json(self, obj: dict[str, Any]) -> None:
+        _flush_stdout(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
 # ── Run backend + interactive responder (worker-side dispatch) ──────
@@ -625,6 +708,13 @@ def _build_default_backend() -> WorkerRunBackend:
 
 
 async def _main_async() -> int:
+    from tui_gateway.services.worker_db_proxy import (
+        WorkerDBProxy,
+        set_default_worker_db_proxy,
+    )
+
+    db_proxy = WorkerDBProxy(_StdoutJsonRpcWriter())
+    set_default_worker_db_proxy(db_proxy)
     backend: WorkerRunBackend = _build_default_backend()
     responder: WorkerInteractiveResponder = RealInteractiveResponder()
     active_runs: set[str] = set()
@@ -632,6 +722,7 @@ async def _main_async() -> int:
         lines_in=_stdin_lines(),
         emit=_stdout_writer(),
         handler=_build_default_handler(backend, responder, active_runs),
+        db_reply_handler=db_proxy.handle_reply,
     )
     await proto.emit_log("info", "run_worker: started")
     try:
@@ -641,6 +732,8 @@ async def _main_async() -> int:
             await backend.shutdown()
         except Exception:
             pass
+        db_proxy.close()
+        set_default_worker_db_proxy(None)
         await proto.emit_log("info", "run_worker: exiting")
     return 0
 

@@ -96,6 +96,19 @@ def setup_worker_environment() -> None:
         # it before the swap so any later reassign there is too late.
         # Replace the transport instance instead.
         _server._stdio_transport = _NoopTransport()  # type: ignore[assignment]
+        from tui_gateway.services.worker_db_proxy import get_default_worker_db_proxy
+
+        db_proxy = get_default_worker_db_proxy()
+        if db_proxy is not None:
+            # The worker process must not materialize SessionDB. Keep the
+            # legacy resolver shape but return the IPC proxy everywhere the
+            # prompt/run-control stack asks for a DB handle.
+            def _worker_db_for_stable_session(stable_session_id: str):
+                return db_proxy.scoped(stable_session_id)
+
+            _server._db = db_proxy
+            _server._get_db = lambda: db_proxy  # type: ignore[assignment]
+            _server._db_for_stable_session = _worker_db_for_stable_session  # type: ignore[assignment]
 
         from tui_gateway.methods import prompt as _prompt  # noqa: F401
         from tui_gateway.methods import session as _session  # noqa: F401

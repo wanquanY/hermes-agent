@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from tui_gateway.run_worker import (
+    DBRpcReplyFrame,
+    DBRpcRequestFrame,
     EventFrame,
     FrameDecodeError,
     IncomingFrame,
@@ -43,6 +45,7 @@ from tui_gateway.run_worker import (
     encode_incoming,
 )
 from tui_gateway.services.runtime_proxy import RuntimeScope
+from tui_gateway.services.worker_db_proxy import serialize_db_value
 
 _log = logging.getLogger(__name__)
 
@@ -59,6 +62,40 @@ LogCallback = Callable[[str, LogFrame], Awaitable[None]]
 _DEFAULT_QUEUE_MAXSIZE = 1024
 _DEFAULT_SHUTDOWN_TIMEOUT_S = 3.0
 _SIGTERM_GRACE_S = 2.0
+
+
+DB_RPC_ALLOWED_METHODS = frozenset(
+    {
+        "append_message",
+        "append_run_event",
+        "append_team_mission_conversation_status_event",
+        "append_team_mission_event_for_run",
+        "create_run_if_session_idle",
+        "create_session",
+        "end_session",
+        "fail_orphaned_active_runs",
+        "get_messages_as_conversation",
+        "get_run",
+        "get_session",
+        "get_session_run_status",
+        "get_team_mission_run_binding",
+        "list_conversation_participants",
+        "list_run_events",
+        "list_runs",
+        "list_team_mission_events",
+        "list_team_mission_run_events",
+        "next_run_event_seq",
+        "reduce_team_mission_run_event",
+        "resolve_participant_id",
+        "set_session_title",
+        "update_session_cwd",
+        "update_session_meta",
+        "update_session_model",
+        "update_system_prompt",
+        "upsert_run",
+        "upsert_session",
+    }
+)
 
 
 @dataclass
@@ -137,6 +174,7 @@ class WorkerSupervisor:
         self._on_log = on_log
         self._queue_maxsize = max(1, int(queue_maxsize))
         self._python = python_executable or sys.executable
+        self._db_rpc_lock = asyncio.Lock()
 
     # ── public API ───────────────────────────────────────────────────
 
@@ -356,6 +394,8 @@ class WorkerSupervisor:
         try:
             if isinstance(frame, EventFrame):
                 await self._on_event(scope_key, frame)
+            elif isinstance(frame, DBRpcRequestFrame):
+                await self._handle_db_rpc(worker, frame)
             elif isinstance(frame, InteractiveRequestFrame):
                 await self._on_interactive_request(scope_key, frame)
             elif isinstance(frame, RunTerminalFrame):
@@ -381,6 +421,59 @@ class WorkerSupervisor:
                     leave_profile_context(token)
                 except Exception:
                     pass
+
+    async def _handle_db_rpc(self, worker: RunWorker, frame: DBRpcRequestFrame) -> None:
+        reply = await self._execute_db_rpc(frame)
+        await self._send_db_reply(worker, reply)
+
+    async def _send_db_reply(self, worker: RunWorker, reply: DBRpcReplyFrame) -> bool:
+        data = (encode_incoming(reply) + "\n").encode("utf-8")
+        async with worker.send_lock:
+            if worker.process.stdin is None or worker.process.stdin.is_closing():
+                return False
+            try:
+                worker.process.stdin.write(data)
+                await worker.process.stdin.drain()
+                return True
+            except (BrokenPipeError, ConnectionResetError):
+                return False
+
+    async def _execute_db_rpc(self, frame: DBRpcRequestFrame) -> DBRpcReplyFrame:
+        req_id = str(frame.id or "")
+        method = str(frame.method or "")
+        if not method.startswith("db."):
+            return _db_rpc_error(
+                req_id,
+                "WorkerDBProxyMethodError",
+                f"unsupported worker RPC method {method!r}",
+                code=-32601,
+            )
+        db_method_name = method[3:]
+        if db_method_name not in DB_RPC_ALLOWED_METHODS:
+            return _db_rpc_error(
+                req_id,
+                "WorkerDBProxyMethodError",
+                f"db method {db_method_name!r} is not allowed over worker IPC",
+                code=-32601,
+            )
+        try:
+            args, kwargs = _decode_db_rpc_params(frame.params)
+            db = _db_for_worker_rpc(frame, args, kwargs)
+            if db is None:
+                raise RuntimeError("state.db unavailable")
+            target = getattr(db, db_method_name, None)
+            if not callable(target):
+                raise AttributeError(f"SessionDB has no method {db_method_name!r}")
+            async with self._db_rpc_lock:
+                result = target(*args, **kwargs)
+            return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
+        except Exception as exc:
+            return _db_rpc_error(
+                req_id,
+                type(exc).__name__,
+                str(exc) or repr(exc),
+                code=-32000,
+            )
 
     async def _terminate(self, worker: RunWorker) -> None:
         worker.closing = True
@@ -431,3 +524,80 @@ class WorkerSupervisor:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+
+
+def _decode_db_rpc_params(params: Any) -> tuple[list[Any], dict[str, Any]]:
+    if not isinstance(params, list) or len(params) != 2:
+        raise ValueError("db RPC params must be [args, kwargs]")
+    args, kwargs = params
+    if not isinstance(args, list):
+        raise ValueError("db RPC args must be a list")
+    if not isinstance(kwargs, dict):
+        raise ValueError("db RPC kwargs must be an object")
+    return args, kwargs
+
+
+def _db_for_worker_rpc(
+    frame: DBRpcRequestFrame,
+    args: list[Any],
+    kwargs: dict[str, Any],
+) -> Any:
+    stable = _stable_session_id_from_rpc(frame, args, kwargs)
+    from tui_gateway import server as _server
+
+    if stable:
+        return _server._db_for_stable_session(stable)
+    return _server._get_db()
+
+
+def _stable_session_id_from_rpc(
+    frame: DBRpcRequestFrame,
+    args: list[Any],
+    kwargs: dict[str, Any],
+) -> str:
+    scope = getattr(frame, "db_scope", None)
+    if isinstance(scope, dict):
+        stable = str(scope.get("stable_session_id") or "").strip()
+        if stable:
+            return stable
+    if isinstance(frame, DBRpcRequestFrame):
+        raw_scope = getattr(frame, "db_scope", None)
+        if isinstance(raw_scope, str) and raw_scope.strip():
+            return raw_scope.strip()
+    for key in ("stored_session_id", "session_id", "conversation_session_id"):
+        value = str(kwargs.get(key) or "").strip()
+        if value:
+            return value
+    method = str(frame.method or "")
+    if method in {
+        "db.get_messages_as_conversation",
+        "db.list_conversation_participants",
+        "db.get_session",
+        "db.append_message",
+        "db.append_run_event",
+        "db.list_run_events",
+        "db.list_runs",
+        "db.get_session_run_status",
+        "db.next_run_event_seq",
+        "db.create_session",
+        "db.end_session",
+    } and args:
+        return str(args[0] or "").strip()
+    return ""
+
+
+def _db_rpc_error(
+    req_id: str,
+    error_type: str,
+    message: str,
+    *,
+    code: int,
+) -> DBRpcReplyFrame:
+    return DBRpcReplyFrame(
+        id=req_id,
+        error={
+            "code": int(code),
+            "type": error_type,
+            "message": message,
+        },
+    )
