@@ -362,7 +362,7 @@ def _state_features_present() -> set[str]:
             "initialize_team_mission_from_strategy",
             "get_team_mission_graph",
             "cancel_team_mission",
-            "list_team_mission_run_events",
+            "list_team_mission_events",
         )
     ):
         present.add("state:team_mission_graph")

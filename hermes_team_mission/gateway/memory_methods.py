@@ -147,7 +147,7 @@ def _(rid, params: dict) -> dict:
     except (TypeError, ValueError):
         after_seq = 0
     events = [
-        event for event in db.list_team_mission_run_events(
+        event for event in db.list_team_mission_events(
             mission_id,
             after_seq=after_seq,
             limit=_bounded_limit(params.get("limit"), default=2000, maximum=10000),

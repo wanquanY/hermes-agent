@@ -829,7 +829,7 @@ def _(rid, params: dict) -> dict:
         after_seq = 0
     limit = _bounded_limit(params.get("limit"), default=2000, maximum=10000)
     byte_limit = _bounded_byte_limit(params.get("byte_limit") or params.get("byteLimit"))
-    raw_events = db.list_team_mission_run_events(
+    raw_events = db.list_team_mission_events(
         mission_id,
         after_seq=after_seq,
         limit=min(limit + 1, 10000),

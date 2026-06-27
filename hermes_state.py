@@ -1670,7 +1670,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         return self._execute_write(_do)
 
     def reconcile_mission_activities_one_shot(self) -> Dict[str, Any]:
-        """Backfill mission activities from legacy active_mission_id rows."""
+        """Backfill mission activities from authoritative mission links."""
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
             marker = conn.execute(
                 "SELECT value FROM state_meta WHERE key = ?",
@@ -1682,15 +1682,27 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             try:
                 rows = conn.execute(
                     """
+                    SELECT DISTINCT
+                        tmc.conversation_id,
+                        tmc.stable_session_id,
+                        cm.mission_id AS active_mission_id,
+                        tmc.title,
+                        tmc.created_at,
+                        cm.updated_at
+                    FROM conversation_missions cm
+                    JOIN team_mission_conversations tmc
+                      ON tmc.conversation_id = cm.conversation_id
+                    WHERE COALESCE(cm.mission_id, '') != ''
+                    UNION
                     SELECT
-                        conversation_id,
-                        stable_session_id,
-                        active_mission_id,
-                        title,
-                        created_at,
-                        updated_at
-                    FROM team_mission_conversations
-                    WHERE COALESCE(active_mission_id, '') != ''
+                        tmc.conversation_id,
+                        tmc.stable_session_id,
+                        tmc.active_mission_id,
+                        tmc.title,
+                        tmc.created_at,
+                        tmc.updated_at
+                    FROM team_mission_conversations tmc
+                    WHERE COALESCE(tmc.active_mission_id, '') != ''
                     """
                 ).fetchall()
             except sqlite3.OperationalError:
@@ -2778,7 +2790,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             "       tmc.title AS team_conversation_title, "
             "       tmc.workspace_id AS team_conversation_workspace_id, "
             "       tmc.workspace_path AS team_conversation_workspace_path, "
-            "       tmc.active_mission_id AS team_conversation_active_mission_id, "
+            "       '' AS team_conversation_active_mission_id, "
             "       COUNT(CASE WHEN act.status IN ('pending','running') THEN 1 END) AS active_activity_count, "
             "       COUNT(CASE WHEN act.status IN ('completed','failed') AND act.read_at IS NULL THEN 1 END) AS unread_completion_count, "
             "       COALESCE(("
@@ -2787,7 +2799,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             "              AND cm.status = 'active'"
             "            ORDER BY cm.updated_at DESC, cm.added_at DESC, cm.mission_id DESC"
             "            LIMIT 1"
-            "       ), tmc.active_mission_id) AS active_mission_id, "
+            "       ), '') AS active_mission_id, "
             "       ("
             "           SELECT cm.status FROM conversation_missions cm"
             "            WHERE cm.conversation_id = si.conversation_id"
@@ -2952,17 +2964,17 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                     ),
                 )
                 upserted += 1
-            inactive_conversation_rows = conn.execute(
+            inactive_conversation_count = int(conn.execute(
                 """
-                SELECT DISTINCT cm.conversation_id
+                SELECT COUNT(*)
                   FROM conversation_missions cm
                   JOIN team_missions tm ON tm.mission_id = cm.mission_id
                  WHERE cm.status = 'active'
                    AND LOWER(COALESCE(tm.status,'')) IN
                        ('completed','failed','cancelled','canceled','interrupted','draft','idle')
                 """
-            ).fetchall()
-            if inactive_conversation_rows:
+            ).fetchone()[0] or 0)
+            if inactive_conversation_count:
                 now = time.time()
                 conn.execute(
                     """
@@ -2987,11 +2999,6 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                     """,
                     (now,),
                 )
-                for inactive_row in inactive_conversation_rows:
-                    self._sync_legacy_active_mission_id_on_conn(
-                        conn,
-                        inactive_row[0] if isinstance(inactive_row, tuple) else inactive_row["conversation_id"],
-                    )
             active_run_exists = self._session_index_active_run_exists_sql("session_index")
             active_mission_exists = self._session_index_active_mission_exists_sql("session_index")
             active_run_id_is_terminal = """

@@ -30,11 +30,11 @@ class SessionDBTeamMissionGraphMixin:
             rows = self._conn.execute(
                 """
                 SELECT conversation_id
-                FROM team_mission_conversations
-                WHERE active_mission_id = ?
+                FROM conversation_missions
+                WHERE mission_id = ?
                 UNION
                 SELECT conversation_id
-                FROM conversation_missions
+                FROM team_missions
                 WHERE mission_id = ?
                 """,
                 (mission_id, mission_id),

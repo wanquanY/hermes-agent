@@ -100,23 +100,6 @@ class SessionDBConversationMissionMixin:
         ).fetchone()
         return _text(_row_value(row, "mission_id", ""))
 
-    def _sync_legacy_active_mission_id_on_conn(
-        self,
-        conn: sqlite3.Connection,
-        conversation_id: str,
-    ) -> None:
-        conversation_id = _text(conversation_id)
-        if not conversation_id:
-            return
-        conn.execute(
-            """
-            UPDATE team_mission_conversations
-            SET active_mission_id = ?
-            WHERE conversation_id = ?
-            """,
-            (self._latest_active_conversation_mission_id_on_conn(conn, conversation_id), conversation_id),
-        )
-
     def _add_mission_to_conversation_on_conn(
         self,
         conn: sqlite3.Connection,
@@ -173,7 +156,6 @@ class SessionDBConversationMissionMixin:
             status=normalized_status,
             now=timestamp,
         )
-        self._sync_legacy_active_mission_id_on_conn(conn, conversation_id)
         return self._conversation_mission_from_row(conn.execute(
             """
             SELECT *
@@ -234,7 +216,6 @@ class SessionDBConversationMissionMixin:
                 status=normalized_status,
                 now=now,
             )
-            self._sync_legacy_active_mission_id_on_conn(conn, conversation_id)
             return self._conversation_mission_from_row(conn.execute(
                 """
                 SELECT *
@@ -304,8 +285,6 @@ class SessionDBConversationMissionMixin:
                 (conversation_id, mission_id),
             )
             removed = bool(result.rowcount)
-            if removed:
-                self._sync_legacy_active_mission_id_on_conn(conn, conversation_id)
             return removed
 
         return self._execute_write(_do)

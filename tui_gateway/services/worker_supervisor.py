@@ -115,7 +115,6 @@ DB_RPC_ALLOWED_METHODS = frozenset(
         "list_runs",
         "list_sessions_rich",
         "list_team_mission_events",
-        "list_team_mission_run_events",
         "list_unread_completions",
         "mark_activity_cancelled",
         "mark_activity_completed",

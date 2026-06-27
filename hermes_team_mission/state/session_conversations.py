@@ -6,6 +6,17 @@ from hermes_state_participants import leader_participant_id, member_participant_
 
 
 class SessionDBTeamMissionConversationMixin:
+    _PROJECTED_ACTIVE_MISSION_ID_SQL = """
+        COALESCE((
+            SELECT cm.mission_id
+              FROM conversation_missions cm
+             WHERE cm.conversation_id = team_mission_conversations.conversation_id
+               AND cm.status = 'active'
+             ORDER BY cm.updated_at DESC, cm.added_at DESC, cm.mission_id DESC
+             LIMIT 1
+        ), '') AS projected_active_mission_id
+    """
+
     def _session_index_active_run_exists_sql(self, session_alias: str = "session_index") -> str:
         """SQL predicate: the indexed conversation still has a non-terminal run."""
         si = session_alias
@@ -201,10 +212,10 @@ class SessionDBTeamMissionConversationMixin:
                 """
                 INSERT INTO team_mission_conversations (
                     conversation_id, team_id, stable_session_id, title, objective,
-                    workspace_id, workspace_path, status, active_mission_id,
-                    created_by_user_id, metadata_json, created_at, updated_at
+                    workspace_id, workspace_path, status, created_by_user_id,
+                    metadata_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(conversation_id) DO UPDATE SET
                     team_id = COALESCE(NULLIF(excluded.team_id, ''), team_id),
                     stable_session_id = excluded.stable_session_id,
@@ -213,7 +224,6 @@ class SessionDBTeamMissionConversationMixin:
                     workspace_id = COALESCE(NULLIF(excluded.workspace_id, ''), workspace_id),
                     workspace_path = COALESCE(NULLIF(excluded.workspace_path, ''), workspace_path),
                     status = excluded.status,
-                    active_mission_id = COALESCE(NULLIF(excluded.active_mission_id, ''), active_mission_id),
                     created_by_user_id = COALESCE(NULLIF(excluded.created_by_user_id, ''), created_by_user_id),
                     metadata_json = excluded.metadata_json,
                     updated_at = excluded.updated_at
@@ -227,7 +237,6 @@ class SessionDBTeamMissionConversationMixin:
                     _text(workspace_id),
                     _text(workspace_path),
                     _conversation_status(status),
-                    _text(active_mission_id),
                     _text(created_by_user_id),
                     _json_dumps(merged_metadata if isinstance(merged_metadata, dict) else {}),
                     float(_row_value(existing, "created_at", created) or created),
@@ -243,8 +252,15 @@ class SessionDBTeamMissionConversationMixin:
                     status="active",
                     now=update_updated,
                 )
+            # CR-P4.1: active_mission_id is accepted only as a compatibility
+            # input; the legacy column is no longer written.
             return self._team_mission_conversation_from_row(conn.execute(
-                "SELECT * FROM team_mission_conversations WHERE conversation_id = ?",
+                f"""
+                SELECT team_mission_conversations.*,
+                       {self._PROJECTED_ACTIVE_MISSION_ID_SQL}
+                FROM team_mission_conversations
+                WHERE conversation_id = ?
+                """,
                 (conversation_id,),
             ).fetchone()) or {}
 
@@ -269,6 +285,9 @@ class SessionDBTeamMissionConversationMixin:
         team_id = _text(record.get("team_id"))
         conversation_id = _text(record.get("conversation_id"))
         mission_id = _text(record.get("active_mission_id"))
+        if not mission_id and conversation_id:
+            mission_ids = self.active_mission_ids(conversation_id)
+            mission_id = mission_ids[0] if mission_ids else ""
         running = self.has_active_mission(conversation_id)
         message_count = int(record.get("message_count") or 0)
         started = float(record.get("created_at") or 0)
@@ -720,7 +739,12 @@ class SessionDBTeamMissionConversationMixin:
             return {}
         with self._lock:
             return self._team_mission_conversation_from_row(self._conn.execute(
-                "SELECT * FROM team_mission_conversations WHERE conversation_id = ?",
+                f"""
+                SELECT team_mission_conversations.*,
+                       {self._PROJECTED_ACTIVE_MISSION_ID_SQL}
+                FROM team_mission_conversations
+                WHERE conversation_id = ?
+                """,
                 (conversation_id,),
             ).fetchone()) or {}
 
@@ -730,7 +754,12 @@ class SessionDBTeamMissionConversationMixin:
             return {}
         with self._lock:
             return self._team_mission_conversation_from_row(self._conn.execute(
-                "SELECT * FROM team_mission_conversations WHERE stable_session_id = ?",
+                f"""
+                SELECT team_mission_conversations.*,
+                       {self._PROJECTED_ACTIVE_MISSION_ID_SQL}
+                FROM team_mission_conversations
+                WHERE stable_session_id = ?
+                """,
                 (stable_session_id,),
             ).fetchone()) or {}
 
@@ -817,6 +846,7 @@ class SessionDBTeamMissionConversationMixin:
             rows = self._conn.execute(
                 f"""
                 SELECT team_mission_conversations.*,
+                    {self._PROJECTED_ACTIVE_MISSION_ID_SQL},
                     COALESCE(session_summary.message_count, 0) AS message_count,
                     MAX(
                         COALESCE(
@@ -894,14 +924,19 @@ class SessionDBTeamMissionConversationMixin:
         if normalized_mission_id:
             clauses.append(
                 """(
-                    c.active_mission_id = ?
-                    OR c.conversation_id = ?
+                    c.conversation_id = ?
                     OR c.stable_session_id = ?
                     OR EXISTS (
                         SELECT 1
                         FROM team_missions mission_filter
                         WHERE mission_filter.conversation_id = c.conversation_id
                           AND mission_filter.mission_id = ?
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM conversation_missions cm_filter
+                        WHERE cm_filter.conversation_id = c.conversation_id
+                          AND cm_filter.mission_id = ?
                     )
                 )"""
             )
@@ -1166,7 +1201,12 @@ class SessionDBTeamMissionConversationMixin:
             return {}
         with self._lock:
             conversation = self._team_mission_conversation_from_row(self._conn.execute(
-                "SELECT * FROM team_mission_conversations WHERE conversation_id = ?",
+                f"""
+                SELECT team_mission_conversations.*,
+                       {self._PROJECTED_ACTIVE_MISSION_ID_SQL}
+                FROM team_mission_conversations
+                WHERE conversation_id = ?
+                """,
                 (conversation_id,),
             ).fetchone())
             if conversation is None:

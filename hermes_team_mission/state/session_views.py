@@ -101,7 +101,12 @@ class SessionDBTeamMissionViewMixin:
             if mission is None:
                 return {}
             conversation = self._team_mission_conversation_from_row(self._conn.execute(
-                "SELECT * FROM team_mission_conversations WHERE conversation_id = ?",
+                f"""
+                SELECT team_mission_conversations.*,
+                       {self._PROJECTED_ACTIVE_MISSION_ID_SQL}
+                FROM team_mission_conversations
+                WHERE conversation_id = ?
+                """,
                 (_text(mission.get("conversation_id")),),
             ).fetchone()) if _text(mission.get("conversation_id")) else None
             nodes = [
@@ -181,7 +186,12 @@ class SessionDBTeamMissionViewMixin:
             return {}
         with self._lock:
             conversation = self._team_mission_conversation_from_row(self._conn.execute(
-                "SELECT * FROM team_mission_conversations WHERE conversation_id = ?",
+                f"""
+                SELECT team_mission_conversations.*,
+                       {self._PROJECTED_ACTIVE_MISSION_ID_SQL}
+                FROM team_mission_conversations
+                WHERE conversation_id = ?
+                """,
                 (conversation_id,),
             ).fetchone())
             if conversation is None:

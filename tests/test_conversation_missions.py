@@ -126,7 +126,7 @@ def test_migration_is_idempotent(tmp_path: Path):
     assert [row["mission_id"] for row in rows] == ["mission-legacy"]
 
 
-def test_upsert_conversation_writes_to_both_legacy_and_join_table(tmp_path: Path):
+def test_upsert_conversation_projects_active_mission_from_join_table(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
 
     conversation = db.upsert_team_mission_conversation(
@@ -143,7 +143,7 @@ def test_upsert_conversation_writes_to_both_legacy_and_join_table(tmp_path: Path
     assert rows[0]["status"] == "active"
 
 
-def test_legacy_active_mission_id_field_still_readable(tmp_path: Path):
+def test_legacy_active_mission_id_field_is_not_written_by_new_upsert(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conv-1",
@@ -153,6 +153,7 @@ def test_legacy_active_mission_id_field_still_readable(tmp_path: Path):
         active_mission_id="mission-x",
     )
 
+    conversation = db.get_team_mission_conversation("conv-1")
     row = db._conn.execute(  # noqa: SLF001 - storage compatibility contract.
         """
         SELECT active_mission_id
@@ -162,4 +163,5 @@ def test_legacy_active_mission_id_field_still_readable(tmp_path: Path):
         ("conv-1",),
     ).fetchone()
 
-    assert row["active_mission_id"] == "mission-x"
+    assert conversation["active_mission_id"] == "mission-x"
+    assert (row["active_mission_id"] or "") == ""

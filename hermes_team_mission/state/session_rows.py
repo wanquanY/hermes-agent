@@ -40,7 +40,7 @@ class SessionDBTeamMissionRowsMixin:
             "workspace_id": str(_row_value(row, "workspace_id", "") or ""),
             "workspace_path": str(_row_value(row, "workspace_path", "") or ""),
             "status": str(_row_value(row, "status", "") or ""),
-            "active_mission_id": str(_row_value(row, "active_mission_id", "") or ""),
+            "active_mission_id": str(_row_value(row, "projected_active_mission_id", "") or ""),
             "created_by_user_id": str(_row_value(row, "created_by_user_id", "") or ""),
             "metadata": metadata if isinstance(metadata, dict) else {},
             "created_at": float(_row_value(row, "created_at", 0) or 0),

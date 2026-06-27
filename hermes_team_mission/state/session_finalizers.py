@@ -94,9 +94,8 @@ class SessionDBTeamMissionFinalizerMixin:
             return []
         after_seq = int(after_seq or 0)
         # Deprecated audit alias only; not for timeline render.
-        # CR-P2.5 cleanup: dead branch from pre-CR-P2 dual-source. Kept for
-        # legacy audit-feed callers while render paths consume ordinary
-        # run_events for the stored conversation session.
+        # CR-P4.1: production callers use list_team_mission_events. Keep this
+        # warned compatibility alias until P4.3 removes external/test callers.
         if not self._warned_deprecated_team_mission_run_events:
             _log.warning(
                 "list_team_mission_run_events is deprecated audit compatibility; "
