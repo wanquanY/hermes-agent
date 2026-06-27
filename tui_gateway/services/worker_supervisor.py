@@ -433,7 +433,7 @@ class WorkerSupervisor:
                     pass
 
     async def _handle_db_rpc(self, worker: RunWorker, frame: DBRpcRequestFrame) -> None:
-        reply = await self._execute_worker_jsonrpc(frame)
+        reply = await self._execute_worker_jsonrpc(frame, worker=worker)
         await self._send_db_reply(worker, reply)
 
     async def _send_db_reply(self, worker: RunWorker, reply: DBRpcReplyFrame) -> bool:
@@ -485,14 +485,19 @@ class WorkerSupervisor:
                 code=-32000,
             )
 
-    async def _execute_worker_jsonrpc(self, frame: DBRpcRequestFrame) -> DBRpcReplyFrame:
+    async def _execute_worker_jsonrpc(
+        self,
+        frame: DBRpcRequestFrame,
+        *,
+        worker: RunWorker | None = None,
+    ) -> DBRpcReplyFrame:
         method = str(frame.method or "")
         if method.startswith("db."):
             return await self._execute_db_rpc(frame)
         if method == "worker.dispatch_agent_async":
-            return await self._execute_dispatch_agent_async_rpc(frame)
+            return await self._execute_dispatch_agent_async_rpc(frame, worker=worker)
         if method == "worker.dispatch_team_async":
-            return await self._execute_dispatch_team_async_rpc(frame)
+            return await self._execute_dispatch_team_async_rpc(frame, worker=worker)
         return _db_rpc_error(
             str(frame.id or ""),
             "WorkerRPCMethodError",
@@ -500,9 +505,17 @@ class WorkerSupervisor:
             code=-32601,
         )
 
-    async def _execute_dispatch_agent_async_rpc(self, frame: DBRpcRequestFrame) -> DBRpcReplyFrame:
+    async def _execute_dispatch_agent_async_rpc(
+        self,
+        frame: DBRpcRequestFrame,
+        *,
+        worker: RunWorker | None = None,
+    ) -> DBRpcReplyFrame:
         req_id = str(frame.id or "")
-        params = frame.params if isinstance(frame.params, dict) else {}
+        params = dict(frame.params) if isinstance(frame.params, dict) else {}
+        if worker is not None:
+            params.setdefault("_parent_scope_key", worker.scope_key)
+            params.setdefault("_parent_hermes_home", worker.hermes_home)
         try:
             from tui_gateway.methods.dispatch import dispatch_agent_async
 
@@ -516,9 +529,17 @@ class WorkerSupervisor:
                 code=-32000,
             )
 
-    async def _execute_dispatch_team_async_rpc(self, frame: DBRpcRequestFrame) -> DBRpcReplyFrame:
+    async def _execute_dispatch_team_async_rpc(
+        self,
+        frame: DBRpcRequestFrame,
+        *,
+        worker: RunWorker | None = None,
+    ) -> DBRpcReplyFrame:
         req_id = str(frame.id or "")
-        params = frame.params if isinstance(frame.params, dict) else {}
+        params = dict(frame.params) if isinstance(frame.params, dict) else {}
+        if worker is not None:
+            params.setdefault("_parent_scope_key", worker.scope_key)
+            params.setdefault("_parent_hermes_home", worker.hermes_home)
         try:
             from tui_gateway.methods.dispatch import dispatch_team_async
 

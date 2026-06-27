@@ -1250,6 +1250,9 @@ def _run_prompt_submit(
             previous_active_run_id = getattr(agent, "_hermes_active_run_id", active_context_missing)
             previous_active_turn_id = getattr(agent, "_hermes_active_turn_id", active_context_missing)
             previous_active_runtime_scope_key = getattr(agent, "_hermes_active_runtime_scope_key", active_context_missing)
+            previous_activity_event_bus = getattr(agent, "activity_event_bus", active_context_missing)
+            previous_run_context = getattr(agent, "run_context", active_context_missing)
+            previous_private_run_context = getattr(agent, "_run_context", active_context_missing)
             previous_reasoning_config = getattr(agent, "reasoning_config", active_context_missing)
             turn_reasoning_config = (
                 (turn_metadata or {}).get("reasoning_config")
@@ -1267,6 +1270,11 @@ def _run_prompt_submit(
                 agent._hermes_active_run_id = turn_run_id
                 agent._hermes_active_turn_id = turn_id
                 agent._hermes_active_runtime_scope_key = str(session.get("runtime_scope_key") or "")
+                if session.get("activity_event_bus") is not None:
+                    agent.activity_event_bus = session.get("activity_event_bus")
+                if session.get("run_context") is not None:
+                    agent.run_context = session.get("run_context")
+                    agent._run_context = session.get("run_context")
                 if turn_reasoning_config is not None:
                     agent.reasoning_config = dict(turn_reasoning_config)
                 _log_prompt_stage(session, sid, "agent-run-call-start", run_id=turn_run_id, turn_id=turn_id)
@@ -1360,6 +1368,27 @@ def _run_prompt_submit(
                         pass
                 else:
                     agent._hermes_active_runtime_scope_key = previous_active_runtime_scope_key
+                if previous_activity_event_bus is active_context_missing:
+                    try:
+                        delattr(agent, "activity_event_bus")
+                    except AttributeError:
+                        pass
+                else:
+                    agent.activity_event_bus = previous_activity_event_bus
+                if previous_run_context is active_context_missing:
+                    try:
+                        delattr(agent, "run_context")
+                    except AttributeError:
+                        pass
+                else:
+                    agent.run_context = previous_run_context
+                if previous_private_run_context is active_context_missing:
+                    try:
+                        delattr(agent, "_run_context")
+                    except AttributeError:
+                        pass
+                else:
+                    agent._run_context = previous_private_run_context
                 if previous_reasoning_config is active_context_missing:
                     try:
                         delattr(agent, "reasoning_config")

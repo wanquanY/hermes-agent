@@ -358,6 +358,68 @@ def _sync_failover_system_message(agent, api_messages, active_system_prompt):
     return sp
 
 
+def _activity_event_text(event: dict[str, Any]) -> str:
+    activity_id = str(event.get("activity_id") or event.get("activityId") or "").strip()
+    status = str(event.get("status") or "").strip().lower()
+    label = "FAILED" if status == "failed" else ("CANCELLED" if status == "cancelled" else "completed")
+    if label == "completed":
+        header = f"Async activity {activity_id} (dispatched at {event.get('dispatched_at') or event.get('started_at') or 'unknown'}) just completed:"
+    else:
+        header = f"Async activity {activity_id} (dispatched at {event.get('dispatched_at') or event.get('started_at') or 'unknown'}) just {label}:"
+    result_summary = str(event.get("result_summary") or event.get("error_message") or "").strip()
+    return "\n".join(
+        [
+            header,
+            f"  - kind: {event.get('activity_kind') or event.get('kind') or 'unknown'}",
+            f"  - target: {event.get('target') or event.get('target_profile_id') or event.get('target_mission_id') or 'unknown'}",
+            f"  - result summary: {json.dumps(result_summary, ensure_ascii=False)}",
+            f"  - full result available via: activity_id={activity_id} (call get_activity tool)",
+        ]
+    )
+
+
+def _drain_activity_events_for_api(agent) -> list[dict[str, str]]:
+    bus = getattr(agent, "activity_event_bus", None)
+    if bus is None or not callable(getattr(bus, "drain", None)):
+        return []
+    try:
+        events = bus.drain()
+    except Exception as exc:
+        logger.warning("activity event drain failed: %s", exc)
+        return []
+    if not events:
+        return []
+    messages: list[dict[str, str]] = []
+    read_ids: list[str] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        try:
+            activity_id = str(event.get("activity_id") or event.get("activityId") or "").strip()
+            if not activity_id:
+                continue
+            messages.append({"role": "system", "content": _activity_event_text(event)})
+            read_ids.append(activity_id)
+        except Exception as exc:
+            logger.warning("activity event inject formatting failed: %s", exc)
+    if messages:
+        db = getattr(agent, "_session_db", None)
+        marker = getattr(agent, "_activity_event_read_ids", None)
+        if marker is None:
+            marker = set()
+            setattr(agent, "_activity_event_read_ids", marker)
+        for activity_id in read_ids:
+            if activity_id in marker:
+                continue
+            try:
+                if db is not None and callable(getattr(db, "mark_activity_read", None)):
+                    db.mark_activity_read(activity_id)
+                marker.add(activity_id)
+            except Exception as exc:
+                logger.warning("activity mark_read failed activity_id=%s: %s", activity_id, exc)
+    return messages
+
+
 def run_conversation(
     agent,
     user_message: str,
@@ -1018,6 +1080,11 @@ def run_conversation(
             effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
         if effective_system:
             api_messages = [{"role": "system", "content": effective_system}] + api_messages
+
+        activity_system_messages = _drain_activity_events_for_api(agent)
+        if activity_system_messages:
+            sys_offset = 1 if (api_messages and api_messages[0].get("role") == "system") else 0
+            api_messages[sys_offset:sys_offset] = activity_system_messages
 
         # Inject ephemeral prefill messages right after the system prompt
         # but before conversation history. Same API-call-time-only pattern.

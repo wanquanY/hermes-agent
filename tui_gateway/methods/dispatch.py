@@ -176,6 +176,8 @@ async def dispatch_agent_async(
         or params.get("conversationId")
     )
     parent_activity_id = _text(params.get("parent_activity_id") or params.get("parentActivityId"))
+    parent_scope_key = _text(params.get("_parent_scope_key") or params.get("parent_scope_key"))
+    parent_hermes_home = _text(params.get("_parent_hermes_home") or params.get("parent_hermes_home"))
 
     if not parent_conversation_id:
         raise ValueError("parent_conversation_id required")
@@ -272,6 +274,10 @@ async def dispatch_agent_async(
             run_id=run_id,
             stored_session_id=conversation_id,
             turn_id=turn_id,
+            dispatch_activity_id=activity_id,
+            activity_kind="agent_dispatch",
+            parent_scope_key=parent_scope_key,
+            parent_hermes_home=parent_hermes_home,
         )
     if callable(getattr(pool, "record_run_start", None)):
         await pool.record_run_start(
@@ -366,6 +372,8 @@ async def dispatch_team_async(
         or params.get("conversationId")
     )
     parent_activity_id = _text(params.get("parent_activity_id") or params.get("parentActivityId"))
+    parent_scope_key = _text(params.get("_parent_scope_key") or params.get("parent_scope_key"))
+    parent_hermes_home = _text(params.get("_parent_hermes_home") or params.get("parent_hermes_home"))
 
     if not parent_conversation_id:
         raise ValueError("parent_conversation_id required")
@@ -424,6 +432,8 @@ async def dispatch_team_async(
             "start_leader": True,
             "dispatch_activity_id": activity_id,
             "parent_activity_id": parent_activity_id,
+            "parent_scope_key": parent_scope_key,
+            "parent_hermes_home": parent_hermes_home,
             "parent_conversation_id": parent_conversation_id,
             "files": files,
             "source": "team_dispatch",

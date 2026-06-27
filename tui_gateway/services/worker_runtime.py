@@ -465,6 +465,16 @@ async def _dispatch_prompt_submit(
     }
     if params.get("run_context_json") is not None:
         run_start_kwargs["run_context_json"] = params.get("run_context_json")
+    if params.get("dispatch_activity_id") is not None:
+        run_start_kwargs["dispatch_activity_id"] = params.get("dispatch_activity_id")
+    if params.get("source") in {"agent_dispatch", "team_dispatch"}:
+        run_start_kwargs["activity_kind"] = params.get("source")
+    elif params.get("dispatch_activity_id") is not None:
+        run_start_kwargs["activity_kind"] = "team_dispatch"
+    if params.get("parent_scope_key") is not None:
+        run_start_kwargs["parent_scope_key"] = params.get("parent_scope_key")
+    if params.get("parent_hermes_home") is not None:
+        run_start_kwargs["parent_hermes_home"] = params.get("parent_hermes_home")
     router.record_run_start(**run_start_kwargs)
     await pool.record_run_start(
         conversation_id=stored_session_id,

@@ -34,10 +34,12 @@ from __future__ import annotations
 
 import logging
 import threading
+import json
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
 from tui_gateway.run_worker import (
+    ActivityEventFrame,
     EventFrame,
     InteractiveRequestFrame,
     InteractiveResponseFrame,
@@ -62,6 +64,11 @@ class RunInfo:
     stored_session_id: str
     turn_id: str
     run_context_json: Any = ""
+    dispatch_activity_id: str = ""
+    activity_kind: str = ""
+    parent_scope_key: str = ""
+    parent_hermes_home: str = ""
+    last_message_event: dict[str, Any] | None = None
 
 
 @dataclass
@@ -111,6 +118,10 @@ class WorkerFrameRouter:
         stored_session_id: str,
         turn_id: str = "",
         run_context_json: Any = "",
+        dispatch_activity_id: str = "",
+        activity_kind: str = "",
+        parent_scope_key: str = "",
+        parent_hermes_home: str = "",
     ) -> None:
         run_id = str(run_id or "").strip()
         if not run_id:
@@ -121,6 +132,10 @@ class WorkerFrameRouter:
                 stored_session_id=str(stored_session_id or ""),
                 turn_id=str(turn_id or ""),
                 run_context_json=run_context_json,
+                dispatch_activity_id=str(dispatch_activity_id or ""),
+                activity_kind=str(activity_kind or ""),
+                parent_scope_key=str(parent_scope_key or ""),
+                parent_hermes_home=str(parent_hermes_home or ""),
             )
 
     def forget_run(self, run_id: str) -> None:
@@ -146,6 +161,12 @@ class WorkerFrameRouter:
                 scope_key=info.scope_key,
                 stored_session_id=info.stored_session_id,
                 turn_id=info.turn_id,
+                run_context_json=info.run_context_json,
+                dispatch_activity_id=info.dispatch_activity_id,
+                activity_kind=info.activity_kind,
+                parent_scope_key=info.parent_scope_key,
+                parent_hermes_home=info.parent_hermes_home,
+                last_message_event=dict(info.last_message_event or {}) if info.last_message_event else None,
             ) if info is not None else None
 
     # ── WorkerSupervisor callbacks ──────────────────────────────────
@@ -155,6 +176,7 @@ class WorkerFrameRouter:
         + persist it. ``params`` is the same dict the legacy ws bridge
         used to put on the wire."""
         params = frame.params if isinstance(frame.params, dict) else {}
+        self._capture_last_message_event(params)
         run_context = self._run_context_for_event(params)
         try:
             if run_context is None:
@@ -208,12 +230,11 @@ class WorkerFrameRouter:
     ) -> None:
         stored = frame.stored_session_id
         turn_id = frame.turn_id
-        if not stored or not turn_id:
-            with self._lock:
-                info = self._runs.get(frame.run_id)
-            if info is not None:
-                stored = stored or info.stored_session_id
-                turn_id = turn_id or info.turn_id
+        with self._lock:
+            info = self._runs.get(frame.run_id)
+        if info is not None:
+            stored = stored or info.stored_session_id
+            turn_id = turn_id or info.turn_id
         with self._lock:
             self._runs.pop(frame.run_id, None)
             # Also clear any pending interactive entries that were tied
@@ -234,6 +255,7 @@ class WorkerFrameRouter:
                 scope_key, frame.run_id, frame.status,
             )
             return
+        await self._publish_activity_terminal(scope_key, frame, info, stored)
         # NORMAL COMPLETION: the worker's agent code already published a
         # ``message.complete`` event through the monkey-patched publish
         # path (which arrived on the main side via ``on_event`` → re-
@@ -377,6 +399,119 @@ class WorkerFrameRouter:
             )
             return None
 
+    def _capture_last_message_event(self, params: dict[str, Any]) -> None:
+        if str(params.get("type") or "") != "message.complete":
+            return
+        payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+        run_id = str(params.get("run_id") or payload.get("run_id") or "").strip()
+        if not run_id:
+            return
+        with self._lock:
+            info = self._runs.get(run_id)
+            if info is not None:
+                info.last_message_event = dict(params)
+
+    async def _publish_activity_terminal(
+        self,
+        scope_key: str,
+        frame: RunTerminalFrame,
+        info: RunInfo | None,
+        stored_session_id: str,
+    ) -> None:
+        if info is None or not info.dispatch_activity_id:
+            return
+        activity_id = info.dispatch_activity_id
+        parent_scope_key = info.parent_scope_key
+        parent_hermes_home = info.parent_hermes_home
+        token = None
+        try:
+            if parent_hermes_home:
+                from tui_gateway.services.profile_context import enter_profile_context
+
+                token = enter_profile_context(
+                    {"hermes_home": parent_hermes_home, "runtime_scope_key": parent_scope_key}
+                )
+            from tui_gateway import server as _server
+
+            db = _server._get_db()
+            if db is None:
+                return
+            activity = db.get_activity(activity_id)
+            if not activity:
+                return
+            status = _activity_status(frame.status)
+            last_message = _last_message_from_event(info.last_message_event if info else None)
+            if not last_message:
+                last_message = _last_message_for_activity(db, stored_session_id)
+            result_summary = _result_summary(last_message, frame.message)
+            result_json = {
+                "last_message": last_message,
+                "usage": _usage_from_message(last_message),
+                "run_id": frame.run_id,
+            }
+            if status == "completed":
+                db.mark_activity_completed(
+                    activity_id,
+                    result_summary=result_summary,
+                    result_json=result_json,
+                )
+            elif status == "failed":
+                db.mark_activity_failed(
+                    activity_id,
+                    error_message=result_summary or frame.message or "worker failed",
+                )
+                try:
+                    db.update_activity_status(
+                        activity_id,
+                        "failed",
+                        result_json=result_json,
+                    )
+                except Exception:
+                    pass
+            elif status == "cancelled":
+                db.mark_activity_cancelled(activity_id)
+                try:
+                    db.update_activity_status(
+                        activity_id,
+                        "cancelled",
+                        result_summary=result_summary or frame.message or "cancelled",
+                        result_json=result_json,
+                    )
+                except Exception:
+                    pass
+            updated = db.get_activity(activity_id) or activity
+            event = _activity_event_from_row(
+                updated,
+                status=status,
+                run_id=frame.run_id,
+                result_summary=result_summary,
+                result_json=result_json,
+            )
+            try:
+                self._publish_event(_activity_ws_frame(event), persist=False)
+            except TypeError:
+                self._publish_event(_activity_ws_frame(event))
+            if parent_scope_key:
+                await self._sender.send(
+                    parent_scope_key,
+                    ActivityEventFrame(kind="activity", event=event),
+                )
+        except Exception:
+            _log.exception(
+                "[worker-router] activity terminal handling failed scope=%s run_id=%s activity_id=%s",
+                scope_key,
+                frame.run_id,
+                activity_id,
+            )
+        finally:
+            if token is not None:
+                try:
+                    from tui_gateway.services.profile_context import leave_profile_context
+
+                    leave_profile_context(token)
+                except Exception:
+                    pass
+
 
 def _level_for(name: str) -> int:
     return {
@@ -386,3 +521,126 @@ def _level_for(name: str) -> int:
         "warning": logging.WARNING,
         "error": logging.ERROR,
     }.get(str(name or "").lower(), logging.INFO)
+
+
+def _activity_status(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized in {"", "completed", "success", "ok", "complete"}:
+        return "completed"
+    if normalized in {"cancelled", "canceled", "interrupted"}:
+        return "cancelled"
+    return "failed"
+
+
+def _last_message_for_activity(db: Any, stored_session_id: str) -> dict[str, Any]:
+    try:
+        messages = db.get_messages_as_conversation(stored_session_id)
+    except Exception:
+        return {}
+    if not isinstance(messages, list):
+        return {}
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        content = message.get("content")
+        if role == "assistant" and content:
+            return dict(message)
+    for message in reversed(messages):
+        if isinstance(message, dict):
+            return dict(message)
+    return {}
+
+
+def _last_message_from_event(event: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(event, dict):
+        return {}
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    text = str(payload.get("text") or payload.get("message") or "").strip()
+    if not text:
+        return {}
+    message = {
+        "role": "assistant",
+        "content": text,
+        "metadata": {
+            "run_id": event.get("run_id") or payload.get("run_id"),
+            "turn_id": event.get("turn_id") or payload.get("turn_id"),
+            "status": payload.get("status"),
+            "usage": payload.get("usage"),
+            "source_event": "message.complete",
+        },
+    }
+    return message
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    content = message.get("content") if isinstance(message, dict) else ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def _result_summary(last_message: dict[str, Any], fallback: str) -> str:
+    text = _message_text(last_message).strip() or str(fallback or "").strip()
+    return text[:200]
+
+
+def _usage_from_message(last_message: dict[str, Any]) -> Any:
+    if not isinstance(last_message, dict):
+        return None
+    metadata = last_message.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except Exception:
+            metadata = {}
+    if isinstance(metadata, dict):
+        return metadata.get("usage")
+    return None
+
+
+def _activity_event_from_row(
+    row: dict[str, Any],
+    *,
+    status: str,
+    run_id: str,
+    result_summary: str,
+    result_json: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "activity_id": str(row.get("activity_id") or ""),
+        "status": status,
+        "activity_kind": str(row.get("kind") or ""),
+        "kind": f"activity.{status if status != 'completed' else 'completed'}",
+        "target_profile_id": row.get("target_profile_id"),
+        "target_mission_id": row.get("target_mission_id"),
+        "target": row.get("target_profile_id") or row.get("target_mission_id") or "",
+        "conversation_id": row.get("conversation_id"),
+        "parent_activity_id": row.get("parent_activity_id"),
+        "prompt_summary": row.get("prompt_summary"),
+        "result_summary": row.get("result_summary") or result_summary,
+        "result_json": row.get("result_json") or result_json,
+        "started_at": row.get("started_at"),
+        "dispatched_at": row.get("created_at"),
+        "completed_at": row.get("completed_at"),
+        "run_id": run_id,
+    }
+
+
+def _activity_ws_frame(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": event.get("kind") or "activity.completed",
+        "session_id": str(event.get("conversation_id") or ""),
+        "stored_session_id": str(event.get("conversation_id") or ""),
+        "payload": event,
+    }

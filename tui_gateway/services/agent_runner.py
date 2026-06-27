@@ -166,6 +166,13 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
 
     runtime_sid = uuid.uuid4().hex[:8]
     params = frame.params if isinstance(frame.params, dict) else {}
+    run_context = _run_context_from_frame(frame)
+    try:
+        from agent.activity_event_bus import get_default_activity_event_bus
+
+        activity_event_bus = get_default_activity_event_bus()
+    except Exception:
+        activity_event_bus = None
 
     workspace_context = session_workspace_run_context(frame.stored_session_id, params)
     cwd = str(workspace_context.get("cwd") or "").strip() or None
@@ -211,7 +218,9 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         "close_on_disconnect": False,
         "profile_context": profile_context,
         "agent_context_mode": None,
+        "activity_event_bus": activity_event_bus,
         "runtime_scope_key": runtime_scope_key,
+        "run_context": run_context,
         "running": False,
         "active_run_id": None,
         "active_turn_id": None,
@@ -270,7 +279,6 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
             full_history = list(
                 db.get_messages_as_conversation(frame.stored_session_id)
             )
-            run_context = _run_context_from_frame(frame)
             if _should_project_member_perspective(run_context):
                 try:
                     participants = db.list_conversation_participants(  # type: ignore[attr-defined]

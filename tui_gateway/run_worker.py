@@ -77,6 +77,12 @@ class InteractiveResponseFrame:
 
 
 @dataclass(frozen=True)
+class ActivityEventFrame:
+    kind: str
+    event: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ShutdownFrame:
     pass
 
@@ -92,6 +98,7 @@ IncomingFrame = Union[
     RunStartFrame,
     RunCancelFrame,
     InteractiveResponseFrame,
+    ActivityEventFrame,
     ShutdownFrame,
     DBRpcReplyFrame,
 ]
@@ -229,6 +236,16 @@ def decode_incoming(line: str) -> IncomingFrame:
             request_id=_require_str(obj, "request_id", op=op),
             answer=obj.get("answer"),
         )
+    if op == "event":
+        kind = _require_str(obj, "kind", op=op)
+        event = obj.get("event")
+        if event is None:
+            event = obj.get("params")
+        if event is None:
+            event = obj.get("payload")
+        if not isinstance(event, dict):
+            raise FrameDecodeError("event: field 'event' must be an object")
+        return ActivityEventFrame(kind=kind, event=event)
     if op == "shutdown":
         return ShutdownFrame()
 
@@ -255,6 +272,8 @@ def encode_incoming(frame: IncomingFrame) -> str:
             "request_id": frame.request_id,
             "answer": frame.answer,
         }
+    elif isinstance(frame, ActivityEventFrame):
+        body = {"op": "event", "kind": frame.kind, "event": frame.event}
     elif isinstance(frame, ShutdownFrame):
         body = {"op": "shutdown"}
     elif isinstance(frame, DBRpcReplyFrame):
@@ -465,6 +484,8 @@ class WorkerProtocol:
                     task = asyncio.create_task(self._handler(self, frame))
                     background_tasks.add(task)
                     task.add_done_callback(background_tasks.discard)
+                elif isinstance(frame, ActivityEventFrame):
+                    await self._handler(self, frame)
                 else:
                     # RunCancelFrame / InteractiveResponseFrame complete fast;
                     # awaiting inline keeps ordering deterministic (a cancel
@@ -674,6 +695,18 @@ def _build_default_handler(
                     f"interactive.response: no pending {frame.kind} "
                     f"for request_id={frame.request_id}",
                 )
+        elif isinstance(frame, ActivityEventFrame):
+            if frame.kind != "activity":
+                await proto.emit_log("warn", f"event: unsupported kind={frame.kind!r}")
+                return
+            try:
+                from agent.activity_event_bus import get_default_activity_event_bus
+
+                bus = get_default_activity_event_bus()
+                if bus is not None:
+                    bus.push(frame.event)
+            except Exception as exc:
+                await proto.emit_log("warn", f"activity event route failed: {exc}")
 
     return handler
 
@@ -708,6 +741,10 @@ def _build_default_backend() -> WorkerRunBackend:
 
 
 async def _main_async() -> int:
+    from agent.activity_event_bus import (
+        ActivityEventBus,
+        set_default_activity_event_bus,
+    )
     from tui_gateway.services.worker_db_proxy import (
         WorkerDBProxy,
         set_default_worker_db_proxy,
@@ -719,8 +756,10 @@ async def _main_async() -> int:
 
     db_proxy = WorkerDBProxy(_StdoutJsonRpcWriter())
     rpc_proxy = WorkerRpcProxy(_StdoutJsonRpcWriter())
+    activity_bus = ActivityEventBus()
     set_default_worker_db_proxy(db_proxy)
     set_default_worker_rpc_proxy(rpc_proxy)
+    set_default_activity_event_bus(activity_bus)
     backend: WorkerRunBackend = _build_default_backend()
     responder: WorkerInteractiveResponder = RealInteractiveResponder()
     active_runs: set[str] = set()
@@ -746,6 +785,7 @@ async def _main_async() -> int:
         rpc_proxy.close()
         set_default_worker_db_proxy(None)
         set_default_worker_rpc_proxy(None)
+        set_default_activity_event_bus(None)
         await proto.emit_log("info", "run_worker: exiting")
     return 0
 

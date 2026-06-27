@@ -339,6 +339,12 @@ def _(rid, params: dict) -> dict:
                 "use_strategy_prompt": True,
                 "record_user_task_message": params.get("record_user_task_message") if "record_user_task_message" in params else params.get("recordUserTaskMessage"),
                 "members": members,
+                "dispatch_activity_id": metadata.get("dispatch_activity_id"),
+                "parent_activity_id": metadata.get("parent_activity_id"),
+                "parent_conversation_id": metadata.get("parent_conversation_id"),
+                "parent_scope_key": metadata.get("parent_scope_key"),
+                "parent_hermes_home": metadata.get("parent_hermes_home"),
+                "source": metadata.get("source") or "team_dispatch",
             },
         )
         if isinstance(start_response, dict) and start_response.get("error"):
