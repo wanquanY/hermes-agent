@@ -844,6 +844,8 @@ def _(rid, params: dict) -> dict:
         rid,
         {
             "mission_id": mission_id,
+            "audit_only": True,
+            "auditOnly": True,
             "events": events,
             "last_event_seq": max([int(event.get("seq") or 0) for event in events], default=after_seq),
             "has_more": has_more,
@@ -917,6 +919,8 @@ def _(rid, params: dict) -> dict:
         {
             "mission_id": mission_id,
             "subscription_id": subscription_id,
+            "audit_only": True,
+            "auditOnly": True,
             "events": events,
             "last_event_seq": last_event_seq,
             "has_more": has_more,

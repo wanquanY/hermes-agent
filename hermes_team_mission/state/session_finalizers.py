@@ -71,6 +71,8 @@ class SessionDBTeamMissionFinalizerMixin:
         after_seq: int = 0,
         limit: int = 2000,
     ) -> List[Dict[str, Any]]:
+        # Audit log only; not for timeline render. Render paths consume
+        # run_events for the stored conversation session.
         return _event_log.list_team_mission_events(
             self,
             mission_id,
@@ -89,12 +91,9 @@ class SessionDBTeamMissionFinalizerMixin:
         if not mission_id:
             return []
         after_seq = int(after_seq or 0)
-        # §§5.1 ABI convergence: the canonical team_mission_events log is the
-        # single source of truth for replay. Runtime events are appended to it
-        # at write time (append_team_mission_run_event), so replay and live
-        # share one monotonic per-mission seq domain. The legacy run_events
-        # derived projection (rowid * 1e9 + seq) created a second, incompatible
-        # seq domain and has been removed (INV-1 / single source of truth).
+        # Backward-compatible audit feed only; not for timeline render.
+        # CR-P2.4 makes run_events.seq the authoritative render sequence for
+        # the stored conversation session.
         return self.list_team_mission_events(
             mission_id,
             after_seq=after_seq,

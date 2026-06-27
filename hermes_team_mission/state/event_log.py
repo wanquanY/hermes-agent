@@ -624,6 +624,11 @@ def append_team_mission_event(
     dedupe_key: str,
     source_event: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
+    """Append a Team Mission audit event.
+
+    Audit log only; not for timeline render. User-visible conversation
+    timelines are rendered from run_events for the stored conversation.
+    """
     mission_id = text(mission_id)
     dedupe_key = text(dedupe_key)
     if not mission_id or not dedupe_key or not isinstance(event, dict):
@@ -849,6 +854,10 @@ def list_team_mission_events(
     after_seq: int = 0,
     limit: int = 2000,
 ) -> List[Dict[str, Any]]:
+    """List Team Mission audit events.
+
+    Audit log only; not for timeline render.
+    """
     mission_id = text(mission_id)
     if not mission_id:
         return []

@@ -615,6 +615,63 @@ def _event_run_id(event: Any) -> str:
     return _text(event.get("run_id") or payload.get("run_id") or payload.get("runId"))
 
 
+def _run_event_to_render_message(event: Any) -> dict[str, Any]:
+    if not isinstance(event, dict) or _text(event.get("type")) != "message.complete":
+        return {}
+    payload = _record(event.get("payload"))
+    text = _text(
+        payload.get("text")
+        or payload.get("content")
+        or payload.get("output")
+        or payload.get("final_response")
+        or payload.get("finalResponse")
+    )
+    if not text:
+        return {}
+    run_id = _event_run_id(event)
+    turn_id = _text(event.get("turn_id") or event.get("turnId") or payload.get("turn_id") or payload.get("turnId"))
+    seq = _text(event.get("seq") or payload.get("seq"))
+    participant_id = _event_participant_id(event)
+    metadata = {
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "source_seq": seq,
+        "source": "run_events",
+    }
+    if participant_id:
+        metadata["participant_id"] = participant_id
+        metadata["participantId"] = participant_id
+    message_id = _text(payload.get("message_id") or payload.get("messageId")) or (
+        f"run-event:{run_id}:{seq}" if run_id and seq else ""
+    )
+    message = {
+        "id": message_id,
+        "message_id": message_id,
+        "messageId": message_id,
+        "role": _text(payload.get("role")) or "assistant",
+        "content": text,
+        "text": text,
+        "timestamp": event.get("timestamp") or payload.get("timestamp") or 0,
+        "metadata": metadata,
+    }
+    if participant_id:
+        message["participant_id"] = participant_id
+        message["participantId"] = participant_id
+    return message
+
+
+def _team_render_messages_from_run_events(run_events: list[Any]) -> list[dict[str, Any]]:
+    messages = [
+        message
+        for event in sorted(
+            [event for event in run_events if isinstance(event, dict)],
+            key=lambda item: int(item.get("seq") or 0),
+        )
+        if (message := _run_event_to_render_message(event))
+    ]
+    return _normalize_team_render_messages(messages, run_events=run_events)
+
+
 def _team_snapshot_active_run_ids(conversation: dict[str, Any], mission: dict[str, Any]) -> set[str]:
     active = {
         _text(conversation.get("active_run_id") or conversation.get("activeRunId")),
@@ -695,6 +752,11 @@ def _team_conversation_snapshot(
     if not messages:
         messages = list(graph.get("recent_messages") or graph.get("recentMessages") or [])
     raw_run_events = list(page.get("runEvents") or []) if isinstance(page, dict) else []
+    if not messages:
+        # CR-P2.4: team timeline rendering must not fall back to
+        # team_mission_events. If no durable message rows exist yet, derive
+        # renderable assistant messages from authoritative run_events.seq.
+        messages = _team_render_messages_from_run_events(raw_run_events)
     messages = _normalize_team_render_messages(messages, run_events=raw_run_events)
     page_info = (
         page.get("pageInfo")

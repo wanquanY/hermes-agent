@@ -1002,10 +1002,15 @@ class SessionDBRunMixin:
         runtime_scope_key = _event_runtime_scope_key(frame, stable)
         frame["runtime_scope_key"] = runtime_scope_key
         timestamp = float(frame.get("timestamp") or time.time())
-        seq = int(frame.get("seq") or 0)
-        if seq <= 0:
-            seq = self.next_run_event_seq(stable)
-            frame["seq"] = seq
+        requested_seq = int(frame.get("seq") or 0)
+        authoritative_next_seq = self.next_run_event_seq(stable)
+        # run_events.seq is the authoritative timeline sequence for a stored
+        # conversation. Runtime frames may carry source-side seq values, but
+        # they must never collide with or move behind the persisted run_events
+        # domain for this stored_session_id.
+        seq = requested_seq if requested_seq >= authoritative_next_seq else authoritative_next_seq
+        assert seq >= authoritative_next_seq
+        frame["seq"] = seq
         terminal_status = _event_status(event_type, payload)
         owner_metadata = frame.get("owner_metadata")
         owner_metadata = owner_metadata if isinstance(owner_metadata, dict) else {}
