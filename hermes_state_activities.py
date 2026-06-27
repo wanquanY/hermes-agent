@@ -8,9 +8,19 @@ PRs.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from typing import Any, Dict, List, Optional
+
+_log = logging.getLogger(__name__)
+
+_ACTIVITY_STATUS_ALLOWED_PREVIOUS = {
+    "running": ("pending",),
+    "completed": ("pending", "running"),
+    "failed": ("pending", "running"),
+    "cancelled": ("pending", "running"),
+}
 
 
 def _text(value: Any) -> str:
@@ -136,13 +146,35 @@ class ActivitiesMixin:
             assignments.append("completed_at = ?")
             params.append(float(completed_at))
         params.append(normalized_activity_id)
+        allowed_previous = _ACTIVITY_STATUS_ALLOWED_PREVIOUS.get(normalized_status)
 
         def _do(conn: sqlite3.Connection) -> bool:
+            where = "activity_id = ?"
+            update_params = list(params)
+            if allowed_previous is not None:
+                placeholders = ", ".join("?" for _ in allowed_previous)
+                where = f"{where} AND status IN ({placeholders})"
+                update_params.extend(allowed_previous)
             cursor = conn.execute(
-                f"UPDATE activities SET {', '.join(assignments)} WHERE activity_id = ?",
-                tuple(params),
+                f"UPDATE activities SET {', '.join(assignments)} WHERE {where}",
+                tuple(update_params),
             )
-            return cursor.rowcount > 0
+            if cursor.rowcount > 0:
+                return True
+            if allowed_previous is not None:
+                row = conn.execute(
+                    "SELECT status FROM activities WHERE activity_id = ?",
+                    (normalized_activity_id,),
+                ).fetchone()
+                if row is not None:
+                    current = row["status"] if isinstance(row, sqlite3.Row) else row[0]
+                    _log.warning(
+                        "activity status transition rejected activity_id=%s current=%s requested=%s",
+                        normalized_activity_id,
+                        current,
+                        normalized_status,
+                    )
+            return False
 
         return self._execute_write(_do)  # type: ignore[attr-defined]
 

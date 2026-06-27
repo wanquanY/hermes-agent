@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from hermes_state import SessionDB
 from tui_gateway import server
+from tui_gateway.services import worker_runtime
 
 
 def _db(tmp_path: Path) -> SessionDB:
@@ -90,18 +92,64 @@ def test_activity_cancel_marks_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    sent: list[tuple[str, str, Any]] = []
+
+    class _Router:
+        def lookup_activity_run(self, activity_id: str) -> Any:
+            assert activity_id == "act-1"
+            return SimpleNamespace(
+                run_id="run-1",
+                scope_key="profile:worker",
+                conversation_id="conv-1",
+            )
+
+    class _Supervisor:
+        async def send(self, scope_key: str, conversation_id: str, frame: Any) -> bool:
+            sent.append((scope_key, conversation_id, frame))
+            return True
+
     db = _db(tmp_path)
     db.create_activity(activity_id="act-1", conversation_id="conv-1", kind="agent_dispatch")
     db.update_activity_status("act-1", "running", started_at=10.0)
     monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(worker_runtime, "worker_frame_router", lambda: _Router())
+    monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: _Supervisor())
 
     response = _call("activity.cancel", {"activity_id": "act-1"})
 
-    assert response["result"] == {"ok": True}
+    assert response["result"] == {"ok": True, "worker_signaled": True}
+    assert sent[0][0:2] == ("profile:worker", "conv-1")
+    assert sent[0][2].__class__.__name__ == "RunCancelFrame"
+    assert sent[0][2].run_id == "run-1"
     row = db.get_activity("act-1")
     assert row is not None
     assert row["status"] == "cancelled"
     assert row["completed_at"] is not None
+
+
+def test_activity_cancel_terminal_activity_does_not_signal_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signaled = False
+
+    class _Router:
+        def lookup_activity_run(self, activity_id: str) -> Any:
+            nonlocal signaled
+            signaled = True
+            return None
+
+    db = _db(tmp_path)
+    db.create_activity(activity_id="act-1", conversation_id="conv-1", kind="agent_dispatch")
+    db.mark_activity_completed("act-1", result_summary="Done", result_json={})
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(worker_runtime, "worker_frame_router", lambda: _Router())
+
+    response = _call("activity.cancel", {"activity_id": "act-1"})
+
+    assert response["result"] == {"ok": False, "reason": "already_terminal"}
+    assert signaled is False
+    assert db.get_activity("act-1")["status"] == "completed"
 
 
 def test_activity_mark_read_sets_read_at_timestamp(

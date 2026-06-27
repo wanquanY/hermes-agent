@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 import threading
 import json
+import time
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
@@ -66,6 +67,7 @@ class RunInfo:
     in its frame. Populated by ``record_run_start`` from
     ``prompt.submit`` at run-create time."""
 
+    run_id: str
     scope_key: str
     conversation_id: str
     stored_session_id: str
@@ -139,6 +141,7 @@ class WorkerFrameRouter:
             return
         with self._lock:
             self._runs[run_id] = RunInfo(
+                run_id=run_id,
                 scope_key=str(scope_key or ""),
                 conversation_id=str(conversation_id or stored_session_id or ""),
                 stored_session_id=str(stored_session_id or ""),
@@ -172,6 +175,7 @@ class WorkerFrameRouter:
             info = self._runs.get(run_id)
             return RunInfo(
                 scope_key=info.scope_key,
+                run_id=run_id,
                 conversation_id=info.conversation_id,
                 stored_session_id=info.stored_session_id,
                 turn_id=info.turn_id,
@@ -183,6 +187,31 @@ class WorkerFrameRouter:
                 parent_hermes_home=info.parent_hermes_home,
                 last_message_event=dict(info.last_message_event or {}) if info.last_message_event else None,
             ) if info is not None else None
+
+    def lookup_activity_run(self, activity_id: str) -> Optional[RunInfo]:
+        """Resolve a dispatch activity to its currently active worker run."""
+        normalized_activity_id = str(activity_id or "").strip()
+        if not normalized_activity_id:
+            return None
+        with self._lock:
+            for info in self._runs.values():
+                if info.dispatch_activity_id != normalized_activity_id:
+                    continue
+                return RunInfo(
+                    scope_key=info.scope_key,
+                    run_id=str(getattr(info, "run_id", "") or ""),
+                    conversation_id=info.conversation_id,
+                    stored_session_id=info.stored_session_id,
+                    turn_id=info.turn_id,
+                    run_context_json=info.run_context_json,
+                    dispatch_activity_id=info.dispatch_activity_id,
+                    activity_kind=info.activity_kind,
+                    parent_scope_key=info.parent_scope_key,
+                    parent_conversation_id=info.parent_conversation_id,
+                    parent_hermes_home=info.parent_hermes_home,
+                    last_message_event=dict(info.last_message_event or {}) if info.last_message_event else None,
+                )
+        return None
 
     # ── WorkerSupervisor callbacks ──────────────────────────────────
 
@@ -553,43 +582,39 @@ class WorkerFrameRouter:
                 "usage": _usage_from_message(last_message),
                 "run_id": frame.run_id,
             }
+            updated_ok = False
             if status == "completed":
-                db.mark_activity_completed(
+                updated_ok = db.mark_activity_completed(
                     activity_id,
                     result_summary=result_summary,
                     result_json=result_json,
                 )
             elif status == "failed":
-                db.mark_activity_failed(
+                updated_ok = db.update_activity_status(
                     activity_id,
-                    error_message=result_summary or frame.message or "worker failed",
+                    "failed",
+                    result_summary=result_summary or frame.message or "worker failed",
+                    result_json=result_json,
+                    completed_at=time.time(),
                 )
-                try:
-                    db.update_activity_status(
-                        activity_id,
-                        "failed",
-                        result_json=result_json,
-                    )
-                except Exception:
-                    pass
             elif status == "cancelled":
-                db.mark_activity_cancelled(activity_id)
-                try:
-                    db.update_activity_status(
-                        activity_id,
-                        "cancelled",
-                        result_summary=result_summary or frame.message or "cancelled",
-                        result_json=result_json,
-                    )
-                except Exception:
-                    pass
+                updated_ok = db.update_activity_status(
+                    activity_id,
+                    "cancelled",
+                    result_summary=result_summary or frame.message or "cancelled",
+                    result_json=result_json,
+                    completed_at=time.time(),
+                )
             updated = db.get_activity(activity_id) or activity
+            persisted_status = str(updated.get("status") or status)
+            event_result_summary = result_summary if updated_ok else str(updated.get("result_summary") or "")
+            event_result_json = result_json if updated_ok else {}
             event = _activity_event_from_row(
                 updated,
-                status=status,
+                status=persisted_status,
                 run_id=frame.run_id,
-                result_summary=result_summary,
-                result_json=result_json,
+                result_summary=event_result_summary,
+                result_json=event_result_json,
             )
             try:
                 self._publish_event(_activity_ws_frame(event), persist=False)

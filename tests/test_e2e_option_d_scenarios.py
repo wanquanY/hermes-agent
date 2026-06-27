@@ -436,6 +436,45 @@ async def test_e2e_async_agent_dispatch_round_trip(harness, tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_e2e_late_worker_completion_after_activity_cancel_stays_cancelled(harness) -> None:
+    harness.db.create_activity(
+        activity_id="act-cancel",
+        conversation_id="conv-cancel-parent",
+        kind="agent_dispatch",
+    )
+    assert harness.db.update_activity_status("act-cancel", "running", started_at=100.0)
+    harness.router.record_run_start(
+        scope_key="profile:worker",
+        conversation_id="conv-cancel-child",
+        run_id="run-cancel",
+        stored_session_id="conv-cancel-child",
+        turn_id="turn-cancel",
+        dispatch_activity_id="act-cancel",
+        activity_kind="agent_dispatch",
+        parent_scope_key="conv-cancel-parent",
+        parent_conversation_id="conv-cancel-parent",
+    )
+
+    assert harness.db.mark_activity_cancelled("act-cancel")
+    await _complete_dispatched_run(
+        harness.db,
+        harness.router,
+        scope_key="profile:worker",
+        conversation_id="conv-cancel-child",
+        run_id="run-cancel",
+        stored_session_id="conv-cancel-child",
+        text="Late worker completion must not bounce the UI.",
+    )
+
+    activity = harness.db.get_activity("act-cancel")
+    assert activity["status"] == "cancelled"
+    assert activity["result_summary"] is None
+    assert harness.published_events[-1]["payload"]["type"] == "activity.cancelled"
+    assert harness.published_events[-1]["payload"]["payload"]["status"] == "cancelled"
+    assert harness.supervisor.sent_activity_events[-1][2].event["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_e2e_async_team_dispatch_round_trip(harness) -> None:
     from tui_gateway.methods.dispatch import dispatch_team_async
 

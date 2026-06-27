@@ -294,6 +294,17 @@ class WorkerSupervisor:
                 _log.warning("worker env update failed pid=%s: %s", pid, exc)
         return sent
 
+    async def cancel_run(self, scope_key: str, conversation_id: str, run_id: str) -> bool:
+        """Gracefully ask the worker that owns ``run_id`` to cancel it."""
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return False
+        return await self.send(
+            scope_key,
+            conversation_id,
+            RunCancelFrame(run_id=normalized_run_id),
+        )
+
     async def shutdown(self, scope_key: str, conversation_id: str = "") -> bool:
         async with self._lock:
             worker = self._workers.pop((scope_key, conversation_id or ""), None)
