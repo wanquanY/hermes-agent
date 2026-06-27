@@ -103,6 +103,36 @@ def setup_worker_environment() -> None:
         _log.info("[agent-runner] worker environment set up")
 
 
+def _run_context_from_frame(frame: RunStartFrame) -> Any:
+    params = frame.params if isinstance(frame.params, dict) else {}
+    payload = params.get("run_context_json") or params.get("runContextJson")
+    if payload is None:
+        return None
+    try:
+        from hermes_team_mission.domain.run_context import RunContext
+
+        return RunContext.from_payload(payload)
+    except Exception as exc:
+        _log.warning(
+            "[agent-runner] run_context_json parse failed stored_session=%s: %s",
+            frame.stored_session_id,
+            exc,
+        )
+        return None
+
+
+def _should_project_member_perspective(run_context: Any) -> bool:
+    if run_context is None:
+        return False
+    activity_kind = str(getattr(run_context, "activity_kind", "") or "").strip()
+    participant_id = str(getattr(run_context, "participant_id", "") or "").strip()
+    if activity_kind == "member_chat":
+        return True
+    if activity_kind == "mission" and not participant_id.startswith("leader:"):
+        return True
+    return False
+
+
 def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
     """Materialize a ``_sessions[sid]`` record for the run.
 
@@ -227,6 +257,23 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
             full_history = list(
                 db.get_messages_as_conversation(frame.stored_session_id)
             )
+            run_context = _run_context_from_frame(frame)
+            if _should_project_member_perspective(run_context):
+                try:
+                    participants = db.list_conversation_participants(  # type: ignore[attr-defined]
+                        frame.stored_session_id
+                    )
+                except Exception:
+                    participants = []
+                from hermes_team_mission.state.session_views import (
+                    transform_to_member_perspective,
+                )
+
+                full_history = transform_to_member_perspective(
+                    full_history,
+                    viewing_participant_id=run_context.participant_id,
+                    participants=participants,
+                )
         except Exception:
             _log.warning(
                 "[agent-runner] history hydration failed stored_session=%s",

@@ -4,6 +4,90 @@ from __future__ import annotations
 from .session_common import *
 
 
+def _message_metadata(message: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = message.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _participant_display_name(
+    participant_id: str,
+    participant_by_id: Dict[str, Dict[str, Any]],
+    message: Dict[str, Any],
+    metadata: Dict[str, Any],
+) -> str:
+    participant = participant_by_id.get(participant_id) or {}
+    for source in (participant, metadata, message):
+        for key in ("display_name", "speaker_name", "name", "role"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def transform_to_member_perspective(
+    messages: List[Dict[str, Any]],
+    viewing_participant_id: str,
+    participants: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Project shared conversation history into one member's speaker view.
+
+    The shared conversation stores every agent reply as ``assistant``. A
+    member worker must only see its own past replies as assistant turns; other
+    agents' replies are observed speech and must be replayed as user turns.
+    """
+    viewing = _text(viewing_participant_id)
+    participant_by_id = {
+        _text(participant.get("participant_id")): participant
+        for participant in (participants or [])
+        if isinstance(participant, dict) and _text(participant.get("participant_id"))
+    }
+    projected: List[Dict[str, Any]] = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+
+        role = _text(message.get("role"))
+        if role == "user":
+            projected.append(message)
+            continue
+        if role != "assistant":
+            projected.append(message)
+            continue
+
+        metadata = _message_metadata(message)
+        speaker_participant_id = _text(
+            metadata.get("participant_id") or message.get("participant_id")
+        )
+        if speaker_participant_id and speaker_participant_id == viewing:
+            projected.append(message)
+            continue
+
+        speaker_name = ""
+        if speaker_participant_id:
+            speaker_name = _participant_display_name(
+                speaker_participant_id,
+                participant_by_id,
+                message,
+                metadata,
+            )
+        if not speaker_name:
+            speaker_name = "未知发言者"
+
+        transformed_metadata = dict(metadata)
+        transformed_metadata["transformed_from_role"] = "assistant"
+        transformed_metadata["transformed_speaker_pid"] = speaker_participant_id
+        transformed_metadata["transformed_speaker_name"] = speaker_name
+
+        transformed = {
+            **message,
+            "role": "user",
+            "content": f"[{speaker_name}] {str(message.get('content') or '')}",
+            "metadata": transformed_metadata,
+        }
+        projected.append(transformed)
+    return projected
+
+
 class SessionDBTeamMissionViewMixin:
     def get_team_mission_graph(self, mission_id: str) -> Dict[str, Any]:
         mission_id = str(mission_id or "").strip()
@@ -277,4 +361,3 @@ class SessionDBTeamMissionViewMixin:
             "message_page_info": message_page.get("pageInfo") or {},
             "messagePageInfo": message_page.get("pageInfo") or {},
         }
-
