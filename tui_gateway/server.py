@@ -494,14 +494,9 @@ atexit.register(_shutdown_sessions)
 def _get_db():
     """Return the request-scoped control-plane ``SessionDB``.
 
-    The invariant is "one canonical DB per runtime/control scope", not
-    "always the process default DB". Worker subprocesses set
-    ``DOVIE_HERMES_CONTROL_HOME`` so their control-plane writes land in the
-    same DB as the main gateway scope that spawned them. Main-gateway requests
-    use the active profile context pushed by ``handle_request``; profile-scoped
-    reads such as ``session.list`` and ``team_mission.conversation.list`` must
-    therefore open the ``dovie_profile.hermesHomePath`` DB instead of silently
-    falling back to the process default home.
+    Option D keeps one canonical control-plane DB: the Hermes root
+    ``state.db``. ``DOVIE_HERMES_CONTROL_HOME`` remains only as an explicit
+    test override for that control-plane home; production should not set it.
     """
     return _get_control_plane_db()
 
@@ -529,20 +524,14 @@ def _is_control_plane_stable_session_id(stable_session_id: str) -> bool:
 
 def _get_control_plane_db(*, use_active_profile: bool = True):
     global _db, _db_error
-    # Worker processes set DOVIE_HERMES_CONTROL_HOME at spawn so they can route
-    # control-plane reads/writes (run state, session_index,
-    # team_mission_conversations) back to the SAME db the main gateway owns.
-    # Without this, a worker spawned on a member-chat scope looks up its
-    # stored_session_id in its OWN profile db, misses the row that the main
-    # gateway created (db.create_session in _submit_message_to_member), and the
-    # eventual run.submit fails with 4007 "session not found".
+    # ``use_active_profile`` is retained for older callers, but Option D makes
+    # the control plane a root-level singleton. ``DOVIE_HERMES_CONTROL_HOME``
+    # is only a testing override for that control-plane home; production should
+    # leave it unset so all control reads/writes use root ``state.db``.
     control_home_env = str(os.environ.get("DOVIE_HERMES_CONTROL_HOME") or "").strip()
     process_home = _resolve_home_path(_hermes_home, fallback=_hermes_home)
     if control_home_env:
         control_home = _resolve_home_path(control_home_env, fallback=control_home_env)
-    elif use_active_profile:
-        active_home = _active_hermes_home()
-        control_home = _resolve_home_path(active_home, fallback=process_home)
     else:
         control_home = process_home
 
@@ -566,12 +555,8 @@ def _get_control_plane_db(*, use_active_profile: bool = True):
         _db_error = result.default_error
         return result.db
 
-    # Worker path: control-plane lookups must go to the MAIN gateway's db, not
-    # this worker's own profile db. The shared session_store helper would still
-    # land on the wrong db here — its `active_home == default_home` branch
-    # calls SessionDB() with NO db_path, and SessionDB defaults db_path off the
-    # process's get_hermes_home() (= the worker's profile home). Cache + open
-    # the control-plane SessionDB explicitly so the path is correct.
+    # Testing override path: open the requested control-plane DB explicitly.
+    # This must never be selected from the active profile context.
     home_key = str(control_home)
     cached = _db_by_home.get(home_key)
     if cached is not None:

@@ -1,7 +1,11 @@
 # ruff: noqa: F401,F403,F405,F821,ARG001
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from .common import *
+from hermes_state.profile_dir import resolve_default_agent_dir
 from hermes_state_participants import leader_participant_id, member_participant_id
 from hermes_team_mission.domain.run_context import RunContext
 
@@ -16,7 +20,7 @@ def _home_from_dovie_profile(dovie_profile: dict) -> str:
         ).strip()
         if home:
             return home
-    return str(get_hermes_home())
+    return str(resolve_default_agent_dir(Path(get_hermes_home())))
 
 
 def _home_from_profile_params(profile_params: dict) -> str:
@@ -39,6 +43,10 @@ def _home_from_profile_params(profile_params: dict) -> str:
 
 def _run_context_json(run_context: RunContext) -> str:
     return json.dumps(run_context.to_payload(), ensure_ascii=False)
+
+
+def _control_plane_home() -> str:
+    return str(os.getenv("DOVIE_HERMES_CONTROL_HOME") or get_hermes_home()).strip()
 
 
 def _target_member_id_from_params(params: dict) -> str:
@@ -359,13 +367,14 @@ def _submit_message_to_member(
         pass
 
     member_run_home = _home_from_dovie_profile(dovie_profile)
+    control_home = _control_plane_home()
     run_context = RunContext(
         conversation_session_id=conversation_session_id,
         participant_id=member_participant_id(target_member_id),
         activity_id="member_chat",
         activity_kind="member_chat",
         execution_scope_key=member_scope,
-        control_home=member_run_home,
+        control_home=control_home,
         execution_home=member_run_home,
     )
 
@@ -659,13 +668,14 @@ def _(rid, params: dict) -> dict:
     ).strip() if isinstance(identity_mission, dict) else str(mission_id or "").strip()
     leader_activity_kind = "mission" if activity_mission_id else "chat"
     leader_run_home = _home_from_profile_params(profile_params)
+    control_home = _control_plane_home()
     run_context = RunContext(
         conversation_session_id=conversation_session_id,
         participant_id=leader_participant_id(conversation_id),
         activity_id=activity_mission_id or "chat",
         activity_kind=leader_activity_kind,
         execution_scope_key=runtime_scope_key,
-        control_home=leader_run_home,
+        control_home=control_home,
         execution_home=leader_run_home,
     )
     submit_params = {

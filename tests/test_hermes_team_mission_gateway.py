@@ -773,8 +773,10 @@ def test_team_mission_message_submit_derives_conversation_title_from_first_user_
         "activity_kind": "chat",
         "execution_scope_key": "team:conversation-1:leader-conversation",
         "control_home": run_context["control_home"],
-        "execution_home": run_context["control_home"],
+        "execution_home": run_context["execution_home"],
     }
+    assert Path(run_context["execution_home"]).parts[-2:] == ("profiles", "default")
+    assert run_context["execution_home"] != run_context["control_home"]
 
 
 def test_team_mission_message_submit_rejects_session_id_as_conversation_identity(monkeypatch, tmp_path: Path):
@@ -867,9 +869,10 @@ def test_team_mission_member_submit_carries_run_context_json(monkeypatch, tmp_pa
         "activity_id": "member_chat",
         "activity_kind": "member_chat",
         "execution_scope_key": "member-chat:conversation-1:member-builder",
-        "control_home": str(tmp_path / "builder-home"),
+        "control_home": run_context["control_home"],
         "execution_home": str(tmp_path / "builder-home"),
     }
+    assert run_context["control_home"] != run_context["execution_home"]
 
 
 def test_team_mission_message_submit_conversation_only_does_not_bind_previous_active_mission(monkeypatch, tmp_path: Path):
@@ -1494,9 +1497,10 @@ def test_team_mission_message_submit_forwards_leader_profile_context(monkeypatch
         "activity_id": "mission-1",
         "activity_kind": "mission",
         "execution_scope_key": "team:mission-1:leader-conversation",
-        "control_home": str(tmp_path / "leader-home"),
+        "control_home": run_context["control_home"],
         "execution_home": str(tmp_path / "leader-home"),
     }
+    assert run_context["control_home"] != run_context["execution_home"]
 
 
 def test_team_mission_message_submit_keeps_team_scope_out_of_profile_owner_check(monkeypatch, tmp_path: Path):

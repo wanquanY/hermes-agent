@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_constants import get_hermes_home
+from hermes_state.profile_dir import resolve_default_agent_dir
 
 _DB_SPECS = (
     {
@@ -79,7 +80,7 @@ def _runtime_homes(hermes_home_root: Path) -> list[dict[str, str]]:
             "scope_id": scope_id,
         }
 
-    add(root, "default", "agent-default")
+    add(resolve_default_agent_dir(root), "default", "agent-default")
     for parent, scope_kind in (
         (root / "profiles", "profile"),
         (root / ".dovie" / "versions", "legacy_profile_version"),
@@ -528,10 +529,12 @@ def _resolve_profile_runtime_home(*, root: Path, hermes_home_path: str | Path | 
         return candidate
     scope = _text(runtime_scope_key)
     if scope.startswith("profile:"):
+        if scope.split(":", 1)[1] in {"agent-default", "default"}:
+            return resolve_default_agent_dir(root)
         return root / "profiles" / scope.split(":", 1)[1]
     if scope.startswith("draft:"):
         return root / "drafts" / scope.split(":", 1)[1]
-    return root
+    return resolve_default_agent_dir(root)
 
 
 def rebase_team_mission_workspace_paths(*, old_path: str, new_path: str, db: Any | None = None) -> dict[str, Any]:

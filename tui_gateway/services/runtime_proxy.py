@@ -26,7 +26,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from hermes_constants import get_hermes_home
+from hermes_state.profile_dir import resolve_default_agent_dir
 
 _log = logging.getLogger(__name__)
 
@@ -137,6 +141,17 @@ class RuntimeScope:
         return bool(self.agent_profile_id or self.runtime_scope_key)
 
 
+def _default_agent_home_for_scope(profile_id: str, scope_key: str) -> str:
+    if profile_id not in {"", "agent-default", "default"}:
+        return ""
+    if scope_key not in {"", "profile:agent-default", "profile:default"}:
+        return ""
+    try:
+        return str(resolve_default_agent_dir(Path(get_hermes_home())))
+    except Exception:
+        return ""
+
+
 def runtime_scope_from_params(params: dict[str, Any]) -> RuntimeScope:
     profile = params.get("dovie_profile")
     if not isinstance(profile, dict):
@@ -164,6 +179,8 @@ def runtime_scope_from_params(params: dict[str, Any]) -> RuntimeScope:
         or params.get("hermes_home_path")
         or ""
     ).strip()
+    if not hermes_home:
+        hermes_home = _default_agent_home_for_scope(profile_id, scope_key)
     return RuntimeScope(
         agent_profile_id=profile_id,
         runtime_scope_key=scope_key,
