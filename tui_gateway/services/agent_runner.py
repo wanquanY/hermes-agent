@@ -27,9 +27,6 @@ hazard the Plan agent investigation surfaced
 Phase 5c.2 deliberately leaves several follow-ups for Phase 5d / 6:
 - MCP discovery (``discover_mcp_tools``) is not called — non-MCP
   tools still work; MCP-using agents will see a smaller toolset.
-- The team-mission approval observer is not installed inside the
-  worker — sidebar approval indicators for team-mission member runs
-  won't update via this path.
 - Cron ticker is not started here (lives in the main sidecar).
 """
 

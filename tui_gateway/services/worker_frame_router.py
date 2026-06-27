@@ -51,6 +51,12 @@ _log = logging.getLogger(__name__)
 
 
 _INTERACTIVE_KINDS = frozenset({"clarify", "approval", "secret", "sudo"})
+_CLARIFY_APPROVAL_EVENT_STATES: dict[str, tuple[str, bool]] = {
+    "clarify.request": ("clarify", True),
+    "clarify.resolved": ("clarify", False),
+    "approval.request": ("approval", True),
+    "approval.resolved": ("approval", False),
+}
 
 
 @dataclass
@@ -210,6 +216,7 @@ class WorkerFrameRouter:
                 "[worker-router] publish_event failed scope=%s type=%s",
                 scope_key, params.get("type"),
             )
+        self._project_clarify_approval_state(params)
 
     async def on_interactive_request(
         self,
@@ -424,6 +431,37 @@ class WorkerFrameRouter:
             }
 
     # ── internals ────────────────────────────────────────────────────
+
+    def _project_clarify_approval_state(self, params: dict[str, Any]) -> None:
+        event_type = str(params.get("event_type") or params.get("type") or "")
+        event_state = _CLARIFY_APPROVAL_EVENT_STATES.get(event_type)
+        if event_state is None:
+            return
+        _kind_label, present = event_state
+        session_key = str(
+            params.get("stored_session_id")
+            or params.get("session_id")
+            or params.get("session_key")
+            or ""
+        ).strip()
+        if not session_key:
+            return
+        try:
+            from hermes_team_mission.runtime.approval_observer import (
+                project_clarify_or_approval_state,
+            )
+
+            project_clarify_or_approval_state(
+                session_key,
+                present=present,
+                source_event_type=event_type,
+            )
+        except Exception as exc:
+            _log.warning(
+                "[worker-router] clarify/approval projection failed event_type=%s: %s",
+                event_type,
+                exc,
+            )
 
     def _infer_stored_session_for_scope(self, scope_key: str, conversation_id: str) -> str:
         """Best-effort: when an interactive.request arrives without an

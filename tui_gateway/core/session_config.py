@@ -175,11 +175,8 @@ def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
     # This is THE choke point for every blocking user-input prompt in Dovie:
     # clarify.request, sudo.request, secret.request, approval.request etc.
     # Dovie's tool callbacks (see tui_gateway/services/tool_events.py) wire
-    # the agent's clarify_callback to ``_block(...)`` instead of the legacy
-    # ``tools.clarify_gateway.register`` — so the previous observer that
-    # listened on ``clarify_gateway._notify_state_change`` never saw a
-    # Dovie clarify and the sidebar stayed on running spinner the whole
-    # time the composer was actually blocking.
+    # the agent's clarify_callback to ``_block(...)`` instead of the
+    # worker event-stream path handled by ``WorkerFrameRouter``.
     #
     # Projecting from here covers every Dovie blocking prompt with one
     # write. Best-effort: any DB issue must NOT alter the block timing.
@@ -195,10 +192,9 @@ def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
 
 def _project_block_state(sid: str, *, present: bool) -> None:
     """Write ``waiting_approval`` to every session_index row the agent's
-    blocking-prompt ``sid`` resolves to. Mirrors what
-    ``team_mission_approval_observer`` does for the legacy
-    ``tools.clarify_gateway`` / ``tools.approval`` paths — but for the
-    Dovie-native ``_block`` mechanism.
+    blocking-prompt ``sid`` resolves to. Mirrors the event-stream
+    clarify/approval projection path for the Dovie-native ``_block``
+    mechanism.
 
     The agent's ``sid`` here is the gateway's INTERNAL 8-char hex id
     (e.g. ``1cf7689d``), NOT the conversation's stored_session_id

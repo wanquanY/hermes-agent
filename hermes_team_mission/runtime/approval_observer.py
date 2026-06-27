@@ -1,19 +1,9 @@
-"""Bridges in-process approval/clarify state-change events from
-``tools.approval`` and ``tools.clarify_gateway`` to a team mission conversation
-status projection refresh.
+"""Project clarify/approval events onto sidebar pending state.
 
-Without this bridge, the sidebar only learned about *plan-level* approval gates
-(approval_gate nodes in the mission graph). Member-node tool approvals and
-clarify requests live entirely in process memory and never reached the
-``team_mission.conversation.status`` event stream, so the sidebar showed
-"running" the whole time the composer was actually blocking on the user.
-
-The state-change observers fire on (session_key, present) transitions. We map
-the session_key back to a team mission conversation by inspecting
-``team_mission_run_bindings`` and ``team_mission_conversations.stable_session_id``.
-If we find a hit, we ask the DB to append a fresh conversation.status event so
-the supervisor relays it to the FE. Best-effort: any error during the bridge
-must not break the approval/clarify flow.
+Worker subprocesses report clarify and approval transitions through the
+runtime event stream. The main-process worker frame router calls the public
+projection helper here after publishing those events, so sidebar state is
+derived from the same cross-process channel that renders the request cards.
 """
 
 from __future__ import annotations
@@ -23,74 +13,6 @@ import threading
 from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
-_install_lock = threading.Lock()
-_installed = False
-
-
-def install() -> None:
-    """Register state-change observers with approval + clarify gateways.
-
-    Idempotent — safe to call multiple times (e.g. on sidecar restart). Both
-    observers funnel through the same projection refresh path.
-    """
-    global _installed
-    # Belt + suspenders: write to stderr too. setup_logging() (which attaches
-    # the agent.log file handler) is only called when the first AIAgent
-    # initializes — install() runs much earlier from main_async, so any
-    # logging.warning here is silently dropped on the floor. Stderr always
-    # reaches the sidecar's stdout/err console, so we see the install result
-    # regardless of when logging gets set up.
-    import sys as _sys
-    def _say(msg: str) -> None:
-        try:
-            print(msg, file=_sys.stderr, flush=True)
-        except Exception:
-            pass
-        try:
-            _log.warning(msg)
-        except Exception:
-            pass
-
-    with _install_lock:
-        if _installed:
-            _say("[doxie-approval-observer] install skipped (already installed)")
-            return
-        approval_ok = False
-        clarify_ok = False
-        try:
-            from tools import approval as _approval_module
-        except Exception as exc:
-            _say(f"[doxie-approval-observer] tools.approval import FAILED: {exc}")
-            _approval_module = None
-        try:
-            from tools import clarify_gateway as _clarify_module
-        except Exception as exc:
-            _say(f"[doxie-approval-observer] tools.clarify_gateway import FAILED: {exc}")
-            _clarify_module = None
-        if _approval_module is not None and hasattr(_approval_module, "register_state_change_observer"):
-            try:
-                _approval_module.register_state_change_observer(_on_approval_state_change)
-                approval_ok = True
-            except Exception as exc:
-                _say(f"[doxie-approval-observer] approval register FAILED: {exc}")
-        else:
-            _say(
-                f"[doxie-approval-observer] approval module missing register_state_change_observer (module={_approval_module})"
-            )
-        if _clarify_module is not None and hasattr(_clarify_module, "register_state_change_observer"):
-            try:
-                _clarify_module.register_state_change_observer(_on_clarify_state_change)
-                clarify_ok = True
-            except Exception as exc:
-                _say(f"[doxie-approval-observer] clarify register FAILED: {exc}")
-        else:
-            _say(
-                f"[doxie-approval-observer] clarify module missing register_state_change_observer (module={_clarify_module})"
-            )
-        _installed = True
-        _say(
-            f"[doxie-approval-observer] install done approval_ok={approval_ok} clarify_ok={clarify_ok}"
-        )
 
 
 def _stderr_log(msg: str) -> None:
@@ -106,19 +28,13 @@ def _stderr_log(msg: str) -> None:
         pass
 
 
-def _on_approval_state_change(session_key: str, present: bool) -> None:
-    _stderr_log(f"[doxie-approval-observer] approval state-change session_key={session_key} present={present}")
-    _project_state(session_key, present=present, source_event_type="approval.request" if present else "approval.resolved")
-
-
-def _on_clarify_state_change(session_key: str, present: bool) -> None:
-    _stderr_log(f"[doxie-approval-observer] clarify state-change session_key={session_key} present={present}")
-    _project_state(session_key, present=present, source_event_type="clarify.request" if present else "clarify.resolved")
+def project_clarify_or_approval_state(session_key: str, *, present: bool, source_event_type: str) -> None:
+    """Public: called by worker_frame_router on clarify.* / approval.* events."""
+    _project_state(session_key, present=present, source_event_type=source_event_type)
 
 
 def _project_state(session_key: str, *, present: bool, source_event_type: str) -> None:
-    """Project an in-process tool-approval / clarify state-change onto the
-    canonical sidebar state.
+    """Project a tool-approval / clarify event onto the canonical sidebar state.
 
     Two writes (both best-effort, neither blocks/breaks the source flow):
 

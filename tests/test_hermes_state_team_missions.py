@@ -3679,52 +3679,52 @@ def test_conversation_runtime_summary_includes_in_process_clarify(tmp_path: Path
         _clarify_module.clear_session(leader_session_key)
 
 
-def test_approval_state_change_observer_fires_on_submit_and_clear():
-    """The observer registry must call back when a pending approval shows up
-    or clears. The team_mission_approval_observer relies on this to know
-    when to emit a fresh conversation.status event."""
-    from tools import approval as _approval_module
+def test_approval_state_projection_public_api_sets_and_clears_pending_state(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from hermes_team_mission.runtime.approval_observer import (
+        project_clarify_or_approval_state,
+    )
 
-    events: list[tuple[str, bool]] = []
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_session_index(
+        session_id="sess-A",
+        title="approval projection",
+        session_kind="hermes_session",
+        running=True,
+    )
+    monkeypatch.setattr("tui_gateway.server._get_db", lambda: db, raising=False)
 
-    def observer(session_key: str, present: bool) -> None:
-        events.append((session_key, present))
+    project_clarify_or_approval_state("sess-A", present=True, source_event_type="approval.request")
+    assert _read_session_index_flags(db, "sess-A")["waiting_approval"] == 1
 
-    _approval_module.register_state_change_observer(observer)
-    try:
-        _approval_module.submit_pending("sess-A", {"command": "test"})
-        _approval_module.clear_session("sess-A")
-        assert ("sess-A", True) in events
-        assert ("sess-A", False) in events
-    finally:
-        with _approval_module._lock:
-            if observer in _approval_module._state_change_observers:
-                _approval_module._state_change_observers.remove(observer)
+    project_clarify_or_approval_state("sess-A", present=False, source_event_type="approval.resolved")
+    assert _read_session_index_flags(db, "sess-A")["waiting_approval"] == 0
 
 
-def test_clarify_state_change_observer_fires_on_register_and_clear():
-    from tools import clarify_gateway as _clarify_module
+def test_clarify_state_projection_public_api_sets_and_clears_pending_state(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from hermes_team_mission.runtime.approval_observer import (
+        project_clarify_or_approval_state,
+    )
 
-    events: list[tuple[str, bool]] = []
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_session_index(
+        session_id="sess-B",
+        title="clarify projection",
+        session_kind="hermes_session",
+        running=True,
+    )
+    monkeypatch.setattr("tui_gateway.server._get_db", lambda: db, raising=False)
 
-    def observer(session_key: str, present: bool) -> None:
-        events.append((session_key, present))
+    project_clarify_or_approval_state("sess-B", present=True, source_event_type="clarify.request")
+    assert _read_session_index_flags(db, "sess-B")["waiting_approval"] == 1
 
-    _clarify_module.register_state_change_observer(observer)
-    try:
-        _clarify_module.register(
-            clarify_id="cid-x",
-            session_key="sess-B",
-            question="q?",
-            choices=["1", "2"],
-        )
-        _clarify_module.clear_session("sess-B")
-        assert ("sess-B", True) in events
-        assert ("sess-B", False) in events
-    finally:
-        with _clarify_module._lock:
-            if observer in _clarify_module._state_change_observers:
-                _clarify_module._state_change_observers.remove(observer)
+    project_clarify_or_approval_state("sess-B", present=False, source_event_type="clarify.resolved")
+    assert _read_session_index_flags(db, "sess-B")["waiting_approval"] == 0
 
 
 # -- update_session_index_pending_state_for_session_key --------------------

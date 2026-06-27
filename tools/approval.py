@@ -669,39 +669,6 @@ _session_approved: dict[str, set] = {}
 _session_yolo: set[str] = set()
 _permanent_approved: set = set()
 
-# Optional state-change observers, populated by tui_gateway at startup so that
-# in-process approvals firing for member-node sessions can refresh the team
-# mission conversation status projection. List, not a single callback, so other
-# subsystems can subscribe too. Hooks must be cheap (best-effort, swallow
-# exceptions), they run on the agent thread under _lock release.
-_state_change_observers: list = []
-
-
-def register_state_change_observer(callback) -> None:
-    """Register a (session_key:str, present:bool) -> None observer.
-
-    Called whenever a session transitions between has-pending and no-pending.
-    Used by the team mission projection to emit a conversation.status event
-    when an in-process approval shows up or clears, so the sidebar can react
-    in real time. Best-effort: a raising observer must not break the approval
-    flow."""
-    if callback is None:
-        return
-    with _lock:
-        if callback not in _state_change_observers:
-            _state_change_observers.append(callback)
-
-
-def _notify_state_change(session_key: str, present: bool) -> None:
-    if not session_key:
-        return
-    observers = list(_state_change_observers)
-    for cb in observers:
-        try:
-            cb(session_key, present)
-        except Exception:
-            pass
-
 # =========================================================================
 # Blocking gateway approval (mirrors CLI's synchronous input() flow)
 # =========================================================================
@@ -746,11 +713,8 @@ def unregister_gateway_notify(session_key: str) -> None:
     with _lock:
         _gateway_notify_cbs.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
-        still_has_pending = bool(session_key in _pending)
     for entry in entries:
         entry.event.set()
-    if entries and not still_has_pending:
-        _notify_state_change(session_key, False)
 
 
 def resolve_gateway_approval(session_key: str, choice: str,
@@ -775,16 +739,10 @@ def resolve_gateway_approval(session_key: str, choice: str,
             targets = [queue.pop(0)]
         if not queue:
             _gateway_queues.pop(session_key, None)
-        still_has_pending = bool(
-            _gateway_queues.get(session_key)
-            or session_key in _pending
-        )
 
     for entry in targets:
         entry.result = choice
         entry.event.set()
-    if not still_has_pending:
-        _notify_state_change(session_key, False)
     return len(targets)
 
 
@@ -810,7 +768,6 @@ def submit_pending(session_key: str, approval: dict):
     """Store a pending approval request for a session."""
     with _lock:
         _pending[session_key] = approval
-    _notify_state_change(session_key, True)
 
 
 def has_pending_session(session_key: str) -> bool:
@@ -862,15 +819,13 @@ def clear_session(session_key: str) -> None:
     with _lock:
         _session_approved.pop(session_key, None)
         _session_yolo.discard(session_key)
-        had_pending = _pending.pop(session_key, None) is not None
+        _pending.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
     for entry in entries:
         # Session-boundary cleanup should cancel any blocked approval waits
         # immediately so the old run can unwind instead of idling until timeout.
         entry.result = "deny"
         entry.event.set()
-    if had_pending or entries:
-        _notify_state_change(session_key, False)
 
 
 def is_session_yolo_enabled(session_key: str) -> bool:
@@ -1697,11 +1652,6 @@ def check_all_command_guards(command: str, env_type: str,
             entry = _ApprovalEntry(approval_data)
             with _lock:
                 _gateway_queues.setdefault(session_key, []).append(entry)
-            # Surface the in-process pending approval to observers (e.g. team
-            # mission conversation status projection → sidebar indicator). Best-
-            # effort, swallow errors so a misbehaving observer can never block
-            # the user's approval flow.
-            _notify_state_change(session_key, True)
 
             # Notify plugins that an approval is being requested. Fires before
             # the gateway notify callback so observers (e.g. macOS notifier
@@ -1786,12 +1736,6 @@ def check_all_command_guards(command: str, env_type: str,
                     queue.remove(entry)
                 if not queue:
                     _gateway_queues.pop(session_key, None)
-                still_has_pending = bool(
-                    _gateway_queues.get(session_key)
-                    or session_key in _pending
-                )
-            if not still_has_pending:
-                _notify_state_change(session_key, False)
 
             choice = entry.result
             # Normalize outcome for the post hook. Unresolved (timeout) and
