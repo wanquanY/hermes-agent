@@ -43,6 +43,7 @@ from tui_gateway.services.runtime_proxy import (
 )
 from tui_gateway.services.workspace import session_workspace_run_context
 from tui_gateway.services.worker_frame_router import WorkerFrameRouter
+from tui_gateway.services.worker_pool import WorkerPool
 from tui_gateway.services.worker_supervisor import WorkerSupervisor
 
 _log = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ _log = logging.getLogger(__name__)
 _singleton_lock = threading.RLock()
 _supervisor_singleton: Optional[WorkerSupervisor] = None
 _router_singleton: Optional[WorkerFrameRouter] = None
+_pool_singleton: Optional[WorkerPool] = None
 
 
 def worker_supervisor() -> WorkerSupervisor:
@@ -188,6 +190,15 @@ def worker_frame_router() -> WorkerFrameRouter:
         return _router_singleton
 
 
+def worker_pool() -> WorkerPool:
+    """Process-wide per-conversation worker lease pool."""
+    global _pool_singleton
+    with _singleton_lock:
+        if _pool_singleton is None:
+            _pool_singleton = WorkerPool(worker_supervisor())
+        return _pool_singleton
+
+
 async def shutdown_run_worker_runtime() -> None:
     """Terminate every running worker subprocess and clear the
     singletons. Safe to call multiple times; safe to call when nothing
@@ -197,13 +208,21 @@ async def shutdown_run_worker_runtime() -> None:
     process exits. Sync atexit handlers can't drive this — they have
     no event loop — so this function is exposed for explicit wiring.
     """
-    global _supervisor_singleton, _router_singleton
+    global _supervisor_singleton, _router_singleton, _pool_singleton
     supervisor: Optional[WorkerSupervisor]
+    pool: Optional[WorkerPool]
     with _singleton_lock:
+        pool = _pool_singleton
         supervisor = _supervisor_singleton
+        _pool_singleton = None
         _supervisor_singleton = None
         _router_singleton = None
-    if supervisor is not None:
+    if pool is not None:
+        try:
+            await pool.shutdown()
+        except Exception:
+            _log.exception("[worker-runtime] worker_pool shutdown raised")
+    elif supervisor is not None:
         try:
             await supervisor.shutdown_all()
         except Exception:
@@ -418,15 +437,19 @@ async def _dispatch_prompt_submit(
         await _ack_error(transport, rid, code=4002, message=str(exc))
         return True
 
-    supervisor = worker_supervisor()
+    pool = worker_pool()
     router = worker_frame_router()
 
     try:
-        await supervisor.ensure(scope)
+        lease = await pool.get_or_spawn(
+            stored_session_id,
+            _profile_context_for_worker_pool(scope, params),
+        )
     except Exception as exc:
         _log.exception(
-            "[worker-runtime] supervisor.ensure failed scope=%s",
+            "[worker-runtime] worker_pool.get_or_spawn failed scope=%s conversation=%s",
             scope.runtime_scope_key,
+            stored_session_id,
         )
         await _ack_error(
             transport, rid, code=5021,
@@ -435,7 +458,7 @@ async def _dispatch_prompt_submit(
         return True
 
     run_start_kwargs = {
-        "scope_key": scope.runtime_scope_key,
+        "scope_key": lease.scope_key,
         "run_id": run_id,
         "stored_session_id": stored_session_id,
         "turn_id": turn_id,
@@ -443,6 +466,12 @@ async def _dispatch_prompt_submit(
     if params.get("run_context_json") is not None:
         run_start_kwargs["run_context_json"] = params.get("run_context_json")
     router.record_run_start(**run_start_kwargs)
+    await pool.record_run_start(
+        conversation_id=stored_session_id,
+        run_id=run_id,
+        stored_session_id=stored_session_id,
+        turn_id=turn_id,
+    )
 
     frame_params = {
         k: v for k, v in params.items()
@@ -455,9 +484,10 @@ async def _dispatch_prompt_submit(
     if workspace_context:
         frame_params["cwd"] = workspace_context["cwd"]
         frame_params["workspace"] = workspace_context["workspace"]
+    frame_params["runtime_scope_key"] = lease.scope_key
 
-    ok = await supervisor.send(
-        scope.runtime_scope_key,
+    ok = await worker_supervisor().send(
+        lease.scope_key,
         RunStartFrame(
             run_id=run_id,
             turn_id=turn_id,
@@ -469,8 +499,10 @@ async def _dispatch_prompt_submit(
             params=frame_params,
         ),
     )
+    await pool.release(stored_session_id)
     if not ok:
         router.forget_run(run_id)
+        await pool.forget_run(run_id)
         await _ack_error(
             transport, rid, code=5022,
             message="primary worker stdin write failed",
@@ -484,11 +516,25 @@ async def _dispatch_prompt_submit(
             "run_id": run_id,
             "turn_id": turn_id,
             "stored_session_id": stored_session_id,
-            "runtime_scope_key": scope.runtime_scope_key,
+            "runtime_scope_key": lease.scope_key,
             "source": "primary-run-worker",
         },
     )
     return True
+
+
+def _profile_context_for_worker_pool(scope: RuntimeScope, params: dict[str, Any]) -> dict[str, Any]:
+    profile = params.get("dovie_profile") if isinstance(params.get("dovie_profile"), dict) else {}
+    return {
+        "agent_profile_id": scope.agent_profile_id or profile.get("id") or "",
+        "hermes_home": (
+            scope.hermes_home
+            or profile.get("hermesHomePath")
+            or profile.get("hermes_home_path")
+            or ""
+        ),
+        "runtime_scope_key": scope.runtime_scope_key,
+    }
 
 
 async def _ack_ok(transport: Any, rid: Any, *, result: dict) -> None:
@@ -514,7 +560,8 @@ def _reset_for_tests() -> None:
     running subprocesses (use ``shutdown_run_worker_runtime`` for that).
     Use sparingly — only when a test needs a fresh router/supervisor
     pair AND has already torn down any spawned workers itself."""
-    global _supervisor_singleton, _router_singleton
+    global _supervisor_singleton, _router_singleton, _pool_singleton
     with _singleton_lock:
+        _pool_singleton = None
         _supervisor_singleton = None
         _router_singleton = None

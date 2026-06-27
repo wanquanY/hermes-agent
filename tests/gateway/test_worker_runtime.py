@@ -17,8 +17,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from tui_gateway.services import worker_runtime
+from tui_gateway.services.runtime_proxy import RuntimeScope
 from tui_gateway.services.worker_frame_router import WorkerFrameRouter
-from tui_gateway.services.worker_supervisor import WorkerSupervisor
+from tui_gateway.services.worker_supervisor import RunWorker, WorkerSupervisor
 
 
 @pytest.fixture(autouse=True)
@@ -90,6 +91,22 @@ class _RecordingTransport:
         return True
 
 
+class _FakeProcess:
+    def __init__(self) -> None:
+        self.pid = 4242
+        self.returncode = None
+
+
+def _fake_worker(scope: RuntimeScope) -> RunWorker:
+    return RunWorker(
+        scope=scope,
+        process=_FakeProcess(),
+        inbound_queue=asyncio.Queue(),
+        created_at=0.0,
+        last_used_at=0.0,
+    )
+
+
 def _scoped_prompt_submit(text: str = "hi", **extra) -> dict:
     return {
         "jsonrpc": "2.0",
@@ -130,7 +147,7 @@ async def test_primary_dispatch_intercepts_run_submit(monkeypatch) -> None:
 
     class _FakeSup:
         async def ensure(self, scope):
-            return None
+            return _fake_worker(scope)
 
         async def send(self, scope_key, frame):
             sent.append((scope_key, frame))
@@ -143,7 +160,8 @@ async def test_primary_dispatch_intercepts_run_submit(monkeypatch) -> None:
         def forget_run(self, run_id):
             pass
 
-    monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: _FakeSup())
+    fake_sup = _FakeSup()
+    monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: fake_sup)
     monkeypatch.setattr(worker_runtime, "worker_frame_router", lambda: _FakeRouter())
 
     req = _scoped_prompt_submit()
@@ -191,6 +209,7 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
     class _FakeSupervisor:
         async def ensure(self, scope):
             ensure_calls.append(scope)
+            return _fake_worker(scope)
 
         async def send(self, scope_key, frame):
             sent_frames.append((scope_key, frame))
@@ -220,10 +239,10 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
 
     assert handled is True
     assert len(ensure_calls) == 1
-    assert ensure_calls[0].runtime_scope_key == "profile:test"
+    assert ensure_calls[0].runtime_scope_key == "sess-1"
     assert len(sent_frames) == 1
     scope_key, frame = sent_frames[0]
-    assert scope_key == "profile:test"
+    assert scope_key == "sess-1"
     from tui_gateway.run_worker import RunStartFrame
     assert isinstance(frame, RunStartFrame)
     assert frame.stored_session_id == "sess-1"
@@ -251,7 +270,7 @@ async def test_primary_dispatch_injects_session_workspace_context(monkeypatch, t
 
     class _FakeSupervisor:
         async def ensure(self, scope):
-            return None
+            return _fake_worker(scope)
 
         async def send(self, scope_key, frame):
             sent_frames.append((scope_key, frame))
@@ -278,7 +297,8 @@ async def test_primary_dispatch_injects_session_workspace_context(monkeypatch, t
             "source": "session_workspace_binding",
         }
 
-    monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: _FakeSupervisor())
+    fake_sup = _FakeSupervisor()
+    monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: fake_sup)
     monkeypatch.setattr(worker_runtime, "worker_frame_router", lambda: _FakeRouter())
     monkeypatch.setattr(worker_runtime, "session_workspace_run_context", _workspace_context)
 
@@ -322,7 +342,7 @@ async def test_primary_dispatch_acks_error_when_send_fails(monkeypatch) -> None:
 
     class _FailingSupervisor:
         async def ensure(self, scope):
-            return None
+            return _fake_worker(scope)
 
         async def send(self, scope_key, frame):
             return False
@@ -334,7 +354,8 @@ async def test_primary_dispatch_acks_error_when_send_fails(monkeypatch) -> None:
         def forget_run(self, run_id):
             forgot.append(run_id)
 
-    monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: _FailingSupervisor())
+    fake_sup = _FailingSupervisor()
+    monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: fake_sup)
     monkeypatch.setattr(worker_runtime, "worker_frame_router", lambda: _Router())
 
     req = _scoped_prompt_submit()
