@@ -159,8 +159,14 @@ def _project_state(session_key: str, *, present: bool, source_event_type: str) -
                 f"[doxie-approval-observer] index_update session_key={session_key} waiting={present} rows={rows}"
             )
         except Exception as exc:
-            _stderr_log(
-                f"[doxie-approval-observer] index_update FAILED session_key={session_key} exc={exc}"
+            _log.warning(
+                "[doxie-approval-observer] db.%s FAILED session_key=%s waiting=%s error_type=%s error=%s",
+                "update_session_index_pending_state_for_session_key",
+                session_key,
+                present,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
             )
     else:
         _stderr_log(
@@ -188,7 +194,15 @@ def _project_state(session_key: str, *, present: bool, source_event_type: str) -
                 f"[doxie-approval-observer] appended status event mission={mission_id} result_type={type(result).__name__}"
             )
         except Exception as exc:
-            _stderr_log(f"[doxie-approval-observer] append FAILED mission={mission_id} exc={exc}")
+            _log.warning(
+                "[doxie-approval-observer] db.%s FAILED session_key=%s mission=%s error_type=%s error=%s",
+                "append_team_mission_conversation_status_event",
+                session_key,
+                mission_id,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
 
 
 def _missions_for_session_key(db: Any, session_key: str) -> list[str]:
