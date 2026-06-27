@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from tui_gateway.methods._shared import bind_server_globals
 
 _server = bind_server_globals(globals())
+logger = logging.getLogger(__name__)
 
 _SNAPSHOT_SCHEMA_VERSION = "2026-06-16"
 
@@ -461,6 +463,12 @@ def _team_conversation_snapshot(
         return response
     resolved = response.get("result") if isinstance(response.get("result"), dict) else {}
     conversation = resolved.get("conversation") if isinstance(resolved.get("conversation"), dict) else {}
+    if not _text(conversation.get("conversation_id") or conversation.get("conversationId")):
+        logger.error(
+            "team_mission.conversation.resolve returned conversation without canonical id: identifier=%s",
+            identifier,
+        )
+        return _err(rid, 5008, "team_mission resolve returned conversation without canonical id")
     graph = resolved.get("graph") if isinstance(resolved.get("graph"), dict) else {}
     team = resolved.get("team") if isinstance(resolved.get("team"), dict) else {}
     graph_conversation = graph.get("conversation") if isinstance(graph.get("conversation"), dict) else {}

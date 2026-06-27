@@ -488,7 +488,7 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4006, "conversation identifier required")
     result = db.resolve_team_mission_conversation(identifier)
     if not result:
-        return _ok(rid, {"conversation": {}, "mission": {}, "graph": {}})
+        return _err(rid, 4040, "team mission conversation not found")
     conversation = result.get("conversation") if isinstance(result, dict) else None
     _recover_conversation_active_run(db, conversation)
     if isinstance(conversation, dict):

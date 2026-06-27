@@ -1062,7 +1062,7 @@ def test_team_mission_node_create_requires_existing_mission(monkeypatch, tmp_pat
     assert db.get_team_mission_node("missing-mission", "node-1") == {}
 
 
-def test_team_conversation_resolve_returns_empty_when_conversation_is_missing(monkeypatch, tmp_path: Path):
+def test_team_conversation_resolve_returns_error_when_conversation_is_missing(monkeypatch, tmp_path: Path):
     import importlib
 
     from hermes_state import SessionDB
@@ -1077,8 +1077,8 @@ def test_team_conversation_resolve_returns_empty_when_conversation_is_missing(mo
         {"identifier": "missing-conversation"},
     )
 
-    assert "error" not in response
-    assert response["result"] == {"conversation": {}, "mission": {}, "graph": {}}
+    assert response["error"]["code"] == 4040
+    assert response["error"]["message"] == "team mission conversation not found"
 
 
 def test_team_mission_create_records_user_task_in_stable_team_session(monkeypatch, tmp_path: Path):

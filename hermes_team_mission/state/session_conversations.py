@@ -6,6 +6,51 @@ from hermes_state_participants import leader_participant_id, member_participant_
 
 
 class SessionDBTeamMissionConversationMixin:
+    def _canonicalize_team_mission_conversation(
+        self,
+        conversation: Dict[str, Any],
+        *,
+        identifier: str = "",
+        mission: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        conversation = dict(conversation or {})
+        mission = mission if isinstance(mission, dict) else {}
+        metadata = conversation.get("metadata") if isinstance(conversation.get("metadata"), dict) else {}
+        mission_metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+        identifier = _text(identifier)
+        conversation_id = (
+            _text(conversation.get("conversation_id"))
+            or _conversation_id_from_metadata(metadata)
+            or _text(mission.get("conversation_id"))
+            or _conversation_id_from_metadata(mission_metadata)
+            or (identifier if identifier.startswith("team-conversation-") else "")
+        )
+        stable_session_id = (
+            _text(conversation.get("stable_session_id"))
+            or _stable_session_id_from_metadata(metadata)
+            or _stable_session_id_from_metadata(mission_metadata)
+            or _text(mission.get("leader_session_id"))
+            or (identifier if identifier.startswith("team-session-") else "")
+            or conversation_id
+        )
+        team_id = (
+            _text(conversation.get("team_id"))
+            or _text(metadata.get("team_id") or metadata.get("teamId"))
+            or _text(mission.get("team_id"))
+            or _text(mission_metadata.get("team_id") or mission_metadata.get("teamId"))
+            or conversation_id
+        )
+        conversation["conversation_id"] = conversation_id
+        conversation["stable_session_id"] = stable_session_id
+        conversation["team_id"] = team_id
+        return conversation
+
+    def assert_conversation_canonical(self, conv: Dict[str, Any]) -> Dict[str, Any]:
+        assert _text((conv or {}).get("conversation_id")), "team mission conversation missing conversation_id"
+        assert _text((conv or {}).get("stable_session_id")), "team mission conversation missing stable_session_id"
+        assert _text((conv or {}).get("team_id")), "team mission conversation missing team_id"
+        return conv
+
     def upsert_team_mission_conversation(
         self,
         *,
@@ -615,23 +660,33 @@ class SessionDBTeamMissionConversationMixin:
             mission = None
             for _row in _rows:
                 _m = self._team_mission_from_row(_row)
-                # Skip the hidden member-chat container — never resolve to it.
-                if _m and not bool((_m.get("metadata") or {}).get("member_chat_only")):
+                if _m:
                     mission = _m
                     break
             if mission:
+                # P0 keeps member-chat as a transitional hidden mission container:
+                # resolve must still materialize the Conversation id. P1+ will
+                # remove this special branch when Participant becomes first-class.
                 conversation = self.ensure_team_mission_conversation(
                     conversation_id=identifier,
                     mission=mission,
                 )
         if not conversation:
             return {}
+        conversation = self.assert_conversation_canonical(
+            self._canonicalize_team_mission_conversation(conversation, identifier=identifier)
+        )
         graph = self.get_team_mission_conversation_graph(_text(conversation.get("conversation_id")))
+        graph_mission = graph.get("mission") if isinstance(graph, dict) and isinstance(graph.get("mission"), dict) else {}
+        if graph_mission:
+            conversation = self.assert_conversation_canonical(
+                self._canonicalize_team_mission_conversation(conversation, identifier=identifier, mission=graph_mission)
+            )
         messages = list((graph or {}).get("recent_messages") or [])
         page_info = (graph or {}).get("message_page_info") or {}
         return {
             "conversation": conversation,
-            "mission": (graph.get("mission") if isinstance(graph, dict) else {}) or {},
+            "mission": graph_mission,
             "graph": graph if isinstance(graph, dict) else {},
             "messages": messages,
             "pageInfo": page_info,
