@@ -27,17 +27,17 @@ class _FakeSupervisor:
     def __init__(self, *, ensure_delay_s: float = 0.0) -> None:
         self.ensure_delay_s = ensure_delay_s
         self.ensure_calls: list[RuntimeScope] = []
-        self.shutdown_calls: list[str] = []
+        self.shutdown_calls: list[tuple[str, str]] = []
         self.shutdown_all_called = False
-        self.workers: dict[str, RunWorker] = {}
-        self.terminal_events: list[tuple[str, RunTerminalFrame]] = []
+        self.workers: dict[tuple[str, str], RunWorker] = {}
+        self.terminal_events: list[tuple[str, str, RunTerminalFrame]] = []
         self._on_run_terminal = self._record_terminal
 
     async def ensure(self, scope: RuntimeScope, *, env_overrides=None) -> RunWorker:
         self.ensure_calls.append(scope)
         if self.ensure_delay_s:
             await asyncio.sleep(self.ensure_delay_s)
-        existing = self.workers.get(scope.runtime_scope_key)
+        existing = self.workers.get(scope.worker_identity)
         if existing is not None and existing.running():
             existing.mark_used()
             return existing
@@ -48,12 +48,12 @@ class _FakeSupervisor:
             created_at=time.time(),
             last_used_at=time.time(),
         )
-        self.workers[scope.runtime_scope_key] = worker
+        self.workers[scope.worker_identity] = worker
         return worker
 
-    async def shutdown(self, scope_key: str) -> bool:
-        self.shutdown_calls.append(scope_key)
-        worker = self.workers.pop(scope_key, None)
+    async def shutdown(self, scope_key: str, conversation_id: str = "") -> bool:
+        self.shutdown_calls.append((scope_key, conversation_id or ""))
+        worker = self.workers.pop((scope_key, conversation_id or ""), None)
         if worker is None:
             return False
         worker.process.returncode = -15
@@ -65,8 +65,13 @@ class _FakeSupervisor:
             worker.process.returncode = -15
         self.workers.clear()
 
-    async def _record_terminal(self, scope_key: str, frame: RunTerminalFrame) -> None:
-        self.terminal_events.append((scope_key, frame))
+    async def _record_terminal(
+        self,
+        scope_key: str,
+        conversation_id: str,
+        frame: RunTerminalFrame,
+    ) -> None:
+        self.terminal_events.append((scope_key, conversation_id, frame))
 
 
 def _profile() -> dict:
@@ -84,10 +89,13 @@ async def test_get_or_spawn_new_conv_spawns_worker() -> None:
         lease = await pool.get_or_spawn("conv-1", _profile())
 
         assert lease.conversation_id == "conv-1"
-        assert lease.scope_key == "conv-1"
+        assert lease.scope_key == "profile:profile-1"
+        assert lease.worker_conversation_id == "conv-1"
         assert lease.running()
         assert len(supervisor.ensure_calls) == 1
-        assert supervisor.ensure_calls[0].runtime_scope_key == "conv-1"
+        assert supervisor.ensure_calls[0].runtime_scope_key == "profile:profile-1"
+        assert supervisor.ensure_calls[0].conversation_id == "conv-1"
+        assert supervisor.ensure_calls[0].worker_identity == ("profile:profile-1", "conv-1")
         assert supervisor.ensure_calls[0].agent_profile_id == "profile-1"
     finally:
         await pool.shutdown()
@@ -135,7 +143,7 @@ async def test_idle_worker_reaped_after_threshold() -> None:
 
         await pool._reap_once()
 
-        assert supervisor.shutdown_calls == ["conv-1"]
+        assert supervisor.shutdown_calls == [("profile:profile-1", "conv-1")]
         assert pool.stats()["workerCount"] == 0
     finally:
         await pool.shutdown()
@@ -180,16 +188,41 @@ async def test_worker_crash_marks_inflight_runs_failed() -> None:
 
         await pool._reap_once()
 
-        assert supervisor.shutdown_calls == ["conv-1"]
+        assert supervisor.shutdown_calls == [("profile:profile-1", "conv-1")]
         assert pool.stats()["workerCount"] == 0
         assert len(supervisor.terminal_events) == 1
-        scope_key, frame = supervisor.terminal_events[0]
-        assert scope_key == "conv-1"
+        scope_key, conversation_id, frame = supervisor.terminal_events[0]
+        assert scope_key == "profile:profile-1"
+        assert conversation_id == "conv-1"
         assert frame.run_id == "run-1"
         assert frame.status == "failed"
         assert frame.stored_session_id == "conv-1"
         assert frame.turn_id == "turn-1"
         assert "worker crashed" in frame.message
+    finally:
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_worker_pool_emits_events_with_profile_based_scope_key() -> None:
+    supervisor = _FakeSupervisor()
+    pool = WorkerPool(supervisor, reap_tick_s=60)
+    try:
+        lease = await pool.get_or_spawn("conv-1", _profile())
+        await pool.record_run_start(
+            conversation_id="conv-1",
+            run_id="run-1",
+            stored_session_id="conv-1",
+            turn_id="turn-1",
+        )
+        lease.worker.process.returncode = 1
+
+        await pool._reap_once()
+
+        scope_key, conversation_id, frame = supervisor.terminal_events[0]
+        assert scope_key == "profile:profile-1"
+        assert conversation_id == "conv-1"
+        assert frame.stored_session_id == "conv-1"
     finally:
         await pool.shutdown()
 

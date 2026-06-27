@@ -38,10 +38,15 @@ from tui_gateway.services.worker_frame_router import WorkerFrameRouter
 class _FakeSupervisor:
     def __init__(self, deliver: bool = True) -> None:
         self.deliver = deliver
-        self.sent: list[tuple[str, Any]] = []
+        self.sent: list[tuple[str, str, Any]] = []
 
-    async def send(self, scope_key: str, frame: Any) -> bool:
-        self.sent.append((scope_key, frame))
+    async def send(
+        self,
+        scope_key: str,
+        conversation_id: str,
+        frame: Any,
+    ) -> bool:
+        self.sent.append((scope_key, conversation_id, frame))
         return self.deliver
 
 
@@ -71,9 +76,17 @@ async def test_on_event_forwards_payload() -> None:
     router, _sup, events, _ = _make_router()
     await router.on_event(
         "profile:x",
+        "sess-1",
         EventFrame(params={"type": "message.delta", "text": "hi"}),
     )
-    assert events == [{"type": "message.delta", "text": "hi"}]
+    assert events == [
+        {
+            "type": "message.delta",
+            "text": "hi",
+            "runtime_scope_key": "profile:x",
+            "conversation_id": "sess-1",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -100,6 +113,7 @@ async def test_on_interactive_request_records_pending_only() -> None:
         {
             "requestId": "req-1",
             "scopeKey": "profile:x",
+            "conversationId": "sess-1",
             "kind": "clarify",
             "storedSessionId": "sess-1",
         },
@@ -131,6 +145,7 @@ async def test_on_interactive_request_cross_fills_stored_session_from_run() -> N
         {
             "requestId": "req-2",
             "scopeKey": "profile:x",
+            "conversationId": "sess-A",
             "kind": "approval",
             "storedSessionId": "sess-A",
         },
@@ -260,8 +275,9 @@ async def test_respond_routes_to_correct_worker() -> None:
     ok = await router.respond("req-1", "yes", expected_kind="clarify")
     assert ok
     assert len(sup.sent) == 1
-    scope, frame = sup.sent[0]
+    scope, conversation_id, frame = sup.sent[0]
     assert scope == "profile:x"
+    assert conversation_id == "sess-1"
     assert isinstance(frame, InteractiveResponseFrame)
     assert frame.kind == "clarify"
     assert frame.request_id == "req-1"
@@ -360,9 +376,10 @@ def test_pending_snapshot_shape() -> None:
     assert {"pendingInteractive", "activeRuns"} <= snap.keys()
     assert snap["activeRuns"] == [
         {
-            "runId": "run-1",
-            "scopeKey": "profile:x",
-            "storedSessionId": "sess-1",
+                "runId": "run-1",
+                "scopeKey": "profile:x",
+                "conversationId": "sess-1",
+                "storedSessionId": "sess-1",
             "turnId": "t-1",
         }
     ]

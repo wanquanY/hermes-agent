@@ -149,8 +149,8 @@ async def test_primary_dispatch_intercepts_run_submit(monkeypatch) -> None:
         async def ensure(self, scope):
             return _fake_worker(scope)
 
-        async def send(self, scope_key, frame):
-            sent.append((scope_key, frame))
+        async def send(self, scope_key, conversation_id, frame):
+            sent.append((scope_key, conversation_id, frame))
             return True
 
     class _FakeRouter:
@@ -211,8 +211,8 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
             ensure_calls.append(scope)
             return _fake_worker(scope)
 
-        async def send(self, scope_key, frame):
-            sent_frames.append((scope_key, frame))
+        async def send(self, scope_key, conversation_id, frame):
+            sent_frames.append((scope_key, conversation_id, frame))
             return True
 
     fake_sup = _FakeSupervisor()
@@ -221,9 +221,18 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
         def __init__(self):
             self.starts = []
 
-        def record_run_start(self, *, scope_key, run_id, stored_session_id, turn_id):
+        def record_run_start(
+            self,
+            *,
+            scope_key,
+            conversation_id,
+            run_id,
+            stored_session_id,
+            turn_id,
+        ):
             self.starts.append(
                 {"scope_key": scope_key, "run_id": run_id,
+                 "conversation_id": conversation_id,
                  "stored_session_id": stored_session_id, "turn_id": turn_id}
             )
 
@@ -239,10 +248,12 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
 
     assert handled is True
     assert len(ensure_calls) == 1
-    assert ensure_calls[0].runtime_scope_key == "sess-1"
+    assert ensure_calls[0].runtime_scope_key == "profile:test"
+    assert ensure_calls[0].conversation_id == "sess-1"
     assert len(sent_frames) == 1
-    scope_key, frame = sent_frames[0]
-    assert scope_key == "sess-1"
+    scope_key, conversation_id, frame = sent_frames[0]
+    assert scope_key == "profile:test"
+    assert conversation_id == "sess-1"
     from tui_gateway.run_worker import RunStartFrame
     assert isinstance(frame, RunStartFrame)
     assert frame.stored_session_id == "sess-1"
@@ -251,8 +262,11 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
     # named fields.
     assert "text" not in frame.params
     assert "stored_session_id" not in frame.params
+    assert frame.params["runtime_scope_key"] == "profile:test"
+    assert frame.params["conversation_id"] == "sess-1"
     # router recorded the run
     assert len(fake_router.starts) == 1
+    assert fake_router.starts[0]["conversation_id"] == "sess-1"
     assert fake_router.starts[0]["stored_session_id"] == "sess-1"
     # ack returned
     assert len(transport.written) == 1
@@ -272,8 +286,8 @@ async def test_primary_dispatch_injects_session_workspace_context(monkeypatch, t
         async def ensure(self, scope):
             return _fake_worker(scope)
 
-        async def send(self, scope_key, frame):
-            sent_frames.append((scope_key, frame))
+        async def send(self, scope_key, conversation_id, frame):
+            sent_frames.append((scope_key, conversation_id, frame))
             return True
 
     class _FakeRouter:
@@ -305,7 +319,7 @@ async def test_primary_dispatch_injects_session_workspace_context(monkeypatch, t
     handled = await worker_runtime.primary_dispatch(_scoped_prompt_submit(), transport)
 
     assert handled is True
-    _scope_key, frame = sent_frames[0]
+    _scope_key, _conversation_id, frame = sent_frames[0]
     assert frame.params["cwd"] == str(workspace_root)
     assert frame.params["workspace"]["id"] == "workspace-1"
     assert "stored_session_id" not in frame.params
@@ -344,7 +358,7 @@ async def test_primary_dispatch_acks_error_when_send_fails(monkeypatch) -> None:
         async def ensure(self, scope):
             return _fake_worker(scope)
 
-        async def send(self, scope_key, frame):
+        async def send(self, scope_key, conversation_id, frame):
             return False
 
     class _Router:
@@ -373,7 +387,7 @@ async def test_primary_dispatch_acks_error_when_ensure_raises(monkeypatch) -> No
         async def ensure(self, scope):
             raise RuntimeError("spawn failed")
 
-        async def send(self, scope_key, frame):
+        async def send(self, scope_key, conversation_id, frame):
             return True
 
     class _Router:

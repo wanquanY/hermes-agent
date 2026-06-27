@@ -27,7 +27,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, Tuple
 
 from tui_gateway.run_worker import (
     DBRpcReplyFrame,
@@ -50,13 +50,13 @@ from tui_gateway.services.worker_db_proxy import serialize_db_value
 _log = logging.getLogger(__name__)
 
 
-# Callback types. Each receives ``scope_key`` so a single registered
-# handler can fan out by profile without the supervisor having to wrap
-# anything. Callbacks may be coroutines — the dispatch task awaits them.
-EventCallback = Callable[[str, EventFrame], Awaitable[None]]
-InteractiveRequestCallback = Callable[[str, InteractiveRequestFrame], Awaitable[None]]
-RunTerminalCallback = Callable[[str, RunTerminalFrame], Awaitable[None]]
-LogCallback = Callable[[str, LogFrame], Awaitable[None]]
+# Callback types. Each receives the UI routing ``scope_key`` and the
+# per-conversation worker identity suffix so same-profile workers do not
+# collapse into one response/cancel route.
+EventCallback = Callable[[str, str, EventFrame], Awaitable[None]]
+InteractiveRequestCallback = Callable[[str, str, InteractiveRequestFrame], Awaitable[None]]
+RunTerminalCallback = Callable[[str, str, RunTerminalFrame], Awaitable[None]]
+LogCallback = Callable[[str, str, LogFrame], Awaitable[None]]
 
 
 _DEFAULT_QUEUE_MAXSIZE = 1024
@@ -129,6 +129,14 @@ class RunWorker:
         return self.scope.runtime_scope_key
 
     @property
+    def conversation_id(self) -> str:
+        return self.scope.conversation_id
+
+    @property
+    def identity(self) -> Tuple[str, str]:
+        return self.scope.worker_identity
+
+    @property
     def hermes_home(self) -> str:
         """Per-profile HERMES_HOME this worker is bound to. Routed
         callbacks use this to enter the profile context so events
@@ -146,6 +154,8 @@ class RunWorker:
         running = self.running()
         return {
             "scopeKey": self.scope_key,
+            "conversationId": self.conversation_id or None,
+            "workerIdentity": list(self.identity),
             "agentProfileId": self.scope.agent_profile_id or None,
             "hermesHome": self.scope.hermes_home or None,
             "pid": self.process.pid if running else None,
@@ -158,7 +168,7 @@ class RunWorker:
 
 
 class WorkerSupervisor:
-    """Process registry keyed by ``scope.runtime_scope_key``.
+    """Process registry keyed by ``scope.worker_identity``.
 
     A single instance lives in the main sidecar (``app_state.worker_supervisor``,
     wired in Phase 4c/5). Dispatch callbacks are injected at construction
@@ -176,7 +186,7 @@ class WorkerSupervisor:
         queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
         python_executable: Optional[str] = None,
     ) -> None:
-        self._workers: dict[str, RunWorker] = {}
+        self._workers: dict[Tuple[str, str], RunWorker] = {}
         self._lock = asyncio.Lock()
         self._on_event = on_event
         self._on_interactive_request = on_interactive_request
@@ -196,27 +206,33 @@ class WorkerSupervisor:
     ) -> RunWorker:
         if not scope.runtime_scope_key:
             raise RuntimeError("WorkerSupervisor.ensure: runtime_scope_key required")
+        identity = scope.worker_identity
         async with self._lock:
-            existing = self._workers.get(scope.runtime_scope_key)
+            existing = self._workers.get(identity)
             if existing is not None and existing.running():
                 existing.mark_used()
                 return existing
             if existing is not None:
                 # Process died — drop and respawn.
-                self._workers.pop(scope.runtime_scope_key, None)
+                self._workers.pop(identity, None)
             worker = await self._spawn_locked(scope, env_overrides or {})
-            self._workers[scope.runtime_scope_key] = worker
+            self._workers[identity] = worker
             return worker
 
-    def get(self, scope_key: str) -> Optional[RunWorker]:
-        return self._workers.get(scope_key)
+    def get(self, scope_key: str, conversation_id: str = "") -> Optional[RunWorker]:
+        return self._workers.get((scope_key, conversation_id or ""))
 
-    async def send(self, scope_key: str, frame: IncomingFrame) -> bool:
+    async def send(
+        self,
+        scope_key: str,
+        conversation_id: str,
+        frame: IncomingFrame,
+    ) -> bool:
         """Write ``frame`` to the worker's stdin.
 
         Returns False if the worker is not registered or no longer
         running. Caller decides whether to ``ensure()`` first."""
-        worker = self._workers.get(scope_key)
+        worker = self._workers.get((scope_key, conversation_id or ""))
         if worker is None or not worker.running():
             return False
         line = encode_incoming(frame) + "\n"
@@ -232,9 +248,9 @@ class WorkerSupervisor:
         worker.mark_used()
         return True
 
-    async def shutdown(self, scope_key: str) -> bool:
+    async def shutdown(self, scope_key: str, conversation_id: str = "") -> bool:
         async with self._lock:
-            worker = self._workers.pop(scope_key, None)
+            worker = self._workers.pop((scope_key, conversation_id or ""), None)
         if worker is None:
             return False
         await self._terminate(worker)
@@ -258,7 +274,13 @@ class WorkerSupervisor:
             "source": "dovie-run-worker-supervisor",
             "workerCount": len(workers),
             "runningWorkerCount": len(running),
-            "workers": sorted(workers, key=lambda item: str(item.get("scopeKey") or "")),
+            "workers": sorted(
+                workers,
+                key=lambda item: (
+                    str(item.get("scopeKey") or ""),
+                    str(item.get("conversationId") or ""),
+                ),
+            ),
         }
 
     # ── internals ────────────────────────────────────────────────────
@@ -272,6 +294,8 @@ class WorkerSupervisor:
         if scope.hermes_home:
             env["HERMES_HOME"] = scope.hermes_home
         env["DOVIE_HERMES_RUNTIME_SCOPE_KEY"] = scope.runtime_scope_key
+        if scope.conversation_id:
+            env["DOVIE_CONVERSATION_ID"] = scope.conversation_id
         if scope.agent_profile_id:
             env["DOVIE_AGENT_PROFILE_ID"] = scope.agent_profile_id
         env.update(env_overrides)
@@ -306,15 +330,15 @@ class WorkerSupervisor:
         )
         worker.read_task = asyncio.create_task(
             self._read_loop(worker),
-            name=f"run-worker-read[{scope.runtime_scope_key}]",
+            name=f"run-worker-read[{scope.runtime_scope_key}:{scope.conversation_id}]",
         )
         worker.dispatch_task = asyncio.create_task(
             self._dispatch_loop(worker),
-            name=f"run-worker-dispatch[{scope.runtime_scope_key}]",
+            name=f"run-worker-dispatch[{scope.runtime_scope_key}:{scope.conversation_id}]",
         )
         _log.warning(
-            "[worker-supervisor] spawned run_worker pid=%s scope=%s",
-            process.pid, scope.runtime_scope_key,
+            "[worker-supervisor] spawned run_worker pid=%s scope=%s conversation=%s",
+            process.pid, scope.runtime_scope_key, scope.conversation_id,
         )
         return worker
 
@@ -403,17 +427,17 @@ class WorkerSupervisor:
                 )
         try:
             if isinstance(frame, EventFrame):
-                await self._on_event(scope_key, frame)
+                await self._on_event(scope_key, worker.conversation_id, frame)
             elif isinstance(frame, DBRpcRequestFrame):
                 await self._handle_db_rpc(worker, frame)
             elif isinstance(frame, InteractiveRequestFrame):
-                await self._on_interactive_request(scope_key, frame)
+                await self._on_interactive_request(scope_key, worker.conversation_id, frame)
             elif isinstance(frame, RunTerminalFrame):
                 worker.active_runs.discard(frame.run_id)
-                await self._on_run_terminal(scope_key, frame)
+                await self._on_run_terminal(scope_key, worker.conversation_id, frame)
             elif isinstance(frame, LogFrame):
                 if self._on_log is not None:
-                    await self._on_log(scope_key, frame)
+                    await self._on_log(scope_key, worker.conversation_id, frame)
                 else:
                     _log.info(
                         "[worker-log] scope=%s level=%s text=%s",

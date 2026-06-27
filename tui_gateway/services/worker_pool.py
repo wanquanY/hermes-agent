@@ -1,7 +1,7 @@
 """Per-conversation worker lease management.
 
 ``WorkerSupervisor`` owns subprocess mechanics keyed by
-``RuntimeScope.runtime_scope_key``. ``WorkerPool`` adds the policy layer
+``RuntimeScope.worker_identity``. ``WorkerPool`` adds the policy layer
 the control plane needs: one live worker per conversation, serialized
 spawn per conversation, idle reaping, and crash terminalization.
 """
@@ -20,7 +20,7 @@ from tui_gateway.services.worker_supervisor import RunWorker, WorkerSupervisor
 
 _log = logging.getLogger(__name__)
 
-_TerminalCallback = Callable[[str, RunTerminalFrame], Awaitable[None]]
+_TerminalCallback = Callable[[str, str, RunTerminalFrame], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,10 @@ class WorkerLease:
     @property
     def scope_key(self) -> str:
         return self.worker.scope_key
+
+    @property
+    def worker_conversation_id(self) -> str:
+        return self.worker.conversation_id
 
     def running(self) -> bool:
         return self.worker.running()
@@ -149,7 +153,10 @@ class WorkerPool:
                 found = True
                 await self._fail_inflight_runs(state, reason="worker killed")
                 self._states.pop(conv, None)
-                await self._supervisor.shutdown(state.worker.scope_key)
+                await self._supervisor.shutdown(
+                    state.worker.scope_key,
+                    state.worker.conversation_id,
+                )
         if not found:
             await self._drop_lock(conv)
             return False
@@ -289,7 +296,10 @@ class WorkerPool:
                         now - state.idle_since,
                     )
                     self._states.pop(conv, None)
-                    await self._supervisor.shutdown(state.worker.scope_key)
+                    await self._supervisor.shutdown(
+                        state.worker.scope_key,
+                        state.worker.conversation_id,
+                    )
                     removed = True
             if removed:
                 await self._drop_lock(conv)
@@ -312,7 +322,10 @@ class WorkerPool:
             )
         await self._fail_inflight_runs(state, reason=reason)
         self._states.pop(conversation_id, None)
-        await self._supervisor.shutdown(state.worker.scope_key)
+        await self._supervisor.shutdown(
+            state.worker.scope_key,
+            state.worker.conversation_id,
+        )
 
     async def _fail_inflight_runs(self, state: _LeaseState, *, reason: str) -> None:
         run_ids = sorted(set(state.inflight) | set(state.worker.active_runs))
@@ -326,6 +339,7 @@ class WorkerPool:
                 try:
                     await self._terminal_callback(
                         state.worker.scope_key,
+                        state.worker.conversation_id,
                         RunTerminalFrame(
                             run_id=run_id,
                             status="failed",
@@ -372,14 +386,22 @@ class WorkerPool:
                 record.run_id,
             )
 
-    async def _mark_run_terminal(self, scope_key: str, run_id: str) -> None:
+    async def _mark_run_terminal(
+        self,
+        scope_key: str,
+        conversation_id: str,
+        run_id: str,
+    ) -> None:
         normalized_run_id = str(run_id or "").strip()
         if not normalized_run_id:
             return
         conv = self._run_to_conversation.pop(normalized_run_id, "")
         if not conv:
             for candidate, state in self._states.items():
-                if state.worker.scope_key == scope_key:
+                if (
+                    state.worker.scope_key == scope_key
+                    and state.worker.conversation_id == (conversation_id or "")
+                ):
                     conv = candidate
                     break
         if not conv:
@@ -398,11 +420,15 @@ class WorkerPool:
         if self._terminal_callback is None:
             return
 
-        async def _wrapped(scope_key: str, frame: RunTerminalFrame) -> None:
+        async def _wrapped(
+            scope_key: str,
+            conversation_id: str,
+            frame: RunTerminalFrame,
+        ) -> None:
             try:
-                await self._terminal_callback(scope_key, frame)
+                await self._terminal_callback(scope_key, conversation_id, frame)
             finally:
-                await self._mark_run_terminal(scope_key, frame.run_id)
+                await self._mark_run_terminal(scope_key, conversation_id, frame.run_id)
 
         setattr(self._supervisor, "_on_run_terminal", _wrapped)
 
@@ -440,20 +466,49 @@ class WorkerPool:
     @staticmethod
     def _scope_for(conversation_id: str, profile_context: dict) -> RuntimeScope:
         profile = profile_context if isinstance(profile_context, dict) else {}
+        dovie_profile = profile.get("dovie_profile")
+        if not isinstance(dovie_profile, dict):
+            dovie_profile = profile.get("dovieProfile")
+        if not isinstance(dovie_profile, dict):
+            dovie_profile = {}
         agent_profile_id = str(
             profile.get("agent_profile_id")
             or profile.get("agentProfileId")
             or profile.get("id")
+            or dovie_profile.get("agent_profile_id")
+            or dovie_profile.get("agentProfileId")
+            or dovie_profile.get("id")
             or ""
         ).strip()
         hermes_home = str(
             profile.get("hermes_home")
             or profile.get("hermesHomePath")
             or profile.get("hermes_home_path")
+            or profile.get("runtime_home_path")
+            or profile.get("runtimeHomePath")
+            or dovie_profile.get("hermes_home")
+            or dovie_profile.get("hermesHomePath")
+            or dovie_profile.get("hermes_home_path")
+            or dovie_profile.get("runtime_home_path")
+            or dovie_profile.get("runtimeHomePath")
             or ""
         ).strip()
+        explicit_scope_key = str(
+            profile.get("runtime_scope_key")
+            or profile.get("runtimeScopeKey")
+            or dovie_profile.get("runtime_scope_key")
+            or dovie_profile.get("runtimeScopeKey")
+            or ""
+        ).strip()
+        if explicit_scope_key.startswith(("profile:", "team:", "draft:")):
+            scope_key = explicit_scope_key
+        elif agent_profile_id:
+            scope_key = f"profile:{agent_profile_id}"
+        else:
+            scope_key = explicit_scope_key
         return RuntimeScope(
             agent_profile_id=agent_profile_id,
-            runtime_scope_key=conversation_id,
+            runtime_scope_key=scope_key,
+            conversation_id=conversation_id,
             hermes_home=hermes_home,
         )

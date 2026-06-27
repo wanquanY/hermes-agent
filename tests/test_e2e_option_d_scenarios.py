@@ -37,16 +37,16 @@ class _FakeProcess:
 class _FakeSupervisor:
     def __init__(self, parent_bus: ActivityEventBus | None = None) -> None:
         self.ensure_calls: list[RuntimeScope] = []
-        self.shutdown_calls: list[str] = []
+        self.shutdown_calls: list[tuple[str, str]] = []
         self.shutdown_all_called = False
-        self.workers: dict[str, RunWorker] = {}
-        self.sent_run_starts: list[tuple[str, RunStartFrame]] = []
-        self.sent_activity_events: list[tuple[str, ActivityEventFrame]] = []
+        self.workers: dict[tuple[str, str], RunWorker] = {}
+        self.sent_run_starts: list[tuple[str, str, RunStartFrame]] = []
+        self.sent_activity_events: list[tuple[str, str, ActivityEventFrame]] = []
         self.parent_bus = parent_bus
 
     async def ensure(self, scope: RuntimeScope, *, env_overrides=None) -> RunWorker:
         self.ensure_calls.append(scope)
-        existing = self.workers.get(scope.runtime_scope_key)
+        existing = self.workers.get(scope.worker_identity)
         if existing is not None and existing.running():
             existing.mark_used()
             return existing
@@ -57,23 +57,23 @@ class _FakeSupervisor:
             created_at=time.time(),
             last_used_at=time.time(),
         )
-        self.workers[scope.runtime_scope_key] = worker
+        self.workers[scope.worker_identity] = worker
         return worker
 
-    async def send(self, scope_key: str, frame: Any) -> bool:
+    async def send(self, scope_key: str, conversation_id: str, frame: Any) -> bool:
         if isinstance(frame, ActivityEventFrame):
-            self.sent_activity_events.append((scope_key, frame))
+            self.sent_activity_events.append((scope_key, conversation_id, frame))
             if self.parent_bus is not None:
                 self.parent_bus.push(frame.event)
             return True
         if isinstance(frame, RunStartFrame):
-            self.sent_run_starts.append((scope_key, frame))
+            self.sent_run_starts.append((scope_key, conversation_id, frame))
             return True
         return True
 
-    async def shutdown(self, scope_key: str) -> bool:
-        self.shutdown_calls.append(scope_key)
-        worker = self.workers.pop(scope_key, None)
+    async def shutdown(self, scope_key: str, conversation_id: str = "") -> bool:
+        self.shutdown_calls.append((scope_key, conversation_id or ""))
+        worker = self.workers.pop((scope_key, conversation_id or ""), None)
         if worker is None:
             return False
         worker.process.returncode = -15
@@ -190,6 +190,7 @@ async def _complete_dispatched_run(
     router: WorkerFrameRouter,
     *,
     scope_key: str,
+    conversation_id: str | None = None,
     run_id: str,
     stored_session_id: str,
     text: str,
@@ -207,6 +208,7 @@ async def _complete_dispatched_run(
     )
     await router.on_event(
         scope_key,
+        conversation_id or stored_session_id,
         EventFrame(
             params={
                 "type": "message.complete",
@@ -220,6 +222,7 @@ async def _complete_dispatched_run(
     )
     await router.on_run_terminal(
         scope_key,
+        conversation_id or stored_session_id,
         RunTerminalFrame(run_id=run_id, stored_session_id=stored_session_id, status="completed"),
     )
 
@@ -235,7 +238,7 @@ async def test_e2e_plain_chat_via_worker_pool(harness, tmp_path: Path) -> None:
         profile_context=_profile_context(tmp_path),
     )
 
-    first_worker = harness.supervisor.workers["conv-A"]
+    first_worker = harness.supervisor.workers[("profile:profile-main", "conv-A")]
     await _submit_plain_chat(
         harness.db,
         harness.pool,
@@ -252,7 +255,7 @@ async def test_e2e_plain_chat_via_worker_pool(harness, tmp_path: Path) -> None:
         ("user", "hello again"),
         ("assistant", "world again"),
     ]
-    assert harness.supervisor.workers["conv-A"] is first_worker
+    assert harness.supervisor.workers[("profile:profile-main", "conv-A")] is first_worker
     assert len(harness.supervisor.ensure_calls) == 1
     assert harness.pool.stats()["workerCount"] == 1
 
@@ -402,13 +405,15 @@ async def test_e2e_async_agent_dispatch_round_trip(harness, tmp_path: Path) -> N
     )
 
     assert result == {"activity_id": "act-C", "conversation_id": "conv-C-child", "status": "running"}
-    assert harness.supervisor.sent_run_starts[0][0] == "conv-C-child"
-    assert harness.supervisor.sent_run_starts[0][1].prompt == "Investigate the failure"
+    assert harness.supervisor.sent_run_starts[0][0] == "profile:profile-worker"
+    assert harness.supervisor.sent_run_starts[0][1] == "conv-C-child"
+    assert harness.supervisor.sent_run_starts[0][2].prompt == "Investigate the failure"
 
     await _complete_dispatched_run(
         harness.db,
         harness.router,
-        scope_key="conv-C-child",
+        scope_key="profile:profile-worker",
+        conversation_id="conv-C-child",
         run_id="run-C",
         stored_session_id="conv-C-child",
         text="Shard fixed and tests are green.",
@@ -460,6 +465,7 @@ async def test_e2e_async_team_dispatch_round_trip(harness) -> None:
     )
     harness.router.record_run_start(
         scope_key="mission-D",
+        conversation_id="mission-D",
         run_id="run-D",
         stored_session_id="mission-D",
         turn_id="turn-D",
@@ -535,7 +541,8 @@ async def test_e2e_multi_activity_per_conversation(
             _complete_dispatched_run(
                 harness.db,
                 harness.router,
-                scope_key=result["conversation_id"],
+                scope_key="profile:profile-worker",
+                conversation_id=result["conversation_id"],
                 run_id=f"run-E{idx}",
                 stored_session_id=result["conversation_id"],
                 text=f"Task {idx} complete.",

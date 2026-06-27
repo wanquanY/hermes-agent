@@ -100,8 +100,8 @@ def worker_frame_router() -> WorkerFrameRouter:
             from tui_gateway import server as _server
 
             class _SupervisorSenderProxy:
-                async def send(self, scope_key: str, frame):
-                    return await worker_supervisor().send(scope_key, frame)
+                async def send(self, scope_key: str, conversation_id: str, frame):
+                    return await worker_supervisor().send(scope_key, conversation_id, frame)
 
             def _publish_event_with_db(params: dict, *, run_context=None):
                 # The MAIN side is the canonical persistence point for
@@ -390,7 +390,11 @@ async def _dispatch_run_cancel(req: dict, transport: Any, params: dict) -> bool:
     if info is None or not info.scope_key:
         return False
     supervisor = worker_supervisor()
-    ok = await supervisor.send(info.scope_key, RunCancelFrame(run_id=run_id))
+    ok = await supervisor.send(
+        info.scope_key,
+        info.conversation_id,
+        RunCancelFrame(run_id=run_id),
+    )
     if not ok:
         # Worker stdin closed (subprocess died?) — fall through so the
         # in-process handler can synthesize a terminal event and
@@ -459,6 +463,7 @@ async def _dispatch_prompt_submit(
 
     run_start_kwargs = {
         "scope_key": lease.scope_key,
+        "conversation_id": stored_session_id,
         "run_id": run_id,
         "stored_session_id": stored_session_id,
         "turn_id": turn_id,
@@ -473,6 +478,8 @@ async def _dispatch_prompt_submit(
         run_start_kwargs["activity_kind"] = "team_dispatch"
     if params.get("parent_scope_key") is not None:
         run_start_kwargs["parent_scope_key"] = params.get("parent_scope_key")
+    if params.get("parent_conversation_id") is not None:
+        run_start_kwargs["parent_conversation_id"] = params.get("parent_conversation_id")
     if params.get("parent_hermes_home") is not None:
         run_start_kwargs["parent_hermes_home"] = params.get("parent_hermes_home")
     router.record_run_start(**run_start_kwargs)
@@ -495,9 +502,14 @@ async def _dispatch_prompt_submit(
         frame_params["cwd"] = workspace_context["cwd"]
         frame_params["workspace"] = workspace_context["workspace"]
     frame_params["runtime_scope_key"] = lease.scope_key
+    frame_params["conversation_id"] = stored_session_id
+    if scope.agent_profile_id:
+        frame_params.setdefault("agent_profile_id", scope.agent_profile_id)
+        frame_params.setdefault("agentProfileId", scope.agent_profile_id)
 
     ok = await worker_supervisor().send(
         lease.scope_key,
+        stored_session_id,
         RunStartFrame(
             run_id=run_id,
             turn_id=turn_id,
@@ -527,6 +539,7 @@ async def _dispatch_prompt_submit(
             "turn_id": turn_id,
             "stored_session_id": stored_session_id,
             "runtime_scope_key": lease.scope_key,
+            "conversation_id": stored_session_id,
             "source": "primary-run-worker",
         },
     )
@@ -535,8 +548,19 @@ async def _dispatch_prompt_submit(
 
 def _profile_context_for_worker_pool(scope: RuntimeScope, params: dict[str, Any]) -> dict[str, Any]:
     profile = params.get("dovie_profile") if isinstance(params.get("dovie_profile"), dict) else {}
+    agent_profile_id = str(
+        scope.agent_profile_id
+        or profile.get("id")
+        or profile.get("agent_profile_id")
+        or profile.get("agentProfileId")
+        or params.get("agent_profile_id")
+        or params.get("agentProfileId")
+        or ""
+    ).strip()
     return {
-        "agent_profile_id": scope.agent_profile_id or profile.get("id") or "",
+        "agent_profile_id": agent_profile_id,
+        "agentProfileId": agent_profile_id,
+        "id": agent_profile_id,
         "hermes_home": (
             scope.hermes_home
             or profile.get("hermesHomePath")
@@ -544,6 +568,8 @@ def _profile_context_for_worker_pool(scope: RuntimeScope, params: dict[str, Any]
             or ""
         ),
         "runtime_scope_key": scope.runtime_scope_key,
+        "runtimeScopeKey": scope.runtime_scope_key,
+        "dovie_profile": profile,
     }
 
 

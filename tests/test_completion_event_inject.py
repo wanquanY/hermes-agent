@@ -52,10 +52,10 @@ class _FakeAgent:
 
 class _FakeSender:
     def __init__(self) -> None:
-        self.sent: list[tuple[str, Any]] = []
+        self.sent: list[tuple[str, str, Any]] = []
 
-    async def send(self, scope_key: str, frame: Any) -> bool:
-        self.sent.append((scope_key, frame))
+    async def send(self, scope_key: str, conversation_id: str, frame: Any) -> bool:
+        self.sent.append((scope_key, conversation_id, frame))
         return True
 
 
@@ -195,7 +195,7 @@ async def test_dispatched_worker_completion_marks_activity_completed(
     assert events[-1]["payload"]["type"] == "activity.completed"
     assert sender.sent
     assert sender.sent[-1][0] == "leader-scope"
-    assert isinstance(sender.sent[-1][1], ActivityEventFrame)
+    assert isinstance(sender.sent[-1][2], ActivityEventFrame)
 
 
 @pytest.mark.asyncio
@@ -225,8 +225,8 @@ async def test_dispatched_worker_failure_marks_activity_failed_with_error(
     assert row["status"] == "failed"
     assert row["result_summary"] == "worker exploded"
     assert events[-1]["payload"]["type"] == "activity.failed"
-    assert isinstance(sender.sent[-1][1], ActivityEventFrame)
-    assert sender.sent[-1][1].event["status"] == "failed"
+    assert isinstance(sender.sent[-1][2], ActivityEventFrame)
+    assert sender.sent[-1][2].event["status"] == "failed"
 
 
 def test_get_activity_tool_handler_returns_status_and_result(monkeypatch: pytest.MonkeyPatch) -> None:

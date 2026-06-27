@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Tuple
 
 from hermes_constants import get_hermes_home
 from hermes_state.profile_dir import resolve_default_agent_dir
@@ -134,11 +134,16 @@ _CRON_CONTROL_PLANE_ACTIONS = frozenset({"", "list", "status", "runs"})
 class RuntimeScope:
     agent_profile_id: str = ""
     runtime_scope_key: str = ""
+    conversation_id: str = ""
     hermes_home: str = ""
 
     @property
     def has_scope(self) -> bool:
         return bool(self.agent_profile_id or self.runtime_scope_key)
+
+    @property
+    def worker_identity(self) -> Tuple[str, str]:
+        return (self.runtime_scope_key, self.conversation_id)
 
 
 def _default_agent_home_for_scope(profile_id: str, scope_key: str) -> str:
@@ -163,15 +168,28 @@ def runtime_scope_from_params(params: dict[str, Any]) -> RuntimeScope:
         or profile.get("agent_profile_id")
         or ""
     ).strip()
-    scope_key = str(
+    explicit_scope_key = str(
         params.get("runtimeScopeKey")
         or params.get("runtime_scope_key")
         or profile.get("runtimeScopeKey")
         or profile.get("runtime_scope_key")
         or ""
     ).strip()
-    if not scope_key and profile_id:
+    if explicit_scope_key.startswith(("profile:", "team:", "draft:")):
+        scope_key = explicit_scope_key
+    elif profile_id:
         scope_key = f"profile:{profile_id}"
+    else:
+        scope_key = explicit_scope_key
+    conversation_id = str(
+        params.get("conversation_id")
+        or params.get("conversationId")
+        or params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or params.get("session_id")
+        or params.get("sessionId")
+        or ""
+    ).strip()
     hermes_home = str(
         profile.get("hermesHomePath")
         or profile.get("hermes_home_path")
@@ -184,6 +202,7 @@ def runtime_scope_from_params(params: dict[str, Any]) -> RuntimeScope:
     return RuntimeScope(
         agent_profile_id=profile_id,
         runtime_scope_key=scope_key,
+        conversation_id=conversation_id,
         hermes_home=hermes_home,
     )
 

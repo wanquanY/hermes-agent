@@ -186,6 +186,11 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         or params.get("runtimeScopeKey")
         or ""
     ).strip()
+    agent_profile_id = str(
+        params.get("agent_profile_id")
+        or params.get("agentProfileId")
+        or ""
+    ).strip()
     transient = bool(
         params.get("transient")
         or params.get("temporary")
@@ -194,6 +199,19 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
     profile_context: Optional[dict] = None
     if isinstance(params.get("dovie_profile"), dict):
         profile_context = params["dovie_profile"]
+        agent_profile_id = agent_profile_id or str(
+            profile_context.get("id")
+            or profile_context.get("agent_profile_id")
+            or profile_context.get("agentProfileId")
+            or ""
+        ).strip()
+        runtime_scope_key = runtime_scope_key or str(
+            profile_context.get("runtime_scope_key")
+            or profile_context.get("runtimeScopeKey")
+            or ""
+        ).strip()
+    if not runtime_scope_key and agent_profile_id:
+        runtime_scope_key = f"profile:{agent_profile_id}"
 
     # Match the legacy field set so every code path the prompt handler
     # touches finds what it expects. Don't trim — missing fields like
@@ -217,6 +235,8 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         "create_service_tier_override": None,
         "close_on_disconnect": False,
         "profile_context": profile_context,
+        "agent_profile_id": agent_profile_id,
+        "agentProfileId": agent_profile_id,
         "agent_context_mode": None,
         "activity_event_bus": activity_event_bus,
         "runtime_scope_key": runtime_scope_key,

@@ -73,6 +73,16 @@ def _profile_context(profile: dict[str, Any], *, conversation_id: str) -> dict[s
         or profile.get("runtime_home_path")
         or profile.get("runtimeHomePath")
     )
+    explicit_scope_key = _text(
+        profile.get("runtime_scope_key")
+        or profile.get("runtimeScopeKey")
+    )
+    if explicit_scope_key.startswith(("profile:", "team:", "draft:")):
+        runtime_scope_key = explicit_scope_key
+    elif profile_id:
+        runtime_scope_key = f"profile:{profile_id}"
+    else:
+        runtime_scope_key = explicit_scope_key
     context = dict(profile)
     context.update(
         {
@@ -83,8 +93,10 @@ def _profile_context(profile: dict[str, Any], *, conversation_id: str) -> dict[s
             "agentProfileVersionId": version_id,
             "hermes_home": hermes_home,
             "hermesHomePath": hermes_home,
-            "runtime_scope_key": conversation_id,
-            "runtimeScopeKey": conversation_id,
+            "runtime_scope_key": runtime_scope_key,
+            "runtimeScopeKey": runtime_scope_key,
+            "conversation_id": conversation_id,
+            "conversationId": conversation_id,
         }
     )
     return context
@@ -271,12 +283,14 @@ async def dispatch_agent_async(
     if router is not None and callable(getattr(router, "record_run_start", None)):
         router.record_run_start(
             scope_key=lease.scope_key,
+            conversation_id=conversation_id,
             run_id=run_id,
             stored_session_id=conversation_id,
             turn_id=turn_id,
             dispatch_activity_id=activity_id,
             activity_kind="agent_dispatch",
             parent_scope_key=parent_scope_key,
+            parent_conversation_id=parent_conversation_id,
             parent_hermes_home=parent_hermes_home,
         )
     if callable(getattr(pool, "record_run_start", None)):
@@ -290,8 +304,10 @@ async def dispatch_agent_async(
     frame_params = {
         "dovie_profile": target_profile_context,
         "agent_profile_id": target_profile_context["agent_profile_id"],
+        "agentProfileId": target_profile_context["agent_profile_id"],
         "agent_profile_version_id": target_profile_context["agent_profile_version_id"],
         "runtime_scope_key": lease.scope_key,
+        "conversation_id": conversation_id,
         "parent_conversation_id": parent_conversation_id,
         "parent_activity_id": parent_activity_id,
         "dispatch_activity_id": activity_id,
@@ -302,6 +318,7 @@ async def dispatch_agent_async(
     try:
         ok = await supervisor.send(
             lease.scope_key,
+            conversation_id,
             RunStartFrame(
                 run_id=run_id,
                 turn_id=turn_id,

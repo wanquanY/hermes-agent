@@ -59,7 +59,10 @@ class _FakePool:
         self.spawn_calls.append((conversation_id, profile_context))
         if self.db is not None:
             self.pending_row = self.db.get_activity("act-1")
-        return SimpleNamespace(scope_key=conversation_id)
+        return SimpleNamespace(
+            scope_key=profile_context.get("runtime_scope_key") or "",
+            worker_conversation_id=conversation_id,
+        )
 
     async def record_run_start(self, **kwargs: Any) -> None:
         self.recorded_runs.append(dict(kwargs))
@@ -79,10 +82,15 @@ class _FailingPool(_FakePool):
 class _FakeSupervisor:
     def __init__(self, *, ok: bool = True) -> None:
         self.ok = ok
-        self.sent: list[tuple[str, RunStartFrame]] = []
+        self.sent: list[tuple[str, str, RunStartFrame]] = []
 
-    async def send(self, scope_key: str, frame: RunStartFrame) -> bool:
-        self.sent.append((scope_key, frame))
+    async def send(
+        self,
+        scope_key: str,
+        conversation_id: str,
+        frame: RunStartFrame,
+    ) -> bool:
+        self.sent.append((scope_key, conversation_id, frame))
         return self.ok
 
 
@@ -172,8 +180,10 @@ async def test_dispatch_spawns_worker_for_target_profile(tmp_path: Path) -> None
                 "agentProfileVersionId": "version-1",
                 "hermes_home": str(tmp_path / "profile-worker"),
                 "hermesHomePath": str(tmp_path / "profile-worker"),
-                "runtime_scope_key": "conv-child",
-                "runtimeScopeKey": "conv-child",
+                "runtime_scope_key": "profile:profile-worker",
+                "runtimeScopeKey": "profile:profile-worker",
+                "conversation_id": "conv-child",
+                "conversationId": "conv-child",
             },
         )
     ]
@@ -195,8 +205,9 @@ async def test_dispatch_pushes_run_start_frame_with_prompt(tmp_path: Path) -> No
     )
 
     assert len(supervisor.sent) == 1
-    scope_key, frame = supervisor.sent[0]
-    assert scope_key == "conv-child"
+    scope_key, conversation_id, frame = supervisor.sent[0]
+    assert scope_key == "profile:profile-worker"
+    assert conversation_id == "conv-child"
     assert isinstance(frame, RunStartFrame)
     assert frame.run_id == "run-1"
     assert frame.turn_id == "turn-1"
@@ -204,7 +215,8 @@ async def test_dispatch_pushes_run_start_frame_with_prompt(tmp_path: Path) -> No
     assert frame.prompt == "Do the long task"
     assert frame.params["dispatch_activity_id"] == "act-1"
     assert frame.params["files"] == ["tests/a.py"]
-    assert frame.params["runtime_scope_key"] == "conv-child"
+    assert frame.params["runtime_scope_key"] == "profile:profile-worker"
+    assert frame.params["conversation_id"] == "conv-child"
 
 
 @pytest.mark.asyncio

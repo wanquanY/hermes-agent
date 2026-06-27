@@ -61,12 +61,14 @@ class RunInfo:
     ``prompt.submit`` at run-create time."""
 
     scope_key: str
+    conversation_id: str
     stored_session_id: str
     turn_id: str
     run_context_json: Any = ""
     dispatch_activity_id: str = ""
     activity_kind: str = ""
     parent_scope_key: str = ""
+    parent_conversation_id: str = ""
     parent_hermes_home: str = ""
     last_message_event: dict[str, Any] | None = None
 
@@ -74,6 +76,7 @@ class RunInfo:
 @dataclass
 class _Pending:
     scope_key: str
+    conversation_id: str
     kind: str
     stored_session_id: str
 
@@ -84,7 +87,7 @@ class _SupervisorSender(Protocol):
     Kept narrow so tests can stub it without standing up a real
     subprocess."""
 
-    async def send(self, scope_key: str, frame: Any) -> bool: ...
+    async def send(self, scope_key: str, conversation_id: str, frame: Any) -> bool: ...
 
 
 class WorkerFrameRouter:
@@ -114,6 +117,7 @@ class WorkerFrameRouter:
         self,
         *,
         scope_key: str,
+        conversation_id: str = "",
         run_id: str,
         stored_session_id: str,
         turn_id: str = "",
@@ -121,6 +125,7 @@ class WorkerFrameRouter:
         dispatch_activity_id: str = "",
         activity_kind: str = "",
         parent_scope_key: str = "",
+        parent_conversation_id: str = "",
         parent_hermes_home: str = "",
     ) -> None:
         run_id = str(run_id or "").strip()
@@ -129,12 +134,14 @@ class WorkerFrameRouter:
         with self._lock:
             self._runs[run_id] = RunInfo(
                 scope_key=str(scope_key or ""),
+                conversation_id=str(conversation_id or stored_session_id or ""),
                 stored_session_id=str(stored_session_id or ""),
                 turn_id=str(turn_id or ""),
                 run_context_json=run_context_json,
                 dispatch_activity_id=str(dispatch_activity_id or ""),
                 activity_kind=str(activity_kind or ""),
                 parent_scope_key=str(parent_scope_key or ""),
+                parent_conversation_id=str(parent_conversation_id or ""),
                 parent_hermes_home=str(parent_hermes_home or ""),
             )
 
@@ -159,23 +166,38 @@ class WorkerFrameRouter:
             info = self._runs.get(run_id)
             return RunInfo(
                 scope_key=info.scope_key,
+                conversation_id=info.conversation_id,
                 stored_session_id=info.stored_session_id,
                 turn_id=info.turn_id,
                 run_context_json=info.run_context_json,
                 dispatch_activity_id=info.dispatch_activity_id,
                 activity_kind=info.activity_kind,
                 parent_scope_key=info.parent_scope_key,
+                parent_conversation_id=info.parent_conversation_id,
                 parent_hermes_home=info.parent_hermes_home,
                 last_message_event=dict(info.last_message_event or {}) if info.last_message_event else None,
             ) if info is not None else None
 
     # ── WorkerSupervisor callbacks ──────────────────────────────────
 
-    async def on_event(self, scope_key: str, frame: EventFrame) -> None:
+    async def on_event(
+        self,
+        scope_key: str,
+        conversation_id: str | EventFrame,
+        frame: EventFrame | None = None,
+    ) -> None:
         """Forward the 1:1 worker→main event payload to live subscribers
         + persist it. ``params`` is the same dict the legacy ws bridge
         used to put on the wire."""
-        params = frame.params if isinstance(frame.params, dict) else {}
+        if frame is None and isinstance(conversation_id, EventFrame):
+            frame = conversation_id
+            conversation_id = ""
+        if frame is None:
+            return
+        conversation = str(conversation_id or "")
+        params = dict(frame.params) if isinstance(frame.params, dict) else {}
+        params.setdefault("runtime_scope_key", scope_key)
+        params.setdefault("conversation_id", conversation)
         self._capture_last_message_event(params)
         run_context = self._run_context_for_event(params)
         try:
@@ -190,7 +212,10 @@ class WorkerFrameRouter:
             )
 
     async def on_interactive_request(
-        self, scope_key: str, frame: InteractiveRequestFrame,
+        self,
+        scope_key: str,
+        conversation_id: str | InteractiveRequestFrame,
+        frame: InteractiveRequestFrame | None = None,
     ) -> None:
         """Register the ``request_id → scope_key`` mapping so a later
         ``respond`` knows which worker to forward the answer to.
@@ -205,6 +230,12 @@ class WorkerFrameRouter:
         frontend card. The ``InteractiveRequestFrame`` is routing
         metadata only — it carries enough to track the request_id but
         not the full payload renderers expect."""
+        if frame is None and isinstance(conversation_id, InteractiveRequestFrame):
+            frame = conversation_id
+            conversation_id = frame.stored_session_id
+        if frame is None:
+            return
+        conversation = str(conversation_id or "")
         if frame.kind not in _INTERACTIVE_KINDS:
             _log.warning(
                 "[worker-router] dropping interactive.request kind=%r request_id=%r",
@@ -217,17 +248,29 @@ class WorkerFrameRouter:
             # run that's currently active for this scope (best-effort;
             # if multiple are concurrent, the answer routing still
             # works because we key by request_id, not session).
-            stored = self._infer_stored_session_for_scope(scope_key)
+            stored = self._infer_stored_session_for_scope(scope_key, conversation)
+            if not conversation:
+                conversation = stored
         with self._lock:
             self._pending[frame.request_id] = _Pending(
                 scope_key=scope_key,
+                conversation_id=conversation,
                 kind=frame.kind,
                 stored_session_id=stored,
             )
 
     async def on_run_terminal(
-        self, scope_key: str, frame: RunTerminalFrame,
+        self,
+        scope_key: str,
+        conversation_id: str | RunTerminalFrame,
+        frame: RunTerminalFrame | None = None,
     ) -> None:
+        if frame is None and isinstance(conversation_id, RunTerminalFrame):
+            frame = conversation_id
+            conversation_id = frame.stored_session_id
+        if frame is None:
+            return
+        conversation = str(conversation_id or "")
         stored = frame.stored_session_id
         turn_id = frame.turn_id
         with self._lock:
@@ -235,6 +278,8 @@ class WorkerFrameRouter:
         if info is not None:
             stored = stored or info.stored_session_id
             turn_id = turn_id or info.turn_id
+            if not conversation:
+                conversation = info.conversation_id
         with self._lock:
             self._runs.pop(frame.run_id, None)
             # Also clear any pending interactive entries that were tied
@@ -242,7 +287,11 @@ class WorkerFrameRouter:
             # the (dead) blocked thread anyway.
             stale_ids = [
                 rid for rid, pending in self._pending.items()
-                if pending.scope_key == scope_key and pending.stored_session_id == stored
+                if (
+                    pending.scope_key == scope_key
+                    and pending.conversation_id == conversation
+                    and pending.stored_session_id == stored
+                )
             ]
             for rid in stale_ids:
                 self._pending.pop(rid, None)
@@ -255,7 +304,7 @@ class WorkerFrameRouter:
                 scope_key, frame.run_id, frame.status,
             )
             return
-        await self._publish_activity_terminal(scope_key, frame, info, stored)
+        await self._publish_activity_terminal(scope_key, conversation, frame, info, stored)
         # NORMAL COMPLETION: the worker's agent code already published a
         # ``message.complete`` event through the monkey-patched publish
         # path (which arrived on the main side via ``on_event`` → re-
@@ -283,13 +332,23 @@ class WorkerFrameRouter:
                 scope_key, frame.run_id,
             )
 
-    async def on_log(self, scope_key: str, frame: LogFrame) -> None:
+    async def on_log(
+        self,
+        scope_key: str,
+        conversation_id: str | LogFrame,
+        frame: LogFrame | None = None,
+    ) -> None:
         """Default sink — surface worker-side log frames into the main
         sidecar logger so they appear in the same stream as other
         gateway diagnostics."""
+        if frame is None and isinstance(conversation_id, LogFrame):
+            frame = conversation_id
+            conversation_id = ""
+        if frame is None:
+            return
         _log.log(
             _level_for(frame.level),
-            "[run-worker:%s] %s", scope_key, frame.text,
+            "[run-worker:%s:%s] %s", scope_key, conversation_id, frame.text,
         )
 
     # ── main→worker response routing ────────────────────────────────
@@ -321,6 +380,7 @@ class WorkerFrameRouter:
                 return False
         ok = await self._sender.send(
             pending.scope_key,
+            pending.conversation_id,
             InteractiveResponseFrame(
                 kind=pending.kind, request_id=request_id, answer=answer,
             ),
@@ -345,6 +405,7 @@ class WorkerFrameRouter:
                     {
                         "requestId": rid,
                         "scopeKey": pending.scope_key,
+                        "conversationId": pending.conversation_id,
                         "kind": pending.kind,
                         "storedSessionId": pending.stored_session_id,
                     }
@@ -354,6 +415,7 @@ class WorkerFrameRouter:
                     {
                         "runId": rid,
                         "scopeKey": info.scope_key,
+                        "conversationId": info.conversation_id,
                         "storedSessionId": info.stored_session_id,
                         "turnId": info.turn_id,
                     }
@@ -363,7 +425,7 @@ class WorkerFrameRouter:
 
     # ── internals ────────────────────────────────────────────────────
 
-    def _infer_stored_session_for_scope(self, scope_key: str) -> str:
+    def _infer_stored_session_for_scope(self, scope_key: str, conversation_id: str) -> str:
         """Best-effort: when an interactive.request arrives without an
         explicit ``stored_session_id``, look at the active runs for the
         scope. If exactly one run is active for this scope, use its
@@ -372,7 +434,9 @@ class WorkerFrameRouter:
         candidates = [
             info.stored_session_id
             for info in self._runs.values()
-            if info.scope_key == scope_key and info.stored_session_id
+            if info.scope_key == scope_key
+            and (not conversation_id or info.conversation_id == (conversation_id or ""))
+            and info.stored_session_id
         ]
         if len(candidates) == 1:
             return candidates[0]
@@ -414,6 +478,7 @@ class WorkerFrameRouter:
     async def _publish_activity_terminal(
         self,
         scope_key: str,
+        conversation_id: str,
         frame: RunTerminalFrame,
         info: RunInfo | None,
         stored_session_id: str,
@@ -422,6 +487,7 @@ class WorkerFrameRouter:
             return
         activity_id = info.dispatch_activity_id
         parent_scope_key = info.parent_scope_key
+        parent_conversation_id = info.parent_conversation_id
         parent_hermes_home = info.parent_hermes_home
         token = None
         try:
@@ -494,6 +560,7 @@ class WorkerFrameRouter:
             if parent_scope_key:
                 await self._sender.send(
                     parent_scope_key,
+                    parent_conversation_id,
                     ActivityEventFrame(kind="activity", event=event),
                 )
         except Exception:
