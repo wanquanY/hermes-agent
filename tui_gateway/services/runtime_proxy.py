@@ -2,13 +2,19 @@
 
 Phase 6 slimmed this module down: the legacy sub-sidecar proxy stack
 (``RuntimeWorkerPool``, ``RuntimeProxyBridge``, ``proxy_to_runtime``,
-the per-profile ws-server spawn) is gone. The main sidecar now hosts
-every control-plane method in-process, with ``enter_profile_context``
-switching the ``_active_hermes_home`` ContextVar at ``handle_request``
-dispatch entry so ``_get_db()`` resolves the right profile-scoped
-control DB. Methods that actually run the agent (``run.submit`` /
+the per-profile ws-server spawn) is gone. Under Option D the main
+sidecar hosts every control-plane method in-process, and the
+control-plane DB is a single root ``state.db`` singleton (see
+``server._get_db`` — ``DOVIE_HERMES_CONTROL_HOME`` is only a test
+override). ``enter_profile_context`` switches the
+``_active_hermes_home`` ContextVar at ``handle_request`` dispatch
+entry to identify the *active agent profile workspace* (used by
+worker spawn, profile lookup, agent-runner pathing) — it does NOT
+re-route the control-plane DB, which always reads from / writes to
+the root. Methods that actually run the agent (``run.submit`` /
 ``prompt.submit``) are routed through ``WorkerSupervisor`` via
-``worker_runtime.primary_dispatch`` from ``ws.py``.
+``worker_runtime.primary_dispatch`` from ``ws.py``, with the worker
+subprocess accessing the same root DB through ``WorkerDBProxy`` IPC.
 
 What remains here:
 - ``RuntimeScope`` — the typed (agent_profile_id, runtime_scope_key,
