@@ -2274,7 +2274,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         return self._execute_write(_do)
 
     def _repair_session_index_terminal_active_runs_locked(self, conn: sqlite3.Connection) -> int:
-        """Clear stale sidebar state whose recorded active run is already terminal.
+        """Clear stale sidebar state once its conversation has no active runs.
 
         Team mission rows need a narrower rule than regular chat rows: worker
         and leader runs can finish while the mission is still active.  Only clear
@@ -2289,17 +2289,11 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                        active_run_id = '', active_runtime_session_id = '',
                        pending_approval_count = 0
                  WHERE active_run_id != ''
-                   AND active_run_id IN (
-                       SELECT run_id FROM runs
-                        WHERE LOWER(COALESCE(status,'')) IN
-                              ('completed','failed','cancelled','canceled','interrupted')
-                   )
                    AND NOT EXISTS (
-                       SELECT 1 FROM runs active_runs
-                        WHERE active_runs.session_id = session_index.session_id
-                          AND active_runs.run_id != session_index.active_run_id
-                          AND LOWER(COALESCE(active_runs.status,'')) IN
-                              ('queued','starting','running','waiting_approval','cancelling','finalizing')
+                       SELECT 1 FROM runs
+                        WHERE runs.session_id = session_index.session_id
+                          AND LOWER(COALESCE(runs.status,'')) NOT IN
+                              ('completed','failed','cancelled','canceled','interrupted')
                    )
                    AND (
                        session_kind != 'team_mission'
@@ -2432,11 +2426,6 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         team_internal_clause = (
             "NOT (id LIKE 'team:%' AND id LIKE '%:node:%') "
             "AND NOT (COALESCE(parent_session_id,'') LIKE 'team:%:node:%') "
-            # Group-chat member-chat worker sessions (id like 'memberchat:%')
-            # are data plane compatibility sessions. RunContext routes visible
-            # events into the team conversation session, so the worker session
-            # itself must never surface as a sidebar row.
-            "AND NOT (id LIKE 'memberchat:%')"
         )
         # Suppress regular delegate_task / sub-agent children too — they have a
         # non-empty parent_session_id pointing at the user-visible conversation
@@ -2484,13 +2473,8 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 " WHERE COALESCE(parent_session_id,'') LIKE 'team:%:node:%'"
                 ")"
             )
-            # Purge any group-chat member-chat worker sessions that a prior
-            # session.create projected before the filter existed. The worker
-            # session is data plane compatibility state; RunContext routes the
-            # visible reply into the team conversation.
-            conn.execute(
-                "DELETE FROM session_index WHERE session_id LIKE 'memberchat:%'"
-            )
+            # CR-P0.4: removed memberchat:* purge hack; member-chat
+            # conversations are first-class per three-layer redesign.
             # Purge non-team delegate_task subagent children — same predicate
             # as the SELECT subagent_clause above. A previous reconcile may have
             # projected them before this filter existed.
@@ -2602,6 +2586,12 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                         WHERE LOWER(COALESCE(status,'')) IN
                               ('completed','failed','cancelled','canceled','interrupted')
                    )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM runs
+                        WHERE runs.session_id = session_index.session_id
+                          AND LOWER(COALESCE(runs.status,'')) NOT IN
+                              ('completed','failed','cancelled','canceled','interrupted')
+                   )
                 """
             )
             # Heal plan-rejection rows produced by older builds: the graph nodes
@@ -2626,6 +2616,12 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                         WHERE n.mission_id = session_index.mission_id
                           AND LOWER(COALESCE(n.status,'')) IN
                               ('waiting_approval','running','starting')
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM runs
+                        WHERE runs.session_id = session_index.session_id
+                          AND LOWER(COALESCE(runs.status,'')) NOT IN
+                              ('completed','failed','cancelled','canceled','interrupted')
                    )
                 """
             )
