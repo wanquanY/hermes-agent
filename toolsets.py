@@ -54,7 +54,7 @@ _HERMES_CORE_TOOLS = [
     # Clarifying questions
     "clarify",
     # Code execution + delegation
-    "execute_code", "delegate_task",
+    "execute_code", "delegate_task", "invoke_subagent",
     # Dovie automation task management
     "dovie_automation_task_create", "dovie_automation_task_list",
     "dovie_automation_task_update", "dovie_automation_task_remove",
@@ -298,6 +298,12 @@ TOOLSETS = {
     "delegation": {
         "description": "Spawn subagents with isolated context for complex subtasks",
         "tools": ["delegate_task"],
+        "includes": []
+    },
+
+    "subagent": {
+        "description": "Invoke another Hermes profile synchronously in-process",
+        "tools": ["invoke_subagent"],
         "includes": []
     },
 
