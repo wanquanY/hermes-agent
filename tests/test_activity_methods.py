@@ -1,0 +1,155 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from hermes_state import SessionDB
+from tui_gateway import server
+
+
+def _db(tmp_path: Path) -> SessionDB:
+    return SessionDB(tmp_path / "state.db")
+
+
+def _call(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    return server.handle_request({
+        "id": "1",
+        "method": method,
+        "params": params or {},
+    })
+
+
+def _seed_activities(db: SessionDB) -> None:
+    db.create_activity(activity_id="conv1-pending", conversation_id="conv-1", kind="chat")
+    db.create_activity(activity_id="conv1-running", conversation_id="conv-1", kind="agent_dispatch")
+    db.create_activity(activity_id="conv2-running", conversation_id="conv-2", kind="team_dispatch")
+    db.update_activity_status("conv1-running", "running", started_at=10.0)
+    db.update_activity_status("conv2-running", "running", started_at=20.0)
+
+
+def test_activity_methods_registered() -> None:
+    for method_name in (
+        "activity.list",
+        "activity.get",
+        "activity.cancel",
+        "activity.mark_read",
+    ):
+        assert method_name in server._methods
+        assert server._methods[method_name].__module__ == "tui_gateway.methods.activity"
+
+
+def test_activity_list_returns_activities_for_conversation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db(tmp_path)
+    _seed_activities(db)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    response = _call("activity.list", {"conversation_id": "conv-1"})
+
+    assert "error" not in response
+    assert [row["activity_id"] for row in response["result"]] == [
+        "conv1-pending",
+        "conv1-running",
+    ]
+
+
+def test_activity_list_filters_by_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db(tmp_path)
+    _seed_activities(db)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    response = _call("activity.list", {"conversation_id": "conv-1", "status": "running"})
+
+    assert "error" not in response
+    assert [row["activity_id"] for row in response["result"]] == ["conv1-running"]
+
+
+def test_activity_get_returns_single_activity_or_null(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db(tmp_path)
+    db.create_activity(activity_id="act-1", conversation_id="conv-1", kind="agent_dispatch")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    response = _call("activity.get", {"activity_id": "act-1"})
+
+    assert "error" not in response
+    assert response["result"]["activity_id"] == "act-1"
+    assert response["result"]["conversation_id"] == "conv-1"
+
+
+def test_activity_cancel_marks_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db(tmp_path)
+    db.create_activity(activity_id="act-1", conversation_id="conv-1", kind="agent_dispatch")
+    db.update_activity_status("act-1", "running", started_at=10.0)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    response = _call("activity.cancel", {"activity_id": "act-1"})
+
+    assert response["result"] == {"ok": True}
+    row = db.get_activity("act-1")
+    assert row is not None
+    assert row["status"] == "cancelled"
+    assert row["completed_at"] is not None
+
+
+def test_activity_mark_read_sets_read_at_timestamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db(tmp_path)
+    db.create_activity(activity_id="act-1", conversation_id="conv-1", kind="agent_dispatch")
+    db.mark_activity_completed("act-1", result_summary="Done", result_json={})
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    response = _call("activity.mark_read", {"activity_id": "act-1"})
+
+    assert response["result"] == {"ok": True}
+    row = db.get_activity("act-1")
+    assert row is not None
+    assert row["read_at"] is not None
+    assert row["updated_at"] >= row["read_at"]
+
+
+def test_activity_get_returns_null_for_missing_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db(tmp_path)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    response = _call("activity.get", {"activity_id": "missing"})
+
+    assert "error" not in response
+    assert response["result"] is None
+
+
+@pytest.mark.parametrize(
+    ("method_name", "params", "missing_field"),
+    [
+        ("activity.list", {}, "conversation_id"),
+        ("activity.get", {}, "activity_id"),
+        ("activity.cancel", {}, "activity_id"),
+        ("activity.mark_read", {}, "activity_id"),
+    ],
+)
+def test_activity_methods_reject_missing_required_fields(
+    method_name: str,
+    params: dict[str, Any],
+    missing_field: str,
+) -> None:
+    response = _call(method_name, params)
+
+    assert response["error"]["code"] == -32602
+    assert f"{missing_field} required" in response["error"]["message"]
