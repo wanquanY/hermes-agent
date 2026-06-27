@@ -247,6 +247,26 @@ def _messages_page(
     return result, None
 
 
+def _participants_for_session(session_id: str) -> list[dict[str, Any]]:
+    session_id = _text(session_id)
+    if not session_id:
+        return []
+    try:
+        db = _get_db()
+        lister = getattr(db, "list_conversation_participants", None) if db is not None else None
+        if not callable(lister):
+            return []
+        participants = lister(session_id) or []
+        return [dict(item) for item in participants if isinstance(item, dict)]
+    except Exception as exc:
+        logger.warning(
+            "conversation.render_snapshot participants hydrate skipped session_id=%s: %s",
+            session_id,
+            exc,
+        )
+        return []
+
+
 def _record(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -622,6 +642,7 @@ def _team_conversation_snapshot(
             "mission": mission,
             "team": team,
             "graph": graph,
+            "participants": _participants_for_session(session_id),
             "messages": messages,
             "runEvents": run_events,
             "pageInfo": page_info if isinstance(page_info, dict) else {},
@@ -654,6 +675,7 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
             "stable_session_id": session_id,
             "stored_session_id": session_id,
             "session_id": session_id,
+            "participants": _participants_for_session(session_id),
             "messages": list(page.get("messages") or []),
             "runEvents": _structural_run_events(list(page.get("runEvents") or [])),
             "pageInfo": page.get("pageInfo") if isinstance(page.get("pageInfo"), dict) else {},

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .common import *
+from .participant_autocreate import ensure_team_conversation_participants
 
 
 @method("team_capability.snapshot.get")
@@ -194,6 +195,13 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4004, str(exc))
         except Exception as exc:
             return _err(rid, 5008, f"team mission conversation create failed: {exc}")
+        ensure_team_conversation_participants(
+            db,
+            conversation_session_id=conversation_session_id,
+            team_id=team_id,
+            members=None,
+            source="team_mission.create",
+        )
         return _ok(rid, {
             "mission_id": "",
             "conversation_id": conversation_id,
@@ -270,6 +278,14 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4004, str(exc))
     except Exception as exc:
         return _err(rid, 5008, f"team mission create failed: {exc}")
+    ensure_team_conversation_participants(
+        db,
+        conversation_session_id=conversation_session_id,
+        team_id=team_id,
+        members=members,
+        leader_profile_params=_leader_profile_params(params, graph if isinstance(graph, dict) else {}),
+        source="team_mission.create",
+    )
     if capability_snapshot:
         try:
             _bind_team_capability_snapshot_for_mission(

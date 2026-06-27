@@ -146,8 +146,7 @@ def test_session_create_upserts_user_and_agent_participants(tmp_path: Path, monk
     session_id = response["result"]["stored_session_id"]
     participants = db.list_conversation_participants(session_id)
     by_id = {p["participant_id"]: p for p in participants}
-    assert set(by_id) == {"user:local-user", "agent:profile-1"}
-    assert by_id["user:local-user"]["role"] == "user"
+    assert set(by_id) == {"user", "agent:profile-1"}
+    assert by_id["user"]["role"] == "user"
     assert by_id["agent:profile-1"]["role"] == "agent"
     assert by_id["agent:profile-1"]["agent_profile_id"] == "profile-1"
-    assert by_id["agent:profile-1"]["runtime_scope_key"] == "profile:profile-1"

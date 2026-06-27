@@ -9,7 +9,6 @@ from dovie_extension.display_transcript import (
     sanitize_session_list_item,
     sanitize_transcript_messages,
 )
-from hermes_state_participants import agent_participant_id, user_participant_id
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
 from tui_gateway.services.workspace import (
@@ -121,43 +120,41 @@ def _requested_created_by_user_id(params: dict | None = None) -> str:
     ).strip()
 
 
-def _upsert_session_create_conversation_participants(
+def _ensure_session_create_conversation_participants(
     db,
     *,
     session_id: str,
     params: dict,
     runtime_scope_key: str,
 ) -> None:
-    upsert = getattr(db, "upsert_conversation_participant", None)
-    if not callable(upsert):
-        return
     profile_id = _requested_agent_profile_id(params)
     scope = str(runtime_scope_key or "").strip()
     if not profile_id and scope.startswith("profile:"):
         profile_id = scope.split("profile:", 1)[1].strip()
-    user_id = _requested_created_by_user_id(params)
-    upsert(
-        conversation_session_id=session_id,
-        participant_id=user_participant_id(user_id),
-        role="user",
-        metadata={"source": "session.create"},
-    )
-    upsert(
-        conversation_session_id=session_id,
-        participant_id=agent_participant_id(profile_id),
-        role="agent",
-        agent_profile_id=profile_id,
-        agent_profile_version_id=_requested_profile_version_id(params),
-        runtime_scope_key=scope or (f"profile:{profile_id}" if profile_id else ""),
-        display_name=str(
-            params.get("agent_profile_name")
-            or params.get("agentProfileName")
-            or params.get("profile_name")
-            or params.get("profileName")
-            or ""
-        ).strip(),
-        metadata={"source": "session.create"},
-    )
+    ensure_user = getattr(db, "ensure_user_participant", None)
+    ensure_agent = getattr(db, "ensure_agent_participant", None)
+    if callable(ensure_user):
+        ensure_user(session_id, user_id="default")
+    if callable(ensure_agent):
+        ensure_agent(
+            session_id,
+            agent_profile_id=profile_id,
+            display_name=str(
+                params.get("agent_profile_name")
+                or params.get("agentProfileName")
+                or params.get("profile_name")
+                or params.get("profileName")
+                or ""
+            ).strip(),
+            avatar=str(
+                params.get("agent_profile_avatar")
+                or params.get("agentProfileAvatar")
+                or params.get("profile_avatar")
+                or params.get("profileAvatar")
+                or params.get("avatar")
+                or ""
+            ).strip(),
+        )
 
 
 def _project_session_index_on_create(
@@ -860,14 +857,21 @@ def _(rid, params: dict) -> dict:
     if db is not None:
         try:
             db.create_session(key, source="tui", model=model, transient=transient)
-            _upsert_session_create_conversation_participants(
+        except Exception as exc:
+            return _err(rid, 5000, f"session create failed: {exc}")
+        try:
+            _ensure_session_create_conversation_participants(
                 db,
                 session_id=key,
                 params=params,
                 runtime_scope_key=runtime_scope_key,
             )
         except Exception as exc:
-            return _err(rid, 5000, f"session create failed: {exc}")
+            logger.warning(
+                "session.create participant auto-create skipped session_id=%s: %s",
+                key,
+                exc,
+            )
         _project_session_index_on_create(db, key, params, runtime_scope_key, transient)
 
     if control_plane_only:

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from .common import *
+from .participant_autocreate import ensure_member_chat_participant
 from hermes_state.profile_dir import resolve_default_agent_dir
 from hermes_state_participants import leader_participant_id, member_participant_id
 from hermes_team_mission.domain.run_context import RunContext
@@ -279,6 +280,13 @@ def _submit_message_to_member(
         or member.get("name")
         or ""
     ).strip()
+    ensure_member_chat_participant(
+        db,
+        conversation_session_id=conversation_session_id,
+        member=member,
+        member_id=target_member_id,
+        source="team_mission.member_chat.start",
+    )
     try:
         db.upsert_conversation_participant(
             conversation_session_id=conversation_session_id,
@@ -289,9 +297,22 @@ def _submit_message_to_member(
             agent_profile_version_id=str(profile_params.get("agent_profile_version_id") or ""),
             runtime_scope_key=member_scope,
             display_name=display_name,
+            avatar=str(
+                member.get("avatar")
+                or member.get("profile_avatar")
+                or member.get("profileAvatar")
+                or member.get("agent_profile_avatar")
+                or member.get("agentProfileAvatar")
+                or ""
+            ).strip(),
         )
     except Exception as exc:
-        return _err(rid, 5008, f"conversation participant upsert failed: {exc}")
+        _log.warning(
+            "team_mission.member_chat.start participant enrichment skipped conversation_session_id=%s member_id=%s: %s",
+            conversation_session_id,
+            target_member_id,
+            exc,
+        )
 
     # STEP ORDER FIX (2026-06-27): The original code did
     #   1. append_message(conv_session, role=user, ...)   ← FK FAIL: conv session row doesn't exist yet
