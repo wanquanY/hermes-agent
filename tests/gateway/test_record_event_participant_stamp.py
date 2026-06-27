@@ -78,7 +78,7 @@ def test_record_event_stamps_member_participant_from_table(tmp_path: Path):
     assert (event.get("payload") or {}).get("participant_id") == "member:m-alice"
 
 
-def test_record_event_lookup_miss_logs_diagnostic_and_leaves_participant_blank(
+def test_record_event_lookup_miss_falls_back_to_member_hint(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -96,13 +96,9 @@ def test_record_event_lookup_miss_logs_diagnostic_and_leaves_participant_blank(
         payload={"member_id": "m-ghost", "agent_profile_id": "p-ghost"},
     )
 
-    assert not event.get("participant_id")
-    assert not (event.get("payload") or {}).get("participant_id")
-    miss = [fields for label, fields in diagnostics if label == "participant-resolve-miss"]
-    assert miss, diagnostics
-    assert miss[0]["session_id"] == CONV_SESSION
-    assert miss[0]["member_id"] == "m-ghost"
-    assert miss[0]["agent_profile_id"] == "p-ghost"
+    assert event.get("participant_id") == "member:m-ghost"
+    assert (event.get("payload") or {}).get("participant_id") == "member:m-ghost"
+    assert [label for label, _fields in diagnostics if label == "participant-resolve-miss"] == []
 
 
 def test_record_event_preserves_existing_frame_participant_id_and_skips_lookup(

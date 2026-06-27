@@ -166,6 +166,33 @@ def _event_runtime_scope_key(event: Dict[str, Any], fallback: str = "") -> str:
     ).strip()
 
 
+def _event_participant_id(event: Dict[str, Any], fallback: str = "") -> str:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    return str(
+        event.get("participant_id")
+        or event.get("participantId")
+        or payload.get("participant_id")
+        or payload.get("participantId")
+        or fallback
+        or ""
+    ).strip()
+
+
+def _event_with_participant_id(event: Dict[str, Any], participant_id: str = "") -> Dict[str, Any]:
+    normalized = dict(event or {})
+    normalized_participant_id = _event_participant_id(normalized, participant_id)
+    if not normalized_participant_id:
+        return normalized
+    normalized["participant_id"] = normalized_participant_id
+    normalized["participantId"] = normalized_participant_id
+    payload = normalized.get("payload")
+    if isinstance(payload, dict):
+        payload = dict(payload)
+        payload.setdefault("participant_id", normalized_participant_id)
+        normalized["payload"] = payload
+    return normalized
+
+
 def _event_status(event_type: str, payload: Dict[str, Any]) -> str | None:
     if event_type == "error":
         return "failed"
@@ -934,7 +961,13 @@ class SessionDBRunMixin:
 
         return self._execute_write(_do)
 
-    def append_run_event(self, session_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    def append_run_event(
+        self,
+        session_id: str,
+        event: Dict[str, Any],
+        *,
+        participant_id: str = "",
+    ) -> Dict[str, Any]:
         stable = str(session_id or "").strip()
         if not stable:
             return {}
@@ -977,6 +1010,13 @@ class SessionDBRunMixin:
         owner_metadata = frame.get("owner_metadata")
         owner_metadata = owner_metadata if isinstance(owner_metadata, dict) else {}
         frame["timestamp"] = timestamp
+        event_participant_id = _event_participant_id(frame, participant_id)
+        if event_participant_id:
+            frame["participant_id"] = event_participant_id
+            frame["participantId"] = event_participant_id
+            if isinstance(frame.get("payload"), dict):
+                frame["payload"]["participant_id"] = event_participant_id
+                payload = frame["payload"]
         event_json = _json_dumps(frame)
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -1108,10 +1148,15 @@ class SessionDBRunMixin:
                             "turn_id": turn_id or previous_event.get("turn_id") or "",
                             "runtime_session_id": runtime_session_id or previous_event.get("runtime_session_id") or "",
                             "runtime_scope_key": runtime_scope_key,
+                            "participant_id": event_participant_id or _event_participant_id(previous_event),
+                            "participantId": event_participant_id or _event_participant_id(previous_event),
                             "seq": seq,
                             "timestamp": timestamp,
                             "payload": merged_payload,
                         }
+                        merged_participant_id = _event_participant_id(merged_event)
+                        if merged_participant_id and isinstance(merged_event.get("payload"), dict):
+                            merged_event["payload"]["participant_id"] = merged_participant_id
                         conn.execute(
                             """
                             UPDATE run_events
@@ -1119,6 +1164,7 @@ class SessionDBRunMixin:
                                 turn_id = ?,
                                 runtime_session_id = ?,
                                 runtime_scope_key = ?,
+                                participant_id = ?,
                                 seq = ?,
                                 timestamp = ?,
                                 payload_json = ?,
@@ -1131,6 +1177,7 @@ class SessionDBRunMixin:
                                 turn_id,
                                 runtime_session_id,
                                 runtime_scope_key,
+                                merged_participant_id,
                                 seq,
                                 timestamp,
                                 _json_dumps(merged_payload),
@@ -1145,10 +1192,11 @@ class SessionDBRunMixin:
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO run_events (
-                        session_id, run_id, turn_id, runtime_session_id, runtime_scope_key, event_type,
+                        session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                        participant_id, event_type,
                         seq, timestamp, payload_json, event_json, status
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         stable,
@@ -1156,6 +1204,7 @@ class SessionDBRunMixin:
                         turn_id,
                         runtime_session_id,
                         runtime_scope_key,
+                        event_participant_id,
                         event_type,
                         seq,
                         timestamp,
@@ -1417,7 +1466,7 @@ class SessionDBRunMixin:
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                SELECT event_json
+                SELECT event_json, participant_id
                 FROM run_events
                 WHERE session_id = ?
                   AND seq > ?
@@ -1433,6 +1482,10 @@ class SessionDBRunMixin:
         for row in rows:
             event = _json_loads(row["event_json"], {})
             if isinstance(event, dict):
+                event = _event_with_participant_id(
+                    event,
+                    str(_row_value(row, "participant_id", "") or ""),
+                )
                 events.append(event)
         return events
 
@@ -1578,7 +1631,7 @@ class SessionDBRunMixin:
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                SELECT event_json
+                SELECT event_json, participant_id
                 FROM run_events
                 WHERE {where_sql}
                 ORDER BY seq ASC
@@ -1590,6 +1643,10 @@ class SessionDBRunMixin:
         for row in rows:
             event = _json_loads(row["event_json"], {})
             if isinstance(event, dict):
+                event = _event_with_participant_id(
+                    event,
+                    str(_row_value(row, "participant_id", "") or ""),
+                )
                 events.append(event)
         return events
 
@@ -2138,6 +2195,7 @@ class SessionDBRunMixin:
                     if not isinstance(keep_event, dict):
                         keep_event = {}
                     keep_event = {**keep_event, "seq": canonical_seq}
+                    keep_participant_id = _event_participant_id(keep_event)
                     keep_payload = keep_event.get("payload") if isinstance(keep_event.get("payload"), dict) else {}
                     delete_ids = [int(row["id"]) for row in rows_for_group if int(row["id"]) != int(keep_row["id"])]
                     for start in range(0, len(delete_ids), 500):
@@ -2148,12 +2206,14 @@ class SessionDBRunMixin:
                         """
                         UPDATE run_events
                         SET seq = ?,
+                            participant_id = ?,
                             payload_json = ?,
                             event_json = ?
                         WHERE id = ?
                         """,
                         (
                             canonical_seq,
+                            keep_participant_id,
                             _json_dumps(keep_payload),
                             _json_dumps(keep_event),
                             int(keep_row["id"]),
@@ -2200,6 +2260,8 @@ class SessionDBRunMixin:
                         "turn_id": _event_turn_id(event) or _event_turn_id(merged_event),
                         "runtime_session_id": event.get("runtime_session_id") or merged_event.get("runtime_session_id") or "",
                         "runtime_scope_key": _event_runtime_scope_key(event, _event_runtime_scope_key(merged_event)),
+                        "participant_id": _event_participant_id(event, _event_participant_id(merged_event)),
+                        "participantId": _event_participant_id(event, _event_participant_id(merged_event)),
                         "seq": int(event.get("seq") or merged_event.get("seq") or 0),
                         "timestamp": float(event.get("timestamp") or merged_event.get("timestamp") or 0),
                         "payload": merged_payload,
@@ -2211,6 +2273,11 @@ class SessionDBRunMixin:
                     placeholders = ",".join("?" for _ in chunk)
                     conn.execute(f"DELETE FROM run_events WHERE id IN ({placeholders})", tuple(chunk))
                 payload = merged_event.get("payload") if isinstance(merged_event.get("payload"), dict) else {}
+                merged_participant_id = _event_participant_id(merged_event)
+                if merged_participant_id and isinstance(payload, dict):
+                    payload = dict(payload)
+                    payload.setdefault("participant_id", merged_participant_id)
+                    merged_event["payload"] = payload
                 conn.execute(
                     """
                     UPDATE run_events
@@ -2218,6 +2285,7 @@ class SessionDBRunMixin:
                         turn_id = ?,
                         runtime_session_id = ?,
                         runtime_scope_key = ?,
+                        participant_id = ?,
                         seq = ?,
                         timestamp = ?,
                         payload_json = ?,
@@ -2229,6 +2297,7 @@ class SessionDBRunMixin:
                         _event_turn_id(merged_event),
                         str(merged_event.get("runtime_session_id") or ""),
                         _event_runtime_scope_key(merged_event),
+                        merged_participant_id,
                         int(merged_event.get("seq") or 0),
                         float(merged_event.get("timestamp") or 0),
                         _json_dumps(payload),

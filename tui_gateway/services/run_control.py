@@ -21,6 +21,7 @@ from collections.abc import Callable
 from typing import Any, TYPE_CHECKING
 
 from hermes_runtime_event_payloads import primary_deliverable_text
+from hermes_state_participants import agent_participant_id, leader_participant_id, member_participant_id
 from agent.dovie_diagnostics import emit_dovie_diagnostic
 from tui_gateway.services.run_control_events import (
     delta_event_for_subscription as _delta_event_for_subscription,
@@ -1112,6 +1113,163 @@ def _apply_run_context_to_frame(
     return frame
 
 
+def _parse_run_context(value: Any) -> "RunContext | None":
+    if not value:
+        return None
+    try:
+        from hermes_team_mission.domain.run_context import RunContext
+
+        return RunContext.from_payload(value)
+    except Exception:
+        return None
+
+
+def _run_context_from_frame(frame: dict[str, Any], run_context: "RunContext | None") -> "RunContext | None":
+    if run_context is not None:
+        return run_context
+    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    existing = payload.get("run_context") if isinstance(payload.get("run_context"), dict) else None
+    return (
+        _parse_run_context(existing)
+        or _parse_run_context(frame.get("run_context_json") or frame.get("runContextJson"))
+        or _parse_run_context(payload.get("run_context_json") or payload.get("runContextJson"))
+    )
+
+
+def _participant_id_from_scope(scope: str) -> str:
+    normalized = str(scope or "").strip()
+    if not normalized:
+        return ""
+    if normalized.startswith("member-chat:"):
+        member_id = normalized.rsplit(":", 1)[-1].strip()
+        if not member_id:
+            return ""
+        return member_id if member_id.startswith("member:") else member_participant_id(member_id)
+    if normalized.startswith("team:"):
+        parts = [part.strip() for part in normalized.split(":") if part.strip()]
+        if len(parts) >= 2 and any("leader" in part for part in parts[2:]):
+            try:
+                return leader_participant_id(parts[1])
+            except ValueError:
+                return ""
+    if normalized.startswith("profile:"):
+        profile_id = normalized.split("profile:", 1)[1].strip()
+        return agent_participant_id(profile_id) if profile_id else ""
+    return ""
+
+
+def _participant_id_from_user(payload: dict[str, Any], frame: dict[str, Any]) -> str:
+    role = str(frame.get("role") or payload.get("role") or "").strip().lower()
+    if role != "user":
+        return ""
+    user_id = str(
+        frame.get("user_id")
+        or frame.get("userId")
+        or payload.get("user_id")
+        or payload.get("userId")
+        or frame.get("created_by_user_id")
+        or frame.get("createdByUserId")
+        or payload.get("created_by_user_id")
+        or payload.get("createdByUserId")
+        or ""
+    ).strip()
+    return f"user:{user_id}" if user_id else "user"
+
+
+def _stamp_participant_id(
+    frame: dict[str, Any],
+    *,
+    stable: str = "",
+    event_type: str = "",
+    run_id: str = "",
+    turn_id: str = "",
+    db: Any = None,
+    run_context: "RunContext | None" = None,
+) -> str:
+    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    context = _run_context_from_frame(frame, run_context)
+    participant_id = str(
+        frame.get("participant_id")
+        or frame.get("participantId")
+        or payload.get("participant_id")
+        or payload.get("participantId")
+        or (context.participant_id if context is not None else "")
+        or ""
+    ).strip()
+    scope_hint = (
+        str(payload.get("runtime_scope_key") or payload.get("runtimeScopeKey") or "").strip()
+        or str(frame.get("runtime_scope_key") or frame.get("runtimeScopeKey") or "").strip()
+        or (context.execution_scope_key if context is not None else "")
+    )
+    team_identity = payload.get("team_mission") if isinstance(payload.get("team_mission"), dict) else {}
+    member_hint = (
+        str(payload.get("member_id") or payload.get("memberId") or "").strip()
+        or str(frame.get("member_id") or frame.get("memberId") or "").strip()
+        or str(team_identity.get("member_id") or team_identity.get("memberId") or "").strip()
+    )
+    profile_hint = (
+        str(payload.get("agent_profile_id") or payload.get("agentProfileId") or "").strip()
+        or str(frame.get("agent_profile_id") or frame.get("agentProfileId") or "").strip()
+        or str(team_identity.get("agent_profile_id") or team_identity.get("agentProfileId") or "").strip()
+    )
+    if stable and not participant_id and (scope_hint or member_hint or profile_hint):
+        resolver = _db_method(db, "resolve_participant_id")
+        resolver_failed = False
+        if resolver:
+            try:
+                participant_id = str(
+                    resolver(
+                        conversation_session_id=stable,
+                        runtime_scope_key=scope_hint,
+                        member_id=member_hint,
+                        agent_profile_id=profile_hint,
+                    )
+                    or ""
+                ).strip()
+            except Exception as exc:
+                resolver_failed = True
+                _diagnostic_warning(
+                    "participant-resolve-error",
+                    db=_db_label(db),
+                    event_type=event_type,
+                    session_id=stable,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    runtime_scope_key=scope_hint,
+                    member_id=member_hint,
+                    agent_profile_id=profile_hint,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+        if not participant_id:
+            participant_id = _participant_id_from_scope(scope_hint)
+        if not participant_id and member_hint:
+            participant_id = member_hint if member_hint.startswith("member:") else member_participant_id(member_hint)
+        if not participant_id and profile_hint:
+            participant_id = agent_participant_id(profile_hint)
+        if not participant_id and resolver and not resolver_failed:
+            _diagnostic_warning(
+                "participant-resolve-miss",
+                db=_db_label(db),
+                event_type=event_type,
+                session_id=stable,
+                run_id=run_id,
+                turn_id=turn_id,
+                runtime_scope_key=scope_hint,
+                member_id=member_hint,
+                agent_profile_id=profile_hint,
+            )
+    if not participant_id:
+        participant_id = _participant_id_from_user(payload, frame)
+    if not participant_id:
+        return ""
+    frame["participant_id"] = participant_id
+    frame["participantId"] = participant_id
+    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    payload["participant_id"] = participant_id
+    frame["payload"] = payload
+    return participant_id
+
+
 def record_event(
     params: dict[str, Any],
     owner_transport: Transport | None = None,
@@ -1134,77 +1292,19 @@ def record_event(
     owner_metadata = owner_metadata if isinstance(owner_metadata, dict) else {}
     now = time.time()
     frame["timestamp"] = now
-    # Conversation-architecture refactor (P1-PR-B): event speaker identity is
-    # authoritative when present, otherwise resolved from conversation_participants.
-    # Lookup miss/error intentionally leaves participant_id blank so PR-C can
-    # keep using legacy speaker fallback without silently misattributing to leader.
-    participant_id = str(frame.get("participant_id") or "").strip()
-    if not participant_id and isinstance(payload, dict):
-        participant_id = str(payload.get("participant_id") or "").strip()
-        if participant_id:
-            frame["participant_id"] = participant_id
-    if stable and not participant_id:
-        team_identity = payload.get("team_mission") if isinstance(payload.get("team_mission"), dict) else {}
-        scope_hint = (
-            str(payload.get("runtime_scope_key") or "").strip()
-            or str(frame.get("runtime_scope_key") or "").strip()
-        )
-        member_hint = (
-            str(payload.get("member_id") or "").strip()
-            or str(frame.get("member_id") or "").strip()
-            or str(team_identity.get("member_id") or "").strip()
-        )
-        profile_hint = (
-            str(payload.get("agent_profile_id") or "").strip()
-            or str(frame.get("agent_profile_id") or "").strip()
-            or str(team_identity.get("agent_profile_id") or "").strip()
-        )
-        if scope_hint or member_hint or profile_hint:
-            resolved_participant = ""
-            resolver = _db_method(db, "resolve_participant_id")
-            resolver_failed = False
-            if resolver:
-                try:
-                    resolved_participant = str(
-                        resolver(
-                            conversation_session_id=stable,
-                            runtime_scope_key=scope_hint,
-                            member_id=member_hint,
-                            agent_profile_id=profile_hint,
-                        )
-                        or ""
-                    ).strip()
-                except Exception as exc:
-                    resolver_failed = True
-                    _diagnostic_warning(
-                        "participant-resolve-error",
-                        db=_db_label(db),
-                        event_type=event_type,
-                        session_id=stable,
-                        run_id=run_id,
-                        turn_id=turn_id,
-                        runtime_scope_key=scope_hint,
-                        member_id=member_hint,
-                        agent_profile_id=profile_hint,
-                        error=f"{type(exc).__name__}: {exc}",
-                    )
-            if resolved_participant:
-                frame["participant_id"] = resolved_participant
-                if isinstance(frame.get("payload"), dict):
-                    frame["payload"]["participant_id"] = resolved_participant
-                    payload = frame["payload"]
-            elif resolver and not resolver_failed:
-                _diagnostic_warning(
-                    "participant-resolve-miss",
-                    db=_db_label(db),
-                    event_type=event_type,
-                    session_id=stable,
-                    run_id=run_id,
-                    turn_id=turn_id,
-                    runtime_scope_key=scope_hint,
-                    member_id=member_hint,
-                    agent_profile_id=profile_hint,
-                )
+    # CR-P0.2: persisted/published runtime events carry the first-class
+    # Participant speaker id. CR-P1 will make this the frontend's only
+    # authoritative speaker key instead of node/member/profile fallbacks.
+    participant_id = _stamp_participant_id(
+        frame,
+        stable=stable,
+        event_type=event_type,
+        run_id=run_id,
+        turn_id=turn_id,
+        db=db,
+        run_context=run_context,
+    )
+    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     terminal_event = _terminal_status(event_type, payload)
     scheduler_mission_id = ""
     mission_events_for_fanout: list[dict[str, Any]] = []
@@ -1325,7 +1425,7 @@ def record_event(
             # projection hook for this call and for the mirror's nested
             # append_run_event — otherwise the event would be projected twice.
             setattr(db, "_team_mission_projecting", True)
-            saved = method(stable, frame)
+            saved = method(stable, frame, participant_id=participant_id)
             if (
                 isinstance(saved, dict)
                 and saved.get("_persistence_disposition") in {"duplicate_terminal", "ignored_after_terminal"}
@@ -1529,6 +1629,15 @@ def publish_recorded_event(
     alone is diagnostic context; it must not suppress an explicit subscription.
     """
     publish_params = _apply_run_context_to_frame(dict(params), run_context)
+    _stamp_participant_id(
+        publish_params,
+        stable=_stable_session_id(publish_params),
+        event_type=str(publish_params.get("type") or "").strip(),
+        run_id=_event_run_id(publish_params),
+        turn_id=_event_turn_id(publish_params),
+        db=db,
+        run_context=run_context,
+    )
     subscribers = record_event(
         publish_params,
         owner_transport=owner_transport,

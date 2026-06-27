@@ -285,6 +285,106 @@ def _message_source_run_id(message: dict[str, Any]) -> str:
     )
 
 
+def _message_participant_id(message: dict[str, Any]) -> str:
+    metadata = _message_metadata(message)
+    team_mission = _record(
+        message.get("teamMission")
+        or message.get("team_mission")
+        or metadata.get("team_mission")
+        or metadata.get("teamMission")
+    )
+    return _text(
+        message.get("participant_id")
+        or message.get("participantId")
+        or metadata.get("participant_id")
+        or metadata.get("participantId")
+        or team_mission.get("participant_id")
+        or team_mission.get("participantId")
+    )
+
+
+def _event_participant_id(event: Any) -> str:
+    if not isinstance(event, dict):
+        return ""
+    payload = _record(event.get("payload"))
+    return _text(
+        event.get("participant_id")
+        or event.get("participantId")
+        or payload.get("participant_id")
+        or payload.get("participantId")
+    )
+
+
+def _run_event_participant_index(run_events: list[Any]) -> dict[str, str]:
+    indexed: dict[str, str] = {}
+    for event in run_events:
+        if not isinstance(event, dict):
+            continue
+        participant_id = _event_participant_id(event)
+        if not participant_id:
+            continue
+        payload = _record(event.get("payload"))
+        run_id = _event_run_id(event)
+        seq = _text(event.get("seq") or payload.get("seq"))
+        source_seq = _text(event.get("source_seq") or event.get("sourceSeq") or payload.get("source_seq") or payload.get("sourceSeq"))
+        message_id = _text(payload.get("message_id") or payload.get("messageId"))
+        for key in (
+            f"run:{run_id}" if run_id else "",
+            f"run-seq:{run_id}:{seq}" if run_id and seq else "",
+            f"run-seq:{run_id}:{source_seq}" if run_id and source_seq else "",
+            f"message:{message_id}" if message_id else "",
+        ):
+            if key:
+                indexed.setdefault(key, participant_id)
+    return indexed
+
+
+def _participant_id_for_message_from_events(
+    message: dict[str, Any],
+    event_participants: dict[str, str],
+) -> str:
+    message_id = _message_id(message)
+    run_id = _text(_message_metadata(message).get("run_id") or _message_metadata(message).get("runId"))
+    source_run_id = _message_source_run_id(message)
+    source_seq = _message_source_seq(message)
+    for key in (
+        f"message:{message_id}" if message_id else "",
+        f"run-seq:{source_run_id}:{source_seq}" if source_run_id and source_seq else "",
+        f"run-seq:{run_id}:{source_seq}" if run_id and source_seq else "",
+        f"run:{source_run_id}" if source_run_id else "",
+        f"run:{run_id}" if run_id else "",
+    ):
+        if key and event_participants.get(key):
+            return event_participants[key]
+    return ""
+
+
+def _with_message_participant_id(message: dict[str, Any], participant_id: str) -> dict[str, Any]:
+    participant_id = _text(participant_id)
+    if not participant_id or _message_participant_id(message):
+        return message
+    next_message = dict(message)
+    next_message["participant_id"] = participant_id
+    next_message["participantId"] = participant_id
+    metadata = dict(_message_metadata(next_message))
+    metadata["participant_id"] = participant_id
+    metadata["participantId"] = participant_id
+    team_mission = dict(_record(
+        next_message.get("teamMission")
+        or next_message.get("team_mission")
+        or metadata.get("team_mission")
+        or metadata.get("teamMission")
+    ))
+    team_mission["participant_id"] = participant_id
+    team_mission["participantId"] = participant_id
+    metadata["team_mission"] = team_mission
+    metadata["teamMission"] = team_mission
+    next_message["team_mission"] = team_mission
+    next_message["teamMission"] = team_mission
+    next_message["metadata"] = metadata
+    return next_message
+
+
 def _message_render_identity(message: dict[str, Any], index: int) -> str:
     message_id = _message_id(message)
     if message_id:
@@ -340,13 +440,22 @@ def _with_unique_team_render_run_id(
     return next_message
 
 
-def _normalize_team_render_messages(messages: list[Any]) -> list[dict[str, Any]]:
+def _normalize_team_render_messages(
+    messages: list[Any],
+    *,
+    run_events: list[Any] | None = None,
+) -> list[dict[str, Any]]:
+    event_participants = _run_event_participant_index(list(run_events or []))
     unique_messages: list[dict[str, Any]] = []
     seen_message_keys: set[str] = set()
     for index, raw in enumerate(messages):
         if not isinstance(raw, dict):
             continue
         message = dict(raw)
+        message = _with_message_participant_id(
+            message,
+            _participant_id_for_message_from_events(message, event_participants),
+        )
         key = _message_render_identity(message, index)
         if key in seen_message_keys:
             continue
@@ -485,7 +594,8 @@ def _team_conversation_snapshot(
     messages = list(page.get("messages") or []) if isinstance(page, dict) else []
     if not messages:
         messages = list(graph.get("recent_messages") or graph.get("recentMessages") or [])
-    messages = _normalize_team_render_messages(messages)
+    raw_run_events = list(page.get("runEvents") or []) if isinstance(page, dict) else []
+    messages = _normalize_team_render_messages(messages, run_events=raw_run_events)
     page_info = (
         page.get("pageInfo")
         if isinstance(page, dict) and isinstance(page.get("pageInfo"), dict)
@@ -493,7 +603,7 @@ def _team_conversation_snapshot(
     )
     mission = resolved.get("mission") if isinstance(resolved.get("mission"), dict) else {}
     run_events = _filter_team_render_run_events(
-        list(page.get("runEvents") or []) if isinstance(page, dict) else [],
+        raw_run_events,
         conversation=conversation,
         mission=mission,
         messages=messages,

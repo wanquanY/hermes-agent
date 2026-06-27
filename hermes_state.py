@@ -52,7 +52,7 @@ DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 # allowing narrowly scoped submodules such as ``hermes_state.migrations``.
 __path__ = [str(Path(__file__).with_name("hermes_state"))]
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -387,6 +387,7 @@ CREATE TABLE IF NOT EXISTS run_events (
     turn_id TEXT,
     runtime_session_id TEXT,
     runtime_scope_key TEXT,
+    participant_id TEXT NOT NULL DEFAULT '',
     event_type TEXT NOT NULL,
     seq INTEGER NOT NULL,
     timestamp REAL NOT NULL,
@@ -578,6 +579,8 @@ CREATE INDEX IF NOT EXISTS idx_run_events_scope_seq
     ON run_events(runtime_scope_key, session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_run_events_run
     ON run_events(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_run_events_participant
+    ON run_events(participant_id);
 CREATE INDEX IF NOT EXISTS idx_run_event_archives_session
     ON run_event_archives(session_id, archived_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_teams_status_updated
@@ -1129,6 +1132,32 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         except sqlite3.OperationalError:
             pass
 
+    def _migrate_run_events_participant_id(self, cursor: sqlite3.Cursor) -> None:
+        """v28: add durable event speaker identity for P1 Participant rollout."""
+        try:
+            rows = cursor.execute('PRAGMA table_info("run_events")').fetchall()
+        except sqlite3.OperationalError:
+            return
+        names = {
+            row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            for row in rows
+        }
+        if "participant_id" not in names:
+            try:
+                cursor.execute(
+                    'ALTER TABLE "run_events" '
+                    'ADD COLUMN "participant_id" TEXT NOT NULL DEFAULT \'\''
+                )
+            except sqlite3.OperationalError as exc:
+                logger.debug("run_events.participant_id migration skipped: %s", exc)
+        try:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_run_events_participant "
+                "ON run_events(participant_id)"
+            )
+        except sqlite3.OperationalError as exc:
+            logger.debug("idx_run_events_participant create skipped: %s", exc)
+
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -1264,6 +1293,8 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 self._migrate_agent_profile_versions_to_latest_profiles(cursor)
             if current_version < 24:
                 compact_team_mission_event_json_storage(cursor, logger)
+            if current_version < 28:
+                self._migrate_run_events_participant_id(cursor)
             if current_version < SCHEMA_VERSION:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
