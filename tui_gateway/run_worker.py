@@ -12,6 +12,7 @@ Protocol (one JSON object per line, UTF-8, ``\\n``-terminated):
        "prompt", "params"}
       {"op":"run.cancel", "run_id"}
       {"op":"interactive.response", "kind", "request_id", "answer"}
+      {"op":"runtime.env.update", "env_updates": {"KEY": "value"}}
       {"op":"shutdown"}
 
     outbound (worker → main)
@@ -32,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -83,6 +85,11 @@ class ActivityEventFrame:
 
 
 @dataclass(frozen=True)
+class RuntimeEnvUpdateFrame:
+    env_updates: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ShutdownFrame:
     pass
 
@@ -99,6 +106,7 @@ IncomingFrame = Union[
     RunCancelFrame,
     InteractiveResponseFrame,
     ActivityEventFrame,
+    RuntimeEnvUpdateFrame,
     ShutdownFrame,
     DBRpcReplyFrame,
 ]
@@ -192,6 +200,22 @@ def _optional_mapping(obj: dict, key: str) -> dict[str, Any]:
     return value
 
 
+def _string_mapping(obj: dict, key: str, *, op: str) -> dict[str, str]:
+    value = obj.get(key)
+    if not isinstance(value, dict):
+        raise FrameDecodeError(f"{op}: field {key!r} must be an object")
+    result: dict[str, str] = {}
+    for raw_key, raw_value in value.items():
+        if not isinstance(raw_key, str):
+            raise FrameDecodeError(f"{op}: env update keys must be strings")
+        if not isinstance(raw_value, str):
+            raise FrameDecodeError(
+                f"{op}: env update value for {raw_key!r} must be a string"
+            )
+        result[raw_key] = raw_value
+    return result
+
+
 def decode_incoming(line: str) -> IncomingFrame:
     """Parse one stdin line into a typed inbound frame."""
     stripped = line.strip()
@@ -246,6 +270,10 @@ def decode_incoming(line: str) -> IncomingFrame:
         if not isinstance(event, dict):
             raise FrameDecodeError("event: field 'event' must be an object")
         return ActivityEventFrame(kind=kind, event=event)
+    if op == "runtime.env.update":
+        return RuntimeEnvUpdateFrame(
+            env_updates=_string_mapping(obj, "env_updates", op=op)
+        )
     if op == "shutdown":
         return ShutdownFrame()
 
@@ -274,6 +302,8 @@ def encode_incoming(frame: IncomingFrame) -> str:
         }
     elif isinstance(frame, ActivityEventFrame):
         body = {"op": "event", "kind": frame.kind, "event": frame.event}
+    elif isinstance(frame, RuntimeEnvUpdateFrame):
+        body = {"op": "runtime.env.update", "env_updates": frame.env_updates}
     elif isinstance(frame, ShutdownFrame):
         body = {"op": "shutdown"}
     elif isinstance(frame, DBRpcReplyFrame):
@@ -707,6 +737,16 @@ def _build_default_handler(
                     bus.push(frame.event)
             except Exception as exc:
                 await proto.emit_log("warn", f"activity event route failed: {exc}")
+        elif isinstance(frame, RuntimeEnvUpdateFrame):
+            for key, value in frame.env_updates.items():
+                if value:
+                    os.environ[key] = value
+                else:
+                    os.environ.pop(key, None)
+            await proto.emit_log(
+                "info",
+                f"[worker] runtime env updated keys={list(frame.env_updates.keys())}",
+            )
 
     return handler
 

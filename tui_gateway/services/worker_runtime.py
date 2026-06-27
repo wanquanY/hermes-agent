@@ -255,6 +255,8 @@ async def primary_dispatch(req: Any, transport: Any) -> bool:
     # intercept both — the prompt.submit one catches any caller that
     # bypasses the desktop runtime client (CLI tools, tests).
     params = req.get("params") if isinstance(req.get("params"), dict) else {}
+    if method == "runtime.cloud_proxy.update":
+        return await _dispatch_runtime_cloud_proxy_update(req, transport, params)
     if method == "run.cancel":
         return await _dispatch_run_cancel(req, transport, params)
     if method in _INTERACTIVE_RESPONSE_METHODS:
@@ -267,6 +269,31 @@ async def primary_dispatch(req: Any, transport: Any) -> bool:
         # route through worker.
         return False
     return await _dispatch_prompt_submit(req, transport, scope, params)
+
+
+async def _dispatch_runtime_cloud_proxy_update(
+    req: dict,
+    transport: Any,
+    params: dict,
+) -> bool:
+    rid = req.get("id")
+    try:
+        from tui_gateway.methods.runtime_cloud_proxy import (
+            apply_runtime_cloud_proxy_update,
+        )
+
+        result = await apply_runtime_cloud_proxy_update(params)
+    except Exception as exc:
+        _log.warning("[worker-runtime] runtime cloud proxy update failed: %s", exc)
+        await _ack_error(
+            transport,
+            rid,
+            code=5023,
+            message=f"runtime cloud proxy update failed: {exc}",
+        )
+        return True
+    await _ack_ok(transport, rid, result=result)
+    return True
 
 
 # Interactive-response RPCs the agent's tools block on. The agent runs

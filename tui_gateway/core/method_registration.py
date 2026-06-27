@@ -13,6 +13,7 @@ METHOD_MODULES = (
     "session_history",
     "session_interrupt",
     "session_runtime_controls",
+    "runtime_cloud_proxy",
     "live_session",
     "session_branch",
     "conversation_activity",

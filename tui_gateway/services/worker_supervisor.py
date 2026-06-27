@@ -38,6 +38,7 @@ from tui_gateway.run_worker import (
     InteractiveRequestFrame,
     LogFrame,
     OutgoingFrame,
+    RuntimeEnvUpdateFrame,
     RunCancelFrame,
     RunTerminalFrame,
     ShutdownFrame,
@@ -268,18 +269,30 @@ class WorkerSupervisor:
         worker = self._workers.get((scope_key, conversation_id or ""))
         if worker is None or not worker.running():
             return False
-        line = encode_incoming(frame) + "\n"
-        data = line.encode("utf-8")
-        async with worker.send_lock:
-            if worker.process.stdin is None or worker.process.stdin.is_closing():
-                return False
-            try:
-                worker.process.stdin.write(data)
-                await worker.process.stdin.drain()
-            except (BrokenPipeError, ConnectionResetError):
-                return False
+        if not await self._send_frame_to_worker(worker, frame):
+            return False
         worker.mark_used()
         return True
+
+    async def broadcast_runtime_env_update(self, env_updates: dict[str, str]) -> int:
+        """Send a runtime env update control frame to every live worker."""
+        sent = 0
+        async with self._lock:
+            workers = list(self._workers.values())
+        frame = RuntimeEnvUpdateFrame(env_updates=dict(env_updates or {}))
+        for worker in workers:
+            if not worker.running():
+                continue
+            try:
+                if await self._send_frame_to_worker(worker, frame):
+                    sent += 1
+                else:
+                    pid = worker.process.pid if worker.process is not None else None
+                    _log.warning("worker env update failed pid=%s: stdin closed", pid)
+            except Exception as exc:
+                pid = worker.process.pid if worker.process is not None else None
+                _log.warning("worker env update failed pid=%s: %s", pid, exc)
+        return sent
 
     async def shutdown(self, scope_key: str, conversation_id: str = "") -> bool:
         async with self._lock:
@@ -317,6 +330,22 @@ class WorkerSupervisor:
         }
 
     # ── internals ────────────────────────────────────────────────────
+
+    async def _send_frame_to_worker(
+        self,
+        worker: RunWorker,
+        frame: IncomingFrame,
+    ) -> bool:
+        data = (encode_incoming(frame) + "\n").encode("utf-8")
+        async with worker.send_lock:
+            if worker.process.stdin is None or worker.process.stdin.is_closing():
+                return False
+            try:
+                worker.process.stdin.write(data)
+                await worker.process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                return False
+        return True
 
     async def _spawn_locked(
         self, scope: RuntimeScope, env_overrides: dict[str, str],
@@ -494,16 +523,7 @@ class WorkerSupervisor:
         await self._send_db_reply(worker, reply)
 
     async def _send_db_reply(self, worker: RunWorker, reply: DBRpcReplyFrame) -> bool:
-        data = (encode_incoming(reply) + "\n").encode("utf-8")
-        async with worker.send_lock:
-            if worker.process.stdin is None or worker.process.stdin.is_closing():
-                return False
-            try:
-                worker.process.stdin.write(data)
-                await worker.process.stdin.drain()
-                return True
-            except (BrokenPipeError, ConnectionResetError):
-                return False
+        return await self._send_frame_to_worker(worker, reply)
 
     async def _execute_db_rpc(self, frame: DBRpcRequestFrame) -> DBRpcReplyFrame:
         req_id = str(frame.id or "")
