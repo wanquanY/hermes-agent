@@ -5,6 +5,8 @@ from .session_common import *
 
 
 class SessionDBTeamMissionFinalizerMixin:
+    _warned_deprecated_team_mission_run_events = False
+
     def reduce_team_mission_graph(self, mission_id: str) -> Dict[str, Any]:
         return _graph_state.reduce_team_mission_graph(self, mission_id)
 
@@ -91,9 +93,16 @@ class SessionDBTeamMissionFinalizerMixin:
         if not mission_id:
             return []
         after_seq = int(after_seq or 0)
-        # Backward-compatible audit feed only; not for timeline render.
-        # CR-P2.4 makes run_events.seq the authoritative render sequence for
-        # the stored conversation session.
+        # Deprecated audit alias only; not for timeline render.
+        # CR-P2.5 cleanup: dead branch from pre-CR-P2 dual-source. Kept for
+        # legacy audit-feed callers while render paths consume ordinary
+        # run_events for the stored conversation session.
+        if not self._warned_deprecated_team_mission_run_events:
+            _log.warning(
+                "list_team_mission_run_events is deprecated audit compatibility; "
+                "render paths must use ordinary run_events"
+            )
+            self._warned_deprecated_team_mission_run_events = True
         return self.list_team_mission_events(
             mission_id,
             after_seq=after_seq,
