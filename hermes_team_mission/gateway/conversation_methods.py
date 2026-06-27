@@ -297,6 +297,15 @@ def _(rid, params: dict) -> dict:
             graph = db.get_team_mission_graph(mission_id)
         except Exception as exc:
             return _err(rid, 5008, f"team capability snapshot bind failed: {exc}")
+    try:
+        db.ensure_mission_activity(
+            conversation_id=conversation_session_id,
+            mission_id=mission_id,
+            status="running",
+            prompt_summary=str(params.get("title") or params.get("objective") or params.get("prompt") or ""),
+        )
+    except Exception as exc:
+        return _err(rid, 5008, f"team mission activity create failed: {exc}")
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     metadata = mission.get("metadata") if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict) else {}
     root_node = next(

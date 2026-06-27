@@ -238,6 +238,14 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
             metadata=dict(mission.get("metadata") or {}),
         )
         updated_graph = db.get_team_mission_graph(mission_id)
+    if mission_status.lower() in _TERMINAL_MISSION_STATUSES:
+        linked_status = "cancelled" if mission_status.lower() in {"cancelled", "canceled", "interrupted"} else mission_status
+        linker = getattr(db, "_set_linked_conversation_mission_status", None)
+        if callable(linker):
+            try:
+                linker(mission_id=mission_id, mission=mission, status=linked_status)
+            except Exception:
+                pass
     # Project the mission's live state onto its conversation's session_index row
     # so the sidebar's running/approval indicator stays correct from the
     # single-query read (no read-time mission-graph walk).

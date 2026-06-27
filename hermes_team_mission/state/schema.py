@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS team_mission_conversations (
     workspace_id TEXT,
     workspace_path TEXT,
     status TEXT NOT NULL,
+    -- CR-P3.1: prefer list_active_mission_activities; this field will be removed in P4.
     active_mission_id TEXT,
     created_by_user_id TEXT,
     metadata_json TEXT,

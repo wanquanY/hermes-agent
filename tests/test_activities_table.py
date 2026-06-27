@@ -173,7 +173,7 @@ def test_invalid_kind_raises_check_constraint(tmp_path: Path) -> None:
     db = _db(tmp_path)
 
     with pytest.raises(sqlite3.IntegrityError):
-        db.create_activity(activity_id="act-1", conversation_id="conv-1", kind="mission")
+        db.create_activity(activity_id="act-1", conversation_id="conv-1", kind="not_a_kind")
 
 
 def test_invalid_status_raises_check_constraint(tmp_path: Path) -> None:

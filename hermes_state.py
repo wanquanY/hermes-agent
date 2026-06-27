@@ -58,8 +58,22 @@ DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 # allowing narrowly scoped submodules such as ``hermes_state.migrations``.
 __path__ = [str(Path(__file__).with_name("hermes_state"))]
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 CONVERSATION_PARTICIPANTS_BACKFILL_META_KEY = "conversation_participants_backfill_cr_p1_2"
+MISSION_ACTIVITIES_BACKFILL_META_KEY = "mission_activities_backfill_cr_p3_1"
+
+
+def _sqlite_row_value(row: sqlite3.Row | tuple[Any, ...] | None, key: str, index: int, default: Any = None) -> Any:
+    if row is None:
+        return default
+    try:
+        return row[key]  # type: ignore[index]
+    except (IndexError, KeyError, TypeError):
+        try:
+            return row[index]  # type: ignore[index]
+        except (IndexError, TypeError):
+            return default
+
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -304,7 +318,7 @@ CREATE TABLE IF NOT EXISTS activities (
     activity_id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL,
     parent_activity_id TEXT,
-    kind TEXT NOT NULL CHECK (kind IN ('chat', 'agent_dispatch', 'team_dispatch', 'member_chat')),
+    kind TEXT NOT NULL CHECK (kind IN ('chat', 'agent_dispatch', 'team_dispatch', 'member_chat', 'mission')),
     target_profile_id TEXT,
     target_team_id TEXT,
     target_mission_id TEXT,
@@ -570,6 +584,9 @@ CREATE INDEX IF NOT EXISTS idx_activities_conv
     ON activities(conversation_id, status);
 CREATE INDEX IF NOT EXISTS idx_activities_parent
     ON activities(parent_activity_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_activities_mission
+    ON activities(target_mission_id)
+    WHERE kind = 'mission' AND COALESCE(target_mission_id, '') != '';
 CREATE INDEX IF NOT EXISTS idx_session_lineage_parent
     ON session_lineage(parent_session_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_session_lineage_root
@@ -732,6 +749,18 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 logger.warning(
                     "conversation participants startup backfill skipped: %s",
                     participant_backfill_exc,
+                )
+            try:
+                mission_activity_backfill = self.reconcile_mission_activities_one_shot()
+                if int(mission_activity_backfill.get("inserted") or 0):
+                    logger.info(
+                        "backfilled %d mission activity row(s)",
+                        int(mission_activity_backfill.get("inserted") or 0),
+                    )
+            except Exception as mission_activity_backfill_exc:
+                logger.warning(
+                    "mission activities startup backfill skipped: %s",
+                    mission_activity_backfill_exc,
                 )
             run_team_mission_startup_maintenance(self, logger)
             try:
@@ -1177,6 +1206,90 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         except sqlite3.OperationalError as exc:
             logger.debug("idx_run_events_participant create skipped: %s", exc)
 
+    def _migrate_activities_kind_mission_check(self, cursor: sqlite3.Cursor) -> None:
+        """v29: rebuild activities so the kind CHECK accepts mission rows."""
+        try:
+            row = cursor.execute(
+                """
+                SELECT sql
+                FROM sqlite_master
+                WHERE type = 'table' AND name = 'activities'
+                """
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return
+        sql = str(_sqlite_row_value(row, "sql", 0, "") or "")
+        if "'mission'" in sql:
+            return
+        try:
+            columns = cursor.execute('PRAGMA table_info("activities")').fetchall()
+        except sqlite3.OperationalError:
+            return
+        live_columns = [
+            str(_sqlite_row_value(column, "name", 1, "") or "")
+            for column in columns
+            if str(_sqlite_row_value(column, "name", 1, "") or "")
+        ]
+        desired_columns = [
+            "activity_id",
+            "conversation_id",
+            "parent_activity_id",
+            "kind",
+            "target_profile_id",
+            "target_team_id",
+            "target_mission_id",
+            "status",
+            "prompt_summary",
+            "result_summary",
+            "result_json",
+            "started_at",
+            "completed_at",
+            "notify_parent",
+            "read_at",
+            "created_at",
+            "updated_at",
+        ]
+        copy_columns = [column for column in desired_columns if column in live_columns]
+        if not copy_columns:
+            return
+        try:
+            cursor.execute("DROP INDEX IF EXISTS idx_activities_conv")
+            cursor.execute("DROP INDEX IF EXISTS idx_activities_parent")
+            cursor.execute("DROP INDEX IF EXISTS idx_activities_mission")
+            cursor.execute("DROP TABLE IF EXISTS activities_legacy_kind_check")
+            cursor.execute("ALTER TABLE activities RENAME TO activities_legacy_kind_check")
+            cursor.execute(
+                """
+                CREATE TABLE activities (
+                    activity_id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    parent_activity_id TEXT,
+                    kind TEXT NOT NULL CHECK (kind IN ('chat', 'agent_dispatch', 'team_dispatch', 'member_chat', 'mission')),
+                    target_profile_id TEXT,
+                    target_team_id TEXT,
+                    target_mission_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+                    prompt_summary TEXT,
+                    result_summary TEXT,
+                    result_json TEXT,
+                    started_at REAL,
+                    completed_at REAL,
+                    notify_parent INTEGER NOT NULL DEFAULT 1,
+                    read_at REAL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            column_sql = ", ".join(f'"{column}"' for column in copy_columns)
+            cursor.execute(
+                f"INSERT INTO activities ({column_sql}) "
+                f"SELECT {column_sql} FROM activities_legacy_kind_check"
+            )
+            cursor.execute("DROP TABLE activities_legacy_kind_check")
+        except sqlite3.OperationalError as exc:
+            logger.debug("activities kind mission CHECK migration skipped: %s", exc)
+
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -1204,6 +1317,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         self._backfill_session_index_conversation_kind(cursor)
         reconcile_team_mission_node_primary_key(cursor)
         migrate_active_mission_id_to_conversation_missions(cursor)
+        self._migrate_activities_kind_mission_check(cursor)
 
         # Indexes that reference reconciler-added columns must be created
         # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL
@@ -1314,6 +1428,8 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 compact_team_mission_event_json_storage(cursor, logger)
             if current_version < 28:
                 self._migrate_run_events_participant_id(cursor)
+            if current_version < 29:
+                self._migrate_activities_kind_mission_check(cursor)
             if current_version < SCHEMA_VERSION:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
@@ -1550,6 +1666,66 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 "participants_before": participant_rows,
                 "conversation_estimate": conversation_estimate,
             }
+
+        return self._execute_write(_do)
+
+    def reconcile_mission_activities_one_shot(self) -> Dict[str, Any]:
+        """Backfill mission activities from legacy active_mission_id rows."""
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            marker = conn.execute(
+                "SELECT value FROM state_meta WHERE key = ?",
+                (MISSION_ACTIVITIES_BACKFILL_META_KEY,),
+            ).fetchone()
+            marked = bool(marker and str(marker["value"] or "") == "1")
+            if marked:
+                return {"ran": False, "inserted": 0}
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        conversation_id,
+                        stable_session_id,
+                        active_mission_id,
+                        title,
+                        created_at,
+                        updated_at
+                    FROM team_mission_conversations
+                    WHERE COALESCE(active_mission_id, '') != ''
+                    """
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            inserted = 0
+            for row in rows:
+                mission_id = str(row["active_mission_id"] or "").strip()
+                stable_session_id = str(row["stable_session_id"] or row["conversation_id"] or "").strip()
+                if not mission_id or not stable_session_id:
+                    continue
+                existed = conn.execute(
+                    """
+                    SELECT 1
+                    FROM activities
+                    WHERE kind = 'mission' AND target_mission_id = ?
+                    LIMIT 1
+                    """,
+                    (mission_id,),
+                ).fetchone()
+                self._ensure_mission_activity_on_conn(
+                    conn,
+                    conversation_id=stable_session_id,
+                    mission_id=mission_id,
+                    status="running",
+                    prompt_summary=str(row["title"] or ""),
+                    now=float(row["updated_at"] or row["created_at"] or time.time()),
+                )
+                if existed is None:
+                    inserted += 1
+            conn.execute(
+                "INSERT INTO state_meta (key, value) VALUES (?, '1') "
+                "ON CONFLICT(key) DO UPDATE SET value = '1'",
+                (MISSION_ACTIVITIES_BACKFILL_META_KEY,),
+            )
+            return {"ran": True, "inserted": inserted}
 
         return self._execute_write(_do)
 

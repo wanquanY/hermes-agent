@@ -347,6 +347,26 @@ def _participants_for_session(session_id: str) -> list[dict[str, Any]]:
         return []
 
 
+def _mission_activities_for_session(session_id: str) -> list[dict[str, Any]]:
+    session_id = _text(session_id)
+    if not session_id:
+        return []
+    try:
+        db = _get_db()
+        lister = getattr(db, "list_active_mission_activities", None) if db is not None else None
+        if not callable(lister):
+            return []
+        activities = lister(session_id) or []
+        return [dict(item) for item in activities if isinstance(item, dict)]
+    except Exception as exc:
+        logger.warning(
+            "conversation.render_snapshot mission activities hydrate skipped session_id=%s: %s",
+            session_id,
+            exc,
+        )
+        return []
+
+
 def _record(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -785,6 +805,7 @@ def _team_conversation_snapshot(
             "session_id": session_id,
             "conversation": conversation,
             "mission": mission,
+            "missions": _mission_activities_for_session(session_id),
             "missionPresent": mission_present,
             "mission_present": mission_present,
             "team": team,

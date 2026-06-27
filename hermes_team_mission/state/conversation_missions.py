@@ -17,6 +17,58 @@ def _conversation_mission_status(value: str | None) -> str:
 
 
 class SessionDBConversationMissionMixin:
+    def _activity_conversation_id_for_mission_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        conversation_id: str,
+    ) -> str:
+        conversation_id = _text(conversation_id)
+        if not conversation_id:
+            return ""
+        row = conn.execute(
+            """
+            SELECT stable_session_id
+            FROM team_mission_conversations
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+        stable_session_id = _text(_row_value(row, "stable_session_id", ""))
+        return stable_session_id or conversation_id
+
+    def _sync_mission_activity_for_conversation_mission_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        conversation_id: str,
+        mission_id: str,
+        status: str,
+        now: float | None = None,
+    ) -> None:
+        conversation_id = _text(conversation_id)
+        mission_id = _text(mission_id)
+        if not conversation_id or not mission_id:
+            return
+        normalized_status = _conversation_mission_status(status)
+        activity_conversation_id = self._activity_conversation_id_for_mission_on_conn(conn, conversation_id)
+        if normalized_status == "active":
+            self._ensure_mission_activity_on_conn(
+                conn,
+                conversation_id=activity_conversation_id,
+                mission_id=mission_id,
+                status="running",
+                now=now,
+            )
+            return
+        activity_status = "cancelled" if normalized_status == "cancelled" else normalized_status
+        self._mark_mission_activity_terminal_on_conn(
+            conn,
+            mission_id=mission_id,
+            status=activity_status,
+            result_summary=f"Mission {activity_status}",
+            now=now,
+        )
+
     def _conversation_mission_from_row(self, row: sqlite3.Row | None) -> Dict[str, Any] | None:
         if row is None:
             return None
@@ -114,6 +166,13 @@ class SessionDBConversationMissionMixin:
                 metadata_json,
             ),
         )
+        self._sync_mission_activity_for_conversation_mission_on_conn(
+            conn,
+            conversation_id=conversation_id,
+            mission_id=mission_id,
+            status=normalized_status,
+            now=timestamp,
+        )
         self._sync_legacy_active_mission_id_on_conn(conn, conversation_id)
         return self._conversation_mission_from_row(conn.execute(
             """
@@ -168,6 +227,13 @@ class SessionDBConversationMissionMixin:
             )
             if not result.rowcount:
                 return None
+            self._sync_mission_activity_for_conversation_mission_on_conn(
+                conn,
+                conversation_id=conversation_id,
+                mission_id=mission_id,
+                status=normalized_status,
+                now=now,
+            )
             self._sync_legacy_active_mission_id_on_conn(conn, conversation_id)
             return self._conversation_mission_from_row(conn.execute(
                 """
