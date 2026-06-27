@@ -6,6 +6,86 @@ from hermes_state_participants import leader_participant_id, member_participant_
 
 
 class SessionDBTeamMissionConversationMixin:
+    def _session_index_active_run_exists_sql(self, session_alias: str = "session_index") -> str:
+        """SQL predicate: the indexed conversation still has a non-terminal run."""
+        si = session_alias
+        terminal = "'completed','failed','cancelled','canceled','interrupted'"
+        return f"""
+            EXISTS (
+                SELECT 1
+                  FROM runs active_runs
+                 WHERE LOWER(COALESCE(active_runs.status,'')) NOT IN ({terminal})
+                   AND (
+                       active_runs.session_id = {si}.session_id
+                       OR (
+                           COALESCE({si}.conversation_id, '') != ''
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM team_mission_conversations active_tmc
+                                WHERE active_tmc.conversation_id = {si}.conversation_id
+                                  AND (
+                                      active_tmc.stable_session_id = active_runs.session_id
+                                      OR active_tmc.conversation_id = active_runs.session_id
+                                  )
+                           )
+                       )
+                       OR (
+                           COALESCE({si}.conversation_id, '') != ''
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM team_mission_run_bindings active_binding
+                                 JOIN team_missions active_mission
+                                   ON active_mission.mission_id = active_binding.mission_id
+                                WHERE active_binding.run_id = active_runs.run_id
+                                  AND active_mission.conversation_id = {si}.conversation_id
+                           )
+                       )
+                       OR (
+                           COALESCE({si}.conversation_id, '') = ''
+                           AND COALESCE({si}.mission_id, '') != ''
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM team_mission_run_bindings active_binding
+                                 JOIN team_missions active_mission
+                                   ON active_mission.mission_id = active_binding.mission_id
+                                WHERE active_binding.run_id = active_runs.run_id
+                                  AND active_mission.conversation_id IN (
+                                      SELECT indexed_mission.conversation_id
+                                        FROM team_missions indexed_mission
+                                       WHERE indexed_mission.mission_id = {si}.mission_id
+                                  )
+                           )
+                       )
+                   )
+            )
+        """
+
+    def _session_index_active_mission_exists_sql(self, session_alias: str = "session_index") -> str:
+        """SQL predicate: the indexed team conversation still has active missions."""
+        si = session_alias
+        return f"""
+            EXISTS (
+                SELECT 1
+                  FROM conversation_missions active_cm
+                 WHERE active_cm.status = 'active'
+                   AND (
+                       (
+                           COALESCE({si}.conversation_id, '') != ''
+                           AND active_cm.conversation_id = {si}.conversation_id
+                       )
+                       OR (
+                           COALESCE({si}.conversation_id, '') = ''
+                           AND COALESCE({si}.mission_id, '') != ''
+                           AND active_cm.conversation_id IN (
+                               SELECT indexed_mission.conversation_id
+                                 FROM team_missions indexed_mission
+                                WHERE indexed_mission.mission_id = {si}.mission_id
+                           )
+                       )
+                   )
+            )
+        """
+
     def _canonicalize_team_mission_conversation(
         self,
         conversation: Dict[str, Any],
@@ -425,17 +505,35 @@ class SessionDBTeamMissionConversationMixin:
 
         def _do(conn: sqlite3.Connection) -> int:
             if not running:
+                if waiting_approval:
+                    return int(conn.execute(
+                        """
+                        UPDATE session_index
+                           SET status = ?, running = 0, waiting_approval = 1,
+                               active_run_id = '', active_runtime_session_id = '',
+                               pending_approval_count = 0
+                         WHERE mission_id = ?
+                        """,
+                        (str(status or "waiting_approval"), mid),
+                    ).rowcount or 0)
+                active_run_exists = self._session_index_active_run_exists_sql("session_index")
+                active_mission_exists = self._session_index_active_mission_exists_sql("session_index")
                 # A not-running row must NOT keep a stale active_run_id /
                 # active_runtime_session_id. The sidebar derives running as
                 # (running || active_run_id), so a leftover active_run_id makes a
                 # finished team conversation spin forever even with running=0.
+                # Mission cancel is activity-scoped: only collapse the
+                # conversation row when the whole conversation has no active run
+                # and no sibling active mission left.
                 return int(conn.execute(
-                    """
+                    f"""
                     UPDATE session_index
                        SET status = ?, running = 0, waiting_approval = ?,
                            active_run_id = '', active_runtime_session_id = '',
                            pending_approval_count = 0
                      WHERE mission_id = ?
+                       AND NOT ({active_run_exists})
+                       AND NOT ({active_mission_exists})
                     """,
                     (str(status or "idle"), 1 if waiting_approval else 0, mid),
                 ).rowcount or 0)

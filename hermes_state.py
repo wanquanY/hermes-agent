@@ -2693,33 +2693,35 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
     def _repair_session_index_terminal_active_runs_locked(self, conn: sqlite3.Connection) -> int:
         """Clear stale sidebar state once its conversation has no active runs.
 
-        Team mission rows need a narrower rule than regular chat rows: worker
-        and leader runs can finish while the mission is still active.  Only clear
-        a team row from terminal run state when it has no active mission binding
-        or the bound mission itself is terminal.
+        Team mission rows need a narrower rule than regular chat rows: mission
+        cancel is activity-scoped, so a terminal run must not collapse the whole
+        conversation while a sibling mission or another conversation run remains
+        active.
         """
         try:
+            active_run_exists = self._session_index_active_run_exists_sql("session_index")
+            active_mission_exists = self._session_index_active_mission_exists_sql("session_index")
+            active_run_id_is_terminal = """
+                EXISTS (
+                    SELECT 1
+                      FROM runs indexed_active_run
+                     WHERE indexed_active_run.run_id = session_index.active_run_id
+                       AND LOWER(COALESCE(indexed_active_run.status,'')) IN
+                           ('completed','failed','cancelled','canceled','interrupted')
+                )
+            """
             return int(conn.execute(
-                """
+                f"""
                 UPDATE session_index
                    SET running = 0, status = 'idle', waiting_approval = 0,
                        active_run_id = '', active_runtime_session_id = '',
                        pending_approval_count = 0
                  WHERE active_run_id != ''
-                   AND NOT EXISTS (
-                       SELECT 1 FROM runs
-                        WHERE runs.session_id = session_index.session_id
-                          AND LOWER(COALESCE(runs.status,'')) NOT IN
-                              ('completed','failed','cancelled','canceled','interrupted')
-                   )
+                   AND ({active_run_id_is_terminal})
+                   AND NOT ({active_run_exists})
                    AND (
                        conversation_kind != 'team'
-                       OR COALESCE(mission_id, '') = ''
-                       OR mission_id IN (
-                           SELECT mission_id FROM team_missions
-                            WHERE LOWER(COALESCE(status,'')) IN
-                                  ('completed','failed','cancelled','canceled','interrupted')
-                       )
+                       OR NOT ({active_mission_exists})
                    )
                 """
             ).rowcount or 0)
@@ -2990,12 +2992,23 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                         conn,
                         inactive_row[0] if isinstance(inactive_row, tuple) else inactive_row["conversation_id"],
                     )
+            active_run_exists = self._session_index_active_run_exists_sql("session_index")
+            active_mission_exists = self._session_index_active_mission_exists_sql("session_index")
+            active_run_id_is_terminal = """
+                EXISTS (
+                    SELECT 1
+                      FROM runs indexed_active_run
+                     WHERE indexed_active_run.run_id = session_index.active_run_id
+                       AND LOWER(COALESCE(indexed_active_run.status,'')) IN
+                           ('completed','failed','cancelled','canceled','interrupted')
+                )
+            """
             # Heal team-mission conversation rows whose mission is already terminal
             # but whose status projection is still "running"/waiting (e.g. a cancel
             # that bypassed the graph reducer) — otherwise the sidebar shows a
             # finished team task as running after restart.
             conn.execute(
-                """
+                f"""
                 UPDATE session_index
                    SET running = 0, status = 'idle', waiting_approval = 0,
                        active_run_id = '', active_runtime_session_id = '',
@@ -3008,12 +3021,9 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                         WHERE LOWER(COALESCE(status,'')) IN
                               ('completed','failed','cancelled','canceled','interrupted')
                    )
-                   AND NOT EXISTS (
-                       SELECT 1 FROM runs
-                        WHERE runs.session_id = session_index.session_id
-                          AND LOWER(COALESCE(runs.status,'')) NOT IN
-                              ('completed','failed','cancelled','canceled','interrupted')
-                   )
+                   AND (active_run_id = '' OR ({active_run_id_is_terminal}))
+                   AND NOT ({active_run_exists})
+                   AND NOT ({active_mission_exists})
                 """
             )
             # Heal plan-rejection rows produced by older builds: the graph nodes
@@ -3022,7 +3032,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             # reducer/event fired. Draft missions with no active/approval nodes
             # are idle, not approval-blocked.
             conn.execute(
-                """
+                f"""
                 UPDATE session_index
                    SET running = 0, status = 'idle', waiting_approval = 0,
                        active_run_id = '', active_runtime_session_id = '',
@@ -3039,12 +3049,8 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                           AND LOWER(COALESCE(n.status,'')) IN
                               ('waiting_approval','running','starting')
                    )
-                   AND NOT EXISTS (
-                       SELECT 1 FROM runs
-                        WHERE runs.session_id = session_index.session_id
-                          AND LOWER(COALESCE(runs.status,'')) NOT IN
-                              ('completed','failed','cancelled','canceled','interrupted')
-                   )
+                   AND NOT ({active_run_exists})
+                   AND NOT ({active_mission_exists})
                 """
             )
             self._repair_session_index_terminal_active_runs_locked(conn)

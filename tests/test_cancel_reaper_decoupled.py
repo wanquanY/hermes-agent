@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from hermes_state import SessionDB
+from tests.team_mission_gateway_test_support import team_mission_gateway
+
+
+CONVERSATION_ID = "conversation-1"
+CONVERSATION_SESSION_ID = "team-session-1"
+
+
+def _db(tmp_path: Path) -> SessionDB:
+    return SessionDB(tmp_path / "state.db")
+
+
+def _wire_gateway_db(monkeypatch, db: SessionDB) -> None:
+    team_mission = team_mission_gateway()
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+
+
+def _create_conversation(db: SessionDB, *, active_mission_id: str = "") -> None:
+    db.upsert_team_mission_conversation(
+        conversation_id=CONVERSATION_ID,
+        stable_session_id=CONVERSATION_SESSION_ID,
+        team_id="team-1",
+        title="Team conversation",
+        status="active",
+        active_mission_id=active_mission_id,
+    )
+
+
+def _create_index(
+    db: SessionDB,
+    *,
+    mission_id: str,
+    active_run_id: str = "run-active",
+) -> None:
+    db.upsert_session_index(
+        session_id=CONVERSATION_SESSION_ID,
+        title="Team conversation",
+        source="team_mission",
+        session_kind="team_mission",
+        conversation_kind="team",
+        conversation_id=CONVERSATION_ID,
+        team_id="team-1",
+        mission_id=mission_id,
+        running=True,
+        status="running",
+        active_run_id=active_run_id,
+        active_runtime_session_id=f"runtime-{active_run_id}",
+        started_at=1.0,
+        updated_at=2.0,
+    )
+
+
+def _create_mission(db: SessionDB, mission_id: str, *, status: str = "running") -> None:
+    db.upsert_team_mission(
+        mission_id=mission_id,
+        conversation_id=CONVERSATION_ID,
+        team_id="team-1",
+        title=f"Mission {mission_id}",
+        objective=f"Objective {mission_id}",
+        mode="supervised_mission",
+        status=status,
+        leader_session_id=CONVERSATION_SESSION_ID,
+    )
+    db.add_mission_to_conversation(
+        conversation_id=CONVERSATION_ID,
+        mission_id=mission_id,
+        status="active" if status not in {"completed", "failed", "cancelled", "canceled"} else status,
+    )
+    db.ensure_mission_activity(
+        conversation_id=CONVERSATION_SESSION_ID,
+        mission_id=mission_id,
+        status="running" if status not in {"completed", "failed", "cancelled", "canceled"} else "cancelled",
+    )
+
+
+def _bind_member_run(
+    db: SessionDB,
+    *,
+    mission_id: str,
+    run_id: str,
+    status: str = "running",
+) -> None:
+    node_id = f"worker-{mission_id}"
+    session_id = f"team:{mission_id}:node:{node_id}"
+    db.upsert_team_mission_node(
+        mission_id=mission_id,
+        node_id=node_id,
+        kind="worker",
+        title=f"Worker {mission_id}",
+        objective=f"Work {mission_id}",
+        status="running",
+        runtime_scope_key=session_id,
+    )
+    db.upsert_run(
+        run_id=run_id,
+        session_id=session_id,
+        runtime_scope_key=session_id,
+        runtime_session_id=f"runtime-{run_id}",
+        status=status,
+    )
+    db.bind_team_mission_run(
+        mission_id=mission_id,
+        node_id=node_id,
+        run_id=run_id,
+        session_id=session_id,
+        runtime_session_id=f"runtime-{run_id}",
+        runtime_scope_key=session_id,
+        role="worker",
+    )
+
+
+def _cancel_via_gateway(monkeypatch, db: SessionDB, mission_id: str) -> tuple[dict, list[dict]]:
+    from tui_gateway import server
+
+    _wire_gateway_db(monkeypatch, db)
+    canceled: list[dict] = []
+
+    def fake_run_cancel(rid, params):
+        canceled.append(dict(params))
+        db.upsert_run(
+            run_id=params["run_id"],
+            session_id=params["stored_session_id"],
+            runtime_session_id=params["runtime_session_id"],
+            runtime_scope_key=params["runtime_scope_key"],
+            status="cancelled",
+        )
+        return {"jsonrpc": "2.0", "id": rid, "result": {"status": "cancelled", **params}}
+
+    monkeypatch.setitem(server._methods, "run.cancel", fake_run_cancel)
+    response = server._methods["team_mission.cancel"](
+        1,
+        {"mission_id": mission_id, "canceled_by": "user", "reason": "stop"},
+    )
+    assert "error" not in response
+    return response["result"], canceled
+
+
+def test_team_mission_cancel_marks_only_mission_activity_cancelled(monkeypatch, tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _create_conversation(db, active_mission_id="mission-A")
+    _create_mission(db, "mission-A")
+    _create_mission(db, "mission-B")
+
+    _cancel_via_gateway(monkeypatch, db, "mission-A")
+
+    activity_a = db.get_activity_for_mission("mission-A")
+    activity_b = db.get_activity_for_mission("mission-B")
+    assert activity_a is not None
+    assert activity_b is not None
+    assert activity_a["status"] == "cancelled"
+    assert activity_a["completed_at"] is not None
+    assert activity_b["status"] == "running"
+    assert [row["target_mission_id"] for row in db.list_active_mission_activities(CONVERSATION_SESSION_ID)] == [
+        "mission-B"
+    ]
+
+
+def test_team_mission_cancel_does_not_idle_conversation_with_other_active_runs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    _create_conversation(db, active_mission_id="mission-A")
+    _create_mission(db, "mission-A")
+    _bind_member_run(db, mission_id="mission-A", run_id="run-mission-A")
+    db.upsert_run(run_id="run-chat", session_id=CONVERSATION_SESSION_ID, status="running")
+    _create_index(db, mission_id="mission-A", active_run_id="run-chat")
+
+    _cancel_via_gateway(monkeypatch, db, "mission-A")
+
+    row = db.get_session_index(CONVERSATION_SESSION_ID)
+    assert row is not None
+    assert row["running"] is True
+    assert row["status"] == "running"
+    assert row["active_run_id"] == "run-chat"
+    assert db.get_run("run-mission-A")["status"] == "cancelled"
+    assert db.get_run("run-chat")["status"] == "running"
+
+
+def test_team_mission_cancel_does_cancel_its_own_member_runs(monkeypatch, tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _create_conversation(db, active_mission_id="mission-A")
+    _create_mission(db, "mission-A")
+    _create_mission(db, "mission-B")
+    _bind_member_run(db, mission_id="mission-A", run_id="run-A")
+    _bind_member_run(db, mission_id="mission-B", run_id="run-B")
+
+    result, canceled = _cancel_via_gateway(monkeypatch, db, "mission-A")
+
+    assert [item["run_id"] for item in result["canceled_runs"]] == ["run-A"]
+    assert [item["run_id"] for item in canceled] == ["run-A"]
+    assert db.get_run("run-A")["status"] == "cancelled"
+    assert db.get_run("run-B")["status"] == "running"
+
+
+def test_multi_mission_parallel_cancel_one_does_not_affect_others(monkeypatch, tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _create_conversation(db, active_mission_id="mission-B")
+    _create_mission(db, "mission-A")
+    _create_mission(db, "mission-B")
+    _bind_member_run(db, mission_id="mission-A", run_id="run-A")
+    _bind_member_run(db, mission_id="mission-B", run_id="run-B")
+    _create_index(db, mission_id="mission-A", active_run_id="run-B")
+
+    _cancel_via_gateway(monkeypatch, db, "mission-A")
+
+    assert db.get_team_mission_graph("mission-A")["mission"]["status"] == "cancelled"
+    assert db.get_team_mission_graph("mission-B")["mission"]["status"] == "running"
+    assert db.get_activity_for_mission("mission-A")["status"] == "cancelled"
+    assert db.get_activity_for_mission("mission-B")["status"] == "running"
+    row = db.get_session_index(CONVERSATION_SESSION_ID)
+    assert row is not None
+    assert row["running"] is True
+    assert row["active_run_id"] == "run-B"
+
+
+def test_reaper_only_idles_conversation_when_all_runs_terminal_AND_no_active_missions(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    _create_conversation(db, active_mission_id="mission-B")
+    _create_mission(db, "mission-A", status="cancelled")
+    _create_mission(db, "mission-B")
+    db.upsert_run(run_id="run-terminal", session_id=CONVERSATION_SESSION_ID, status="completed")
+    _create_index(db, mission_id="mission-A", active_run_id="run-terminal")
+
+    db.reconcile_session_index()
+
+    row = db.get_session_index(CONVERSATION_SESSION_ID)
+    assert row is not None
+    assert row["running"] is True
+    assert row["status"] == "running"
+
+    db.set_conversation_mission_status(
+        conversation_id=CONVERSATION_ID,
+        mission_id="mission-B",
+        status="cancelled",
+    )
+    db.reconcile_session_index()
+
+    row = db.get_session_index(CONVERSATION_SESSION_ID)
+    assert row is not None
+    assert row["running"] is False
+    assert row["status"] == "idle"
+    assert row["active_run_id"] == ""

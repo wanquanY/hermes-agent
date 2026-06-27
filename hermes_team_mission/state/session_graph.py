@@ -1031,6 +1031,8 @@ class SessionDBTeamMissionGraphMixin:
             # terminate the live worker runs and clear the zombie state.
             if mission_status in {"cancelled", "canceled"}:
                 _mark_conversation_mission_cancelled()
+            # Activity-scoped projection: this only clears the conversation row
+            # when no sibling mission and no other active run remain.
             self.update_session_index_for_mission(
                 mission_id, status="idle", running=False, waiting_approval=False,
             )
@@ -1133,8 +1135,9 @@ class SessionDBTeamMissionGraphMixin:
         )
         _mark_conversation_mission_cancelled()
         # Cancel does NOT go through reduce_team_mission_graph, so project the now-
-        # terminal status onto the conversation's session_index here — otherwise the
-        # sidebar keeps showing the cancelled mission as "running" after restart.
+        # terminal activity onto session_index. The projection is conversation-
+        # scoped and only idles the row when no sibling mission and no other
+        # active run remain.
         self.update_session_index_for_mission(
             mission_id, status="idle", running=False, waiting_approval=False,
         )
