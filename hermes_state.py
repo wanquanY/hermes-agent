@@ -25,6 +25,7 @@ from pathlib import Path
 
 from agent.memory_manager import sanitize_context
 from hermes_constants import get_hermes_home
+from hermes_state_activities import ActivitiesMixin
 from hermes_state_agent_profiles import SessionDBAgentProfileMixin
 from hermes_state_branch import SessionDBBranchMixin
 from hermes_state_member_chat import SessionDBMemberChatMixin
@@ -288,6 +289,25 @@ CREATE TABLE IF NOT EXISTS conversation_participants (
     PRIMARY KEY (conversation_session_id, participant_id)
 );
 
+CREATE TABLE IF NOT EXISTS activities (
+    activity_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    parent_activity_id TEXT,
+    kind TEXT NOT NULL CHECK (kind IN ('chat', 'agent_dispatch', 'team_dispatch', 'member_chat')),
+    target_profile_id TEXT,
+    target_mission_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+    prompt_summary TEXT,
+    result_summary TEXT,
+    result_json TEXT,
+    started_at REAL,
+    completed_at REAL,
+    notify_parent INTEGER NOT NULL DEFAULT 1,
+    read_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -533,6 +553,10 @@ CREATE INDEX IF NOT EXISTS idx_messages_session
     ON messages(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_session_active
     ON messages(session_id, active, timestamp);
+CREATE INDEX IF NOT EXISTS idx_activities_conv
+    ON activities(conversation_id, status);
+CREATE INDEX IF NOT EXISTS idx_activities_parent
+    ON activities(parent_activity_id, status);
 CREATE INDEX IF NOT EXISTS idx_session_lineage_parent
     ON session_lineage(parent_session_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_session_lineage_root
@@ -626,7 +650,7 @@ END;
 """
 
 
-class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBMemberChatMixin, SessionDBParticipantMixin, SessionDBRunMixin, SessionDBBranchMixin):
+class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBMemberChatMixin, SessionDBParticipantMixin, ActivitiesMixin, SessionDBRunMixin, SessionDBBranchMixin):
     """
     SQLite-backed session storage with FTS5 search.
 

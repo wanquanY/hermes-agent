@@ -70,20 +70,29 @@ DB_RPC_ALLOWED_METHODS = frozenset(
         "append_run_event",
         "append_team_mission_conversation_status_event",
         "append_team_mission_event_for_run",
+        "create_activity",
         "create_run_if_session_idle",
         "create_session",
         "end_session",
         "fail_orphaned_active_runs",
+        "get_activity",
         "get_messages_as_conversation",
         "get_run",
         "get_session",
         "get_session_run_status",
         "get_team_mission_run_binding",
+        "get_unread_completion_count",
         "list_conversation_participants",
+        "list_activities",
         "list_run_events",
         "list_runs",
         "list_team_mission_events",
         "list_team_mission_run_events",
+        "list_unread_completions",
+        "mark_activity_cancelled",
+        "mark_activity_completed",
+        "mark_activity_failed",
+        "mark_activity_read",
         "next_run_event_seq",
         "reduce_team_mission_run_event",
         "resolve_participant_id",
@@ -91,6 +100,7 @@ DB_RPC_ALLOWED_METHODS = frozenset(
         "update_session_cwd",
         "update_session_meta",
         "update_session_model",
+        "update_activity_status",
         "update_system_prompt",
         "upsert_run",
         "upsert_session",
@@ -564,7 +574,7 @@ def _stable_session_id_from_rpc(
         raw_scope = getattr(frame, "db_scope", None)
         if isinstance(raw_scope, str) and raw_scope.strip():
             return raw_scope.strip()
-    for key in ("stored_session_id", "session_id", "conversation_session_id"):
+    for key in ("stored_session_id", "session_id", "conversation_session_id", "conversation_id"):
         value = str(kwargs.get(key) or "").strip()
         if value:
             return value

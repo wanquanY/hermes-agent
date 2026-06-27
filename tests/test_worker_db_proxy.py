@@ -134,6 +134,46 @@ async def test_append_message_proxy_writes_through_main(monkeypatch: pytest.Monk
     assert db.appended == [("session-1", "user", "hi")]
 
 
+@pytest.mark.asyncio
+async def test_create_activity_proxy_writes_through_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(
+        "tui_gateway.server._db_for_stable_session",
+        lambda _stable: db,
+        raising=False,
+    )
+    supervisor = WorkerSupervisor(
+        on_event=_noop,
+        on_interactive_request=_noop,
+        on_run_terminal=_noop,
+    )
+    reply = await supervisor._execute_db_rpc(
+        DBRpcRequestFrame(
+            id="1",
+            method="db.create_activity",
+            params=[
+                [],
+                {
+                    "activity_id": "act-1",
+                    "conversation_id": "conv-1",
+                    "kind": "agent_dispatch",
+                    "prompt_summary": "Review the report",
+                },
+            ],
+            db_scope={"stable_session_id": "conv-1"},
+        )
+    )
+
+    assert reply.error is None
+    assert reply.result["activity_id"] == "act-1"
+    assert reply.result["conversation_id"] == "conv-1"
+    assert reply.result["status"] == "pending"
+    assert db.get_activity("act-1")["prompt_summary"] == "Review the report"
+
+
 def test_proxy_handles_sqlite_row_conversion(tmp_path: Path) -> None:
     path = tmp_path / "row.db"
     conn = sqlite3.connect(path)
