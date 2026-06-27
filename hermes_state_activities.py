@@ -40,6 +40,7 @@ class ActivitiesMixin:
         kind,
         parent_activity_id=None,
         target_profile_id=None,
+        target_team_id=None,
         target_mission_id=None,
         prompt_summary=None,
         notify_parent=True,
@@ -61,12 +62,12 @@ class ActivitiesMixin:
                 """
                 INSERT INTO activities (
                     activity_id, conversation_id, parent_activity_id, kind,
-                    target_profile_id, target_mission_id, status,
+                    target_profile_id, target_team_id, target_mission_id, status,
                     prompt_summary, result_summary, result_json,
                     started_at, completed_at, notify_parent, read_at,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, NULL, NULL, ?, NULL, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, NULL, NULL, ?, NULL, ?, ?)
                 """,
                 (
                     normalized_activity_id,
@@ -74,6 +75,7 @@ class ActivitiesMixin:
                     _optional_text(parent_activity_id),
                     normalized_kind,
                     _optional_text(target_profile_id),
+                    _optional_text(target_team_id),
                     _optional_text(target_mission_id),
                     _optional_text(prompt_summary),
                     1 if notify_parent else 0,
@@ -95,6 +97,7 @@ class ActivitiesMixin:
         status,
         *,
         target_profile_id=None,
+        target_team_id=None,
         target_mission_id=None,
         result_summary=None,
         result_json=None,
@@ -114,6 +117,9 @@ class ActivitiesMixin:
         if target_profile_id is not None:
             assignments.append("target_profile_id = ?")
             params.append(_optional_text(target_profile_id))
+        if target_team_id is not None:
+            assignments.append("target_team_id = ?")
+            params.append(_optional_text(target_team_id))
         if target_mission_id is not None:
             assignments.append("target_mission_id = ?")
             params.append(_optional_text(target_mission_id))

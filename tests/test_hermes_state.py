@@ -1,5 +1,6 @@
 """Tests for hermes_state.py — SessionDB SQLite CRUD, FTS5 search, export."""
 
+import sqlite3
 import time
 import pytest
 from pathlib import Path
@@ -14,6 +15,86 @@ def db(tmp_path):
     session_db = SessionDB(db_path=db_path)
     yield session_db
     session_db.close()
+
+
+def test_create_activity_persists_target_team_id(db):
+    row = db.create_activity(
+        activity_id="act-team",
+        conversation_id="conv-team",
+        kind="team_dispatch",
+        target_team_id="team-1",
+        target_mission_id="mission-1",
+        prompt_summary="Release readiness",
+    )
+
+    assert row["target_team_id"] == "team-1"
+    assert row["prompt_summary"] == "Release readiness"
+    assert db.get_activity("act-team")["target_team_id"] == "team-1"
+    assert db.list_activities("conv-team")[0]["target_team_id"] == "team-1"
+
+
+def test_existing_activities_table_migrates_target_team_id_column(tmp_path):
+    db_path = tmp_path / "legacy_state.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE activities (
+                activity_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                parent_activity_id TEXT,
+                kind TEXT NOT NULL CHECK (kind IN ('chat', 'agent_dispatch', 'team_dispatch', 'member_chat')),
+                target_profile_id TEXT,
+                target_mission_id TEXT,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+                prompt_summary TEXT,
+                result_summary TEXT,
+                result_json TEXT,
+                started_at REAL,
+                completed_at REAL,
+                notify_parent INTEGER NOT NULL DEFAULT 1,
+                read_at REAL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO activities (
+                activity_id, conversation_id, parent_activity_id, kind,
+                target_profile_id, target_mission_id, status,
+                prompt_summary, result_summary, result_json,
+                started_at, completed_at, notify_parent, read_at,
+                created_at, updated_at
+            )
+            VALUES (
+                'legacy-act', 'conv-team', NULL, 'team_dispatch',
+                NULL, 'legacy-mission', 'pending',
+                'Legacy dispatch', NULL, NULL,
+                NULL, NULL, 1, NULL,
+                1, 1
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    migrated = SessionDB(db_path=db_path)
+    try:
+        legacy_row = migrated.get_activity("legacy-act")
+        assert legacy_row["target_team_id"] is None
+
+        new_row = migrated.create_activity(
+            activity_id="new-act",
+            conversation_id="conv-team",
+            kind="team_dispatch",
+            target_team_id="team-1",
+        )
+        assert new_row["target_team_id"] == "team-1"
+    finally:
+        migrated.close()
 
 
 def test_list_run_events_filtered_filters_subagent_events_at_db_boundary(db):

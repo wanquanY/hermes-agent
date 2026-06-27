@@ -76,8 +76,9 @@ async def test_dispatch_team_creates_activity_with_pending_status(tmp_path: Path
     assert create.pending_row["conversation_id"] == "conv-parent"
     assert create.pending_row["kind"] == "team_dispatch"
     assert create.pending_row["status"] == "pending"
+    assert create.pending_row["target_team_id"] == "team-1"
     assert create.pending_row["target_mission_id"] is None
-    assert create.pending_row["prompt_summary"] == "team-1: Release readiness"
+    assert create.pending_row["prompt_summary"] == "Release readiness"
 
 
 @pytest.mark.asyncio
@@ -110,6 +111,7 @@ async def test_dispatch_team_links_target_mission_id_after_create(tmp_path: Path
 
     row = db.get_activity("act-1")
     assert row["status"] == "running"
+    assert row["target_team_id"] == "team-1"
     assert row["target_mission_id"] == "mission-1"
     assert row["started_at"] == 123.0
 

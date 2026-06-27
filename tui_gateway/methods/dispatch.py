@@ -29,11 +29,15 @@ def _prompt_summary(params: dict[str, Any]) -> str:
     return _text(params.get("prompt"))[:200]
 
 
-def _team_prompt_summary(params: dict[str, Any], target_team_id: str) -> str:
+def _team_prompt_summary(params: dict[str, Any]) -> str:
     summary = _text(params.get("summary") or params.get("prompt_summary") or params.get("promptSummary"))
-    if summary and target_team_id:
-        return f"{target_team_id}: {summary}"[:200]
-    return (target_team_id or summary)[:200]
+    if summary:
+        return summary[:200]
+    return _text(
+        params.get("mission_objective")
+        or params.get("missionObjective")
+        or params.get("objective")
+    )[:200]
 
 
 def _create_dispatch_activity(
@@ -44,6 +48,7 @@ def _create_dispatch_activity(
     kind: str,
     parent_activity_id: str = "",
     target_profile_id: str = "",
+    target_team_id: str = "",
     target_mission_id: str = "",
     prompt_summary: str = "",
 ) -> dict[str, Any]:
@@ -53,6 +58,7 @@ def _create_dispatch_activity(
         kind=kind,
         parent_activity_id=parent_activity_id or None,
         target_profile_id=target_profile_id or None,
+        target_team_id=target_team_id or None,
         target_mission_id=target_mission_id or None,
         prompt_summary=prompt_summary,
     )
@@ -412,7 +418,8 @@ async def dispatch_team_async(
         conversation_id=parent_conversation_id,
         kind="team_dispatch",
         parent_activity_id=parent_activity_id,
-        prompt_summary=_team_prompt_summary(params, target_team_id),
+        target_team_id=target_team_id,
+        prompt_summary=_team_prompt_summary(params),
     )
 
     def _fail(message: str) -> dict[str, Any]:

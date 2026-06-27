@@ -299,6 +299,7 @@ CREATE TABLE IF NOT EXISTS activities (
     parent_activity_id TEXT,
     kind TEXT NOT NULL CHECK (kind IN ('chat', 'agent_dispatch', 'team_dispatch', 'member_chat')),
     target_profile_id TEXT,
+    target_team_id TEXT,
     target_mission_id TEXT,
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
     prompt_summary TEXT,
