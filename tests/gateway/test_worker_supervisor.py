@@ -42,17 +42,27 @@ class _Collector:
         self.logs: list[tuple[str, LogFrame]] = []
         self.terminal_received = asyncio.Event()
 
-    async def on_event(self, scope: str, frame: EventFrame) -> None:
+    async def on_event(self, scope: str, conversation_id: str, frame: EventFrame) -> None:
         self.events.append((scope, frame))
 
-    async def on_interactive(self, scope: str, frame: InteractiveRequestFrame) -> None:
+    async def on_interactive(
+        self,
+        scope: str,
+        conversation_id: str,
+        frame: InteractiveRequestFrame,
+    ) -> None:
         self.interactive.append((scope, frame))
 
-    async def on_terminal(self, scope: str, frame: RunTerminalFrame) -> None:
+    async def on_terminal(
+        self,
+        scope: str,
+        conversation_id: str,
+        frame: RunTerminalFrame,
+    ) -> None:
         self.terminal.append((scope, frame))
         self.terminal_received.set()
 
-    async def on_log(self, scope: str, frame: LogFrame) -> None:
+    async def on_log(self, scope: str, conversation_id: str, frame: LogFrame) -> None:
         self.logs.append((scope, frame))
 
 
@@ -99,6 +109,7 @@ async def test_spawn_send_run_start_receive_terminal(tmp_path) -> None:
 
         ok = await sup.send(
             worker.scope_key,
+            worker.conversation_id,
             RunStartFrame(
                 run_id="run-e2e-1",
                 turn_id="turn-1",
@@ -146,6 +157,7 @@ async def test_ensure_is_idempotent(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.live_system_guard_bypass
 async def test_shutdown_terminates_process(tmp_path) -> None:
     collector = _Collector()
     sup = _make_supervisor(collector)
@@ -162,6 +174,7 @@ async def test_shutdown_terminates_process(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.live_system_guard_bypass
 async def test_send_returns_false_when_worker_dead(tmp_path) -> None:
     collector = _Collector()
     sup = _make_supervisor(collector)
@@ -172,6 +185,7 @@ async def test_send_returns_false_when_worker_dead(tmp_path) -> None:
         await worker.process.wait()
         ok = await sup.send(
             worker.scope_key,
+            worker.conversation_id,
             RunCancelFrame(run_id="r-doesnt-matter"),
         )
         assert ok is False
@@ -182,7 +196,7 @@ async def test_send_returns_false_when_worker_dead(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_send_unknown_scope_returns_false(tmp_path) -> None:
     sup = _make_supervisor(_Collector())
-    ok = await sup.send("never-spawned", RunCancelFrame(run_id="x"))
+    ok = await sup.send("never-spawned", "", RunCancelFrame(run_id="x"))
     assert ok is False
     await sup.shutdown_all()
 

@@ -139,7 +139,7 @@ async def test_idle_worker_reaped_after_threshold() -> None:
     try:
         await pool.get_or_spawn("conv-1", _profile())
         await pool.release("conv-1")
-        pool._states["conv-1"].idle_since = time.time() - 10
+        pool._states[("conv-1", "")].idle_since = time.time() - 10
 
         await pool._reap_once()
 
@@ -162,7 +162,7 @@ async def test_active_worker_not_reaped_while_run_inflight() -> None:
             turn_id="turn-1",
         )
         await pool.release("conv-1")
-        pool._states["conv-1"].idle_since = time.time() - 10
+        pool._states[("conv-1", "")].idle_since = time.time() - 10
 
         await pool._reap_once()
 

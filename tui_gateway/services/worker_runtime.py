@@ -475,6 +475,7 @@ async def _dispatch_prompt_submit(
         lease = await pool.get_or_spawn(
             stored_session_id,
             _profile_context_for_worker_pool(scope, params),
+            scope_key=scope.runtime_scope_key,
         )
     except Exception as exc:
         _log.exception(
@@ -515,6 +516,7 @@ async def _dispatch_prompt_submit(
         run_id=run_id,
         stored_session_id=stored_session_id,
         turn_id=turn_id,
+        scope_key=lease.scope_key,
     )
 
     frame_params = {
@@ -548,7 +550,7 @@ async def _dispatch_prompt_submit(
             params=frame_params,
         ),
     )
-    await pool.release(stored_session_id)
+    await pool.release(stored_session_id, scope_key=lease.scope_key)
     if not ok:
         router.forget_run(run_id)
         await pool.forget_run(run_id)

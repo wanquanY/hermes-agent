@@ -2,8 +2,8 @@
 
 ``WorkerSupervisor`` owns subprocess mechanics keyed by
 ``RuntimeScope.worker_identity``. ``WorkerPool`` adds the policy layer
-the control plane needs: one live worker per conversation, serialized
-spawn per conversation, idle reaping, and crash terminalization.
+the control plane needs: one live worker per conversation/scope lease,
+serialized spawn per lease, idle reaping, and crash terminalization.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from tui_gateway.services.worker_supervisor import RunWorker, WorkerSupervisor
 _log = logging.getLogger(__name__)
 
 _TerminalCallback = Callable[[str, str, RunTerminalFrame], Awaitable[None]]
+_StateKey = tuple[str, str]
 
 
 @dataclass(frozen=True)
@@ -81,9 +82,9 @@ class WorkerPool:
         self._supervisor = supervisor
         self._idle_reap_after_s = float(idle_reap_after_s)
         self._reap_tick_s = float(reap_tick_s)
-        self._states: dict[str, _LeaseState] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
-        self._run_to_conversation: dict[str, str] = {}
+        self._states: dict[_StateKey, _LeaseState] = {}
+        self._locks: dict[_StateKey, asyncio.Lock] = {}
+        self._run_to_state_key: dict[str, _StateKey] = {}
         self._lock = asyncio.Lock()
         self._closing = False
         self._last_reap_at = 0.0
@@ -98,14 +99,16 @@ class WorkerPool:
         self,
         conversation_id: str,
         profile_context: dict,
+        scope_key: str | None = None,
     ) -> WorkerLease:
-        """Return live worker for conv; spawn if none. Thread-safe."""
+        """Return live worker for conversation/scope; spawn if none."""
 
         conv = self._normalize_conversation_id(conversation_id)
+        key = self._state_key(conv, scope_key)
         self._ensure_reap_task()
-        conv_lock = await self._lock_for(conv)
-        async with conv_lock:
-            state = self._states.get(conv)
+        lease_lock = await self._lock_for(key)
+        async with lease_lock:
+            state = self._states.get(key)
             if state is not None and state.worker.running():
                 now = time.time()
                 state.last_acquired_at = now
@@ -113,9 +116,9 @@ class WorkerPool:
                 state.worker.mark_used()
                 return WorkerLease(conversation_id=conv, worker=state.worker, acquired_at=now)
             if state is not None:
-                await self._handle_dead_worker(conv, state, reason="worker exited before acquire")
+                await self._handle_dead_worker(key, state, reason="worker exited before acquire")
 
-            scope = self._scope_for(conv, profile_context)
+            scope = self._scope_for(conv, profile_context, scope_key=scope_key)
             worker = await self._supervisor.ensure(scope)
             now = time.time()
             state = _LeaseState(
@@ -124,43 +127,50 @@ class WorkerPool:
                 created_at=now,
                 last_acquired_at=now,
             )
-            self._states[conv] = state
+            self._states[key] = state
             return WorkerLease(conversation_id=conv, worker=worker, acquired_at=now)
 
-    async def release(self, conversation_id: str) -> None:
-        """Mark worker idle. In-flight runs still block idle reaping."""
+    async def release(self, conversation_id: str, scope_key: str | None = None) -> None:
+        """Mark worker idle. In-flight runs still block idle reaping.
+
+        Without ``scope_key`` this preserves legacy conversation-level
+        semantics and releases every scoped worker for the conversation.
+        """
 
         conv = self._normalize_conversation_id(conversation_id)
-        conv_lock = await self._lock_for(conv)
-        async with conv_lock:
-            state = self._states.get(conv)
-            if state is not None and state.worker.running():
-                now = time.time()
-                state.idle_since = now
-                state.worker.last_used_at = now
+        for key in await self._state_keys_for(conv, scope_key):
+            lease_lock = await self._lock_for(key)
+            async with lease_lock:
+                state = self._states.get(key)
+                if state is not None and state.worker.running():
+                    now = time.time()
+                    state.idle_since = now
+                    state.worker.last_used_at = now
 
-    async def kill(self, conversation_id: str) -> bool:
-        """Force-terminate worker for conv."""
+    async def kill(self, conversation_id: str, scope_key: str | None = None) -> bool:
+        """Force-terminate worker(s) for conversation/scope."""
 
         conv = self._normalize_conversation_id(conversation_id)
-        conv_lock = await self._lock_for(conv)
         found = False
-        async with conv_lock:
-            state = self._states.get(conv)
-            if state is None:
-                pass
-            else:
+        keys = await self._state_keys_for(conv, scope_key)
+        for key in keys:
+            lease_lock = await self._lock_for(key)
+            async with lease_lock:
+                state = self._states.get(key)
+                if state is None:
+                    continue
                 found = True
                 await self._fail_inflight_runs(state, reason="worker killed")
-                self._states.pop(conv, None)
+                self._states.pop(key, None)
                 await self._supervisor.shutdown(
                     state.worker.scope_key,
                     state.worker.conversation_id,
                 )
+            await self._drop_lock(key)
         if not found:
-            await self._drop_lock(conv)
+            for key in keys:
+                await self._drop_lock(key)
             return False
-        await self._drop_lock(conv)
         return True
 
     async def shutdown(self) -> None:
@@ -179,7 +189,7 @@ class WorkerPool:
         async with self._lock:
             self._states.clear()
             self._locks.clear()
-            self._run_to_conversation.clear()
+            self._run_to_state_key.clear()
 
     def stats(self) -> dict:
         """Return worker counts and reap timing diagnostics."""
@@ -223,6 +233,7 @@ class WorkerPool:
         run_id: str,
         stored_session_id: str,
         turn_id: str = "",
+        scope_key: str | None = None,
     ) -> None:
         """Track an in-flight run so reaping and crash recovery are exact."""
 
@@ -230,9 +241,12 @@ class WorkerPool:
         normalized_run_id = str(run_id or "").strip()
         if not normalized_run_id:
             return
-        conv_lock = await self._lock_for(conv)
-        async with conv_lock:
-            state = self._states.get(conv)
+        key = await self._state_key_for_run_record(conv, scope_key)
+        if key is None:
+            return
+        lease_lock = await self._lock_for(key)
+        async with lease_lock:
+            state = self._states.get(key)
             if state is None:
                 return
             state.inflight[normalized_run_id] = _RunRecord(
@@ -241,7 +255,7 @@ class WorkerPool:
                 turn_id=str(turn_id or "").strip(),
             )
             state.worker.active_runs.add(normalized_run_id)
-            self._run_to_conversation[normalized_run_id] = conv
+            self._run_to_state_key[normalized_run_id] = key
 
     async def forget_run(self, run_id: str) -> None:
         """Drop a run from pool tracking without publishing a terminal event."""
@@ -249,12 +263,12 @@ class WorkerPool:
         normalized_run_id = str(run_id or "").strip()
         if not normalized_run_id:
             return
-        conv = self._run_to_conversation.pop(normalized_run_id, "")
-        if not conv:
+        key = self._run_to_state_key.pop(normalized_run_id, None)
+        if key is None:
             return
-        conv_lock = await self._lock_for(conv)
-        async with conv_lock:
-            state = self._states.get(conv)
+        lease_lock = await self._lock_for(key)
+        async with lease_lock:
+            state = self._states.get(key)
             if state is None:
                 return
             state.inflight.pop(normalized_run_id, None)
@@ -276,37 +290,38 @@ class WorkerPool:
         now = time.time()
         self._last_reap_at = now
         candidates = list(self._states.items())
-        for conv, state in candidates:
-            conv_lock = await self._lock_for(conv)
+        for key, state in candidates:
+            lease_lock = await self._lock_for(key)
             removed = False
-            async with conv_lock:
-                current = self._states.get(conv)
+            async with lease_lock:
+                current = self._states.get(key)
                 if current is not state:
                     continue
                 if not state.worker.running():
-                    await self._handle_dead_worker(conv, state, reason="worker crashed")
+                    await self._handle_dead_worker(key, state, reason="worker crashed")
                     removed = True
                 elif not state.has_inflight() and state.idle_since is not None:
                     if now - state.idle_since <= self._idle_reap_after_s:
                         continue
                     _log.warning(
-                        "[worker-pool] reaping idle worker conv_id=%s pid=%s idle_for=%.3fs",
-                        conv,
+                        "[worker-pool] reaping idle worker conv_id=%s scope_key=%s pid=%s idle_for=%.3fs",
+                        state.conversation_id,
+                        state.worker.scope_key,
                         state.worker.process.pid,
                         now - state.idle_since,
                     )
-                    self._states.pop(conv, None)
+                    self._states.pop(key, None)
                     await self._supervisor.shutdown(
                         state.worker.scope_key,
                         state.worker.conversation_id,
                     )
                     removed = True
             if removed:
-                await self._drop_lock(conv)
+                await self._drop_lock(key)
 
     async def _handle_dead_worker(
         self,
-        conversation_id: str,
+        key: _StateKey,
         state: _LeaseState,
         *,
         reason: str,
@@ -315,13 +330,14 @@ class WorkerPool:
         inflight_count = len(set(state.inflight) | set(state.worker.active_runs))
         if inflight_count:
             _log.warning(
-                "[worker-pool] worker conv_id=%s crashed after %.3fs inflight=%d",
-                conversation_id,
+                "[worker-pool] worker conv_id=%s scope_key=%s crashed after %.3fs inflight=%d",
+                state.conversation_id,
+                state.worker.scope_key,
                 uptime,
                 inflight_count,
             )
         await self._fail_inflight_runs(state, reason=reason)
-        self._states.pop(conversation_id, None)
+        self._states.pop(key, None)
         await self._supervisor.shutdown(
             state.worker.scope_key,
             state.worker.conversation_id,
@@ -358,7 +374,7 @@ class WorkerPool:
                 self._publish_failed_run_direct(state, record, message=message)
             state.worker.active_runs.discard(run_id)
             state.inflight.pop(run_id, None)
-            self._run_to_conversation.pop(run_id, None)
+            self._run_to_state_key.pop(run_id, None)
 
     def _publish_failed_run_direct(
         self,
@@ -395,20 +411,20 @@ class WorkerPool:
         normalized_run_id = str(run_id or "").strip()
         if not normalized_run_id:
             return
-        conv = self._run_to_conversation.pop(normalized_run_id, "")
-        if not conv:
+        key = self._run_to_state_key.pop(normalized_run_id, None)
+        if key is None:
             for candidate, state in self._states.items():
                 if (
                     state.worker.scope_key == scope_key
                     and state.worker.conversation_id == (conversation_id or "")
                 ):
-                    conv = candidate
+                    key = candidate
                     break
-        if not conv:
+        if key is None:
             return
-        conv_lock = await self._lock_for(conv)
-        async with conv_lock:
-            state = self._states.get(conv)
+        lease_lock = await self._lock_for(key)
+        async with lease_lock:
+            state = self._states.get(key)
             if state is None:
                 return
             state.inflight.pop(normalized_run_id, None)
@@ -443,18 +459,57 @@ class WorkerPool:
             return
         self._reap_task = loop.create_task(self._reap_loop(), name="worker-pool-reap")
 
-    async def _lock_for(self, conversation_id: str) -> asyncio.Lock:
+    async def _lock_for(self, key: _StateKey) -> asyncio.Lock:
         async with self._lock:
-            lock = self._locks.get(conversation_id)
+            lock = self._locks.get(key)
             if lock is None:
                 lock = asyncio.Lock()
-                self._locks[conversation_id] = lock
+                self._locks[key] = lock
             return lock
 
-    async def _drop_lock(self, conversation_id: str) -> None:
+    async def _drop_lock(self, key: _StateKey) -> None:
         async with self._lock:
-            if conversation_id not in self._states:
-                self._locks.pop(conversation_id, None)
+            if key not in self._states:
+                self._locks.pop(key, None)
+
+    @staticmethod
+    def _state_key(conversation_id: str, scope_key: str | None = None) -> _StateKey:
+        return (conversation_id, str(scope_key or "").strip())
+
+    async def _state_keys_for(
+        self,
+        conversation_id: str,
+        scope_key: str | None = None,
+    ) -> list[_StateKey]:
+        if scope_key is not None:
+            return [self._state_key(conversation_id, scope_key)]
+        async with self._lock:
+            return [
+                key for key in sorted(self._states)
+                if key[0] == conversation_id
+            ]
+
+    async def _state_key_for_run_record(
+        self,
+        conversation_id: str,
+        scope_key: str | None = None,
+    ) -> _StateKey | None:
+        if scope_key is not None:
+            return self._state_key(conversation_id, scope_key)
+        async with self._lock:
+            keys = [key for key in self._states if key[0] == conversation_id]
+        if len(keys) == 1:
+            return keys[0]
+        legacy_key = self._state_key(conversation_id)
+        if legacy_key in keys:
+            return legacy_key
+        if keys:
+            _log.warning(
+                "[worker-pool] record_run_start without scope_key is ambiguous conv_id=%s scopes=%s",
+                conversation_id,
+                [key[1] for key in sorted(keys)],
+            )
+        return None
 
     @staticmethod
     def _normalize_conversation_id(conversation_id: str) -> str:
@@ -464,7 +519,12 @@ class WorkerPool:
         return conv
 
     @staticmethod
-    def _scope_for(conversation_id: str, profile_context: dict) -> RuntimeScope:
+    def _scope_for(
+        conversation_id: str,
+        profile_context: dict,
+        *,
+        scope_key: str | None = None,
+    ) -> RuntimeScope:
         profile = profile_context if isinstance(profile_context, dict) else {}
         dovie_profile = profile.get("dovie_profile")
         if not isinstance(dovie_profile, dict):
@@ -494,21 +554,19 @@ class WorkerPool:
             or ""
         ).strip()
         explicit_scope_key = str(
-            profile.get("runtime_scope_key")
+            scope_key
+            or profile.get("runtime_scope_key")
             or profile.get("runtimeScopeKey")
             or dovie_profile.get("runtime_scope_key")
             or dovie_profile.get("runtimeScopeKey")
             or ""
         ).strip()
-        if explicit_scope_key.startswith(("profile:", "team:", "draft:")):
-            scope_key = explicit_scope_key
-        elif agent_profile_id:
-            scope_key = f"profile:{agent_profile_id}"
-        else:
-            scope_key = explicit_scope_key
+        resolved_scope_key = explicit_scope_key or (
+            f"profile:{agent_profile_id}" if agent_profile_id else ""
+        )
         return RuntimeScope(
             agent_profile_id=agent_profile_id,
-            runtime_scope_key=scope_key,
+            runtime_scope_key=resolved_scope_key,
             conversation_id=conversation_id,
             hermes_home=hermes_home,
         )
