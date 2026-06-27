@@ -366,6 +366,7 @@ class SessionDBTeamMissionGraphMixin:
             effective_canonical_node_id = (
                 _text(canonical_node_id)
                 or existing_canonical_node_id
+                # CR-P3.3: graph identity only; for speaker use participant_id.
                 or _conversation_graph_node_id(mission_id, node_id)
             )
             effective_task_frame_id = (
@@ -1401,6 +1402,7 @@ class SessionDBTeamMissionGraphMixin:
                 ),
             )
             if str(node_id or "").strip():
+                # CR-P3.3: graph identity only; for speaker use participant_id.
                 canonical_node_id = _conversation_graph_node_id(mission_id, str(node_id or ""))
                 task_frame_id = f"mission-frame:{mission_id}" if mission_id else ""
                 conn.execute(

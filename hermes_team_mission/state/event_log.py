@@ -186,6 +186,7 @@ def _canonical_subject(source_event: Dict[str, Any], identity: Dict[str, str]) -
             "id": approval_id,
             "approval_id": approval_id,
             "node_id": approval_id,
+            # CR-P3.3: graph identity only; for speaker use participant_id.
             "canonical_node_id": _canonical_graph_node_id(mission_id, approval_id),
         })
         return {key: value for key, value in subject.items() if text(value)}
@@ -209,6 +210,7 @@ def _canonical_subject(source_event: Dict[str, Any], identity: Dict[str, str]) -
             "type": "node",
             "id": node_id,
             "node_id": node_id,
+            # CR-P3.3: graph identity only; for speaker use participant_id.
             "canonical_node_id": _canonical_graph_node_id(mission_id, node_id),
             "node_kind": node_kind,
             "output_contract_format": output_contract_format,
@@ -322,6 +324,7 @@ def _apply_subject_node_identity(target: Dict[str, Any], subject: Dict[str, Any]
     target["nodeId"] = node_id
     canonical_node_id = _subject_canonical_node_id(subject)
     if canonical_node_id:
+        # CR-P3.3: graph identity only; for speaker use participant_id.
         target["canonical_node_id"] = canonical_node_id
         target["canonicalNodeId"] = canonical_node_id
     if text(subject.get("type")).lower() == "approval":

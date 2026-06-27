@@ -75,6 +75,7 @@ class SessionDBTeamMissionRowsMixin:
         raw_kind = str(row["kind"] or "")
         kind = _normalize_node_kind(raw_kind)
         metadata = _metadata_with_normalized_node_kind(metadata, raw_kind=raw_kind, canonical_kind=kind)
+        # CR-P3.3: graph identity only; for speaker use participant_id.
         return {
             "node_id": str(row["node_id"] or ""),
             "mission_id": str(row["mission_id"] or ""),
@@ -239,6 +240,7 @@ class SessionDBTeamMissionRowsMixin:
         runtime_session_id = _text(node.get("runtime_session_id")) or _text(binding.get("runtime_session_id"))
         runtime_scope_key = _text(node.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key"))
         run_id = _text(binding.get("run_id"))
+        # CR-P3.3: graph identity only; for speaker use participant_id.
         canonical_node_id = _text(node.get("canonical_node_id")) or _conversation_graph_node_id(
             _text(node.get("mission_id") or binding.get("mission_id")),
             node_id,
@@ -340,4 +342,3 @@ class SessionDBTeamMissionRowsMixin:
 
     def _team_mission_deliverable_from_row(self, row: sqlite3.Row | None) -> Dict[str, Any]:
         return _deliverable_state.row_to_deliverable(row)
-

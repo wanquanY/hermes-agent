@@ -323,7 +323,25 @@ def _task_id_from_node_and_binding(node: Dict[str, Any] | None, binding: Dict[st
 
 
 def _conversation_graph_node_id(mission_id: str, node_id: str) -> str:
+    # CR-P3.3: graph identity only; for speaker use participant_id.
     return _canonical_node_id(mission_id, node_id)
+
+
+def node_to_participant_id(node: Dict[str, Any] | None) -> str:
+    """Return only an explicit participant stamp from node metadata.
+
+    CR-P3.3: graph identity only; for speaker use participant_id. This helper
+    deliberately never derives speaker identity from node_id/canonical_node_id.
+    """
+    if not isinstance(node, dict):
+        return ""
+    metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+    return _text(
+        node.get("participant_id")
+        or node.get("participantId")
+        or metadata.get("participant_id")
+        or metadata.get("participantId")
+    )
 
 
 def _participant_id_from_runtime_event_context(
@@ -332,7 +350,6 @@ def _participant_id_from_runtime_event_context(
     node: Dict[str, Any],
     binding: Dict[str, Any],
 ) -> str:
-    node_metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
     binding_metadata = binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}
     mission_metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
     run_context = binding_metadata.get("run_context") if isinstance(binding_metadata.get("run_context"), dict) else {}
@@ -347,8 +364,7 @@ def _participant_id_from_runtime_event_context(
         or binding_metadata.get("participantId")
         or run_context.get("participant_id")
         or run_context.get("participantId")
-        or node_metadata.get("participant_id")
-        or node_metadata.get("participantId")
+        or node_to_participant_id(node)
         or mission_metadata.get("participant_id")
         or mission_metadata.get("participantId")
     )
@@ -373,6 +389,7 @@ def _team_mission_runtime_event_identity(
     mission_id = _text(mission.get("mission_id") or binding.get("mission_id") or node.get("mission_id"))
     mission_metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
     node_id = _text(node.get("node_id") or binding.get("node_id"))
+    # CR-P3.3: graph identity only; for speaker use participant_id.
     canonical_id = _canonical_node_id(mission_id, node_id)
     node_kind = _normalize_node_kind(node.get("kind"))
     output_contract = node.get("output_contract") if isinstance(node.get("output_contract"), dict) else {}

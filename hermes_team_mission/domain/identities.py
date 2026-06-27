@@ -15,6 +15,8 @@ def canonical_node_id(mission_id: str, node_id: str) -> str:
     ``node_id`` remains mission-local for graph lookups. This helper is for
     cross-mission projections where two missions in one conversation may reuse
     the same local node id.
+
+    CR-P3.3: graph identity only; for speaker use participant_id.
     """
 
     mission_id = _text(mission_id)

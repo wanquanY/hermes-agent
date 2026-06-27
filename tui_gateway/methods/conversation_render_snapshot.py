@@ -572,6 +572,7 @@ def _normalize_team_render_messages(
         if not isinstance(raw, dict):
             continue
         message = dict(raw)
+        # CR-P3.3: graph identity only; for speaker use participant_id.
         message = _with_message_participant_id(
             message,
             _participant_id_for_message_from_events(message, event_participants),
