@@ -491,6 +491,8 @@ class WorkerSupervisor:
             return await self._execute_db_rpc(frame)
         if method == "worker.dispatch_agent_async":
             return await self._execute_dispatch_agent_async_rpc(frame)
+        if method == "worker.dispatch_team_async":
+            return await self._execute_dispatch_team_async_rpc(frame)
         return _db_rpc_error(
             str(frame.id or ""),
             "WorkerRPCMethodError",
@@ -505,6 +507,22 @@ class WorkerSupervisor:
             from tui_gateway.methods.dispatch import dispatch_agent_async
 
             result = await dispatch_agent_async(params)
+            return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
+        except Exception as exc:
+            return _db_rpc_error(
+                req_id,
+                type(exc).__name__,
+                str(exc) or repr(exc),
+                code=-32000,
+            )
+
+    async def _execute_dispatch_team_async_rpc(self, frame: DBRpcRequestFrame) -> DBRpcReplyFrame:
+        req_id = str(frame.id or "")
+        params = frame.params if isinstance(frame.params, dict) else {}
+        try:
+            from tui_gateway.methods.dispatch import dispatch_team_async
+
+            result = await dispatch_team_async(params)
             return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
         except Exception as exc:
             return _db_rpc_error(

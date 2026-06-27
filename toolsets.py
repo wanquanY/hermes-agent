@@ -54,7 +54,7 @@ _HERMES_CORE_TOOLS = [
     # Clarifying questions
     "clarify",
     # Code execution + delegation
-    "execute_code", "delegate_task", "invoke_subagent", "dispatch_agent_async",
+    "execute_code", "delegate_task", "invoke_subagent", "dispatch_agent_async", "dispatch_team_async",
     # Dovie automation task management
     "dovie_automation_task_create", "dovie_automation_task_list",
     "dovie_automation_task_update", "dovie_automation_task_remove",
@@ -303,7 +303,7 @@ TOOLSETS = {
 
     "subagent": {
         "description": "Invoke or dispatch another Hermes profile",
-        "tools": ["invoke_subagent", "dispatch_agent_async"],
+        "tools": ["invoke_subagent", "dispatch_agent_async", "dispatch_team_async"],
         "includes": []
     },
 

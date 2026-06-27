@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import time
 import uuid
 from typing import Any
@@ -26,6 +27,35 @@ def _prompt_summary(params: dict[str, Any]) -> str:
     if summary:
         return summary[:200]
     return _text(params.get("prompt"))[:200]
+
+
+def _team_prompt_summary(params: dict[str, Any], target_team_id: str) -> str:
+    summary = _text(params.get("summary") or params.get("prompt_summary") or params.get("promptSummary"))
+    if summary and target_team_id:
+        return f"{target_team_id}: {summary}"[:200]
+    return (target_team_id or summary)[:200]
+
+
+def _create_dispatch_activity(
+    db: Any,
+    *,
+    activity_id: str,
+    conversation_id: str,
+    kind: str,
+    parent_activity_id: str = "",
+    target_profile_id: str = "",
+    target_mission_id: str = "",
+    prompt_summary: str = "",
+) -> dict[str, Any]:
+    return db.create_activity(
+        activity_id=activity_id,
+        conversation_id=conversation_id,
+        kind=kind,
+        parent_activity_id=parent_activity_id or None,
+        target_profile_id=target_profile_id or None,
+        target_mission_id=target_mission_id or None,
+        prompt_summary=prompt_summary,
+    )
 
 
 def _profile_context(profile: dict[str, Any], *, conversation_id: str) -> dict[str, Any]:
@@ -58,6 +88,70 @@ def _profile_context(profile: dict[str, Any], *, conversation_id: str) -> dict[s
         }
     )
     return context
+
+
+def _workspace_payload_from_parent(params: dict[str, Any], parent_conversation_id: str) -> dict[str, Any]:
+    workspace = params.get("workspace") if isinstance(params.get("workspace"), dict) else {}
+    cwd = _text(params.get("cwd"))
+    workspace_id = _text(params.get("workspace_id") or params.get("workspaceId"))
+    workspace_path = _text(params.get("workspace_path") or params.get("workspacePath"))
+    if workspace or cwd or workspace_id or workspace_path:
+        payload: dict[str, Any] = {}
+        if workspace:
+            payload["workspace"] = workspace
+        if cwd:
+            payload["cwd"] = cwd
+        if workspace_id:
+            payload["workspace_id"] = workspace_id
+        if workspace_path:
+            payload["workspace_path"] = workspace_path
+        return payload
+    try:
+        from tui_gateway.services.workspace import session_workspace_binding
+
+        binding = session_workspace_binding(parent_conversation_id)
+    except Exception:
+        binding = None
+    if not isinstance(binding, dict) or not binding:
+        return {}
+    bound_workspace = binding.get("workspace") if isinstance(binding.get("workspace"), dict) else {}
+    workspace_path = _text(binding.get("workspace_path") or binding.get("workspacePath") or binding.get("cwd"))
+    if not bound_workspace and not workspace_path:
+        return {}
+    return {
+        "workspace": bound_workspace
+        or {
+            "id": _text(binding.get("workspace_id") or binding.get("workspaceId")),
+            "path": workspace_path,
+            "name": "workspace",
+            "kind": "local",
+        },
+        "cwd": _text(binding.get("cwd") or workspace_path),
+    }
+
+
+def _team_mission_create_method():
+    creator = _methods.get("team_mission.create")
+    if creator is not None:
+        return creator
+    importlib.import_module("hermes_team_mission.gateway.conversation_methods")
+    return _methods.get("team_mission.create")
+
+
+def _jsonrpc_error_message(response: Any, *, fallback: str) -> str:
+    if not isinstance(response, dict):
+        return fallback
+    error = response.get("error")
+    if isinstance(error, dict):
+        return _text(error.get("message")) or fallback
+    return fallback
+
+
+def _team_mission_result(response: Any) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        return {}
+    result = response.get("result")
+    return result if isinstance(result, dict) else {}
 
 
 async def dispatch_agent_async(
@@ -103,11 +197,12 @@ async def dispatch_agent_async(
     if db is None:
         raise RuntimeError("Hermes state db unavailable")
 
-    db.create_activity(
+    _create_dispatch_activity(
+        db,
         activity_id=activity_id,
         conversation_id=parent_conversation_id,
         kind="agent_dispatch",
-        parent_activity_id=parent_activity_id or None,
+        parent_activity_id=parent_activity_id,
         target_profile_id=target_profile_id,
         prompt_summary=_prompt_summary(params),
     )
@@ -241,12 +336,132 @@ async def dispatch_agent_async(
     }
 
 
-def _run_sync(coro):
+async def dispatch_team_async(
+    params: dict[str, Any],
+    *,
+    db: Any = None,
+    team_mission_create: Any = None,
+    uuid_factory: Any = None,
+    time_fn: Any = None,
+) -> dict[str, Any]:
+    """Create an async team-dispatch activity and start a team mission."""
+
+    params = params if isinstance(params, dict) else {}
+    target_team_id = _text(
+        params.get("target_team_id")
+        or params.get("targetTeamId")
+        or params.get("team_id")
+        or params.get("teamId")
+    )
+    mission_objective = str(
+        params.get("mission_objective")
+        or params.get("missionObjective")
+        or params.get("objective")
+        or ""
+    )
+    parent_conversation_id = _text(
+        params.get("parent_conversation_id")
+        or params.get("parentConversationId")
+        or params.get("conversation_id")
+        or params.get("conversationId")
+    )
+    parent_activity_id = _text(params.get("parent_activity_id") or params.get("parentActivityId"))
+
+    if not parent_conversation_id:
+        raise ValueError("parent_conversation_id required")
+
+    uuid_factory = uuid_factory or (lambda: uuid.uuid4().hex)
+    time_fn = time_fn or time.time
+    activity_id = _text(params.get("activity_id") or params.get("activityId")) or str(uuid_factory())
+    mission_id = _text(params.get("mission_id") or params.get("missionId")) or str(uuid_factory())
+    files = _files(params.get("files"))
+
+    if db is None:
+        db = _get_db()
+    if db is None:
+        raise RuntimeError("Hermes state db unavailable")
+
+    _create_dispatch_activity(
+        db,
+        activity_id=activity_id,
+        conversation_id=parent_conversation_id,
+        kind="team_dispatch",
+        parent_activity_id=parent_activity_id,
+        prompt_summary=_team_prompt_summary(params, target_team_id),
+    )
+
+    def _fail(message: str) -> dict[str, Any]:
+        db.update_activity_status(
+            activity_id,
+            "failed",
+            result_summary=message,
+            completed_at=time_fn(),
+        )
+        return {
+            "activity_id": activity_id,
+            "mission_id": mission_id,
+            "status": "failed",
+            "error": message,
+        }
+
+    if not target_team_id:
+        return _fail("target_team_id required")
+    if not mission_objective.strip():
+        return _fail("mission_objective required")
+
+    if team_mission_create is None:
+        team_mission_create = _team_mission_create_method()
+    if not callable(team_mission_create):
+        return _fail("team_mission.create unavailable")
+
+    create_params: dict[str, Any] = {
+        "mission_id": mission_id,
+        "team_id": target_team_id,
+        "title": _text(params.get("title") or params.get("summary")) or mission_objective[:80],
+        "objective": mission_objective,
+        "metadata": {
+            **(params.get("metadata") if isinstance(params.get("metadata"), dict) else {}),
+            "start_leader": True,
+            "dispatch_activity_id": activity_id,
+            "parent_activity_id": parent_activity_id,
+            "parent_conversation_id": parent_conversation_id,
+            "files": files,
+            "source": "team_dispatch",
+        },
+    }
+    create_params.update(_workspace_payload_from_parent(params, parent_conversation_id))
+
+    try:
+        create_response = team_mission_create(f"dispatch-team-{activity_id}", create_params)
+    except Exception as exc:
+        return _fail(str(exc) or type(exc).__name__)
+
+    if isinstance(create_response, dict) and create_response.get("error"):
+        return _fail(_jsonrpc_error_message(create_response, fallback="team mission create failed"))
+
+    result = _team_mission_result(create_response)
+    created_mission_id = _text(result.get("mission_id") or mission_id)
+    if not created_mission_id:
+        return _fail("team mission create did not return mission_id")
+
+    db.update_activity_status(
+        activity_id,
+        "running",
+        target_mission_id=created_mission_id,
+        started_at=time_fn(),
+    )
+    return {
+        "activity_id": activity_id,
+        "mission_id": created_mission_id,
+    }
+
+
+def _run_sync(coro, *, method_name: str):
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
-    raise RuntimeError("worker.dispatch_agent_async cannot run inside an active event loop")
+    raise RuntimeError(f"{method_name} cannot run inside an active event loop")
 
 
 @method("worker.dispatch_agent_async")
@@ -264,8 +479,36 @@ def worker_dispatch_agent_async(rid, params: dict) -> dict:
     """
 
     try:
-        return _ok(rid, _run_sync(dispatch_agent_async(params)))
+        return _ok(
+            rid,
+            _run_sync(dispatch_agent_async(params), method_name="worker.dispatch_agent_async"),
+        )
     except ValueError as exc:
         return _err(rid, 4006, str(exc))
     except Exception as exc:
         return _err(rid, 5008, f"agent dispatch failed: {exc}")
+
+
+@method("worker.dispatch_team_async")
+def worker_dispatch_team_async(rid, params: dict) -> dict:
+    """Called by worker subprocess via IPC.
+
+    params: {
+      target_team_id: str,
+      mission_objective: str,
+      files: optional[list[str]],
+      parent_activity_id: optional[str],
+      parent_conversation_id: str,
+    }
+    Returns: {activity_id, mission_id}
+    """
+
+    try:
+        return _ok(
+            rid,
+            _run_sync(dispatch_team_async(params), method_name="worker.dispatch_team_async"),
+        )
+    except ValueError as exc:
+        return _err(rid, 4006, str(exc))
+    except Exception as exc:
+        return _err(rid, 5008, f"team dispatch failed: {exc}")

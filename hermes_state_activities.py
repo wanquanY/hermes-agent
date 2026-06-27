@@ -94,6 +94,8 @@ class ActivitiesMixin:
         activity_id,
         status,
         *,
+        target_profile_id=None,
+        target_mission_id=None,
         result_summary=None,
         result_json=None,
         started_at=None,
@@ -109,6 +111,12 @@ class ActivitiesMixin:
         now = time.time()
         assignments = ["status = ?", "updated_at = ?"]
         params: List[Any] = [normalized_status, now]
+        if target_profile_id is not None:
+            assignments.append("target_profile_id = ?")
+            params.append(_optional_text(target_profile_id))
+        if target_mission_id is not None:
+            assignments.append("target_mission_id = ?")
+            params.append(_optional_text(target_mission_id))
         if result_summary is not None:
             assignments.append("result_summary = ?")
             params.append(_optional_text(result_summary))
