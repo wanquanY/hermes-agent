@@ -2502,6 +2502,18 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
 
         return self._execute_write(_do)
 
+    def get_session_index(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Return the exact control-plane session_index row for a session."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM session_index WHERE session_id = ?",
+                (sid,),
+            ).fetchone()
+        return self._session_index_row_to_item(row) if row else None
+
     def _repair_session_index_terminal_active_runs_locked(self, conn: sqlite3.Connection) -> int:
         """Clear stale sidebar state once its conversation has no active runs.
 

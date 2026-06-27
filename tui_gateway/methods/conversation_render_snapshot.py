@@ -165,6 +165,8 @@ def _conversation_identifier(params: dict[str, Any]) -> str:
         or params.get("conversationId")
         or params.get("mission_id")
         or params.get("missionId")
+        or params.get("session_id")
+        or params.get("sessionId")
         or params.get("conversation_session_id")
         or params.get("conversationSessionId")
         or params.get("stable_session_id")
@@ -185,6 +187,71 @@ def _conversation_kind(params: dict[str, Any]) -> str:
     if kind in {"direct", "ordinary", "hermes_session"}:
         return "direct"
     return ""
+
+
+def _route_kind_from_session_index(db: Any, session_id: str) -> str:
+    session_id = _text(session_id)
+    if not session_id:
+        return ""
+    getter = getattr(db, "get_session_index", None)
+    if not callable(getter):
+        return ""
+    try:
+        row = getter(session_id) or {}
+    except Exception as exc:
+        logger.warning(
+            "conversation.render_snapshot route kind lookup skipped session_id=%s: %s",
+            session_id,
+            exc,
+        )
+        return ""
+    return _conversation_kind(row)
+
+
+def _route_kind_from_team_conversation(db: Any, identifier: str) -> str:
+    identifier = _text(identifier)
+    resolver = getattr(db, "resolve_team_mission_conversation", None)
+    if not identifier or not callable(resolver):
+        return ""
+    try:
+        resolved = resolver(identifier) or {}
+    except Exception as exc:
+        logger.warning(
+            "conversation.render_snapshot team route lookup skipped identifier=%s: %s",
+            identifier,
+            exc,
+        )
+        return ""
+    conversation = resolved.get("conversation") if isinstance(resolved, dict) else {}
+    if isinstance(conversation, dict) and _text(
+        conversation.get("conversation_id") or conversation.get("conversationId")
+    ):
+        return "team"
+    return ""
+
+
+def _route_conversation_kind(params: dict[str, Any]) -> str:
+    explicit_kind = _conversation_kind(params)
+    if explicit_kind:
+        return explicit_kind
+    db = _get_db()
+    if db is None:
+        return "direct"
+
+    session_id = _stored_session_id(params)
+    identifier = _conversation_identifier(params)
+    for candidate in dict.fromkeys([session_id, identifier]):
+        kind = _route_kind_from_session_index(db, candidate)
+        if kind:
+            return kind
+
+    # Compatibility for callers that only pass the team conversation id. This
+    # detects the conversation row itself, not active_mission_id.
+    for candidate in dict.fromkeys([identifier, session_id]):
+        kind = _route_kind_from_team_conversation(db, candidate)
+        if kind:
+            return kind
+    return "direct"
 
 
 def _stored_session_id(params: dict[str, Any]) -> str:
@@ -635,6 +702,9 @@ def _team_conversation_snapshot(
         else graph.get("message_page_info") or graph.get("messagePageInfo") or {}
     )
     mission = resolved.get("mission") if isinstance(resolved.get("mission"), dict) else {}
+    mission_present = bool(_text(mission.get("mission_id") or mission.get("missionId")))
+    if not mission_present:
+        mission = {}
     run_events = _filter_team_render_run_events(
         raw_run_events,
         conversation=conversation,
@@ -653,6 +723,8 @@ def _team_conversation_snapshot(
             "session_id": session_id,
             "conversation": conversation,
             "mission": mission,
+            "missionPresent": mission_present,
+            "mission_present": mission_present,
             "team": team,
             "graph": graph,
             "participants": _participants_for_session(session_id),
@@ -709,7 +781,7 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
 @method("conversation.render_snapshot")
 def _(rid, params: dict) -> dict:
     params = params if isinstance(params, dict) else {}
-    if _conversation_kind(params) == "team":
+    if _route_conversation_kind(params) == "team":
         return _team_conversation_snapshot(rid, params)
     return _ordinary_conversation_snapshot(rid, params)
 
