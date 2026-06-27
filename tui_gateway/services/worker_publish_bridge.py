@@ -30,6 +30,7 @@ testable module. The ``AgentRunBackend`` installs it on
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import threading
 from dataclasses import dataclass
@@ -47,6 +48,12 @@ _log = logging.getLogger(__name__)
 # Emit signature provided by ``WorkerProtocol.emit``: awaitable that
 # enqueues a frame on the same stdout writer the protocol uses.
 EmitAsync = Callable[[OutgoingFrame], Awaitable[None]]
+_active_run_context_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "worker_active_run_context",
+    default=None,
+)
+_active_run_context_lock = threading.RLock()
+_active_run_context: Any = None
 
 
 # Map ``server._block`` event types to the ``InteractiveRequestFrame``
@@ -77,6 +84,48 @@ class _PatchHandle:
     original: Any
 
 
+@dataclass
+class _RunContextHandle:
+    token: contextvars.Token[Any]
+    previous: Any
+
+
+def get_active_run_context() -> Any:
+    """Return the worker process's currently active RunContext.
+
+    The runner thread sets a ContextVar for same-thread call paths and a
+    process-active fallback for the legacy agent thread spawned under
+    ``_execute_prompt_submit``. The worker process runs one active agent
+    at a time, matching ``AgentRunBackend``'s concurrency guard.
+    """
+    context = _active_run_context_var.get()
+    if context is not None:
+        return context
+    with _active_run_context_lock:
+        return _active_run_context
+
+
+def _push_active_run_context(run_context: Any) -> _RunContextHandle:
+    global _active_run_context
+    token = _active_run_context_var.set(run_context)
+    with _active_run_context_lock:
+        previous = _active_run_context
+        _active_run_context = run_context
+    return _RunContextHandle(token=token, previous=previous)
+
+
+def _pop_active_run_context(handle: _RunContextHandle | None) -> None:
+    global _active_run_context
+    if handle is None:
+        return
+    try:
+        _active_run_context_var.reset(handle.token)
+    except Exception:
+        _log.debug("[worker-publish-bridge] active run context reset failed", exc_info=True)
+    with _active_run_context_lock:
+        _active_run_context = handle.previous
+
+
 class WorkerPublishBridge:
     """Owns the set of installed monkey-patches for one run.
 
@@ -93,10 +142,11 @@ class WorkerPublishBridge:
         self._lock = threading.RLock()
         self._installed = False
         self._stored_session_id: str = ""
+        self._active_context_handle: _RunContextHandle | None = None
 
     # ── public API ───────────────────────────────────────────────────
 
-    def install(self, *, stored_session_id: str = "") -> None:
+    def install(self, *, stored_session_id: str = "", run_context: Any = None) -> None:
         with self._lock:
             if self._installed:
                 raise RuntimeError(
@@ -104,6 +154,8 @@ class WorkerPublishBridge:
                     "build a new bridge per run instead of reusing."
                 )
             self._stored_session_id = stored_session_id
+            if run_context is not None:
+                self._active_context_handle = _push_active_run_context(run_context)
             self._install_publish_hook()
             self._install_clarify_hook()
             self._install_approval_hooks()
@@ -124,6 +176,8 @@ class WorkerPublishBridge:
                         handle.module.__name__, handle.attr_name,
                     )
             self._handles.clear()
+            _pop_active_run_context(self._active_context_handle)
+            self._active_context_handle = None
             self._installed = False
 
     @property
@@ -151,6 +205,32 @@ class WorkerPublishBridge:
 
     # ── per-hook installers ─────────────────────────────────────────
 
+    def _event_with_active_participant_id(self, params: dict) -> dict:
+        if not isinstance(params, dict):
+            return params
+        run_context = get_active_run_context()
+        participant_id = str(getattr(run_context, "participant_id", "") or "").strip()
+        if not participant_id:
+            return params
+        payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+        existing = str(
+            params.get("participant_id")
+            or params.get("participantId")
+            or payload.get("participant_id")
+            or payload.get("participantId")
+            or ""
+        ).strip()
+        if existing:
+            return params
+        stamped = dict(params)
+        stamped_payload = dict(payload)
+        stamped["participant_id"] = participant_id
+        stamped["participantId"] = participant_id
+        stamped_payload["participant_id"] = participant_id
+        stamped_payload["participantId"] = participant_id
+        stamped["payload"] = stamped_payload
+        return stamped
+
     def _install_publish_hook(self) -> None:
         """Wrap ``run_control.publish_recorded_event`` so every event
         the agent emits is *also* sent out as an ``EventFrame`` on
@@ -175,6 +255,7 @@ class WorkerPublishBridge:
             # is the source of truth for live subscribers; the DB
             # persist is the canonical truth that gets read on replay.
             if isinstance(params, dict):
+                params = bridge._event_with_active_participant_id(params)
                 bridge.emit_threadsafe(EventFrame(params=dict(params)))
                 # The Dovie-native blocking primitive (``server._block``)
                 # bypasses ``tools/clarify_gateway.register`` /
@@ -319,9 +400,10 @@ def install_for_run(
     emit: EmitAsync,
     loop: asyncio.AbstractEventLoop,
     stored_session_id: str = "",
+    run_context: Any = None,
 ) -> WorkerPublishBridge:
     """Convenience factory: build + install in one call. Returns the
     bridge so the caller can ``uninstall()`` it at run end."""
     bridge = WorkerPublishBridge(emit=emit, loop=loop)
-    bridge.install(stored_session_id=stored_session_id)
+    bridge.install(stored_session_id=stored_session_id, run_context=run_context)
     return bridge

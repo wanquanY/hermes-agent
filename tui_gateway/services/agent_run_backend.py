@@ -47,6 +47,24 @@ _log = logging.getLogger(__name__)
 AgentRunner = Callable[[RunStartFrame, threading.Event], Any]
 
 
+def _run_context_from_frame(frame: RunStartFrame) -> Any:
+    params = frame.params if isinstance(frame.params, dict) else {}
+    payload = params.get("run_context_json") or params.get("runContextJson")
+    if payload is None:
+        return None
+    try:
+        from hermes_team_mission.domain.run_context import RunContext
+
+        return RunContext.from_payload(payload)
+    except Exception as exc:
+        _log.warning(
+            "[agent-run-backend] run_context_json parse failed run_id=%s: %s",
+            frame.run_id,
+            exc,
+        )
+        return None
+
+
 @dataclass
 class _ActiveRun:
     run_id: str
@@ -86,14 +104,11 @@ class AgentRunBackend(WorkerRunBackend):
     async def start(self, frame: RunStartFrame, emit: Emit) -> None:
         loop = self._loop_provider() if self._loop_provider else asyncio.get_running_loop()
         cancel_event = threading.Event()
-        bridge = WorkerPublishBridge(emit=emit, loop=loop)
-        bridge.install(stored_session_id=frame.stored_session_id)
 
         with self._lock:
             if self._active is not None and self._active.thread.is_alive():
                 # Refuse concurrent runs — the legacy worker is single-run
                 # per process and the agent libraries assume the same.
-                bridge.uninstall()
                 await emit(
                     RunTerminalFrame(
                         run_id=frame.run_id,
@@ -104,6 +119,12 @@ class AgentRunBackend(WorkerRunBackend):
                     )
                 )
                 return
+
+            bridge = WorkerPublishBridge(emit=emit, loop=loop)
+            bridge.install(
+                stored_session_id=frame.stored_session_id,
+                run_context=_run_context_from_frame(frame),
+            )
 
             # Container for the runner's return value / exception, captured
             # by the thread and read back here.

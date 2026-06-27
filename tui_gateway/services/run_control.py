@@ -1188,6 +1188,8 @@ def _stamp_participant_id(
 ) -> str:
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     context = _run_context_from_frame(frame, run_context)
+    # Worker stamps participant_id directly via worker_publish_bridge (H6-v2);
+    # RunContext/DB/scope fallback below is legacy/back-compat only.
     participant_id = str(
         frame.get("participant_id")
         or frame.get("participantId")
