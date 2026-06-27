@@ -2130,6 +2130,8 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         item = {key: row[key] for key in row.keys()}
         for flag in ("transient", "running", "waiting_approval"):
             item[flag] = bool(item.get(flag))
+        for count_field in ("active_activity_count", "unread_completion_count"):
+            item[count_field] = int(item.get(count_field) or 0)
         if (
             item.get("session_kind") == "team_mission"
             and item.get("conversation_id")
@@ -2327,6 +2329,8 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             "       tmc.workspace_id AS team_conversation_workspace_id, "
             "       tmc.workspace_path AS team_conversation_workspace_path, "
             "       tmc.active_mission_id AS team_conversation_active_mission_id, "
+            "       COUNT(CASE WHEN act.status IN ('pending','running') THEN 1 END) AS active_activity_count, "
+            "       COUNT(CASE WHEN act.status IN ('completed','failed') AND act.read_at IS NULL THEN 1 END) AS unread_completion_count, "
             "       COALESCE(("
             "           SELECT cm.mission_id FROM conversation_missions cm"
             "            WHERE cm.conversation_id = si.conversation_id"
@@ -2350,8 +2354,11 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             "  FROM session_index si "
             "  LEFT JOIN agent_teams at ON at.id = si.team_id "
             "  LEFT JOIN agent_profiles ap ON ap.id = at.lead_agent_profile_id "
-            "  LEFT JOIN team_mission_conversations tmc ON tmc.conversation_id = si.conversation_id"
+            "  LEFT JOIN team_mission_conversations tmc ON tmc.conversation_id = si.conversation_id "
+            "  LEFT JOIN activities act "
+            "    ON act.conversation_id = COALESCE(NULLIF(si.conversation_id, ''), si.session_id)"
             + where_sql +
+            " GROUP BY si.session_id "
             " ORDER BY si.updated_at DESC, si.started_at DESC, si.session_id DESC LIMIT ?"
         )
         params.append(capped + 1)
