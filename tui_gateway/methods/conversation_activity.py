@@ -53,9 +53,10 @@ def _mission_id(session: dict[str, Any]) -> str:
 
 
 def _session_kind(session: dict[str, Any]) -> str:
-    source = _text(session.get("source")).lower()
-    kind = _text(session.get("session_kind") or session.get("sessionKind")).lower()
-    if source == "team_mission" or kind == "team_mission":
+    conversation_kind = _text(
+        session.get("conversation_kind") or session.get("conversationKind")
+    ).lower()
+    if conversation_kind == "team":
         return "team_mission"
     return "ordinary"
 

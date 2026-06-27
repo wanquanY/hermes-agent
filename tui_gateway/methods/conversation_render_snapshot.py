@@ -174,6 +174,19 @@ def _conversation_identifier(params: dict[str, Any]) -> str:
     )
 
 
+def _conversation_kind(params: dict[str, Any]) -> str:
+    kind = _text(
+        params.get("conversation_kind")
+        or params.get("conversationKind")
+        or params.get("kind")
+    ).lower()
+    if kind in {"team", "team_mission", "team-mission"}:
+        return "team"
+    if kind in {"direct", "ordinary", "hermes_session"}:
+        return "direct"
+    return ""
+
+
 def _stored_session_id(params: dict[str, Any]) -> str:
     metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
     return _text(
@@ -696,10 +709,7 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
 @method("conversation.render_snapshot")
 def _(rid, params: dict) -> dict:
     params = params if isinstance(params, dict) else {}
-    kind = _text(params.get("kind") or params.get("conversation_kind") or params.get("conversationKind")).lower()
-    if kind in {"team", "team_mission", "team-mission"}:
-        return _team_conversation_snapshot(rid, params)
-    if _conversation_identifier(params) and not _stored_session_id(params):
+    if _conversation_kind(params) == "team":
         return _team_conversation_snapshot(rid, params)
     return _ordinary_conversation_snapshot(rid, params)
 

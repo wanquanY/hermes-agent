@@ -2394,7 +2394,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         for count_field in ("active_activity_count", "unread_completion_count"):
             item[count_field] = int(item.get(count_field) or 0)
         if (
-            item.get("session_kind") == "team_mission"
+            item.get("conversation_kind") == "team"
             and item.get("conversation_id")
             and "conversation_has_active_mission" in item
         ):
@@ -2525,7 +2525,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                               ('completed','failed','cancelled','canceled','interrupted')
                    )
                    AND (
-                       session_kind != 'team_mission'
+                       conversation_kind != 'team'
                        OR COALESCE(mission_id, '') = ''
                        OR mission_id IN (
                            SELECT mission_id FROM team_missions
@@ -2544,6 +2544,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         limit: int = 200,
         cursor: Optional[Dict[str, Any]] = None,
         include_transient: bool = False,
+        conversation_kind: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Single indexed read for the sidebar: keyset-paginated, newest first.
 
@@ -2556,6 +2557,10 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         params: List[Any] = []
         if not include_transient:
             where.append("si.transient = 0")
+        normalized_conversation_kind = str(conversation_kind or "").strip().lower()
+        if normalized_conversation_kind in {"direct", "team"}:
+            where.append("si.conversation_kind = ?")
+            params.append(normalized_conversation_kind)
         if isinstance(cursor, dict) and cursor.get("session_id"):
             cu = float(cursor.get("updated_at") or 0)
             cs = float(cursor.get("started_at") or 0)
@@ -2807,7 +2812,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                    SET running = 0, status = 'idle', waiting_approval = 0,
                        active_run_id = '', active_runtime_session_id = '',
                        pending_approval_count = 0
-                 WHERE session_kind = 'team_mission'
+                 WHERE conversation_kind = 'team'
                    AND (running = 1 OR waiting_approval = 1 OR status != 'idle'
                         OR active_run_id != '' OR active_runtime_session_id != '')
                    AND mission_id IN (
@@ -2834,7 +2839,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                    SET running = 0, status = 'idle', waiting_approval = 0,
                        active_run_id = '', active_runtime_session_id = '',
                        pending_approval_count = 0
-                 WHERE session_kind = 'team_mission'
+                 WHERE conversation_kind = 'team'
                    AND waiting_approval = 1
                    AND mission_id IN (
                        SELECT mission_id FROM team_missions

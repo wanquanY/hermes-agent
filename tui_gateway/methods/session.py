@@ -24,6 +24,15 @@ _agent_interrupt_work_queue: queue.SimpleQueue = queue.SimpleQueue()
 _INTERNAL_SESSION_LIST_SOURCES = ("tool", "cron")
 
 
+def _normalized_conversation_kind(row: dict | None) -> str:
+    kind = str(
+        (row or {}).get("conversation_kind")
+        or (row or {}).get("conversationKind")
+        or ""
+    ).strip().lower()
+    return kind if kind in {"direct", "team"} else "direct"
+
+
 def _interrupt_trace(message: str) -> None:
     if not is_truthy_value(os.environ.get("HERMES_INTERRUPT_TRACE")):
         return
@@ -1126,10 +1135,8 @@ def _session_index_list_item(row: dict) -> dict:
     rows receive the joined conversation and latest-active-mission projection.
     """
     session_kind = row.get("session_kind") or "hermes_session"
-    conversation_kind = row.get("conversation_kind") or (
-        "team" if session_kind == "team_mission" or row.get("team_id") else "direct"
-    )
-    is_team_mission_row = session_kind == "team_mission" or bool(row.get("team_id"))
+    conversation_kind = _normalized_conversation_kind(row)
+    is_team_conversation = conversation_kind == "team"
     active_mission_id = (
         row.get("active_mission_id")
         or row.get("team_conversation_active_mission_id")
@@ -1169,12 +1176,12 @@ def _session_index_list_item(row: dict) -> dict:
         "active_mission_id": active_mission_id,
         "mission_status": row.get("mission_status") or "",
     }
-    if is_team_mission_row:
+    if is_team_conversation:
         if active_mission_id:
             item["mission_id"] = active_mission_id
     # Conversation-architecture refactor (P2): team display context joined in
     # at read time. Only emit when present so plain-chat rows stay clean.
-    if row.get("team_id"):
+    if is_team_conversation and row.get("team_id"):
         team_name = row.get("team_name") or ""
         team_avatar = _safe_json_decode(row.get("team_avatar_json"))
         lead_profile_id = row.get("team_lead_profile_id") or ""
@@ -1219,11 +1226,10 @@ def _session_index_list_item(row: dict) -> dict:
 
 def _session_index_row_with_active_mission_running(db, row: dict) -> dict:
     item = dict(row or {})
-    session_kind = item.get("session_kind") or "hermes_session"
-    is_team_mission_row = session_kind == "team_mission" or bool(item.get("team_id"))
+    is_team_conversation = _normalized_conversation_kind(item) == "team"
     conversation_id = str(item.get("conversation_id") or "").strip()
     has_active_mission = getattr(db, "has_active_mission", None)
-    if is_team_mission_row and conversation_id and callable(has_active_mission):
+    if is_team_conversation and conversation_id and callable(has_active_mission):
         item["running"] = bool(has_active_mission(conversation_id))
     return item
 
@@ -1281,14 +1287,32 @@ def _(rid, params: dict) -> dict:
             if params.get("include_transient") is not None
             else params.get("includeTransient")
         )
-        result = lister(
-            limit=limit,
-            cursor=cursor or None,
-            include_transient=include_transient,
-        )
+        requested_conversation_kind = str(
+            params.get("conversation_kind")
+            or params.get("conversationKind")
+            or ""
+        ).strip().lower()
+        if requested_conversation_kind not in {"direct", "team"}:
+            requested_conversation_kind = ""
+        list_kwargs = {
+            "limit": limit,
+            "cursor": cursor or None,
+            "include_transient": include_transient,
+        }
+        if requested_conversation_kind:
+            list_kwargs["conversation_kind"] = requested_conversation_kind
+        try:
+            result = lister(**list_kwargs)
+        except TypeError:
+            if not requested_conversation_kind:
+                raise
+            list_kwargs.pop("conversation_kind", None)
+            result = lister(**list_kwargs)
         rows = [
             _session_index_row_with_active_mission_running(db, row)
             for row in (result.get("sessions") or [])
+            if not requested_conversation_kind
+            or _normalized_conversation_kind(row) == requested_conversation_kind
         ]
         items = [
             sanitize_session_list_item(_session_index_list_item(row))
