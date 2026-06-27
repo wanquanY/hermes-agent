@@ -177,6 +177,7 @@ METHOD_MODULES = {
     "activity.get": "tui_gateway.methods.activity",
     "activity.cancel": "tui_gateway.methods.activity",
     "activity.mark_read": "tui_gateway.methods.activity",
+    "runtime.cloud_proxy.update": "tui_gateway.methods.runtime_cloud_proxy",
     "conversation.activity.list": "tui_gateway.methods.conversation_activity",
     "conversation.render_snapshot": "tui_gateway.methods.conversation_render_snapshot",
     "session.delete": "tui_gateway.methods.session",
