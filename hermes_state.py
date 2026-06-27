@@ -48,6 +48,10 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
+# Keep the long-standing ``hermes_state.py`` module import-compatible while
+# allowing narrowly scoped submodules such as ``hermes_state.migrations``.
+__path__ = [str(Path(__file__).with_name("hermes_state"))]
+
 SCHEMA_VERSION = 27
 
 # ---------------------------------------------------------------------------
