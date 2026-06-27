@@ -16,6 +16,7 @@ METHOD_MODULES = (
     "live_session",
     "session_branch",
     "conversation_activity",
+    "dispatch",
     "conversation_render_snapshot",
     "prompt",
     "prompt_respond",

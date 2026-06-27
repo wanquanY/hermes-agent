@@ -433,7 +433,7 @@ class WorkerSupervisor:
                     pass
 
     async def _handle_db_rpc(self, worker: RunWorker, frame: DBRpcRequestFrame) -> None:
-        reply = await self._execute_db_rpc(frame)
+        reply = await self._execute_worker_jsonrpc(frame)
         await self._send_db_reply(worker, reply)
 
     async def _send_db_reply(self, worker: RunWorker, reply: DBRpcReplyFrame) -> bool:
@@ -476,6 +476,35 @@ class WorkerSupervisor:
                 raise AttributeError(f"SessionDB has no method {db_method_name!r}")
             async with self._db_rpc_lock:
                 result = target(*args, **kwargs)
+            return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
+        except Exception as exc:
+            return _db_rpc_error(
+                req_id,
+                type(exc).__name__,
+                str(exc) or repr(exc),
+                code=-32000,
+            )
+
+    async def _execute_worker_jsonrpc(self, frame: DBRpcRequestFrame) -> DBRpcReplyFrame:
+        method = str(frame.method or "")
+        if method.startswith("db."):
+            return await self._execute_db_rpc(frame)
+        if method == "worker.dispatch_agent_async":
+            return await self._execute_dispatch_agent_async_rpc(frame)
+        return _db_rpc_error(
+            str(frame.id or ""),
+            "WorkerRPCMethodError",
+            f"unsupported worker RPC method {method!r}",
+            code=-32601,
+        )
+
+    async def _execute_dispatch_agent_async_rpc(self, frame: DBRpcRequestFrame) -> DBRpcReplyFrame:
+        req_id = str(frame.id or "")
+        params = frame.params if isinstance(frame.params, dict) else {}
+        try:
+            from tui_gateway.methods.dispatch import dispatch_agent_async
+
+            result = await dispatch_agent_async(params)
             return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
         except Exception as exc:
             return _db_rpc_error(

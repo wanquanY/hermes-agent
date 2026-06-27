@@ -712,17 +712,27 @@ async def _main_async() -> int:
         WorkerDBProxy,
         set_default_worker_db_proxy,
     )
+    from tui_gateway.services.worker_rpc_proxy import (
+        WorkerRpcProxy,
+        set_default_worker_rpc_proxy,
+    )
 
     db_proxy = WorkerDBProxy(_StdoutJsonRpcWriter())
+    rpc_proxy = WorkerRpcProxy(_StdoutJsonRpcWriter())
     set_default_worker_db_proxy(db_proxy)
+    set_default_worker_rpc_proxy(rpc_proxy)
     backend: WorkerRunBackend = _build_default_backend()
     responder: WorkerInteractiveResponder = RealInteractiveResponder()
     active_runs: set[str] = set()
+
+    def _handle_jsonrpc_reply(reply: dict[str, Any]) -> bool:
+        return rpc_proxy.handle_reply(reply) or db_proxy.handle_reply(reply)
+
     proto = WorkerProtocol(
         lines_in=_stdin_lines(),
         emit=_stdout_writer(),
         handler=_build_default_handler(backend, responder, active_runs),
-        db_reply_handler=db_proxy.handle_reply,
+        db_reply_handler=_handle_jsonrpc_reply,
     )
     await proto.emit_log("info", "run_worker: started")
     try:
@@ -733,7 +743,9 @@ async def _main_async() -> int:
         except Exception:
             pass
         db_proxy.close()
+        rpc_proxy.close()
         set_default_worker_db_proxy(None)
+        set_default_worker_rpc_proxy(None)
         await proto.emit_log("info", "run_worker: exiting")
     return 0
 
