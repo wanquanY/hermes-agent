@@ -214,9 +214,9 @@ async def test_bridge_installs_and_uninstalls(monkeypatch) -> None:
     original_cls = bridge_mod.WorkerPublishBridge
 
     class _RecordingBridge(original_cls):
-        def install(self, *, stored_session_id: str = ""):
+        def install(self, *, stored_session_id: str = "", run_context=None):
             install_calls.append(stored_session_id)
-            return super().install(stored_session_id=stored_session_id)
+            return super().install(stored_session_id=stored_session_id, run_context=run_context)
 
         def uninstall(self):
             uninstall_calls.append(1)

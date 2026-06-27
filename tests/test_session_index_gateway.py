@@ -133,6 +133,8 @@ def test_session_index_list_emits_team_display_context_for_team_rows(monkeypatch
     the conversation's objective — replacing the supplementary
     loadTeamConversationSidebarSessions stream and the merge heuristic."""
     db = _setup(monkeypatch, tmp_path)
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    monkeypatch.setattr(session_methods, "_SESSION_INDEX_RECONCILED", True)
 
     # Reference data the JOIN needs.
     db.upsert_agent_team(
@@ -142,6 +144,12 @@ def test_session_index_list_emits_team_display_context_for_team_rows(monkeypatch
     db.upsert_agent_profile(
         profile_id="profile-leader", slug="leader", name="多多", avatar="🤖",
         hermes_home_path="/tmp/leader-home",
+    )
+    db.upsert_agent_team_member(
+        member_id="member-leader",
+        team_id="team-1",
+        agent_profile_id="profile-leader",
+        role="lead",
     )
     db.ensure_team_mission_conversation(
         conversation_id="conv-1",
@@ -176,6 +184,10 @@ def test_session_index_list_emits_team_display_context_for_team_rows(monkeypatch
     assert team_item["team_name"] == "Stellar"
     assert team_item["team"]["name"] == "Stellar"
     assert team_item["team"]["lead_agent_profile_id"] == "profile-leader"
+    assert team_item["team"]["leaderMember"]["agentProfileId"] == "profile-leader"
+    assert team_item["team"]["leaderMember"]["profileAvatar"] == "🤖"
+    assert team_item["team"]["displayMembers"][0]["agentProfileId"] == "profile-leader"
+    assert team_item["team"]["displayMembers"][0]["profileAvatar"] == "🤖"
     assert team_item["lead_profile_name"] == "多多"
     assert team_item["lead_profile_avatar"] == "🤖"
     assert team_item["objective"] == "抵达火星"

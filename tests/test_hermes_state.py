@@ -1048,6 +1048,18 @@ class TestSessionLifecycle:
         session = db.get_session("s1")
         assert session["system_prompt"] == "You are a helpful assistant."
 
+    def test_scoped_system_prompt_does_not_overwrite_session_prompt(self, db):
+        db.create_session(session_id="s1", source="team_mission")
+        db.update_system_prompt("s1", "backend transcript prompt")
+
+        db.update_scoped_system_prompt("s1", "member-chat:s1:frontend", "frontend scoped prompt")
+
+        assert db.get_scoped_system_prompt("s1", "member-chat:s1:frontend") == "frontend scoped prompt"
+        assert db.get_session("s1")["system_prompt"] == "backend transcript prompt"
+
+        db.update_scoped_system_prompt("s1", "member-chat:s1:frontend", "frontend scoped prompt v2")
+        assert db.get_scoped_system_prompt("s1", "member-chat:s1:frontend") == "frontend scoped prompt v2"
+
     def test_update_token_counts(self, db):
         db.create_session(session_id="s1", source="cli")
         db.update_token_counts("s1", input_tokens=200, output_tokens=100)

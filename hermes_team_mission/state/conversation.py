@@ -311,14 +311,9 @@ def normalize_team_mission_conversation_session(
         },
     )
 
-    def _do(conn: sqlite3.Connection) -> int:
-        cursor = conn.execute(
-            "UPDATE sessions SET source = 'team_mission' WHERE id = ? AND source != 'team_mission'",
-            (stable_session_id,),
-        )
-        return cursor.rowcount
-
-    db._execute_write(_do)
+    updater = getattr(db, "update_session_source", None)
+    if callable(updater):
+        updater(stable_session_id, "team_mission")
     return conversation
 
 

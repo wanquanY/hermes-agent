@@ -23,11 +23,13 @@ Tests pass a stub so unit tests don't need to spin up the LLM stack.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from agent.dovie_persona_trace import trace_persona_payload
 from tui_gateway.run_worker import (
     Emit,
     LogFrame,
@@ -63,6 +65,44 @@ def _run_context_from_frame(frame: RunStartFrame) -> Any:
             exc,
         )
         return None
+
+
+def _json_for_log(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return repr(value)
+
+
+def _member_persona_worker_start_text(frame: RunStartFrame, run_context: Any) -> str:
+    params = frame.params if isinstance(frame.params, dict) else {}
+    dovie_profile = params.get("dovie_profile") if isinstance(params.get("dovie_profile"), dict) else {}
+    run_context_payload = None
+    if run_context is not None:
+        try:
+            run_context_payload = run_context.to_payload()
+        except Exception:
+            run_context_payload = repr(run_context)
+    return "[h9-trace member-persona] worker run.start frame " + _json_for_log({
+        "stored_session_id": frame.stored_session_id,
+        "run_id": frame.run_id,
+        "turn_id": frame.turn_id,
+        "agent_profile_id": params.get("agent_profile_id") or "",
+        "agent_profile_version_id": params.get("agent_profile_version_id") or "",
+        "runtime_scope_key": params.get("runtime_scope_key") or "",
+        "dovie_profile_home": (
+            dovie_profile.get("hermesHomePath")
+            or dovie_profile.get("hermes_home_path")
+            or ""
+        ),
+        "dovie_profile_runtime_scope_key": (
+            dovie_profile.get("runtimeScopeKey")
+            or dovie_profile.get("runtime_scope_key")
+            or ""
+        ),
+        "run_context": run_context_payload,
+        "cwd": params.get("cwd") or "",
+    })
 
 
 @dataclass
@@ -120,10 +160,11 @@ class AgentRunBackend(WorkerRunBackend):
                 )
                 return
 
+            run_context = _run_context_from_frame(frame)
             bridge = WorkerPublishBridge(emit=emit, loop=loop)
             bridge.install(
                 stored_session_id=frame.stored_session_id,
-                run_context=_run_context_from_frame(frame),
+                run_context=run_context,
             )
 
             # Container for the runner's return value / exception, captured
@@ -149,6 +190,32 @@ class AgentRunBackend(WorkerRunBackend):
                 frame=frame,
             )
             self._active = active
+            await emit(LogFrame(
+                level="warn",
+                text=_member_persona_worker_start_text(frame, run_context),
+            ))
+            params = frame.params if isinstance(frame.params, dict) else {}
+            dovie_profile = params.get("dovie_profile") if isinstance(params.get("dovie_profile"), dict) else {}
+            trace_persona_payload(
+                "worker.run-start-frame",
+                stored_session_id=frame.stored_session_id,
+                run_id=frame.run_id,
+                turn_id=frame.turn_id,
+                runtime_scope_key=str(params.get("runtime_scope_key") or ""),
+                agent_profile_id=str(params.get("agent_profile_id") or ""),
+                dovie_profile_home=str(
+                    dovie_profile.get("hermesHomePath")
+                    or dovie_profile.get("hermes_home_path")
+                    or ""
+                ),
+                dovie_profile_runtime_scope_key=str(
+                    dovie_profile.get("runtimeScopeKey")
+                    or dovie_profile.get("runtime_scope_key")
+                    or ""
+                ),
+                run_context=run_context.to_payload() if run_context is not None else None,
+                cwd=str(params.get("cwd") or ""),
+            )
         thread.start()
 
         try:

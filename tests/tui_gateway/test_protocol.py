@@ -1224,6 +1224,26 @@ def test_run_submit_extracts_image_paths_from_prompt_attachments(server, monkeyp
     assert submitted["turn_metadata"]["attachments"][0]["kind"] == "image"
 
 
+def test_prompt_image_refs_merge_submitted_images_and_text_refs(tmp_path):
+    from tui_gateway.services.media import image_refs_for_prompt
+
+    attached = tmp_path / "attached.png"
+    extra = tmp_path / "extra.png"
+    attached.write_bytes(b"\x89PNG\r\n\x1a\n")
+    extra.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    paths, urls = image_refs_for_prompt(
+        [str(attached)],
+        (
+            f"看这个附件 {attached}，再对比 {extra} "
+            "和 https://example.com/remote.png。"
+        ),
+    )
+
+    assert paths == [str(attached), str(extra)]
+    assert urls == ["https://example.com/remote.png"]
+
+
 def test_events_subscribe_returns_subscription_id_and_unsubscribes(capture):
     server, _buf = capture
     token = server.bind_transport(server._stdio_transport)

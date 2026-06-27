@@ -32,6 +32,7 @@ from agent.auxiliary_client import set_runtime_main
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.direct_tool_response import build_direct_tool_response
 from agent.dovie_diagnostics import emit_dovie_diagnostic
+from agent.dovie_persona_trace import persona_text_probe, trace_persona_chain
 from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
@@ -104,6 +105,37 @@ def _ra():
     return run_agent
 
 
+def _system_prompt_execution_scope_key(agent) -> str:
+    """Return the execution-scope prompt cache key for multi-speaker runs.
+
+    A team conversation has one visible transcript session, but each leader or
+    member run can execute with a different profile home and SOUL.md. Reusing
+    ``sessions.system_prompt`` for those runs leaks the first speaker's persona
+    into later speakers. Only scoped RunContext executions use this alternate
+    key; ordinary one-agent sessions keep the original byte-stable session
+    prompt cache.
+    """
+    session_id = str(getattr(agent, "session_id", "") or "").strip()
+    for context in (
+        getattr(agent, "run_context", None),
+        getattr(agent, "_run_context", None),
+    ):
+        conversation_session_id = str(
+            getattr(context, "conversation_session_id", "") or ""
+        ).strip()
+        execution_scope_key = str(
+            getattr(context, "execution_scope_key", "") or ""
+        ).strip()
+        if (
+            conversation_session_id
+            and execution_scope_key
+            and conversation_session_id == session_id
+            and execution_scope_key != session_id
+        ):
+            return execution_scope_key
+    return ""
+
+
 def _restore_or_build_system_prompt(agent, system_message, conversation_history):
     """Restore the cached system prompt from the session DB or build it fresh.
 
@@ -138,19 +170,41 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         has_session_db=bool(getattr(agent, "_session_db", None)),
         cached=bool(getattr(agent, "_cached_system_prompt", None)),
     )
+    scoped_prompt_key = _system_prompt_execution_scope_key(agent)
     stored_prompt = None
     stored_state = "missing"
     if conversation_history and agent._session_db:
         try:
-            _log_dovie_turn_stage(agent, "system-prompt-db-read-start")
-            session_row = agent._session_db.get_session(agent.session_id)
+            _log_dovie_turn_stage(
+                agent,
+                "system-prompt-db-read-start",
+                prompt_scope_key=scoped_prompt_key,
+            )
+            if scoped_prompt_key:
+                get_scoped = getattr(agent._session_db, "get_scoped_system_prompt", None)
+                session_row = None
+                raw_prompt = (
+                    get_scoped(agent.session_id, scoped_prompt_key)
+                    if callable(get_scoped)
+                    else None
+                )
+            else:
+                session_row = agent._session_db.get_session(agent.session_id)
+                raw_prompt = session_row.get("system_prompt") if session_row is not None else None
             _log_dovie_turn_stage(
                 agent,
                 "system-prompt-db-read-end",
                 has_session_row=session_row is not None,
+                has_scoped_prompt=bool(raw_prompt) if scoped_prompt_key else False,
+                prompt_scope_key=scoped_prompt_key,
             )
-            if session_row is not None:
-                raw_prompt = session_row.get("system_prompt")
+            if scoped_prompt_key:
+                if raw_prompt == "":
+                    stored_state = "empty"
+                elif raw_prompt is not None:
+                    stored_prompt = raw_prompt
+                    stored_state = "present"
+            elif session_row is not None:
                 if raw_prompt is None:
                     stored_state = "null"
                 elif raw_prompt == "":
@@ -161,10 +215,10 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         except Exception as exc:
             _log_dovie_turn_stage(agent, "system-prompt-db-read-error", error=str(exc))
             logger.warning(
-                "Session DB get_session failed for system-prompt restore "
-                "(session=%s): %s. Falling back to fresh build — prefix "
+                "Session DB system-prompt restore failed "
+                "(session=%s, scope=%s): %s. Falling back to fresh build — prefix "
                 "cache will miss for this turn.",
-                agent.session_id, exc,
+                agent.session_id, scoped_prompt_key or "", exc,
             )
 
     if stored_prompt:
@@ -175,6 +229,14 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             agent,
             "system-prompt-restored",
             prompt_chars=len(stored_prompt or ""),
+            prompt_scope_key=scoped_prompt_key,
+        )
+        trace_persona_chain(
+            agent,
+            "turn.system-prompt-restored",
+            prompt_scope_key=scoped_prompt_key,
+            stored_state=stored_state,
+            prompt=persona_text_probe(stored_prompt),
         )
         return
 
@@ -197,12 +259,21 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         agent,
         "system-prompt-fresh-build-start",
         stored_state=stored_state,
+        prompt_scope_key=scoped_prompt_key,
     )
     agent._cached_system_prompt = agent._build_system_prompt(system_message)
     _log_dovie_turn_stage(
         agent,
         "system-prompt-fresh-build-end",
         prompt_chars=len(agent._cached_system_prompt or ""),
+        prompt_scope_key=scoped_prompt_key,
+    )
+    trace_persona_chain(
+        agent,
+        "turn.system-prompt-fresh-build-end",
+        prompt_scope_key=scoped_prompt_key,
+        stored_state=stored_state,
+        prompt=persona_text_probe(agent._cached_system_prompt),
     )
 
     # Plugin hook: on_session_start — fired once when a brand-new
@@ -232,16 +303,41 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # subsequent turn).
     if agent._session_db:
         try:
-            _log_dovie_turn_stage(agent, "system-prompt-db-write-start")
-            agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
-            _log_dovie_turn_stage(agent, "system-prompt-db-write-end")
+            _log_dovie_turn_stage(
+                agent,
+                "system-prompt-db-write-start",
+                prompt_scope_key=scoped_prompt_key,
+            )
+            trace_persona_chain(
+                agent,
+                "turn.system-prompt-db-write-start",
+                prompt_scope_key=scoped_prompt_key,
+                prompt=persona_text_probe(agent._cached_system_prompt),
+            )
+            if scoped_prompt_key:
+                update_scoped = getattr(agent._session_db, "update_scoped_system_prompt", None)
+                if not callable(update_scoped):
+                    raise AttributeError("SessionDB has no update_scoped_system_prompt")
+                update_scoped(agent.session_id, scoped_prompt_key, agent._cached_system_prompt)
+            else:
+                agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
+            _log_dovie_turn_stage(
+                agent,
+                "system-prompt-db-write-end",
+                prompt_scope_key=scoped_prompt_key,
+            )
+            trace_persona_chain(
+                agent,
+                "turn.system-prompt-db-write-end",
+                prompt_scope_key=scoped_prompt_key,
+            )
         except Exception as exc:
             _log_dovie_turn_stage(agent, "system-prompt-db-write-error", error=str(exc))
             logger.warning(
-                "Session DB update_system_prompt failed for session %s: "
+                "Session DB system-prompt persistence failed for session %s scope %s: "
                 "%s. Subsequent turns will rebuild the system prompt and "
                 "miss the prefix cache.",
-                agent.session_id, exc,
+                agent.session_id, scoped_prompt_key or "", exc,
             )
 
 
@@ -1161,6 +1257,24 @@ def run_conversation(
         # the OpenAI SDK. Sanitizing here prevents the 3-retry cycle.
         _sanitize_messages_surrogates(api_messages)
 
+        api_system_content = ""
+        if api_messages and api_messages[0].get("role") == "system":
+            api_system_content = str(api_messages[0].get("content") or "")
+        last_user_content = ""
+        for _msg in reversed(api_messages):
+            if isinstance(_msg, dict) and _msg.get("role") == "user":
+                last_user_content = str(_msg.get("content") or "")
+                break
+        trace_persona_chain(
+            agent,
+            "turn.provider-messages-ready",
+            api_mode=str(getattr(agent, "api_mode", "") or ""),
+            message_count=len(api_messages),
+            roles=[str(m.get("role") or "") for m in api_messages if isinstance(m, dict)][:12],
+            system=persona_text_probe(api_system_content),
+            last_user=persona_text_probe(last_user_content, preview_chars=80),
+        )
+
         # Calculate approximate request size for logging
         total_chars = sum(len(str(msg)) for msg in api_messages)
         approx_tokens = estimate_messages_tokens_rough(api_messages)
@@ -1287,6 +1401,37 @@ def run_conversation(
                     agent,
                     "api-kwargs-build-end",
                     key_count=len(api_kwargs or {}),
+                )
+                payload_system = ""
+                if isinstance(api_kwargs, dict):
+                    payload_system = str(api_kwargs.get("instructions") or "")
+                    if not payload_system:
+                        payload_messages = api_kwargs.get("messages")
+                        if isinstance(payload_messages, list) and payload_messages:
+                            first_payload = payload_messages[0]
+                            if isinstance(first_payload, dict) and first_payload.get("role") == "system":
+                                payload_system = str(first_payload.get("content") or "")
+                trace_persona_chain(
+                    agent,
+                    "turn.provider-kwargs-built",
+                    api_mode=str(getattr(agent, "api_mode", "") or ""),
+                    kwargs_keys=sorted(str(key) for key in (api_kwargs or {}).keys()),
+                    instructions_or_system=persona_text_probe(payload_system),
+                    payload_message_count=(
+                        len(api_kwargs.get("messages") or [])
+                        if isinstance(api_kwargs, dict) and isinstance(api_kwargs.get("messages"), list)
+                        else 0
+                    ),
+                    payload_input_count=(
+                        len(api_kwargs.get("input") or [])
+                        if isinstance(api_kwargs, dict) and isinstance(api_kwargs.get("input"), list)
+                        else 0
+                    ),
+                    tool_count=(
+                        len(api_kwargs.get("tools") or [])
+                        if isinstance(api_kwargs, dict) and isinstance(api_kwargs.get("tools"), list)
+                        else 0
+                    ),
                 )
                 if agent._force_ascii_payload:
                     _sanitize_structure_non_ascii(api_kwargs)

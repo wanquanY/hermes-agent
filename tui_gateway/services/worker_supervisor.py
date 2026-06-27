@@ -22,6 +22,7 @@ deleted in Phase 6.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import sys
@@ -51,6 +52,33 @@ from tui_gateway.services.worker_db_proxy import serialize_db_value
 _log = logging.getLogger(__name__)
 
 
+def _trace_transcript_persistence_rpc_enabled(stable_session_id: str, method: str) -> bool:
+    return method == "db.append_message" and str(stable_session_id or "").startswith(
+        "team-session-team-conversation-"
+    )
+
+
+def _db_rpc_append_message_probe(args: list[Any], kwargs: dict[str, Any]) -> dict[str, Any]:
+    def _arg(index: int, key: str, default: Any = "") -> Any:
+        return kwargs.get(key) if key in kwargs else (args[index] if len(args) > index else default)
+
+    metadata = _arg(13, "metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    content = _arg(2, "content", "")
+    content_text = content if isinstance(content, str) else str(content or "")
+    return {
+        "session_id": str(_arg(0, "session_id", "")),
+        "role": str(_arg(1, "role", "")),
+        "participant_id": str(_arg(3, "participant_id", "")),
+        "metadata_run_id": str(metadata.get("run_id") or ""),
+        "metadata_turn_id": str(metadata.get("turn_id") or ""),
+        "metadata_client_message_id": str(metadata.get("client_message_id") or ""),
+        "content_len": len(content_text),
+        "content_sha1": hashlib.sha1(content_text.encode("utf-8", errors="replace")).hexdigest()[:12],
+        "content_preview": content_text[:120].replace("\n", "\\n"),
+    }
+
+
 # Callback types. Each receives the UI routing ``scope_key`` and the
 # per-conversation worker identity suffix so same-profile workers do not
 # collapse into one response/cancel route.
@@ -63,6 +91,26 @@ LogCallback = Callable[[str, str, LogFrame], Awaitable[None]]
 _DEFAULT_QUEUE_MAXSIZE = 1024
 _DEFAULT_SHUTDOWN_TIMEOUT_S = 3.0
 _SIGTERM_GRACE_S = 2.0
+_WORKER_STDIO_LIMIT_ENV = "HERMES_WORKER_STDIO_LIMIT_BYTES"
+_MIN_WORKER_STDIO_LIMIT_BYTES = 1024 * 1024
+_DEFAULT_WORKER_STDIO_LIMIT_BYTES = 64 * 1024 * 1024
+
+
+def _normalize_worker_stdio_limit_bytes(value: Any = None) -> int:
+    if value is None:
+        value = os.environ.get(_WORKER_STDIO_LIMIT_ENV)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = _DEFAULT_WORKER_STDIO_LIMIT_BYTES
+    if parsed <= 0:
+        parsed = _DEFAULT_WORKER_STDIO_LIMIT_BYTES
+    return max(_MIN_WORKER_STDIO_LIMIT_BYTES, parsed)
+
+
+def _is_stream_limit_overrun(exc: ValueError) -> bool:
+    message = str(exc)
+    return "chunk is longer than limit" in message or "Separator is not found" in message
 
 
 # Enforced by tests/test_worker_db_proxy_whitelist_coverage.py.
@@ -95,10 +143,14 @@ DB_RPC_ALLOWED_METHODS = frozenset(
         "get_messages_around",
         "get_messages_as_conversation",
         "get_messages_page_as_conversation",
+        "get_conversation_message_read_model",
+        "get_message_by_conversation_message_id",
         "get_next_title_in_lineage",
         "get_participant",
         "get_run",
+        "get_scoped_system_prompt",
         "get_session",
+        "get_session_index",
         "get_session_run_status",
         "get_session_title",
         "get_team_mission_conversation",
@@ -115,6 +167,7 @@ DB_RPC_ALLOWED_METHODS = frozenset(
         "list_runs",
         "list_sessions_rich",
         "list_team_mission_events",
+        "list_team_mission_run_events",
         "list_unread_completions",
         "mark_activity_cancelled",
         "mark_activity_completed",
@@ -134,15 +187,18 @@ DB_RPC_ALLOWED_METHODS = frozenset(
         "try_acquire_compression_lock",
         "update_participant_display",
         "update_activity_status",
+        "update_session_source",
         "update_session_cwd",
         "update_session_index_for_mission",
         "update_session_index_pending_state_for_session_key",
         "update_session_meta",
         "update_session_model",
+        "update_scoped_system_prompt",
         "update_system_prompt",
         "update_token_counts",
         "upsert_run",
         "upsert_session",
+        "upsert_projected_conversation_message",
         "upsert_team_mission",
         "upsert_team_mission_deliverable",
         "upsert_team_mission_edge",
@@ -228,6 +284,7 @@ class WorkerSupervisor:
         on_log: Optional[LogCallback] = None,
         queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
         python_executable: Optional[str] = None,
+        stdio_limit_bytes: Optional[int] = None,
     ) -> None:
         self._workers: dict[Tuple[str, str], RunWorker] = {}
         self._lock = asyncio.Lock()
@@ -237,6 +294,7 @@ class WorkerSupervisor:
         self._on_log = on_log
         self._queue_maxsize = max(1, int(queue_maxsize))
         self._python = python_executable or sys.executable
+        self._stdio_limit_bytes = _normalize_worker_stdio_limit_bytes(stdio_limit_bytes)
         self._db_rpc_lock = asyncio.Lock()
 
     # ── public API ───────────────────────────────────────────────────
@@ -401,6 +459,11 @@ class WorkerSupervisor:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=None,
+            # Worker stdout is a line-framed JSON protocol, but image turns can
+            # surface large event frames while the model input carries native
+            # image data. The default asyncio limit is only 64 KiB and crashes
+            # readline() before the frame reaches the router.
+            limit=self._stdio_limit_bytes,
         )
         now = time.time()
         worker = RunWorker(
@@ -434,7 +497,19 @@ class WorkerSupervisor:
             return
         try:
             while True:
-                raw = await stdout.readline()
+                try:
+                    raw = await stdout.readline()
+                except ValueError as exc:
+                    if _is_stream_limit_overrun(exc):
+                        _log.error(
+                            "[worker-supervisor] %s oversized stdout frame dropped "
+                            "limit_bytes=%s: %s",
+                            worker.scope_key,
+                            self._stdio_limit_bytes,
+                            exc,
+                        )
+                        continue
+                    raise
                 if not raw:
                     # EOF: worker closed stdout / exited.
                     break
@@ -563,8 +638,25 @@ class WorkerSupervisor:
                 f"db method {db_method_name!r} is not allowed over worker IPC",
                 code=-32601,
             )
+        trace_stable_session_id = ""
+        trace_append_message = False
         try:
             args, kwargs = _decode_db_rpc_params(frame.params)
+            trace_stable_session_id = _stable_session_id_from_rpc(frame, args, kwargs)
+            trace_append_message = _trace_transcript_persistence_rpc_enabled(
+                trace_stable_session_id,
+                method,
+            )
+            if trace_append_message:
+                _log.warning(
+                    "[h11-trace transcript-persistence] db-rpc-append-message-start %s",
+                    {
+                        "request_id": req_id,
+                        "stable_session_id": trace_stable_session_id,
+                        "method": method,
+                        "message": _db_rpc_append_message_probe(args, kwargs),
+                    },
+                )
             db = _db_for_worker_rpc(frame, args, kwargs)
             if db is None:
                 raise RuntimeError("state.db unavailable")
@@ -573,8 +665,28 @@ class WorkerSupervisor:
                 raise AttributeError(f"SessionDB has no method {db_method_name!r}")
             async with self._db_rpc_lock:
                 result = target(*args, **kwargs)
+            if trace_append_message:
+                _log.warning(
+                    "[h11-trace transcript-persistence] db-rpc-append-message-end %s",
+                    {
+                        "request_id": req_id,
+                        "stable_session_id": trace_stable_session_id,
+                        "method": method,
+                        "result": str(result),
+                    },
+                )
             return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
         except Exception as exc:
+            if trace_append_message:
+                _log.warning(
+                    "[h11-trace transcript-persistence] db-rpc-append-message-failed %s",
+                    {
+                        "request_id": req_id,
+                        "stable_session_id": trace_stable_session_id,
+                        "method": method,
+                        "error": str(exc) or repr(exc),
+                    },
+                )
             return _db_rpc_error(
                 req_id,
                 type(exc).__name__,
@@ -745,6 +857,8 @@ def _stable_session_id_from_rpc(
             return value
     method = str(frame.method or "")
     if method in {
+        "db.get_conversation_message_read_model",
+        "db.get_message_by_conversation_message_id",
         "db.get_messages_as_conversation",
         "db.list_conversation_participants",
         "db.get_participant",
@@ -756,6 +870,7 @@ def _stable_session_id_from_rpc(
         "db.ensure_member_participant",
         "db.ensure_agent_participant",
         "db.get_session",
+        "db.get_session_index",
         "db.append_message",
         "db.append_run_event",
         "db.list_run_events",

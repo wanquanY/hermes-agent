@@ -13,6 +13,8 @@ model (we don't strip them from ``messages``) but the DB-flush layer
 skips them.
 """
 
+from types import SimpleNamespace
+
 from run_agent import AIAgent
 
 
@@ -130,3 +132,22 @@ def test_real_user_turn_metadata_still_propagates_to_next_assistant():
     assert meta.get("turn_id") == "T1"
     assert meta.get("run_id") == "R1"
     assert meta.get("client_message_id") == "C1"
+
+
+def test_assistant_message_participant_id_uses_agent_run_context_without_stamping_user():
+    agent = _agent_with_recording_db()
+    agent._run_context = SimpleNamespace(participant_id="member:backend")
+    messages = [
+        {
+            "role": "user",
+            "content": "你是谁？",
+            "metadata": {"turn_id": "T1", "run_id": "R1"},
+        },
+        {"role": "assistant", "content": "我是后端工程师。"},
+    ]
+
+    AIAgent._flush_messages_to_session_db(agent, messages, conversation_history=[])
+
+    user_row, assistant_row = agent._session_db.appended
+    assert user_row["participant_id"] == ""
+    assert assistant_row["participant_id"] == "member:backend"

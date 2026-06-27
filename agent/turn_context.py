@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.iteration_budget import IterationBudget
 from agent.model_metadata import estimate_request_tokens_rough
+from agent.dovie_persona_trace import persona_text_probe, trace_persona_chain
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,13 @@ def build_turn_context(
         agent.platform or "unknown", len(conversation_history or []),
         _msg_preview,
     )
+    trace_persona_chain(
+        agent,
+        "turn-context.start",
+        history_count=len(conversation_history or []),
+        user=persona_text_probe(user_message, preview_chars=80),
+        persist_user=persona_text_probe(persist_user_message, preview_chars=80),
+    )
 
     # Initialize conversation (copy to avoid mutating the caller's list).
     messages = list(conversation_history) if conversation_history else []
@@ -254,6 +262,11 @@ def build_turn_context(
         restore_or_build_system_prompt(agent, system_message, conversation_history)
 
     active_system_prompt = agent._cached_system_prompt
+    trace_persona_chain(
+        agent,
+        "turn-context.system-prompt-active",
+        prompt=persona_text_probe(active_system_prompt),
+    )
 
     # Crash-resilience: persist the inbound user turn as soon as the session row exists.
     try:

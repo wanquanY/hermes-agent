@@ -3907,6 +3907,45 @@ def test_apply_model_switch_real_switch_still_appends_marker(monkeypatch):
     assert marker_calls[0][1] == {"model": "claude-opus-4-7", "provider": "anthropic"}
 
 
+def test_persist_live_system_prompt_uses_execution_scope_cache():
+    class _DB:
+        def __init__(self):
+            self.scoped_calls = []
+
+        def update_system_prompt(self, *_args):
+            raise AssertionError("transcript session prompt must not be overwritten")
+
+        def update_scoped_system_prompt(self, *args):
+            self.scoped_calls.append(args)
+
+    class _Agent:
+        session_id = "session-key"
+
+        def __init__(self, db):
+            self._session_db = db
+            self._cached_system_prompt = None
+
+        def _build_system_prompt(self, _system_message):
+            return "frontend scoped prompt"
+
+    db = _DB()
+    agent = _Agent(db)
+    session = _session(
+        agent=agent,
+        run_context=types.SimpleNamespace(
+            conversation_session_id="session-key",
+            execution_scope_key="member-chat:session-key:frontend",
+        ),
+    )
+
+    server._persist_live_session_system_prompt(session)
+
+    assert agent._cached_system_prompt == "frontend scoped prompt"
+    assert db.scoped_calls == [
+        ("session-key", "member-chat:session-key:frontend", "frontend scoped prompt")
+    ]
+
+
 def test_append_model_switch_marker_skips_empty_conversation():
     """The marker must NOT be injected when no user/assistant turn exists yet —
     the desktop applies the profile model (deepseek-v4-pro) on top of the
@@ -4834,8 +4873,10 @@ def test_prompt_submit_emits_append_only_message_delta(monkeypatch):
     ]
     assert deltas[0]["offset"] == 0
     assert [payload["offset"] for payload in deltas] == [0, 8, 14, 19]
+    assert [payload["message_seq_in_run"] for payload in deltas] == [1, 1, 1, 1]
     complete_events = [args[2] for args in emitted if args[0] == "message.complete"]
     assert complete_events[-1]["text"] == "文件已创建完成。\n\n- **文件名**：`team_stream_refactor_check.txt`"
+    assert complete_events[-1]["message_seq_in_run"] == 1
 
 
 def test_prompt_submit_reconciles_diverged_stream_with_message_complete_text(monkeypatch):
@@ -4943,6 +4984,7 @@ def test_prompt_submit_splits_tool_event_stream_segments_with_client_message_ids
         "文件确认无误，下面是最终结论。",
     ]
     assert [payload["offset"] for payload in deltas] == [0, 0]
+    assert [payload["message_seq_in_run"] for payload in deltas] == [1, 2]
     assert [payload["client_message_id"] for payload in deltas] == [
         "turn-segmented-stream:assistant-segment:0",
         "turn-segmented-stream:assistant-segment:1",
@@ -4951,6 +4993,7 @@ def test_prompt_submit_splits_tool_event_stream_segments_with_client_message_ids
     complete_events = [args[2] for args in emitted if args[0] == "message.complete"]
     assert complete_events[-1].get("final_text_mismatch") is not True
     assert complete_events[-1]["client_message_id"] == "turn-segmented-stream:assistant-segment:1"
+    assert complete_events[-1]["message_seq_in_run"] == 2
     assert complete_events[-1]["text"] == "文件确认无误，下面是最终结论。"
 
 

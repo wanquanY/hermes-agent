@@ -8,12 +8,21 @@ import time
 from typing import Any
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
+from agent.dovie_persona_trace import (
+    coerce_dovie_context,
+    dovie_context_probe,
+    persona_text_probe,
+    run_context_probe,
+    trace_persona_chain,
+    trace_persona_payload,
+)
 from hermes_runtime_event_payloads import terminal_text_metadata
 from hermes_team_mission.state.conversation import normalize_team_mission_conversation_session
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
 from tui_gateway.services.prompt_attachments import submitted_attachments as _normalize_submitted_attachments
 from tui_gateway.services.prompt_attachments import submitted_image_paths as _normalize_submitted_image_paths
+from tui_gateway.services.prompt_image_routing import build_image_aware_run_message
 from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
 from tui_gateway.services.toolset_scope import ensure_session_turn_toolsets
 from tui_gateway.services.voice import voice_tts_enabled
@@ -82,6 +91,61 @@ def _text_probe(value: Any) -> dict[str, Any]:
     }
 
 
+def _trace_transcript_persistence_enabled(stored_session_id: str, runtime_scope_key: str = "") -> bool:
+    return str(stored_session_id or "").startswith("team-session-team-conversation-") or str(
+        runtime_scope_key or ""
+    ).startswith("member-chat:")
+
+
+def _message_probe(message: Any) -> dict[str, Any]:
+    if not isinstance(message, dict):
+        return {"type": type(message).__name__}
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    content = message.get("content")
+    content_text = content if isinstance(content, str) else str(content or "")
+    return {
+        "role": str(message.get("role") or ""),
+        "participant_id": str(
+            message.get("participant_id")
+            or message.get("participantId")
+            or metadata.get("participant_id")
+            or metadata.get("participantId")
+            or ""
+        ),
+        "turn_id": str(metadata.get("turn_id") or ""),
+        "run_id": str(metadata.get("run_id") or ""),
+        "content_len": len(content_text),
+        "content_sha1": hashlib.sha1(content_text.encode("utf-8", errors="replace")).hexdigest()[:12],
+        "content_preview": content_text[:120].replace("\n", "\\n"),
+    }
+
+
+def _history_probe(messages: list, *, limit: int = 5) -> list[dict[str, Any]]:
+    return [_message_probe(message) for message in list(messages or [])[-limit:]]
+
+
+def _trace_transcript_persistence(session: dict, sid: str, label: str, **fields: Any) -> None:
+    runtime_scope_key = str(
+        session.get("active_runtime_scope_key")
+        or session.get("runtime_scope_key")
+        or session.get("session_key")
+        or sid
+    )
+    stored_session_id = str(session.get("session_key") or sid)
+    if not _trace_transcript_persistence_enabled(stored_session_id, runtime_scope_key):
+        return
+    emit_dovie_diagnostic(
+        "[h11-trace transcript-persistence]",
+        {
+            "stage": label,
+            "sid": sid,
+            "stored_session_id": stored_session_id,
+            "runtime_scope_key": runtime_scope_key,
+            **fields,
+        },
+    )
+
+
 def _payload_text(payload: dict | None) -> str:
     if not isinstance(payload, dict):
         return ""
@@ -101,6 +165,15 @@ def _apply_dovie_product_runtime_policy(agent: Any, raw_context: Any) -> None:
         agent,
         "_delegate_inherits_parent_tools",
         bool(team_mission.get("delegate_inherits_parent_tools") or team_mission.get("delegateInheritsParentTools")),
+    )
+    trace_persona_payload(
+        "gateway.dovie-product-runtime-policy-applied",
+        context=dovie_context_probe(raw_context),
+        agent_session_id=str(getattr(agent, "session_id", "") or ""),
+        agent_model=str(getattr(agent, "model", "") or ""),
+        agent_provider=str(getattr(agent, "provider", "") or ""),
+        agent_platform=str(getattr(agent, "platform", "") or ""),
+        delegate_inherits_parent_tools=bool(getattr(agent, "_delegate_inherits_parent_tools", False)),
     )
 
 
@@ -351,6 +424,22 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
         or sid
     ).strip()
     effective_runtime_scope_key = runtime_scope_key or stable_session_id
+    trace_persona_payload(
+        "gateway.prompt-submit.received",
+        rid=rid,
+        sid=sid,
+        stored_session_id=stable_session_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        runtime_scope_key=effective_runtime_scope_key,
+        requested_model=requested_model,
+        session_agent_profile_id=str(session.get("agent_profile_id") or session.get("agentProfileId") or ""),
+        profile_context=session.get("profile_context") if isinstance(session.get("profile_context"), dict) else {},
+        run_context=run_context_probe(session.get("run_context")),
+        text=persona_text_probe(text, preview_chars=80),
+        draft=persona_text_probe(params.get("draft_text") or params.get("draftText") or "", preview_chars=80),
+        dovie_product_context=dovie_context_probe(raw_dovie_context),
+    )
     approval_policy = str(
         params.get("approval_policy")
         or params.get("approvalPolicy")
@@ -508,7 +597,49 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
     _start_agent_build(sid, session)
 
     def run_after_agent_ready() -> None:
+        # BUG-7 trace: capture the persona-resolution inputs/outputs at the
+        # exact point the worker enters the per-call profile ContextVar.
+        # Three traces in this block let us pin down whether
+        #   (a) session.profile_context has the wrong keys (BUG-1 vector)
+        #   (b) ENV / ContextVar disagrees with what we expected
+        #   (c) get_hermes_home() resolves to a profile we did not intend
+        import os as _os_for_trace
+
+        from hermes_constants import (
+            get_hermes_home as _get_hermes_home_for_trace,
+            get_hermes_home_override as _get_hermes_home_override_for_trace,
+        )
+
+        _pc_for_trace = session.get("profile_context")
+        trace_persona_payload(
+            "worker.profile-context-before-enter",
+            sid=sid,
+            stored_session_id=stable_session_id,
+            run_id=rid,
+            session_profile_context_type=type(_pc_for_trace).__name__,
+            session_profile_context_keys=(
+                sorted(_pc_for_trace.keys()) if isinstance(_pc_for_trace, dict) else []
+            ),
+            session_profile_context_hermes_home=(
+                str(_pc_for_trace.get("hermes_home") or "") if isinstance(_pc_for_trace, dict) else ""
+            ),
+            session_profile_context_hermesHomePath=(
+                str(_pc_for_trace.get("hermesHomePath") or "") if isinstance(_pc_for_trace, dict) else ""
+            ),
+            env_HERMES_HOME=_os_for_trace.environ.get("HERMES_HOME") or "",
+            contextvar_override_before=_get_hermes_home_override_for_trace() or "",
+            resolved_home_before=str(_get_hermes_home_for_trace()),
+        )
         profile_tokens = _enter_profile_context(session.get("profile_context"))
+        trace_persona_payload(
+            "worker.profile-context-after-enter",
+            sid=sid,
+            stored_session_id=stable_session_id,
+            run_id=rid,
+            env_HERMES_HOME=_os_for_trace.environ.get("HERMES_HOME") or "",
+            contextvar_override_after=_get_hermes_home_override_for_trace() or "",
+            resolved_home_after=str(_get_hermes_home_for_trace()),
+        )
         try:
             err = _wait_agent(session, rid)
             if err:
@@ -698,6 +829,23 @@ def _run_prompt_submit(
         turn_run_id = str(session.get("active_run_id") or "")
         turn_id = str((turn_metadata or {}).get("turn_id") or session.get("active_turn_id") or "")
         session["attached_images"] = []
+    _trace_transcript_persistence(
+        session,
+        sid,
+        "prompt-history-captured",
+        run_id=turn_run_id,
+        turn_id=turn_id,
+        history_version=history_version,
+        history_count=len(history),
+        history_tail=_history_probe(history),
+        text=_text_probe(text),
+        turn_metadata={
+            "turn_id": str((turn_metadata or {}).get("turn_id") or ""),
+            "run_id": str((turn_metadata or {}).get("run_id") or ""),
+            "client_message_id": str((turn_metadata or {}).get("client_message_id") or ""),
+            "persist_user_message": str((turn_metadata or {}).get("persist_user_message") or ""),
+        },
+    )
     agent = session.get("agent")
     if agent is None:
         _log_prompt_stage(session, sid, "agent-missing", run_id=turn_run_id, turn_id=turn_id)
@@ -708,6 +856,26 @@ def _run_prompt_submit(
             turn_id=turn_id,
         )
         return
+    delta_normalizer = _MessageDeltaNormalizer()
+    message_segment_index = 0
+
+    def current_client_message_id() -> str:
+        base = str(turn_id or turn_run_id or sid or "prompt-turn").strip()
+        return f"{base}:assistant-segment:{message_segment_index}"
+
+    def current_message_seq_in_run() -> int:
+        return message_segment_index + 1
+
+    def current_message_identity_payload() -> dict[str, Any]:
+        message_seq = current_message_seq_in_run()
+        client_message_id = current_client_message_id()
+        return {
+            "client_message_id": client_message_id,
+            "clientMessageId": client_message_id,
+            "message_seq_in_run": message_seq,
+            "messageSeqInRun": message_seq,
+        }
+
     _log_prompt_stage(
         session,
         sid,
@@ -717,8 +885,9 @@ def _run_prompt_submit(
         history_count=len(history),
         image_count=len(images),
         text_len=len(str(text or "")),
+        message_seq_in_run=current_message_seq_in_run(),
     )
-    _emit("message.start", sid)
+    _emit("message.start", sid, current_message_identity_payload())
     _log_prompt_stage(session, sid, "after-message-start", run_id=turn_run_id, turn_id=turn_id)
 
     def terminalize_if_still_active(reason: str) -> None:
@@ -814,13 +983,6 @@ def _run_prompt_submit(
                         flush=True,
                     )
             return stale
-
-    delta_normalizer = _MessageDeltaNormalizer()
-    message_segment_index = 0
-
-    def current_client_message_id() -> str:
-        base = str(turn_id or turn_run_id or sid or "prompt-turn").strip()
-        return f"{base}:assistant-segment:{message_segment_index}"
 
     def close_current_text_segment(reason: str = "stream_boundary") -> None:
         nonlocal message_segment_index
@@ -1081,111 +1243,16 @@ def _run_prompt_submit(
                     error=str(exc),
                 )
 
-            # Decide image routing per-turn based on active provider/model.
-            # "native" → pass pixels to the main model as OpenAI-style content
-            # parts (adapters translate for Anthropic/Gemini/Bedrock/etc.).
-            # "text"   → pre-analyze with vision_analyze and prepend the text.
-            # See agent/image_routing.py for the full decision table.
-            run_message: Any = prompt
-            if images:
-                try:
-                    _log_prompt_stage(
-                        session,
-                        sid,
-                        "image-routing-decision-start",
-                        run_id=turn_run_id,
-                        turn_id=turn_id,
-                        image_count=len(images),
-                    )
-                    from agent.image_routing import (
-                        decide_image_input_mode,
-                        build_native_content_parts,
-                    )
-                    from agent.auxiliary_client import (
-                        _read_main_model,
-                        _read_main_provider,
-                    )
-                    from hermes_cli.config import load_config as _tui_load_config
-
-                    _cfg = _tui_load_config()
-                    _descriptor = dict(session.get("model_descriptor") or {})
-                    _supports_vision = (
-                        bool(_descriptor.get("vision_enabled"))
-                        if isinstance(_descriptor.get("vision_enabled"), bool)
-                        else None
-                    )
-                    _mode = decide_image_input_mode(
-                        _read_main_provider(),
-                        _read_main_model(),
-                        _cfg,
-                        supports_vision_override=_supports_vision,
-                    )
-                    _log_prompt_stage(
-                        session,
-                        sid,
-                        "image-routing-decision-end",
-                        run_id=turn_run_id,
-                        turn_id=turn_id,
-                        mode=_mode,
-                    )
-                except Exception as _img_exc:
-                    print(
-                        f"[tui_gateway] image_routing decision failed, defaulting to text: {_img_exc}",
-                        file=sys.stderr,
-                    )
-                    _mode = "text"
-                    _log_prompt_stage(
-                        session,
-                        sid,
-                        "image-routing-decision-error",
-                        run_id=turn_run_id,
-                        turn_id=turn_id,
-                        error=str(_img_exc),
-                    )
-
-                if _mode == "native":
-                    try:
-                        _log_prompt_stage(session, sid, "native-image-build-start", run_id=turn_run_id, turn_id=turn_id)
-                        _parts, _skipped = build_native_content_parts(
-                            prompt,
-                            images,
-                        )
-                        if _skipped:
-                            print(
-                                f"[tui_gateway] native image attachment skipped {len(_skipped)} unreadable path(s)",
-                                file=sys.stderr,
-                            )
-                        if any(p.get("type") == "image_url" for p in _parts):
-                            run_message = _parts
-                        else:
-                            run_message = _enrich_with_attached_images(prompt, images)
-                        _log_prompt_stage(
-                            session,
-                            sid,
-                            "native-image-build-end",
-                            run_id=turn_run_id,
-                            turn_id=turn_id,
-                            skipped_count=len(_skipped or []),
-                            part_count=len(_parts or []),
-                        )
-                    except Exception as _img_exc:
-                        print(
-                            f"[tui_gateway] native attach failed, falling back to text: {_img_exc}",
-                            file=sys.stderr,
-                        )
-                        run_message = _enrich_with_attached_images(prompt, images)
-                        _log_prompt_stage(
-                            session,
-                            sid,
-                            "native-image-build-error",
-                            run_id=turn_run_id,
-                            turn_id=turn_id,
-                            error=str(_img_exc),
-                        )
-                else:
-                    _log_prompt_stage(session, sid, "text-image-enrichment-start", run_id=turn_run_id, turn_id=turn_id)
-                    run_message = _enrich_with_attached_images(prompt, images)
-                    _log_prompt_stage(session, sid, "text-image-enrichment-end", run_id=turn_run_id, turn_id=turn_id)
+            run_message = build_image_aware_run_message(
+                prompt=prompt,
+                prompt_text=text,
+                submitted_images=images,
+                session=session,
+                sid=sid,
+                run_id=turn_run_id,
+                turn_id=turn_id,
+                log_prompt_stage=_log_prompt_stage,
+            )
 
             _log_prompt_stage(
                 session,
@@ -1238,8 +1305,7 @@ def _run_prompt_submit(
                 )
                 if payload is None:
                     return
-                payload["client_message_id"] = current_client_message_id()
-                payload["clientMessageId"] = payload["client_message_id"]
+                payload.update(current_message_identity_payload())
                 render_delta = payload.get("delta") or payload.get("text") or ""
                 if streamer and (r := streamer.feed(render_delta)) is not None:
                     payload["rendered"] = r
@@ -1277,13 +1343,57 @@ def _run_prompt_submit(
                     agent._run_context = session.get("run_context")
                 if turn_reasoning_config is not None:
                     agent.reasoning_config = dict(turn_reasoning_config)
-                _log_prompt_stage(session, sid, "agent-run-call-start", run_id=turn_run_id, turn_id=turn_id)
+                _log_prompt_stage(
+                    session,
+                    sid,
+                    "agent-run-call-start",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                )
+                trace_persona_chain(
+                    agent,
+                    "gateway.agent-run-call-start",
+                    sid=sid,
+                    stored_session_id=str(session.get("session_key") or sid),
+                    history_count=len(history),
+                    run_message=persona_text_probe(run_message, preview_chars=80),
+                    clean_prompt=persona_text_probe(clean_prompt, preview_chars=80),
+                    turn_metadata={
+                        "turn_id": (turn_metadata or {}).get("turn_id") or "",
+                        "run_id": (turn_metadata or {}).get("run_id") or "",
+                        "client_message_id": (turn_metadata or {}).get("client_message_id") or "",
+                        "model": (turn_metadata or {}).get("model") or "",
+                        "dovie_product_context": dovie_context_probe(
+                            coerce_dovie_context((turn_metadata or {}).get("dovie_product_context"))
+                        ),
+                    },
+                )
                 result = agent.run_conversation(
                     run_message,
                     conversation_history=list(history),
                     stream_callback=_stream,
                     persist_user_message=clean_prompt,
                     turn_metadata=turn_metadata,
+                )
+                _trace_transcript_persistence(
+                    session,
+                    sid,
+                    "agent-run-returned",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    result_type=type(result).__name__,
+                    result_message_count=len(result.get("messages") or [])
+                    if isinstance(result, dict) and isinstance(result.get("messages"), list)
+                    else 0,
+                    result_tail=_history_probe(result.get("messages") or [])
+                    if isinstance(result, dict) and isinstance(result.get("messages"), list)
+                    else [],
+                    final_response=_text_probe(result.get("final_response"))
+                    if isinstance(result, dict)
+                    else _text_probe(result),
+                    error=_text_probe(result.get("error"))
+                    if isinstance(result, dict)
+                    else _text_probe(""),
                 )
                 _log_prompt_stage(
                     session,
@@ -1292,6 +1402,21 @@ def _run_prompt_submit(
                     run_id=turn_run_id,
                     turn_id=turn_id,
                     result_type=type(result).__name__,
+                )
+                trace_persona_chain(
+                    agent,
+                    "gateway.agent-run-call-end",
+                    sid=sid,
+                    stored_session_id=str(session.get("session_key") or sid),
+                    result_type=type(result).__name__,
+                    final_response=persona_text_probe(
+                        result.get("final_response") if isinstance(result, dict) else "",
+                        preview_chars=120,
+                    ),
+                    error=persona_text_probe(
+                        result.get("error") if isinstance(result, dict) else "",
+                        preview_chars=80,
+                    ),
                 )
                 emit_dovie_diagnostic(
                     "[dovie-prompt]",
@@ -1320,6 +1445,23 @@ def _run_prompt_submit(
                     conversation_history=list(history),
                     stream_callback=_stream,
                 )
+                _trace_transcript_persistence(
+                    session,
+                    sid,
+                    "agent-run-returned-compat",
+                    run_id=turn_run_id,
+                    turn_id=turn_id,
+                    result_type=type(result).__name__,
+                    result_message_count=len(result.get("messages") or [])
+                    if isinstance(result, dict) and isinstance(result.get("messages"), list)
+                    else 0,
+                    result_tail=_history_probe(result.get("messages") or [])
+                    if isinstance(result, dict) and isinstance(result.get("messages"), list)
+                    else [],
+                    final_response=_text_probe(result.get("final_response"))
+                    if isinstance(result, dict)
+                    else _text_probe(result),
+                )
                 _log_prompt_stage(
                     session,
                     sid,
@@ -1327,6 +1469,17 @@ def _run_prompt_submit(
                     run_id=turn_run_id,
                     turn_id=turn_id,
                     result_type=type(result).__name__,
+                )
+                trace_persona_chain(
+                    agent,
+                    "gateway.agent-run-compat-fallback-end",
+                    sid=sid,
+                    stored_session_id=str(session.get("session_key") or sid),
+                    result_type=type(result).__name__,
+                    final_response=persona_text_probe(
+                        result.get("final_response") if isinstance(result, dict) else "",
+                        preview_chars=120,
+                    ),
                 )
                 emit_dovie_diagnostic(
                     "[dovie-prompt]",
@@ -1419,8 +1572,6 @@ def _run_prompt_submit(
                     "status": "cancelled",
                     "streamed": True,
                     "text": partial_text,
-                    "client_message_id": current_client_message_id(),
-                    "clientMessageId": current_client_message_id(),
                     # ``interrupted`` flags this row as a terminal-by-cancel
                     # so the next turn's hydrate + provider-side message-
                     # validation see a closed assistant turn, not a
@@ -1430,6 +1581,7 @@ def _run_prompt_submit(
                     # ``persist_interrupted_partial``).
                     "interrupted": True,
                     **terminal_text_metadata(partial_text, prefix="text"),
+                    **current_message_identity_payload(),
                 }
                 interrupt_message_id = _latest_assistant_message_id_for_turn(
                     str(session.get("session_key") or sid),
@@ -1451,6 +1603,17 @@ def _run_prompt_submit(
                             session["history"] = result["messages"]
                             session["history_version"] = history_version + 1
                             post_turn_history = list(session["history"])
+                            _trace_transcript_persistence(
+                                session,
+                                sid,
+                                "prompt-history-update-applied",
+                                run_id=turn_run_id,
+                                turn_id=turn_id,
+                                previous_history_version=history_version,
+                                new_history_version=history_version + 1,
+                                result_message_count=len(result["messages"]),
+                                session_history_tail=_history_probe(session["history"]),
+                            )
                         else:
                             # History mutated externally during the turn
                             # (undo/compress/retry/rollback now guard on
@@ -1465,6 +1628,17 @@ def _run_prompt_submit(
                                 f"(expected={history_version} current={current_version}) — "
                                 f"agent output NOT written to session history",
                                 file=sys.stderr,
+                            )
+                            _trace_transcript_persistence(
+                                session,
+                                sid,
+                                "prompt-history-update-skipped-version-mismatch",
+                                run_id=turn_run_id,
+                                turn_id=turn_id,
+                                expected_history_version=history_version,
+                                current_history_version=current_version,
+                                result_message_count=len(result["messages"]),
+                                result_tail=_history_probe(result["messages"]),
                             )
                             status_note = (
                                 "History changed during this turn — the response above is visible "
@@ -1548,8 +1722,7 @@ def _run_prompt_submit(
                         if streamer and (r := streamer.feed(render_delta)) is not None:
                             final_delta_payload["rendered"] = r
                         final_delta_payload["source"] = "final_response_reconciliation"
-                        final_delta_payload["client_message_id"] = current_client_message_id()
-                        final_delta_payload["clientMessageId"] = final_delta_payload["client_message_id"]
+                        final_delta_payload.update(current_message_identity_payload())
                         _emit("message.delta", sid, final_delta_payload)
                         stream_delta_emitted = True
                 elif current_stream_text and raw_text != current_stream_text:
@@ -1560,8 +1733,7 @@ def _run_prompt_submit(
                 "status": status,
                 "streamed": stream_delta_emitted,
                 "text": raw_text,
-                "client_message_id": current_client_message_id(),
-                "clientMessageId": current_client_message_id(),
+                **current_message_identity_payload(),
                 **terminal_text_metadata(raw_text, prefix="text"),
             }
             if interrupt_detail:
@@ -1595,6 +1767,18 @@ def _run_prompt_submit(
                     "status": status,
                     "text_len": len(raw) if isinstance(raw, str) else 0,
                 },
+            )
+            _trace_transcript_persistence(
+                session,
+                sid,
+                "message-complete-emit",
+                run_id=turn_run_id,
+                turn_id=turn_id,
+                status=status,
+                message_id=message_id or "",
+                raw_text=_text_probe(raw_text),
+                streamed=stream_delta_emitted,
+                final_delta_mismatch=final_delta_mismatch,
             )
             _emit("message.complete", sid, payload)
             terminal_attempted = True

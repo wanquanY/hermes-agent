@@ -711,7 +711,10 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
             _message_page_info(page.get("pageInfo")),
         )
     try:
-        display_history = db.get_messages_as_conversation(
+        history_reader = getattr(db, "get_conversation_message_read_model", None)
+        if not callable(history_reader):
+            history_reader = db.get_messages_as_conversation
+        display_history = history_reader(
             session_id,
             include_ancestors=True,
             include_storage_metadata=True,
@@ -734,7 +737,10 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
 
 def _display_history_conversation(db, session_id: str) -> list[dict]:
     try:
-        return db.get_messages_as_conversation(
+        history_reader = getattr(db, "get_conversation_message_read_model", None)
+        if not callable(history_reader):
+            history_reader = db.get_messages_as_conversation
+        return history_reader(
             session_id,
             include_ancestors=True,
             include_storage_metadata=True,
@@ -1187,6 +1193,15 @@ def _session_index_list_item(row: dict) -> dict:
         lead_profile_id = row.get("team_lead_profile_id") or ""
         lead_profile_name = row.get("team_lead_profile_name") or ""
         lead_profile_avatar = row.get("team_lead_profile_avatar") or ""
+        member_count = int(row.get("team_member_count") or 0)
+        leader_member = _safe_json_decode(row.get("team_leader_member_json")) or {}
+        if not isinstance(leader_member, dict):
+            leader_member = {}
+        display_members = _safe_json_decode(row.get("team_display_members_json")) or []
+        if not isinstance(display_members, list):
+            display_members = []
+        if leader_member and not display_members:
+            display_members = [leader_member]
         team_block = {
             "id": row.get("team_id") or "",
             "name": team_name,
@@ -1196,10 +1211,22 @@ def _session_index_list_item(row: dict) -> dict:
         if lead_profile_id:
             team_block["lead_agent_profile_id"] = lead_profile_id
             team_block["leadAgentProfileId"] = lead_profile_id
+        if member_count:
+            team_block["member_count"] = member_count
+            team_block["memberCount"] = member_count
+        if leader_member:
+            team_block["leader_member"] = leader_member
+            team_block["leaderMember"] = leader_member
+        if display_members:
+            team_block["display_members"] = display_members
+            team_block["displayMembers"] = display_members
         item["team"] = team_block
         if team_name:
             item["team_name"] = team_name
             item["teamName"] = team_name
+        if member_count:
+            item["team_member_count"] = member_count
+            item["teamMemberCount"] = member_count
         if lead_profile_name:
             item["lead_profile_name"] = lead_profile_name
             item["leadProfileName"] = lead_profile_name
@@ -1314,10 +1341,14 @@ def _(rid, params: dict) -> dict:
             if not requested_conversation_kind
             or _normalized_conversation_kind(row) == requested_conversation_kind
         ]
-        items = [
-            sanitize_session_list_item(_session_index_list_item(row))
+        visible_rows = [
+            row
             for row in rows
             if not _is_hidden_empty_index_draft(row)
+        ]
+        items = [
+            sanitize_session_list_item(_session_index_list_item(row))
+            for row in visible_rows
         ]
         page = result.get("pageInfo") or {}
         next_cursor = _encode_page_cursor(page.get("nextCursor")) if page.get("nextCursor") else ""
@@ -1501,7 +1532,10 @@ def _(rid, params: dict) -> dict:
     _enable_gateway_prompts()
     try:
         db.reopen_session(target)
-        history = db.get_messages_as_conversation(target)
+        history_reader = getattr(db, "get_conversation_message_read_model", None)
+        if not callable(history_reader):
+            history_reader = db.get_messages_as_conversation
+        history = history_reader(target)
         # P1 participant-view projection: when this runtime is hydrating a
         # MULTI-PARTICIPANT conversation (the team leader reading a team
         # conversation that also contains member-chat mirrored replies, or

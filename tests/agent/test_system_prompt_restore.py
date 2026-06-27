@@ -16,6 +16,7 @@ instead of rebuilding).  Covers:
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,6 +32,8 @@ def _make_agent(session_db=None, prebuilt_prompt: str = "BUILT_PROMPT"):
     agent.model = "test-model"
     agent.platform = "cli"
     agent._session_db = session_db
+    agent.run_context = None
+    agent._run_context = None
     agent._build_system_prompt = MagicMock(return_value=prebuilt_prompt)
     return agent
 
@@ -118,7 +121,7 @@ class TestSilentFailureWarnings:
         assert agent._cached_system_prompt == "BUILT_PROMPT"
         # Loud warning about the read failure
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any("get_session failed" in r.getMessage() for r in warnings), \
+        assert any("system-prompt restore failed" in r.getMessage() for r in warnings), \
             f"Expected a get_session warning, got: {[r.getMessage() for r in warnings]}"
         assert any("disk full" in r.getMessage() for r in warnings)
 
@@ -167,7 +170,7 @@ class TestSilentFailureWarnings:
         # Warning surfaced
         warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
         assert any(
-            "update_system_prompt failed" in m and "database is locked" in m
+            "system-prompt persistence failed" in m and "database is locked" in m
             for m in warnings
         ), f"Expected write-failure warning, got: {warnings}"
 
@@ -217,6 +220,48 @@ class TestPromptStabilityInvariant:
         assert agent._cached_system_prompt == stored
         # Byte-level check
         assert agent._cached_system_prompt.encode("utf-8") == stored.encode("utf-8")
+
+
+class TestExecutionScopedPromptReuse:
+    def test_scoped_run_reuses_scoped_prompt_not_transcript_prompt(self):
+        db = MagicMock()
+        db.get_scoped_system_prompt.return_value = "FRONTEND_SCOPED_PROMPT"
+        agent = _make_agent(session_db=db)
+        agent.run_context = SimpleNamespace(
+            conversation_session_id=agent.session_id,
+            execution_scope_key="member-chat:test-session-id:frontend",
+        )
+
+        _restore_or_build_system_prompt(agent, None, [{"role": "user", "content": "hi"}])
+
+        assert agent._cached_system_prompt == "FRONTEND_SCOPED_PROMPT"
+        db.get_scoped_system_prompt.assert_called_once_with(
+            agent.session_id,
+            "member-chat:test-session-id:frontend",
+        )
+        db.get_session.assert_not_called()
+        agent._build_system_prompt.assert_not_called()
+        db.update_system_prompt.assert_not_called()
+
+    def test_scoped_run_writes_scoped_prompt_without_overwriting_transcript_prompt(self):
+        db = MagicMock()
+        db.get_scoped_system_prompt.return_value = None
+        agent = _make_agent(session_db=db)
+        agent.run_context = SimpleNamespace(
+            conversation_session_id=agent.session_id,
+            execution_scope_key="member-chat:test-session-id:frontend",
+        )
+
+        _restore_or_build_system_prompt(agent, None, [{"role": "user", "content": "hi"}])
+
+        assert agent._cached_system_prompt == "BUILT_PROMPT"
+        agent._build_system_prompt.assert_called_once_with(None)
+        db.update_scoped_system_prompt.assert_called_once_with(
+            agent.session_id,
+            "member-chat:test-session-id:frontend",
+            "BUILT_PROMPT",
+        )
+        db.update_system_prompt.assert_not_called()
 
 
 if __name__ == "__main__":

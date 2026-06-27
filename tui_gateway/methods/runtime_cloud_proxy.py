@@ -13,6 +13,15 @@ _server = bind_server_globals(globals())
 
 _T = TypeVar("_T")
 
+_MANAGED_PROXY_PATHS: tuple[tuple[str, str], ...] = (
+    ("DOVIE_MINERU_PROXY_URL", "/api/v1/llm-proxy/v1/document-parse"),
+    ("DOVIE_SERPER_PROXY_URL", "/api/v1/llm-proxy/v1/serper-search"),
+    ("DOVIE_WEB_PARSE_PROXY_URL", "/api/v1/llm-proxy/v1/web-page-parse"),
+    ("DOVIE_IMAGE_GENERATE_PROXY_URL", "/api/v1/llm-proxy/v1/image-generate"),
+    ("DOVIE_VIDEO_GENERATE_PROXY_URL", "/api/v1/llm-proxy/v1/video-generate"),
+    ("DOVIE_SKILL_CATEGORIES_URL", "/api/v1/llm-proxy/v1/skill-market/categories"),
+)
+
 
 def _has_any(params: dict[str, Any], keys: tuple[str, ...]) -> bool:
     return any(key in params for key in keys)
@@ -29,6 +38,24 @@ def _fingerprint(runtime_token: str, api_origin: str) -> str:
     return hashlib.sha256(f"{runtime_token}|{api_origin}".encode()).hexdigest()[:12]
 
 
+def _normalize_api_origin(api_origin: str) -> str:
+    return str(api_origin or "").strip().rstrip("/")
+
+
+def _managed_proxy_env(api_origin: str) -> dict[str, str]:
+    normalized = _normalize_api_origin(api_origin)
+    if not normalized:
+        return {key: "" for key, _path in _MANAGED_PROXY_PATHS}
+    return {key: f"{normalized}{path}" for key, path in _MANAGED_PROXY_PATHS}
+
+
+def _apply_env_update(key: str, value: str) -> None:
+    if value:
+        os.environ[key] = value
+    else:
+        os.environ.pop(key, None)
+
+
 async def apply_runtime_cloud_proxy_update(params: dict[str, Any]) -> dict[str, Any]:
     """Update runtime cloud proxy env in the gateway and live workers.
 
@@ -41,22 +68,20 @@ async def apply_runtime_cloud_proxy_update(params: dict[str, Any]) -> dict[str, 
     token_present = _has_any(params, token_keys)
     origin_present = _has_any(params, origin_keys)
     runtime_token = _text_param(params, token_keys)
-    api_origin = _text_param(params, origin_keys)
+    api_origin = _normalize_api_origin(_text_param(params, origin_keys))
 
     env_updates: dict[str, str] = {}
     if token_present:
-        if runtime_token:
-            os.environ["DOVIE_LLM_RUNTIME_TOKEN"] = runtime_token
-        else:
-            os.environ.pop("DOVIE_LLM_RUNTIME_TOKEN", None)
+        _apply_env_update("DOVIE_LLM_RUNTIME_TOKEN", runtime_token)
         env_updates["DOVIE_LLM_RUNTIME_TOKEN"] = runtime_token
 
     if origin_present:
-        if api_origin:
-            os.environ["DOVIE_API_ORIGIN"] = api_origin
-        else:
-            os.environ.pop("DOVIE_API_ORIGIN", None)
+        _apply_env_update("DOVIE_API_ORIGIN", api_origin)
         env_updates["DOVIE_API_ORIGIN"] = api_origin
+        proxy_env = _managed_proxy_env(api_origin)
+        env_updates.update(proxy_env)
+        for key, value in proxy_env.items():
+            _apply_env_update(key, value)
 
     resulting_token = os.environ.get("DOVIE_LLM_RUNTIME_TOKEN", "")
     resulting_origin = os.environ.get("DOVIE_API_ORIGIN", "")

@@ -105,6 +105,10 @@ def history_to_messages(history: list[dict]) -> list[dict]:
                 item["message_id"] = str(message.get("id"))
             if message.get("timestamp") is not None:
                 item["timestamp"] = message.get("timestamp")
+            participant_id = str(message.get("participant_id") or message.get("participantId") or "").strip()
+            if participant_id:
+                item["participant_id"] = participant_id
+                item["participantId"] = participant_id
             if isinstance(message.get("metadata"), dict):
                 item["metadata"] = dict(message["metadata"])
             messages.append(item)
@@ -116,6 +120,10 @@ def history_to_messages(history: list[dict]) -> list[dict]:
             item["message_id"] = str(message.get("id"))
         if message.get("timestamp") is not None:
             item["timestamp"] = message.get("timestamp")
+        participant_id = str(message.get("participant_id") or message.get("participantId") or "").strip()
+        if participant_id:
+            item["participant_id"] = participant_id
+            item["participantId"] = participant_id
         if isinstance(message.get("metadata"), dict):
             item["metadata"] = dict(message["metadata"])
         if reasoning_text.strip():

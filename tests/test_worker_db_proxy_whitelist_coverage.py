@@ -32,6 +32,7 @@ IGNORED_DB_METHOD_NAMES = {
 EXPLICITLY_ALLOWED_WITHOUT_STATIC_WORKER_CALL = {
     "create_activity",
     "get_activity_for_mission",
+    "get_session_index",
     "get_unread_completion_count",
     "list_active_mission_activities",
     "list_activities",

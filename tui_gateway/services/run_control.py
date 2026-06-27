@@ -34,6 +34,10 @@ from tui_gateway.services.run_control_events import (
     stream_text_delta as _stream_text_delta,
     terminal_delivery_identity as _terminal_delivery_identity,
 )
+from tui_gateway.services.transcript_projector import (
+    SessionDBTranscriptProjectionStore,
+    TranscriptProjector,
+)
 from tui_gateway.transport import Transport
 
 if TYPE_CHECKING:
@@ -100,6 +104,11 @@ _STREAM_TRACE_EVENT_TYPES = {
     "reasoning.delta",
     "thinking.delta",
 }
+_TRANSCRIPT_PROJECTOR_EVENT_TYPES = {
+    "message.start",
+    "message.delta",
+    "message.complete",
+}
 
 
 def _transport_debug_id(transport: Any) -> str:
@@ -122,6 +131,127 @@ def _stream_trace_summary(event: dict[str, Any]) -> dict[str, Any]:
 
 def _trace_stream_route(stage: str, **fields: Any) -> None:
     emit_dovie_diagnostic("[dovie-stream-route]", {"stage": stage, **fields})
+
+
+def _message_metadata(message: Any) -> dict[str, Any]:
+    if not isinstance(message, dict):
+        return {}
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    return metadata
+
+
+def _message_content_text(message: Any) -> str:
+    if not isinstance(message, dict):
+        return ""
+    return str(message.get("content") or message.get("text") or "")
+
+
+def _message_run_id(message: Any) -> str:
+    if not isinstance(message, dict):
+        return ""
+    metadata = _message_metadata(message)
+    return str(
+        metadata.get("run_id")
+        or metadata.get("runId")
+        or message.get("run_id")
+        or message.get("runId")
+        or ""
+    ).strip()
+
+
+def _message_probe(message: Any) -> dict[str, Any]:
+    if not isinstance(message, dict):
+        return {"type": type(message).__name__}
+    content = _message_content_text(message)
+    metadata = _message_metadata(message)
+    return {
+        "id": str(message.get("id") or message.get("message_id") or message.get("messageId") or ""),
+        "role": str(message.get("role") or ""),
+        "participant_id": str(
+            message.get("participant_id")
+            or message.get("participantId")
+            or metadata.get("participant_id")
+            or metadata.get("participantId")
+            or ""
+        ),
+        "run_id": _message_run_id(message),
+        "turn_id": str(metadata.get("turn_id") or metadata.get("turnId") or ""),
+        "content_len": len(content),
+        "content_preview": content[:120].replace("\n", "\\n"),
+    }
+
+
+def _transcript_coverage_for_run(db: Any, stable: str, run_id: str) -> dict[str, Any]:
+    getter = _db_method(db, "get_messages_as_conversation")
+    if getter is None or not stable or not run_id:
+        return {
+            "lookup_available": bool(getter),
+            "message_count": 0,
+            "covered": False,
+            "matching_messages": [],
+            "tail": [],
+        }
+    try:
+        messages = list(getter(stable) or [])
+    except Exception as exc:
+        return {
+            "lookup_available": True,
+            "lookup_error": f"{type(exc).__name__}: {exc}",
+            "message_count": 0,
+            "covered": False,
+            "matching_messages": [],
+            "tail": [],
+        }
+    matching = [
+        message for message in messages
+        if _message_run_id(message) == run_id
+    ]
+    return {
+        "lookup_available": True,
+        "message_count": len(messages),
+        "covered": bool(matching),
+        "matching_messages": [_message_probe(message) for message in matching[-5:]],
+        "tail": [_message_probe(message) for message in messages[-5:]],
+    }
+
+
+def _trace_complete_transcript_coverage(
+    *,
+    db: Any,
+    stable: str,
+    run_id: str,
+    turn_id: str,
+    participant_id: str,
+    event_type: str,
+    terminal_event: str | None,
+    frame: dict[str, Any],
+) -> None:
+    if event_type != "message.complete" or not stable or not run_id:
+        return
+    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    text = str(
+        primary_deliverable_text(payload)
+        or payload.get("text")
+        or payload.get("content")
+        or ""
+    )
+    coverage = _transcript_coverage_for_run(db, stable, run_id)
+    logger.warning(
+        "[h11-trace transcript-persistence] record-event-complete-transcript-coverage %s",
+        {
+            "session_id": stable,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "participant_id": participant_id,
+            "terminal_status": terminal_event or "",
+            "runtime_scope_key": str(frame.get("runtime_scope_key") or ""),
+            "seq": int(frame.get("seq") or 0),
+            "event_text_len": len(text),
+            "event_text_preview": text[:120].replace("\n", "\\n"),
+            **coverage,
+        },
+    )
+
 
 _lock = threading.RLock()
 _events_by_session: dict[str, deque[dict[str, Any]]] = defaultdict(
@@ -160,6 +290,123 @@ def _json_for_log(value: Any) -> str:
 
 def _diagnostic_warning(label: str, **fields: Any) -> None:
     logger.warning("[dovie-run-control] %s %s", label, _json_for_log(fields))
+
+
+def _session_conversation_kind(db: Any, stable: str) -> str:
+    getter = _db_method(db, "get_session_index")
+    if getter is None or not stable:
+        return ""
+    try:
+        row = getter(stable)
+    except Exception as exc:
+        _diagnostic_warning(
+            "transcript-projector-session-kind-failed",
+            db=_db_label(db),
+            session_id=stable,
+            error=str(exc),
+        )
+        return ""
+    if not isinstance(row, dict):
+        return ""
+    return str(row.get("conversation_kind") or "").strip().lower()
+
+
+def _is_team_conversation_session(db: Any, stable: str) -> bool:
+    return _session_conversation_kind(db, stable) == "team"
+
+
+def _project_team_transcript_event(
+    *,
+    db: Any,
+    stable: str,
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    event_type = str((event or {}).get("type") or "").strip()
+    if event_type not in _TRANSCRIPT_PROJECTOR_EVENT_TYPES:
+        return {"attempted": False, "reason": "non-message-event"}
+    if not stable or not _is_team_conversation_session(db, stable):
+        return {"attempted": False, "reason": "not-team-conversation"}
+    if not (
+        _db_method(db, "get_message_by_conversation_message_id")
+        and _db_method(db, "upsert_projected_conversation_message")
+    ):
+        _diagnostic_warning(
+            "transcript-projector-store-unavailable",
+            db=_db_label(db),
+            session_id=stable,
+            event_type=event_type,
+            run_id=_event_run_id(event),
+            turn_id=_event_turn_id(event),
+            seq=int((event or {}).get("seq") or 0),
+        )
+        return {"attempted": False, "reason": "store-unavailable"}
+    try:
+        result = TranscriptProjector(SessionDBTranscriptProjectionStore(db)).reduce(event)
+    except Exception as exc:
+        _diagnostic_warning(
+            "transcript-projector-failed",
+            db=_db_label(db),
+            session_id=stable,
+            event_type=event_type,
+            run_id=_event_run_id(event),
+            turn_id=_event_turn_id(event),
+            seq=int((event or {}).get("seq") or 0),
+            error=str(exc),
+        )
+        return {"attempted": True, "applied": False, "error": str(exc)}
+
+    diagnostics = [
+        {
+            "code": diagnostic.code,
+            "message": diagnostic.message,
+            "fields": diagnostic.fields,
+        }
+        for diagnostic in result.diagnostics
+    ]
+    if not result.applied and diagnostics:
+        _diagnostic_warning(
+            "transcript-projector-skipped",
+            db=_db_label(db),
+            session_id=stable,
+            event_type=event_type,
+            run_id=_event_run_id(event),
+            turn_id=_event_turn_id(event),
+            seq=int((event or {}).get("seq") or 0),
+            diagnostics=diagnostics,
+        )
+    elif result.applied and event_type == "message.complete":
+        emit_dovie_diagnostic(
+            "[dovie-transcript-projector]",
+            {
+                "stage": "message-complete-projected",
+                "session_id": stable,
+                "run_id": _event_run_id(event),
+                "turn_id": _event_turn_id(event),
+                "seq": int((event or {}).get("seq") or 0),
+                "action": result.action,
+                "conversation_message_id": (
+                    result.message.conversation_message_id
+                    if result.message is not None
+                    else ""
+                ),
+                "participant_id": (
+                    result.message.participant_id
+                    if result.message is not None
+                    else ""
+                ),
+            },
+        )
+    return {
+        "attempted": True,
+        "applied": result.applied,
+        "action": result.action,
+        "diagnostics": diagnostics,
+        "conversation_message_id": (
+            result.message.conversation_message_id
+            if result.message is not None
+            else ""
+        ),
+    }
 
 
 def _run_summary(run: dict[str, Any] | None) -> dict[str, Any]:
@@ -1190,14 +1437,10 @@ def _stamp_participant_id(
     context = _run_context_from_frame(frame, run_context)
     # Worker stamps participant_id directly via worker_publish_bridge (H6-v2);
     # RunContext/DB/scope fallback below is legacy/back-compat only.
-    participant_id = str(
-        frame.get("participant_id")
-        or frame.get("participantId")
-        or payload.get("participant_id")
-        or payload.get("participantId")
-        or (context.participant_id if context is not None else "")
-        or ""
-    ).strip()
+    frame_pid = str(frame.get("participant_id") or frame.get("participantId") or "").strip()
+    payload_pid = str(payload.get("participant_id") or payload.get("participantId") or "").strip()
+    ctx_pid = str(context.participant_id if context is not None else "" or "").strip()
+    participant_id = frame_pid or payload_pid or ctx_pid
     scope_hint = (
         str(payload.get("runtime_scope_key") or payload.get("runtimeScopeKey") or "").strip()
         or str(frame.get("runtime_scope_key") or frame.get("runtimeScopeKey") or "").strip()
@@ -1428,6 +1671,7 @@ def record_event(
             # append_run_event — otherwise the event would be projected twice.
             setattr(db, "_team_mission_projecting", True)
             saved = method(stable, frame, participant_id=participant_id)
+            event_for_projection = saved if isinstance(saved, dict) else frame
             if (
                 isinstance(saved, dict)
                 and saved.get("_persistence_disposition") in {"duplicate_terminal", "ignored_after_terminal"}
@@ -1462,6 +1706,21 @@ def record_event(
                     stable, run_id, frame.get("seq"), len(result),
                 )
                 return result
+            _project_team_transcript_event(
+                db=db,
+                stable=stable,
+                event=event_for_projection,
+            )
+            _trace_complete_transcript_coverage(
+                db=db,
+                stable=stable,
+                run_id=run_id,
+                turn_id=turn_id,
+                participant_id=participant_id,
+                event_type=event_type,
+                terminal_event=terminal_event,
+                frame=event_for_projection,
+            )
             if terminal_event:
                 _diagnostic_warning(
                     "terminal-event-persisted",

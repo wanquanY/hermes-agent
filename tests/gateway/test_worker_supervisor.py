@@ -29,9 +29,14 @@ from tui_gateway.run_worker import (
     RunCancelFrame,
     RunStartFrame,
     RunTerminalFrame,
+    encode_outgoing,
 )
 from tui_gateway.services.runtime_proxy import RuntimeScope
-from tui_gateway.services.worker_supervisor import WorkerSupervisor
+from tui_gateway.services.worker_supervisor import (
+    RunWorker,
+    WorkerSupervisor,
+    _DEFAULT_WORKER_STDIO_LIMIT_BYTES,
+)
 
 
 class _Collector:
@@ -199,6 +204,100 @@ async def test_send_unknown_scope_returns_false(tmp_path) -> None:
     ok = await sup.send("never-spawned", "", RunCancelFrame(run_id="x"))
     assert ok is False
     await sup.shutdown_all()
+
+
+class _FakeStdin:
+    def __init__(self) -> None:
+        self.closed = False
+        self.writes: list[bytes] = []
+
+    def is_closing(self) -> bool:
+        return self.closed
+
+    def write(self, data: bytes) -> None:
+        self.writes.append(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeProcess:
+    def __init__(self, stdout: asyncio.StreamReader) -> None:
+        self.stdin = _FakeStdin()
+        self.stdout = stdout
+        self.pid = 4242
+        self.returncode = None
+
+    async def wait(self) -> int:
+        self.returncode = 0
+        return 0
+
+    def terminate(self) -> None:
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+@pytest.mark.asyncio
+async def test_spawn_configures_large_worker_stdio_limit(monkeypatch, tmp_path) -> None:
+    captured: dict[str, int] = {}
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["limit"] = kwargs["limit"]
+        stdout = asyncio.StreamReader(limit=kwargs["limit"])
+        stdout.feed_eof()
+        return _FakeProcess(stdout)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    collector = _Collector()
+    sup = _make_supervisor(collector)
+    try:
+        await sup.ensure(_scope(tmp_path))
+        assert captured["limit"] == _DEFAULT_WORKER_STDIO_LIMIT_BYTES
+    finally:
+        await sup.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_read_loop_dispatches_large_event_frame(tmp_path) -> None:
+    collector = _Collector()
+    sup = _make_supervisor(collector)
+    stdout = asyncio.StreamReader(limit=_DEFAULT_WORKER_STDIO_LIMIT_BYTES)
+    large_text = "x" * (128 * 1024)
+    stdout.feed_data(
+        (
+            encode_outgoing(
+                EventFrame(params={
+                    "type": "message.complete",
+                    "session_id": "sess-large",
+                    "payload": {"text": large_text},
+                })
+            )
+            + "\n"
+        ).encode("utf-8")
+    )
+    stdout.feed_eof()
+    worker = RunWorker(
+        scope=_scope(tmp_path),
+        process=_FakeProcess(stdout),
+        inbound_queue=asyncio.Queue(maxsize=1),
+        created_at=0.0,
+        last_used_at=0.0,
+    )
+
+    await asyncio.gather(
+        sup._read_loop(worker),
+        sup._dispatch_loop(worker),
+    )
+
+    assert len(collector.events) == 1
+    assert collector.events[0][0] == "profile:test-e2e"
+    assert collector.events[0][1].params["payload"]["text"] == large_text
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from agent.dovie_persona_trace import trace_persona_payload
 from .common import *
 from .participant_autocreate import ensure_member_chat_participant
 from hermes_state.profile_dir import resolve_default_agent_dir
@@ -48,6 +49,26 @@ def _run_context_json(run_context: RunContext) -> str:
 
 def _control_plane_home() -> str:
     return str(os.getenv("DOVIE_HERMES_CONTROL_HOME") or get_hermes_home()).strip()
+
+
+def _h9_member_persona_diagnostic(label: str, **fields) -> None:
+    try:
+        run_control._diagnostic_warning(  # noqa: SLF001
+            f"[h9-trace member-persona] {label}",
+            **fields,
+        )
+    except Exception:
+        pass
+
+
+def _h11_transcript_persistence_diagnostic(label: str, **fields) -> None:
+    try:
+        run_control._diagnostic_warning(  # noqa: SLF001
+            f"[h11-trace transcript-persistence] {label}",
+            **fields,
+        )
+    except Exception:
+        pass
 
 
 def _target_member_id_from_params(params: dict) -> str:
@@ -221,6 +242,14 @@ def _submit_message_to_member(
     agent never starts ('prompt worker terminal event did not close active run')."""
     if not conversation_session_id:
         return _err(rid, 4006, "conversation_session_id required")
+    _h11_transcript_persistence_diagnostic(
+        "member-submit-start",
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        target_member_id=target_member_id,
+        text_len=len(str(text or "")),
+        text_preview=str(text or "")[:120].replace("\n", "\\n"),
+    )
     members = _leader_members_from_params(params, mission if isinstance(mission, dict) else {}, db=db)
     member = _find_team_member_by_id(members, target_member_id)
     if not member:
@@ -257,21 +286,30 @@ def _submit_message_to_member(
         "runtimeScopeKey": member_scope,
         "runtime_scope_key": member_scope,
     }
-    try:
-        run_control._diagnostic_warning(  # noqa: SLF001 — same diagnostic channel record_event uses
-            "member-chat-submit",
-            conversation_id=conversation_id,
-            conversation_session_id=conversation_session_id,
-            target_member_id=target_member_id,
-            agent_profile_id=agent_profile_id,
-            member_scope=member_scope,
-            hermes_home=hermes_home,
-            dovie_profile_scope=str(dovie_profile.get("runtimeScopeKey") or ""),
-            dovie_profile_scope_snake=str(dovie_profile.get("runtime_scope_key") or ""),
-            dovie_profile_home=str(dovie_profile.get("hermesHomePath") or ""),
-        )
-    except Exception:
-        pass
+    _h9_member_persona_diagnostic(
+        "member-chat-submit scope prepared",
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        target_member_id=target_member_id,
+        agent_profile_id=agent_profile_id,
+        member_scope=member_scope,
+        hermes_home=hermes_home,
+        dovie_profile_scope=str(dovie_profile.get("runtimeScopeKey") or ""),
+        dovie_profile_scope_snake=str(dovie_profile.get("runtime_scope_key") or ""),
+        dovie_profile_home=str(dovie_profile.get("hermesHomePath") or ""),
+    )
+    trace_persona_payload(
+        "team-mission.member-chat-submit-scope-prepared",
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        target_member_id=target_member_id,
+        agent_profile_id=agent_profile_id,
+        member_scope=member_scope,
+        hermes_home=hermes_home,
+        dovie_profile_scope=str(dovie_profile.get("runtimeScopeKey") or ""),
+        dovie_profile_scope_snake=str(dovie_profile.get("runtime_scope_key") or ""),
+        dovie_profile_home=str(dovie_profile.get("hermesHomePath") or ""),
+    )
     display_name = str(
         member.get("display_name")
         or member.get("displayName")
@@ -280,6 +318,73 @@ def _submit_message_to_member(
         or member.get("name")
         or ""
     ).strip()
+    display_avatar = str(
+        member.get("avatar")
+        or member.get("profile_avatar")
+        or member.get("profileAvatar")
+        or member.get("agent_profile_avatar")
+        or member.get("agentProfileAvatar")
+        or ""
+    ).strip()
+    _h9_member_persona_diagnostic(
+        "hermes member submit resolved",
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        target_member_id=target_member_id,
+        member={
+            "id": member.get("id") or member.get("member_id") or "",
+            "name": member.get("name") or "",
+            "display_name": display_name,
+            "role": member.get("role") or "",
+            "agent_profile_id": (
+                member.get("agent_profile_id")
+                or member.get("agentProfileId")
+                or ""
+            ),
+            "profile_name": (
+                member.get("profile_name")
+                or member.get("profileName")
+                or member.get("agent_profile_name")
+                or member.get("agentProfileName")
+                or ""
+            ),
+        },
+        profile_params={
+            "agent_profile_id": agent_profile_id,
+            "agent_profile_version_id": str(profile_params.get("agent_profile_version_id") or ""),
+            "hermes_home": hermes_home,
+            "dovie_profile_runtime_scope_key": str(dovie_profile.get("runtimeScopeKey") or ""),
+            "dovie_profile_runtime_scope_key_snake": str(dovie_profile.get("runtime_scope_key") or ""),
+            "dovie_profile_home": str(dovie_profile.get("hermesHomePath") or ""),
+        },
+        member_scope=member_scope,
+    )
+    trace_persona_payload(
+        "team-mission.member-submit-resolved",
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        target_member_id=target_member_id,
+        member={
+            "id": member.get("id") or member.get("member_id") or "",
+            "name": member.get("name") or "",
+            "display_name": display_name,
+            "role": member.get("role") or "",
+            "agent_profile_id": (
+                member.get("agent_profile_id")
+                or member.get("agentProfileId")
+                or ""
+            ),
+        },
+        profile_params={
+            "agent_profile_id": agent_profile_id,
+            "agent_profile_version_id": str(profile_params.get("agent_profile_version_id") or ""),
+            "hermes_home": hermes_home,
+            "dovie_profile_runtime_scope_key": str(dovie_profile.get("runtimeScopeKey") or ""),
+            "dovie_profile_runtime_scope_key_snake": str(dovie_profile.get("runtime_scope_key") or ""),
+            "dovie_profile_home": str(dovie_profile.get("hermesHomePath") or ""),
+        },
+        member_scope=member_scope,
+    )
     ensure_member_chat_participant(
         db,
         conversation_session_id=conversation_session_id,
@@ -297,14 +402,7 @@ def _submit_message_to_member(
             agent_profile_version_id=str(profile_params.get("agent_profile_version_id") or ""),
             runtime_scope_key=member_scope,
             display_name=display_name,
-            avatar=str(
-                member.get("avatar")
-                or member.get("profile_avatar")
-                or member.get("profileAvatar")
-                or member.get("agent_profile_avatar")
-                or member.get("agentProfileAvatar")
-                or ""
-            ).strip(),
+            avatar=display_avatar,
         )
     except Exception as exc:
         _log.warning(
@@ -366,12 +464,31 @@ def _submit_message_to_member(
             metadata={"display_title_source": "first_user_message"} if conversation_title else None,
         )
     except Exception as exc:
+        _h11_transcript_persistence_diagnostic(
+            "member-submit-conversation-ensure-failed",
+            conversation_id=conversation_id,
+            conversation_session_id=conversation_session_id,
+            target_member_id=target_member_id,
+            error=str(exc),
+        )
         return _err(rid, 5008, f"team conversation session unavailable: {exc}")
+    _h11_transcript_persistence_diagnostic(
+        "member-submit-conversation-ensured",
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        target_member_id=target_member_id,
+        ensured_session_id=str(
+            (ensured_conversation or {}).get("stable_session_id")
+            or (ensured_conversation or {}).get("session_id")
+            or ""
+        ) if isinstance(ensured_conversation, dict) else "",
+        title=str((ensured_conversation or {}).get("title") or "") if isinstance(ensured_conversation, dict) else "",
+    )
 
     # 3. NOW it is safe to record the user's @-message into the shared
     # conversation transcript. The conv session row exists, FK satisfied.
     try:
-        db.append_message(
+        appended_user_message = db.append_message(
             conversation_session_id,
             role="user",
             content=text,
@@ -382,9 +499,26 @@ def _submit_message_to_member(
                 "display_name": display_name,
             }},
         )
-    except Exception:
+        _h11_transcript_persistence_diagnostic(
+            "member-submit-user-message-appended",
+            conversation_id=conversation_id,
+            conversation_session_id=conversation_session_id,
+            target_member_id=target_member_id,
+            run_target_member_id=target_member_id,
+            append_result=str(appended_user_message),
+            text_len=len(str(text or "")),
+            text_preview=str(text or "")[:120].replace("\n", "\\n"),
+        )
+    except Exception as exc:
         # Should not happen post-ensure, but the original try/except is
         # preserved so an unexpected DB error doesn't abort the submit.
+        _h11_transcript_persistence_diagnostic(
+            "member-submit-user-message-append-failed",
+            conversation_id=conversation_id,
+            conversation_session_id=conversation_session_id,
+            target_member_id=target_member_id,
+            error=str(exc),
+        )
         pass
 
     member_run_home = _home_from_dovie_profile(dovie_profile)
@@ -397,6 +531,24 @@ def _submit_message_to_member(
         execution_scope_key=member_scope,
         control_home=control_home,
         execution_home=member_run_home,
+    )
+    _h9_member_persona_diagnostic(
+        "hermes member run context",
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        target_member_id=target_member_id,
+        run_context=run_context.to_payload(),
+        member_run_home=member_run_home,
+        control_home=control_home,
+    )
+    trace_persona_payload(
+        "team-mission.member-run-context",
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        target_member_id=target_member_id,
+        run_context=run_context.to_payload(),
+        member_run_home=member_run_home,
+        control_home=control_home,
     )
 
     runtime_session_error = _ensure_team_mission_runtime_session_shell(conversation_session_id)
@@ -444,6 +596,49 @@ def _submit_message_to_member(
             },
         },
     }
+    _h11_transcript_persistence_diagnostic(
+        "member-submit-run-dispatch-prepared",
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        target_member_id=target_member_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        stored_session_id=submit_params.get("stored_session_id"),
+        session_id=submit_params.get("session_id"),
+        runtime_scope_key=submit_params.get("runtime_scope_key"),
+        participant_id=run_context.participant_id,
+        persist_user_message=submit_params.get("persist_user_message"),
+        text_len=len(str(text or "")),
+        text_preview=str(text or "")[:120].replace("\n", "\\n"),
+    )
+    _h9_member_persona_diagnostic(
+        "hermes member run.submit prepared",
+        stored_session_id=submit_params.get("stored_session_id"),
+        run_id=submit_params.get("run_id"),
+        turn_id=submit_params.get("turn_id"),
+        agent_profile_id=submit_params.get("agent_profile_id"),
+        agent_profile_version_id=submit_params.get("agent_profile_version_id"),
+        runtime_scope_key=submit_params.get("runtime_scope_key"),
+        dovie_profile_home=str(dovie_profile.get("hermesHomePath") or ""),
+        dovie_profile_runtime_scope_key=str(dovie_profile.get("runtimeScopeKey") or ""),
+        dovie_profile_runtime_scope_key_snake=str(dovie_profile.get("runtime_scope_key") or ""),
+        run_context=run_context.to_payload(),
+        workspace_cwd=workspace_context.get("cwd"),
+    )
+    trace_persona_payload(
+        "team-mission.member-run-submit-prepared",
+        stored_session_id=submit_params.get("stored_session_id"),
+        run_id=submit_params.get("run_id"),
+        turn_id=submit_params.get("turn_id"),
+        agent_profile_id=submit_params.get("agent_profile_id"),
+        agent_profile_version_id=submit_params.get("agent_profile_version_id"),
+        runtime_scope_key=submit_params.get("runtime_scope_key"),
+        dovie_profile_home=str(dovie_profile.get("hermesHomePath") or ""),
+        dovie_profile_runtime_scope_key=str(dovie_profile.get("runtimeScopeKey") or ""),
+        dovie_profile_runtime_scope_key_snake=str(dovie_profile.get("runtime_scope_key") or ""),
+        run_context=run_context.to_payload(),
+        workspace_cwd=workspace_context.get("cwd"),
+    )
     # Dispatch run.submit through the runtime-proxy path so the worker spawns
     # on the member-chat execution scope and runs inside the member's profile home
     # (HERMES_HOME=profiles/<member>). The in-process `_methods["run.submit"]`
@@ -452,6 +647,40 @@ def _submit_message_to_member(
     # the member's SOUL.md / memories / skills never loaded and every member
     # answered with the default "Hermes Agent" persona.
     proxied = _proxy_run_submit_via_worker(submit_params)
+    _h11_transcript_persistence_diagnostic(
+        "member-submit-run-dispatch-result",
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        target_member_id=target_member_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        runtime_scope_key=member_scope,
+        ok=bool(proxied.get("ok")),
+        error=proxied.get("error") or "",
+        reason=proxied.get("reason") or "",
+    )
+    _h9_member_persona_diagnostic(
+        "hermes member proxy result",
+        stored_session_id=conversation_session_id,
+        target_member_id=target_member_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        member_scope=member_scope,
+        ok=bool(proxied.get("ok")),
+        error=proxied.get("error") or "",
+        reason=proxied.get("reason") or "",
+    )
+    trace_persona_payload(
+        "team-mission.member-proxy-result",
+        stored_session_id=conversation_session_id,
+        target_member_id=target_member_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        member_scope=member_scope,
+        ok=bool(proxied.get("ok")),
+        error=proxied.get("error") or "",
+        reason=proxied.get("reason") or "",
+    )
     if proxied.get("error"):
         return _err(rid, 5020, proxied["error"])
     if not proxied.get("ok"):

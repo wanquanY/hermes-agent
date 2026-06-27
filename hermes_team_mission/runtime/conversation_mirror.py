@@ -80,6 +80,7 @@ def _append_message_once(
     role: str,
     content: str,
     metadata: dict[str, Any],
+    participant_id: str = "",
     replace_existing_content: bool = False,
 ) -> bool:
     if not session_id or not content:
@@ -118,7 +119,13 @@ def _append_message_once(
     except Exception:
         pass
     try:
-        db.append_message(session_id, role, content, metadata=metadata)
+        db.append_message(
+            session_id,
+            role,
+            content,
+            participant_id=participant_id,
+            metadata=metadata,
+        )
         return True
     except Exception:
         return False
@@ -197,6 +204,23 @@ def append_user_task_message(
 def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     return dict(payload)
+
+
+def _event_participant_id(event: dict[str, Any], binding: dict[str, Any] | None = None) -> str:
+    payload = _event_payload(event)
+    binding = binding if isinstance(binding, dict) else {}
+    binding_metadata = mapping(binding.get("metadata"))
+    run_context = mapping(binding_metadata.get("run_context"))
+    return text(
+        event.get("participant_id")
+        or event.get("participantId")
+        or payload.get("participant_id")
+        or payload.get("participantId")
+        or binding_metadata.get("participant_id")
+        or binding_metadata.get("participantId")
+        or run_context.get("participant_id")
+        or run_context.get("participantId")
+    )
 
 
 def _payload_stream_text(payload: dict[str, Any]) -> str:
@@ -349,6 +373,7 @@ def _append_final_deliverable_message(
     node: dict[str, Any],
     binding: dict[str, Any],
     content: str,
+    participant_id: str = "",
     artifact_refs: list[dict[str, Any]] | None = None,
 ) -> bool:
     task_id = _task_id_from_metadata(
@@ -370,6 +395,10 @@ def _append_final_deliverable_message(
         "source_session_id": source_session_id,
         "source_seq": source_seq,
     }
+    participant_id = text(participant_id)
+    if participant_id:
+        team_ref["participant_id"] = participant_id
+        team_ref["participantId"] = participant_id
     if artifacts:
         team_ref["artifact_refs"] = artifacts
         team_ref["artifactRefs"] = artifacts
@@ -382,8 +411,10 @@ def _append_final_deliverable_message(
             **({"run_id": text(conversation_run_id)} if text(conversation_run_id) else {}),
             **({"turn_id": text(turn_id)} if text(turn_id) else {}),
             **({"client_message_id": text(client_message_id)} if text(client_message_id) else {}),
+            **({"participant_id": participant_id, "participantId": participant_id} if participant_id else {}),
             "team_mission": team_ref,
         },
+        participant_id=participant_id,
         replace_existing_content=True,
     )
 
@@ -504,6 +535,7 @@ def recover_final_deliverable_messages(db: Any, conversation: dict[str, Any] | N
             node=node,
             binding=dict(binding or {}),
             content=final_deliverable_text,
+            participant_id=_event_participant_id(event, binding),
             artifact_refs=artifact_refs_from_event(event),
         ):
             _upsert_legacy_imported_deliverable(
@@ -630,6 +662,7 @@ def mirror_event_to_conversation(
         except Exception:
             binding = {}
     binding = dict(binding or {})
+    participant_id = _event_participant_id(frame, binding)
     source_session_id = text(frame.get("stored_session_id") or binding.get("session_id"))
     if target_session_id == source_session_id:
         return {}
@@ -719,6 +752,7 @@ def mirror_event_to_conversation(
                 node=node,
                 binding=binding,
                 content=final_deliverable_text,
+                participant_id=participant_id,
                 artifact_refs=artifact_refs_from_event(frame),
             )
         return {}
@@ -729,6 +763,7 @@ def mirror_event_to_conversation(
             "source_seq": source_seq,
             "source_session_id": source_session_id,
             "source_runtime_scope_key": text(frame.get("runtime_scope_key") or binding.get("runtime_scope_key")),
+            **({"participant_id": participant_id, "participantId": participant_id} if participant_id else {}),
             **identity_payload,
             "node_kind": text(node.get("kind")),
             "team_mission_final_deliverable": is_final_deliverable,
@@ -767,6 +802,7 @@ def mirror_event_to_conversation(
             node=node,
             binding=binding,
             content=final_deliverable_text,
+            participant_id=participant_id,
             artifact_refs=artifact_refs_from_event(mirror),
         )
     saved = db.append_run_event(target_session_id, mirror)

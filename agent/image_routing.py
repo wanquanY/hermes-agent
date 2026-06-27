@@ -7,10 +7,10 @@ Two modes:
             OpenAI chat.completions) already translate these into their
             vendor-specific multimodal formats.
 
-  text    — run ``vision_analyze`` on each image up-front and prepend the
-            description to the user's text. The model never sees the pixels;
-            it only sees a lossy text summary. This is the pre-existing
-            behaviour and still the right choice for non-vision models.
+  text    — expose exact image handles plus a mandatory ``vision_analyze``
+            instruction in the user turn. The visible tool lifecycle performs
+            the auxiliary vision call, so the UI can show progress and the
+            image is analysed only once.
 
 The decision is made once per message turn by :func:`decide_image_input_mode`.
 It reads ``agent.image_input_mode`` from config.yaml (``auto`` | ``native``
@@ -37,6 +37,8 @@ from __future__ import annotations
 import base64
 import logging
 import mimetypes
+import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,6 +46,86 @@ logger = logging.getLogger(__name__)
 
 
 _VALID_MODES = frozenset({"auto", "native", "text"})
+
+
+# Image extensions used by extract_image_refs(). Kept tight on purpose: we only
+# auto-attach files the model can actually see. Documents and archives are
+# routed through the document/file attachment path instead.
+_IMAGE_EXTS = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".heic",
+)
+_IMAGE_EXT_PATTERN = "|".join(e.lstrip(".") for e in _IMAGE_EXTS)
+
+_LOCAL_IMAGE_PATH_RE = re.compile(
+    r"(?<![/:\w.])(?:~/|/)(?:[\w.\-]+/)*[\w.\-]+\.(?:"
+    + _IMAGE_EXT_PATTERN
+    + r")\b",
+    re.IGNORECASE,
+)
+_IMAGE_URL_RE = re.compile(
+    r"https?://[^\s<>\"']+?\.(?:"
+    + _IMAGE_EXT_PATTERN
+    + r")(?:\?[^\s<>\"']*)?",
+    re.IGNORECASE,
+)
+
+
+def extract_image_refs(text: str) -> Tuple[List[str], List[str]]:
+    """Scan text for local image paths and remote image URLs.
+
+    Returns (local_paths, urls). Local paths must exist on disk; URLs are
+    syntax-filtered only and left for the provider or vision tool to fetch.
+    References inside fenced code blocks and inline backticks are ignored.
+    """
+    if not isinstance(text, str) or not text:
+        return [], []
+
+    code_spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"```[^\n]*\n.*?```", text, re.DOTALL):
+        code_spans.append((match.start(), match.end()))
+    for match in re.finditer(r"`[^`\n]+`", text):
+        code_spans.append((match.start(), match.end()))
+
+    def in_code(pos: int) -> bool:
+        return any(start <= pos < end for start, end in code_spans)
+
+    local_paths: list[str] = []
+    seen_paths: set[str] = set()
+    for match in _LOCAL_IMAGE_PATH_RE.finditer(text):
+        if in_code(match.start()):
+            continue
+        raw = match.group(0)
+        expanded = os.path.expanduser(raw)
+        try:
+            if not os.path.isfile(expanded):
+                continue
+        except OSError:
+            continue
+        if expanded in seen_paths:
+            continue
+        seen_paths.add(expanded)
+        local_paths.append(expanded)
+
+    urls: list[str] = []
+    seen_urls: set[str] = set()
+    for match in _IMAGE_URL_RE.finditer(text):
+        if in_code(match.start()):
+            continue
+        url = match.group(0).rstrip(".,;:!?)]>")
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        urls.append(url)
+
+    return local_paths, urls
 
 
 # Strict YAML/JSON boolean coercion for capability overrides.
@@ -330,34 +412,32 @@ def _file_to_data_url(path: Path) -> Optional[str]:
 def build_native_content_parts(
     user_text: str,
     image_paths: List[str],
+    image_urls: Optional[List[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Build an OpenAI-style ``content`` list for a user turn.
 
     Shape:
       [{"type": "text", "text": "...\\n\\n[Image attached at: /local/path]"},
        {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+       {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
        ...]
 
-    The local path of each successfully attached image is appended to the
-    text part as ``[Image attached at: <path>]``. The model still sees the
-    pixels via the ``image_url`` part (full native vision); the path note
-    just gives it a string handle so MCP/skill tools that take an image
-    path or URL argument can be invoked on the same image without an
-    extra round-trip. This parallels the text-mode hint produced by
-    ``Runner._enrich_message_with_vision`` (``vision_analyze using image_url:
-    <path>``) so behaviour is consistent across both image input modes.
+    Local paths are embedded as base64 data URLs. Remote URLs are passed
+    through; the provider fetches them server-side. The text part receives a
+    stable handle for each image so tools can refer to the same source.
 
     Images are attached at their native size. If a provider rejects the
     request because an image is too large (e.g. Anthropic's 5 MB per-image
     ceiling), the agent's retry loop transparently shrinks and retries
     once — see ``run_agent._try_shrink_image_parts_in_messages``.
 
-    Returns (content_parts, skipped_paths). Skipped paths are files that
-    couldn't be read from disk and are NOT advertised in the path hints.
+    Returns (content_parts, skipped_paths). Skipped paths are local files that
+    could not be read; URLs are not validated here.
     """
     skipped: List[str] = []
     image_parts: List[Dict[str, Any]] = []
     attached_paths: List[str] = []
+    attached_urls: List[str] = []
 
     for raw_path in image_paths:
         p = Path(raw_path)
@@ -374,16 +454,26 @@ def build_native_content_parts(
         })
         attached_paths.append(str(raw_path))
 
+    for url in image_urls or []:
+        url = (url or "").strip()
+        if not url:
+            continue
+        image_parts.append({
+            "type": "image_url",
+            "image_url": {"url": url},
+        })
+        attached_urls.append(url)
+
     text = (user_text or "").strip()
 
     # If at least one image attached, build a single text part that combines
-    # the user's caption (or a neutral default) with one path hint per image.
-    if attached_paths:
+    # the user's caption (or a neutral default) with one hint per image.
+    if attached_paths or attached_urls:
         base_text = text or "What do you see in this image?"
-        path_hints = "\n".join(
-            f"[Image attached at: {p}]" for p in attached_paths
-        )
-        combined_text = f"{base_text}\n\n{path_hints}"
+        hint_lines: List[str] = []
+        hint_lines.extend(f"[Image attached at: {p}]" for p in attached_paths)
+        hint_lines.extend(f"[Image attached: {u}]" for u in attached_urls)
+        combined_text = f"{base_text}\n\n" + "\n".join(hint_lines)
         parts: List[Dict[str, Any]] = [{"type": "text", "text": combined_text}]
         parts.extend(image_parts)
         return parts, skipped
@@ -398,4 +488,5 @@ def build_native_content_parts(
 __all__ = [
     "decide_image_input_mode",
     "build_native_content_parts",
+    "extract_image_refs",
 ]

@@ -1461,6 +1461,26 @@ def load_soul_md(context_length: Optional[int] = None) -> Optional[str]:
     ``skip_soul=True`` so SOUL.md isn't injected twice.
     """
     _log_dovie_prompt_builder_stage("load-soul-enter")
+    # BUG-7 trace: dump the actual HERMES_HOME resolution at the exact
+    # point SOUL.md is fetched. If contextvar_override / ENV / resolved
+    # disagree here we can pin the cause without inspecting downstream
+    # silent fallback. Cheap (one stat call later); never raises.
+    try:
+        from agent.dovie_persona_trace import trace_persona_payload as _trace_persona_payload_local
+        from hermes_constants import (
+            get_hermes_home_override as _get_hermes_home_override_local,
+        )
+        import os as _os_for_soul_trace
+
+        _trace_persona_payload_local(
+            "prompt-builder.load-soul.home-resolution",
+            contextvar_override=_get_hermes_home_override_local() or "",
+            env_HERMES_HOME=_os_for_soul_trace.environ.get("HERMES_HOME") or "",
+            resolved_home=str(get_hermes_home()),
+            context_length=context_length,
+        )
+    except Exception:
+        pass
     soul_path = get_hermes_home() / "SOUL.md"
     _log_dovie_prompt_builder_stage("load-soul-path", path=str(soul_path))
     try:

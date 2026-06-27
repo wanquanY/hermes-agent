@@ -197,8 +197,9 @@ def _parse_with_dovie_mineru_proxy(
     else:
         if path is None:
             raise MinerUError("Dovie MinerU proxy local parsing requires 'path'")
+        file_bytes = path.read_bytes()
         fields["file_name"] = path.name
-        files["file"] = (path.name, path.read_bytes(), mime_type or "application/octet-stream")
+        files["file"] = (path.name, file_bytes, mime_type or "application/octet-stream")
 
     result = _http_post_multipart(
         proxy_url,

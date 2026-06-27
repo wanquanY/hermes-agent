@@ -59,6 +59,12 @@ class _FakeDB:
     def get_messages_as_conversation(self, session_id: str):
         return list(self.messages)
 
+    def get_conversation_message_read_model(self, session_id: str):
+        return [{"role": "assistant", "content": f"canonical:{session_id}"}]
+
+    def get_session_index(self, session_id: str):
+        return {"session_id": session_id, "conversation_kind": "team"}
+
     def append_message(self, session_id: str, role: str, content: str | None = None, **kwargs):
         self.appended.append((session_id, role, content))
         self.messages.append({"role": role, "content": content})
@@ -132,6 +138,45 @@ async def test_append_message_proxy_writes_through_main(monkeypatch: pytest.Monk
     assert reply.error is None
     assert reply.result == 2
     assert db.appended == [("session-1", "user", "hi")]
+
+
+@pytest.mark.asyncio
+async def test_projector_read_model_methods_are_exposed_to_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FakeDB()
+    monkeypatch.setattr(
+        "tui_gateway.server._db_for_stable_session",
+        lambda _stable: db,
+        raising=False,
+    )
+    supervisor = WorkerSupervisor(
+        on_event=_noop,
+        on_interactive_request=_noop,
+        on_run_terminal=_noop,
+    )
+
+    read_model_reply = await supervisor._execute_db_rpc(
+        DBRpcRequestFrame(
+            id="1",
+            method="db.get_conversation_message_read_model",
+            params=[["team-session-1"], {}],
+            db_scope={"stable_session_id": "team-session-1"},
+        )
+    )
+    session_index_reply = await supervisor._execute_db_rpc(
+        DBRpcRequestFrame(
+            id="2",
+            method="db.get_session_index",
+            params=[["team-session-1"], {}],
+            db_scope={"stable_session_id": "team-session-1"},
+        )
+    )
+
+    assert read_model_reply.error is None
+    assert read_model_reply.result == [{"role": "assistant", "content": "canonical:team-session-1"}]
+    assert session_index_reply.error is None
+    assert session_index_reply.result["conversation_kind"] == "team"
 
 
 @pytest.mark.asyncio

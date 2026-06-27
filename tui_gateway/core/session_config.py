@@ -481,9 +481,43 @@ def _persist_live_session_system_prompt(session: dict | None) -> None:
     try:
         prompt = agent._build_system_prompt(None)
         agent._cached_system_prompt = prompt
+        prompt_scope_key = _system_prompt_execution_scope_key(session, agent)
+        if prompt_scope_key:
+            update_scoped = getattr(db, "update_scoped_system_prompt", None)
+            if not callable(update_scoped):
+                return
+            update_scoped(
+                getattr(agent, "session_id", None) or session_key,
+                prompt_scope_key,
+                prompt,
+            )
+            return
         db.update_system_prompt(getattr(agent, "session_id", None) or session_key, prompt)
     except Exception:
         logger.debug("failed to persist live session system prompt", exc_info=True)
+
+
+def _system_prompt_execution_scope_key(session: dict, agent: Any) -> str:
+    session_key = str(session.get("session_key") or getattr(agent, "session_id", "") or "").strip()
+    for context in (
+        session.get("run_context"),
+        getattr(agent, "run_context", None),
+        getattr(agent, "_run_context", None),
+    ):
+        conversation_session_id = str(
+            getattr(context, "conversation_session_id", "") or ""
+        ).strip()
+        execution_scope_key = str(
+            getattr(context, "execution_scope_key", "") or ""
+        ).strip()
+        if (
+            conversation_session_id
+            and execution_scope_key
+            and conversation_session_id == session_key
+            and execution_scope_key != session_key
+        ):
+            return execution_scope_key
+    return ""
 
 
 def _append_model_switch_marker(session: dict | None, *, model: str, provider: str) -> None:

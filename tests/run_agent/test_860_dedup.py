@@ -101,6 +101,33 @@ class TestFlushDeduplication:
             rows = db.get_messages(agent.session_id)
             assert len(rows) == 3, f"Expected 3 total messages, got {len(rows)}"
 
+    def test_team_conversation_flush_is_owned_by_projector(self):
+        """Team transcripts are projected from run_events, not worker flush."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = SessionDB(db_path=db_path)
+
+            agent = self._make_agent(db)
+            db.upsert_session_index(
+                session_id=agent.session_id,
+                source="team_mission",
+                conversation_kind="team",
+                started_at=1.0,
+                updated_at=1.0,
+            )
+
+            messages = [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "projector should own this"},
+            ]
+
+            agent._flush_messages_to_session_db(messages, [])
+
+            assert db.get_messages(agent.session_id) == []
+            assert agent._last_flushed_db_idx == len(messages)
+
     def test_persist_session_multiple_calls_no_duplication(self):
         """Multiple _persist_session calls don't duplicate DB entries."""
         from hermes_state import SessionDB

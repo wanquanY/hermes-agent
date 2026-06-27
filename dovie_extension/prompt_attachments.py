@@ -66,13 +66,16 @@ def format_document_attachment_context(attachments: list[dict[str, Any]] | None)
         return ""
     rows: list[str] = []
     for index, item in enumerate(attachments, 1):
-        if not isinstance(item, dict) or not is_document_attachment(item):
+        if not isinstance(item, dict):
             continue
         name = _attachment_name(item)
         path = _attachment_path(item)
         url = _attachment_url(item)
         mime = _attachment_mime(item)
         file_type = _attachment_file_type(item, path, url, name)
+        is_document = is_document_attachment(item)
+        if not is_document:
+            continue
         parse_args: list[str] = []
         if path:
             parse_args.append(f"path={path!r}")

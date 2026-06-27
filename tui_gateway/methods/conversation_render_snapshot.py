@@ -71,6 +71,74 @@ def _structural_run_events(events: list[Any]) -> list[dict[str, Any]]:
     return [dict(event) for event in events if _is_structural_run_event(event)]
 
 
+def _trace_transcript_read_model(label: str, **fields: Any) -> None:
+    try:
+        logger.warning("[h11-trace transcript-persistence] %s %s", label, fields)
+    except Exception:
+        pass
+
+
+def _message_probe(message: Any) -> dict[str, Any]:
+    if not isinstance(message, dict):
+        return {"type": type(message).__name__}
+    metadata = _message_metadata(message)
+    content = _text(message.get("content") or message.get("text"))
+    return {
+        "id": _text(message.get("id") or message.get("message_id") or message.get("messageId")),
+        "role": _text(message.get("role")),
+        "participant_id": _message_participant_id(message),
+        "run_id": _text(metadata.get("run_id") or metadata.get("runId") or _message_source_run_id(message)),
+        "turn_id": _text(metadata.get("turn_id") or metadata.get("turnId")),
+        "content_len": len(content),
+        "content_preview": content[:120].replace("\n", "\\n"),
+    }
+
+
+def _event_probe(event: Any) -> dict[str, Any]:
+    if not isinstance(event, dict):
+        return {"type": type(event).__name__}
+    payload = _record(event.get("payload"))
+    content = _text(
+        payload.get("text")
+        or payload.get("content")
+        or payload.get("output")
+        or payload.get("final_response")
+        or payload.get("finalResponse")
+    )
+    return {
+        "type": _text(event.get("type")),
+        "seq": event.get("seq"),
+        "run_id": _event_run_id(event),
+        "turn_id": _text(event.get("turn_id") or event.get("turnId") or payload.get("turn_id") or payload.get("turnId")),
+        "participant_id": _event_participant_id(event),
+        "status": _text(payload.get("status")),
+        "content_len": len(content),
+        "content_preview": content[:120].replace("\n", "\\n"),
+    }
+
+
+def _run_ids_from_render_messages(messages: list[dict[str, Any]]) -> list[str]:
+    run_ids = sorted(item for item in _covered_render_run_ids(messages) if item)
+    return run_ids
+
+
+def _missing_complete_render_messages(
+    *,
+    messages: list[dict[str, Any]],
+    raw_run_events: list[Any],
+) -> list[dict[str, Any]]:
+    covered = _covered_render_run_ids(messages)
+    complete_messages = _team_render_messages_from_run_events(raw_run_events)
+    missing: list[dict[str, Any]] = []
+    for message in complete_messages:
+        metadata = _message_metadata(message)
+        run_id = _text(metadata.get("run_id") or metadata.get("runId") or _message_source_run_id(message))
+        if run_id and run_id in covered:
+            continue
+        missing.append(message)
+    return missing
+
+
 def _mark_transport_truncated(result: dict[str, Any]) -> None:
     result["transportTruncated"] = True
     page_info = result.get("pageInfo")
@@ -480,8 +548,8 @@ def _participant_id_for_message_from_events(
 
 
 def _with_message_participant_id(message: dict[str, Any], participant_id: str) -> dict[str, Any]:
-    participant_id = _text(participant_id)
-    if not participant_id or _message_participant_id(message):
+    participant_id = _text(participant_id) or _message_participant_id(message)
+    if not participant_id:
         return message
     next_message = dict(message)
     next_message["participant_id"] = participant_id
@@ -770,15 +838,48 @@ def _team_conversation_snapshot(
     if error:
         return error
     messages = list(page.get("messages") or []) if isinstance(page, dict) else []
+    page_messages = list(messages)
+    graph_recent_messages = list(graph.get("recent_messages") or graph.get("recentMessages") or [])
     if not messages:
-        messages = list(graph.get("recent_messages") or graph.get("recentMessages") or [])
+        messages = graph_recent_messages
     raw_run_events = list(page.get("runEvents") or []) if isinstance(page, dict) else []
+    fallback_from_run_events = False
     if not messages:
         # CR-P2.4: team timeline rendering must not fall back to
         # team_mission_events. If no durable message rows exist yet, derive
         # renderable assistant messages from authoritative run_events.seq.
         messages = _team_render_messages_from_run_events(raw_run_events)
+        fallback_from_run_events = True
     messages = _normalize_team_render_messages(messages, run_events=raw_run_events)
+    missing_complete_messages = _missing_complete_render_messages(
+        messages=messages,
+        raw_run_events=raw_run_events,
+    )
+    # BUG-6 fix: when the persisted messages cover only part of the
+    # ``run_events.message.complete`` set, fill the gap from run_events
+    # so the rendered transcript matches the canonical event log. This
+    # protects against:
+    #   - TranscriptProjector race / transient failure left a half-state
+    #   - Legacy conversations created before the projector landed
+    #   - Phase-4 backfill not yet run
+    # Read-time only: nothing is written back to the ``messages`` table.
+    # Persisted messages take precedence (their content/metadata is
+    # canonical); the fill-in is appended and ``_normalize_team_render_messages``
+    # dedupes by render identity. Trace ``filled_missing_complete_run_ids``
+    # makes the patch visible in [h7-trace] logs.
+    filled_missing_complete_messages: list[dict[str, Any]] = []
+    if missing_complete_messages and not fallback_from_run_events:
+        filled_missing_complete_messages = list(missing_complete_messages)
+        messages = _normalize_team_render_messages(
+            list(messages) + filled_missing_complete_messages,
+            run_events=raw_run_events,
+        )
+        # Recompute missing now that we have filled — keeps the trace
+        # field honest about what is still unrenderable.
+        missing_complete_messages = _missing_complete_render_messages(
+            messages=messages,
+            raw_run_events=raw_run_events,
+        )
     page_info = (
         page.get("pageInfo")
         if isinstance(page, dict) and isinstance(page.get("pageInfo"), dict)
@@ -793,6 +894,33 @@ def _team_conversation_snapshot(
         conversation=conversation,
         mission=mission,
         messages=messages,
+    )
+    complete_events = [
+        event for event in raw_run_events
+        if isinstance(event, dict) and _text(event.get("type")) == "message.complete"
+    ]
+    _trace_transcript_read_model(
+        "render-read-model",
+        projection_source=projection_source,
+        identifier=identifier,
+        session_id=session_id,
+        conversation_id=_text(conversation.get("conversation_id") or conversation.get("conversationId")),
+        mission_id=_text(mission.get("mission_id") or mission.get("missionId")),
+        page_message_count=len(page_messages),
+        graph_recent_message_count=len(graph_recent_messages),
+        raw_run_event_count=len(raw_run_events),
+        raw_message_complete_count=len(complete_events),
+        fallback_from_run_events=fallback_from_run_events,
+        normalized_message_count=len(messages),
+        returned_run_event_count=len(run_events),
+        covered_run_ids=_run_ids_from_render_messages(messages),
+        complete_event_run_ids=sorted({_event_run_id(event) for event in complete_events if _event_run_id(event)}),
+        missing_complete_run_ids=_run_ids_from_render_messages(missing_complete_messages),
+        filled_missing_complete_run_ids=_run_ids_from_render_messages(filled_missing_complete_messages),
+        message_tail=[_message_probe(message) for message in messages[-5:]],
+        complete_event_tail=[_event_probe(event) for event in complete_events[-5:]],
+        missing_complete_tail=[_message_probe(message) for message in missing_complete_messages[-5:]],
+        page_info=page_info if isinstance(page_info, dict) else {},
     )
     branch_info = page.get("branchInfo") if isinstance(page, dict) else None
     return _ok(

@@ -16,6 +16,7 @@ from agent.image_routing import (
     _supports_vision_override,
     build_native_content_parts,
     decide_image_input_mode,
+    extract_image_refs,
 )
 
 
@@ -441,6 +442,113 @@ class TestBuildNativeContentParts:
         assert url.startswith("data:image/png;base64,"), (
             f"Expected MIME sniffing to detect PNG bytes regardless of .webp suffix, got: {url[:60]}"
         )
+
+    def test_url_only_passes_remote_image_url_through(self):
+        parts, skipped = build_native_content_parts(
+            "what is this?",
+            [],
+            image_urls=["https://example.com/diagram.png"],
+        )
+
+        assert skipped == []
+        assert len(parts) == 2
+        assert parts[0]["type"] == "text"
+        assert "[Image attached: https://example.com/diagram.png]" in parts[0]["text"]
+        assert parts[1] == {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/diagram.png"},
+        }
+
+    def test_mixed_local_path_and_remote_url_parts(self, tmp_path: Path):
+        img = tmp_path / "local.png"
+        img.write_bytes(_png_bytes())
+
+        parts, skipped = build_native_content_parts(
+            "compare",
+            [str(img)],
+            image_urls=["https://example.com/remote.jpg"],
+        )
+
+        assert skipped == []
+        text_part = parts[0]
+        image_parts = [p for p in parts if p.get("type") == "image_url"]
+        assert text_part["text"].count("[Image attached") == 2
+        assert str(img) in text_part["text"]
+        assert "https://example.com/remote.jpg" in text_part["text"]
+        assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
+        assert image_parts[1]["image_url"]["url"] == "https://example.com/remote.jpg"
+
+
+# ─── extract_image_refs ──────────────────────────────────────────────────────
+
+
+class TestExtractImageRefs:
+    def test_empty_or_none_returns_empty(self):
+        assert extract_image_refs("") == ([], [])
+        assert extract_image_refs(None) == ([], [])  # type: ignore[arg-type]
+
+    def test_finds_existing_absolute_path(self, tmp_path: Path):
+        img = tmp_path / "screenshot.png"
+        img.write_bytes(_png_bytes())
+
+        paths, urls = extract_image_refs(f"Look at {img} and summarize it.")
+
+        assert paths == [str(img)]
+        assert urls == []
+
+    def test_skips_nonexistent_local_path(self, tmp_path: Path):
+        paths, urls = extract_image_refs(f"Look at {tmp_path / 'missing.png'}.")
+
+        assert paths == []
+        assert urls == []
+
+    def test_finds_http_image_url(self):
+        paths, urls = extract_image_refs("Check https://example.com/photos/cat.png.")
+
+        assert paths == []
+        assert urls == ["https://example.com/photos/cat.png"]
+
+    def test_finds_https_url_with_query_string(self):
+        paths, urls = extract_image_refs("Diagram: https://cdn.example.com/a.jpeg?size=large&v=2")
+
+        assert paths == []
+        assert urls == ["https://cdn.example.com/a.jpeg?size=large&v=2"]
+
+    def test_ignores_paths_and_urls_in_code_blocks(self, tmp_path: Path):
+        img = tmp_path / "real.png"
+        img.write_bytes(_png_bytes())
+        text = (
+            f"Attach {img}\n"
+            "```\n"
+            "/tmp/example.png\n"
+            "https://example.com/example.png\n"
+            "```\n"
+            "`https://example.com/inline.png`"
+        )
+
+        paths, urls = extract_image_refs(text)
+
+        assert paths == [str(img)]
+        assert urls == []
+
+    def test_dedupes_paths_and_urls(self, tmp_path: Path):
+        img = tmp_path / "dup.png"
+        img.write_bytes(_png_bytes())
+        text = f"{img} {img} https://example.com/x.png https://example.com/x.png"
+
+        paths, urls = extract_image_refs(text)
+
+        assert paths == [str(img)]
+        assert urls == ["https://example.com/x.png"]
+
+    def test_mixed_paths_and_urls(self, tmp_path: Path):
+        img = tmp_path / "local.png"
+        img.write_bytes(_png_bytes())
+
+        paths, urls = extract_image_refs(f"Compare {img} with https://example.com/design/v2.png")
+
+        assert paths == [str(img)]
+        assert urls == ["https://example.com/design/v2.png"]
 
 
 # ─── Oversize handling ───────────────────────────────────────────────────────

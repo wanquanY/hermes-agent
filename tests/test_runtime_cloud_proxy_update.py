@@ -76,6 +76,18 @@ def _fingerprint(token: str, origin: str) -> str:
     return hashlib.sha256(f"{token}|{origin}".encode()).hexdigest()[:12]
 
 
+def _managed_proxy_env(origin: str) -> dict[str, str]:
+    origin = origin.rstrip("/")
+    return {
+        "DOVIE_MINERU_PROXY_URL": f"{origin}/api/v1/llm-proxy/v1/document-parse",
+        "DOVIE_SERPER_PROXY_URL": f"{origin}/api/v1/llm-proxy/v1/serper-search",
+        "DOVIE_WEB_PARSE_PROXY_URL": f"{origin}/api/v1/llm-proxy/v1/web-page-parse",
+        "DOVIE_IMAGE_GENERATE_PROXY_URL": f"{origin}/api/v1/llm-proxy/v1/image-generate",
+        "DOVIE_VIDEO_GENERATE_PROXY_URL": f"{origin}/api/v1/llm-proxy/v1/video-generate",
+        "DOVIE_SKILL_CATEGORIES_URL": f"{origin}/api/v1/llm-proxy/v1/skill-market/categories",
+    }
+
+
 def _install_fake_supervisor(monkeypatch: pytest.MonkeyPatch, supervisor: _FakeSupervisor) -> None:
     monkeypatch.setattr(
         "tui_gateway.services.worker_runtime.worker_supervisor",
@@ -91,6 +103,8 @@ async def test_runtime_cloud_proxy_update_sets_main_process_env(
     _install_fake_supervisor(monkeypatch, supervisor)
     monkeypatch.delenv("DOVIE_LLM_RUNTIME_TOKEN", raising=False)
     monkeypatch.delenv("DOVIE_API_ORIGIN", raising=False)
+    for key in _managed_proxy_env("https://old.example.test"):
+        monkeypatch.delenv(key, raising=False)
 
     result = await runtime_cloud_proxy.apply_runtime_cloud_proxy_update(
         {"runtime_token": "token-1", "api_origin": "https://api.example.test"}
@@ -99,10 +113,15 @@ async def test_runtime_cloud_proxy_update_sets_main_process_env(
     assert result["ok"] is True
     assert os.environ["DOVIE_LLM_RUNTIME_TOKEN"] == "token-1"
     assert os.environ["DOVIE_API_ORIGIN"] == "https://api.example.test"
+    assert (
+        os.environ["DOVIE_MINERU_PROXY_URL"]
+        == "https://api.example.test/api/v1/llm-proxy/v1/document-parse"
+    )
     assert supervisor.updates == [
         {
             "DOVIE_LLM_RUNTIME_TOKEN": "token-1",
             "DOVIE_API_ORIGIN": "https://api.example.test",
+            **_managed_proxy_env("https://api.example.test"),
         }
     ]
 
@@ -123,6 +142,7 @@ async def test_runtime_cloud_proxy_update_broadcasts_to_workers(
         {
             "DOVIE_LLM_RUNTIME_TOKEN": "worker-token",
             "DOVIE_API_ORIGIN": "https://runtime.example.test",
+            **_managed_proxy_env("https://runtime.example.test"),
         }
     ]
 
@@ -156,8 +176,34 @@ async def test_runtime_cloud_proxy_update_with_empty_token_clears_env(
 
     assert "DOVIE_LLM_RUNTIME_TOKEN" not in os.environ
     assert os.environ["DOVIE_API_ORIGIN"] == "https://origin.test"
+    assert (
+        os.environ["DOVIE_MINERU_PROXY_URL"]
+        == "https://origin.test/api/v1/llm-proxy/v1/document-parse"
+    )
     assert supervisor.updates[-1]["DOVIE_LLM_RUNTIME_TOKEN"] == ""
     assert result["fingerprint"] == _fingerprint("", "https://origin.test")
+
+
+@pytest.mark.asyncio
+async def test_runtime_cloud_proxy_update_with_empty_origin_clears_managed_proxy_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = _FakeSupervisor()
+    _install_fake_supervisor(monkeypatch, supervisor)
+    monkeypatch.setenv("DOVIE_API_ORIGIN", "https://old-origin.test")
+    for key, value in _managed_proxy_env("https://old-origin.test").items():
+        monkeypatch.setenv(key, value)
+
+    result = await runtime_cloud_proxy.apply_runtime_cloud_proxy_update(
+        {"api_origin": ""}
+    )
+
+    assert result["ok"] is True
+    assert "DOVIE_API_ORIGIN" not in os.environ
+    for key in _managed_proxy_env("https://old-origin.test"):
+        assert key not in os.environ
+        assert supervisor.updates[-1][key] == ""
+    assert supervisor.updates[-1]["DOVIE_API_ORIGIN"] == ""
 
 
 @pytest.mark.asyncio

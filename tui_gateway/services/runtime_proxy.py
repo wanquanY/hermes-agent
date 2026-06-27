@@ -181,7 +181,7 @@ def runtime_scope_from_params(params: dict[str, Any]) -> RuntimeScope:
         or profile.get("runtime_scope_key")
         or ""
     ).strip()
-    if explicit_scope_key.startswith(("profile:", "team:", "draft:")):
+    if explicit_scope_key.startswith(("profile:", "team:", "draft:", "member-chat:")):
         scope_key = explicit_scope_key
     elif profile_id:
         scope_key = f"profile:{profile_id}"
