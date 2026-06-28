@@ -122,3 +122,22 @@ class ActivityCommand:
                 else self.result_event_id
             ),
         )
+
+
+# Activity Command bus event type constants - Phase 1.C reconciler emits
+# these via run_control.record_event so subscribers / replay get a
+# canonical timeline of every command's state change.
+#
+# Namespace MUST stay under `activity.command.*` to avoid colliding with
+# the existing activities-table lifecycle events emitted by
+# tui_gateway/services/worker_frame_router.py (activity.running /
+# activity.completed).
+ACTIVITY_COMMAND_EVENT_TYPES = frozenset({
+    "activity.command.created",        # create command satisfied
+    "activity.command.start.accepted", # start command dispatched
+    "activity.command.run.spawned",    # worker spawn acked (1.D will emit)
+    "activity.command.run.started",    # worker run.started observed
+    "activity.command.run.failed",     # spawn / run failed durably
+    "activity.command.cancelled",      # cancel command satisfied
+    "activity.command.completed",      # complete command satisfied
+})
