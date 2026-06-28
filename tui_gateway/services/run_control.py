@@ -1847,6 +1847,7 @@ def publish_run_terminal_event(
     turn_id: str = "",
     runtime_scope_key: str = "",
     runtime_session_id: str = "",
+    activity_id: str = "",
     status: str = "failed",
     message: str = "",
     db: Any = None,
@@ -1863,6 +1864,10 @@ def publish_run_terminal_event(
         "turn_id": str(turn_id or "").strip(),
         "status": payload_status,
     }
+    normalized_activity_id = str(activity_id or "").strip()
+    if normalized_activity_id:
+        payload["activity_id"] = normalized_activity_id
+        payload["activityId"] = normalized_activity_id
     if message:
         payload["message"] = str(message)
         payload["text"] = str(message) if payload_status == "error" else ""
@@ -1875,6 +1880,7 @@ def publish_run_terminal_event(
         "run_id": normalized_run_id,
         "turn_id": str(turn_id or "").strip(),
         "runtime_scope_key": str(runtime_scope_key or stable).strip(),
+        **({"activity_id": normalized_activity_id, "activityId": normalized_activity_id} if normalized_activity_id else {}),
         "seq": next_event_seq(stable, db=db),
         "owner_metadata": {
             "gateway_pid": os.getpid(),

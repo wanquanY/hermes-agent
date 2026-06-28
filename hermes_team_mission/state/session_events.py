@@ -358,6 +358,11 @@ class SessionDBTeamMissionEventMixin:
             "runtime_scope_key": str(frame.get("runtime_scope_key") or binding["runtime_scope_key"] or binding["session_id"] or ""),
             "payload": payload,
         })
+        activity_id = f"mission:{mission_id}"
+        frame["activity_id"] = activity_id
+        frame["activityId"] = activity_id
+        payload["activity_id"] = activity_id
+        payload["activityId"] = activity_id
         frame = _runtime_event_with_team_mission_identity(frame, identity)
         prev_projecting = getattr(self, "_team_mission_projecting", False)
         # Guard so the inner append_run_event (and any conversation mirror it

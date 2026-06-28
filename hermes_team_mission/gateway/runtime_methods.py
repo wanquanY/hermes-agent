@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 from .common import *
@@ -19,6 +20,53 @@ def _team_chain_log(stage: str, **fields) -> None:
         _log.warning("[dovie-team-chain] %s %s", stage, json.dumps(fields, ensure_ascii=False, sort_keys=True, default=str))
     except Exception:
         pass
+
+
+def _dovie_profile_log_summary(profile: dict) -> dict:
+    profile = profile if isinstance(profile, dict) else {}
+    return {
+        "id": str(profile.get("id") or profile.get("agentProfileId") or profile.get("agent_profile_id") or ""),
+        "runtime_scope_key": str(profile.get("runtimeScopeKey") or profile.get("runtime_scope_key") or ""),
+        "has_home": bool(profile.get("hermesHomePath") or profile.get("hermes_home_path") or profile.get("hermes_home")),
+    }
+
+
+def _team_mission_log_summary(submit_params: dict) -> dict:
+    product_context = (
+        submit_params.get("dovie_product_context")
+        if isinstance(submit_params.get("dovie_product_context"), dict)
+        else {}
+    )
+    team_mission = (
+        product_context.get("team_mission")
+        if isinstance(product_context.get("team_mission"), dict)
+        else {}
+    )
+    members = team_mission.get("members") if isinstance(team_mission.get("members"), list) else []
+    metadata = team_mission.get("metadata") if isinstance(team_mission.get("metadata"), dict) else {}
+    snapshot_meta = (
+        metadata.get("team_capability_snapshot")
+        if isinstance(metadata.get("team_capability_snapshot"), dict)
+        else {}
+    )
+    return {
+        "surface": str(team_mission.get("surface") or ""),
+        "conversation_id": str(team_mission.get("conversation_id") or ""),
+        "conversation_session_id": str(team_mission.get("conversation_session_id") or ""),
+        "mission_id": str(team_mission.get("mission_id") or ""),
+        "node_id": str(team_mission.get("node_id") or ""),
+        "node_kind": str(team_mission.get("node_kind") or ""),
+        "node_phase": str(team_mission.get("node_phase") or ""),
+        "node_role": str(team_mission.get("node_role") or ""),
+        "team_id": str(team_mission.get("team_id") or ""),
+        "member_count": len(members),
+        "has_members": bool(members),
+        "has_capability_snapshot": bool(
+            team_mission.get("team_capability_snapshot_id")
+            or team_mission.get("team_capability_snapshot_version")
+            or snapshot_meta
+        ),
+    }
 
 
 def _home_from_dovie_profile(dovie_profile: dict) -> str:
@@ -156,10 +204,8 @@ def _submit_run_via_worker_with_response(rid, submit_params: dict) -> dict:
         stored_session_id=str(submit_params.get("stored_session_id") or submit_params.get("session_id") or ""),
         runtime_scope_key=str(submit_params.get("runtime_scope_key") or ""),
         agent_profile_id=str(submit_params.get("agent_profile_id") or ""),
-        dovie_profile=submit_params.get("dovie_profile") if isinstance(submit_params.get("dovie_profile"), dict) else {},
-        team_mission=(submit_params.get("dovie_product_context") or {}).get("team_mission")
-        if isinstance(submit_params.get("dovie_product_context"), dict)
-        else {},
+        dovie_profile=_dovie_profile_log_summary(submit_params.get("dovie_profile")),
+        team_mission=_team_mission_log_summary(submit_params),
     )
     proxied = _proxy_run_submit_via_worker(submit_params)
     if proxied.get("error"):
@@ -240,25 +286,92 @@ def _proxy_run_submit_via_worker(submit_params: dict) -> dict:
     import asyncio
     import uuid as _uuid
     from tui_gateway.server import current_transport
-    from tui_gateway.services.worker_runtime import primary_dispatch
+    from tui_gateway.services.worker_runtime import (
+        ControlPlaneTransport,
+        current_worker_runtime_loop,
+        primary_dispatch,
+    )
 
-    transport = current_transport()
-    if transport is None:
-        return {"ok": False, "reason": "no_transport"}
-    loop = getattr(transport, "_loop", None)
-    if loop is None or not loop.is_running():
+    source_transport = current_transport()
+    run_id = str(submit_params.get("run_id") or submit_params.get("client_run_id") or "")
+    turn_id = str(submit_params.get("turn_id") or "")
+    stored_session_id = str(submit_params.get("stored_session_id") or submit_params.get("session_id") or "")
+    runtime_scope_key = str(submit_params.get("runtime_scope_key") or "")
+    dispatch_started = time.monotonic()
+    loop = current_worker_runtime_loop()
+    if loop is None:
+        loop = getattr(source_transport, "_loop", None)
+    if loop is None:
+        _team_chain_log(
+            "hermes-run-dispatch-proxy-no-runtime-loop",
+            run_id=run_id,
+            turn_id=turn_id,
+            stored_session_id=stored_session_id,
+            runtime_scope_key=runtime_scope_key,
+        )
+        return {"ok": False, "reason": "no_runtime_loop"}
+    if not loop.is_running():
+        _team_chain_log(
+            "hermes-run-dispatch-proxy-loop-unavailable",
+            run_id=run_id,
+            turn_id=turn_id,
+            stored_session_id=stored_session_id,
+            runtime_scope_key=runtime_scope_key,
+            source_transport=getattr(source_transport, "_diagnostics", lambda: {})(),
+        )
         return {"ok": False, "reason": "loop_not_running"}
+    try:
+        if asyncio.get_running_loop() is loop:
+            return {"error": "internal run dispatch attempted to synchronously wait on the worker runtime loop"}
+    except RuntimeError:
+        pass
+    transport = ControlPlaneTransport(loop=loop)
     req = {
         "jsonrpc": "2.0",
         "id": f"member-chat:{_uuid.uuid4().hex}",
         "method": "run.submit",
         "params": dict(submit_params),
     }
+    _team_chain_log(
+        "hermes-run-dispatch-proxy-schedule",
+        request_id=req["id"],
+        run_id=run_id,
+        turn_id=turn_id,
+        stored_session_id=stored_session_id,
+        runtime_scope_key=runtime_scope_key,
+        transport=transport._diagnostics(),
+        source_transport=getattr(source_transport, "_diagnostics", lambda: {})(),
+    )
     fut = asyncio.run_coroutine_threadsafe(primary_dispatch(req, transport), loop)
     try:
         ok = fut.result(timeout=30.0)
     except Exception as exc:
+        _team_chain_log(
+            "hermes-run-dispatch-proxy-exception",
+            request_id=req["id"],
+            run_id=run_id,
+            turn_id=turn_id,
+            stored_session_id=stored_session_id,
+            runtime_scope_key=runtime_scope_key,
+            elapsed_ms=round((time.monotonic() - dispatch_started) * 1000, 1),
+            error_type=type(exc).__name__,
+            error=str(exc),
+            transport=transport._diagnostics(),
+            source_transport=getattr(source_transport, "_diagnostics", lambda: {})(),
+        )
         return {"error": f"member-chat dispatch failed: {exc}"}
+    _team_chain_log(
+        "hermes-run-dispatch-proxy-result",
+        request_id=req["id"],
+        run_id=run_id,
+        turn_id=turn_id,
+        stored_session_id=stored_session_id,
+        runtime_scope_key=runtime_scope_key,
+        elapsed_ms=round((time.monotonic() - dispatch_started) * 1000, 1),
+        ok=bool(ok),
+        transport=transport._diagnostics(),
+        response_frames=transport.frames,
+    )
     return {"ok": bool(ok)}
 
 
@@ -2141,6 +2254,28 @@ def _(rid, params: dict) -> dict:
             "objective": str(node.get("objective") or mission.get("objective") or "").strip(),
             "root_node_id": node_id,
         }
+    node_participant_id = (
+        leader_participant_id(conversation_id)
+        if leader_control_node
+        else member_participant_id(
+            str(
+                node.get("member_id")
+                or node.get("memberId")
+                or metadata.get("member_id")
+                or metadata.get("memberId")
+                or node_id
+            ).strip()
+        )
+    )
+    run_context = RunContext(
+        conversation_session_id=conversation_session_id,
+        participant_id=node_participant_id,
+        activity_id=f"mission:{mission_id}",
+        activity_kind="mission",
+        execution_scope_key=runtime_scope_key,
+        control_home=_control_plane_home(),
+        execution_home=_home_from_profile_params(profile_params),
+    )
     binding_metadata = {"turn_id": turn_id, "source": "team_mission.node.start"}
     if task_id:
         binding_metadata["task_id"] = task_id
@@ -2152,7 +2287,7 @@ def _(rid, params: dict) -> dict:
         runtime_session_id="",
         runtime_scope_key=runtime_scope_key,
         role=_node_role(node),
-        metadata={**binding_metadata, "prebound": True},
+        metadata={**binding_metadata, "prebound": True, "run_context_json": _run_context_json(run_context)},
     )
     submit_params = {
         **params,
@@ -2163,6 +2298,7 @@ def _(rid, params: dict) -> dict:
         "run_id": run_id,
         "turn_id": turn_id,
         "runtime_scope_key": runtime_scope_key,
+        "run_context_json": _run_context_json(run_context),
         "agent_profile_id": agent_profile_id,
         "agent_profile_version_id": agent_profile_version_id,
         "cwd": workspace_context["cwd"],

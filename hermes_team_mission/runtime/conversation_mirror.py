@@ -685,6 +685,7 @@ def mirror_event_to_conversation(
         node=node,
         binding=binding,
     )
+    mirror_activity_id = f"team-conversation:{text(identity_payload.get('conversation_id')) or target_session_id}"
     turn_id = text(frame.get("turn_id") or payload.get("turn_id"))
     client_message_id = text(
         frame.get("client_message_id")
@@ -769,6 +770,8 @@ def mirror_event_to_conversation(
             "team_mission_final_deliverable": is_final_deliverable,
             "team_mission_conversation_mirror": True,
             "team_mission_mirror_source": text(source),
+            "activity_id": mirror_activity_id,
+            "activityId": mirror_activity_id,
         }
     )
     mirror = {
@@ -776,6 +779,8 @@ def mirror_event_to_conversation(
         "stored_session_id": target_session_id,
         "run_id": mirror_run_id,
         "runtime_scope_key": f"team_mission:{mission_id}",
+        "activity_id": mirror_activity_id,
+        "activityId": mirror_activity_id,
         "payload": payload,
         **{key: value for key, value in identity_payload.items() if "_" in key and text(value)},
         "source_seq": source_seq,

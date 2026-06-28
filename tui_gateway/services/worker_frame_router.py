@@ -353,12 +353,25 @@ class WorkerFrameRouter:
         if normalized_status in ("", "completed", "success", "ok"):
             return
         try:
+            terminal_activity_id = ""
+            if info is not None:
+                terminal_activity_id = str(info.dispatch_activity_id or "").strip()
+                if not terminal_activity_id and info.run_context_json:
+                    try:
+                        from hermes_team_mission.domain.run_context import RunContext
+
+                        terminal_activity_id = str(
+                            RunContext.from_payload(info.run_context_json).activity_id or ""
+                        ).strip()
+                    except Exception:
+                        terminal_activity_id = ""
             self._publish_run_terminal(
                 stored_session_id=stored,
                 run_id=frame.run_id,
                 turn_id=turn_id,
                 runtime_scope_key=scope_key,
                 runtime_session_id=stored,
+                activity_id=terminal_activity_id,
                 status=frame.status,
                 message=frame.message,
             )

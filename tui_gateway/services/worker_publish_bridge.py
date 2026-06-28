@@ -205,29 +205,43 @@ class WorkerPublishBridge:
 
     # ── per-hook installers ─────────────────────────────────────────
 
-    def _event_with_active_participant_id(self, params: dict) -> dict:
+    def _event_with_active_run_context(self, params: dict) -> dict:
         if not isinstance(params, dict):
             return params
         run_context = get_active_run_context()
         participant_id = str(getattr(run_context, "participant_id", "") or "").strip()
-        if not participant_id:
+        activity_id = str(getattr(run_context, "activity_id", "") or "").strip()
+        if not participant_id and not activity_id:
             return params
         payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-        existing = str(
+        existing_participant_id = str(
             params.get("participant_id")
             or params.get("participantId")
             or payload.get("participant_id")
             or payload.get("participantId")
             or ""
         ).strip()
-        if existing:
+        existing_activity_id = str(
+            params.get("activity_id")
+            or params.get("activityId")
+            or payload.get("activity_id")
+            or payload.get("activityId")
+            or ""
+        ).strip()
+        if (not participant_id or existing_participant_id) and (not activity_id or existing_activity_id):
             return params
         stamped = dict(params)
         stamped_payload = dict(payload)
-        stamped["participant_id"] = participant_id
-        stamped["participantId"] = participant_id
-        stamped_payload["participant_id"] = participant_id
-        stamped_payload["participantId"] = participant_id
+        if participant_id and not existing_participant_id:
+            stamped["participant_id"] = participant_id
+            stamped["participantId"] = participant_id
+            stamped_payload["participant_id"] = participant_id
+            stamped_payload["participantId"] = participant_id
+        if activity_id and not existing_activity_id:
+            stamped["activity_id"] = activity_id
+            stamped["activityId"] = activity_id
+            stamped_payload["activity_id"] = activity_id
+            stamped_payload["activityId"] = activity_id
         stamped["payload"] = stamped_payload
         return stamped
 
@@ -255,7 +269,7 @@ class WorkerPublishBridge:
             # is the source of truth for live subscribers; the DB
             # persist is the canonical truth that gets read on replay.
             if isinstance(params, dict):
-                params = bridge._event_with_active_participant_id(params)
+                params = bridge._event_with_active_run_context(params)
                 bridge.emit_threadsafe(EventFrame(params=dict(params)))
                 # The Dovie-native blocking primitive (``server._block``)
                 # bypasses ``tools/clarify_gateway.register`` /

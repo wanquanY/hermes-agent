@@ -223,6 +223,30 @@ def _event_activity_id(event: Dict[str, Any], fallback: str = "") -> str:
     ).strip()
 
 
+def _recovery_activity_id_for_run(conn: sqlite3.Connection, row: sqlite3.Row) -> str:
+    """Return a non-empty activity id for internally synthesized run recovery events."""
+    run_id = str(_row_value(row, "run_id", "") or "").strip()
+    if run_id:
+        try:
+            binding = conn.execute(
+                "SELECT mission_id FROM team_mission_run_bindings WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            binding = None
+        mission_id = str(_row_value(binding, "mission_id", "") or "").strip()
+        if mission_id:
+            return f"mission:{mission_id}"
+    session_id = str(_row_value(row, "session_id", "") or "").strip()
+    if session_id.startswith("team-session-team-conversation-"):
+        conversation_id = session_id.removeprefix("team-session-team-conversation-")
+        if conversation_id:
+            return f"team-conversation:{conversation_id}"
+    if session_id:
+        return f"chat:{session_id}"
+    return ""
+
+
 def _event_with_participant_id(event: Dict[str, Any], participant_id: str = "") -> Dict[str, Any]:
     normalized = dict(event or {})
     normalized_participant_id = _event_participant_id(normalized, participant_id)
@@ -1317,6 +1341,8 @@ class SessionDBRunMixin:
                             "runtime_scope_key": runtime_scope_key,
                             "participant_id": event_participant_id or _event_participant_id(previous_event),
                             "participantId": event_participant_id or _event_participant_id(previous_event),
+                            "activity_id": event_activity_id or _event_activity_id(previous_event),
+                            "activityId": event_activity_id or _event_activity_id(previous_event),
                             "seq": seq,
                             "timestamp": timestamp,
                             "payload": merged_payload,
@@ -1324,6 +1350,9 @@ class SessionDBRunMixin:
                         merged_participant_id = _event_participant_id(merged_event)
                         if merged_participant_id and isinstance(merged_event.get("payload"), dict):
                             merged_event["payload"]["participant_id"] = merged_participant_id
+                        merged_activity_id = _event_activity_id(merged_event)
+                        if merged_activity_id and isinstance(merged_event.get("payload"), dict):
+                            merged_event["payload"]["activity_id"] = merged_activity_id
                         merged_runtime_source_seq = runtime_source_seq_from_event(merged_event)
                         merged_frame_blob, merged_frame_format = encode_run_event_frame(merged_event)
                         conn.execute(
@@ -1334,6 +1363,7 @@ class SessionDBRunMixin:
                                 runtime_session_id = ?,
                                 runtime_scope_key = ?,
                                 participant_id = ?,
+                                activity_id = ?,
                                 seq = ?,
                                 timestamp = ?,
                                 payload_json = ?,
@@ -1352,6 +1382,7 @@ class SessionDBRunMixin:
                                 runtime_session_id,
                                 runtime_scope_key,
                                 merged_participant_id,
+                                merged_activity_id or None,
                                 seq,
                                 timestamp,
                                 _json_dumps(merged_payload),
@@ -2234,6 +2265,10 @@ class SessionDBRunMixin:
                     "message": reason,
                     "recovery": True,
                 }
+                terminal_activity_id = _recovery_activity_id_for_run(conn, row)
+                if terminal_activity_id:
+                    terminal_payload["activity_id"] = terminal_activity_id
+                    terminal_payload["activityId"] = terminal_activity_id
                 terminal_frame = {
                     "type": "message.complete",
                     "session_id": row["runtime_session_id"] or row["session_id"],
@@ -2241,6 +2276,7 @@ class SessionDBRunMixin:
                     "run_id": row["run_id"],
                     "turn_id": row["turn_id"],
                     "runtime_scope_key": row["runtime_scope_key"] or row["session_id"],
+                    **({"activity_id": terminal_activity_id, "activityId": terminal_activity_id} if terminal_activity_id else {}),
                     "seq": terminal_seq,
                     "timestamp": now,
                     "payload": terminal_payload,
@@ -2249,11 +2285,11 @@ class SessionDBRunMixin:
                 inserted_terminal = conn.execute(
                     """
                     INSERT INTO run_events (
-                        session_id, run_id, turn_id, runtime_session_id, runtime_scope_key, event_type,
+                        session_id, run_id, turn_id, runtime_session_id, runtime_scope_key, activity_id, event_type,
                         seq, timestamp, payload_json, event_json, status,
                         frame_blob, frame_format, retention_class, projection_state, runtime_source_seq
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["session_id"],
@@ -2261,6 +2297,7 @@ class SessionDBRunMixin:
                         row["turn_id"],
                         row["runtime_session_id"],
                         row["runtime_scope_key"] or row["session_id"],
+                        terminal_activity_id or None,
                         "message.complete",
                         terminal_seq,
                         now,

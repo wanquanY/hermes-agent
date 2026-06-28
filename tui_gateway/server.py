@@ -784,6 +784,13 @@ def _emit(event: str, sid: str, payload: dict | None = None):
             or session.get("runtime_scope_key")
             or stable_session_id
         )
+        run_context = session.get("run_context")
+        activity_id = str(
+            event_payload.get("activity_id")
+            or event_payload.get("activityId")
+            or getattr(run_context, "activity_id", "")
+            or (f"chat:{stable_session_id}" if stable_session_id else "")
+        ).strip()
         if stable_session_id:
             params["stored_session_id"] = stable_session_id
         if run_id:
@@ -792,6 +799,8 @@ def _emit(event: str, sid: str, payload: dict | None = None):
             params["turn_id"] = turn_id
         if runtime_scope_key:
             params["runtime_scope_key"] = runtime_scope_key
+        if activity_id:
+            params["activity_id"] = activity_id
         if sid:
             params["runtime_session_id"] = sid
         session_transport = session.get("transport")
@@ -807,11 +816,16 @@ def _emit(event: str, sid: str, payload: dict | None = None):
                 "turn_id": turn_id,
                 "runtime_session_id": sid,
                 "runtime_scope_key": runtime_scope_key,
+                "activity_id": activity_id,
+                "activityId": activity_id,
                 "owner_metadata": {
                     "gateway_pid": os.getpid(),
                     "gateway_instance_id": _GATEWAY_INSTANCE_ID,
                 },
-                "payload": event_payload,
+                "payload": {
+                    **event_payload,
+                    **({"activity_id": activity_id, "activityId": activity_id} if activity_id else {}),
+                },
             }
             frame["seq"] = run_control.next_event_seq(stable_session_id, db=event_db)
             params["seq"] = frame["seq"]
