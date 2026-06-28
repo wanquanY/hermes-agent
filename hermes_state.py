@@ -466,9 +466,10 @@ CREATE TABLE IF NOT EXISTS run_events (
     UNIQUE(session_id, seq)
 );
 
-CREATE INDEX IF NOT EXISTS idx_run_events_activity_seq
-    ON run_events(activity_id, seq)
-    WHERE activity_id IS NOT NULL;
+-- idx_run_events_activity_seq is created via DEFERRED_INDEX_SQL after
+-- _reconcile_columns() has added the activity_id column to legacy DBs.
+-- Declaring it here would break startup on any DB that predates ADR-0001
+-- Phase 0 (the index's column reference fails before the reconciler runs).
 
 CREATE TABLE IF NOT EXISTS run_event_search_index (
     run_event_id INTEGER PRIMARY KEY,
@@ -678,6 +679,11 @@ CREATE INDEX IF NOT EXISTS idx_session_index_order
     ON session_index(updated_at DESC, started_at DESC, session_id DESC);
 CREATE INDEX IF NOT EXISTS idx_session_index_profile
     ON session_index(owner_agent_profile_id, owner_profile_version_id);
+-- ADR-0001 Phase 0: activity_id is reconciler-added on legacy DBs, so this
+-- partial index must run AFTER _reconcile_columns(), i.e. via DEFERRED_INDEX_SQL.
+CREATE INDEX IF NOT EXISTS idx_run_events_activity_seq
+    ON run_events(activity_id, seq)
+    WHERE activity_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_messages_session
     ON messages(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_session_active
