@@ -10,6 +10,7 @@ from .participant_autocreate import ensure_member_chat_participant
 from hermes_state.profile_dir import resolve_default_agent_dir
 from hermes_state_participants import leader_participant_id, member_participant_id
 from hermes_team_mission.domain.run_context import RunContext
+from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command
 from tui_gateway.services.transcript_projector import conversation_user_message_id_for
 
 
@@ -678,6 +679,19 @@ def _(rid, params: dict) -> dict:
     )
     if archived_team_error:
         return _err(rid, 4023, archived_team_error)
+    # ADR-0001 Phase 1.D: audit-only activity_command for leader conversation submit.
+    # Activity kind is chat; this starts a leader run, not a new mission.
+    _legacy_activity_command_id = record_legacy_activity_command(
+        db,
+        activity_id=f"team-conversation:{conversation_id}" if conversation_id else "",
+        kind="start",
+        payload={
+            "conversation_id": conversation_id,
+            "conversation_session_id": str(params.get("conversation_session_id") or ""),
+            "text_len": len(str(params.get("text") or "")),
+        },
+        source="team_mission.message.submit",
+    )
     # Group-chat: route directly to a worker member, bypassing the leader.
     target_member_id = _target_member_id_from_params(params)
     if target_member_id:
@@ -1826,6 +1840,19 @@ def _(rid, params: dict) -> dict:
     if not mission_id:
         return _err(rid, 4040, "team mission not found")
     reason = str(params.get("reason") or "").strip() or "Team Mission cancelled by user."
+    # ADR-0001 Phase 1.D: audit-only activity_command for mission cancel.
+    # The mission_not_dict silent failure behavior is intentionally left for 1.E.
+    _legacy_activity_command_id = record_legacy_activity_command(
+        db,
+        activity_id=f"mission:{mission_id}" if mission_id else "",
+        kind="cancel",
+        payload={
+            "mission_id": mission_id,
+            "canceled_by": str(params.get("canceled_by") or ""),
+            "reason": str(params.get("reason") or ""),
+        },
+        source="team_mission.cancel",
+    )
     result = db.cancel_team_mission(
         mission_id=mission_id,
         canceled_by=str(params.get("canceled_by") or params.get("canceledBy") or "user"),
@@ -1963,6 +1990,18 @@ def _(rid, params: dict) -> dict:
     node = db.get_team_mission_node(mission_id, node_id)
     if not node:
         return _err(rid, 4040, "team mission node not found")
+    # ADR-0001 Phase 1.D: audit-only activity_command for node-start.
+    _legacy_activity_command_id = record_legacy_activity_command(
+        db,
+        activity_id=f"mission:{mission_id}" if mission_id else "",
+        kind="start",
+        payload={
+            "mission_id": mission_id,
+            "node_id": node_id,
+            "use_strategy_prompt": bool(params.get("use_strategy_prompt", False)),
+        },
+        source="team_mission.node.start",
+    )
     graph = db.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     metadata = dict(node.get("metadata") or {})

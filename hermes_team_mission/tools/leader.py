@@ -17,6 +17,7 @@ from typing import Any
 from hermes_state import SessionDB
 from hermes_team_mission.domain.modes import MODE_AUTONOMOUS_MISSION
 from hermes_team_mission.domain.modes import MODE_SUPERVISED_MISSION
+from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command
 from hermes_team_mission.runtime.profile_scope import gateway_call as _gateway_call
 from hermes_team_mission.runtime.profile_scope import team_mission_control_db as _team_mission_control_db
 from hermes_team_mission.runtime.profile_scope import unwrap_response as _unwrap_response
@@ -330,6 +331,23 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
         "conversation_mode": conversation_mode,
         "task_execution_mode": task_execution_mode,
     }
+    # ADR-0001 Phase 1.D: audit-only activity_command for leader-tool mission start.
+    _db = _get_db(parent_agent)
+    if _db is not None:
+        record_legacy_activity_command(
+            _db,
+            activity_id=f"mission:{mission_id}" if mission_id else "",
+            kind="create",
+            payload={
+                "mission_id": mission_id,
+                "task_id": task_id,
+                "conversation_id": conversation_id,
+                "conversation_session_id": conversation_session_id,
+                "title": title,
+                "objective": objective,
+            },
+            source="team_mission_start_task",
+        )
     create_response = _gateway_call(
         "team_mission.create",
         {

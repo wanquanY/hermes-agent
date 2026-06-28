@@ -9,6 +9,7 @@ from typing import Any
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
 from hermes_runtime_event_payloads import terminal_text_metadata
+from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command
 from hermes_team_mission.state.conversation import normalize_team_mission_conversation_session
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
@@ -404,6 +405,20 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                     message="session busy",
                 )
             return _err(rid, 4009, "session busy")
+        # ADR-0001 Phase 1.D: audit-only activity_command for single-agent prompt.
+        # Single-agent chat doubles as Activity (kind=chat) per ADR-0001 Q4.
+        _session_id = stable_session_id
+        if _session_id:
+            record_legacy_activity_command(
+                _db_for_stable_session(stable_session_id),
+                activity_id=f"chat:{_session_id}",
+                kind="start",
+                payload={
+                    "session_id": _session_id,
+                    "text_len": len(str(params.get("text") or "")),
+                },
+                source="prompt.submit",
+            )
         session["running"] = True
         session["active_run_id"] = run_id
         session["active_turn_id"] = turn_id

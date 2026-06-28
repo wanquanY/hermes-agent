@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from .common import *
 from .participant_autocreate import ensure_team_conversation_participants
+from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command
 
 
 @method("team_capability.snapshot.get")
@@ -249,6 +250,21 @@ def _(rid, params: dict) -> dict:
         )
     except ValueError as exc:
         return _err(rid, 4004, str(exc))
+    # ADR-0001 Phase 1.D: audit-only activity_command row. Does not replace
+    # existing behavior; the legacy create flow proceeds unchanged.
+    _legacy_activity_command_id = record_legacy_activity_command(
+        db,
+        activity_id=f"mission:{mission_id}" if mission_id else "",
+        kind="create",
+        payload={
+            "mission_id": mission_id,
+            "team_id": team_id,
+            "conversation_id": str(params.get("conversation_id") or ""),
+            "conversation_session_id": str(params.get("conversation_session_id") or ""),
+            "title": str(params.get("title") or ""),
+        },
+        source="team_mission.create",
+    )
     try:
         graph = db.initialize_team_mission_from_strategy(
             mission_id=mission_id,
