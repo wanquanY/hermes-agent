@@ -23,6 +23,11 @@ from tui_gateway.services import run_control
 
 _server = bind_server_globals(globals())
 
+_TERMINAL_MISSION_STATUSES = frozenset(
+    {"completed", "failed", "cancelled", "canceled", "interrupted"}
+)
+
+
 def _err(rid, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
 
@@ -118,6 +123,25 @@ def _db_or_error(rid):
     return db, None
 
 
+def _mission_id_from_activity_id(activity_id: str) -> str:
+    prefix = "mission:"
+    if not activity_id.startswith(prefix):
+        return ""
+    return activity_id[len(prefix) :].strip()
+
+
+def _is_terminal_mission(db, mission_id: str) -> bool:
+    get_graph = getattr(db, "get_team_mission_graph", None)
+    if not callable(get_graph):
+        return False
+    graph = get_graph(mission_id)
+    mission = graph.get("mission") if isinstance(graph, dict) else {}
+    if not isinstance(mission, dict):
+        return False
+    status = str(mission.get("status") or "").strip().lower()
+    return status in _TERMINAL_MISSION_STATUSES
+
+
 def _activity_command_response(
     rid,
     *,
@@ -210,6 +234,55 @@ def runtime_activity_subscribe(rid, params: dict) -> dict:
                 [int(event.get("seq") or 0) for event in replay],
                 default=after_seq,
             ),
+        },
+    )
+
+
+@method("runtime.activity.maintenance")
+def runtime_activity_maintenance(rid, params: dict) -> dict:
+    """ADR-0001 §Phase 2.E-1: explicit maintenance hook for activities.
+
+    Replaces the implicit reap/prune side-effects that lived inside
+    team_mission.subscribe (which is being removed in Phase 2.E-5).
+    """
+    params = params if isinstance(params, dict) else {}
+    activity_id = str(
+        params.get("activity_id") or params.get("activityId") or ""
+    ).strip()
+    if not activity_id:
+        return _validation_error(rid, "activity_id required")
+    if not _ACTIVITY_ID_FORMAT_PATTERN.match(activity_id):
+        return _validation_error(rid, "activity_id malformed")
+
+    db, err = _db_or_error(rid)
+    if err:
+        return err
+
+    actions: list[str] = []
+    errors: list[str] = []
+    mission_id = _mission_id_from_activity_id(activity_id)
+    if mission_id and _is_terminal_mission(db, mission_id):
+        reaper = getattr(db, "reap_terminal_mission_runs", None)
+        if callable(reaper):
+            try:
+                reaper(mission_id)
+                actions.append("reaped")
+            except Exception as exc:
+                errors.append(f"reap_terminal_mission_runs: {exc}")
+        pruner = getattr(db, "prune_team_mission_events", None)
+        if callable(pruner):
+            try:
+                pruner(mission_id)
+                actions.append("pruned")
+            except Exception as exc:
+                errors.append(f"prune_team_mission_events: {exc}")
+
+    return _ok(
+        rid,
+        {
+            "activity_id": activity_id,
+            "actions": actions,
+            "errors": errors,
         },
     )
 
