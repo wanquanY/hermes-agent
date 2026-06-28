@@ -249,13 +249,13 @@ def test_team_mission_leader_node_toolsets_are_surface_scoped():
 
     team_mission = team_mission_gateway()
 
-    # Planning toolset is intentionally write-graph + ask-user + read-only-workspace.
-    # See _start_toolsets: clarify and file_readonly belong in the same exact set.
+    # Planning toolset is intentionally read-team + write-graph + ask-user + read-only-workspace.
+    # See _start_toolsets: team_mission_read, clarify, and file_readonly belong in the same exact set.
     assert team_mission._start_toolsets(
         {},
         {"mode": "supervised_mission"},
         {"kind": "root", "metadata": {"role": "leader", "phase": "planning"}},
-    ) == ["team_mission_planning", "clarify", "file_readonly"]
+    ) == ["team_mission_read", "team_mission_planning", "clarify", "file_readonly"]
     assert team_mission._start_toolsets(
         {},
         {"mode": "supervised_mission"},
@@ -466,7 +466,7 @@ def test_team_mission_gateway_methods_create_graph_and_replay_events(monkeypatch
     assert submitted["text"] != "规划审批后执行"
     assert "team_mission_node_create" in submitted["text"]
     assert "team_mission_plan_complete" in submitted["text"]
-    assert submitted["enabled_toolsets"] == ["team_mission_planning", "clarify", "file_readonly"]
+    assert submitted["enabled_toolsets"] == ["team_mission_read", "team_mission_planning", "clarify", "file_readonly"]
     assert "delegation" in submitted["disabled_toolsets"]
     assert submitted["toolset_scope"] == "exact"
     assert submitted["dovie_product_context"]["team_mission"]["node_role"] == "leader"
@@ -696,7 +696,7 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(mo
     assert submit_response["result"]["conversation_id"] == "mission-1"
     assert submitted[0]["stored_session_id"] == "team-session-1"
     assert submitted[0]["agent_profile_id"] == "profile-leader"
-    assert submitted[0]["persist_user_message"] == "你好啊"
+    assert submitted[0]["persist_user_message"] == ""
     assert db.get_team_mission_graph("mission-1") == {}
 
     resolve_response = server._methods["team_mission.conversation.resolve"](
@@ -764,7 +764,7 @@ def test_team_mission_message_submit_derives_conversation_title_from_first_user_
     conversation = db.get_team_mission_conversation("conversation-1")
     assert conversation["title"] == "你是谁？ 我是谁？"
     assert conversation["display_title_source"] == "first_user_message"
-    assert submitted["persist_user_message"] == "你是谁？ 我是谁？"
+    assert submitted["persist_user_message"] == ""
     run_context = json.loads(submitted["run_context_json"])
     assert run_context == {
         "conversation_session_id": "team-session-1",
@@ -1210,7 +1210,7 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
 
     assert response["result"]["conversation_session_id"] == "team-session-1"
     assert submitted["stored_session_id"] == "team-session-1"
-    assert submitted["persist_user_message"] == "你好，上一轮进度怎么样？"
+    assert submitted["persist_user_message"] == ""
     assert submitted["enabled_toolsets"] == [
         "team_mission_conversation_leader",
         "clarify",
@@ -1291,7 +1291,7 @@ def test_team_mission_message_submit_direct_reply_disables_tools_and_reasoning(m
     assert submitted["reasoning_config"] == {"enabled": False}
     assert "team_mission_start_task" not in submitted["text"]
     assert "Answer directly" in submitted["text"]
-    assert submitted["persist_user_message"] == "我测试功能，你写一篇不少于800字的科幻作文，不要启动团队任务，你自己完成"
+    assert submitted["persist_user_message"] == ""
     assert db.get_team_mission_graph("mission-1") == {}
 
 
@@ -1351,7 +1351,7 @@ def test_team_mission_message_submit_explicit_start_task_overrides_negated_direc
     assert "The user explicitly asked you not to start or launch a team task" not in submitted["text"]
     assert "Do not call tools, do not create tasks" not in submitted["text"]
     assert "reasoning_config" not in submitted
-    assert submitted["persist_user_message"].startswith("请必须启动团队任务")
+    assert submitted["persist_user_message"] == ""
     assert submitted["dovie_product_context"]["team_mission"]["team_id"] == "team-1"
 
 
@@ -1829,9 +1829,34 @@ def test_team_mission_message_submit_merges_requested_leader_conversation_toolse
     assert "delegation" in submitted["disabled_toolsets"]
     assert submitted["agent_context_mode"] == "team_leader"
     assert "Hermes" not in submitted["text"]
-    assert "DoXie team conversation" in submitted["text"]
-    assert "Keep the same persona, identity, tone, and memory as the underlying DoXie profile" in submitted["text"]
+    assert "Dovie team conversation" in submitted["text"]
+    assert "underlying Dovie profile supplies tone and memory only" in submitted["text"]
+    assert "team member utterances, not roles you performed" in submitted["text"]
     assert "Never expose internal runtime" in submitted["text"]
+
+
+def test_team_leader_direct_reply_prompt_keeps_team_speaker_ownership():
+    from hermes_team_mission.gateway.common import _leader_direct_reply_prompt
+
+    prompt = _leader_direct_reply_prompt(
+        user_text="总结一下我们的对话记录",
+        graph={
+            "conversation": {
+                "conversation_id": "team-conversation-1",
+                "title": "团队会话",
+                "stable_session_id": "team-session-team-conversation-1",
+            },
+            "mission": {},
+            "nodes": [],
+            "edges": [],
+        },
+    )
+
+    assert "Dovie team conversation" in prompt
+    assert "underlying Dovie profile supplies tone and memory only" in prompt
+    assert "team member utterances, not roles you performed" in prompt
+    assert "Current team conversation context" in prompt
+    assert "team-session-team-conversation-1" in prompt
 
 
 def test_team_mission_member_node_start_keeps_delegation_available(monkeypatch, tmp_path: Path):
@@ -2377,10 +2402,14 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
     assert result["node"]["node_id"] == f"team-mission:{result['mission_id']}:root"
     assert submitted["record_user_task_message"] is False
     assert submitted["agent_profile_id"] == "profile-leader"
-    assert submitted["enabled_toolsets"] == ["team_mission_planning", "clarify", "file_readonly"]
+    assert submitted["enabled_toolsets"] == ["team_mission_read", "team_mission_planning", "clarify", "file_readonly"]
     assert "delegation" in submitted["disabled_toolsets"]
     assert submitted["toolset_scope"] == "exact"
     assert submitted["dovie_product_context"]["team_mission"]["node_phase"] == "planning"
+    assert [member["member_id"] for member in submitted["dovie_product_context"]["team_mission"]["members"]] == [
+        "member-leader",
+        "member-builder",
+    ]
     assert "Mission objective: 规划并执行第二个任务" in submitted["text"]
     assert "Mission objective: 初始任务" not in submitted["text"]
     updated_graph = db.get_team_mission_graph(result["mission_id"])
@@ -3456,6 +3485,52 @@ def test_team_mission_cancel_marks_graph_and_cancels_active_runs(monkeypatch, tm
             "reason": "用户终止团队任务",
         }
     ]
+
+
+def test_team_mission_cancel_resolves_active_mission_from_conversation_id(monkeypatch, tmp_path: Path):
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    team_mission = team_mission_gateway()
+    db = SessionDB(tmp_path / "state.db")
+    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    db.upsert_team_mission(
+        mission_id="mission-active",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="执行任务",
+        objective="完成任务图",
+        mode="autonomous_mission",
+        status="running",
+    )
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-conversation-1",
+        team_id="team-1",
+        title="团队会话",
+        active_mission_id="mission-active",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-active",
+        node_id="node-worker",
+        kind="worker",
+        title="执行节点",
+        objective="交付结果",
+        status="running",
+    )
+
+    response = server._methods["team_mission.cancel"](
+        1,
+        {
+            "conversation_id": "conversation-1",
+            "canceled_by": "user",
+            "reason": "用户终止团队任务",
+        },
+    )
+
+    assert response["result"]["mission_id"] == "mission-active"
+    assert response["result"]["mission_status"] == "cancelled"
+    assert db.get_team_mission_graph("mission-active")["mission"]["status"] == "cancelled"
 
 
 def test_team_mission_cancel_reaps_zombie_run_on_already_terminal_mission(monkeypatch, tmp_path: Path):

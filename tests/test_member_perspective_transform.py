@@ -110,3 +110,72 @@ def test_idempotent_transform_twice_same_result() -> None:
     assert twice == once
     assert twice[0]["content"] == "[Leader] Leader instruction"
     assert twice[0]["content"].count("[Leader]") == 1
+
+
+def test_other_participant_tool_turns_do_not_leak_into_viewer_history() -> None:
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call-bob", "function": {"name": "search", "arguments": "{}"}}],
+            "metadata": {"participant_id": "member:bob"},
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-bob",
+            "content": "{\"ok\": true}",
+            "metadata": {"participant_id": "member:bob"},
+        },
+        {
+            "role": "assistant",
+            "content": "查完了。",
+            "metadata": {"participant_id": "member:bob"},
+        },
+    ]
+
+    result = transform_to_member_perspective(
+        messages,
+        viewing_participant_id="leader:conv-1",
+        participants=[
+            {"participant_id": "leader:conv-1", "display_name": "小多"},
+            {"participant_id": "member:bob", "display_name": "后端工程师"},
+        ],
+    )
+
+    assert [(message["role"], message["content"]) for message in result] == [
+        ("user", "[后端工程师] 查完了。"),
+    ]
+    assert "tool_calls" not in result[0]
+    assert "tool_call_id" not in result[0]
+
+
+def test_viewer_own_tool_turns_remain_valid_tool_sequences() -> None:
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call-leader", "function": {"name": "clarify", "arguments": "{}"}}],
+            "metadata": {"participant_id": "leader:conv-1"},
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-leader",
+            "content": "{\"ok\": true}",
+            "metadata": {"participant_id": "leader:conv-1"},
+        },
+        {
+            "role": "assistant",
+            "content": "我已经确认。",
+            "metadata": {"participant_id": "leader:conv-1"},
+        },
+    ]
+
+    result = transform_to_member_perspective(
+        messages,
+        viewing_participant_id="leader:conv-1",
+        participants=[{"participant_id": "leader:conv-1", "display_name": "小多"}],
+    )
+
+    assert [message["role"] for message in result] == ["assistant", "tool", "assistant"]
+    assert result[0]["tool_calls"][0]["id"] == "call-leader"
+    assert result[1]["tool_call_id"] == "call-leader"

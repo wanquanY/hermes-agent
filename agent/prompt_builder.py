@@ -148,7 +148,7 @@ def _strip_yaml_frontmatter(content: str) -> str:
 # =========================================================================
 
 DEFAULT_AGENT_IDENTITY = (
-    "You are Hermes Agent, an intelligent AI assistant created by Nous Research. "
+    "You are Dovie, an intelligent AI assistant created for the Dovie product. "
     "You are helpful, knowledgeable, and direct. You assist users with a wide "
     "range of tasks including answering questions, writing and editing code, "
     "analyzing information, creative work, and executing actions via your tools. "
@@ -158,9 +158,11 @@ DEFAULT_AGENT_IDENTITY = (
 )
 
 HERMES_AGENT_HELP_GUIDANCE = (
-    "If the user asks about configuring, setting up, or using Hermes Agent "
-    "itself, load the `hermes-agent` skill with skill_view(name='hermes-agent') "
-    "before answering. Docs: https://hermes-agent.nousresearch.com/docs"
+    "If the user asks about configuring, setting up, or using Dovie itself, "
+    "treat Dovie as the product identity. Use the available Dovie runtime, "
+    "profile, config, tool, or documentation capabilities before answering "
+    "when they are available. Do not present internal implementation names as "
+    "the product identity."
 )
 
 MEMORY_GUIDANCE = (
@@ -605,7 +607,7 @@ PLATFORM_HINTS = {
         "brief and natural."
     ),
     "webui": (
-        "You are in the Hermes WebUI, a browser-based chat interface. "
+        "You are in the Dovie WebUI, a browser-based chat interface. "
         "Full Markdown rendering is supported — headings, bold, italic, code "
         "blocks, tables, math (LaTeX), and Mermaid diagrams all render natively. "
         "To display local or remote media/files inline, include "
@@ -638,7 +640,7 @@ WSL_ENVIRONMENT_HINT = (
 
 # Non-local terminal backends that run commands (and therefore every file
 # tool: read_file, write_file, patch, search_files) inside a separate
-# container / remote host rather than on the machine where Hermes itself
+# container / remote host rather than on the machine where Dovie itself
 # runs. For these backends, host info (Windows/Linux/macOS, $HOME, cwd) is
 # misleading — the agent should only see the machine it can actually touch.
 _REMOTE_TERMINAL_BACKENDS = frozenset({
@@ -836,8 +838,8 @@ def build_environment_hints() -> str:
                 f"Terminal backend: {backend}. Your `terminal`, `read_file`, "
                 f"`write_file`, `patch`, and `search_files` tools all operate "
                 f"inside this {backend} environment — NOT on the machine "
-                f"where Hermes itself is running. The host OS, home, and cwd "
-                f"of the Hermes process are irrelevant; only the following "
+                f"where Dovie itself is running. The host OS, home, and cwd "
+                f"of the Dovie process are irrelevant; only the following "
                 f"backend state matters:\n{probe}"
             )
         else:
@@ -847,7 +849,7 @@ def build_environment_hints() -> str:
             hints.append(
                 f"Terminal backend: {backend}. Your `terminal`, `read_file`, "
                 f"`write_file`, `patch`, and `search_files` tools all operate "
-                f"inside {description} — NOT on the machine where Hermes "
+                f"inside {description} — NOT on the machine where Dovie "
                 f"itself runs. The backend probe didn't respond at "
                 f"prompt-build time, so the sandbox's current user, $HOME, "
                 f"and working directory are unknown from here. If you need "
@@ -1316,10 +1318,11 @@ def build_skills_system_prompt(
             "for tasks like code review, planning, and testing — load them even for tasks you "
             "already know how to do, because the skill defines how it should be done here.\n"
             "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
-            "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
-            "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
-            "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
-            "`hermes setup`) so you don't have to guess or invent workarounds.\n"
+            "or troubleshoot Dovie itself — its config, models, providers, tools, "
+            "skills, voice, gateway, plugins, or any feature — load the relevant Dovie "
+            "skill first when one is available. If no dedicated Dovie skill is listed, "
+            "use the available runtime tools or documentation sources and state what "
+            "you could verify instead of inventing workarounds.\n"
             "If a skill has issues, fix it with skill_manage(action='patch').\n"
             "After difficult/iterative tasks, offer to save as a skill. "
             "If a skill you loaded was missing steps, had wrong commands, or needed "
@@ -1461,26 +1464,6 @@ def load_soul_md(context_length: Optional[int] = None) -> Optional[str]:
     ``skip_soul=True`` so SOUL.md isn't injected twice.
     """
     _log_dovie_prompt_builder_stage("load-soul-enter")
-    # BUG-7 trace: dump the actual HERMES_HOME resolution at the exact
-    # point SOUL.md is fetched. If contextvar_override / ENV / resolved
-    # disagree here we can pin the cause without inspecting downstream
-    # silent fallback. Cheap (one stat call later); never raises.
-    try:
-        from agent.dovie_persona_trace import trace_persona_payload as _trace_persona_payload_local
-        from hermes_constants import (
-            get_hermes_home_override as _get_hermes_home_override_local,
-        )
-        import os as _os_for_soul_trace
-
-        _trace_persona_payload_local(
-            "prompt-builder.load-soul.home-resolution",
-            contextvar_override=_get_hermes_home_override_local() or "",
-            env_HERMES_HOME=_os_for_soul_trace.environ.get("HERMES_HOME") or "",
-            resolved_home=str(get_hermes_home()),
-            context_length=context_length,
-        )
-    except Exception:
-        pass
     soul_path = get_hermes_home() / "SOUL.md"
     _log_dovie_prompt_builder_stage("load-soul-path", path=str(soul_path))
     try:

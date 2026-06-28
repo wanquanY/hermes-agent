@@ -89,13 +89,34 @@ def _(rid, params: dict) -> dict:
                 )
         except Exception as exc:
             return _err(rid, 5000, f"run event page failed: {exc}")
+    include_tool_events = bool(params.get("include_tool_events", params.get("includeToolEvents", True)))
+    tool_events = []
+    if include_tool_events:
+        try:
+            list_tool_events = getattr(db, "list_tool_events", None)
+            if callable(list_tool_events):
+                tool_events = list_tool_events(
+                    target,
+                    run_id=str(params.get("run_id") or params.get("runId") or ""),
+                    limit=_bounded_page_limit(
+                        params.get("tool_events_limit", params.get("toolEventsLimit")),
+                        default=2000,
+                        maximum=5000,
+                    ),
+                )
+        except Exception as exc:
+            return _err(rid, 5000, f"tool event page failed: {exc}")
+    raw_messages = _history_to_messages(page.get("messages") or [])
+    sanitized_messages = sanitize_transcript_messages(raw_messages)
+    page_info = _message_page_info(page.get("pageInfo"))
     return _ok(
         rid,
         {
             "session_id": target,
-            "messages": sanitize_transcript_messages(_history_to_messages(page.get("messages") or [])),
+            "messages": sanitized_messages,
+            "toolEvents": tool_events,
             "runEvents": run_events,
-            "pageInfo": _message_page_info(page.get("pageInfo")),
+            "pageInfo": page_info,
             "branchInfo": db.get_session_branch_info(target) if hasattr(db, "get_session_branch_info") else None,
         },
     )

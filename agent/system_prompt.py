@@ -30,7 +30,6 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
-from agent.dovie_persona_trace import persona_text_probe, trace_persona_chain
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
@@ -882,13 +881,6 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     warm across turns.
     """
     _log_dovie_system_prompt_stage(agent, "parts-start")
-    trace_persona_chain(
-        agent,
-        "system-prompt.parts-start",
-        load_soul_identity=bool(getattr(agent, "load_soul_identity", False)),
-        skip_context_files=bool(getattr(agent, "skip_context_files", False)),
-        valid_tool_count=len(getattr(agent, "valid_tool_names", []) or []),
-    )
     load_soul_md = _patched_run_agent_attr("load_soul_md", _load_soul_md)
     build_nous_subscription_prompt = _patched_run_agent_attr(
         "build_nous_subscription_prompt",
@@ -933,12 +925,6 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             "load-soul-end",
             has_soul=bool(_soul_content),
             soul_chars=len(_soul_content or ""),
-        )
-        trace_persona_chain(
-            agent,
-            "system-prompt.soul-load-end",
-            has_soul=bool(_soul_content),
-            soul=persona_text_probe(_soul_content),
         )
         if _soul_content:
             stable_parts.append(_soul_content)
@@ -995,19 +981,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         except Exception:
             pass
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
-        trace_persona_chain(
-            agent,
-            "system-prompt.identity-fallback-appended",
-            segment=persona_text_probe(DEFAULT_AGENT_IDENTITY),
-        )
 
-    # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
+    # Pointer to product-help behavior for questions about Dovie itself.
     stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
-    trace_persona_chain(
-        agent,
-        "system-prompt.hermes-help-guidance-appended",
-        segment=persona_text_probe(HERMES_AGENT_HELP_GUIDANCE),
-    )
 
     # Tool-aware behavioral guidance: only inject when the tools are loaded
     tool_guidance = []
@@ -1029,12 +1005,6 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(KANBAN_GUIDANCE)
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
-        trace_persona_chain(
-            agent,
-            "system-prompt.tool-guidance-appended",
-            guidance_count=len(tool_guidance),
-            segment=persona_text_probe(" ".join(tool_guidance)),
-        )
 
     # Computer-use (macOS) — goes in as its own block rather than being
     # merged into tool_guidance because the content is multi-paragraph.
@@ -1139,7 +1109,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if _env_hints:
         stable_parts.append(_env_hints)
 
-    # Coding posture (base Hermes, any interactive coding surface in a code
+    # Coding posture (Dovie, any interactive coding surface in a code
     # workspace — see agent/coding_context.py). The operating brief + the live
     # git/workspace snapshot are built once here and cached for the session;
     # the snapshot is never re-probed per turn (that would break the prompt
@@ -1176,9 +1146,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             # Probe failure must never block prompt build.
             pass
 
-    # Active-profile hint — names the Hermes profile the agent is running
-    # under so it doesn't conflate ~/.hermes/skills/ (default profile) with
-    # ~/.hermes/profiles/<active>/skills/ (this profile's). Deterministic
+    # Active-profile hint — names the Dovie runtime profile the agent is running
+    # under so it doesn't conflate default profile resources with another
+    # profile's resources. Deterministic
     # for the lifetime of the agent — profile name doesn't change
     # mid-session, so this doesn't break the prompt cache.
     # See file_safety._resolve_active_profile_name + classify_cross_profile_target
@@ -1190,33 +1160,26 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         active_profile = "default"
     if active_profile == "default":
         active_profile_hint = (
-            "Active Hermes profile: default. Other profiles (if any) live "
-            "under ~/.hermes/profiles/<name>/. Each profile has its own "
-            "skills/, plugins/, cron/, and memories/ that affect a different "
-            "session than this one. Do not modify another profile's "
-            "skills/plugins/cron/memories unless the user explicitly directs "
-            "you to."
+            "Active Dovie runtime profile: default. Other profiles each have "
+            "their own skills, plugins, scheduled tasks, and memories that "
+            "affect a different session than this one. Treat this as an "
+            "internal execution boundary, not as your public identity. Do not "
+            "modify another profile's resources unless the user explicitly "
+            "directs you to."
         )
         stable_parts.append(active_profile_hint)
     else:
         active_profile_hint = (
-            f"Active Hermes profile: {active_profile}. This session reads "
-            f"and writes ~/.hermes/profiles/{active_profile}/. The default "
-            f"profile's data lives at ~/.hermes/skills/, ~/.hermes/plugins/, "
-            f"~/.hermes/cron/, ~/.hermes/memories/ — those belong to a "
-            f"different session run from a different shell. Do NOT modify "
-            f"another profile's skills/plugins/cron/memories unless the user "
-            f"explicitly directs you to. The cross-profile write guard will "
-            f"refuse such writes by default; pass cross_profile=True only "
-            f"after explicit direction."
+            f"Active Dovie runtime profile: {active_profile}. This session "
+            f"reads and writes that profile's resources. The default profile "
+            f"belongs to a different session context. Treat this as an "
+            f"internal execution boundary, not as your public identity. Do NOT "
+            f"modify another profile's skills, plugins, scheduled tasks, or "
+            f"memories unless the user explicitly directs you to. The "
+            f"cross-profile write guard will refuse such writes by default; "
+            f"pass cross_profile=True only after explicit direction."
         )
         stable_parts.append(active_profile_hint)
-    trace_persona_chain(
-        agent,
-        "system-prompt.active-profile-hint-appended",
-        active_profile=active_profile,
-        segment=persona_text_probe(active_profile_hint),
-    )
 
     platform_key = (agent.platform or "").lower().strip()
     # Resolve the built-in/plugin default hint for this platform, then apply
@@ -1237,12 +1200,6 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     _effective_hint = _resolve_platform_hint(agent, platform_key, _default_hint)
     if _effective_hint:
         stable_parts.append(_effective_hint)
-        trace_persona_chain(
-            agent,
-            "system-prompt.platform-hint-appended",
-            platform_key=platform_key,
-            segment=persona_text_probe(_effective_hint),
-        )
 
     # ── Context tier (cwd-dependent, may change between sessions) ─
     context_parts: List[str] = []
@@ -1334,11 +1291,6 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if agent.provider:
         timestamp_line += f"\nProvider: {agent.provider}"
     volatile_parts.append(timestamp_line)
-    trace_persona_chain(
-        agent,
-        "system-prompt.timestamp-line-appended",
-        segment=persona_text_probe(timestamp_line),
-    )
 
     _log_dovie_system_prompt_stage(
         agent,
@@ -1350,16 +1302,6 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     stable_text = "\n\n".join(p.strip() for p in stable_parts if p and p.strip())
     context_text = "\n\n".join(p.strip() for p in context_parts if p and p.strip())
     volatile_text = "\n\n".join(p.strip() for p in volatile_parts if p and p.strip())
-    trace_persona_chain(
-        agent,
-        "system-prompt.parts-end",
-        stable_parts=len(stable_parts),
-        context_parts=len(context_parts),
-        volatile_parts=len(volatile_parts),
-        stable=persona_text_probe(stable_text),
-        context=persona_text_probe(context_text),
-        volatile=persona_text_probe(volatile_text),
-    )
     return {
         "stable":   stable_text,
         "context":  context_text,
@@ -1386,11 +1328,6 @@ def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str
     parts = build_system_prompt_parts(agent, system_message=system_message)
     prompt = "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
     _log_dovie_system_prompt_stage(agent, "build-end", prompt_chars=len(prompt))
-    trace_persona_chain(
-        agent,
-        "system-prompt.build-end",
-        prompt=persona_text_probe(prompt),
-    )
 
     # Surface context-file truncation warnings through the normal agent status
     # channel so gateway/CLI users see them in chat instead of only in logs.

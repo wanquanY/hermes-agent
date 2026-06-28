@@ -28,6 +28,7 @@ from tui_gateway.services.agent_runner import (
     _ensure_worker_session,
     setup_worker_environment,
 )
+from hermes_team_mission.domain.run_context import RunContext
 
 
 def test_noop_transport_write_returns_true() -> None:
@@ -104,6 +105,77 @@ def test_worker_session_defers_agent_build_until_prompt_submit(monkeypatch: pyte
     assert sessions[sid] is session
     assert session["agent"] is None
     assert starts == []
+
+
+def test_team_leader_worker_hydrates_member_replies_as_observed_group_speech(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from tui_gateway import server as _server
+
+    class FakeDB:
+        def get_conversation_message_read_model(self, session_id: str):
+            assert session_id == "team-session-team-conversation-1"
+            return [
+                {
+                    "role": "user",
+                    "content": "你是谁？",
+                    "metadata": {"participant_id": "user"},
+                },
+                {
+                    "role": "assistant",
+                    "content": "我是小多，负责团队协调。",
+                    "metadata": {"participant_id": "leader:team-conversation-1"},
+                },
+                {
+                    "role": "assistant",
+                    "content": "我是前端工程师，负责 UI。",
+                    "metadata": {"participant_id": "member:frontend"},
+                },
+            ]
+
+        def list_conversation_participants(self, session_id: str):
+            assert session_id == "team-session-team-conversation-1"
+            return [
+                {"participant_id": "leader:team-conversation-1", "display_name": "小多"},
+                {"participant_id": "member:frontend", "display_name": "前端工程师"},
+            ]
+
+    control_home = str(tmp_path / "control")
+    execution_home = str(tmp_path / "execution")
+    monkeypatch.setattr(_server, "_sessions", {})
+    monkeypatch.setattr(_server, "_sessions_lock", threading.Lock())
+    monkeypatch.setattr(_server, "_stdio_transport", _NoopTransport())
+    monkeypatch.setattr(_server, "_db_for_stable_session", lambda _sid: FakeDB())
+
+    _, session = _ensure_worker_session(
+        RunStartFrame(
+            run_id="team-leader-run-1",
+            turn_id="team-leader-turn-1",
+            stored_session_id="team-session-team-conversation-1",
+            prompt="总结一下我们的对话记录",
+            params={
+                "cwd": str(tmp_path),
+                "runtime_scope_key": "team:team-conversation-1:leader-conversation",
+                "run_context_json": RunContext(
+                    conversation_session_id="team-session-team-conversation-1",
+                    participant_id="leader:team-conversation-1",
+                    activity_id="chat",
+                    activity_kind="chat",
+                    execution_scope_key="team:team-conversation-1:leader-conversation",
+                    control_home=control_home,
+                    execution_home=execution_home,
+                ).to_payload(),
+            },
+        )
+    )
+
+    assert [(msg["role"], msg["content"]) for msg in session["history"]] == [
+        ("user", "你是谁？"),
+        ("assistant", "我是小多，负责团队协调。"),
+        ("user", "[前端工程师] 我是前端工程师，负责 UI。"),
+    ]
+    assert session["history"][2]["metadata"]["transformed_speaker_pid"] == "member:frontend"
 
 
 def test_worker_session_restores_workspace_context(

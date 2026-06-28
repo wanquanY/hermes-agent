@@ -72,6 +72,9 @@ def test_collect_storage_stats_reports_runtime_tables_artifacts_and_logs(tmp_pat
     assert stats["state_db"]["tables"]["sessions"]["rows"] == 1
     assert stats["state_db"]["tables"]["messages"]["rows"] == 2
     assert stats["state_db"]["tables"]["run_events"]["rows"] == 1
+    assert stats["state_db"]["tables"]["run_event_search_index"]["rows"] == 1
+    assert stats["state_db"]["tables"]["session_runtime_state"]["rows"] == 0
+    assert stats["state_db"]["tables"]["tool_events"]["rows"] == 0
     assert stats["state_db"]["tables"]["messages"]["payload_bytes"] > 0
     assert stats["state_db"]["tables"]["run_events"]["payload_bytes"] > 0
     assert stats["gateway_db"]["tables"]["gateway_artifacts"]["rows"] == 1
@@ -83,6 +86,9 @@ def test_collect_storage_stats_reports_runtime_tables_artifacts_and_logs(tmp_pat
     assert stats["workspace_files"]["physical_size_bytes"] == artifact_path.stat().st_size
     assert stats["summary"]["message_rows"] == 2
     assert stats["summary"]["run_event_rows"] == 1
+    assert stats["summary"]["run_event_search_index_rows"] == 1
+    assert stats["summary"]["session_runtime_state_rows"] == 0
+    assert stats["summary"]["tool_events_rows"] == 0
     assert stats["summary"]["artifact_metadata_rows"] == 1
     assert stats["summary"]["physical_registered_workspace_file_bytes"] == artifact_path.stat().st_size
 

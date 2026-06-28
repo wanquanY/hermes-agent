@@ -252,6 +252,13 @@ class SessionDBTeamMissionConversationMixin:
                     status="active",
                     now=update_updated,
                 )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO sessions (id, source, started_at, transient)
+                VALUES (?, 'team_mission', ?, 0)
+                """,
+                (stable_session_id, created),
+            )
             # CR-P4.1: active_mission_id is accepted only as a compatibility
             # input; the legacy column is no longer written.
             return self._team_mission_conversation_from_row(conn.execute(

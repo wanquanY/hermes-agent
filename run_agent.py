@@ -1255,24 +1255,6 @@ class AIAgent:
 
         Ensures conversations are never lost, even on errors or early returns.
         """
-        if self._trace_transcript_persistence_enabled():
-            logger.warning(
-                "[h11-trace transcript-persistence] persist-session-start %s",
-                {
-                    "session_id": self.session_id,
-                    "run_id": str(getattr(self, "_hermes_active_run_id", "") or ""),
-                    "turn_id": str(getattr(self, "_hermes_active_turn_id", "") or ""),
-                    "runtime_scope_key": str(
-                        getattr(self, "_hermes_active_runtime_scope_key", "") or ""
-                    ),
-                    "conversation_history_len": len(conversation_history or []),
-                    "messages_len": len(messages or []),
-                    "messages_tail": self._transcript_persistence_tail_probe(messages),
-                    "conversation_history_tail": self._transcript_persistence_tail_probe(
-                        conversation_history or []
-                    ),
-                },
-            )
         self._drop_trailing_empty_response_scaffolding(messages)
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
@@ -1337,17 +1319,6 @@ class AIAgent:
         from agent.agent_runtime_helpers import repair_message_sequence
         return repair_message_sequence(self, messages)
 
-    def _trace_transcript_persistence_enabled(self) -> bool:
-        session_id = str(getattr(self, "session_id", "") or "")
-        runtime_scope_key = str(getattr(self, "_hermes_active_runtime_scope_key", "") or "")
-        run_context = getattr(self, "run_context", None) or getattr(self, "_run_context", None)
-        execution_scope_key = str(getattr(run_context, "execution_scope_key", "") or "")
-        return (
-            session_id.startswith("team-session-team-conversation-")
-            or runtime_scope_key.startswith("member-chat:")
-            or execution_scope_key.startswith("member-chat:")
-        )
-
     def _team_conversation_projector_owns_transcript(self) -> bool:
         session_id = str(getattr(self, "session_id", "") or "").strip()
         db = getattr(self, "_session_db", None)
@@ -1358,50 +1329,11 @@ class AIAgent:
             return False
         try:
             row = getter(session_id)
-        except Exception as exc:
-            if self._trace_transcript_persistence_enabled():
-                logger.warning(
-                    "[h11-trace transcript-persistence] projector-owner-check-failed %s",
-                    {"session_id": session_id, "error": str(exc)},
-                )
+        except Exception:
             return False
         if not isinstance(row, dict):
             return False
         return str(row.get("conversation_kind") or "").strip().lower() == "team"
-
-    def _transcript_persistence_message_probe(self, msg: Any) -> Dict[str, Any]:
-        if not isinstance(msg, dict):
-            return {"type": type(msg).__name__}
-        metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
-        content = msg.get("content")
-        if _is_multimodal_tool_result(content):
-            content = _multimodal_text_summary(content)
-        elif isinstance(content, list):
-            text_parts = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text_parts.append(str(part.get("text", "")))
-            content = "\n".join(text_parts)
-        content_text = content if isinstance(content, str) else str(content or "")
-        return {
-            "role": str(msg.get("role") or ""),
-            "participant_id": str(
-                msg.get("participant_id")
-                or msg.get("participantId")
-                or metadata.get("participant_id")
-                or metadata.get("participantId")
-                or ""
-            ),
-            "run_id": str(metadata.get("run_id") or ""),
-            "turn_id": str(metadata.get("turn_id") or ""),
-            "client_message_id": str(metadata.get("client_message_id") or ""),
-            "content_len": len(content_text),
-            "content_sha1": hashlib.sha1(content_text.encode("utf-8", errors="replace")).hexdigest()[:12],
-            "content_preview": content_text[:120].replace("\n", "\\n"),
-        }
-
-    def _transcript_persistence_tail_probe(self, messages: List[Dict], limit: int = 5) -> List[Dict[str, Any]]:
-        return [self._transcript_persistence_message_probe(msg) for msg in list(messages or [])[-limit:]]
 
     def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Persist any un-flushed messages to the SQLite session store.
@@ -1416,50 +1348,12 @@ class AIAgent:
         try:
             if self._team_conversation_projector_owns_transcript():
                 self._last_flushed_db_idx = len(messages or [])
-                if self._trace_transcript_persistence_enabled():
-                    logger.warning(
-                        "[h11-trace transcript-persistence] flush-skipped-projector-owned-team %s",
-                        {
-                            "session_id": self.session_id,
-                            "run_id": str(getattr(self, "_hermes_active_run_id", "") or ""),
-                            "turn_id": str(getattr(self, "_hermes_active_turn_id", "") or ""),
-                            "runtime_scope_key": str(
-                                getattr(self, "_hermes_active_runtime_scope_key", "") or ""
-                            ),
-                            "messages_len": len(messages or []),
-                            "conversation_history_len": len(conversation_history or []),
-                            "new_last_flushed_db_idx": self._last_flushed_db_idx,
-                        },
-                    )
                 return
             # Retry row creation if the earlier attempt failed transiently.
             if not self._session_db_created:
                 self._ensure_db_session()
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
-            trace_transcript_persistence = self._trace_transcript_persistence_enabled()
-            appended_messages: List[Dict[str, Any]] = []
-            if trace_transcript_persistence:
-                logger.warning(
-                    "[h11-trace transcript-persistence] flush-start %s",
-                    {
-                        "session_id": self.session_id,
-                        "run_id": str(getattr(self, "_hermes_active_run_id", "") or ""),
-                        "turn_id": str(getattr(self, "_hermes_active_turn_id", "") or ""),
-                        "runtime_scope_key": str(
-                            getattr(self, "_hermes_active_runtime_scope_key", "") or ""
-                        ),
-                        "conversation_history_len": len(conversation_history or []),
-                        "messages_len": len(messages or []),
-                        "last_flushed_db_idx": self._last_flushed_db_idx,
-                        "start_idx": start_idx,
-                        "flush_from": flush_from,
-                        "messages_tail": self._transcript_persistence_tail_probe(messages),
-                        "flush_slice_tail": self._transcript_persistence_tail_probe(
-                            list(messages or [])[flush_from:]
-                        ),
-                    },
-                )
 
             def _turn_metadata(value):
                 if not isinstance(value, dict):
@@ -1488,12 +1382,6 @@ class AIAgent:
                 # gets stamped with the OUTER turn's ids (the synthetic doesn't
                 # define a new turn).
                 if isinstance(msg, dict) and msg.get("_synthetic_continuation"):
-                    if trace_transcript_persistence:
-                        appended_messages.append({
-                            "index": msg_idx,
-                            "skipped": "_synthetic_continuation",
-                            **self._transcript_persistence_message_probe(msg),
-                        })
                     continue
                 role = msg.get("role", "unknown")
                 msg_metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
@@ -1533,111 +1421,24 @@ class AIAgent:
                 elif isinstance(msg.get("tool_calls"), list):
                     tool_calls_data = msg["tool_calls"]
                 msg_participant_id = self._flush_message_participant_id(role, msg, msg_metadata)
-                if role in {"assistant", "tool"}:
-                    logger.warning(
-                        "[h9-trace member-persona] session db message participant %s",
-                        {
-                            "session_id": self.session_id,
-                            "role": role,
-                            "run_id": msg_metadata.get("run_id") or "",
-                            "turn_id": msg_metadata.get("turn_id") or "",
-                            "client_message_id": msg_metadata.get("client_message_id") or "",
-                            "participant_id": msg_participant_id,
-                            "message_has_participant_id": bool(
-                                str(msg.get("participant_id") or msg.get("participantId") or "").strip()
-                            ),
-                            "metadata_has_participant_id": bool(
-                                str(
-                                    msg_metadata.get("participant_id")
-                                    or msg_metadata.get("participantId")
-                                    or ""
-                                ).strip()
-                            ),
-                            "agent_run_context_participant_id": str(
-                                getattr(getattr(self, "run_context", None), "participant_id", "")
-                                or getattr(getattr(self, "_run_context", None), "participant_id", "")
-                                or ""
-                            ).strip(),
-                        },
-                    )
-                try:
-                    append_result = self._session_db.append_message(
-                        session_id=self.session_id,
-                        role=role,
-                        content=content,
-                        participant_id=msg_participant_id,
-                        tool_name=msg.get("tool_name"),
-                        tool_calls=tool_calls_data,
-                        tool_call_id=msg.get("tool_call_id"),
-                        finish_reason=msg.get("finish_reason"),
-                        reasoning=msg.get("reasoning") if role == "assistant" else None,
-                        reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
-                        reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
-                        codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
-                        codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
-                        metadata=msg_metadata,
-                    )
-                except Exception as append_exc:
-                    if trace_transcript_persistence:
-                        logger.warning(
-                            "[h11-trace transcript-persistence] flush-append-failed %s",
-                            {
-                                "session_id": self.session_id,
-                                "run_id": str(getattr(self, "_hermes_active_run_id", "") or ""),
-                                "turn_id": str(getattr(self, "_hermes_active_turn_id", "") or ""),
-                                "index": msg_idx,
-                                "role": role,
-                                "participant_id": msg_participant_id,
-                                "message": self._transcript_persistence_message_probe(msg),
-                                "error": str(append_exc),
-                            },
-                        )
-                    raise
-                if trace_transcript_persistence:
-                    message_probe = self._transcript_persistence_message_probe(msg)
-                    message_probe.update({
-                        "index": msg_idx,
-                        "resolved_participant_id": msg_participant_id,
-                        "append_result": str(append_result),
-                    })
-                    appended_messages.append(message_probe)
+                self._session_db.append_message(
+                    session_id=self.session_id,
+                    role=role,
+                    content=content,
+                    participant_id=msg_participant_id,
+                    tool_name=msg.get("tool_name"),
+                    tool_calls=tool_calls_data,
+                    tool_call_id=msg.get("tool_call_id"),
+                    finish_reason=msg.get("finish_reason"),
+                    reasoning=msg.get("reasoning") if role == "assistant" else None,
+                    reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
+                    reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
+                    codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
+                    codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    metadata=msg_metadata,
+                )
             self._last_flushed_db_idx = len(messages)
-            if trace_transcript_persistence:
-                logger.warning(
-                    "[h11-trace transcript-persistence] flush-end %s",
-                    {
-                        "session_id": self.session_id,
-                        "run_id": str(getattr(self, "_hermes_active_run_id", "") or ""),
-                        "turn_id": str(getattr(self, "_hermes_active_turn_id", "") or ""),
-                        "runtime_scope_key": str(
-                            getattr(self, "_hermes_active_runtime_scope_key", "") or ""
-                        ),
-                        "messages_len": len(messages or []),
-                        "flush_from": flush_from,
-                        "new_last_flushed_db_idx": self._last_flushed_db_idx,
-                        "appended_count": len([
-                            item for item in appended_messages if not item.get("skipped")
-                        ]),
-                        "appended_messages": appended_messages,
-                    },
-                )
         except Exception as e:
-            if self._trace_transcript_persistence_enabled():
-                logger.warning(
-                    "[h11-trace transcript-persistence] flush-failed %s",
-                    {
-                        "session_id": self.session_id,
-                        "run_id": str(getattr(self, "_hermes_active_run_id", "") or ""),
-                        "turn_id": str(getattr(self, "_hermes_active_turn_id", "") or ""),
-                        "runtime_scope_key": str(
-                            getattr(self, "_hermes_active_runtime_scope_key", "") or ""
-                        ),
-                        "conversation_history_len": len(conversation_history or []),
-                        "messages_len": len(messages or []),
-                        "last_flushed_db_idx": self._last_flushed_db_idx,
-                        "error": str(e),
-                    },
-                )
             logger.warning("Session DB append_message failed: %s", e)
 
     def _flush_message_participant_id(

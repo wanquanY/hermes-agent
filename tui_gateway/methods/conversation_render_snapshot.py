@@ -71,52 +71,6 @@ def _structural_run_events(events: list[Any]) -> list[dict[str, Any]]:
     return [dict(event) for event in events if _is_structural_run_event(event)]
 
 
-def _trace_transcript_read_model(label: str, **fields: Any) -> None:
-    try:
-        logger.warning("[h11-trace transcript-persistence] %s %s", label, fields)
-    except Exception:
-        pass
-
-
-def _message_probe(message: Any) -> dict[str, Any]:
-    if not isinstance(message, dict):
-        return {"type": type(message).__name__}
-    metadata = _message_metadata(message)
-    content = _text(message.get("content") or message.get("text"))
-    return {
-        "id": _text(message.get("id") or message.get("message_id") or message.get("messageId")),
-        "role": _text(message.get("role")),
-        "participant_id": _message_participant_id(message),
-        "run_id": _text(metadata.get("run_id") or metadata.get("runId") or _message_source_run_id(message)),
-        "turn_id": _text(metadata.get("turn_id") or metadata.get("turnId")),
-        "content_len": len(content),
-        "content_preview": content[:120].replace("\n", "\\n"),
-    }
-
-
-def _event_probe(event: Any) -> dict[str, Any]:
-    if not isinstance(event, dict):
-        return {"type": type(event).__name__}
-    payload = _record(event.get("payload"))
-    content = _text(
-        payload.get("text")
-        or payload.get("content")
-        or payload.get("output")
-        or payload.get("final_response")
-        or payload.get("finalResponse")
-    )
-    return {
-        "type": _text(event.get("type")),
-        "seq": event.get("seq"),
-        "run_id": _event_run_id(event),
-        "turn_id": _text(event.get("turn_id") or event.get("turnId") or payload.get("turn_id") or payload.get("turnId")),
-        "participant_id": _event_participant_id(event),
-        "status": _text(payload.get("status")),
-        "content_len": len(content),
-        "content_preview": content[:120].replace("\n", "\\n"),
-    }
-
-
 def _run_ids_from_render_messages(messages: list[dict[str, Any]]) -> list[str]:
     run_ids = sorted(item for item in _covered_render_run_ids(messages) if item)
     return run_ids
@@ -186,7 +140,8 @@ def _cap_render_result(result: dict[str, Any], *, max_bytes: int = _RENDER_MAX_B
 
     Drops the recoverable collections newest-kept: oldest ``runEvents`` first
     (live deltas re-arrive via the events subscription; finished-run text already
-    lives in ``messages``), then oldest ``messages`` (paginated + re-fetchable),
+    lives in ``messages``), then ``toolEvents`` and oldest ``messages``
+    (paginated + re-fetchable),
     until the serialized result fits. Flags ``transportTruncated`` + pageInfo
     hasMore so the client lazy-loads the remainder instead of assuming it has the
     whole history.
@@ -194,7 +149,7 @@ def _cap_render_result(result: dict[str, Any], *, max_bytes: int = _RENDER_MAX_B
     if _payload_byte_size(result) <= max_bytes:
         return result
     truncated = False
-    for key in ("runEvents", "messages"):
+    for key in ("runEvents", "toolEvents", "messages"):
         truncated = _cap_list_tail(result, result, key, max_bytes=max_bytes) or truncated
         if _payload_byte_size(result) <= max_bytes:
             break
@@ -212,6 +167,7 @@ def _cap_render_result(result: dict[str, Any], *, max_bytes: int = _RENDER_MAX_B
             changed = False
             for container, key in (
                 (result, "runEvents"),
+                (result, "toolEvents"),
                 (result, "messages"),
                 (graph, "recent_messages") if isinstance(graph, dict) else ({}, ""),
                 (graph, "task_frames") if isinstance(graph, dict) else ({}, ""),
@@ -372,6 +328,7 @@ def _messages_page(
             return None, _err("conversation-render-snapshot", 4006, "session_id required")
         return {
             "messages": [],
+            "toolEvents": [],
             "runEvents": [],
             "pageInfo": {},
             "branchInfo": None,
@@ -387,6 +344,7 @@ def _messages_page(
             return None, response
         return {
             "messages": [],
+            "toolEvents": [],
             "runEvents": [],
             "pageInfo": {},
             "branchInfo": None,
@@ -843,6 +801,7 @@ def _team_conversation_snapshot(
     if not messages:
         messages = graph_recent_messages
     raw_run_events = list(page.get("runEvents") or []) if isinstance(page, dict) else []
+    tool_events = list(page.get("toolEvents") or []) if isinstance(page, dict) else []
     fallback_from_run_events = False
     if not messages:
         # CR-P2.4: team timeline rendering must not fall back to
@@ -865,8 +824,8 @@ def _team_conversation_snapshot(
     # Read-time only: nothing is written back to the ``messages`` table.
     # Persisted messages take precedence (their content/metadata is
     # canonical); the fill-in is appended and ``_normalize_team_render_messages``
-    # dedupes by render identity. Trace ``filled_missing_complete_run_ids``
-    # makes the patch visible in [h7-trace] logs.
+    # dedupes by render identity. ``filled_missing_complete_run_ids`` remains
+    # available in the render summary for targeted inspection.
     filled_missing_complete_messages: list[dict[str, Any]] = []
     if missing_complete_messages and not fallback_from_run_events:
         filled_missing_complete_messages = list(missing_complete_messages)
@@ -895,33 +854,6 @@ def _team_conversation_snapshot(
         mission=mission,
         messages=messages,
     )
-    complete_events = [
-        event for event in raw_run_events
-        if isinstance(event, dict) and _text(event.get("type")) == "message.complete"
-    ]
-    _trace_transcript_read_model(
-        "render-read-model",
-        projection_source=projection_source,
-        identifier=identifier,
-        session_id=session_id,
-        conversation_id=_text(conversation.get("conversation_id") or conversation.get("conversationId")),
-        mission_id=_text(mission.get("mission_id") or mission.get("missionId")),
-        page_message_count=len(page_messages),
-        graph_recent_message_count=len(graph_recent_messages),
-        raw_run_event_count=len(raw_run_events),
-        raw_message_complete_count=len(complete_events),
-        fallback_from_run_events=fallback_from_run_events,
-        normalized_message_count=len(messages),
-        returned_run_event_count=len(run_events),
-        covered_run_ids=_run_ids_from_render_messages(messages),
-        complete_event_run_ids=sorted({_event_run_id(event) for event in complete_events if _event_run_id(event)}),
-        missing_complete_run_ids=_run_ids_from_render_messages(missing_complete_messages),
-        filled_missing_complete_run_ids=_run_ids_from_render_messages(filled_missing_complete_messages),
-        message_tail=[_message_probe(message) for message in messages[-5:]],
-        complete_event_tail=[_event_probe(event) for event in complete_events[-5:]],
-        missing_complete_tail=[_message_probe(message) for message in missing_complete_messages[-5:]],
-        page_info=page_info if isinstance(page_info, dict) else {},
-    )
     branch_info = page.get("branchInfo") if isinstance(page, dict) else None
     return _ok(
         rid,
@@ -941,6 +873,7 @@ def _team_conversation_snapshot(
             "graph": graph,
             "participants": _participants_for_session(session_id),
             "messages": messages,
+            "toolEvents": tool_events,
             "runEvents": run_events,
             "pageInfo": page_info if isinstance(page_info, dict) else {},
             "branchInfo": branch_info if isinstance(branch_info, dict) else None,
@@ -974,6 +907,7 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
             "session_id": session_id,
             "participants": _participants_for_session(session_id),
             "messages": list(page.get("messages") or []),
+            "toolEvents": list(page.get("toolEvents") or []),
             "runEvents": _structural_run_events(list(page.get("runEvents") or [])),
             "pageInfo": page.get("pageInfo") if isinstance(page.get("pageInfo"), dict) else {},
             "branchInfo": page.get("branchInfo") if isinstance(page.get("branchInfo"), dict) else None,

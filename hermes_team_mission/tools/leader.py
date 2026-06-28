@@ -9,6 +9,7 @@ by the separate ``team_mission_planning`` toolset.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -32,6 +33,14 @@ _START_TASK_HANDOFF_MESSAGE = (
     "state, not the final result. The final deliverable will be written "
     "back here when the mission graph completes."
 )
+_log = logging.getLogger(__name__)
+
+
+def _team_chain_log(stage: str, **fields: Any) -> None:
+    try:
+        _log.warning("[dovie-team-chain] %s %s", stage, json.dumps(fields, ensure_ascii=False, sort_keys=True, default=str))
+    except Exception:
+        pass
 
 
 def _text(value: Any) -> str:
@@ -206,11 +215,13 @@ def _handle_status(args: dict[str, Any], parent_agent=None, **_kwargs) -> str:
 def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> str:
     ctx = _team_context()
     if isinstance(ctx, str):
+        _team_chain_log("start-task-tool-rejected-context", error=ctx)
         return tool_error(ctx)
     team_context = ctx
     db = _get_db(parent_agent)
     objective = _text(args.get("objective") or args.get("task") or args.get("prompt"))
     if not objective:
+        _team_chain_log("start-task-tool-rejected-objective", args_keys=sorted(str(key) for key in args.keys()))
         return tool_error("objective is required.")
     title = _text(args.get("title")) or objective[:80] or "Team task"
     task_id = _text(args.get("task_id") or args.get("taskId")) or f"task-{uuid.uuid4().hex[:12]}"
@@ -230,8 +241,29 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
         conversation = resolved.get("conversation") if isinstance(resolved, dict) and isinstance(resolved.get("conversation"), Mapping) else {}
         conversation_session_id = _text(conversation.get("stable_session_id")) or conversation_id
     if not conversation_id or not conversation_session_id:
+        _team_chain_log(
+            "start-task-tool-rejected-missing-conversation",
+            requested_mission_id=mission_id,
+            task_id=task_id,
+            conversation_id=conversation_id,
+            conversation_session_id=conversation_session_id,
+            team_context=team_context,
+        )
         return tool_error("Team Mission conversation context is not available for this Leader turn.")
     active_run_id = _active_run_id(parent_agent)
+    _team_chain_log(
+        "start-task-tool-entry",
+        requested_mission_id=mission_id,
+        task_id=task_id,
+        title=title,
+        objective_length=len(objective),
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        team_id=_text(team_context.get("team_id") or team_context.get("teamId")),
+        active_run_id=active_run_id,
+        workspace_id=_text(team_context.get("workspace_id") or team_context.get("workspaceId")),
+        workspace_path=_text(team_context.get("workspace_path") or team_context.get("workspacePath")),
+    )
     existing_mission_id, existing_graph = _active_mission_graph(db, {
         **team_context,
         "conversation_id": conversation_id,
@@ -253,6 +285,14 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
     ):
         node = _root_leader_node(existing_graph)
         mission_status = _text(existing_mission.get("status")) or "planning"
+        _team_chain_log(
+            "start-task-tool-idempotent",
+            mission_id=existing_mission_id,
+            task_id=existing_task_id or task_id,
+            conversation_id=conversation_id,
+            active_run_id=active_run_id,
+            mission_status=mission_status,
+        )
         return tool_result(
             success=True,
             intent="start_team_task",
@@ -312,12 +352,31 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
     )
     created, error = _unwrap_response(create_response)
     if error:
+        _team_chain_log(
+            "start-task-tool-create-error",
+            requested_mission_id=mission_id,
+            task_id=task_id,
+            conversation_id=conversation_id,
+            conversation_session_id=conversation_session_id,
+            error=error,
+        )
         return tool_error(error)
     graph = db.get_team_mission_graph(mission_id)
     started = created.get("leader_start") if isinstance(created.get("leader_start"), Mapping) else {}
     node = started.get("node") if isinstance(started.get("node"), Mapping) else _root_leader_node(graph)
     mission = graph.get("mission") if isinstance(graph, dict) and isinstance(graph.get("mission"), Mapping) else {}
     mission_status = _text(mission.get("status")) or "planning"
+    _team_chain_log(
+        "start-task-tool-created",
+        mission_id=mission_id,
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        task_id=task_id,
+        mission_status=mission_status,
+        node_id=_text((node or {}).get("node_id") or (node or {}).get("nodeId")),
+        run=started.get("run") if isinstance(started, Mapping) else {},
+        graph_node_count=len(graph.get("nodes") or []) if isinstance(graph, dict) else 0,
+    )
     return tool_result(
         success=True,
         intent="start_team_task",

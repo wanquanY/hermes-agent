@@ -14,6 +14,9 @@ STATE_DB_TABLES: tuple[str, ...] = (
     "messages",
     "runs",
     "run_events",
+    "run_event_search_index",
+    "session_runtime_state",
+    "tool_events",
     "run_event_archives",
 )
 GATEWAY_DB_TABLES: tuple[str, ...] = (
@@ -43,7 +46,31 @@ STATE_PAYLOAD_COLUMNS: dict[str, tuple[str, ...]] = {
         "metadata_json",
     ),
     "runs": ("error", "metadata_json"),
-    "run_events": ("payload_json", "event_json", "status"),
+    "run_events": (
+        "payload_json",
+        "event_json",
+        "frame_blob",
+        "frame_format",
+        "retention_class",
+        "projected_message_id",
+        "projected_tool_event_id",
+        "projection_state",
+        "runtime_source_seq",
+        "status",
+    ),
+    "run_event_search_index": (
+        "runtime_source_seq",
+        "search_text",
+    ),
+    "session_runtime_state": ("profile_json", "payload_hash", "status", "model", "provider"),
+    "tool_events": (
+        "arguments_json",
+        "progress_json",
+        "result_json",
+        "result_text",
+        "summary",
+        "metadata_json",
+    ),
     "run_event_archives": ("metadata_json", "reason"),
 }
 GATEWAY_PAYLOAD_COLUMNS: dict[str, tuple[str, ...]] = {
@@ -336,6 +363,13 @@ def collect_storage_stats(
             "logical_payload_bytes": logical_payload_bytes,
             "message_rows": _safe_int(state_db["tables"]["messages"]["rows"]),
             "run_event_rows": _safe_int(state_db["tables"]["run_events"]["rows"]),
+            "run_event_search_index_rows": _safe_int(
+                state_db["tables"]["run_event_search_index"]["rows"]
+            ),
+            "session_runtime_state_rows": _safe_int(
+                state_db["tables"]["session_runtime_state"]["rows"]
+            ),
+            "tool_events_rows": _safe_int(state_db["tables"]["tool_events"]["rows"]),
             "session_rows": _safe_int(state_db["tables"]["sessions"]["rows"]),
             "artifact_metadata_rows": _safe_int(gateway_db["tables"]["gateway_artifacts"]["rows"]),
             "artifact_link_rows": _safe_int(gateway_db["tables"]["gateway_session_artifacts"]["rows"]),

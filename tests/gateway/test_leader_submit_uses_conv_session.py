@@ -56,6 +56,7 @@ def _submit_leader(
     tmp_path: Path,
     *,
     mission_id: str = "",
+    conversation_ensure_index_only: bool = False,
 ) -> tuple[SessionDB, dict[str, Any], dict[str, Any]]:
     team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
@@ -68,6 +69,26 @@ def _submit_leader(
         return {"ok": True}
 
     monkeypatch.setattr(runtime_methods, "_proxy_run_submit_via_worker", fake_proxy_run_submit)
+    if conversation_ensure_index_only:
+        def fake_ensure_team_mission_conversation(**kwargs: Any) -> dict[str, Any]:
+            db.upsert_session_index(
+                session_id=kwargs["stable_session_id"],
+                source="team_mission",
+                session_kind="team_mission",
+                conversation_kind="team",
+                title=kwargs.get("title") or "",
+                team_id=kwargs.get("team_id") or "",
+                mission_id=kwargs.get("mission_id") or "",
+                conversation_id=kwargs.get("conversation_id") or "",
+            )
+            return {
+                "conversation_id": kwargs["conversation_id"],
+                "stable_session_id": kwargs["stable_session_id"],
+                "title": kwargs.get("title") or "",
+                "team_id": kwargs.get("team_id") or "",
+            }
+
+        monkeypatch.setattr(db, "ensure_team_mission_conversation", fake_ensure_team_mission_conversation)
 
     params: dict[str, Any]
     if mission_id:
@@ -156,6 +177,47 @@ def test_leader_spawn_stored_session_id_is_conv_session(monkeypatch: pytest.Monk
     assert captured["session_id"] == CONVERSATION_SESSION_ID
     assert not captured["stored_session_id"].startswith("memberchat:")
     assert response["result"]["leader_turn"]["stored_session_id"] == CONVERSATION_SESSION_ID
+
+
+def test_leader_submit_persists_visible_user_message_before_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    db, captured, _response = _submit_leader(monkeypatch, tmp_path)
+
+    messages = db.get_conversation_message_read_model(
+        CONVERSATION_SESSION_ID,
+        include_storage_metadata=True,
+    )
+
+    assert [message["role"] for message in messages] == ["user"]
+    assert messages[0]["content"] == "Leader 直接回复一次"
+    assert messages[0]["conversation_message_id"].startswith("msg_")
+    assert messages[0]["metadata"]["message_kind"] == "user_submission"
+    assert messages[0]["metadata"]["run_id"] == captured["run_id"]
+    assert messages[0]["metadata"]["turn_id"] == captured["turn_id"]
+
+
+def test_leader_submit_materializes_canonical_session_when_index_exists_without_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    db, captured, _response = _submit_leader(
+        monkeypatch,
+        tmp_path,
+        conversation_ensure_index_only=True,
+    )
+
+    assert db.get_session_index(CONVERSATION_SESSION_ID)
+    assert db.get_session(CONVERSATION_SESSION_ID)
+    messages = db.get_conversation_message_read_model(
+        CONVERSATION_SESSION_ID,
+        include_storage_metadata=True,
+    )
+    assert [message["role"] for message in messages] == ["user"]
+    assert messages[0]["content"] == "Leader 直接回复一次"
+    assert messages[0]["metadata"]["run_id"] == captured["run_id"]
+    assert messages[0]["metadata"]["turn_id"] == captured["turn_id"]
 
 
 @pytest.mark.asyncio

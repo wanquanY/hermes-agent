@@ -1587,6 +1587,14 @@ def _(rid, params: dict) -> dict:
             _clear_session_context(tokens)
             _leave_profile_context(profile_tokens)
     except Exception as e:
+        logger.warning(
+            "[dovie-session-resume] failed session_id=%s hydrate=%s runtime_scope_key=%s db_type=%s error=%s",
+            target,
+            hydrate,
+            runtime_scope_key,
+            type(db).__name__,
+            e,
+        )
         return _err(rid, 5000, f"resume failed: {e}")
 
     with _session_resume_lock:

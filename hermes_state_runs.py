@@ -8,7 +8,40 @@ import time
 from typing import Any, Dict, List, Optional
 
 from hermes_runtime_event_payloads import primary_deliverable_text
-from hermes_team_mission.runtime.run_event_retention import should_preserve_terminal_stream_row
+from hermes_state_run_event_codec import (
+    decode_run_event_row,
+    encode_run_event_frame,
+    payload_from_run_event_row,
+    update_run_event_frame_columns,
+)
+from hermes_state_run_event_index import (
+    project_run_event_search_index,
+    project_run_event_search_index_from_row,
+    runtime_source_seq_from_event,
+)
+from hermes_state_run_event_reference import (
+    reference_projected_run_event_payloads,
+    rehydrate_referenced_run_event,
+)
+from hermes_state_runtime import (
+    json_loads as runtime_json_loads,
+    session_info_payload_hash,
+    session_info_record,
+    session_runtime_identity_matches,
+    session_runtime_state_from_row,
+)
+from hermes_state_tool_events import (
+    TOOL_EVENT_TYPES,
+    project_tool_event,
+    tool_event_row_to_dict,
+)
+from hermes_team_mission.runtime.run_event_retention import (
+    COALESCIBLE_STREAM_EVENT_TYPES,
+    DEFAULT_RUN_EVENT_MAX_PER_SESSION,
+    DEFAULT_RUN_EVENT_RETENTION_DAYS,
+    RunEventRetentionPolicy,
+    TERMINAL_RUN_PRUNABLE_EVENT_TYPES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,28 +60,12 @@ TERMINAL_RUN_STATUS_RANK = {
     "failed": 1,
     "completed": 2,
 }
-DEFAULT_RUN_EVENT_RETENTION_DAYS = 14
-DEFAULT_RUN_EVENT_MAX_PER_SESSION = 5000
 RUN_EVENT_PRUNE_INTERVAL_EVENTS = 500
 CONTROL_ONLY_ACTIVE_RUN_REPAIR_STALE_SECONDS = 60.0
 CONTROL_ONLY_ACTIVE_RUN_REPAIR_OWNER_DEAD_GRACE_SECONDS = 10.0
 DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS = 300.0
 DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS = 2.0
-COALESCIBLE_STREAM_EVENT_TYPES = {
-    "reasoning.delta",
-    "thinking.delta",
-    "subagent.output_delta",
-    "subagent.reasoning_delta",
-    "subagent.thinking",
-    "agent_profile_test.output_delta",
-    "agent_profile_test.thinking",
-}
-TERMINAL_RUN_PRUNABLE_EVENT_TYPES = {
-    "message.delta",
-    "tool.progress",
-    "tool.generating",
-    *COALESCIBLE_STREAM_EVENT_TYPES,
-}
+RUN_EVENT_RETENTION_POLICY = RunEventRetentionPolicy()
 STREAM_COMPACTION_BOUNDARY_EVENT_TYPES = {
     "message.start",
     "message.complete",
@@ -120,6 +137,10 @@ def _json_loads(value: str | None, fallback: Any) -> Any:
         return fallback
 
 
+def _run_event_retention_class(event_type: str) -> str:
+    return RUN_EVENT_RETENTION_POLICY.classify_event_type(str(event_type or "").strip())
+
+
 def _sql_status_literals(statuses: set[str]) -> str:
     return ",".join("'" + status.replace("'", "''") + "'" for status in sorted(statuses))
 
@@ -173,6 +194,30 @@ def _event_participant_id(event: Dict[str, Any], fallback: str = "") -> str:
         or event.get("participantId")
         or payload.get("participant_id")
         or payload.get("participantId")
+        or fallback
+        or ""
+    ).strip()
+
+
+def _event_activity_id(event: Dict[str, Any], fallback: str = "") -> str:
+    """ADR-0001: extract activity_id from event frame.
+
+    Look in three places (in order):
+      1. top-level event["activity_id"] / event["activityId"]
+      2. event.payload.activity_id / activityId
+      3. event.metadata.activity_id / activityId
+    Returns "" when nothing is found; the caller decides whether to fall
+    back to RunContext or leave the column NULL for a backfill pass.
+    """
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    return str(
+        event.get("activity_id")
+        or event.get("activityId")
+        or payload.get("activity_id")
+        or payload.get("activityId")
+        or metadata.get("activity_id")
+        or metadata.get("activityId")
         or fallback
         or ""
     ).strip()
@@ -961,12 +1006,95 @@ class SessionDBRunMixin:
 
         return self._execute_write(_do)
 
+    def _upsert_session_runtime_state_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        session_id: str,
+        payload: Dict[str, Any],
+        runtime_scope_key: str = "",
+        runtime_session_id: str = "",
+        run_id: str = "",
+        turn_id: str = "",
+        updated_at: float = 0.0,
+        source_seq: int = 0,
+    ) -> tuple[Dict[str, Any], bool]:
+        record = session_info_record(
+            session_id=session_id,
+            payload=payload,
+            runtime_scope_key=runtime_scope_key,
+            runtime_session_id=runtime_session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+            updated_at=updated_at,
+            source_seq=source_seq,
+        )
+        existing = conn.execute(
+            "SELECT * FROM session_runtime_state WHERE session_id = ?",
+            (record["session_id"],),
+        ).fetchone()
+        duplicate = session_runtime_identity_matches(existing, record)
+        if duplicate:
+            existing_state = session_runtime_state_from_row(existing)
+            return existing_state or record, True
+        conn.execute(
+            """
+            INSERT INTO session_runtime_state (
+                session_id, runtime_scope_key, runtime_session_id, run_id,
+                turn_id, status, model, provider, profile_json,
+                payload_hash, updated_at, source_seq
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                runtime_scope_key = excluded.runtime_scope_key,
+                runtime_session_id = excluded.runtime_session_id,
+                run_id = excluded.run_id,
+                turn_id = excluded.turn_id,
+                status = excluded.status,
+                model = excluded.model,
+                provider = excluded.provider,
+                profile_json = excluded.profile_json,
+                payload_hash = excluded.payload_hash,
+                updated_at = excluded.updated_at,
+                source_seq = excluded.source_seq
+            WHERE COALESCE(excluded.source_seq, 0) >= COALESCE(session_runtime_state.source_seq, 0)
+            """,
+            (
+                record["session_id"],
+                record["runtime_scope_key"],
+                record["runtime_session_id"],
+                record["run_id"],
+                record["turn_id"],
+                record["status"],
+                record["model"],
+                record["provider"],
+                record["profile_json"],
+                record["payload_hash"],
+                record["updated_at"],
+                record["source_seq"],
+            ),
+        )
+        return record, False
+
+    def get_session_runtime_state(self, session_id: str) -> Dict[str, Any] | None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM session_runtime_state WHERE session_id = ?",
+                (stable,),
+            ).fetchone()
+        state = session_runtime_state_from_row(row)
+        return state or None
+
     def append_run_event(
         self,
         session_id: str,
         event: Dict[str, Any],
         *,
         participant_id: str = "",
+        activity_id: str = "",
     ) -> Dict[str, Any]:
         stable = str(session_id or "").strip()
         if not stable:
@@ -1022,15 +1150,48 @@ class SessionDBRunMixin:
             if isinstance(frame.get("payload"), dict):
                 frame["payload"]["participant_id"] = event_participant_id
                 payload = frame["payload"]
+        # ADR-0001: stamp the frame's activity_id at write time so all
+        # downstream readers (subscribe/replay/projector) can slice by
+        # activity without scanning by session_id.
+        event_activity_id = _event_activity_id(frame, activity_id)
+        if event_activity_id:
+            frame["activity_id"] = event_activity_id
+            frame["activityId"] = event_activity_id
+            if isinstance(frame.get("payload"), dict):
+                frame["payload"]["activity_id"] = event_activity_id
+                payload = frame["payload"]
         event_json = _json_dumps(frame)
+        frame_blob, frame_format = encode_run_event_frame(frame)
+        retention_class = _run_event_retention_class(event_type)
+        runtime_source_seq = runtime_source_seq_from_event(frame)
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
             inserted_event = frame
             event_json_for_insert = event_json
+            frame_blob_for_insert = frame_blob
+            frame_format_for_insert = frame_format
             coalesced = False
             existing = None
             existing_status = ""
             ignored_after_terminal = False
+            if event_type == "session.info":
+                runtime_state, duplicate_session_info = self._upsert_session_runtime_state_locked(
+                    conn,
+                    session_id=stable,
+                    payload=payload,
+                    runtime_scope_key=runtime_scope_key,
+                    runtime_session_id=runtime_session_id,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    updated_at=timestamp,
+                    source_seq=seq,
+                )
+                if duplicate_session_info:
+                    duplicate_event = dict(frame)
+                    duplicate_event["seq"] = int(runtime_state.get("source_seq") or seq)
+                    duplicate_event["_persistence_disposition"] = "duplicate_session_info"
+                    duplicate_event["_session_runtime_state"] = runtime_state
+                    return duplicate_event
             if run_id:
                 existing = conn.execute(
                     "SELECT * FROM runs WHERE run_id = ?",
@@ -1042,7 +1203,7 @@ class SessionDBRunMixin:
                     if preferred_status == existing_status:
                         canonical = conn.execute(
                             """
-                            SELECT event_json
+                            SELECT *
                             FROM run_events
                             WHERE session_id = ?
                               AND run_id = ?
@@ -1052,7 +1213,7 @@ class SessionDBRunMixin:
                             """,
                             (stable, run_id, existing_status),
                         ).fetchone()
-                        canonical_event = _json_loads(_row_value(canonical, "event_json", ""), {})
+                        canonical_event = decode_run_event_row(canonical)
                         if isinstance(canonical_event, dict) and canonical_event:
                             canonical_event["_persistence_disposition"] = "duplicate_terminal"
                             return canonical_event
@@ -1074,6 +1235,7 @@ class SessionDBRunMixin:
                 if ignored_after_terminal:
                     frame["_persistence_disposition"] = "ignored_after_terminal"
                     event_json_for_insert = _json_dumps(frame)
+                    frame_blob_for_insert, frame_format_for_insert = encode_run_event_frame(frame)
             if _event_is_coalescible_stream_delta(frame):
                 boundary_event_types = _stream_compaction_boundary_event_types(event_type)
                 boundary_placeholders = ",".join("?" for _ in boundary_event_types)
@@ -1098,7 +1260,7 @@ class SessionDBRunMixin:
                 boundary_seq = int(_row_value(boundary, "boundary_seq", 0) or 0)
                 candidates = conn.execute(
                     """
-                    SELECT id, seq, event_json
+                    SELECT *
                     FROM run_events
                     WHERE session_id = ?
                       AND event_type = ?
@@ -1123,7 +1285,7 @@ class SessionDBRunMixin:
                 previous = None
                 previous_event: Dict[str, Any] = {}
                 for candidate in candidates:
-                    candidate_event = _json_loads(_row_value(candidate, "event_json", ""), {})
+                    candidate_event = decode_run_event_row(candidate)
                     if (
                         isinstance(candidate_event, dict)
                         and _stream_events_can_coalesce(candidate_event, frame)
@@ -1162,6 +1324,8 @@ class SessionDBRunMixin:
                         merged_participant_id = _event_participant_id(merged_event)
                         if merged_participant_id and isinstance(merged_event.get("payload"), dict):
                             merged_event["payload"]["participant_id"] = merged_participant_id
+                        merged_runtime_source_seq = runtime_source_seq_from_event(merged_event)
+                        merged_frame_blob, merged_frame_format = encode_run_event_frame(merged_event)
                         conn.execute(
                             """
                             UPDATE run_events
@@ -1174,7 +1338,12 @@ class SessionDBRunMixin:
                                 timestamp = ?,
                                 payload_json = ?,
                                 event_json = ?,
-                                status = ?
+                                status = ?,
+                                frame_blob = ?,
+                                frame_format = ?,
+                                retention_class = ?,
+                                projection_state = COALESCE(NULLIF(projection_state, ''), 'raw'),
+                                runtime_source_seq = ?
                             WHERE id = ?
                             """,
                             (
@@ -1188,6 +1357,10 @@ class SessionDBRunMixin:
                                 _json_dumps(merged_payload),
                                 _json_dumps(merged_event),
                                 terminal_status or "",
+                                merged_frame_blob,
+                                merged_frame_format,
+                                retention_class,
+                                merged_runtime_source_seq,
                                 previous["id"],
                             ),
                         )
@@ -1198,10 +1371,12 @@ class SessionDBRunMixin:
                     """
                     INSERT OR IGNORE INTO run_events (
                         session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
-                        participant_id, event_type,
-                        seq, timestamp, payload_json, event_json, status
+                        participant_id, activity_id, event_type,
+                        seq, timestamp, payload_json, event_json, status,
+                        frame_blob, frame_format, retention_class, projection_state,
+                        runtime_source_seq
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         stable,
@@ -1210,15 +1385,72 @@ class SessionDBRunMixin:
                         runtime_session_id,
                         runtime_scope_key,
                         event_participant_id,
+                        event_activity_id or None,
                         event_type,
                         seq,
                         timestamp,
                         _json_dumps(payload),
                         event_json_for_insert,
                         "ignored_after_terminal" if ignored_after_terminal else terminal_status or "",
+                        frame_blob_for_insert,
+                        frame_format_for_insert,
+                        retention_class,
+                        "raw",
+                        runtime_source_seq,
                     ),
                 )
+            inserted_row = conn.execute(
+                """
+                SELECT *
+                FROM run_events
+                WHERE session_id = ?
+                  AND seq = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (stable, int(inserted_event.get("seq") or seq)),
+            ).fetchone()
+            if inserted_row is not None:
+                try:
+                    project_run_event_search_index_from_row(conn, inserted_row)
+                except Exception as exc:
+                    logger.debug(
+                        "run event search index projection skipped for %s/%s/%s: %s",
+                        stable,
+                        run_id,
+                        seq,
+                        exc,
+                    )
+            if event_type in TOOL_EVENT_TYPES and not ignored_after_terminal:
+                try:
+                    projected_tool_event = project_tool_event(conn, inserted_event)
+                    if isinstance(projected_tool_event, dict) and projected_tool_event.get("id"):
+                        inserted_event = dict(inserted_event)
+                        inserted_event["_projected_tool_event_id"] = projected_tool_event.get("id")
+                        if inserted_row is not None:
+                            conn.execute(
+                                """
+                                UPDATE run_events
+                                SET projected_tool_event_id = ?,
+                                    projection_state = COALESCE(NULLIF(projection_state, ''), 'raw')
+                                WHERE id = ?
+                                """,
+                                (
+                                    str(projected_tool_event.get("id") or ""),
+                                    int(inserted_row["id"]),
+                                ),
+                            )
+                except Exception as exc:
+                    logger.debug(
+                        "tool event projection skipped for %s/%s/%s: %s",
+                        stable,
+                        run_id,
+                        seq,
+                        exc,
+                    )
             if run_id:
+                if ignored_after_terminal:
+                    return inserted_event
                 should_track_run = bool(
                     existing is not None
                     or terminal_status
@@ -1440,6 +1672,7 @@ class SessionDBRunMixin:
         active_only: bool = False,
         runtime_scope_key: str = "",
         run_id: str = "",
+        activity_id: str = "",
         limit: int = 2000,
     ) -> List[Dict[str, Any]]:
         stable = str(session_id or "").strip()
@@ -1457,6 +1690,14 @@ class SessionDBRunMixin:
         if normalized_run_id:
             run_clause = "AND run_id = ?"
             params.append(normalized_run_id)
+        # ADR-0001: optional activity_id filter — when supplied, narrow
+        # the result to a single Activity. Backwards compatible because
+        # the clause is empty when activity_id is "".
+        activity_clause = ""
+        normalized_activity_id = str(activity_id or "").strip()
+        if normalized_activity_id:
+            activity_clause = "AND activity_id = ?"
+            params.append(normalized_activity_id)
         active_clause = ""
         if active_only:
             active_statuses = _sql_status_literals(ACTIVE_RUN_STATUSES)
@@ -1471,12 +1712,13 @@ class SessionDBRunMixin:
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                SELECT event_json, participant_id
+                SELECT *
                 FROM run_events
                 WHERE session_id = ?
                   AND seq > ?
                   {scope_clause}
                   {run_clause}
+                  {activity_clause}
                   {active_clause}
                 ORDER BY seq ASC
                 LIMIT ?
@@ -1484,15 +1726,159 @@ class SessionDBRunMixin:
                 tuple(params),
             ).fetchall()
         events = []
-        for row in rows:
-            event = _json_loads(row["event_json"], {})
-            if isinstance(event, dict):
-                event = _event_with_participant_id(
-                    event,
-                    str(_row_value(row, "participant_id", "") or ""),
-                )
-                events.append(event)
+        with self._lock:
+            for row in rows:
+                event = decode_run_event_row(row)
+                if isinstance(event, dict):
+                    event = rehydrate_referenced_run_event(self._conn, row, event)
+                    event = _event_with_participant_id(
+                        event,
+                        str(_row_value(row, "participant_id", "") or ""),
+                    )
+                    events.append(event)
         return events
+
+    def list_tool_events(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        run_id: str = "",
+        limit: int = 2000,
+    ) -> List[Dict[str, Any]]:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return []
+        bounded_limit = max(1, min(int(limit or 2000), 5000))
+        params: list[Any] = [stable, int(after_seq or 0)]
+        run_clause = ""
+        normalized_run_id = str(run_id or "").strip()
+        if normalized_run_id:
+            run_clause = "AND COALESCE(run_id, '') = ?"
+            params.append(normalized_run_id)
+        params.append(bounded_limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT *
+                FROM tool_events
+                WHERE session_id = ?
+                  AND COALESCE(seq_last, seq_start, 0) > ?
+                  {run_clause}
+                ORDER BY COALESCE(seq_start, seq_last, id) ASC, id ASC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [
+            item
+            for row in rows
+            if (item := tool_event_row_to_dict(row))
+        ]
+
+    def backfill_run_event_frame_blobs(
+        self,
+        *,
+        session_id: str = "",
+        limit: int = 5000,
+    ) -> Dict[str, Any]:
+        stable_filter = str(session_id or "").strip()
+        bounded_limit = max(1, min(int(limit or 5000), 20000))
+
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            params: list[Any] = []
+            session_clause = ""
+            if stable_filter:
+                session_clause = "AND session_id = ?"
+                params.append(stable_filter)
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM run_events
+                WHERE (
+                    frame_blob IS NULL
+                    OR COALESCE(frame_format, '') = ''
+                    OR COALESCE(retention_class, '') = ''
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM run_event_search_index idx
+                        WHERE idx.run_event_id = run_events.id
+                    )
+                )
+                  {session_clause}
+                ORDER BY session_id ASC, seq ASC, id ASC
+                LIMIT ?
+                """,
+                (*params, bounded_limit),
+            ).fetchall()
+            for row in rows:
+                event = decode_run_event_row(row)
+                runtime_source_seq = runtime_source_seq_from_event(event)
+                update_run_event_frame_columns(
+                    conn,
+                    row_id=int(row["id"]),
+                    event=event,
+                    retention_class=_run_event_retention_class(str(row["event_type"] or event.get("type") or "")),
+                    projection_state="raw",
+                )
+                conn.execute(
+                    "UPDATE run_events SET runtime_source_seq = ? WHERE id = ?",
+                    (runtime_source_seq, int(row["id"])),
+                )
+                project_run_event_search_index(
+                    conn,
+                    row_id=int(row["id"]),
+                    session_id=str(row["session_id"] or event.get("stored_session_id") or ""),
+                    seq=int(row["seq"] or event.get("seq") or 0),
+                    event_type=str(row["event_type"] or event.get("type") or ""),
+                    runtime_scope_key=str(row["runtime_scope_key"] or event.get("runtime_scope_key") or ""),
+                    runtime_source_seq=runtime_source_seq,
+                    event=event,
+                    updated_at=float(row["timestamp"] or event.get("timestamp") or 0),
+                )
+            remaining = conn.execute(
+                f"""
+                SELECT COUNT(1) AS count
+                FROM run_events
+                WHERE (
+                    frame_blob IS NULL
+                    OR COALESCE(frame_format, '') = ''
+                    OR COALESCE(retention_class, '') = ''
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM run_event_search_index idx
+                        WHERE idx.run_event_id = run_events.id
+                    )
+                )
+                  {session_clause}
+                """,
+                tuple(params),
+            ).fetchone()
+            return {
+                "updated_events": len(rows),
+                "remaining_events": int(_row_value(remaining, "count", 0) or 0),
+                "limit": bounded_limit,
+            }
+
+        return self._execute_write(_do)
+
+    def reference_run_event_payloads(
+        self,
+        *,
+        session_id: str = "",
+        limit: int = 1000,
+    ) -> Dict[str, Any]:
+        stable_filter = str(session_id or "").strip()
+        bounded_limit = max(1, min(int(limit or 1000), 20000))
+
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            return reference_projected_run_event_payloads(
+                conn,
+                session_id=stable_filter,
+                limit=bounded_limit,
+            )
+
+        return self._execute_write(_do)
 
     def has_run_event_source(
         self,
@@ -1510,12 +1896,11 @@ class SessionDBRunMixin:
             source_seq = 0
         if not stable or source_seq <= 0:
             return False
-        source_token = f'"runtime_source_seq":{source_seq}'
         clauses = [
             "session_id = ?",
-            "(instr(payload_json, ?) > 0 OR instr(event_json, ?) > 0)",
+            "runtime_source_seq = ?",
         ]
-        params: list[Any] = [stable, source_token, source_token]
+        params: list[Any] = [stable, source_seq]
         normalized_run_id = str(run_id or "").strip()
         if normalized_run_id:
             clauses.append("run_id = ?")
@@ -1606,12 +1991,12 @@ class SessionDBRunMixin:
         bounded_limit = max(1, min(int(limit or 2000), 20000))
         params: list[Any] = [stable, int(after_seq or 0)]
         clauses: list[str] = [
-            "session_id = ?",
-            "seq > ?",
+            "e.session_id = ?",
+            "e.seq > ?",
         ]
         scope = str(runtime_scope_key or "").strip()
         if scope:
-            clauses.append("COALESCE(runtime_scope_key, session_id) = ?")
+            clauses.append("COALESCE(e.runtime_scope_key, e.session_id) = ?")
             params.append(scope)
         normalized_types = [
             str(item or "").strip()
@@ -1620,39 +2005,46 @@ class SessionDBRunMixin:
         ]
         if normalized_types:
             placeholders = ", ".join("?" for _ in normalized_types)
-            clauses.append(f"event_type IN ({placeholders})")
+            clauses.append(f"e.event_type IN ({placeholders})")
             params.extend(normalized_types)
         else:
             prefix = str(event_type_prefix or "").strip()
             if prefix:
-                clauses.append("event_type LIKE ?")
+                clauses.append("e.event_type LIKE ?")
                 params.append(f"{prefix}%")
         contains = str(payload_contains or "").strip()
+        from_sql = "run_events e"
         if contains:
-            clauses.append("(instr(payload_json, ?) > 0 OR instr(event_json, ?) > 0)")
-            params.extend([contains, contains])
+            from_sql = (
+                "run_events e "
+                "JOIN run_event_search_index idx ON idx.run_event_id = e.id"
+            )
+            clauses.append("instr(idx.search_text, ?) > 0")
+            params.append(contains)
         params.append(bounded_limit)
         where_sql = " AND ".join(clauses)
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                SELECT event_json, participant_id
-                FROM run_events
+                SELECT e.*
+                FROM {from_sql}
                 WHERE {where_sql}
-                ORDER BY seq ASC
+                ORDER BY e.seq ASC
                 LIMIT ?
                 """,
                 tuple(params),
             ).fetchall()
         events = []
-        for row in rows:
-            event = _json_loads(row["event_json"], {})
-            if isinstance(event, dict):
-                event = _event_with_participant_id(
-                    event,
-                    str(_row_value(row, "participant_id", "") or ""),
-                )
-                events.append(event)
+        with self._lock:
+            for row in rows:
+                event = decode_run_event_row(row)
+                if isinstance(event, dict):
+                    event = rehydrate_referenced_run_event(self._conn, row, event)
+                    event = _event_with_participant_id(
+                        event,
+                        str(_row_value(row, "participant_id", "") or ""),
+                    )
+                    events.append(event)
         return events
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
@@ -1809,13 +2201,15 @@ class SessionDBRunMixin:
                     "timestamp": now,
                     "payload": terminal_payload,
                 }
-                conn.execute(
+                terminal_frame_blob, terminal_frame_format = encode_run_event_frame(terminal_frame)
+                inserted_terminal = conn.execute(
                     """
                     INSERT INTO run_events (
                         session_id, run_id, turn_id, runtime_session_id, runtime_scope_key, event_type,
-                        seq, timestamp, payload_json, event_json, status
+                        seq, timestamp, payload_json, event_json, status,
+                        frame_blob, frame_format, retention_class, projection_state, runtime_source_seq
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["session_id"],
@@ -1829,7 +2223,23 @@ class SessionDBRunMixin:
                         _json_dumps(terminal_payload),
                         _json_dumps(terminal_frame),
                         "failed",
+                        terminal_frame_blob,
+                        terminal_frame_format,
+                        _run_event_retention_class("message.complete"),
+                        "raw",
+                        runtime_source_seq_from_event(terminal_frame),
                     ),
+                )
+                project_run_event_search_index(
+                    conn,
+                    row_id=int(inserted_terminal.lastrowid or 0),
+                    session_id=str(row["session_id"] or ""),
+                    seq=terminal_seq,
+                    event_type="message.complete",
+                    runtime_scope_key=str(row["runtime_scope_key"] or row["session_id"] or ""),
+                    runtime_source_seq=runtime_source_seq_from_event(terminal_frame),
+                    event=terminal_frame,
+                    updated_at=now,
                 )
                 conn.execute(
                     """
@@ -1918,6 +2328,62 @@ class SessionDBRunMixin:
                     _json_dumps({"policy": "run_event_retention"}),
                 ),
             )
+
+    def prune_duplicate_session_info_events(
+        self,
+        *,
+        session_id: str = "",
+    ) -> Dict[str, Any]:
+        stable_filter = str(session_id or "").strip()
+
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            params: list[Any] = []
+            session_clause = ""
+            if stable_filter:
+                session_clause = "AND session_id = ?"
+                params.append(stable_filter)
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM run_events
+                WHERE event_type = 'session.info'
+                  {session_clause}
+                ORDER BY session_id ASC, seq ASC, id ASC
+                """,
+                tuple(params),
+            ).fetchall()
+            previous_by_identity: dict[tuple[str, str, str, str, str], tuple[str, sqlite3.Row]] = {}
+            rows_to_delete: list[sqlite3.Row] = []
+            for row in rows:
+                event = decode_run_event_row(row)
+                event = event if isinstance(event, dict) else {}
+                payload = event.get("payload") if isinstance(event.get("payload"), dict) else None
+                if payload is None:
+                    payload = payload_from_run_event_row(row)
+                payload = payload if isinstance(payload, dict) else {}
+                identity = (
+                    str(event.get("stored_session_id") or row["session_id"] or ""),
+                    str(event.get("runtime_scope_key") or row["runtime_scope_key"] or ""),
+                    str(event.get("runtime_session_id") or event.get("session_id") or row["runtime_session_id"] or ""),
+                    str(event.get("run_id") or row["run_id"] or ""),
+                    str(event.get("turn_id") or row["turn_id"] or ""),
+                )
+                payload_hash = session_info_payload_hash(payload)
+                previous = previous_by_identity.get(identity)
+                if previous is not None and previous[0] == payload_hash:
+                    rows_to_delete.append(previous[1])
+                previous_by_identity[identity] = (payload_hash, row)
+            if not rows_to_delete:
+                return {"deleted_events": 0}
+            self._archive_run_event_rows(conn, rows_to_delete, reason="duplicate_session_info")
+            ids = [int(row["id"]) for row in rows_to_delete]
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                conn.execute(f"DELETE FROM run_events WHERE id IN ({placeholders})", tuple(chunk))
+            return {"deleted_events": len(rows_to_delete)}
+
+        return self._execute_write(_do)
 
     def prune_run_events(
         self,
@@ -2038,7 +2504,11 @@ class SessionDBRunMixin:
                 """,
                 (stable, normalized_run_id, *normalized_types),
             ).fetchall()
-            rows = [row for row in rows if not should_preserve_terminal_stream_row(conn, row)]
+            rows = [
+                row
+                for row in rows
+                if RUN_EVENT_RETENTION_POLICY.can_delete_terminal_stream_row(conn, row)
+            ]
             if not rows:
                 return {"deleted_events": 0, "event_types": list(normalized_types)}
             self._archive_run_event_rows(conn, rows, reason="terminal_run_stream_events")
@@ -2122,7 +2592,11 @@ class SessionDBRunMixin:
                     """,
                     tuple(prune_params),
                 ).fetchall()
-                rows_to_delete = [row for row in rows_to_delete if not should_preserve_terminal_stream_row(conn, row)]
+                rows_to_delete = [
+                    row
+                    for row in rows_to_delete
+                    if RUN_EVENT_RETENTION_POLICY.can_delete_terminal_stream_row(conn, row)
+                ]
                 if not rows_to_delete:
                     return
                 self._archive_run_event_rows(conn, rows_to_delete, reason="terminal_run_stream_events")
@@ -2196,12 +2670,14 @@ class SessionDBRunMixin:
                         continue
                     keep_row = rows_for_group[-1]
                     canonical_seq = int(rows_for_group[0]["seq"] or keep_row["seq"] or 0)
-                    keep_event = _json_loads(keep_row["event_json"], {})
+                    keep_event = decode_run_event_row(keep_row)
                     if not isinstance(keep_event, dict):
                         keep_event = {}
                     keep_event = {**keep_event, "seq": canonical_seq}
                     keep_participant_id = _event_participant_id(keep_event)
                     keep_payload = keep_event.get("payload") if isinstance(keep_event.get("payload"), dict) else {}
+                    keep_frame_blob, keep_frame_format = encode_run_event_frame(keep_event)
+                    keep_runtime_source_seq = runtime_source_seq_from_event(keep_event)
                     delete_ids = [int(row["id"]) for row in rows_for_group if int(row["id"]) != int(keep_row["id"])]
                     for start in range(0, len(delete_ids), 500):
                         chunk = delete_ids[start:start + 500]
@@ -2213,7 +2689,12 @@ class SessionDBRunMixin:
                         SET seq = ?,
                             participant_id = ?,
                             payload_json = ?,
-                            event_json = ?
+                            event_json = ?,
+                            frame_blob = ?,
+                            frame_format = ?,
+                            retention_class = COALESCE(NULLIF(retention_class, ''), ?),
+                            projection_state = COALESCE(NULLIF(projection_state, ''), 'raw'),
+                            runtime_source_seq = ?
                         WHERE id = ?
                         """,
                         (
@@ -2221,8 +2702,25 @@ class SessionDBRunMixin:
                             keep_participant_id,
                             _json_dumps(keep_payload),
                             _json_dumps(keep_event),
+                            keep_frame_blob,
+                            keep_frame_format,
+                            _run_event_retention_class(str(group["event_type"] or keep_event.get("type") or "")),
+                            keep_runtime_source_seq,
                             int(keep_row["id"]),
                         ),
+                    )
+                    project_run_event_search_index(
+                        conn,
+                        row_id=int(keep_row["id"]),
+                        session_id=str(group["session_id"] or keep_event.get("stored_session_id") or ""),
+                        seq=canonical_seq,
+                        event_type=str(group["event_type"] or keep_event.get("type") or ""),
+                        runtime_scope_key=str(
+                            keep_row["runtime_scope_key"] or keep_event.get("runtime_scope_key") or ""
+                        ),
+                        runtime_source_seq=keep_runtime_source_seq,
+                        event=keep_event,
+                        updated_at=float(keep_row["timestamp"] or keep_event.get("timestamp") or 0),
                     )
                     normalized_run_id = str(group["run_id"] or "").strip()
                     if normalized_run_id:
@@ -2283,6 +2781,8 @@ class SessionDBRunMixin:
                     payload = dict(payload)
                     payload.setdefault("participant_id", merged_participant_id)
                     merged_event["payload"] = payload
+                compact_frame_blob, compact_frame_format = encode_run_event_frame(merged_event)
+                compact_runtime_source_seq = runtime_source_seq_from_event(merged_event)
                 conn.execute(
                     """
                     UPDATE run_events
@@ -2294,7 +2794,12 @@ class SessionDBRunMixin:
                         seq = ?,
                         timestamp = ?,
                         payload_json = ?,
-                        event_json = ?
+                        event_json = ?,
+                        frame_blob = ?,
+                        frame_format = ?,
+                        retention_class = COALESCE(NULLIF(retention_class, ''), ?),
+                        projection_state = COALESCE(NULLIF(projection_state, ''), 'raw'),
+                        runtime_source_seq = ?
                     WHERE id = ?
                     """,
                     (
@@ -2307,8 +2812,23 @@ class SessionDBRunMixin:
                         float(merged_event.get("timestamp") or 0),
                         _json_dumps(payload),
                         _json_dumps(merged_event),
+                        compact_frame_blob,
+                        compact_frame_format,
+                        _run_event_retention_class(str(merged_event.get("type") or "")),
+                        compact_runtime_source_seq,
                         int(keep_row["id"]),
                     ),
+                )
+                project_run_event_search_index(
+                    conn,
+                    row_id=int(keep_row["id"]),
+                    session_id=str(keep_row["session_id"] or merged_event.get("stored_session_id") or ""),
+                    seq=int(merged_event.get("seq") or 0),
+                    event_type=str(keep_row["event_type"] or merged_event.get("type") or ""),
+                    runtime_scope_key=_event_runtime_scope_key(merged_event),
+                    runtime_source_seq=compact_runtime_source_seq,
+                    event=merged_event,
+                    updated_at=float(merged_event.get("timestamp") or keep_row["timestamp"] or 0),
                 )
                 compacted_segments += 1
                 deleted_events += len(delete_ids)
@@ -2320,7 +2840,7 @@ class SessionDBRunMixin:
             prune_terminal_stream_rows()
             compact_terminal_duplicates()
             for row in rows_for_compaction():
-                event = _json_loads(row["event_json"], {})
+                event = decode_run_event_row(row)
                 if not isinstance(event, dict) or not _event_is_coalescible_stream_delta(event):
                     event_dict = event if isinstance(event, dict) else {}
                     event_type = str(_row_value(row, "event_type", "") or event_dict.get("type") or "")

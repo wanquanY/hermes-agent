@@ -33,56 +33,17 @@ Phase 5c.2 deliberately leaves several follow-ups for Phase 5d / 6:
 from __future__ import annotations
 
 import io
-import hashlib
 import logging
 import threading
 import time
 import uuid
 from typing import Any, Optional
 
-from agent.dovie_persona_trace import trace_persona_payload
 from tui_gateway.run_worker import RunStartFrame
 from tui_gateway.services.profile_context import profile_context_for_params
 from tui_gateway.services.workspace import session_workspace_run_context
 
 _log = logging.getLogger(__name__)
-
-
-def _trace_transcript_persistence_enabled(stored_session_id: str, runtime_scope_key: str = "") -> bool:
-    return str(stored_session_id or "").startswith("team-session-team-conversation-") or str(
-        runtime_scope_key or ""
-    ).startswith("member-chat:")
-
-
-def _message_probe(message: Any) -> dict[str, Any]:
-    if not isinstance(message, dict):
-        return {"type": type(message).__name__}
-    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-    content = message.get("content")
-    content_text = content if isinstance(content, str) else str(content or "")
-    return {
-        "role": str(message.get("role") or ""),
-        "participant_id": str(
-            message.get("participant_id")
-            or message.get("participantId")
-            or metadata.get("participant_id")
-            or metadata.get("participantId")
-            or ""
-        ),
-        "turn_id": str(metadata.get("turn_id") or ""),
-        "run_id": str(metadata.get("run_id") or ""),
-        "content_len": len(content_text),
-        "content_sha1": hashlib.sha1(content_text.encode("utf-8", errors="replace")).hexdigest()[:12],
-        "content_preview": content_text[:120].replace("\n", "\\n"),
-    }
-
-
-def _history_probe(messages: list, *, limit: int = 5) -> list[dict[str, Any]]:
-    return [_message_probe(message) for message in list(messages or [])[-limit:]]
-
-
-def _trace_transcript_persistence(label: str, **fields: Any) -> None:
-    _log.warning("[h11-trace transcript-persistence] %s %s", label, fields)
 
 
 # Idempotent env setup — invoked from ``_build_default_backend`` at
@@ -176,9 +137,17 @@ def _should_project_member_perspective(run_context: Any) -> bool:
         return False
     activity_kind = str(getattr(run_context, "activity_kind", "") or "").strip()
     participant_id = str(getattr(run_context, "participant_id", "") or "").strip()
+    conversation_session_id = str(getattr(run_context, "conversation_session_id", "") or "").strip()
+    execution_scope_key = str(getattr(run_context, "execution_scope_key", "") or "").strip()
     if activity_kind == "member_chat":
         return True
-    if activity_kind == "mission" and not participant_id.startswith("leader:"):
+    if activity_kind == "mission":
+        return True
+    if participant_id.startswith(("leader:", "member:")):
+        return True
+    if conversation_session_id.startswith("team-session-team-conversation-"):
+        return True
+    if execution_scope_key.startswith(("team:", "member-chat:")):
         return True
     return False
 
@@ -300,42 +269,6 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         "transient": transient,
         "workspace": workspace,
     }
-    _resolved_profile_home = str(profile_context.get("hermes_home") or "") if isinstance(profile_context, dict) else ""
-    _raw_profile_home = (
-        str(raw_dovie_profile.get("hermesHomePath") or raw_dovie_profile.get("hermes_home_path") or "")
-        if isinstance(raw_dovie_profile, dict)
-        else ""
-    )
-    _log.warning(
-        "[h9-trace member-persona] worker session prepared %s",
-        {
-            "stored_session_id": frame.stored_session_id,
-            "runtime_sid": runtime_sid,
-            "run_id": frame.run_id,
-            "turn_id": frame.turn_id,
-            "runtime_scope_key": runtime_scope_key,
-            "agent_profile_id": agent_profile_id,
-            "resolved_profile_home": _resolved_profile_home,
-            "raw_dovie_profile_home": _raw_profile_home,
-            "profile_context_keys": sorted(profile_context.keys()) if isinstance(profile_context, dict) else [],
-            "run_context": run_context.to_payload() if run_context is not None else None,
-            "cwd": cwd or "",
-        },
-    )
-    trace_persona_payload(
-        "worker.session-prepared",
-        stored_session_id=frame.stored_session_id,
-        runtime_sid=runtime_sid,
-        run_id=frame.run_id,
-        turn_id=frame.turn_id,
-        runtime_scope_key=runtime_scope_key,
-        agent_profile_id=agent_profile_id,
-        resolved_profile_home=_resolved_profile_home,
-        raw_dovie_profile_home=_raw_profile_home,
-        profile_context_keys=sorted(profile_context.keys()) if isinstance(profile_context, dict) else [],
-        run_context=run_context.to_payload() if run_context is not None else None,
-        cwd=cwd or "",
-    )
     # Hydrate conversation history from the canonical control_home DB
     # so the agent's ``run_conversation(conversation_history=...)`` call
     # — fed from this ``session_record["history"]`` — sees recent prior
@@ -375,14 +308,9 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         if not callable(history_reader):
             history_reader = getattr(db, "get_messages_as_conversation", None)
     if callable(history_reader):
-        raw_history: list = []
-        projected_history: list = []
-        projection_applied = False
         try:
             full_history = list(history_reader(frame.stored_session_id))
-            raw_history = list(full_history)
             if _should_project_member_perspective(run_context):
-                projection_applied = True
                 try:
                     participants = db.list_conversation_participants(  # type: ignore[attr-defined]
                         frame.stored_session_id
@@ -398,7 +326,6 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
                     viewing_participant_id=run_context.participant_id,
                     participants=participants,
                 )
-            projected_history = list(full_history)
         except Exception:
             _log.warning(
                 "[agent-runner] history hydration failed stored_session=%s",
@@ -407,23 +334,6 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
             full_history = []
         trimmed_history = _trim_history_to_window(full_history)
         session_record["history"] = trimmed_history
-        if _trace_transcript_persistence_enabled(frame.stored_session_id, runtime_scope_key):
-            _trace_transcript_persistence(
-                "worker-history-hydrated",
-                stored_session_id=frame.stored_session_id,
-                runtime_sid=runtime_sid,
-                run_id=frame.run_id,
-                turn_id=frame.turn_id,
-                runtime_scope_key=runtime_scope_key,
-                participant_id=str(getattr(run_context, "participant_id", "") or ""),
-                projection_applied=projection_applied,
-                raw_count=len(raw_history),
-                projected_count=len(projected_history),
-                trimmed_count=len(trimmed_history),
-                raw_tail=_history_probe(raw_history),
-                projected_tail=_history_probe(projected_history),
-                trimmed_tail=_history_probe(trimmed_history),
-            )
 
     with _server._sessions_lock:
         _server._sessions[runtime_sid] = session_record

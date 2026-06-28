@@ -32,8 +32,11 @@ def transform_to_member_perspective(
     """Project shared conversation history into one member's speaker view.
 
     The shared conversation stores every agent reply as ``assistant``. A
-    member worker must only see its own past replies as assistant turns; other
-    agents' replies are observed speech and must be replayed as user turns.
+    participant worker must only see its own past replies as assistant turns;
+    other participants' replies are observed speech and must be replayed as
+    user turns. Tool rows are kept only for the viewer's own assistant turns;
+    another participant's tool calls are not part of this viewer's model
+    context.
     """
     viewing = _text(viewing_participant_id)
     participant_by_id = {
@@ -42,11 +45,19 @@ def transform_to_member_perspective(
         if isinstance(participant, dict) and _text(participant.get("participant_id"))
     }
     projected: List[Dict[str, Any]] = []
+    drop_following_tools = False
     for message in messages or []:
         if not isinstance(message, dict):
             continue
 
         role = _text(message.get("role"))
+        if role == "tool":
+            if drop_following_tools:
+                continue
+            projected.append(message)
+            continue
+
+        drop_following_tools = False
         if role == "user":
             projected.append(message)
             continue
@@ -60,6 +71,11 @@ def transform_to_member_perspective(
         )
         if speaker_participant_id and speaker_participant_id == viewing:
             projected.append(message)
+            continue
+
+        content = str(message.get("content") or "")
+        if not content:
+            drop_following_tools = True
             continue
 
         speaker_name = ""
@@ -81,10 +97,16 @@ def transform_to_member_perspective(
         transformed = {
             **message,
             "role": "user",
-            "content": f"[{speaker_name}] {str(message.get('content') or '')}",
+            "content": f"[{speaker_name}] {content}",
             "metadata": transformed_metadata,
         }
+        transformed.pop("tool_calls", None)
+        transformed.pop("tool_call_id", None)
+        transformed.pop("reasoning", None)
+        transformed.pop("reasoning_content", None)
+        transformed.pop("reasoning_details", None)
         projected.append(transformed)
+        drop_following_tools = True
     return projected
 
 

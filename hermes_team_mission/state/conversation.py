@@ -9,6 +9,7 @@ from hermes_team_mission.domain.utils import text as _text
 
 _PLACEHOLDER_TEAM_CONVERSATION_TITLES = {"", "Team Mission", "团队会话"}
 _ACTIVE_RUN_STATUS_SQL = "'cancelling','finalizing','queued','running','starting','waiting_approval'"
+_EMPTY_TEAM_CONVERSATION_PRUNE_GRACE_SECONDS = 300.0
 
 
 def is_placeholder_team_mission_conversation_title(title: Any) -> bool:
@@ -420,15 +421,22 @@ def repair_placeholder_team_mission_conversation_titles(db: Any, *, limit: int =
     return db._execute_write(_do) or 0
 
 
-def prune_empty_team_mission_conversations(db: Any, *, limit: int = 5000) -> int:
+def prune_empty_team_mission_conversations(
+    db: Any,
+    *,
+    limit: int = 5000,
+    min_age_seconds: float = _EMPTY_TEAM_CONVERSATION_PRUNE_GRACE_SECONDS,
+) -> int:
     bounded_limit = max(1, min(int(limit or 5000), 10000))
+    cutoff = time.time() - max(0.0, float(min_age_seconds or 0.0))
     with db._lock:
         rows = db._conn.execute(
             """
             SELECT c.conversation_id AS conversation_id,
                    c.stable_session_id AS stable_session_id
             FROM team_mission_conversations c
-            WHERE NOT EXISTS (
+            WHERE COALESCE(c.updated_at, c.created_at, 0) <= ?
+              AND NOT EXISTS (
                   SELECT 1
                   FROM conversation_missions cm
                   WHERE cm.conversation_id = c.conversation_id
@@ -458,7 +466,7 @@ def prune_empty_team_mission_conversations(db: Any, *, limit: int = 5000) -> int
             ORDER BY c.updated_at DESC, c.conversation_id ASC
             LIMIT ?
             """,
-            (bounded_limit,),
+            (cutoff, bounded_limit),
         ).fetchall()
     conversation_ids = [
         _text(_row_value(row, "conversation_id", ""))
@@ -479,8 +487,16 @@ def prune_empty_team_mission_conversations(db: Any, *, limit: int = 5000) -> int
             f"DELETE FROM team_mission_conversations WHERE conversation_id IN ({placeholders})",
             tuple(conversation_ids),
         )
+        conn.execute(
+            f"DELETE FROM session_index WHERE conversation_id IN ({placeholders})",
+            tuple(conversation_ids),
+        )
         if stable_session_ids:
             session_placeholders = ",".join("?" for _ in stable_session_ids)
+            conn.execute(
+                f"DELETE FROM session_index WHERE session_id IN ({session_placeholders})",
+                tuple(stable_session_ids),
+            )
             conn.execute(
                 f"""
                 DELETE FROM sessions

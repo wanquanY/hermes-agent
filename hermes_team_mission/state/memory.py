@@ -5,6 +5,7 @@ import sqlite3
 import time
 from typing import Any, Dict, List
 
+from hermes_state_run_event_codec import decode_run_event_row
 from hermes_team_mission.domain.utils import MEMORY_COMMITTED_STATUS
 from hermes_team_mission.domain.utils import MEMORY_TERMINAL_STATUSES
 from hermes_team_mission.domain.utils import MEMORY_VISIBLE_TO_WORKER
@@ -438,7 +439,7 @@ def team_mission_bindings_events_map(db: Any, bindings: List[Dict[str, Any]], *,
     with db._lock:
         rows = db._conn.execute(
             f"""
-            SELECT run_id, event_json
+            SELECT *
               FROM run_events
              WHERE run_id IN ({placeholders})
              ORDER BY run_id ASC, seq ASC, id ASC
@@ -450,10 +451,7 @@ def team_mission_bindings_events_map(db: Any, bindings: List[Dict[str, Any]], *,
         run_id = text(_row_value(row, "run_id"))
         if not run_id or len(result.setdefault(run_id, [])) >= bounded_limit:
             continue
-        try:
-            event = json.loads(_row_value(row, "event_json", "{}") or "{}")
-        except (TypeError, json.JSONDecodeError):
-            event = {}
+        event = decode_run_event_row(row)
         if isinstance(event, dict):
             result[run_id].append(event)
     return result

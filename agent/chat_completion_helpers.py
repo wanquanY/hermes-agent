@@ -60,7 +60,6 @@ from agent.tool_guardrails import (
     toolguard_synthetic_result,
 )
 from agent.dovie_diagnostics import emit_dovie_diagnostic
-from agent.dovie_persona_trace import persona_text_probe, trace_persona_chain
 from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname
 
@@ -92,41 +91,6 @@ def _text_probe(value: Any) -> dict[str, Any]:
         "sha1": digest,
         "preview": text[:80].replace("\n", "\\n"),
     }
-
-
-def _trace_persona_api_kwargs(agent, stage: str, api_kwargs: dict) -> None:
-    if not isinstance(api_kwargs, dict):
-        trace_persona_chain(agent, stage, api_kwargs_type=type(api_kwargs).__name__)
-        return
-    system_text = str(api_kwargs.get("instructions") or api_kwargs.get("system") or "")
-    if not system_text:
-        messages = api_kwargs.get("messages")
-        if isinstance(messages, list) and messages:
-            first = messages[0]
-            if isinstance(first, dict) and first.get("role") == "system":
-                system_text = str(first.get("content") or "")
-    trace_persona_chain(
-        agent,
-        stage,
-        api_mode=str(getattr(agent, "api_mode", "") or ""),
-        keys=sorted(str(key) for key in api_kwargs.keys()),
-        system_or_instructions=persona_text_probe(system_text),
-        message_count=(
-            len(api_kwargs.get("messages") or [])
-            if isinstance(api_kwargs.get("messages"), list)
-            else 0
-        ),
-        input_count=(
-            len(api_kwargs.get("input") or [])
-            if isinstance(api_kwargs.get("input"), list)
-            else 0
-        ),
-        tool_count=(
-            len(api_kwargs.get("tools") or [])
-            if isinstance(api_kwargs.get("tools"), list)
-            else 0
-        ),
-    )
 
 
 def _ra():
@@ -472,7 +436,6 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             fast_mode=(agent.request_overrides or {}).get("speed") == "fast",
             drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)),
         )
-        _trace_persona_api_kwargs(agent, "transport.anthropic-kwargs-built", api_kwargs)
         return api_kwargs
 
     # AWS Bedrock native Converse API — bypasses the OpenAI client entirely.
@@ -489,7 +452,6 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             region=region,
             guardrail_config=guardrail,
         )
-        _trace_persona_api_kwargs(agent, "transport.bedrock-kwargs-built", api_kwargs)
         return api_kwargs
 
     if agent.api_mode == "codex_responses":
@@ -546,7 +508,6 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
                 getattr(agent, "_codex_reasoning_replay_enabled", True)
             ),
         )
-        _trace_persona_api_kwargs(agent, "transport.codex-kwargs-built", api_kwargs)
         return api_kwargs
 
     # ── chat_completions (default) ─────────────────────────────────────
@@ -652,7 +613,6 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             supports_reasoning=agent._supports_reasoning_extra_body(),
             qwen_session_metadata=_qwen_meta,
         )
-        _trace_persona_api_kwargs(agent, "transport.chat-profile-kwargs-built", api_kwargs)
         return api_kwargs
 
     # ── Legacy flag path ────────────────────────────────────────────
@@ -701,7 +661,6 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         anthropic_max_output=_ant_max,
         provider_name=agent.provider,
     )
-    _trace_persona_api_kwargs(agent, "transport.chat-legacy-kwargs-built", api_kwargs)
     return api_kwargs
 
 

@@ -1,15 +1,23 @@
 # ruff: noqa: F401,F403,F405,F821,ARG001
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
-from agent.dovie_persona_trace import trace_persona_payload
 from .common import *
 from .participant_autocreate import ensure_member_chat_participant
 from hermes_state.profile_dir import resolve_default_agent_dir
 from hermes_state_participants import leader_participant_id, member_participant_id
 from hermes_team_mission.domain.run_context import RunContext
+from tui_gateway.services.transcript_projector import conversation_user_message_id_for
+
+
+def _team_chain_log(stage: str, **fields) -> None:
+    try:
+        _log.warning("[dovie-team-chain] %s %s", stage, json.dumps(fields, ensure_ascii=False, sort_keys=True, default=str))
+    except Exception:
+        pass
 
 
 def _home_from_dovie_profile(dovie_profile: dict) -> str:
@@ -51,26 +59,6 @@ def _control_plane_home() -> str:
     return str(os.getenv("DOVIE_HERMES_CONTROL_HOME") or get_hermes_home()).strip()
 
 
-def _h9_member_persona_diagnostic(label: str, **fields) -> None:
-    try:
-        run_control._diagnostic_warning(  # noqa: SLF001
-            f"[h9-trace member-persona] {label}",
-            **fields,
-        )
-    except Exception:
-        pass
-
-
-def _h11_transcript_persistence_diagnostic(label: str, **fields) -> None:
-    try:
-        run_control._diagnostic_warning(  # noqa: SLF001
-            f"[h11-trace transcript-persistence] {label}",
-            **fields,
-        )
-    except Exception:
-        pass
-
-
 def _target_member_id_from_params(params: dict) -> str:
     return str(params.get("target_member_id") or params.get("targetMemberId") or "").strip()
 
@@ -84,6 +72,57 @@ def _find_team_member_by_id(members: list[dict], member_id: str) -> dict:
         if mid and mid == member_id:
             return member
     return {}
+
+
+def _upsert_team_user_submission_message(
+    db,
+    *,
+    conversation_id: str,
+    conversation_session_id: str,
+    run_id: str,
+    turn_id: str,
+    text: str,
+    target_member_id: str = "",
+    display_name: str = "",
+    client_message_id: str = "",
+    source_kind: str,
+) -> dict:
+    """Persist the user's visible team-conversation turn exactly once."""
+    if not hasattr(db, "upsert_projected_conversation_message"):
+        raise RuntimeError("SessionDB does not support projected conversation messages")
+    conversation_message_id = conversation_user_message_id_for(
+        session_id=conversation_session_id,
+        turn_id=turn_id,
+        run_id=run_id,
+        client_message_id=client_message_id,
+    )
+    team_metadata = {
+        "kind": source_kind,
+        "conversation_id": conversation_id,
+        "conversation_session_id": conversation_session_id,
+    }
+    if target_member_id:
+        team_metadata["target_member_id"] = target_member_id
+    if display_name:
+        team_metadata["display_name"] = display_name
+    metadata = {
+        "source": "team_mission.message.submit",
+        "message_kind": "user_submission",
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "team_mission": team_metadata,
+    }
+    if client_message_id:
+        metadata["client_message_id"] = client_message_id
+    return db.upsert_projected_conversation_message(
+        session_id=conversation_session_id,
+        conversation_message_id=conversation_message_id,
+        role="user",
+        content=text,
+        participant_id="",
+        metadata=metadata,
+        status="completed",
+    )
 
 
 def _submit_run_via_worker_with_response(rid, submit_params: dict) -> dict:
@@ -109,10 +148,36 @@ def _submit_run_via_worker_with_response(rid, submit_params: dict) -> dict:
     less broken than failing the run entirely. The diagnostic
     ``member-chat-proxy-fallback-in-process`` warning surfaces the
     fallback so we can spot any caller that should be routed."""
+    _team_chain_log(
+        "hermes-run-dispatch-start",
+        run_id=str(submit_params.get("run_id") or submit_params.get("client_run_id") or ""),
+        turn_id=str(submit_params.get("turn_id") or ""),
+        stored_session_id=str(submit_params.get("stored_session_id") or submit_params.get("session_id") or ""),
+        runtime_scope_key=str(submit_params.get("runtime_scope_key") or ""),
+        agent_profile_id=str(submit_params.get("agent_profile_id") or ""),
+        dovie_profile=submit_params.get("dovie_profile") if isinstance(submit_params.get("dovie_profile"), dict) else {},
+        team_mission=(submit_params.get("dovie_product_context") or {}).get("team_mission")
+        if isinstance(submit_params.get("dovie_product_context"), dict)
+        else {},
+    )
     proxied = _proxy_run_submit_via_worker(submit_params)
     if proxied.get("error"):
+        _team_chain_log(
+            "hermes-run-dispatch-error",
+            run_id=str(submit_params.get("run_id") or submit_params.get("client_run_id") or ""),
+            runtime_scope_key=str(submit_params.get("runtime_scope_key") or ""),
+            error=proxied.get("error") or "",
+        )
         return _err(rid, 5020, proxied["error"])
     if proxied.get("ok"):
+        _team_chain_log(
+            "hermes-run-dispatch-proxied",
+            run_id=str(submit_params.get("run_id") or submit_params.get("client_run_id") or ""),
+            turn_id=str(submit_params.get("turn_id") or ""),
+            stored_session_id=str(submit_params.get("stored_session_id") or submit_params.get("session_id") or ""),
+            runtime_scope_key=str(submit_params.get("runtime_scope_key") or ""),
+            agent_profile_id=str(submit_params.get("agent_profile_id") or ""),
+        )
         # primary_dispatch already acknowledged the request on the
         # transport with its own synthetic rid. Construct the
         # JSON-RPC envelope the original caller (with its own rid)
@@ -138,6 +203,13 @@ def _submit_run_via_worker_with_response(rid, submit_params: dict) -> dict:
     run_control._diagnostic_warning(  # noqa: SLF001
         "team-mission-run-proxy-fallback-in-process",
         stored_session_id=str(submit_params.get("stored_session_id") or ""),
+        runtime_scope_key=str(submit_params.get("runtime_scope_key") or ""),
+        reason=proxied.get("reason") or "",
+    )
+    _team_chain_log(
+        "hermes-run-dispatch-fallback-in-process",
+        run_id=str(submit_params.get("run_id") or submit_params.get("client_run_id") or ""),
+        stored_session_id=str(submit_params.get("stored_session_id") or submit_params.get("session_id") or ""),
         runtime_scope_key=str(submit_params.get("runtime_scope_key") or ""),
         reason=proxied.get("reason") or "",
     )
@@ -242,14 +314,6 @@ def _submit_message_to_member(
     agent never starts ('prompt worker terminal event did not close active run')."""
     if not conversation_session_id:
         return _err(rid, 4006, "conversation_session_id required")
-    _h11_transcript_persistence_diagnostic(
-        "member-submit-start",
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        target_member_id=target_member_id,
-        text_len=len(str(text or "")),
-        text_preview=str(text or "")[:120].replace("\n", "\\n"),
-    )
     members = _leader_members_from_params(params, mission if isinstance(mission, dict) else {}, db=db)
     member = _find_team_member_by_id(members, target_member_id)
     if not member:
@@ -286,30 +350,6 @@ def _submit_message_to_member(
         "runtimeScopeKey": member_scope,
         "runtime_scope_key": member_scope,
     }
-    _h9_member_persona_diagnostic(
-        "member-chat-submit scope prepared",
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        target_member_id=target_member_id,
-        agent_profile_id=agent_profile_id,
-        member_scope=member_scope,
-        hermes_home=hermes_home,
-        dovie_profile_scope=str(dovie_profile.get("runtimeScopeKey") or ""),
-        dovie_profile_scope_snake=str(dovie_profile.get("runtime_scope_key") or ""),
-        dovie_profile_home=str(dovie_profile.get("hermesHomePath") or ""),
-    )
-    trace_persona_payload(
-        "team-mission.member-chat-submit-scope-prepared",
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        target_member_id=target_member_id,
-        agent_profile_id=agent_profile_id,
-        member_scope=member_scope,
-        hermes_home=hermes_home,
-        dovie_profile_scope=str(dovie_profile.get("runtimeScopeKey") or ""),
-        dovie_profile_scope_snake=str(dovie_profile.get("runtime_scope_key") or ""),
-        dovie_profile_home=str(dovie_profile.get("hermesHomePath") or ""),
-    )
     display_name = str(
         member.get("display_name")
         or member.get("displayName")
@@ -326,65 +366,6 @@ def _submit_message_to_member(
         or member.get("agentProfileAvatar")
         or ""
     ).strip()
-    _h9_member_persona_diagnostic(
-        "hermes member submit resolved",
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        target_member_id=target_member_id,
-        member={
-            "id": member.get("id") or member.get("member_id") or "",
-            "name": member.get("name") or "",
-            "display_name": display_name,
-            "role": member.get("role") or "",
-            "agent_profile_id": (
-                member.get("agent_profile_id")
-                or member.get("agentProfileId")
-                or ""
-            ),
-            "profile_name": (
-                member.get("profile_name")
-                or member.get("profileName")
-                or member.get("agent_profile_name")
-                or member.get("agentProfileName")
-                or ""
-            ),
-        },
-        profile_params={
-            "agent_profile_id": agent_profile_id,
-            "agent_profile_version_id": str(profile_params.get("agent_profile_version_id") or ""),
-            "hermes_home": hermes_home,
-            "dovie_profile_runtime_scope_key": str(dovie_profile.get("runtimeScopeKey") or ""),
-            "dovie_profile_runtime_scope_key_snake": str(dovie_profile.get("runtime_scope_key") or ""),
-            "dovie_profile_home": str(dovie_profile.get("hermesHomePath") or ""),
-        },
-        member_scope=member_scope,
-    )
-    trace_persona_payload(
-        "team-mission.member-submit-resolved",
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        target_member_id=target_member_id,
-        member={
-            "id": member.get("id") or member.get("member_id") or "",
-            "name": member.get("name") or "",
-            "display_name": display_name,
-            "role": member.get("role") or "",
-            "agent_profile_id": (
-                member.get("agent_profile_id")
-                or member.get("agentProfileId")
-                or ""
-            ),
-        },
-        profile_params={
-            "agent_profile_id": agent_profile_id,
-            "agent_profile_version_id": str(profile_params.get("agent_profile_version_id") or ""),
-            "hermes_home": hermes_home,
-            "dovie_profile_runtime_scope_key": str(dovie_profile.get("runtimeScopeKey") or ""),
-            "dovie_profile_runtime_scope_key_snake": str(dovie_profile.get("runtime_scope_key") or ""),
-            "dovie_profile_home": str(dovie_profile.get("hermesHomePath") or ""),
-        },
-        member_scope=member_scope,
-    )
     ensure_member_chat_participant(
         db,
         conversation_session_id=conversation_session_id,
@@ -440,9 +421,10 @@ def _submit_message_to_member(
     except ValueError as exc:
         return _err(rid, 4004, str(exc))
 
-    # 2. Ensure the team conversation row exists (creates conv session row in
-    # sessions table so subsequent append_message FK is satisfied). MUST run
-    # before any append_message(conversation_session_id, ...) call.
+    # 2. Ensure the team conversation row exists. Some older/partial
+    # conversation creation paths only materialize session_index, so the
+    # canonical sessions row is enforced explicitly below before transcript
+    # writes touch messages.session_id.
     conversation_title = _conversation_title_from_submit(db, params, text)
     team_id_for_ensure = str(
         params.get("team_id") or params.get("teamId")
@@ -464,62 +446,39 @@ def _submit_message_to_member(
             metadata={"display_title_source": "first_user_message"} if conversation_title else None,
         )
     except Exception as exc:
-        _h11_transcript_persistence_diagnostic(
-            "member-submit-conversation-ensure-failed",
-            conversation_id=conversation_id,
-            conversation_session_id=conversation_session_id,
-            target_member_id=target_member_id,
-            error=str(exc),
-        )
         return _err(rid, 5008, f"team conversation session unavailable: {exc}")
-    _h11_transcript_persistence_diagnostic(
-        "member-submit-conversation-ensured",
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        target_member_id=target_member_id,
-        ensured_session_id=str(
-            (ensured_conversation or {}).get("stable_session_id")
-            or (ensured_conversation or {}).get("session_id")
-            or ""
-        ) if isinstance(ensured_conversation, dict) else "",
-        title=str((ensured_conversation or {}).get("title") or "") if isinstance(ensured_conversation, dict) else "",
-    )
-
-    # 3. NOW it is safe to record the user's @-message into the shared
-    # conversation transcript. The conv session row exists, FK satisfied.
     try:
-        appended_user_message = db.append_message(
-            conversation_session_id,
-            role="user",
-            content=text,
-            metadata={"team_mission": {
-                "kind": "member_chat_user",
-                "target_member_id": target_member_id,
-                "conversation_session_id": conversation_session_id,
-                "display_name": display_name,
-            }},
-        )
-        _h11_transcript_persistence_diagnostic(
-            "member-submit-user-message-appended",
+        _ensure_team_conversation_session(db, conversation_session_id)
+    except Exception as exc:
+        return _err(rid, 5008, f"team conversation session unavailable: {exc}")
+
+    # 3. Reserve the run/turn identity before writing the user transcript row.
+    # The same identity is sent to the worker, so retries/upserts cannot create
+    # duplicate user messages and repeated text in later turns remains distinct.
+    optimistic_run_id = str(params.get("client_run_id") or params.get("run_id") or "").strip()
+    run_id = optimistic_run_id or uuid.uuid4().hex
+    turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
+    client_message_id = str(params.get("client_message_id") or params.get("clientMessageId") or "").strip()
+
+    # 4. NOW it is safe to record the user's @-message into the shared
+    # conversation transcript. The conv session row exists, FK satisfied. Use
+    # an idempotent projected row; the worker owns execution, not visible user
+    # transcript persistence.
+    try:
+        _upsert_team_user_submission_message(
+            db,
             conversation_id=conversation_id,
             conversation_session_id=conversation_session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+            text=text,
             target_member_id=target_member_id,
-            run_target_member_id=target_member_id,
-            append_result=str(appended_user_message),
-            text_len=len(str(text or "")),
-            text_preview=str(text or "")[:120].replace("\n", "\\n"),
+            display_name=display_name,
+            client_message_id=client_message_id,
+            source_kind="member_chat_user",
         )
     except Exception as exc:
-        # Should not happen post-ensure, but the original try/except is
-        # preserved so an unexpected DB error doesn't abort the submit.
-        _h11_transcript_persistence_diagnostic(
-            "member-submit-user-message-append-failed",
-            conversation_id=conversation_id,
-            conversation_session_id=conversation_session_id,
-            target_member_id=target_member_id,
-            error=str(exc),
-        )
-        pass
+        return _err(rid, 5008, f"team user message persistence failed: {exc}")
 
     member_run_home = _home_from_dovie_profile(dovie_profile)
     control_home = _control_plane_home()
@@ -532,24 +491,6 @@ def _submit_message_to_member(
         control_home=control_home,
         execution_home=member_run_home,
     )
-    _h9_member_persona_diagnostic(
-        "hermes member run context",
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        target_member_id=target_member_id,
-        run_context=run_context.to_payload(),
-        member_run_home=member_run_home,
-        control_home=control_home,
-    )
-    trace_persona_payload(
-        "team-mission.member-run-context",
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        target_member_id=target_member_id,
-        run_context=run_context.to_payload(),
-        member_run_home=member_run_home,
-        control_home=control_home,
-    )
 
     runtime_session_error = _ensure_team_mission_runtime_session_shell(conversation_session_id)
     if runtime_session_error:
@@ -557,15 +498,12 @@ def _submit_message_to_member(
     if not isinstance(ensured_conversation, dict):
         ensured_conversation = {}
 
-    # 4. The worker now runs on the conversation session itself. With no
+    # 5. The worker now runs on the conversation session itself. With no
     # memberchat mirror registry to rewrite run ids, use the frontend's
     # pre-reserved optimistic run id directly when present so terminal frames
     # settle the same conversation-side run the UI is tracking.
-    optimistic_run_id = str(params.get("client_run_id") or params.get("run_id") or "").strip()
-    run_id = optimistic_run_id or uuid.uuid4().hex
-    turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
 
-    # 5. run.submit with CLEAN member params only — NOT {**params} (which carries
+    # 6. run.submit with CLEAN member params only — NOT {**params} (which carries
     #    the frontend's leader scope/profile and breaks the worker spawn).
     submit_params = {
         "stored_session_id": conversation_session_id,
@@ -596,49 +534,6 @@ def _submit_message_to_member(
             },
         },
     }
-    _h11_transcript_persistence_diagnostic(
-        "member-submit-run-dispatch-prepared",
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        target_member_id=target_member_id,
-        run_id=run_id,
-        turn_id=turn_id,
-        stored_session_id=submit_params.get("stored_session_id"),
-        session_id=submit_params.get("session_id"),
-        runtime_scope_key=submit_params.get("runtime_scope_key"),
-        participant_id=run_context.participant_id,
-        persist_user_message=submit_params.get("persist_user_message"),
-        text_len=len(str(text or "")),
-        text_preview=str(text or "")[:120].replace("\n", "\\n"),
-    )
-    _h9_member_persona_diagnostic(
-        "hermes member run.submit prepared",
-        stored_session_id=submit_params.get("stored_session_id"),
-        run_id=submit_params.get("run_id"),
-        turn_id=submit_params.get("turn_id"),
-        agent_profile_id=submit_params.get("agent_profile_id"),
-        agent_profile_version_id=submit_params.get("agent_profile_version_id"),
-        runtime_scope_key=submit_params.get("runtime_scope_key"),
-        dovie_profile_home=str(dovie_profile.get("hermesHomePath") or ""),
-        dovie_profile_runtime_scope_key=str(dovie_profile.get("runtimeScopeKey") or ""),
-        dovie_profile_runtime_scope_key_snake=str(dovie_profile.get("runtime_scope_key") or ""),
-        run_context=run_context.to_payload(),
-        workspace_cwd=workspace_context.get("cwd"),
-    )
-    trace_persona_payload(
-        "team-mission.member-run-submit-prepared",
-        stored_session_id=submit_params.get("stored_session_id"),
-        run_id=submit_params.get("run_id"),
-        turn_id=submit_params.get("turn_id"),
-        agent_profile_id=submit_params.get("agent_profile_id"),
-        agent_profile_version_id=submit_params.get("agent_profile_version_id"),
-        runtime_scope_key=submit_params.get("runtime_scope_key"),
-        dovie_profile_home=str(dovie_profile.get("hermesHomePath") or ""),
-        dovie_profile_runtime_scope_key=str(dovie_profile.get("runtimeScopeKey") or ""),
-        dovie_profile_runtime_scope_key_snake=str(dovie_profile.get("runtime_scope_key") or ""),
-        run_context=run_context.to_payload(),
-        workspace_cwd=workspace_context.get("cwd"),
-    )
     # Dispatch run.submit through the runtime-proxy path so the worker spawns
     # on the member-chat execution scope and runs inside the member's profile home
     # (HERMES_HOME=profiles/<member>). The in-process `_methods["run.submit"]`
@@ -647,40 +542,6 @@ def _submit_message_to_member(
     # the member's SOUL.md / memories / skills never loaded and every member
     # answered with the default "Hermes Agent" persona.
     proxied = _proxy_run_submit_via_worker(submit_params)
-    _h11_transcript_persistence_diagnostic(
-        "member-submit-run-dispatch-result",
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        target_member_id=target_member_id,
-        run_id=run_id,
-        turn_id=turn_id,
-        runtime_scope_key=member_scope,
-        ok=bool(proxied.get("ok")),
-        error=proxied.get("error") or "",
-        reason=proxied.get("reason") or "",
-    )
-    _h9_member_persona_diagnostic(
-        "hermes member proxy result",
-        stored_session_id=conversation_session_id,
-        target_member_id=target_member_id,
-        run_id=run_id,
-        turn_id=turn_id,
-        member_scope=member_scope,
-        ok=bool(proxied.get("ok")),
-        error=proxied.get("error") or "",
-        reason=proxied.get("reason") or "",
-    )
-    trace_persona_payload(
-        "team-mission.member-proxy-result",
-        stored_session_id=conversation_session_id,
-        target_member_id=target_member_id,
-        run_id=run_id,
-        turn_id=turn_id,
-        member_scope=member_scope,
-        ok=bool(proxied.get("ok")),
-        error=proxied.get("error") or "",
-        reason=proxied.get("reason") or "",
-    )
     if proxied.get("error"):
         return _err(rid, 5020, proxied["error"])
     if not proxied.get("ok"):
@@ -745,6 +606,19 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4006, "text required")
     conversation_id = _conversation_id_from_params(params, {})
     conversation_session_id = _conversation_session_id_from_params(params, {})
+    _team_chain_log(
+        "hermes-message-submit-entry",
+        mission_id=mission_id,
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        team_id=str(params.get("team_id") or params.get("teamId") or ""),
+        target_member_id=_target_member_id_from_params(params),
+        run_id=str(params.get("run_id") or params.get("client_run_id") or ""),
+        turn_id=str(params.get("turn_id") or params.get("turnId") or ""),
+        text_length=len(text),
+        attachment_count=len(_submitted_attachments(params)),
+        has_dovie_product_context=isinstance(params.get("dovie_product_context"), dict),
+    )
     if not mission_id and not conversation_id:
         return _err(rid, 4006, "mission_id or conversation_id required")
     graph = db.get_team_mission_graph(mission_id) if mission_id else {}
@@ -807,6 +681,16 @@ def _(rid, params: dict) -> dict:
     # Group-chat: route directly to a worker member, bypassing the leader.
     target_member_id = _target_member_id_from_params(params)
     if target_member_id:
+        _team_chain_log(
+            "hermes-message-submit-route-member",
+            conversation_id=conversation_id,
+            conversation_session_id=conversation_session_id,
+            target_member_id=target_member_id,
+            run_id=str(params.get("run_id") or params.get("client_run_id") or ""),
+            turn_id=str(params.get("turn_id") or params.get("turnId") or ""),
+            runtime_scope_key=str(params.get("runtime_scope_key") or ""),
+            mission_id=str((identity_mission or {}).get("mission_id") or mission_id or "") if isinstance(identity_mission, dict) else str(mission_id or ""),
+        )
         return _submit_message_to_member(
             rid,
             params,
@@ -870,6 +754,7 @@ def _(rid, params: dict) -> dict:
                 "team_id": str(params.get("team_id") or params.get("teamId") or (identity_mission or {}).get("team_id") or ""),
             },
         )
+        _ensure_team_conversation_session(db, conversation_session_id)
     except ValueError as exc:
         return _err(rid, 4004, str(exc))
     except Exception as exc:
@@ -889,6 +774,7 @@ def _(rid, params: dict) -> dict:
     )
     run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
     turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
+    client_message_id = str(params.get("client_message_id") or params.get("clientMessageId") or "").strip()
     draft_text = str(params.get("draft_text") or params.get("draftText") or text)
     submitted_attachments = _submitted_attachments(params)
     direct_reply = _leader_message_requests_direct_reply(text)
@@ -928,6 +814,36 @@ def _(rid, params: dict) -> dict:
         control_home=control_home,
         execution_home=leader_run_home,
     )
+    _team_chain_log(
+        "hermes-message-submit-route-leader",
+        mission_id=mission_id,
+        activity_mission_id=activity_mission_id,
+        activity_kind=leader_activity_kind,
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        runtime_scope_key=runtime_scope_key,
+        agent_profile_id=str(profile_params.get("agent_profile_id") or ""),
+        profile_runtime_scope_key=str(profile_params.get("runtime_scope_key") or ""),
+        hermes_home=_home_from_profile_params(profile_params),
+        direct_reply=direct_reply,
+        toolsets=[] if direct_reply else _leader_message_toolsets(params),
+        disabled_toolsets=_leader_disabled_toolsets(params),
+    )
+    try:
+        _upsert_team_user_submission_message(
+            db,
+            conversation_id=conversation_id,
+            conversation_session_id=conversation_session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+            text=draft_text,
+            client_message_id=client_message_id,
+            source_kind="leader_chat_user",
+        )
+    except Exception as exc:
+        return _err(rid, 5008, f"team user message persistence failed: {exc}")
     submit_params = {
         **params,
         **profile_params,
@@ -950,7 +866,7 @@ def _(rid, params: dict) -> dict:
             if direct_reply
             else _leader_router_prompt(user_text=text, graph=prompt_graph if isinstance(prompt_graph, dict) and prompt_graph else graph, memory_text=memory_text)
         ),
-        "persist_user_message": draft_text,
+        "persist_user_message": "",
         "draft_text": draft_text,
         "attachments": submitted_attachments,
         "enabled_toolsets": [] if direct_reply else _leader_message_toolsets(params),
@@ -968,8 +884,28 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5008, runtime_session_error)
     response = _submit_run_via_worker_with_response(rid, submit_params)
     if isinstance(response, dict) and response.get("error"):
+        _team_chain_log(
+            "hermes-message-submit-run-error",
+            conversation_id=conversation_id,
+            conversation_session_id=conversation_session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+            runtime_scope_key=runtime_scope_key,
+            error=response.get("error"),
+        )
         return response
     result = response.get("result") if isinstance(response, dict) else {}
+    _team_chain_log(
+        "hermes-message-submit-run-returned",
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        run_id=str(result.get("run_id") or run_id),
+        turn_id=str(result.get("turn_id") or turn_id),
+        runtime_session_id=str(result.get("session_id") or ""),
+        stored_session_id=str(result.get("stored_session_id") or ""),
+        runtime_scope_key=str(result.get("runtime_scope_key") or runtime_scope_key),
+        status=str(result.get("status") or ""),
+    )
     if isinstance(mission, dict) and mission and submitted_attachments:
         _record_leader_input_attachment_artifacts(
             db,
@@ -979,6 +915,19 @@ def _(rid, params: dict) -> dict:
             attachments=submitted_attachments,
         )
     ensure_team_leader_message_run_state(db, run_id=run_id, session_id=conversation_session_id, runtime_scope_key=runtime_scope_key, result=result)
+    _team_chain_log(
+        "hermes-message-submit-return",
+        mission_id=mission_id,
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
+        run_id=str(result.get("run_id") or run_id),
+        turn_id=str(result.get("turn_id") or turn_id),
+        runtime_session_id=str(result.get("session_id") or ""),
+        runtime_scope_key=str(result.get("runtime_scope_key") or runtime_scope_key),
+        graph_node_count=len((graph or {}).get("nodes") or []) if isinstance(graph, dict) else 0,
+        activity_mission_id=activity_mission_id,
+        direct_reply=direct_reply,
+    )
     return _ok(
         rid,
         {
@@ -1813,14 +1762,69 @@ def _(rid, params: dict) -> dict:
     })
 
 
+def _resolve_cancel_mission_id(db, params: dict) -> str:
+    def _existing_mission_id(candidate: str) -> str:
+        candidate = str(candidate or "").strip()
+        if not candidate:
+            return ""
+        graph = db.get_team_mission_graph(candidate) if hasattr(db, "get_team_mission_graph") else {}
+        mission = graph.get("mission") if isinstance(graph, dict) else None
+        if not isinstance(mission, dict):
+            return ""
+        return str(
+            mission.get("mission_id")
+            or mission.get("missionId")
+            or candidate
+        ).strip()
+
+    explicit_mission_id = _mission_id_from_params(params)
+    resolved = _existing_mission_id(explicit_mission_id)
+    if resolved:
+        return resolved
+
+    identifiers = [
+        _conversation_id_from_params(params, {}),
+        _conversation_session_id_from_params(params, {}),
+        explicit_mission_id,
+    ]
+    seen: set[str] = set()
+    for identifier in identifiers:
+        identifier = str(identifier or "").strip()
+        if not identifier or identifier in seen:
+            continue
+        seen.add(identifier)
+        resolver = getattr(db, "resolve_team_mission_conversation", None)
+        projection = resolver(identifier) if callable(resolver) else {}
+        if not isinstance(projection, dict):
+            continue
+        conversation = projection.get("conversation") if isinstance(projection.get("conversation"), dict) else {}
+        projection_mission = projection.get("mission") if isinstance(projection.get("mission"), dict) else {}
+        graph = projection.get("graph") if isinstance(projection.get("graph"), dict) else {}
+        graph_mission = graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
+        for candidate in (
+            conversation.get("active_mission_id"),
+            conversation.get("activeMissionId"),
+            projection_mission.get("mission_id"),
+            projection_mission.get("missionId"),
+            graph_mission.get("mission_id"),
+            graph_mission.get("missionId"),
+        ):
+            resolved = _existing_mission_id(str(candidate or "").strip())
+            if resolved:
+                return resolved
+    return ""
+
+
 @method("team_mission.cancel")
 def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5008)
-    mission_id = _mission_id_from_params(params)
+    if not (_mission_id_from_params(params) or _conversation_id_from_params(params, {}) or _conversation_session_id_from_params(params, {})):
+        return _err(rid, 4006, "mission_id or conversation_id required")
+    mission_id = _resolve_cancel_mission_id(db, params)
     if not mission_id:
-        return _err(rid, 4006, "mission_id required")
+        return _err(rid, 4040, "team mission not found")
     reason = str(params.get("reason") or "").strip() or "Team Mission cancelled by user."
     result = db.cancel_team_mission(
         mission_id=mission_id,
@@ -2081,6 +2085,11 @@ def _(rid, params: dict) -> dict:
         or ""
     ).strip()
     mission_metadata = mission.get("metadata") if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict) else {}
+    leader_members = (
+        _leader_members_from_params(params, mission if isinstance(mission, dict) else {}, db=db)
+        if leader_control_node
+        else []
+    )
     active_task = dict(mission_metadata.get("active_task") or {}) if isinstance(mission_metadata.get("active_task"), dict) else {}
     if not active_task and _is_root_planning_node(node):
         active_task = {
@@ -2139,6 +2148,7 @@ def _(rid, params: dict) -> dict:
                 "task_brief": worker_context.get("task_brief") if worker_context else _node_task_brief(node),
                 "output_contract": node.get("output_contract") or {},
                 "memory": memory_context,
+                **({"members": leader_members} if leader_members else {}),
                 "worker_context": {
                     key: value
                     for key, value in (worker_context or {}).items()

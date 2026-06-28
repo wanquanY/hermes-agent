@@ -797,7 +797,7 @@ def _emit(event: str, sid: str, payload: dict | None = None):
         session_transport = session.get("transport")
         context_transport = current_transport()
         direct_transport = session_transport or context_transport or _stdio_transport
-        if stable_session_id and run_id:
+        if stable_session_id and (run_id or event == "session.info"):
             event_db = _db_for_stable_session(stable_session_id)
             frame = {
                 "type": event,

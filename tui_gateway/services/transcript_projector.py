@@ -13,7 +13,12 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 
-_MESSAGE_EVENT_TYPES = {"message.start", "message.delta", "message.complete"}
+_MESSAGE_EVENT_TYPES = {
+    "message.start",
+    "message.delta",
+    "message.complete",
+    "reasoning.delta",
+}
 
 
 def _text(value: Any) -> str:
@@ -56,6 +61,17 @@ def _event_status(event: dict[str, Any]) -> str:
     return "streaming"
 
 
+def _event_reasoning_text(event: dict[str, Any]) -> str:
+    payload = _payload(event)
+    return _first_text(
+        payload.get("delta"),
+        payload.get("text"),
+        payload.get("reasoning"),
+        payload.get("reasoning_content"),
+        payload.get("reasoningContent"),
+    )
+
+
 @dataclass(frozen=True)
 class ProjectionDiagnostic:
     code: str
@@ -79,6 +95,7 @@ class ProjectedTranscriptMessage:
     participant_id: str
     metadata: dict[str, Any]
     status: str = "streaming"
+    reasoning: str = ""
 
     @property
     def key(self) -> ProjectionKey:
@@ -97,6 +114,7 @@ class ProjectedTranscriptMessage:
             "participant_id": self.participant_id,
             "metadata": copy.deepcopy(self.metadata),
             "status": self.status,
+            "reasoning": self.reasoning,
         }
 
 
@@ -165,6 +183,7 @@ class SessionDBTranscriptProjectionStore:
             participant_id=message.participant_id,
             metadata=message.metadata,
             status=message.status,
+            reasoning=message.reasoning,
         )
         projected = self._row_to_projected_message(row)
         if projected is None:
@@ -199,11 +218,38 @@ class SessionDBTranscriptProjectionStore:
             participant_id=participant_id,
             metadata=metadata,
             status=_text(metadata.get("projection_status")) or "streaming",
+            reasoning=row.get("reasoning") if isinstance(row.get("reasoning"), str) else "",
         )
 
 
 def conversation_message_id_for(key: ProjectionKey) -> str:
     raw = f"{key.session_id}\0{key.run_id}\0{key.message_seq_in_run}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+    return f"msg_{digest}"
+
+
+def conversation_user_message_id_for(
+    *,
+    session_id: str,
+    turn_id: str,
+    run_id: str = "",
+    client_message_id: str = "",
+) -> str:
+    """Stable id for a user-submission row in a visible conversation.
+
+    Team conversation user turns are created at submit time, not from worker
+    message events. ``turn_id`` is the primary identity because the same text
+    can be sent repeatedly in different turns; ``run_id`` and
+    ``client_message_id`` are fallback entropy for older callers.
+    """
+    stable_session_id = _text(session_id)
+    stable_turn_id = _text(turn_id)
+    stable_run_id = _text(run_id)
+    stable_client_message_id = _text(client_message_id)
+    identity = stable_turn_id or stable_client_message_id or stable_run_id
+    if not stable_session_id or not identity:
+        raise ValueError("session_id and one user message identity are required")
+    raw = f"{stable_session_id}\0user\0{identity}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
     return f"msg_{digest}"
 
@@ -327,17 +373,33 @@ class TranscriptProjector:
         if existing is not None:
             metadata = {**existing.metadata, **{key: value for key, value in metadata.items() if value != ""}}
 
+        existing_content = existing.content if existing else ""
+        existing_reasoning = existing.reasoning if existing else ""
+
         if event_type == "message.start":
             content = existing.content if existing else ""
+            reasoning = existing_reasoning
             status = "streaming"
         elif event_type == "message.delta":
             delta = _event_text(event)
-            content = self._apply_delta(existing.content if existing else "", delta, payload, diagnostics)
+            content = self._apply_delta(existing_content, delta, payload, diagnostics)
+            reasoning = existing_reasoning
             status = existing.status if existing and existing.status != "streaming" else "streaming"
-        else:
+        elif event_type == "message.complete":
             final_text = _event_text(event, terminal=True)
-            content = final_text if final_text else (existing.content if existing else "")
+            content = final_text if final_text else existing_content
+            reasoning = existing_reasoning
             status = _event_status(event)
+        else:
+            content = existing_content
+            reasoning_delta = _event_reasoning_text(event)
+            reasoning = self._apply_reasoning_delta(
+                existing_reasoning,
+                reasoning_delta,
+                payload,
+                diagnostics,
+            )
+            status = existing.status if existing and existing.status != "streaming" else "streaming"
 
         message = ProjectedTranscriptMessage(
             conversation_message_id=conversation_message_id,
@@ -347,6 +409,7 @@ class TranscriptProjector:
             participant_id=participant_id,
             metadata=metadata,
             status=status,
+            reasoning=reasoning,
         )
         stored = self._store.upsert_projected_message(message)
         return ProjectionResult(
@@ -406,4 +469,51 @@ class TranscriptProjector:
                 )
             )
             return current + delta
+        return current + delta
+
+    def _apply_reasoning_delta(
+        self,
+        current: str,
+        delta: str,
+        payload: dict[str, Any],
+        diagnostics: list[ProjectionDiagnostic],
+    ) -> str:
+        if not delta:
+            return current
+        mode = _text(payload.get("mode")).lower()
+        if mode == "replace":
+            return delta
+        offset = payload.get("offset")
+        if offset is not None:
+            try:
+                parsed_offset = int(offset)
+            except (TypeError, ValueError):
+                diagnostics.append(
+                    ProjectionDiagnostic(
+                        "reasoning-delta-offset-invalid",
+                        "reasoning delta offset is not an integer",
+                        {"offset": offset},
+                    )
+                )
+                return current + delta
+            if parsed_offset == len(current):
+                return current + delta
+            if 0 <= parsed_offset < len(current):
+                already_projected = current[parsed_offset : parsed_offset + len(delta)]
+                if already_projected == delta:
+                    return current
+                if parsed_offset == 0 and delta.startswith(current):
+                    return delta
+            diagnostics.append(
+                ProjectionDiagnostic(
+                    "reasoning-delta-offset-diverged",
+                    "reasoning delta offset does not match projected reasoning length",
+                    {"offset": parsed_offset, "reasoning_length": len(current)},
+                )
+            )
+            return current + delta
+        if delta == current:
+            return current
+        if current and delta.startswith(current):
+            return delta
         return current + delta

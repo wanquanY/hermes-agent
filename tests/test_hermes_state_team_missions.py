@@ -727,7 +727,6 @@ def test_team_mission_conversation_list_reads_session_summary_not_messages(tmp_p
     )
     db.create_session("team-session-1", source="team_mission", transient=False)
     db.append_message("team-session-1", role="user", content="列表只需要摘要")
-
     statements = []
     with db._lock:
         db._conn.set_trace_callback(statements.append)
@@ -744,6 +743,24 @@ def test_team_mission_conversation_list_reads_session_summary_not_messages(tmp_p
     assert "join messages" not in traced_sql
 
 
+def test_upsert_team_mission_conversation_materializes_canonical_session(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        title="团队会话",
+        created_at=100,
+    )
+
+    session = db.get_session("team-session-1")
+    assert session is not None
+    assert session["id"] == "team-session-1"
+    assert session["source"] == "team_mission"
+    db.append_message("team-session-1", role="user", content="直接 upsert 后可写消息")
+
+
 def test_empty_team_mission_conversation_shells_are_not_history_and_are_pruned(tmp_path: Path):
     db_path = tmp_path / "state.db"
     db = SessionDB(db_path)
@@ -754,6 +771,15 @@ def test_empty_team_mission_conversation_shells_are_not_history_and_are_pruned(t
         workspace_id="workspace-1",
         workspace_path="/tmp/workspace",
     )
+    stale_timestamp = 1.0
+    db._execute_write(lambda conn: conn.execute(
+        """
+        UPDATE team_mission_conversations
+           SET created_at = ?, updated_at = ?
+         WHERE conversation_id = ?
+        """,
+        (stale_timestamp, stale_timestamp, "empty-conversation"),
+    ))
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="mission-conversation",
@@ -774,7 +800,28 @@ def test_empty_team_mission_conversation_shells_are_not_history_and_are_pruned(t
 
     assert reopened.get_team_mission_conversation("empty-conversation") == {}
     assert reopened.get_session("empty-team-session") is None
+    assert reopened.get_session_index("empty-team-session") is None
     assert reopened.get_team_mission_conversation("mission-conversation")["conversation_id"] == "mission-conversation"
+
+
+def test_fresh_empty_team_mission_conversation_survives_startup_maintenance_until_first_message(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    db = SessionDB(db_path)
+    db.ensure_team_mission_conversation(
+        conversation_id="fresh-conversation",
+        stable_session_id="fresh-team-session",
+        team_id="team-1",
+        workspace_id="workspace-1",
+        workspace_path="/tmp/workspace",
+    )
+    assert db.get_session("fresh-team-session") is not None
+    db.close()
+
+    reopened = SessionDB(db_path)
+
+    assert reopened.get_team_mission_conversation("fresh-conversation")["conversation_id"] == "fresh-conversation"
+    assert reopened.get_session("fresh-team-session") is not None
+    reopened.append_message("fresh-team-session", role="user", content="首条消息不应被 GC 竞态破坏")
 
 
 def test_placeholder_team_mission_conversation_title_repairs_from_first_user_message(tmp_path: Path):

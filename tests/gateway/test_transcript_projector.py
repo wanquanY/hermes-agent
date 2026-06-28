@@ -9,6 +9,7 @@ from tui_gateway.services.transcript_projector import (
     SessionDBTranscriptProjectionStore,
     TranscriptProjector,
     conversation_message_id_for,
+    conversation_user_message_id_for,
 )
 
 
@@ -96,6 +97,130 @@ def test_delta_and_complete_update_same_message_seq() -> None:
     assert stored is not None
     assert stored.content == "canonical final"
     assert stored.metadata["source_event_seq"] == "3"
+
+
+def test_reasoning_delta_updates_same_projected_assistant_message() -> None:
+    projector, store = _projector()
+
+    projector.reduce(_event("message.start", message_seq_in_run=1))
+    projector.reduce(
+        _event(
+            "reasoning.delta",
+            message_seq_in_run=1,
+            seq=2,
+            payload={"delta": "先分析", "text": "先分析", "offset": 0},
+        )
+    )
+    projector.reduce(
+        _event(
+            "message.delta",
+            message_seq_in_run=1,
+            seq=3,
+            payload={"delta": "答案", "offset": 0},
+        )
+    )
+    complete = projector.reduce(
+        _event(
+            "message.complete",
+            message_seq_in_run=1,
+            seq=4,
+            payload={"text": "最终答案", "status": "complete"},
+        )
+    )
+
+    assert complete.applied is True
+    assert complete.message is not None
+    assert complete.message.content == "最终答案"
+    assert complete.message.reasoning == "先分析"
+    assert len(store.list_messages()) == 1
+    stored = store.get_projected_message(ProjectionKey(SESSION_ID, "run-1", "1"))
+    assert stored is not None
+    assert stored.content == "最终答案"
+    assert stored.reasoning == "先分析"
+
+
+def test_reasoning_delta_before_message_start_is_preserved() -> None:
+    projector, store = _projector()
+
+    projector.reduce(
+        _event(
+            "reasoning.delta",
+            message_seq_in_run=1,
+            seq=1,
+            payload={"delta": "提前思考", "offset": 0},
+        )
+    )
+    projector.reduce(_event("message.start", message_seq_in_run=1, seq=2))
+    projector.reduce(
+        _event(
+            "message.complete",
+            message_seq_in_run=1,
+            seq=3,
+            payload={"text": "答案", "status": "complete"},
+        )
+    )
+
+    assert len(store.list_messages()) == 1
+    stored = store.get_projected_message(ProjectionKey(SESSION_ID, "run-1", "1"))
+    assert stored is not None
+    assert stored.content == "答案"
+    assert stored.reasoning == "提前思考"
+    assert stored.status == "completed"
+
+
+def test_reasoning_snapshot_events_are_idempotent() -> None:
+    projector, store = _projector()
+
+    projector.reduce(_event("message.start", message_seq_in_run=1))
+    projector.reduce(
+        _event(
+            "reasoning.delta",
+            message_seq_in_run=1,
+            seq=2,
+            payload={"text": "The user asks."},
+        )
+    )
+    projector.reduce(
+        _event(
+            "reasoning.delta",
+            message_seq_in_run=1,
+            seq=3,
+            payload={"text": "The user asks. I should answer as frontend."},
+        )
+    )
+    projector.reduce(
+        _event(
+            "reasoning.delta",
+            message_seq_in_run=1,
+            seq=4,
+            payload={"text": "The user asks. I should answer as frontend."},
+        )
+    )
+
+    stored = store.get_projected_message(ProjectionKey(SESSION_ID, "run-1", "1"))
+    assert stored is not None
+    assert stored.reasoning == "The user asks. I should answer as frontend."
+    assert len(store.list_messages()) == 1
+
+
+def test_reasoning_offset_replay_is_idempotent() -> None:
+    projector, store = _projector()
+    event = _event(
+        "reasoning.delta",
+        message_seq_in_run=1,
+        seq=2,
+        payload={"delta": "重复片段", "offset": 0},
+    )
+
+    projector.reduce(_event("message.start", message_seq_in_run=1))
+    first = projector.reduce(event)
+    second = projector.reduce(event)
+
+    assert first.applied is True
+    assert second.applied is True
+    stored = store.get_projected_message(ProjectionKey(SESSION_ID, "run-1", "1"))
+    assert stored is not None
+    assert stored.reasoning == "重复片段"
 
 
 def test_same_run_different_message_seq_creates_multiple_assistant_messages() -> None:
@@ -230,9 +355,17 @@ def test_session_db_store_updates_same_projected_message(tmp_path) -> None:
         )
         projector.reduce(
             _event(
-                "message.complete",
+                "reasoning.delta",
                 message_seq_in_run=1,
                 seq=3,
+                payload={"delta": "reasoning draft", "offset": 0},
+            )
+        )
+        projector.reduce(
+            _event(
+                "message.complete",
+                message_seq_in_run=1,
+                seq=4,
                 payload={"text": "canonical final", "status": "complete"},
             )
         )
@@ -240,11 +373,15 @@ def test_session_db_store_updates_same_projected_message(tmp_path) -> None:
         messages = db.get_messages_as_conversation(SESSION_ID, include_storage_metadata=True)
         assert len(messages) == 1
         assert messages[0]["content"] == "canonical final"
+        assert messages[0]["reasoning"] == "reasoning draft"
         assert messages[0]["participant_id"] == PARTICIPANT_ID
         assert messages[0]["conversation_message_id"] == conversation_message_id_for(
             ProjectionKey(SESSION_ID, "run-1", "1")
         )
         assert messages[0]["metadata"]["projection_status"] == "completed"
+        read_model = db.get_conversation_message_read_model(SESSION_ID, include_storage_metadata=True)
+        assert len(read_model) == 1
+        assert read_model[0]["reasoning"] == "reasoning draft"
         assert db.get_session(SESSION_ID)["message_count"] == 1
     finally:
         db.close()
@@ -311,9 +448,18 @@ def test_record_event_projects_team_conversation_messages(tmp_path) -> None:
         )
         record_event(
             _event(
-                "message.complete",
+                "reasoning.delta",
                 message_seq_in_run=1,
                 seq=3,
+                payload={"delta": "projected reasoning", "offset": 0},
+            ),
+            db=db,
+        )
+        record_event(
+            _event(
+                "message.complete",
+                message_seq_in_run=1,
+                seq=4,
                 payload={"text": "canonical final", "status": "complete"},
             ),
             db=db,
@@ -322,6 +468,7 @@ def test_record_event_projects_team_conversation_messages(tmp_path) -> None:
         messages = db.get_messages_as_conversation(SESSION_ID, include_storage_metadata=True)
         assert len(messages) == 1
         assert messages[0]["content"] == "canonical final"
+        assert messages[0]["reasoning"] == "projected reasoning"
         assert messages[0]["participant_id"] == PARTICIPANT_ID
         assert messages[0]["conversation_message_id"] == conversation_message_id_for(
             ProjectionKey(SESSION_ID, "run-1", "1")
@@ -427,6 +574,58 @@ def test_team_read_model_collapses_legacy_worker_flush_shadows(tmp_path) -> None
         assert [message["role"] for message in page["messages"]] == ["user", "assistant"]
         assert [message["content"] for message in page["messages"]] == [prompt, canonical_reply]
         assert page["pageInfo"]["totalCount"] == 2
+    finally:
+        db.close()
+
+
+def test_team_read_model_prefers_projected_user_submission_over_worker_shadow(tmp_path) -> None:
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session(session_id=SESSION_ID, source="team_mission")
+        db.upsert_session_index(
+            session_id=SESSION_ID,
+            source="team_mission",
+            conversation_kind="team",
+            started_at=1.0,
+            updated_at=1.0,
+        )
+        run_id = "team-leader-run-user"
+        turn_id = "team-leader-turn-user"
+        prompt = "第一条团队会话用户消息"
+        conversation_message_id = conversation_user_message_id_for(
+            session_id=SESSION_ID,
+            run_id=run_id,
+            turn_id=turn_id,
+        )
+
+        db.upsert_projected_conversation_message(
+            session_id=SESSION_ID,
+            conversation_message_id=conversation_message_id,
+            role="user",
+            content=prompt,
+            participant_id="",
+            metadata={
+                "source": "team_mission.message.submit",
+                "message_kind": "user_submission",
+                "run_id": run_id,
+                "turn_id": turn_id,
+            },
+            status="completed",
+        )
+        db.append_message(
+            SESSION_ID,
+            role="user",
+            content=prompt,
+            metadata={"run_id": run_id, "turn_id": turn_id},
+        )
+
+        raw_messages = db.get_messages_as_conversation(SESSION_ID, include_storage_metadata=True)
+        read_model = db.get_conversation_message_read_model(SESSION_ID, include_storage_metadata=True)
+
+        assert len(raw_messages) == 2
+        assert [message["role"] for message in read_model] == ["user"]
+        assert read_model[0]["content"] == prompt
+        assert read_model[0]["conversation_message_id"] == conversation_message_id
     finally:
         db.close()
 

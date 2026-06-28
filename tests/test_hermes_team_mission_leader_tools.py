@@ -109,7 +109,7 @@ def test_start_task_does_not_inherit_non_planning_conversation_mode(monkeypatch,
 
     assert result["success"] is True
     assert result["task_status"] == "planning"
-    assert submitted["enabled_toolsets"] == ["team_mission_planning", "clarify", "file_readonly"]
+    assert submitted["enabled_toolsets"] == ["team_mission_read", "team_mission_planning", "clarify", "file_readonly"]
     assert submitted["dovie_product_context"]["team_mission"]["node_phase"] == "planning"
     graph = db.get_team_mission_graph(result["mission_id"])
     assert graph["mission"]["mode"] == "supervised_mission"

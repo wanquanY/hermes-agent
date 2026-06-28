@@ -295,13 +295,29 @@ class WSTransport:
             return not self._closed
         except Exception as exc:
             self._closed = True
+            frame_meta = _frame_meta(line)
             _log.warning(
                 "gateway ws write failed: %s %s %s frame=%s",
                 type(exc).__name__,
                 exc,
                 self._diagnostics(),
-                _frame_meta(line),
+                frame_meta,
             )
+            if str(frame_meta.get("stored_session_id") or "").startswith("team-session-") or str(frame_meta.get("runtime_scope_key") or "").startswith("team:"):
+                _log.warning(
+                    "[dovie-team-chain] gateway-ws-write-failed %s",
+                    json.dumps(
+                        {
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                            "connection": self._diagnostics(),
+                            "frame": frame_meta,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    ),
+                )
             return False
 
     async def write_async(self, obj: dict) -> bool:

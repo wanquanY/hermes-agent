@@ -60,6 +60,26 @@ class TestStoredPromptReuse:
         # No warnings on the happy path
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
+    def test_legacy_hermes_brand_prompt_is_rebuilt(self, caplog):
+        """Old cached prompts must not keep leaking Hermes identity."""
+        stored = (
+            "You are Hermes Agent.\n\n"
+            "Active Hermes profile: default.\n"
+            "Conversation started: Sunday, May 17, 2026\n"
+        )
+        db = MagicMock()
+        db.get_session.return_value = {"system_prompt": stored}
+        agent = _make_agent(session_db=db, prebuilt_prompt="You are Dovie.\nConversation started: today")
+
+        with caplog.at_level(logging.WARNING, logger="agent.conversation_loop"):
+            _restore_or_build_system_prompt(agent, None, [{"role": "user", "content": "hi"}])
+
+        assert agent._cached_system_prompt == "You are Dovie.\nConversation started: today"
+        agent._build_system_prompt.assert_called_once_with(None)
+        db.update_system_prompt.assert_called_once_with(agent.session_id, agent._cached_system_prompt)
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("legacy_dovie_branding" in message for message in warnings)
+
     def test_present_row_with_unicode_preserved(self):
         """Non-ASCII bytes in the stored prompt are not mangled."""
         stored = "Stored prompt with unicode: ☤ ⚗ ◆ — and emoji 🦊"
@@ -204,7 +224,7 @@ class TestPromptStabilityInvariant:
         invalidates KV cache on every prefix-cache backend.
         """
         stored = (
-            "You are Hermes Agent.\n"
+            "You are Dovie.\n"
             "\n"
             "Conversation started: Sunday, May 17, 2026\n"
             "Session ID: 20260517_153500_abc123\n"

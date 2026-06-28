@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from tui_gateway.services.storage_maintenance import run_startup_storage_maintenance
+
 
 @dataclass(frozen=True)
 class SessionStoreResult:
@@ -45,7 +47,7 @@ def get_session_db_for_home(
             return SessionStoreResult(None, default_db, default_error)
         try:
             db = session_db_factory()
-            _run_startup_run_event_maintenance(db, logger)
+            _run_startup_run_event_maintenance(db, logger, profile_home=default_home)
             return SessionStoreResult(db, db, None)
         except Exception as exc:
             error = str(exc)
@@ -64,7 +66,7 @@ def get_session_db_for_home(
 
     try:
         db = session_db_factory(db_path=active_home / "state.db")
-        _run_startup_run_event_maintenance(db, logger)
+        _run_startup_run_event_maintenance(db, logger, profile_home=active_home)
         db_by_home[home_key] = db
         db_error_by_home.pop(home_key, None)
         return SessionStoreResult(db, default_db, default_error)
@@ -92,12 +94,18 @@ def db_unavailable_detail(
     )
 
 
-def _run_startup_run_event_maintenance(db: Any, logger: logging.Logger) -> None:
-    method = getattr(db, "maybe_auto_compact_run_events", None)
-    if not callable(method):
-        return
+def _run_startup_run_event_maintenance(
+    db: Any,
+    logger: logging.Logger,
+    *,
+    profile_home: str | Path = "",
+) -> None:
     try:
-        result = method()
+        result = run_startup_storage_maintenance(
+            db,
+            profile_home=profile_home,
+            logger=logger,
+        )
         deleted_events = int(result.get("deleted_events") or 0) if isinstance(result, dict) else 0
         if isinstance(result, dict) and not result.get("skipped") and deleted_events > 0:
             logger.info(

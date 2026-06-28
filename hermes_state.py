@@ -36,7 +36,13 @@ from hermes_state_participants import (
     member_participant_id,
     user_participant_id,
 )
+from hermes_state_run_event_codec import decode_run_event_row
+from hermes_state_run_event_codec import update_run_event_frame_columns
+from hermes_state_run_event_index import project_run_event_search_index
+from hermes_state_run_event_index import runtime_source_seq_from_event
+from hermes_state_runtime import session_info_record
 from hermes_state_runs import SessionDBRunMixin
+from hermes_state_tool_events import backfill_tool_events_from_run_events
 from hermes_state_team_capabilities import SessionDBTeamCapabilityMixin
 from hermes_team_mission.state.session_mixin import SessionDBTeamMissionMixin
 from hermes_state_team_registry import SessionDBTeamRegistryMixin
@@ -46,9 +52,11 @@ from hermes_team_mission.state.schema import reconcile_team_mission_node_primary
 from hermes_team_mission.state.schema import team_mission_deferred_index_sql
 from hermes_team_mission.state.schema import team_mission_schema_sql
 from hermes_team_mission.state.maintenance import run_team_mission_startup_maintenance
+from hermes_team_mission.runtime.run_event_retention import RunEventRetentionPolicy
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
+
 
 T = TypeVar("T")
 
@@ -58,9 +66,10 @@ DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 # allowing narrowly scoped submodules such as ``hermes_state.migrations``.
 __path__ = [str(Path(__file__).with_name("hermes_state"))]
 
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 37
 CONVERSATION_PARTICIPANTS_BACKFILL_META_KEY = "conversation_participants_backfill_cr_p1_2"
 MISSION_ACTIVITIES_BACKFILL_META_KEY = "mission_activities_backfill_cr_p3_1"
+RUN_EVENT_RETENTION_POLICY = RunEventRetentionPolicy()
 
 
 def _sqlite_row_value(row: sqlite3.Row | tuple[Any, ...] | None, key: str, index: int, default: Any = None) -> Any:
@@ -419,13 +428,75 @@ CREATE TABLE IF NOT EXISTS run_events (
     runtime_session_id TEXT,
     runtime_scope_key TEXT,
     participant_id TEXT NOT NULL DEFAULT '',
+    activity_id TEXT,
     event_type TEXT NOT NULL,
     seq INTEGER NOT NULL,
     timestamp REAL NOT NULL,
     payload_json TEXT,
     event_json TEXT NOT NULL,
     status TEXT,
+    frame_blob BLOB,
+    frame_format TEXT,
+    retention_class TEXT,
+    projected_message_id TEXT,
+    projected_tool_event_id TEXT,
+    projection_state TEXT,
+    runtime_source_seq INTEGER NOT NULL DEFAULT 0,
     UNIQUE(session_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_events_activity_seq
+    ON run_events(activity_id, seq)
+    WHERE activity_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS run_event_search_index (
+    run_event_id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    runtime_scope_key TEXT,
+    runtime_source_seq INTEGER NOT NULL DEFAULT 0,
+    search_text TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY (run_event_id) REFERENCES run_events(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS session_runtime_state (
+    session_id TEXT PRIMARY KEY,
+    runtime_scope_key TEXT,
+    runtime_session_id TEXT,
+    run_id TEXT,
+    turn_id TEXT,
+    status TEXT,
+    model TEXT,
+    provider TEXT,
+    profile_json TEXT,
+    payload_hash TEXT,
+    updated_at REAL NOT NULL,
+    source_seq INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS tool_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    run_id TEXT,
+    turn_id TEXT,
+    tool_call_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at REAL,
+    updated_at REAL NOT NULL,
+    completed_at REAL,
+    seq_start INTEGER,
+    seq_last INTEGER,
+    arguments_json TEXT,
+    progress_json TEXT,
+    result_json TEXT,
+    result_text TEXT,
+    summary TEXT,
+    participant_id TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT,
+    UNIQUE(session_id, tool_call_id)
 );
 
 CREATE TABLE IF NOT EXISTS run_event_archives (
@@ -618,6 +689,26 @@ CREATE INDEX IF NOT EXISTS idx_run_events_run
     ON run_events(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_run_events_participant
     ON run_events(participant_id);
+CREATE INDEX IF NOT EXISTS idx_run_events_retention_class
+    ON run_events(retention_class, timestamp);
+CREATE INDEX IF NOT EXISTS idx_run_events_projection_state
+    ON run_events(projection_state, session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_events_runtime_source_seq
+    ON run_events(session_id, runtime_source_seq, event_type);
+CREATE INDEX IF NOT EXISTS idx_run_event_search_index_session_seq
+    ON run_event_search_index(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_event_search_index_source_seq
+    ON run_event_search_index(session_id, runtime_source_seq, event_type);
+CREATE INDEX IF NOT EXISTS idx_session_runtime_state_scope
+    ON session_runtime_state(runtime_scope_key, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_runtime_state_status
+    ON session_runtime_state(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_events_session_seq
+    ON tool_events(session_id, seq_start, seq_last);
+CREATE INDEX IF NOT EXISTS idx_tool_events_run
+    ON tool_events(run_id, seq_start);
+CREATE INDEX IF NOT EXISTS idx_tool_events_participant
+    ON tool_events(participant_id);
 CREATE INDEX IF NOT EXISTS idx_run_event_archives_session
     ON run_event_archives(session_id, archived_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_teams_status_updated
@@ -1225,6 +1316,178 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         except sqlite3.OperationalError:
             pass
 
+    def _backfill_session_runtime_state(self, cursor: sqlite3.Cursor) -> None:
+        """Build latest-only runtime state from existing session.info frames."""
+
+        try:
+            rows = cursor.execute(
+                """
+                SELECT *
+                FROM run_events
+                WHERE event_type = 'session.info'
+                ORDER BY session_id ASC, seq ASC, id ASC
+                """
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            logger.debug("session_runtime_state backfill skipped: %s", exc)
+            return
+
+        latest_by_session: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            event = decode_run_event_row(row)
+            event = event if isinstance(event, dict) else {}
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else None
+            payload = payload if isinstance(payload, dict) else {}
+            session_id = str(event.get("stored_session_id") or row["session_id"] or "").strip()
+            if not session_id:
+                continue
+            record = session_info_record(
+                session_id=session_id,
+                payload=payload,
+                runtime_scope_key=str(event.get("runtime_scope_key") or row["runtime_scope_key"] or ""),
+                runtime_session_id=str(
+                    event.get("runtime_session_id")
+                    or event.get("session_id")
+                    or row["runtime_session_id"]
+                    or ""
+                ),
+                run_id=str(event.get("run_id") or row["run_id"] or ""),
+                turn_id=str(event.get("turn_id") or row["turn_id"] or ""),
+                updated_at=float(event.get("timestamp") or row["timestamp"] or 0),
+                source_seq=int(event.get("seq") or row["seq"] or 0),
+            )
+            latest_by_session[session_id] = record
+
+        for record in latest_by_session.values():
+            cursor.execute(
+                """
+                INSERT INTO session_runtime_state (
+                    session_id, runtime_scope_key, runtime_session_id, run_id,
+                    turn_id, status, model, provider, profile_json,
+                    payload_hash, updated_at, source_seq
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    runtime_scope_key = excluded.runtime_scope_key,
+                    runtime_session_id = excluded.runtime_session_id,
+                    run_id = excluded.run_id,
+                    turn_id = excluded.turn_id,
+                    status = excluded.status,
+                    model = excluded.model,
+                    provider = excluded.provider,
+                    profile_json = excluded.profile_json,
+                    payload_hash = excluded.payload_hash,
+                    updated_at = excluded.updated_at,
+                    source_seq = excluded.source_seq
+                WHERE COALESCE(excluded.source_seq, 0) >= COALESCE(session_runtime_state.source_seq, 0)
+                """,
+                (
+                    record["session_id"],
+                    record["runtime_scope_key"],
+                    record["runtime_session_id"],
+                    record["run_id"],
+                    record["turn_id"],
+                    record["status"],
+                    record["model"],
+                    record["provider"],
+                    record["profile_json"],
+                    record["payload_hash"],
+                    record["updated_at"],
+                    record["source_seq"],
+                ),
+            )
+
+    def _backfill_tool_events(self, cursor: sqlite3.Cursor) -> None:
+        """Build the tool timeline read model from existing tool runtime frames."""
+
+        backfill_tool_events_from_run_events(cursor.connection, logger=logger)
+
+    def _backfill_run_event_frame_indexes(self, cursor: sqlite3.Cursor) -> None:
+        """Build compressed frame/search-index columns for existing run_events rows."""
+
+        try:
+            rows = cursor.execute(
+                """
+                SELECT *
+                FROM run_events
+                WHERE frame_blob IS NULL
+                   OR COALESCE(frame_format, '') = ''
+                   OR COALESCE(retention_class, '') = ''
+                   OR NOT EXISTS (
+                       SELECT 1
+                       FROM run_event_search_index idx
+                       WHERE idx.run_event_id = run_events.id
+                   )
+                ORDER BY session_id ASC, seq ASC, id ASC
+                """
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            logger.debug("run_event frame/search-index backfill skipped: %s", exc)
+            return
+
+        for row in rows:
+            event = decode_run_event_row(row)
+            event = event if isinstance(event, dict) else {}
+            event_type = str(row["event_type"] or event.get("type") or "")
+            runtime_source_seq = runtime_source_seq_from_event(event)
+            update_run_event_frame_columns(
+                cursor.connection,
+                row_id=int(row["id"]),
+                event=event,
+                retention_class=RUN_EVENT_RETENTION_POLICY.classify_event_type(event_type),
+                projection_state="raw",
+            )
+            cursor.execute(
+                "UPDATE run_events SET runtime_source_seq = ? WHERE id = ?",
+                (runtime_source_seq, int(row["id"])),
+            )
+            project_run_event_search_index(
+                cursor.connection,
+                row_id=int(row["id"]),
+                session_id=str(row["session_id"] or event.get("stored_session_id") or ""),
+                seq=int(row["seq"] or event.get("seq") or 0),
+                event_type=event_type,
+                runtime_scope_key=str(row["runtime_scope_key"] or event.get("runtime_scope_key") or ""),
+                runtime_source_seq=runtime_source_seq,
+                event=event,
+                updated_at=float(row["timestamp"] or event.get("timestamp") or 0),
+            )
+
+    def _migrate_run_events_activity_id(self, cursor: sqlite3.Cursor) -> None:
+        """v37: add ``activity_id`` to ``run_events`` so Activity Runtime can
+        query by activity dimension without scanning by session_id.
+
+        See ADR-0001 (Activity as Runtime Primitive). The column is nullable
+        during Phase 0; backfill is done out-of-band by
+        ``tui_gateway.services.storage_backfill_activity_id``. After backfill
+        completes the read path may treat ``activity_id`` as authoritative,
+        but the column stays nullable so legacy / orphan rows do not block
+        writes.
+        """
+        try:
+            rows = cursor.execute('PRAGMA table_info("run_events")').fetchall()
+        except sqlite3.OperationalError:
+            return
+        names = {
+            row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            for row in rows
+        }
+        if "activity_id" not in names:
+            try:
+                cursor.execute(
+                    'ALTER TABLE "run_events" ADD COLUMN "activity_id" TEXT'
+                )
+            except sqlite3.OperationalError as exc:
+                logger.debug("run_events.activity_id migration skipped: %s", exc)
+        try:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_run_events_activity_seq "
+                "ON run_events(activity_id, seq) "
+                "WHERE activity_id IS NOT NULL"
+            )
+        except sqlite3.OperationalError as exc:
+            logger.debug("idx_run_events_activity_seq create skipped: %s", exc)
+
     def _migrate_run_events_participant_id(self, cursor: sqlite3.Cursor) -> None:
         """v28: add durable event speaker identity for P1 Participant rollout."""
         try:
@@ -1425,6 +1688,8 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         row = cursor.fetchone()
         if row is None:
             self._backfill_session_list_summaries(cursor)
+            self._backfill_session_runtime_state(cursor)
+            self._backfill_tool_events(cursor)
             cursor.execute(
                 "INSERT INTO schema_version (version) VALUES (?)",
                 (SCHEMA_VERSION,),
@@ -1515,6 +1780,14 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 self._migrate_messages_participant_id(cursor)
             if current_version < 31:
                 self._migrate_session_system_prompts(cursor)
+            if current_version < 33:
+                self._backfill_session_runtime_state(cursor)
+            if current_version < 34:
+                self._backfill_tool_events(cursor)
+            if current_version < 36:
+                self._backfill_run_event_frame_indexes(cursor)
+            if current_version < 37:
+                self._migrate_run_events_activity_id(cursor)
             if current_version < SCHEMA_VERSION:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
@@ -3920,11 +4193,14 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
     ) -> bool:
         if message.get("role") != "user":
             return False
+        if cls._conversation_message_has_projector_id(message):
+            return False
         run_id = cls._conversation_message_run_id(message)
         fingerprint = cls._conversation_message_content_fingerprint(message)
         if not run_id or not fingerprint:
             return False
         current_id = cls._conversation_message_storage_id(message)
+        turn_id = cls._conversation_message_turn_id(message)
         for previous in reversed(canonical_messages):
             if not isinstance(previous, dict):
                 continue
@@ -3932,10 +4208,13 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             previous_run_id = cls._conversation_message_run_id(previous)
             if previous_role == "user":
                 previous_id = cls._conversation_message_storage_id(previous)
-                if previous_run_id:
-                    return False
                 if cls._conversation_message_content_fingerprint(previous) != fingerprint:
                     return False
+                if previous_run_id:
+                    previous_turn_id = cls._conversation_message_turn_id(previous)
+                    return previous_run_id == run_id and (
+                        not turn_id or not previous_turn_id or previous_turn_id == turn_id
+                    )
                 if current_id and previous_id and current_id - previous_id > 4:
                     return False
                 return True
@@ -4067,6 +4346,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         participant_id: str,
         metadata: Dict[str, Any],
         status: str = "",
+        reasoning: Any = "",
     ) -> Dict[str, Any]:
         """Insert or update a projector-owned visible transcript row.
 
@@ -4092,6 +4372,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             next_metadata["projection_status"] = projection_status
         metadata_json = json.dumps(next_metadata, ensure_ascii=False) if next_metadata else None
         stored_content = self._encode_content(content)
+        stored_reasoning = str(reasoning or "")
         message_timestamp = time.time()
 
         def _update_session_index(conn) -> None:
@@ -4133,9 +4414,9 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                     """
                     INSERT INTO messages (
                         session_id, role, content, participant_id, timestamp,
-                        conversation_message_id, metadata_json
+                        conversation_message_id, metadata_json, reasoning
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         stable_session_id,
@@ -4145,6 +4426,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                         message_timestamp,
                         stable_message_id,
                         metadata_json,
+                        stored_reasoning,
                     ),
                 )
                 conn.execute(
@@ -4171,6 +4453,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                            participant_id = ?,
                            timestamp = ?,
                            metadata_json = ?,
+                           reasoning = ?,
                            active = 1
                      WHERE id = ?
                     """,
@@ -4180,6 +4463,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                         normalized_participant_id,
                         message_timestamp,
                         json.dumps(merged_metadata, ensure_ascii=False),
+                        stored_reasoning,
                         existing["id"],
                     ),
                 )

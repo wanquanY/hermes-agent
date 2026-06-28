@@ -904,6 +904,17 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
                 },
             ]
 
+        def list_tool_events(self, *args, **kwargs):
+            assert args[0] == "s1"
+            return [
+                {
+                    "tool_call_id": "tool-1",
+                    "name": "create_agent_profile_draft",
+                    "status": "completed",
+                    "result": {"dovie_event": "agent_profile_draft_saved"},
+                },
+            ]
+
     cursor = server._methods["session.messages"].__globals__["_encode_page_cursor"]({"id": 20})
     monkeypatch.setattr(server, "_get_db", lambda: _MessagesDB())
 
@@ -923,6 +934,7 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
     assert resp["result"]["messages"] == [
         {"role": "user", "text": "older", "message_id": "10", "timestamp": 10.0},
     ]
+    assert resp["result"]["toolEvents"][0]["tool_call_id"] == "tool-1"
     assert resp["result"]["runEvents"][0]["type"] == "tool.complete"
     assert resp["result"]["runEvents"][0]["payload"]["result"]["draft"]["id"] == "draft-1"
     assert resp["result"]["pageInfo"]["hasMoreBefore"] is False

@@ -244,6 +244,56 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5021, f"storage stats failed: {exc}")
 
 
+@method("storage.maintenance.status")
+def _(rid, params: dict) -> dict:
+    """Return storage maintenance service state and recent task results."""
+    try:
+        from tui_gateway.services.storage_maintenance import (
+            get_storage_maintenance_service,
+            storage_maintenance_disabled,
+        )
+
+        service = get_storage_maintenance_service()
+        return _ok(
+            rid,
+            {
+                "disabled": storage_maintenance_disabled(),
+                "running": service.running,
+                "lastResults": service.last_results(),
+            },
+        )
+    except Exception as exc:
+        return _err(rid, 5022, f"storage maintenance status failed: {exc}")
+
+
+@method("storage.maintenance.run")
+def _(rid, params: dict) -> dict:
+    """Run storage maintenance now for the current SessionDB profile."""
+    try:
+        from tui_gateway.services.storage_maintenance import (
+            register_session_db_for_maintenance,
+            storage_maintenance_disabled,
+        )
+
+        if storage_maintenance_disabled():
+            return _ok(rid, {"skipped": True, "reason": "disabled"})
+        db = _get_db()
+        if db is None:
+            return _db_unavailable_error(rid, code=5000)
+        service = register_session_db_for_maintenance(
+            db,
+            profile_home=str(getattr(db, "db_path", "") or ""),
+            start=True,
+        )
+        raw_force = params.get("force")
+        if raw_force is None:
+            raw_force = params.get("runNow", True)
+        force = str(raw_force).strip().lower() not in {"0", "false", "no", "off"}
+        return _ok(rid, service.run_once(force=force))
+    except Exception as exc:
+        return _err(rid, 5023, f"storage maintenance run failed: {exc}")
+
+
 @method("process.stop")
 def _(rid, params: dict) -> dict:
     try:

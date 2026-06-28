@@ -22,7 +22,6 @@ deleted in Phase 6.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import os
 import sys
@@ -50,33 +49,6 @@ from tui_gateway.services.runtime_proxy import RuntimeScope
 from tui_gateway.services.worker_db_proxy import serialize_db_value
 
 _log = logging.getLogger(__name__)
-
-
-def _trace_transcript_persistence_rpc_enabled(stable_session_id: str, method: str) -> bool:
-    return method == "db.append_message" and str(stable_session_id or "").startswith(
-        "team-session-team-conversation-"
-    )
-
-
-def _db_rpc_append_message_probe(args: list[Any], kwargs: dict[str, Any]) -> dict[str, Any]:
-    def _arg(index: int, key: str, default: Any = "") -> Any:
-        return kwargs.get(key) if key in kwargs else (args[index] if len(args) > index else default)
-
-    metadata = _arg(13, "metadata", {})
-    metadata = metadata if isinstance(metadata, dict) else {}
-    content = _arg(2, "content", "")
-    content_text = content if isinstance(content, str) else str(content or "")
-    return {
-        "session_id": str(_arg(0, "session_id", "")),
-        "role": str(_arg(1, "role", "")),
-        "participant_id": str(_arg(3, "participant_id", "")),
-        "metadata_run_id": str(metadata.get("run_id") or ""),
-        "metadata_turn_id": str(metadata.get("turn_id") or ""),
-        "metadata_client_message_id": str(metadata.get("client_message_id") or ""),
-        "content_len": len(content_text),
-        "content_sha1": hashlib.sha1(content_text.encode("utf-8", errors="replace")).hexdigest()[:12],
-        "content_preview": content_text[:120].replace("\n", "\\n"),
-    }
 
 
 # Callback types. Each receives the UI routing ``scope_key`` and the
@@ -205,6 +177,11 @@ DB_RPC_ALLOWED_METHODS = frozenset(
         "upsert_team_mission_node",
     }
 )
+
+WORKER_TEAM_MISSION_GATEWAY_METHODS = frozenset({
+    "team_mission.create",
+    "team_mission.team_profile.get",
+})
 
 
 @dataclass
@@ -638,25 +615,8 @@ class WorkerSupervisor:
                 f"db method {db_method_name!r} is not allowed over worker IPC",
                 code=-32601,
             )
-        trace_stable_session_id = ""
-        trace_append_message = False
         try:
             args, kwargs = _decode_db_rpc_params(frame.params)
-            trace_stable_session_id = _stable_session_id_from_rpc(frame, args, kwargs)
-            trace_append_message = _trace_transcript_persistence_rpc_enabled(
-                trace_stable_session_id,
-                method,
-            )
-            if trace_append_message:
-                _log.warning(
-                    "[h11-trace transcript-persistence] db-rpc-append-message-start %s",
-                    {
-                        "request_id": req_id,
-                        "stable_session_id": trace_stable_session_id,
-                        "method": method,
-                        "message": _db_rpc_append_message_probe(args, kwargs),
-                    },
-                )
             db = _db_for_worker_rpc(frame, args, kwargs)
             if db is None:
                 raise RuntimeError("state.db unavailable")
@@ -665,28 +625,8 @@ class WorkerSupervisor:
                 raise AttributeError(f"SessionDB has no method {db_method_name!r}")
             async with self._db_rpc_lock:
                 result = target(*args, **kwargs)
-            if trace_append_message:
-                _log.warning(
-                    "[h11-trace transcript-persistence] db-rpc-append-message-end %s",
-                    {
-                        "request_id": req_id,
-                        "stable_session_id": trace_stable_session_id,
-                        "method": method,
-                        "result": str(result),
-                    },
-                )
             return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
         except Exception as exc:
-            if trace_append_message:
-                _log.warning(
-                    "[h11-trace transcript-persistence] db-rpc-append-message-failed %s",
-                    {
-                        "request_id": req_id,
-                        "stable_session_id": trace_stable_session_id,
-                        "method": method,
-                        "error": str(exc) or repr(exc),
-                    },
-                )
             return _db_rpc_error(
                 req_id,
                 type(exc).__name__,
@@ -707,6 +647,8 @@ class WorkerSupervisor:
             return await self._execute_dispatch_agent_async_rpc(frame, worker=worker)
         if method == "worker.dispatch_team_async":
             return await self._execute_dispatch_team_async_rpc(frame, worker=worker)
+        if method == "worker.team_mission_gateway_call":
+            return await self._execute_team_mission_gateway_call_rpc(frame, worker=worker)
         return _db_rpc_error(
             str(frame.id or ""),
             "WorkerRPCMethodError",
@@ -729,6 +671,46 @@ class WorkerSupervisor:
             from tui_gateway.methods.dispatch import dispatch_agent_async
 
             result = await dispatch_agent_async(params)
+            return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
+        except Exception as exc:
+            return _db_rpc_error(
+                req_id,
+                type(exc).__name__,
+                str(exc) or repr(exc),
+                code=-32000,
+            )
+
+    async def _execute_team_mission_gateway_call_rpc(
+        self,
+        frame: DBRpcRequestFrame,
+        *,
+        worker: RunWorker | None = None,
+    ) -> DBRpcReplyFrame:
+        req_id = str(frame.id or "")
+        params = dict(frame.params) if isinstance(frame.params, dict) else {}
+        gateway_method = str(params.get("method") or "").strip()
+        gateway_params = params.get("params") if isinstance(params.get("params"), dict) else {}
+        if gateway_method not in WORKER_TEAM_MISSION_GATEWAY_METHODS:
+            return _db_rpc_error(
+                req_id,
+                "WorkerRPCMethodError",
+                f"team mission gateway method {gateway_method!r} is not allowed over worker IPC",
+                code=-32601,
+            )
+        _log.info(
+            "[dovie-team-mission-gateway-call] route=main-worker-rpc method=%s worker_scope=%s conversation_id=%s param_keys=%s",
+            gateway_method,
+            worker.scope_key if worker is not None else "",
+            worker.conversation_id if worker is not None else "",
+            sorted(gateway_params.keys()),
+        )
+        try:
+            from tui_gateway import server as _server
+
+            target = _server._methods.get(gateway_method)
+            if not callable(target):
+                raise RuntimeError(f"Gateway method {gateway_method} is unavailable.")
+            result = target(f"worker-team-mission:{req_id}", dict(gateway_params))
             return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
         except Exception as exc:
             return _db_rpc_error(

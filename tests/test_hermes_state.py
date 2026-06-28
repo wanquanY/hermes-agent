@@ -97,6 +97,57 @@ def test_existing_activities_table_migrates_target_team_id_column(tmp_path):
         migrated.close()
 
 
+def test_existing_session_info_events_backfill_session_runtime_state(tmp_path):
+    db_path = tmp_path / "legacy_state.db"
+    legacy = SessionDB(db_path=db_path)
+    try:
+        legacy.append_run_event(
+            "stored-1",
+            {
+                "type": "session.info",
+                "session_id": "runtime-1",
+                "stored_session_id": "stored-1",
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "runtime_scope_key": "profile:agent-default",
+                "seq": 1,
+                "payload": {"status": "starting", "model": "old-model"},
+            },
+        )
+        legacy.append_run_event(
+            "stored-1",
+            {
+                "type": "session.info",
+                "session_id": "runtime-1",
+                "stored_session_id": "stored-1",
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "runtime_scope_key": "profile:agent-default",
+                "seq": 2,
+                "payload": {"status": "running", "model": "new-model"},
+            },
+        )
+        legacy._conn.execute("DELETE FROM session_runtime_state")
+        legacy._conn.execute("UPDATE schema_version SET version = 32")
+        legacy._conn.commit()
+    finally:
+        legacy.close()
+
+    migrated = SessionDB(db_path=db_path)
+    try:
+        state = migrated.get_session_runtime_state("stored-1")
+
+        assert state["runtime_scope_key"] == "profile:agent-default"
+        assert state["runtime_session_id"] == "runtime-1"
+        assert state["run_id"] == "run-1"
+        assert state["turn_id"] == "turn-1"
+        assert state["status"] == "running"
+        assert state["model"] == "new-model"
+        assert state["source_seq"] == 2
+    finally:
+        migrated.close()
+
+
 def test_list_run_events_filtered_filters_subagent_events_at_db_boundary(db):
     db.append_run_event(
         "stored-1",
@@ -369,8 +420,9 @@ def test_append_run_event_skips_delta_coalesce_when_target_seq_is_occupied(db):
 
     events = db.list_run_events("stored-1")
 
-    assert [event["seq"] for event in events] == [1, 2]
-    assert [event["type"] for event in events] == ["message.delta", "tool.start"]
+    assert [event["seq"] for event in events] == [1, 2, 3]
+    assert [event["type"] for event in events] == ["message.delta", "tool.start", "message.delta"]
+    assert events[2]["payload"] == {"mode": "append", "text": "好", "delta": "好", "offset": 1}
 
 
 def test_append_run_event_preserves_message_deltas_across_tool_events(db):
@@ -632,6 +684,144 @@ def test_append_run_event_compacts_on_terminal_event(db, monkeypatch):
     assert calls == [{"session_id": "stored-1"}]
 
 
+def test_append_session_info_updates_runtime_state_and_deduplicates_raw_rows(db):
+    payload = {
+        "status": "starting",
+        "model": "test-model",
+        "provider": "test-provider",
+        "profile": {"id": "agent-default", "name": "Default"},
+    }
+    first = db.append_run_event(
+        "stored-1",
+        {
+            "type": "session.info",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "runtime_scope_key": "profile:agent-default",
+            "seq": 1,
+            "payload": payload,
+        },
+    )
+    duplicate = db.append_run_event(
+        "stored-1",
+        {
+            "type": "session.info",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "runtime_scope_key": "profile:agent-default",
+            "seq": 2,
+            "payload": dict(payload),
+        },
+    )
+
+    state = db.get_session_runtime_state("stored-1")
+    events = db.list_run_events("stored-1")
+
+    assert first["seq"] == 1
+    assert duplicate["_persistence_disposition"] == "duplicate_session_info"
+    assert duplicate["seq"] == 1
+    assert state["runtime_scope_key"] == "profile:agent-default"
+    assert state["runtime_session_id"] == "runtime-1"
+    assert state["run_id"] == "run-1"
+    assert state["turn_id"] == "turn-1"
+    assert state["status"] == "starting"
+    assert state["model"] == "test-model"
+    assert state["provider"] == "test-provider"
+    assert state["profile"] == {"id": "agent-default", "name": "Default"}
+    assert state["source_seq"] == 1
+    assert [event["type"] for event in events] == ["session.info"]
+
+
+def test_append_session_info_same_payload_new_run_is_not_deduplicated(db):
+    payload = {"status": "starting", "model": "test-model"}
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "session.info",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "runtime_scope_key": "profile:agent-default",
+            "seq": 1,
+            "payload": payload,
+        },
+    )
+    second = db.append_run_event(
+        "stored-1",
+        {
+            "type": "session.info",
+            "session_id": "runtime-2",
+            "stored_session_id": "stored-1",
+            "run_id": "run-2",
+            "turn_id": "turn-2",
+            "runtime_scope_key": "profile:agent-default",
+            "seq": 2,
+            "payload": dict(payload),
+        },
+    )
+
+    state = db.get_session_runtime_state("stored-1")
+    events = db.list_run_events("stored-1")
+
+    assert "_persistence_disposition" not in second
+    assert state["runtime_session_id"] == "runtime-2"
+    assert state["run_id"] == "run-2"
+    assert state["turn_id"] == "turn-2"
+    assert state["source_seq"] == 2
+    assert [event["seq"] for event in events] == [1, 2]
+
+
+def test_prune_duplicate_session_info_events_keeps_latest_duplicate(db):
+    payload_a = '{"status":"starting","model":"test-model"}'
+    payload_b = '{"status":"running","model":"test-model"}'
+    for seq, payload in ((1, payload_a), (2, payload_a), (3, payload_b), (4, payload_b)):
+        db._conn.execute(
+            """
+            INSERT INTO run_events (
+                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                event_type, seq, timestamp, payload_json, event_json, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "stored-1",
+                "run-1",
+                "turn-1",
+                "runtime-1",
+                "profile:agent-default",
+                "session.info",
+                seq,
+                float(seq),
+                payload,
+                (
+                    '{"type":"session.info","session_id":"runtime-1",'
+                    '"stored_session_id":"stored-1","run_id":"run-1",'
+                    '"turn_id":"turn-1","runtime_scope_key":"profile:agent-default",'
+                    f'"seq":{seq},"timestamp":{float(seq)},"payload":{payload}}}'
+                ),
+                "",
+            ),
+        )
+
+    result = db.prune_duplicate_session_info_events(session_id="stored-1")
+    events = db.list_run_events("stored-1")
+    archive = db._conn.execute(  # noqa: SLF001 - storage contract assertion.
+        "SELECT reason, event_count, first_seq, last_seq FROM run_event_archives"
+    ).fetchone()
+
+    assert result["deleted_events"] == 2
+    assert [event["seq"] for event in events] == [2, 4]
+    assert [event["payload"]["status"] for event in events] == ["starting", "running"]
+    assert archive["reason"] == "duplicate_session_info"
+    assert archive["event_count"] == 2
+    assert archive["first_seq"] == 1
+    assert archive["last_seq"] == 3
+
+
 def test_append_run_event_deduplicates_repeated_terminal_for_run(db):
     db.append_run_event(
         "stored-1",
@@ -841,6 +1031,74 @@ def test_compact_run_events_prunes_terminal_stream_rows_from_old_database(db):
     assert archive["event_count"] == len(prunable_rows)
     assert archive["first_seq"] == 1
     assert archive["last_seq"] == len(prunable_rows)
+
+
+def test_compact_run_events_preserves_tool_complete_for_terminal_run(db):
+    db.upsert_run(
+        run_id="run-1",
+        session_id="stored-1",
+        runtime_scope_key="stored-1",
+        turn_id="turn-1",
+        runtime_session_id="runtime-1",
+        status="completed",
+    )
+
+    rows = (
+        (
+            1,
+            "tool.complete",
+            '{"tool_name":"terminal","result":"important output"}',
+            "",
+        ),
+        (
+            2,
+            "message.delta",
+            '{"mode":"append","text":"A","delta":"A","offset":0}',
+            "",
+        ),
+        (
+            3,
+            "message.complete",
+            '{"status":"complete","text":"final"}',
+            "completed",
+        ),
+    )
+    for seq, event_type, payload, status in rows:
+        db._conn.execute(
+            """
+            INSERT INTO run_events (
+                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                event_type, seq, timestamp, payload_json, event_json, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "stored-1",
+                "run-1",
+                "turn-1",
+                "runtime-1",
+                "stored-1",
+                event_type,
+                seq,
+                float(seq),
+                payload,
+                (
+                    f'{{"type":"{event_type}","session_id":"runtime-1",'
+                    '"stored_session_id":"stored-1","run_id":"run-1",'
+                    '"turn_id":"turn-1","runtime_scope_key":"stored-1",'
+                    f'"seq":{seq},"timestamp":{float(seq)},"payload":{payload}}}'
+                ),
+                status,
+            ),
+        )
+
+    result = db.compact_run_events(session_id="stored-1")
+    events = db.list_run_events("stored-1")
+
+    assert result["pruned_terminal_stream_events"] == 1
+    assert result["deleted_events"] == 1
+    assert [event["type"] for event in events] == ["tool.complete", "message.complete"]
+    assert events[0]["payload"] == {"tool_name": "terminal", "result": "important output"}
+    assert events[1]["payload"] == {"status": "complete", "text": "final"}
 
 
 def test_compact_run_events_preserves_active_message_delta_rows(db):

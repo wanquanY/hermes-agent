@@ -975,15 +975,17 @@ def _start_toolsets(params: dict, mission: dict, node: dict, *, profile_params: 
     if _is_team_leader_control_node(node):
         if _node_phase(node) in {"planning", "change_request"}:
             # Planning is "design the task graph", not "do the work". The leader is
-            # allowed to (a) WRITE the graph (team_mission_planning), (b) ASK the user
-            # for missing inputs (clarify) so it does not build the graph on guessed
-            # assumptions and waste an approval+execution round, and (c) READ the
-            # workspace (file_readonly) so the graph reflects what is actually there.
+            # allowed to (a) READ the team roster/capability snapshot
+            # (team_mission_read), (b) WRITE the graph (team_mission_planning),
+            # (c) ASK the user for missing inputs (clarify) so it does not build the
+            # graph on guessed assumptions and waste an approval+execution round, and
+            # (d) READ the workspace (file_readonly) so the graph reflects what is
+            # actually there.
             # It is NOT allowed to write files or run commands — that is a worker job
             # behind the approval gate; giving leader write/exec here would bypass the
             # whole supervised approval boundary. The toolset_scope is "exact", so
             # everything must be listed explicitly.
-            return ["team_mission_planning", "clarify", "file_readonly"]
+            return ["team_mission_read", "team_mission_planning", "clarify", "file_readonly"]
         return ["team_mission_read"]
     toolsets = _normalize_toolsets(params.get("enabled_toolsets") or params.get("enabledToolsets"))
     if not toolsets:
@@ -1781,9 +1783,10 @@ def _record_leader_input_attachment_artifacts(
 def _leader_router_prompt(*, user_text: str, graph: dict, memory_text: str = "") -> str:
     context_json = json.dumps(_compact_graph_context(graph), ensure_ascii=False, indent=2)
     parts = [
-        "You are the Team Leader for a DoXie team conversation.",
-        "Keep the same persona, identity, tone, and memory as the underlying DoXie profile. Team mode only adds team context and team coordination tools.",
-        "Never expose internal runtime, framework, or implementation names to the user. The product name shown to users is DoXie.",
+        "You are the Team Leader for a Dovie team conversation.",
+        "Your visible identity is the team conversation Leader/coordinator. The underlying Dovie profile supplies tone and memory only; it must not override speaker ownership in the team conversation.",
+        "Prior assistant messages authored by other participants are team member utterances, not roles you performed. When summarizing or explaining prior conversation, attribute each member's messages to that participant by name or role.",
+        "Never expose internal runtime, framework, or implementation names to the user. The product name shown to users is Dovie.",
         "",
         "Route this user message before acting:",
         "- Answer directly for greetings, status questions, explanations, follow-up questions, clarifications, or requests about prior/current work.",
@@ -1791,7 +1794,7 @@ def _leader_router_prompt(*, user_text: str, graph: dict, memory_text: str = "")
         "- Use team_mission_status when you need fresh mission graph or memory context to answer.",
         "- Call team_mission_start_task only when the user is asking to start a new substantive executable team task that benefits from planning, multi-agent work, workspace changes, research, verification, or a deliverable.",
         "- Do not call team_mission_start_task for greetings, lightweight Q&A, status checks, or discussion that can be answered directly.",
-        "- Do not call delegate_task or ordinary subagents. In DoXie team mode, the Leader coordinates the user conversation, task graph, and member nodes.",
+        "- Do not call delegate_task or ordinary subagents. In Dovie team mode, the Leader coordinates the user conversation, task graph, and member nodes.",
         "- If you start a task, keep your visible reply brief and tell the user that planning has started.",
         "- After team_mission_start_task succeeds, stop the current turn. Do not continue with research, file work, terminal commands, or deliverable execution.",
         "- Reply in the user's language.",
@@ -1810,22 +1813,21 @@ def _leader_router_prompt(*, user_text: str, graph: dict, memory_text: str = "")
 
 def _leader_direct_reply_prompt(*, user_text: str, graph: dict, memory_text: str = "") -> str:
     parts = [
-        "You are the Team Leader in a DoXie team conversation.",
-        "Keep the same persona, identity, tone, and memory as the underlying DoXie profile. Team mode only adds team context and team coordination tools.",
-        "Never expose internal runtime, framework, or implementation names to the user. The product name shown to users is DoXie.",
+        "You are the Team Leader in a Dovie team conversation.",
+        "Your visible identity is the team conversation Leader/coordinator. The underlying Dovie profile supplies tone and memory only; it must not override speaker ownership in the team conversation.",
+        "Prior assistant messages authored by other participants are team member utterances, not roles you performed. When summarizing or explaining prior conversation, attribute each member's messages to that participant by name or role.",
+        "Never expose internal runtime, framework, or implementation names to the user. The product name shown to users is Dovie.",
         "The user explicitly asked you not to start or launch a team task for this turn.",
         "Answer directly in the user's language. Do not call tools, do not create tasks, and do not mention internal routing.",
     ]
     context = _compact_graph_context(graph)
-    active_mission = context.get("mission") if isinstance(context, dict) else {}
-    if isinstance(active_mission, dict) and active_mission:
-        parts.extend(
-            [
-                "",
-                "Current team conversation context for reference only:",
-                json.dumps(context, ensure_ascii=False, indent=2),
-            ]
-        )
+    parts.extend(
+        [
+            "",
+            "Current team conversation context for reference only. The active mission may be empty until a team task is started:",
+            json.dumps(context, ensure_ascii=False, indent=2),
+        ]
+    )
     if memory_text:
         parts.extend(["", memory_text])
     parts.extend(["", "User message:", user_text])

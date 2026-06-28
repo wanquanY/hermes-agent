@@ -15,6 +15,8 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from hermes_state_run_event_codec import payload_from_run_event_row
+
 
 TOOL_RESULT_BUDGET_CHARS = 8 * 1024
 TOOL_ARGS_BUDGET_CHARS = 8 * 1024
@@ -235,7 +237,7 @@ def _terminal_excerpt(db: Any, run_id: str, *, limit: int = RECENT_EVENT_MAX_CHA
     with db._lock:
         row = db._conn.execute(
             """
-            SELECT event_type, payload_json, event_json, seq
+            SELECT *
               FROM run_events
              WHERE run_id = ?
              ORDER BY seq DESC, id DESC
@@ -243,10 +245,7 @@ def _terminal_excerpt(db: Any, run_id: str, *, limit: int = RECENT_EVENT_MAX_CHA
             """,
             (run_id,),
         ).fetchone()
-    payload = _json_loads(_row_value(row, "payload_json", ""), {})
-    if not isinstance(payload, dict):
-        event = _json_loads(_row_value(row, "event_json", ""), {})
-        payload = event.get("payload") if isinstance(event, dict) and isinstance(event.get("payload"), dict) else {}
+    payload = payload_from_run_event_row(row)
     excerpt = cap_text(
         payload.get("summary")
         or payload.get("text")

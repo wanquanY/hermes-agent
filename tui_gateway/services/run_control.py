@@ -108,6 +108,7 @@ _TRANSCRIPT_PROJECTOR_EVENT_TYPES = {
     "message.start",
     "message.delta",
     "message.complete",
+    "reasoning.delta",
 }
 
 
@@ -131,126 +132,6 @@ def _stream_trace_summary(event: dict[str, Any]) -> dict[str, Any]:
 
 def _trace_stream_route(stage: str, **fields: Any) -> None:
     emit_dovie_diagnostic("[dovie-stream-route]", {"stage": stage, **fields})
-
-
-def _message_metadata(message: Any) -> dict[str, Any]:
-    if not isinstance(message, dict):
-        return {}
-    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-    return metadata
-
-
-def _message_content_text(message: Any) -> str:
-    if not isinstance(message, dict):
-        return ""
-    return str(message.get("content") or message.get("text") or "")
-
-
-def _message_run_id(message: Any) -> str:
-    if not isinstance(message, dict):
-        return ""
-    metadata = _message_metadata(message)
-    return str(
-        metadata.get("run_id")
-        or metadata.get("runId")
-        or message.get("run_id")
-        or message.get("runId")
-        or ""
-    ).strip()
-
-
-def _message_probe(message: Any) -> dict[str, Any]:
-    if not isinstance(message, dict):
-        return {"type": type(message).__name__}
-    content = _message_content_text(message)
-    metadata = _message_metadata(message)
-    return {
-        "id": str(message.get("id") or message.get("message_id") or message.get("messageId") or ""),
-        "role": str(message.get("role") or ""),
-        "participant_id": str(
-            message.get("participant_id")
-            or message.get("participantId")
-            or metadata.get("participant_id")
-            or metadata.get("participantId")
-            or ""
-        ),
-        "run_id": _message_run_id(message),
-        "turn_id": str(metadata.get("turn_id") or metadata.get("turnId") or ""),
-        "content_len": len(content),
-        "content_preview": content[:120].replace("\n", "\\n"),
-    }
-
-
-def _transcript_coverage_for_run(db: Any, stable: str, run_id: str) -> dict[str, Any]:
-    getter = _db_method(db, "get_messages_as_conversation")
-    if getter is None or not stable or not run_id:
-        return {
-            "lookup_available": bool(getter),
-            "message_count": 0,
-            "covered": False,
-            "matching_messages": [],
-            "tail": [],
-        }
-    try:
-        messages = list(getter(stable) or [])
-    except Exception as exc:
-        return {
-            "lookup_available": True,
-            "lookup_error": f"{type(exc).__name__}: {exc}",
-            "message_count": 0,
-            "covered": False,
-            "matching_messages": [],
-            "tail": [],
-        }
-    matching = [
-        message for message in messages
-        if _message_run_id(message) == run_id
-    ]
-    return {
-        "lookup_available": True,
-        "message_count": len(messages),
-        "covered": bool(matching),
-        "matching_messages": [_message_probe(message) for message in matching[-5:]],
-        "tail": [_message_probe(message) for message in messages[-5:]],
-    }
-
-
-def _trace_complete_transcript_coverage(
-    *,
-    db: Any,
-    stable: str,
-    run_id: str,
-    turn_id: str,
-    participant_id: str,
-    event_type: str,
-    terminal_event: str | None,
-    frame: dict[str, Any],
-) -> None:
-    if event_type != "message.complete" or not stable or not run_id:
-        return
-    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
-    text = str(
-        primary_deliverable_text(payload)
-        or payload.get("text")
-        or payload.get("content")
-        or ""
-    )
-    coverage = _transcript_coverage_for_run(db, stable, run_id)
-    logger.warning(
-        "[h11-trace transcript-persistence] record-event-complete-transcript-coverage %s",
-        {
-            "session_id": stable,
-            "run_id": run_id,
-            "turn_id": turn_id,
-            "participant_id": participant_id,
-            "terminal_status": terminal_event or "",
-            "runtime_scope_key": str(frame.get("runtime_scope_key") or ""),
-            "seq": int(frame.get("seq") or 0),
-            "event_text_len": len(text),
-            "event_text_preview": text[:120].replace("\n", "\\n"),
-            **coverage,
-        },
-    )
 
 
 _lock = threading.RLock()
@@ -373,28 +254,6 @@ def _project_team_transcript_event(
             turn_id=_event_turn_id(event),
             seq=int((event or {}).get("seq") or 0),
             diagnostics=diagnostics,
-        )
-    elif result.applied and event_type == "message.complete":
-        emit_dovie_diagnostic(
-            "[dovie-transcript-projector]",
-            {
-                "stage": "message-complete-projected",
-                "session_id": stable,
-                "run_id": _event_run_id(event),
-                "turn_id": _event_turn_id(event),
-                "seq": int((event or {}).get("seq") or 0),
-                "action": result.action,
-                "conversation_message_id": (
-                    result.message.conversation_message_id
-                    if result.message is not None
-                    else ""
-                ),
-                "participant_id": (
-                    result.message.participant_id
-                    if result.message is not None
-                    else ""
-                ),
-            },
         )
     return {
         "attempted": True,
@@ -1356,6 +1215,11 @@ def _apply_run_context_to_frame(
     frame["stored_session_id"] = run_context.conversation_session_id
     if not str(frame.get("participant_id") or "").strip():
         frame["participant_id"] = run_context.participant_id
+    # ADR-0001: surface activity_id at frame top-level so append_run_event
+    # picks it up via _event_activity_id() and writes it into the column.
+    activity_id = str(getattr(run_context, "activity_id", "") or "").strip()
+    if activity_id and not str(frame.get("activity_id") or "").strip():
+        frame["activity_id"] = activity_id
     payload["run_context"] = run_context.to_payload()
     return frame
 
@@ -1674,7 +1538,11 @@ def record_event(
             event_for_projection = saved if isinstance(saved, dict) else frame
             if (
                 isinstance(saved, dict)
-                and saved.get("_persistence_disposition") in {"duplicate_terminal", "ignored_after_terminal"}
+                and saved.get("_persistence_disposition") in {
+                    "duplicate_terminal",
+                    "ignored_after_terminal",
+                    "duplicate_session_info",
+                }
             ):
                 # Phase 23: duplicate persistence MUST NOT drop the live
                 # subscriber delivery. The legacy ``return []`` here was
@@ -1710,16 +1578,6 @@ def record_event(
                 db=db,
                 stable=stable,
                 event=event_for_projection,
-            )
-            _trace_complete_transcript_coverage(
-                db=db,
-                stable=stable,
-                run_id=run_id,
-                turn_id=turn_id,
-                participant_id=participant_id,
-                event_type=event_type,
-                terminal_event=terminal_event,
-                frame=event_for_projection,
             )
             if terminal_event:
                 _diagnostic_warning(
@@ -1975,6 +1833,24 @@ def publish_run_terminal_event(
         seq=int(frame.get("seq") or 0),
         message=str(message or ""),
     )
+    if stable.startswith("team-session-") or str(runtime_scope_key or "").startswith("team:"):
+        logger.warning(
+            "[dovie-team-chain] terminal-event-published %s",
+            _json_for_log(
+                {
+                    "db": _db_label(db),
+                    "status": terminal_status,
+                    "payload_status": payload_status,
+                    "session_id": stable,
+                    "runtime_session_id": str(runtime_session_id or stable).strip(),
+                    "run_id": normalized_run_id,
+                    "turn_id": str(turn_id or "").strip(),
+                    "runtime_scope_key": str(runtime_scope_key or stable).strip(),
+                    "seq": int(frame.get("seq") or 0),
+                    "message": str(message or ""),
+                }
+            ),
+        )
     publish_recorded_event(frame, owner_transport=owner_transport, db=db)
     return frame
 
@@ -2124,6 +2000,25 @@ def subscribe_session_with_id(
         subscription = _subscriptions_by_id.get(normalized_subscription_id)
         if subscription is not None:
             subscription["last_seq"] = _max_event_seq(events, after_seq)
+    if stable.startswith("team-session-") or scope.startswith("team:"):
+        logger.warning(
+            "[dovie-team-chain] backend-events-subscribe %s",
+            _json_for_log(
+                {
+                    "subscription_id": normalized_subscription_id,
+                    "stored_session_id": stable,
+                    "after_seq": int(after_seq or 0),
+                    "active_only": bool(active_only),
+                    "runtime_scope_key": scope,
+                    "run_id": normalized_run_id,
+                    "active_run_ids": sorted(active_run_ids),
+                    "event_count": len(events),
+                    "first_seq": events[0].get("seq") if events else None,
+                    "last_seq": events[-1].get("seq") if events else None,
+                    "transport": _transport_debug_id(transport),
+                }
+            ),
+        )
     if after_seq <= 0:
         return normalized_subscription_id, events
     return normalized_subscription_id, [event for event in events if int(event.get("seq") or 0) > after_seq]
@@ -2228,6 +2123,18 @@ def unsubscribe_session(
         removed = _remove_subscription_ids_locked(ids)
         if transport is not None and stable:
             _subscribers_by_session.get(stable, set()).discard(transport)
+    if stable.startswith("team-session-"):
+        logger.warning(
+            "[dovie-team-chain] backend-events-unsubscribe %s",
+            _json_for_log(
+                {
+                    "subscription_id": normalized_subscription_id,
+                    "stored_session_id": stable,
+                    "removed": removed,
+                    "transport": _transport_debug_id(transport),
+                }
+            ),
+        )
     return removed
 
 

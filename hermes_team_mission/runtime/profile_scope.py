@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from hermes_team_mission.context.worker_context import cap_text
+
+_log = logging.getLogger(__name__)
+
+_CONTROL_PLANE_GATEWAY_METHODS = frozenset({
+    "team_mission.create",
+    "team_mission.team_profile.get",
+})
 
 
 def text(value: Any) -> str:
@@ -215,14 +223,59 @@ def compact_team_profile_snapshot(
     return _fit_snapshot_budget(result, max_chars=max_chars)
 
 
-def gateway_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+def _worker_rpc_proxy() -> Any:
     try:
+        from tui_gateway.services.worker_rpc_proxy import get_default_worker_rpc_proxy
+
+        return get_default_worker_rpc_proxy()
+    except Exception:
+        return None
+
+
+def gateway_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+    normalized_method = text(method)
+    payload = dict(params) if isinstance(params, Mapping) else {}
+    proxy = _worker_rpc_proxy()
+    if proxy is not None:
+        if normalized_method not in _CONTROL_PLANE_GATEWAY_METHODS:
+            return {
+                "error": {
+                    "message": (
+                        f"Gateway method {normalized_method} is not allowed from "
+                        "Team Mission worker runtime."
+                    ),
+                },
+            }
+        try:
+            _log.info(
+                "[dovie-team-mission-gateway-call] route=worker-ipc method=%s param_keys=%s",
+                normalized_method,
+                sorted(payload.keys()),
+            )
+            response = proxy.request(
+                "worker.team_mission_gateway_call",
+                {"method": normalized_method, "params": payload},
+            )
+            return response if isinstance(response, dict) else {"result": response}
+        except Exception as exc:
+            _log.warning(
+                "[dovie-team-mission-gateway-call] route=worker-ipc failed method=%s error=%s",
+                normalized_method,
+                exc,
+            )
+            return {"error": {"message": str(exc)}}
+    try:
+        _log.info(
+            "[dovie-team-mission-gateway-call] route=local method=%s param_keys=%s",
+            normalized_method,
+            sorted(payload.keys()),
+        )
         from tui_gateway import server
 
-        fn = server._methods.get(method)
+        fn = server._methods.get(normalized_method)
         if not callable(fn):
-            return {"error": {"message": f"Gateway method {method} is unavailable."}}
-        return fn(None, params)
+            return {"error": {"message": f"Gateway method {normalized_method} is unavailable."}}
+        return fn(None, payload)
     except Exception as exc:
         return {"error": {"message": str(exc)}}
 

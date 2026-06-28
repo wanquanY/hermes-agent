@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
+from hermes_state_run_event_codec import decode_run_event_row
 
 
 def _text(value: Any) -> str:
@@ -198,8 +199,8 @@ def _fetch_recent_messages(db: Any, session_id: str, *, limit: int) -> tuple[lis
 
 
 def _event_from_row(row: Any, session_id: str) -> dict[str, Any]:
-    event = _json_loads(_row_value(row, "event_json", ""), {})
-    payload = _json_loads(_row_value(row, "payload_json", ""), {})
+    event = decode_run_event_row(row)
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     if not isinstance(event, dict):
         event = {}
     if not isinstance(payload, dict):

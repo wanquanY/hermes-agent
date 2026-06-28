@@ -32,7 +32,6 @@ from agent.auxiliary_client import set_runtime_main
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.direct_tool_response import build_direct_tool_response
 from agent.dovie_diagnostics import emit_dovie_diagnostic
-from agent.dovie_persona_trace import persona_text_probe, trace_persona_chain
 from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
@@ -136,6 +135,26 @@ def _system_prompt_execution_scope_key(agent) -> str:
     return ""
 
 
+_LEGACY_BRAND_PROMPT_MARKERS = (
+    "Hermes Agent",
+    "Active Hermes profile",
+    "Hermes WebUI",
+    "using Hermes Agent",
+    "troubleshoot Hermes Agent",
+    "where Hermes itself",
+    "Hermes itself is running",
+    "of the Hermes process",
+)
+
+
+def _stored_system_prompt_stale_reason(prompt: str) -> str:
+    """Return why a cached prompt must be rebuilt, or ``""`` when reusable."""
+    text = str(prompt or "")
+    if any(marker in text for marker in _LEGACY_BRAND_PROMPT_MARKERS):
+        return "legacy_dovie_branding"
+    return ""
+
+
 def _restore_or_build_system_prompt(agent, system_message, conversation_history):
     """Restore the cached system prompt from the session DB or build it fresh.
 
@@ -222,23 +241,33 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             )
 
     if stored_prompt:
-        # Continuing session — reuse the exact system prompt from the
-        # previous turn so the Anthropic cache prefix matches.
-        agent._cached_system_prompt = stored_prompt
-        _log_dovie_turn_stage(
-            agent,
-            "system-prompt-restored",
-            prompt_chars=len(stored_prompt or ""),
-            prompt_scope_key=scoped_prompt_key,
-        )
-        trace_persona_chain(
-            agent,
-            "turn.system-prompt-restored",
-            prompt_scope_key=scoped_prompt_key,
-            stored_state=stored_state,
-            prompt=persona_text_probe(stored_prompt),
-        )
-        return
+        stale_reason = _stored_system_prompt_stale_reason(stored_prompt)
+        if stale_reason:
+            logger.warning(
+                "Stored system prompt for session %s is stale (%s); rebuilding "
+                "from scratch this turn so the Dovie prompt policy is applied.",
+                agent.session_id,
+                stale_reason,
+            )
+            _log_dovie_turn_stage(
+                agent,
+                "system-prompt-stale-rebuild",
+                prompt_scope_key=scoped_prompt_key,
+                stale_reason=stale_reason,
+            )
+            stored_prompt = None
+            stored_state = "stale"
+        else:
+            # Continuing session — reuse the exact system prompt from the
+            # previous turn so the Anthropic cache prefix matches.
+            agent._cached_system_prompt = stored_prompt
+            _log_dovie_turn_stage(
+                agent,
+                "system-prompt-restored",
+                prompt_chars=len(stored_prompt or ""),
+                prompt_scope_key=scoped_prompt_key,
+            )
+            return
 
     if conversation_history and stored_state in ("null", "empty"):
         # Continuing session whose stored prompt is unusable.  The
@@ -267,13 +296,6 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         "system-prompt-fresh-build-end",
         prompt_chars=len(agent._cached_system_prompt or ""),
         prompt_scope_key=scoped_prompt_key,
-    )
-    trace_persona_chain(
-        agent,
-        "turn.system-prompt-fresh-build-end",
-        prompt_scope_key=scoped_prompt_key,
-        stored_state=stored_state,
-        prompt=persona_text_probe(agent._cached_system_prompt),
     )
 
     # Plugin hook: on_session_start — fired once when a brand-new
@@ -308,12 +330,6 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
                 "system-prompt-db-write-start",
                 prompt_scope_key=scoped_prompt_key,
             )
-            trace_persona_chain(
-                agent,
-                "turn.system-prompt-db-write-start",
-                prompt_scope_key=scoped_prompt_key,
-                prompt=persona_text_probe(agent._cached_system_prompt),
-            )
             if scoped_prompt_key:
                 update_scoped = getattr(agent._session_db, "update_scoped_system_prompt", None)
                 if not callable(update_scoped):
@@ -324,11 +340,6 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             _log_dovie_turn_stage(
                 agent,
                 "system-prompt-db-write-end",
-                prompt_scope_key=scoped_prompt_key,
-            )
-            trace_persona_chain(
-                agent,
-                "turn.system-prompt-db-write-end",
                 prompt_scope_key=scoped_prompt_key,
             )
         except Exception as exc:
@@ -1257,24 +1268,6 @@ def run_conversation(
         # the OpenAI SDK. Sanitizing here prevents the 3-retry cycle.
         _sanitize_messages_surrogates(api_messages)
 
-        api_system_content = ""
-        if api_messages and api_messages[0].get("role") == "system":
-            api_system_content = str(api_messages[0].get("content") or "")
-        last_user_content = ""
-        for _msg in reversed(api_messages):
-            if isinstance(_msg, dict) and _msg.get("role") == "user":
-                last_user_content = str(_msg.get("content") or "")
-                break
-        trace_persona_chain(
-            agent,
-            "turn.provider-messages-ready",
-            api_mode=str(getattr(agent, "api_mode", "") or ""),
-            message_count=len(api_messages),
-            roles=[str(m.get("role") or "") for m in api_messages if isinstance(m, dict)][:12],
-            system=persona_text_probe(api_system_content),
-            last_user=persona_text_probe(last_user_content, preview_chars=80),
-        )
-
         # Calculate approximate request size for logging
         total_chars = sum(len(str(msg)) for msg in api_messages)
         approx_tokens = estimate_messages_tokens_rough(api_messages)
@@ -1401,37 +1394,6 @@ def run_conversation(
                     agent,
                     "api-kwargs-build-end",
                     key_count=len(api_kwargs or {}),
-                )
-                payload_system = ""
-                if isinstance(api_kwargs, dict):
-                    payload_system = str(api_kwargs.get("instructions") or "")
-                    if not payload_system:
-                        payload_messages = api_kwargs.get("messages")
-                        if isinstance(payload_messages, list) and payload_messages:
-                            first_payload = payload_messages[0]
-                            if isinstance(first_payload, dict) and first_payload.get("role") == "system":
-                                payload_system = str(first_payload.get("content") or "")
-                trace_persona_chain(
-                    agent,
-                    "turn.provider-kwargs-built",
-                    api_mode=str(getattr(agent, "api_mode", "") or ""),
-                    kwargs_keys=sorted(str(key) for key in (api_kwargs or {}).keys()),
-                    instructions_or_system=persona_text_probe(payload_system),
-                    payload_message_count=(
-                        len(api_kwargs.get("messages") or [])
-                        if isinstance(api_kwargs, dict) and isinstance(api_kwargs.get("messages"), list)
-                        else 0
-                    ),
-                    payload_input_count=(
-                        len(api_kwargs.get("input") or [])
-                        if isinstance(api_kwargs, dict) and isinstance(api_kwargs.get("input"), list)
-                        else 0
-                    ),
-                    tool_count=(
-                        len(api_kwargs.get("tools") or [])
-                        if isinstance(api_kwargs, dict) and isinstance(api_kwargs.get("tools"), list)
-                        else 0
-                    ),
                 )
                 if agent._force_ascii_payload:
                     _sanitize_structure_non_ascii(api_kwargs)

@@ -4,6 +4,7 @@ from __future__ import annotations
 from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS
 from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS
 from hermes_state_runs import orphaned_active_run_decision
+from hermes_state_run_event_codec import payload_from_run_event_row
 
 from .session_common import *
 
@@ -1479,7 +1480,7 @@ class SessionDBTeamMissionGraphMixin:
         run_id = str(run_id or "").strip()
         if not run_id:
             return False
-        sql = "SELECT event_type, payload_json, event_json, seq FROM run_events WHERE run_id = ?"
+        sql = "SELECT * FROM run_events WHERE run_id = ?"
         params: list[Any] = [run_id]
         if max_seq > 0:
             sql += " AND seq <= ?"
@@ -1489,10 +1490,7 @@ class SessionDBTeamMissionGraphMixin:
             rows = self._conn.execute(sql, params).fetchall()
         for row in rows:
             event_type = _text(_row_value(row, "event_type"))
-            payload = _json_loads(_row_value(row, "payload_json", ""), None)
-            if not isinstance(payload, dict):
-                event = _json_loads(_row_value(row, "event_json", ""), {})
-                payload = event.get("payload") if isinstance(event, dict) and isinstance(event.get("payload"), dict) else {}
+            payload = payload_from_run_event_row(row)
             if _event_has_deliverable_text(event_type, payload):
                 return True
         return False

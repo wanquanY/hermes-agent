@@ -242,6 +242,14 @@ class GatewayToolEventBridge:
         if self._tool_progress_enabled(sid):
             self._emit("tool.generating", sid, {"name": name})
 
+    def on_reasoning_delta(self, sid: str, text: str) -> None:
+        payload = {
+            "text": text,
+            "source": "provider_reasoning",
+            **({"verbose": True} if self._session_verbose(sid) else {}),
+        }
+        self._emit("reasoning.delta", sid, payload)
+
     def on_tool_start(self, sid: str, tool_call_id: str, name: str, args: dict) -> None:
         session = self._sessions.get(sid)
         if session_interrupted(session):
@@ -520,15 +528,7 @@ class GatewayToolEventBridge:
             ),
             "tool_gen_callback": lambda name: self.on_tool_generating(sid, name),
             "thinking_callback": lambda text: self._emit(self._thinking_event, sid, {"text": text}),
-            "reasoning_callback": lambda text: self._emit(
-                "reasoning.delta",
-                sid,
-                {
-                    "text": text,
-                    "source": "provider_reasoning",
-                    **({"verbose": True} if self._session_verbose(sid) else {}),
-                },
-            ),
+            "reasoning_callback": lambda text: self.on_reasoning_delta(sid, text),
             "status_callback": lambda kind, text=None: status_update(
                 sid, str(kind), None if text is None else str(text)
             ),
