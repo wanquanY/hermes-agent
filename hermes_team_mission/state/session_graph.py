@@ -972,7 +972,13 @@ class SessionDBTeamMissionGraphMixin:
         graph = self.get_team_mission_graph(mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) else None
         if not isinstance(mission, dict):
-            _log.warning("[doxie-cancel] cancel_team_mission ABORT mission_id=%s mission_not_dict", mission_id)
+            _log.warning(
+                "[doxie-cancel] cancel_team_mission ABORT mission_id=%s "
+                "reason=graph_empty_for_resolved_mission_id "
+                "(caller's resolver returned mission_id but get_team_mission_graph "
+                "found no mission row — race or stale resolver)",
+                mission_id,
+            )
             return {}
         _log.debug(
             "[doxie-cancel] cancel_team_mission ENTRY mission_id=%s current_status=%s node_count=%s",

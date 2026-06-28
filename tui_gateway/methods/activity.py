@@ -10,6 +10,7 @@ belong to the Phase 1.C reconciler and later migration phases.
 from __future__ import annotations
 
 import asyncio
+import re as _re
 import uuid
 from typing import Any
 
@@ -20,6 +21,10 @@ from hermes_team_mission.domain.activity import (
 from tui_gateway.methods._shared import bind_server_globals
 
 _server = bind_server_globals(globals())
+
+_ACTIVITY_ID_FORMAT_PATTERN = _re.compile(
+    r"^(?:(?:mission|chat|team-conversation):.+|act-[a-z_]+(?:-.+|:.+))$"
+)
 
 
 def _err(rid, code: int, message: str) -> dict[str, Any]:
@@ -274,6 +279,13 @@ def activity_command_cancel(rid, params: dict[str, Any]) -> dict[str, Any]:
     """
     try:
         activity_id = _required_text(params, "activity_id")
+        if not _ACTIVITY_ID_FORMAT_PATTERN.match(activity_id):
+            return _validation_error(
+                rid,
+                f"activity_id must match {_ACTIVITY_ID_FORMAT_PATTERN.pattern}; "
+                f"got {activity_id!r} — pass an activity_id from activity.create, "
+                f"NOT a conversation_id or mission_id directly",
+            )
         command_id = _optional_text(params, "command_id") or _generate_command_id()
         _optional_text(params, "reason")
     except ValueError as exc:

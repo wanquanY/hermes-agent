@@ -175,7 +175,9 @@ def test_activity_start_persists_command(gateway_db: SessionDB) -> None:
 
 
 def test_activity_cancel_returns_command_id(gateway_db: SessionDB) -> None:
-    result = _assert_ok(_call("activity.command.cancel", {"activity_id": "act-cancel"}))
+    result = _assert_ok(
+        _call("activity.command.cancel", {"activity_id": "act-mission-cancel"})
+    )
 
     assert result["command_id"].startswith("cmd-")
     assert result["status"] == "accepted"
@@ -186,7 +188,7 @@ def test_activity_cancel_preserves_reason_in_payload(gateway_db: SessionDB) -> N
         _call(
             "activity.command.cancel",
             {
-                "activity_id": "act-cancel",
+                "activity_id": "act-mission-cancel",
                 "command_id": "cmd-cancel",
                 "reason": "user requested stop",
             },
@@ -253,7 +255,10 @@ def test_activity_start_rerun_same_command_id_returns_already_existed(
 def test_activity_cancel_rerun_same_command_id_returns_already_existed(
     gateway_db: SessionDB,
 ) -> None:
-    params = {"activity_id": "act-idem-cancel", "command_id": "cmd-idem-cancel"}
+    params = {
+        "activity_id": "act-mission-idem-cancel",
+        "command_id": "cmd-idem-cancel",
+    }
     first = _assert_ok(_call("activity.command.cancel", params))
     second = _assert_ok(_call("activity.command.cancel", params))
 
@@ -329,6 +334,26 @@ def test_activity_cancel_rejects_missing_activity_id(gateway_db: SessionDB) -> N
     _assert_validation(_call("activity.command.cancel", {}), "activity_id required")
 
 
+def test_activity_command_cancel_rejects_unprefixed_activity_id(
+    gateway_db: SessionDB,
+) -> None:
+    response = _call(
+        "activity.command.cancel",
+        {"activity_id": "conversation-id-without-prefix"},
+    )
+
+    assert response["error"]["code"] == 4006
+    assert "NOT a conversation_id or mission_id directly" in response["error"]["message"]
+
+
+def test_legacy_activity_cancel_keeps_unprefixed_activity_id_compatibility(
+    gateway_db: SessionDB,
+) -> None:
+    response = _call("activity.cancel", {"activity_id": "conversation-id-without-prefix"})
+
+    assert response["result"] == {"ok": False, "reason": "already_terminal"}
+
+
 def test_activity_complete_rejects_missing_activity_id(gateway_db: SessionDB) -> None:
     _assert_validation(_call("activity.complete", {}), "activity_id required")
 
@@ -368,20 +393,27 @@ def test_activity_start_does_not_spawn_worker(gateway_db: SessionDB) -> None:
 
 def test_activity_cancel_does_not_kill_workers(gateway_db: SessionDB) -> None:
     gateway_db.create_activity(
-        activity_id="act-stays-running",
+        activity_id="act-mission-stays-running",
         conversation_id="conversation-activity-rpc",
         kind="agent_dispatch",
     )
-    gateway_db.update_activity_status("act-stays-running", "running", started_at=1.0)
+    gateway_db.update_activity_status(
+        "act-mission-stays-running",
+        "running",
+        started_at=1.0,
+    )
 
     _assert_ok(
         _call(
             "activity.command.cancel",
-            {"activity_id": "act-stays-running", "command_id": "cmd-no-kill"},
+            {
+                "activity_id": "act-mission-stays-running",
+                "command_id": "cmd-no-kill",
+            },
         )
     )
 
-    assert gateway_db.get_activity("act-stays-running")["status"] == "running"
+    assert gateway_db.get_activity("act-mission-stays-running")["status"] == "running"
     _assert_no_forbidden_symbols({
         "cancel_run",
         "RunCancelFrame",
