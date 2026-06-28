@@ -357,6 +357,15 @@ def _dispatch_team_mission_ready_scheduler(
     trigger_event: str = "",
     run_id: str = "",
 ) -> None:
+    """Dispatch the Team Mission scheduler off the caller's loop.
+
+    record_event() can be called from arbitrary contexts, including the
+    worker runtime loop when worker subprocesses write terminal events back.
+    Running the scheduler synchronously on that path can eventually call
+    team_mission.node.start -> _proxy_run_submit_via_worker, which refuses to
+    synchronously wait on the worker runtime loop. Off-loading the scheduler to
+    a daemon thread breaks that loop identity and lets record_event return.
+    """
     normalized_mission_id = str(mission_id or "").strip()
     if not normalized_mission_id:
         return
@@ -364,15 +373,23 @@ def _dispatch_team_mission_ready_scheduler(
         callback = _team_mission_ready_scheduler
     if not callable(callback):
         return
-    try:
-        callback(
-            mission_id=normalized_mission_id,
-            db=db,
-            trigger_event=trigger_event,
-            run_id=run_id,
-        )
-    except Exception:
-        logger.warning("failed to schedule Team Mission ready nodes", exc_info=True)
+
+    def _run_callback() -> None:
+        try:
+            callback(
+                mission_id=normalized_mission_id,
+                db=db,
+                trigger_event=trigger_event,
+                run_id=run_id,
+            )
+        except Exception:
+            logger.warning("failed to schedule Team Mission ready nodes", exc_info=True)
+
+    threading.Thread(
+        target=_run_callback,
+        name=f"team-mission-scheduler:{normalized_mission_id[:8]}",
+        daemon=True,
+    ).start()
 
 
 def _remember_subscription_delivery(

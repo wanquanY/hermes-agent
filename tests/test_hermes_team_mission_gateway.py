@@ -31,6 +31,22 @@ def _workspace_kwargs(tmp_path: Path, workspace_id: str = "workspace-1") -> dict
     return {"workspace_id": workspace["workspace_id"], "workspace_path": workspace["workspace_path"]}
 
 
+def _wait_for_team_mission_node_status(db, mission_id: str, node_id: str, expected_status: str) -> dict:
+    deadline = time.monotonic() + 2
+    last_status = None
+    while time.monotonic() < deadline:
+        node = db.get_team_mission_node(mission_id, node_id)
+        if node:
+            last_status = node.get("status")
+            if last_status == expected_status:
+                return node
+        time.sleep(0.01)
+    raise AssertionError(
+        f"team mission node {node_id!r} status did not become {expected_status!r}; "
+        f"last status: {last_status!r}"
+    )
+
+
 def _team_task_brief(label: str = "deliverable") -> dict:
     return {
         "background": f"用户请求团队协作完成 {label}，需要成员基于任务图上下文执行。",
@@ -5644,7 +5660,7 @@ def test_team_mission_terminal_event_auto_starts_unblocked_child_node(monkeypatc
     )
 
     assert db.get_team_mission_node("mission-1", "node-a")["status"] == "completed"
-    assert db.get_team_mission_node("mission-1", "node-b")["status"] == "running"
+    assert _wait_for_team_mission_node_status(db, "mission-1", "node-b", "running")
     assert submitted[0]["dovie_product_context"]["team_mission"]["node_id"] == "node-b"
     assert "Run B after A" in submitted[0]["text"]
     assert "Acceptance criteria:" in submitted[0]["text"]
@@ -5850,7 +5866,7 @@ def test_team_mission_terminal_event_auto_starts_verifier_finalizer(monkeypatch,
     )
 
     verifier_id = "team-mission:mission-1:verifier"
-    assert db.get_team_mission_node("mission-1", verifier_id)["status"] == "running"
+    assert _wait_for_team_mission_node_status(db, "mission-1", verifier_id, "running")
     assert submitted[0]["dovie_product_context"]["team_mission"]["node_id"] == verifier_id
 
 
