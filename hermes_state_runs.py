@@ -1738,6 +1738,50 @@ class SessionDBRunMixin:
                     events.append(event)
         return events
 
+    def list_run_events_by_activity(
+        self,
+        activity_id: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 2000,
+    ) -> List[Dict[str, Any]]:
+        """Return all run_events for an activity_id across sessions, ordered by seq."""
+        normalized_activity_id = str(activity_id or "").strip()
+        if not normalized_activity_id:
+            return []
+        bounded_limit = max(1, min(int(limit or 2000), 5000))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT *
+                FROM run_events
+                WHERE activity_id = ?
+                  AND seq > ?
+                ORDER BY seq ASC
+                LIMIT ?
+                """,
+                (normalized_activity_id, int(after_seq or 0), bounded_limit),
+            ).fetchall()
+        events = []
+        with self._lock:
+            for row in rows:
+                event = decode_run_event_row(row)
+                if isinstance(event, dict):
+                    event = rehydrate_referenced_run_event(self._conn, row, event)
+                    event = _event_with_participant_id(
+                        event,
+                        str(_row_value(row, "participant_id", "") or ""),
+                    )
+                    event["activity_id"] = normalized_activity_id
+                    event["activityId"] = normalized_activity_id
+                    payload = event.get("payload")
+                    if isinstance(payload, dict):
+                        payload = dict(payload)
+                        payload.setdefault("activity_id", normalized_activity_id)
+                        event["payload"] = payload
+                    events.append(event)
+        return events
+
     def list_tool_events(
         self,
         session_id: str,

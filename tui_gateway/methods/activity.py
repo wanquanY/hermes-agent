@@ -19,6 +19,7 @@ from hermes_team_mission.domain.activity import (
     ACTIVITY_KINDS,
 )
 from tui_gateway.methods._shared import bind_server_globals
+from tui_gateway.services import run_control
 
 _server = bind_server_globals(globals())
 
@@ -167,6 +168,67 @@ def _insert_activity_command(
         ),
         None,
     )
+
+
+@method("runtime.activity.subscribe")
+def runtime_activity_subscribe(rid, params: dict) -> dict:
+    """ADR-0001 §Phase 2.A: subscribe to a single Activity's event stream."""
+    params = params if isinstance(params, dict) else {}
+    activity_id = str(params.get("activity_id") or params.get("activityId") or "").strip()
+    if not activity_id:
+        return _validation_error(rid, "activity_id required")
+    if not _ACTIVITY_ID_FORMAT_PATTERN.match(activity_id):
+        return _validation_error(rid, "activity_id malformed")
+    try:
+        after_seq = max(0, int(params.get("after_seq") or params.get("afterSeq") or 0))
+    except (TypeError, ValueError):
+        after_seq = 0
+    try:
+        limit = max(1, min(int(params.get("limit") or 2000), 2000))
+    except (TypeError, ValueError):
+        limit = 2000
+
+    db, err = _db_or_error(rid)
+    if err:
+        return err
+    list_by_activity = getattr(db, "list_run_events_by_activity", None)
+    if not callable(list_by_activity):
+        return _err(rid, 5008, "state.db unavailable")
+
+    existing = list_by_activity(activity_id, after_seq=0, limit=1)
+    if not existing:
+        return _err(rid, 4040, "activity has no run_events")
+
+    subscription_id, replay = run_control.subscribe_activity(
+        activity_id=activity_id,
+        transport=current_transport(),
+        after_seq=after_seq,
+        limit=limit,
+        db=db,
+    )
+    return _ok(
+        rid,
+        {
+            "subscription_id": subscription_id,
+            "events": replay,
+            "after_seq": max(
+                [int(event.get("seq") or 0) for event in replay],
+                default=after_seq,
+            ),
+        },
+    )
+
+
+@method("runtime.activity.unsubscribe")
+def runtime_activity_unsubscribe(rid, params: dict) -> dict:
+    """Unsubscribe from a runtime.activity.subscribe subscription."""
+    params = params if isinstance(params, dict) else {}
+    subscription_id = str(
+        params.get("subscription_id") or params.get("subscriptionId") or ""
+    ).strip()
+    if not subscription_id:
+        return _validation_error(rid, "subscription_id required")
+    return _ok(rid, {"removed": run_control.unsubscribe_activity(subscription_id)})
 
 
 @method("activity.create")

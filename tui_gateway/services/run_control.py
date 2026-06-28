@@ -142,6 +142,7 @@ _subscribers_by_session: dict[str, set[Transport]] = defaultdict(set)
 _subscriptions_by_id: dict[str, dict[str, Any]] = {}
 _subscription_ids_by_session: dict[str, set[str]] = defaultdict(set)
 _subscription_ids_by_mission: dict[str, set[str]] = defaultdict(set)
+_subscription_ids_by_activity: dict[str, set[str]] = defaultdict(set)
 _subscription_ids_by_transport: dict[Transport, set[str]] = defaultdict(set)
 _run_state_by_id: dict[str, dict[str, Any]] = {}
 _run_ids_by_session: dict[str, list[str]] = defaultdict(list)
@@ -391,6 +392,20 @@ def _remember_subscription_delivery(
         _remember_direct_terminal_delivery(subscription, event)
 
 
+def _event_activity_id(event: dict[str, Any]) -> str:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    return str(
+        event.get("activity_id")
+        or event.get("activityId")
+        or payload.get("activity_id")
+        or payload.get("activityId")
+        or metadata.get("activity_id")
+        or metadata.get("activityId")
+        or ""
+    ).strip()
+
+
 def _reserve_subscription_delivery(
     subscription: dict[str, Any],
     event: dict[str, Any],
@@ -452,6 +467,10 @@ def remember_transport_delivery(
                 if str(subscription.get("mission_id") or "").strip() != event_mission_id:
                     continue
                 _remember_subscription_run(subscription, event)
+            elif kind == "activity":
+                if str(subscription.get("activity_id") or "").strip() != _event_activity_id(event):
+                    continue
+                _remember_subscription_run(subscription, event)
                 continue
             _remember_subscription_delivery(subscription, event, direct=direct)
 
@@ -494,6 +513,9 @@ def _event_for_live_subscription_delivery(
                     if isinstance(binding, dict):
                         event_mission_id = str(binding.get("mission_id") or "").strip()
             if str(subscription.get("mission_id") or "").strip() != event_mission_id:
+                continue
+        elif kind == "activity":
+            if str(subscription.get("activity_id") or "").strip() != _event_activity_id(event):
                 continue
         else:
             continue
@@ -855,19 +877,25 @@ def _poll_subscription_events() -> None:
             subscription_kind = str(subscription.get("kind") or "session")
             if subscription_kind == "team_mission":
                 method = _db_method(db, "list_team_mission_events") or _db_method(db, "list_team_mission_run_events")
+            elif subscription_kind == "activity":
+                method = _db_method(db, "list_run_events_by_activity")
             else:
                 method = _db_method(db, "list_run_events")
             if method is None:
                 continue
             stable = str(subscription.get("stored_session_id") or "").strip()
             mission_id = str(subscription.get("mission_id") or "").strip()
+            activity_id = str(subscription.get("activity_id") or "").strip()
             transport = subscription.get("transport")
             if transport is None:
                 continue
             if subscription_kind == "team_mission" and not mission_id:
                 continue
-            if subscription_kind != "team_mission" and not stable:
+            if subscription_kind == "activity" and not activity_id:
                 continue
+            if subscription_kind != "team_mission" and not stable:
+                if subscription_kind != "activity":
+                    continue
             last_seq = int(subscription.get("last_seq") or 0)
             active_only = bool(subscription.get("active_only"))
             runtime_scope_key = str(subscription.get("runtime_scope_key") or "").strip()
@@ -878,6 +906,12 @@ def _poll_subscription_events() -> None:
                 if subscription_kind == "team_mission":
                     events = method(
                         mission_id,
+                        after_seq=last_seq,
+                        limit=_MAX_EVENTS_PER_SESSION,
+                    )
+                elif subscription_kind == "activity":
+                    events = method(
+                        activity_id,
                         after_seq=last_seq,
                         limit=_MAX_EVENTS_PER_SESSION,
                     )
@@ -893,7 +927,7 @@ def _poll_subscription_events() -> None:
                 logger.debug("failed to poll run event log", exc_info=True)
                 continue
             events = [event for event in events if isinstance(event, dict)]
-            if subscription_kind != "team_mission":
+            if subscription_kind not in {"team_mission", "activity"}:
                 events = [
                     event
                     for event in events
@@ -925,6 +959,7 @@ def _poll_subscription_events() -> None:
                             subscription_kind=subscription_kind,
                             stored_session_id=stable,
                             mission_id=mission_id,
+                            activity_id=activity_id,
                             run_id=_event_run_id(event),
                             turn_id=_event_turn_id(event),
                             runtime_scope_key=_event_runtime_scope_key(event),
@@ -947,6 +982,7 @@ def _poll_subscription_events() -> None:
                         subscription_kind=subscription_kind,
                         stored_session_id=stable,
                         mission_id=mission_id,
+                        activity_id=activity_id,
                         run_id=_event_run_id(event_for_transport),
                         turn_id=_event_turn_id(event_for_transport),
                         runtime_scope_key=_event_runtime_scope_key(event_for_transport),
@@ -1509,6 +1545,14 @@ def record_event(
                     _remember_subscription_run(subscription, frame)
                     subscribers.add(transport)
             subscribers.update(_subscribers_by_session.get(stable, set()))
+        activity_id = _event_activity_id(frame)
+        if activity_id:
+            for subscription_id in list(_subscription_ids_by_activity.get(activity_id, set())):
+                subscription = _subscriptions_by_id.get(subscription_id)
+                transport = subscription.get("transport") if isinstance(subscription, dict) else None
+                if transport is not None and isinstance(subscription, dict):
+                    _remember_subscription_run(subscription, frame)
+                    subscribers.add(transport)
         if skip_owner_transport and owner_transport is not None:
             subscribers.discard(owner_transport)
         result = list(subscribers)
@@ -1893,9 +1937,88 @@ def _remove_subscription_ids_locked(subscription_ids: set[str]) -> int:
         mission_id = str(subscription.get("mission_id") or "")
         if mission_id:
             _subscription_ids_by_mission.get(mission_id, set()).discard(sub_id)
+        activity_id = str(subscription.get("activity_id") or "")
+        if activity_id:
+            _subscription_ids_by_activity.get(activity_id, set()).discard(sub_id)
         if sub_transport is not None:
             _subscription_ids_by_transport.get(sub_transport, set()).discard(sub_id)
     return removed
+
+
+def subscribe_activity(
+    *,
+    activity_id: str,
+    transport: Transport | None,
+    after_seq: int = 0,
+    limit: int = 2000,
+    db: Any = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Register an activity-scoped subscription. Returns (subscription_id, replay_events)."""
+    normalized_activity_id = str(activity_id or "").strip()
+    if not normalized_activity_id:
+        return "", []
+    try:
+        bounded_limit = max(1, min(int(limit or 2000), 2000))
+    except (TypeError, ValueError):
+        bounded_limit = 2000
+    try:
+        normalized_after_seq = max(0, int(after_seq or 0))
+    except (TypeError, ValueError):
+        normalized_after_seq = 0
+
+    normalized_subscription_id = uuid.uuid4().hex
+    with _lock:
+        if transport is not None:
+            duplicate_subscription_ids = {
+                sub_id
+                for sub_id in _subscription_ids_by_transport.get(transport, set())
+                if (
+                    str((_subscriptions_by_id.get(sub_id) or {}).get("kind") or "") == "activity"
+                    and str((_subscriptions_by_id.get(sub_id) or {}).get("activity_id") or "").strip()
+                    == normalized_activity_id
+                )
+            }
+            _remove_subscription_ids_locked(duplicate_subscription_ids)
+            _subscriptions_by_id[normalized_subscription_id] = {
+                "id": normalized_subscription_id,
+                "kind": "activity",
+                "activity_id": normalized_activity_id,
+                "stored_session_id": "",
+                "transport": transport,
+                "active_only": False,
+                "runtime_scope_key": "",
+                "active_run_ids": set(),
+                "last_seq": normalized_after_seq,
+                "db": db,
+                "created_at": time.time(),
+            }
+            _subscription_ids_by_activity[normalized_activity_id].add(normalized_subscription_id)
+            _subscription_ids_by_transport[transport].add(normalized_subscription_id)
+            if _db_method(db, "list_run_events_by_activity") is not None:
+                _start_subscription_poller_locked()
+
+    events: list[dict[str, Any]] = []
+    if method := _db_method(db, "list_run_events_by_activity"):
+        try:
+            events = method(
+                normalized_activity_id,
+                after_seq=normalized_after_seq,
+                limit=bounded_limit,
+            )
+        except Exception:
+            events = []
+    events = [event for event in events if isinstance(event, dict)]
+    events = [
+        event
+        for event in events
+        if _event_activity_id(event) == normalized_activity_id
+        and int(event.get("seq") or 0) > normalized_after_seq
+    ]
+    with _lock:
+        subscription = _subscriptions_by_id.get(normalized_subscription_id)
+        if subscription is not None:
+            subscription["last_seq"] = _max_event_seq(events, normalized_after_seq)
+    return normalized_subscription_id, events
 
 
 def subscribe_session_with_id(
@@ -2096,6 +2219,20 @@ def subscribe_team_mission_with_id(
     if after_seq <= 0:
         return normalized_subscription_id, events
     return normalized_subscription_id, [event for event in events if int(event.get("seq") or 0) > after_seq]
+
+
+def unsubscribe_activity(subscription_id: str) -> int:
+    """Remove activity-scoped subscription. Returns 1 if removed, 0 if not found."""
+    normalized_subscription_id = str(subscription_id or "").strip()
+    if not normalized_subscription_id:
+        return 0
+    with _lock:
+        subscription = _subscriptions_by_id.get(normalized_subscription_id)
+        if not isinstance(subscription, dict):
+            return 0
+        if str(subscription.get("kind") or "") != "activity":
+            return 0
+        return _remove_subscription_ids_locked({normalized_subscription_id})
 
 
 def unsubscribe_session(
