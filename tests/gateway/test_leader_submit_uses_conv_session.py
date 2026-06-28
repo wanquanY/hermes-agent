@@ -268,7 +268,7 @@ def test_leader_with_active_mission_sets_activity_kind_mission(monkeypatch: pyte
     _chat_db, chat_captured, _chat_response = _submit_leader(monkeypatch, tmp_path / "chat")
     chat_context = RunContext.from_payload(chat_captured["run_context_json"])
     assert chat_context.activity_kind == "chat"
-    assert chat_context.activity_id == "chat"
+    assert chat_context.activity_id == f"chat:{CONVERSATION_SESSION_ID}"
 
     _mission_db, mission_captured, _mission_response = _submit_leader(
         monkeypatch,
@@ -278,4 +278,4 @@ def test_leader_with_active_mission_sets_activity_kind_mission(monkeypatch: pyte
     mission_context = RunContext.from_payload(mission_captured["run_context_json"])
     assert mission_context.conversation_session_id == CONVERSATION_SESSION_ID
     assert mission_context.activity_kind == "mission"
-    assert mission_context.activity_id == "mission-1"
+    assert mission_context.activity_id == "mission:mission-1"

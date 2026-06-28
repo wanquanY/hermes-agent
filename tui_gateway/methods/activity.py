@@ -10,23 +10,18 @@ belong to the Phase 1.C reconciler and later migration phases.
 from __future__ import annotations
 
 import asyncio
-import re as _re
 import uuid
 from typing import Any
 
 from hermes_team_mission.domain.activity import (
     ACTIVITY_COMMAND_KINDS,
+    ACTIVITY_ID_FORMAT_PATTERN as _ACTIVITY_ID_FORMAT_PATTERN,
     ACTIVITY_KINDS,
 )
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
 
 _server = bind_server_globals(globals())
-
-_ACTIVITY_ID_FORMAT_PATTERN = _re.compile(
-    r"^(?:(?:mission|chat|team-conversation):.+|act-[a-z_]+(?:-.+|:.+))$"
-)
-
 
 def _err(rid, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}

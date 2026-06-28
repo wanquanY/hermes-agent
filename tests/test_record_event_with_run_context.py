@@ -21,7 +21,7 @@ def _run_context(
     return RunContext(
         conversation_session_id=conversation_session_id,
         participant_id=participant_id,
-        activity_id="activity-1",
+        activity_id="act-member_chat:conv-X:alice",
         activity_kind="member_chat",
         execution_scope_key="member-chat:alice",
         control_home="/tmp/hermes-control",

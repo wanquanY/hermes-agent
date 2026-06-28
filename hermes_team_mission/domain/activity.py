@@ -7,6 +7,7 @@ runtime primitives and durable Activity Command intent rows.
 from __future__ import annotations
 
 import dataclasses
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
@@ -20,6 +21,12 @@ ACTIVITY_KINDS = frozenset({
     "member_chat",
     "mission",
 })
+
+# Shared ADR-0001 activity id shape. Keep this as the only regex literal so
+# RPC validation and RunContext construction cannot drift independently.
+ACTIVITY_ID_FORMAT_PATTERN = re.compile(
+    r"^(?:(?:mission|chat|team-conversation):.+|act-[a-z_]+(?:-.+|:.+))$"
+)
 
 # Activity Command kinds: mirror the activity_commands table CHECK constraint.
 ACTIVITY_COMMAND_KINDS = frozenset({"create", "start", "cancel", "complete"})

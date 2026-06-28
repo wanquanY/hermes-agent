@@ -486,7 +486,7 @@ def _submit_message_to_member(
     run_context = RunContext(
         conversation_session_id=conversation_session_id,
         participant_id=member_participant_id(target_member_id),
-        activity_id="member_chat",
+        activity_id=f"act-member_chat:{conversation_session_id}:{target_member_id}",
         activity_kind="member_chat",
         execution_scope_key=member_scope,
         control_home=control_home,
@@ -817,12 +817,16 @@ def _(rid, params: dict) -> dict:
         or ""
     ).strip() if isinstance(identity_mission, dict) else str(mission_id or "").strip()
     leader_activity_kind = "mission" if activity_mission_id else "chat"
+    if activity_mission_id:
+        leader_activity_id = f"mission:{activity_mission_id}"
+    else:
+        leader_activity_id = f"chat:{conversation_session_id}"
     leader_run_home = _home_from_profile_params(profile_params)
     control_home = _control_plane_home()
     run_context = RunContext(
         conversation_session_id=conversation_session_id,
         participant_id=leader_participant_id(conversation_id),
-        activity_id=activity_mission_id or "chat",
+        activity_id=leader_activity_id,
         activity_kind=leader_activity_kind,
         execution_scope_key=runtime_scope_key,
         control_home=control_home,

@@ -769,7 +769,7 @@ def test_team_mission_message_submit_derives_conversation_title_from_first_user_
     assert run_context == {
         "conversation_session_id": "team-session-1",
         "participant_id": "leader:conversation-1",
-        "activity_id": "chat",
+        "activity_id": "chat:team-session-1",
         "activity_kind": "chat",
         "execution_scope_key": "team:conversation-1:leader-conversation",
         "control_home": run_context["control_home"],
@@ -866,7 +866,7 @@ def test_team_mission_member_submit_carries_run_context_json(monkeypatch, tmp_pa
     assert run_context == {
         "conversation_session_id": "team-session-1",
         "participant_id": "member:member-builder",
-        "activity_id": "member_chat",
+        "activity_id": "act-member_chat:team-session-1:member-builder",
         "activity_kind": "member_chat",
         "execution_scope_key": "member-chat:conversation-1:member-builder",
         "control_home": run_context["control_home"],
@@ -1494,7 +1494,7 @@ def test_team_mission_message_submit_forwards_leader_profile_context(monkeypatch
     assert run_context == {
         "conversation_session_id": "team-session-1",
         "participant_id": "leader:mission-1",
-        "activity_id": "mission-1",
+        "activity_id": "mission:mission-1",
         "activity_kind": "mission",
         "execution_scope_key": "team:mission-1:leader-conversation",
         "control_home": run_context["control_home"],

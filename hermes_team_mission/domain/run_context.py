@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hermes_team_mission.domain.activity import ACTIVITY_ID_FORMAT_PATTERN
+
 
 _ACTIVITY_KINDS = frozenset({"chat", "member_chat", "mission"})
 
@@ -40,12 +42,20 @@ class RunContext:
             value = getattr(self, field_name)
             if not isinstance(value, str):
                 raise ValueError(f"{field_name} must be a string")
-            if not value.strip():
+            if field_name != "activity_id" and not value.strip():
                 raise ValueError(f"{field_name} is required and cannot be empty")
 
         if self.activity_kind not in _ACTIVITY_KINDS:
             allowed = ", ".join(sorted(_ACTIVITY_KINDS))
             raise ValueError(f"activity_kind must be one of: {allowed}")
+
+        activity_id = str(self.activity_id or "").strip()
+        if activity_id and not ACTIVITY_ID_FORMAT_PATTERN.match(activity_id):
+            raise ValueError(
+                f"RunContext.activity_id {activity_id!r} does not match the "
+                "ADR-0001 format pattern "
+                "'(mission|chat|team-conversation):.+ | act-<kind>:.+ | act-<kind>-.+'"
+            )
 
         for field_name in ("control_home", "execution_home"):
             value = getattr(self, field_name)
