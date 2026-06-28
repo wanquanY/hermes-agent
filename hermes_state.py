@@ -52,6 +52,7 @@ from hermes_team_mission.state.schema import reconcile_team_mission_node_primary
 from hermes_team_mission.state.schema import team_mission_deferred_index_sql
 from hermes_team_mission.state.schema import team_mission_schema_sql
 from hermes_team_mission.state.maintenance import run_team_mission_startup_maintenance
+from hermes_team_mission.domain.activity import is_legal_transition
 from hermes_team_mission.runtime.run_event_retention import RunEventRetentionPolicy
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
@@ -66,7 +67,7 @@ DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 # allowing narrowly scoped submodules such as ``hermes_state.migrations``.
 __path__ = [str(Path(__file__).with_name("hermes_state"))]
 
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 CONVERSATION_PARTICIPANTS_BACKFILL_META_KEY = "conversation_participants_backfill_cr_p1_2"
 MISSION_ACTIVITIES_BACKFILL_META_KEY = "mission_activities_backfill_cr_p3_1"
 RUN_EVENT_RETENTION_POLICY = RunEventRetentionPolicy()
@@ -342,6 +343,26 @@ CREATE TABLE IF NOT EXISTS activities (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS activity_commands (
+    command_id TEXT PRIMARY KEY,
+    activity_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('create', 'start', 'cancel', 'complete')),
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    intent_at REAL NOT NULL,
+    state TEXT NOT NULL DEFAULT 'accepted'
+        CHECK (state IN ('accepted', 'dispatched', 'satisfied', 'failed')),
+    state_changed_at REAL NOT NULL,
+    result_event_id INTEGER,
+    error_reason TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY (result_event_id) REFERENCES run_events(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_commands_state
+    ON activity_commands(state, intent_at);
+CREATE INDEX IF NOT EXISTS idx_activity_commands_activity
+    ON activity_commands(activity_id, intent_at);
 
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -953,6 +974,215 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             "database is locked after max retries"
         )
 
+    @staticmethod
+    def _activity_command_json(value: dict[str, Any] | None) -> str:
+        if not isinstance(value, dict):
+            value = {}
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _activity_command_json_dict(value: Any) -> dict[str, Any]:
+        if not value:
+            return {}
+        try:
+            decoded = json.loads(str(value))
+        except (TypeError, ValueError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+
+    @classmethod
+    def _activity_command_row_to_dict(cls, row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        item = dict(row)
+        item["payload"] = cls._activity_command_json_dict(item.get("payload_json"))
+        item["metadata"] = cls._activity_command_json_dict(item.get("metadata_json"))
+        item["error_reason"] = str(item.get("error_reason") or "")
+        return item
+
+    @staticmethod
+    def _activity_command_limit(limit: int, default: int) -> int:
+        try:
+            parsed = int(limit)
+        except (TypeError, ValueError):
+            return default
+        return max(1, min(parsed, 5000))
+
+    def insert_activity_command(
+        self,
+        *,
+        command_id: str,
+        activity_id: str,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist a fresh activity command in state='accepted'."""
+        normalized_command_id = str(command_id or "").strip()
+        normalized_activity_id = str(activity_id or "").strip()
+        normalized_kind = str(kind or "").strip()
+        if not normalized_command_id or not normalized_activity_id:
+            return {}
+        payload_json = self._activity_command_json(payload)
+        metadata_json = self._activity_command_json(metadata)
+        now = time.time()
+
+        def _do(conn: sqlite3.Connection) -> dict[str, Any]:
+            cursor = conn.execute(
+                """
+                INSERT INTO activity_commands (
+                    command_id, activity_id, kind, payload_json, intent_at,
+                    state, state_changed_at, result_event_id, error_reason,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, 'accepted', ?, NULL, '', ?)
+                ON CONFLICT(command_id) DO NOTHING
+                """,
+                (
+                    normalized_command_id,
+                    normalized_activity_id,
+                    normalized_kind,
+                    payload_json,
+                    now,
+                    now,
+                    metadata_json,
+                ),
+            )
+            if int(cursor.rowcount or 0) == 0:
+                return {}
+            row = conn.execute(
+                "SELECT * FROM activity_commands WHERE command_id = ?",
+                (normalized_command_id,),
+            ).fetchone()
+            return self._activity_command_row_to_dict(row)
+
+        return self._execute_write(_do)
+
+    def get_activity_command(self, command_id: str) -> dict[str, Any]:
+        """Single-row fetch by command_id."""
+        normalized_command_id = str(command_id or "").strip()
+        if not normalized_command_id:
+            return {}
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM activity_commands WHERE command_id = ?",
+                (normalized_command_id,),
+            ).fetchone()
+        return self._activity_command_row_to_dict(row)
+
+    def list_pending_activity_commands(
+        self,
+        *,
+        states: tuple[str, ...] = ("accepted", "dispatched"),
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Reconciler read path ordered by intent time."""
+        normalized_states = tuple(
+            state
+            for state in (str(value or "").strip() for value in (states or ()))
+            if state
+        )
+        if not normalized_states:
+            return []
+        bounded_limit = self._activity_command_limit(limit, 500)
+        placeholders = ", ".join("?" for _ in normalized_states)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT *
+                  FROM activity_commands
+                 WHERE state IN ({placeholders})
+                 ORDER BY intent_at ASC, command_id ASC
+                 LIMIT ?
+                """,
+                (*normalized_states, bounded_limit),
+            ).fetchall()
+        return [self._activity_command_row_to_dict(row) for row in rows]
+
+    def update_activity_command_state(
+        self,
+        command_id: str,
+        *,
+        next_state: str,
+        error_reason: str = "",
+        result_event_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Atomically validate and persist an Activity Command state change."""
+        normalized_command_id = str(command_id or "").strip()
+        normalized_next_state = str(next_state or "").strip()
+        if not normalized_command_id or not normalized_next_state:
+            return {}
+
+        def _do(conn: sqlite3.Connection) -> dict[str, Any]:
+            row = conn.execute(
+                "SELECT * FROM activity_commands WHERE command_id = ?",
+                (normalized_command_id,),
+            ).fetchone()
+            if row is None:
+                return {}
+            current_state = str(row["state"] or "")
+            if not is_legal_transition(current_state, normalized_next_state):
+                return {}
+            next_error_reason = str(error_reason or row["error_reason"] or "")
+            next_result_event_id = (
+                result_event_id
+                if result_event_id is not None
+                else row["result_event_id"]
+            )
+            now = time.time()
+            cursor = conn.execute(
+                """
+                UPDATE activity_commands
+                   SET state = ?,
+                       state_changed_at = ?,
+                       result_event_id = ?,
+                       error_reason = ?
+                 WHERE command_id = ?
+                   AND state = ?
+                """,
+                (
+                    normalized_next_state,
+                    now,
+                    next_result_event_id,
+                    next_error_reason,
+                    normalized_command_id,
+                    current_state,
+                ),
+            )
+            if int(cursor.rowcount or 0) == 0:
+                return {}
+            updated = conn.execute(
+                "SELECT * FROM activity_commands WHERE command_id = ?",
+                (normalized_command_id,),
+            ).fetchone()
+            return self._activity_command_row_to_dict(updated)
+
+        return self._execute_write(_do)
+
+    def list_activity_commands_for_activity(
+        self,
+        activity_id: str,
+        *,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return all command rows for an activity, ordered by intent time."""
+        normalized_activity_id = str(activity_id or "").strip()
+        if not normalized_activity_id:
+            return []
+        bounded_limit = self._activity_command_limit(limit, 200)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT *
+                  FROM activity_commands
+                 WHERE activity_id = ?
+                 ORDER BY intent_at ASC, command_id ASC
+                 LIMIT ?
+                """,
+                (normalized_activity_id, bounded_limit),
+            ).fetchall()
+        return [self._activity_command_row_to_dict(row) for row in rows]
+
     def update_session_source(self, session_id: str, source: str) -> int:
         """Update one session's canonical source through the public DB surface."""
         sid = str(session_id or "").strip()
@@ -1488,6 +1718,78 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         except sqlite3.OperationalError as exc:
             logger.debug("idx_run_events_activity_seq create skipped: %s", exc)
 
+    def _migrate_activity_commands(self, cursor: sqlite3.Cursor) -> None:
+        """v38: add durable Activity Command intent storage.
+
+        ADR-0001 Phase 1.A introduces ``activity_commands`` as the command
+        bus persistence layer. This migration is intentionally idempotent:
+        it checks live SQLite metadata before creating the table and indexes,
+        so partially migrated databases can safely reopen.
+        """
+        try:
+            table_row = cursor.execute(
+                """
+                SELECT name
+                  FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name = 'activity_commands'
+                """
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return
+        if table_row is None:
+            try:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS activity_commands (
+                        command_id TEXT PRIMARY KEY,
+                        activity_id TEXT NOT NULL,
+                        kind TEXT NOT NULL CHECK (kind IN ('create', 'start', 'cancel', 'complete')),
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        intent_at REAL NOT NULL,
+                        state TEXT NOT NULL DEFAULT 'accepted'
+                            CHECK (state IN ('accepted', 'dispatched', 'satisfied', 'failed')),
+                        state_changed_at REAL NOT NULL,
+                        result_event_id INTEGER,
+                        error_reason TEXT,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        FOREIGN KEY (result_event_id) REFERENCES run_events(id) ON DELETE SET NULL
+                    )
+                    """
+                )
+            except sqlite3.OperationalError as exc:
+                logger.debug("activity_commands table migration skipped: %s", exc)
+                return
+
+        try:
+            index_rows = cursor.execute('PRAGMA index_list("activity_commands")').fetchall()
+        except sqlite3.OperationalError:
+            index_rows = []
+        index_names = {
+            str(_sqlite_row_value(row, "name", 1, "") or "")
+            for row in index_rows
+        }
+        if "idx_activity_commands_state" not in index_names:
+            try:
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_activity_commands_state
+                        ON activity_commands(state, intent_at)
+                    """
+                )
+            except sqlite3.OperationalError as exc:
+                logger.debug("idx_activity_commands_state create skipped: %s", exc)
+        if "idx_activity_commands_activity" not in index_names:
+            try:
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_activity_commands_activity
+                        ON activity_commands(activity_id, intent_at)
+                    """
+                )
+            except sqlite3.OperationalError as exc:
+                logger.debug("idx_activity_commands_activity create skipped: %s", exc)
+
     def _migrate_run_events_participant_id(self, cursor: sqlite3.Cursor) -> None:
         """v28: add durable event speaker identity for P1 Participant rollout."""
         try:
@@ -1788,6 +2090,8 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 self._backfill_run_event_frame_indexes(cursor)
             if current_version < 37:
                 self._migrate_run_events_activity_id(cursor)
+            if current_version < 38:
+                self._migrate_activity_commands(cursor)
             if current_version < SCHEMA_VERSION:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
