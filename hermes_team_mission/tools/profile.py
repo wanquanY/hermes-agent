@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from hermes_state import SessionDB
-from hermes_team_mission.domain.assignees import normalized_member_dicts
 from hermes_team_mission.context.worker_context import TOOL_RESULT_BUDGET_CHARS
 from hermes_team_mission.runtime.profile_scope import compact_team_profile_snapshot
 from hermes_team_mission.runtime.profile_scope import gateway_call
@@ -173,59 +172,27 @@ def _snapshot_id_from_mission(mission: Mapping[str, Any]) -> str:
     return _text(mission_metadata.get("team_capability_snapshot_id") or mission_metadata.get("teamCapabilitySnapshotId"))
 
 
-def _fallback_snapshot_from_mission(mission: Mapping[str, Any]) -> dict[str, Any]:
-    mission_metadata = _metadata(mission.get("metadata"))
-    raw_members = mission_metadata.get("members") if isinstance(mission_metadata.get("members"), list) else []
-    members = normalized_member_dicts(raw_members)
-    member_profiles: list[dict[str, Any]] = []
-    for member in members:
-        member_profile = {
-            "member_id": _text(member.get("member_id")),
-            "agent_profile_id": _text(member.get("profile_id") or member.get("agent_profile_id")),
-            "display_name": _text(member.get("display_name") or member.get("name")),
-            "role": _text(member.get("role")),
-            "profile_description": _text(member.get("profile_summary") or member.get("profile_description")),
-            "capability_tags": list(member.get("capability_tags") or []),
-            "default_toolsets": list(member.get("default_toolsets") or []),
-            "recommended_skills": list(member.get("recommended_skills") or []),
-            "strengths": list(member.get("strengths") or []),
-            "limitations": list(member.get("limitations") or []),
-            "best_for_tasks": list(member.get("best_for_tasks") or []),
-            "avoid_tasks": list(member.get("avoid_tasks") or []),
-            "radar_scores": list(member.get("radar_scores") or []),
-        }
-        member_profiles.append({key: value for key, value in member_profile.items() if value not in ("", [], {})})
-    return {
-        "snapshot_id": _snapshot_id_from_mission(mission),
-        "team_id": _text(mission.get("team_id")),
-        "status": "mission_metadata",
-        "team_profile": {
-            "display_name": _text(mission_metadata.get("team_name") or mission.get("title")),
-            "collaboration_mode": _text(mission.get("mode")),
-            "positioning": "Fallback Team Mission member roster from mission metadata.",
-        },
-        "member_profiles": member_profiles,
-    }
+def _leader_run_profile_params(
+    mission_id: str,
+    mission: Mapping[str, Any],
+    node: Mapping[str, Any],
+) -> dict[str, Any]:
+    """ADR-0001 Phase 2.D params for the planning-leader profile RPC.
 
-
-def _resolve_leader_run_profile(db, mission: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str]:
-    mission_id = _text(mission.get("mission_id"))
+    Carries canonical identity and auxiliary hints so the control-plane handler
+    can resolve the snapshot without the worker touching DB read-model methods.
+    """
+    params: dict[str, Any] = {"mission_id": mission_id}
     snapshot_id = _snapshot_id_from_mission(mission)
-    snapshot = db.get_team_capability_snapshot(snapshot_id) if snapshot_id else {}
-    binding = db.get_team_capability_snapshot_binding(mission_id) if mission_id else {}
-    source = "snapshot_id" if snapshot else ""
-    if not snapshot and mission_id:
-        snapshot = db.get_bound_team_capability_snapshot(mission_id)
-        if snapshot:
-            source = "mission_binding"
-    if not snapshot:
-        team_id = _text(mission.get("team_id"))
-        snapshot = db.get_latest_team_capability_snapshot(team_id) if team_id else {}
-        if snapshot:
-            source = "latest_team_snapshot"
-    if snapshot:
-        return snapshot, binding, source
-    return _fallback_snapshot_from_mission(mission), binding, "mission_metadata_members"
+    if snapshot_id:
+        params["snapshot_id"] = snapshot_id
+    team_id = _text(mission.get("team_id"))
+    if team_id:
+        params["team_id"] = team_id
+    node_id = _text(node.get("node_id"))
+    if node_id:
+        params["node_id"] = node_id
+    return params
 
 
 def _handle_leader_team_profile(args: dict[str, Any], parent_agent=None) -> str:
@@ -255,14 +222,24 @@ def _handle_leader_run_team_profile(args: dict[str, Any], parent_agent=None) -> 
     ctx = _leader_run_context(args, parent_agent)
     if isinstance(ctx, str):
         return tool_error(ctx)
-    db, _run_id, binding, mission, node = ctx
+    _db, _run_id, binding, mission, node = ctx
     mission_id = _text(binding.get("mission_id") or mission.get("mission_id"))
-    snapshot, snapshot_binding, source = _resolve_leader_run_profile(db, mission)
+    # ADR-0001 Phase 2.D: route through the control-plane RPC instead of direct
+    # DB calls. Worker DB proxy does not expose snapshot read-model methods;
+    # team_mission.team_profile.get is the read model boundary.
+    response = gateway_call(
+        "team_mission.team_profile.get",
+        _leader_run_profile_params(mission_id, mission, node),
+    )
+    result, error = unwrap_response(response)
+    if error:
+        return tool_error(error)
+    snapshot = result.get("snapshot") if isinstance(result.get("snapshot"), Mapping) else {}
     return tool_result(
         success=True,
         mission_id=mission_id,
-        source=source,
-        binding=snapshot_binding,
+        source=_text(result.get("source")),
+        binding=result.get("binding") if isinstance(result.get("binding"), Mapping) else {},
         node={
             "node_id": _text(node.get("node_id")),
             "kind": _text(node.get("kind")),
