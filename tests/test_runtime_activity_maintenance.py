@@ -277,28 +277,3 @@ def test_maintenance_act_prefix_is_noop() -> None:
         "actions": [],
         "errors": [],
     }
-
-
-def test_team_mission_subscribe_still_invokes_reaper_and_pruner(
-    db: SessionDB,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    team_mission = team_mission_gateway()
-    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
-    _seed_mission(db, status="running")
-    calls: list[str] = []
-    monkeypatch.setattr(
-        db,
-        "reap_terminal_mission_runs",
-        lambda mission_id: calls.append(f"reap:{mission_id}") or 0,
-    )
-    monkeypatch.setattr(
-        db,
-        "prune_team_mission_events",
-        lambda mission_id: calls.append(f"prune:{mission_id}") or 0,
-    )
-
-    result = server._methods["team_mission.subscribe"](1, {"mission_id": "mission-1"})
-
-    assert "error" not in result
-    assert calls == ["reap:mission-1", "prune:mission-1"]

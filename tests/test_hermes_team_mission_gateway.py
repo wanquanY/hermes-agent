@@ -314,6 +314,21 @@ def test_team_mission_worker_toolsets_follow_current_member_profile(monkeypatch)
         profile_params=profile_params,
     ) == ["hermes-cli", "clarify"]
 
+    handoff_node = {
+        **node,
+        "output_contract": {
+            "format": "structured_deliverable",
+            "delivery_channel": "handoff",
+            "requires_explicit_handoff": True,
+        },
+    }
+    assert team_mission._start_toolsets(
+        params,
+        {"mode": "supervised_mission"},
+        handoff_node,
+        profile_params=profile_params,
+    ) == ["hermes-cli", "team_mission_handoff", "clarify"]
+
 
 def test_team_mission_node_profile_params_accept_dovie_member_fields():
     import importlib
@@ -3945,10 +3960,11 @@ def test_gateway_emit_stream_subscription_persists_append_chunks_without_coalesc
     assert [(event.get("payload") or {}).get("delta") for event in persisted_deltas] == ["你", "好"]
 
 
-def test_run_control_subscription_poll_delivers_new_append_after_direct_delivery(tmp_path: Path):
+def test_run_control_subscription_poll_delivers_new_append_after_direct_delivery(monkeypatch, tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway.services import run_control
 
+    monkeypatch.setattr(run_control, "_STREAM_TRACE_EVENT_TYPES", set())
     db = SessionDB(tmp_path / "state.db")
     transport = _MemoryTransport()
     stable_session_id = "stored-direct-stream"
@@ -3997,10 +4013,11 @@ def test_run_control_subscription_poll_delivers_new_append_after_direct_delivery
     assert delta_payloads[0].get("offset") == 1
 
 
-def test_run_control_subscription_poll_delivers_persisted_append_events_without_suffix_cropping(tmp_path: Path):
+def test_run_control_subscription_poll_delivers_persisted_append_events_without_suffix_cropping(monkeypatch, tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway.services import run_control
 
+    monkeypatch.setattr(run_control, "_STREAM_TRACE_EVENT_TYPES", set())
     db = SessionDB(tmp_path / "state.db")
     transport = _MemoryTransport()
     stable_session_id = "stored-coalesced-stream"
@@ -4068,10 +4085,11 @@ def test_run_control_subscription_poll_delivers_persisted_append_events_without_
     assert payloads[-1].get("offset") == 1
 
 
-def test_active_only_subscription_keeps_seen_live_run_for_terminal_polling(tmp_path: Path):
+def test_active_only_subscription_keeps_seen_live_run_for_terminal_polling(monkeypatch, tmp_path: Path):
     from hermes_state import SessionDB
     from tui_gateway.services import run_control
 
+    monkeypatch.setattr(run_control, "_STREAM_TRACE_EVENT_TYPES", set())
     db = SessionDB(tmp_path / "state.db")
     transport = _MemoryTransport()
     owner_transport = _MemoryTransport()
@@ -4222,7 +4240,7 @@ def test_team_mission_gateway_rejects_invalid_manual_graph(monkeypatch, tmp_path
     assert "unknown node" in response["error"]["message"]
 
 
-def test_team_mission_subscribe_replays_and_streams_mission_events(monkeypatch, tmp_path: Path):
+def test_runtime_activity_subscribe_replays_and_streams_team_mission_runtime_events(monkeypatch, tmp_path: Path):
     import importlib
 
     from hermes_state import SessionDB
@@ -4230,8 +4248,10 @@ def test_team_mission_subscribe_replays_and_streams_mission_events(monkeypatch, 
     from tui_gateway.services import run_control
 
     team_mission = team_mission_gateway()
+    activity_methods = importlib.import_module("tui_gateway.methods.activity")
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    monkeypatch.setattr(activity_methods._server, "_get_db", lambda: db)
     db.initialize_team_mission_from_strategy(
         mission_id="mission-1",
         title="监督执行",
@@ -4253,30 +4273,30 @@ def test_team_mission_subscribe_replays_and_streams_mission_events(monkeypatch, 
         runtime_scope_key="team:mission-1:leader",
         role="leader",
     )
-    db.append_team_mission_run_event(
-        mission_id="mission-1",
-        run_id="run-leader",
-        event={"type": "message.delta", "seq": 1, "payload": {"delta": "先前事件"}},
-    )
-    skipped_snapshot = db.append_team_mission_run_event(
-        mission_id="mission-1",
-        run_id="run-leader",
-        event={
+    run_control.record_event(
+        {
             "type": "message.delta",
-            "seq": 2,
-            "payload": {"mode": "snapshot", "snapshot": "历史 snapshot", "text": "历史 snapshot"},
+            "session_id": "runtime-leader",
+            "stored_session_id": "session-leader",
+            "run_id": "run-leader",
+            "runtime_scope_key": "team:mission-1:leader",
+            "activity_id": "mission:mission-1",
+            "seq": 1,
+            "payload": {
+                "activity_id": "mission:mission-1",
+                "delta": "先前事件",
+            },
         },
+        db=db,
     )
-    assert skipped_snapshot["type"] == "message.delta"
-    assert skipped_snapshot["payload"]["mode"] == "snapshot"
-    assert len(db.list_team_mission_events("mission-1")) == 1
+    assert len(db.list_run_events_by_activity("mission:mission-1")) == 1
 
     transport = _MemoryTransport()
     token = server.bind_transport(transport)
     try:
-        subscribed = server._methods["team_mission.subscribe"](
+        subscribed = server._methods["runtime.activity.subscribe"](
             1,
-            {"mission_id": "mission-1"},
+            {"activity_id": "mission:mission-1"},
         )
     finally:
         server.reset_transport(token)
@@ -4284,57 +4304,52 @@ def test_team_mission_subscribe_replays_and_streams_mission_events(monkeypatch, 
     subscription_id = subscribed["result"]["subscription_id"]
     assert subscription_id
     assert len(subscribed["result"]["events"]) == 1
-    assert subscribed["result"]["events"][0]["type"] == "team_mission.runtime.event"
-    assert subscribed["result"]["events"][0]["payload"]["source_event_type"] == "message.delta"
-    assert subscribed["result"]["events"][0]["payload"]["source_event"]["payload"]["delta"] == "先前事件"
+    assert subscribed["result"]["events"][0]["type"] == "message.delta"
+    assert subscribed["result"]["events"][0]["activity_id"] == "mission:mission-1"
+    assert subscribed["result"]["events"][0]["payload"]["delta"] == "先前事件"
 
-    db.append_team_mission_run_event(
-        mission_id="mission-1",
-        run_id="run-leader",
-        event={"type": "message.delta", "seq": 3, "payload": {"delta": "实时事件"}},
+    run_control.publish_recorded_event(
+        {
+            "type": "message.delta",
+            "session_id": "runtime-leader",
+            "stored_session_id": "session-leader",
+            "run_id": "run-leader",
+            "runtime_scope_key": "team:mission-1:leader",
+            "activity_id": "mission:mission-1",
+            "seq": 2,
+            "payload": {
+                "activity_id": "mission:mission-1",
+                "delta": "实时事件",
+            },
+        },
+        db=db,
     )
 
     deadline = time.time() + 2
     while time.time() < deadline:
         if any(
-            (((frame.get("params") or {}).get("payload") or {}).get("source_event") or {}).get("payload", {}).get("delta") == "实时事件"
+            ((frame.get("params") or {}).get("payload") or {}).get("delta") == "实时事件"
             for frame in transport.frames
         ):
             break
         time.sleep(0.05)
 
     assert any(
-        (((frame.get("params") or {}).get("payload") or {}).get("source_event") or {}).get("payload", {}).get("delta") == "实时事件"
+        ((frame.get("params") or {}).get("payload") or {}).get("delta") == "实时事件"
         for frame in transport.frames
     )
 
-    skipped_live_snapshot = db.append_team_mission_run_event(
-        mission_id="mission-1",
-        run_id="run-leader",
-        event={
-            "type": "message.delta",
-            "seq": 4,
-            "payload": {"mode": "snapshot", "snapshot": "实时 snapshot", "text": "实时 snapshot"},
-        },
-    )
-    assert skipped_live_snapshot["type"] == "message.delta"
-    assert skipped_live_snapshot["payload"]["mode"] == "snapshot"
-    assert len(db.list_team_mission_events("mission-1")) == 2
-    assert not any(
-        (((frame.get("params") or {}).get("payload") or {}).get("source_event") or {}).get("payload", {}).get("snapshot") == "实时 snapshot"
-        for frame in transport.frames
-    )
+    assert len(db.list_run_events_by_activity("mission:mission-1")) == 2
 
-    removed = run_control.unsubscribe_session(subscription_id=subscription_id)
-    assert removed == 1
+    removed = server._methods["runtime.activity.unsubscribe"](2, {"subscription_id": subscription_id})
+    assert removed["result"] == {"removed": 1}
 
 
-def test_team_mission_subscribe_replay_is_byte_paged(monkeypatch, tmp_path: Path):
+def test_team_mission_events_replay_is_byte_paged(monkeypatch, tmp_path: Path):
     import importlib
 
     from hermes_state import SessionDB
     from tui_gateway import server
-    from tui_gateway.services import run_control
 
     team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
@@ -4371,19 +4386,12 @@ def test_team_mission_subscribe_replay_is_byte_paged(monkeypatch, tmp_path: Path
             },
         )
 
-    transport = _MemoryTransport()
-    token = server.bind_transport(transport)
-    try:
-        subscribed = server._methods["team_mission.subscribe"](
-            1,
-            {"mission_id": "mission-1", "limit": 10, "byte_limit": 65536},
-        )
-    finally:
-        server.reset_transport(token)
+    subscribed = server._methods["team_mission.events"](
+        1,
+        {"mission_id": "mission-1", "limit": 10, "byte_limit": 65536},
+    )
 
     result = subscribed["result"]
-    subscription_id = result["subscription_id"]
-    assert subscription_id
     assert result["has_more"] is True
     assert len(result["events"]) == 1
     assert result["last_event_seq"] == result["events"][0]["seq"]
@@ -4400,11 +4408,8 @@ def test_team_mission_subscribe_replay_is_byte_paged(monkeypatch, tmp_path: Path
     assert next_page["events"]
     assert next_page["events"][0]["seq"] > result["last_event_seq"]
 
-    removed = run_control.unsubscribe_session(subscription_id=subscription_id)
-    assert removed == 1
 
-
-def test_team_mission_subscribe_streams_conversation_status_projection(monkeypatch, tmp_path: Path):
+def test_runtime_activity_subscribe_streams_team_mission_completion_event(monkeypatch, tmp_path: Path):
     import importlib
 
     from hermes_state import SessionDB
@@ -4412,8 +4417,10 @@ def test_team_mission_subscribe_streams_conversation_status_projection(monkeypat
     from tui_gateway.services import run_control
 
     team_mission = team_mission_gateway()
+    activity_methods = importlib.import_module("tui_gateway.methods.activity")
     db = SessionDB(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    monkeypatch.setattr(activity_methods._server, "_get_db", lambda: db)
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -4460,13 +4467,26 @@ def test_team_mission_subscribe_streams_conversation_status_projection(monkeypat
         runtime_scope_key="team:mission-1:node:node-worker",
         role="worker",
     )
+    run_control.record_event(
+        {
+            "type": "message.start",
+            "session_id": "runtime-worker",
+            "stored_session_id": "session-worker",
+            "run_id": "run-worker",
+            "runtime_scope_key": "team:mission-1:node:node-worker",
+            "activity_id": "mission:mission-1",
+            "seq": 1,
+            "payload": {"activity_id": "mission:mission-1"},
+        },
+        db=db,
+    )
 
     transport = _MemoryTransport()
     token = server.bind_transport(transport)
     try:
-        subscribed = server._methods["team_mission.subscribe"](
+        subscribed = server._methods["runtime.activity.subscribe"](
             1,
-            {"mission_id": "mission-1"},
+            {"activity_id": "mission:mission-1"},
         )
     finally:
         server.reset_transport(token)
@@ -4474,33 +4494,41 @@ def test_team_mission_subscribe_streams_conversation_status_projection(monkeypat
     subscription_id = subscribed["result"]["subscription_id"]
     assert subscription_id
 
-    db.append_team_mission_run_event(
-        mission_id="mission-1",
-        run_id="run-worker",
-        event={"type": "message.complete", "seq": 1, "payload": {"status": "complete"}},
+    run_control.publish_recorded_event(
+        {
+            "type": "message.complete",
+            "session_id": "runtime-worker",
+            "stored_session_id": "session-worker",
+            "run_id": "run-worker",
+            "runtime_scope_key": "team:mission-1:node:node-worker",
+            "activity_id": "mission:mission-1",
+            "seq": 2,
+            "payload": {
+                "activity_id": "mission:mission-1",
+                "status": "complete",
+            },
+        },
+        db=db,
     )
 
     deadline = time.time() + 2
-    status_payload = {}
+    complete_event = {}
     while time.time() < deadline:
         for frame in transport.frames:
             params = frame.get("params") or {}
-            if params.get("type") == "team_mission.conversation.status":
-                status_payload = params.get("payload") or {}
+            if params.get("type") == "message.complete":
+                complete_event = params
                 break
-        if status_payload:
+        if complete_event:
             break
         time.sleep(0.05)
 
-    conversation = status_payload.get("conversation") or {}
-    assert status_payload["conversation_id"] == "conversation-1"
-    assert status_payload["stable_session_id"] == "team-session-1"
-    assert status_payload["source_event_type"] == "message.complete"
-    assert conversation["mission_status"] == "ready"
-    assert conversation["running"] is True
+    assert complete_event["type"] == "message.complete"
+    assert complete_event["activity_id"] == "mission:mission-1"
+    assert complete_event["payload"]["status"] == "complete"
 
-    removed = run_control.unsubscribe_session(subscription_id=subscription_id)
-    assert removed == 1
+    removed = server._methods["runtime.activity.unsubscribe"](2, {"subscription_id": subscription_id})
+    assert removed["result"] == {"removed": 1}
 
 
 def test_team_mission_node_history_reads_runtime_from_hermes_store(monkeypatch, tmp_path: Path):

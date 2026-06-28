@@ -249,15 +249,16 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
     )
 
     transport = _MemoryTransport()
+    mission_transport = _MemoryTransport()
     node_subscription_id, _ = run_control.subscribe_session_with_id(
         stored_session_id="synthesis-session-1",
         transport=transport,
         active_only=False,
         db=db,
     )
-    mission_subscription_id, _ = run_control.subscribe_team_mission_with_id(
-        mission_id="mission-1",
-        transport=transport,
+    mission_subscription_id, _ = run_control.subscribe_activity(
+        activity_id="mission:mission-1",
+        transport=mission_transport,
         db=db,
     )
     try:
@@ -274,8 +275,10 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
                     "run_id": "run-synthesis",
                     "turn_id": "turn-synthesis",
                     "runtime_scope_key": "team:mission-1:synthesis",
+                    "activity_id": "mission:mission-1",
                     "seq": seq,
                     "payload": {
+                        "activity_id": "mission:mission-1",
                         "mode": "append",
                         "delta": chunk,
                         "text": chunk,
@@ -287,17 +290,16 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
 
         streamed = [
             frame.get("params") or {}
-            for frame in transport.frames
+            for frame in mission_transport.frames
             if (
                 frame.get("method") == "event"
-                and (frame.get("params") or {}).get("type") == "team_mission.runtime.event"
+                and (frame.get("params") or {}).get("type") == "message.delta"
                 and isinstance((frame.get("params") or {}).get("payload"), dict)
-                and ((frame.get("params") or {}).get("payload") or {}).get("source_event_type") == "message.delta"
             )
         ]
-        assert [event["payload"]["source_payload"]["delta"] for event in streamed] == ["最终", "交付", "完成"]
-        assert [event["payload"]["text_stream"]["delta"] for event in streamed] == ["最终", "交付", "完成"]
-        assert [event["payload"]["text_stream"]["offset"] for event in streamed] == [0, 2, 4]
+        assert [event["payload"]["delta"] for event in streamed] == ["最终", "交付", "完成"]
+        assert [event["payload"]["text"] for event in streamed] == ["最终", "交付", "完成"]
+        assert [event["payload"]["offset"] for event in streamed] == [0, 2, 4]
 
         mission_deltas = [
             event
@@ -313,15 +315,9 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         assert [event["payload"]["text_stream"]["delta"] for event in mission_deltas] == ["最终", "交付", "完成"]
         assert all(event["payload"]["subject"]["type"] == "node" for event in mission_deltas)
 
-        subscription = {"kind": "team_mission"}
-        redelivered = [
-            run_control._delta_event_for_subscription(subscription, event)
-            for event in mission_deltas
-        ]
-        assert redelivered == mission_deltas
     finally:
         run_control.unsubscribe_session(subscription_id=node_subscription_id)
-        run_control.unsubscribe_session(subscription_id=mission_subscription_id)
+        run_control.unsubscribe_activity(subscription_id=mission_subscription_id)
 
 
 def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_node_terminal(tmp_path: Path):
@@ -363,11 +359,6 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         active_only=False,
         db=db,
     )
-    mission_subscription_id, _ = run_control.subscribe_team_mission_with_id(
-        mission_id="mission-1",
-        transport=transport,
-        db=db,
-    )
     try:
         direct_event = {
             "type": "message.complete",
@@ -395,15 +386,8 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         assert mission_terminals[0]["source_seq"] == direct_event["seq"]
         assert mission_terminals[0]["payload"]["source_event"]["type"] == "message.complete"
 
-        subscription = run_control._subscriptions_by_id[mission_subscription_id]
-        redelivered = [
-            run_control._delta_event_for_subscription(subscription, event)
-            for event in mission_terminals
-        ]
-        assert redelivered == mission_terminals
     finally:
         run_control.unsubscribe_session(subscription_id=node_subscription_id)
-        run_control.unsubscribe_session(subscription_id=mission_subscription_id)
 
 
 def test_conversation_resolve_recovers_legacy_empty_final_deliverable_message(

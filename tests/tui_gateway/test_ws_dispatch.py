@@ -915,7 +915,7 @@ def test_run_control_live_publish_preserves_append_stream_delta_chunks(tmp_path)
     assert delta_payloads[-1].get("offset") == 1
 
 
-def test_run_control_fans_out_team_mission_event_after_persist(tmp_path):
+def test_run_control_fans_out_team_mission_activity_event_after_persist(tmp_path):
     from hermes_state import SessionDB
     from tui_gateway.services import run_control
 
@@ -953,8 +953,8 @@ def test_run_control_fans_out_team_mission_event_after_persist(tmp_path):
         role="worker",
     )
 
-    subscription_id, replay = run_control.subscribe_team_mission_with_id(
-        mission_id="mission-1",
+    subscription_id, replay = run_control.subscribe_activity(
+        activity_id="mission:mission-1",
         transport=CapturingTransport(),
         db=db,
     )
@@ -967,13 +967,18 @@ def test_run_control_fans_out_team_mission_event_after_persist(tmp_path):
                 "stored_session_id": "session-worker",
                 "run_id": "run-worker",
                 "runtime_scope_key": "team:mission-1:node:node-worker",
+                "activity_id": "mission:mission-1",
                 "seq": 1,
-                "payload": {"delta": "live token", "mode": "append"},
+                "payload": {
+                    "activity_id": "mission:mission-1",
+                    "delta": "live token",
+                    "mode": "append",
+                },
             },
             db=db,
         )
     finally:
-        run_control.unsubscribe_session(subscription_id=subscription_id)
+        run_control.unsubscribe_activity(subscription_id=subscription_id)
         db.close()
 
     delivered_events = [
@@ -982,10 +987,9 @@ def test_run_control_fans_out_team_mission_event_after_persist(tmp_path):
         if item.get("method") == "event"
     ]
     assert len(delivered_events) == 1
-    assert delivered_events[0]["type"] == "team_mission.runtime.event"
-    assert delivered_events[0]["payload"]["protocol"] == "team_mission.event.v1"
-    assert delivered_events[0]["payload"]["kind"] == "node.output.delta"
-    assert delivered_events[0]["payload"]["source_event"]["payload"]["delta"] == "live token"
+    assert delivered_events[0]["type"] == "message.delta"
+    assert delivered_events[0]["activity_id"] == "mission:mission-1"
+    assert delivered_events[0]["payload"]["delta"] == "live token"
 
 
 def test_run_control_session_subscription_ignores_team_mission_projection_events(tmp_path):
@@ -1051,66 +1055,6 @@ def test_run_control_session_subscription_ignores_team_mission_projection_events
     assert delivered_events[0]["payload"]["delta"] == "leader"
 
 
-def test_team_mission_live_push_skips_out_of_order_seq_for_inorder_poller():
-    # notify_team_mission_event_listeners fires outside the seq-assignment lock, so
-    # concurrent member-node appends arrive scrambled. The live push must NOT advance
-    # the cursor past a gap (that skipped tool.complete events forever → node tools
-    # spinning); it leaves the gap for the in-order poller and delivers only once the
-    # missing seq arrives contiguously.
-    from tui_gateway.services import run_control
-
-    delivered = []
-
-    class CapturingTransport:
-        def write(self, obj):
-            delivered.append(obj)
-            return True
-
-    transport = CapturingTransport()
-    subscription_id = "sub-out-of-order"
-    with run_control._lock:
-        run_control._subscriptions_by_id[subscription_id] = {
-            "id": subscription_id,
-            "kind": "team_mission",
-            "mission_id": "mission-x",
-            "stored_session_id": "",
-            "transport": transport,
-            "last_seq": 1,
-            "db": None,
-            "active_only": False,
-            "runtime_scope_key": "",
-            "active_run_ids": set(),
-        }
-        run_control._subscription_ids_by_mission["mission-x"].add(subscription_id)
-
-    def ev(seq):
-        return {
-            "type": "team_mission.runtime.event",
-            "mission_id": "mission-x",
-            "seq": seq,
-            "payload": {"mission_id": "mission-x", "source_event_type": "message.delta"},
-        }
-
-    def seqs():
-        return [(item.get("params") or {}).get("seq") for item in delivered if item.get("method") == "event"]
-
-    try:
-        # out-of-order: seq 3 while last_seq=1 (gap at 2) → withheld, cursor unchanged
-        run_control._deliver_team_mission_events("mission-x", [ev(3)])
-        assert seqs() == []
-        assert run_control._subscriptions_by_id[subscription_id]["last_seq"] == 1
-        # the missing seq 2 arrives contiguously → delivered, cursor advances
-        run_control._deliver_team_mission_events("mission-x", [ev(2)])
-        # seq 3 is now contiguous → delivered
-        run_control._deliver_team_mission_events("mission-x", [ev(3)])
-    finally:
-        with run_control._lock:
-            run_control._subscriptions_by_id.pop(subscription_id, None)
-            run_control._subscription_ids_by_mission.get("mission-x", set()).discard(subscription_id)
-
-    assert seqs() == [2, 3]
-
-
 def test_run_control_replaces_duplicate_session_subscriptions_per_transport(tmp_path):
     from hermes_state import SessionDB
     from tui_gateway.services import run_control
@@ -1162,7 +1106,7 @@ def test_run_control_replaces_duplicate_session_subscriptions_per_transport(tmp_
     assert delivered_events[0]["payload"]["delta"] == "one"
 
 
-def test_run_control_replaces_duplicate_team_mission_subscriptions_per_transport(tmp_path):
+def test_run_control_replaces_duplicate_activity_subscriptions_per_transport(tmp_path):
     from hermes_state import SessionDB
     from tui_gateway.services import run_control
 
@@ -1201,13 +1145,13 @@ def test_run_control_replaces_duplicate_team_mission_subscriptions_per_transport
     )
 
     transport = CapturingTransport()
-    first_subscription_id, _ = run_control.subscribe_team_mission_with_id(
-        mission_id="mission-1",
+    first_subscription_id, _ = run_control.subscribe_activity(
+        activity_id="mission:mission-1",
         transport=transport,
         db=db,
     )
-    second_subscription_id, _ = run_control.subscribe_team_mission_with_id(
-        mission_id="mission-1",
+    second_subscription_id, _ = run_control.subscribe_activity(
+        activity_id="mission:mission-1",
         transport=transport,
         db=db,
     )
@@ -1219,14 +1163,19 @@ def test_run_control_replaces_duplicate_team_mission_subscriptions_per_transport
                 "stored_session_id": "session-worker",
                 "run_id": "run-worker",
                 "runtime_scope_key": "team:mission-1:node:node-worker",
+                "activity_id": "mission:mission-1",
                 "seq": 1,
-                "payload": {"delta": "live token", "mode": "append"},
+                "payload": {
+                    "activity_id": "mission:mission-1",
+                    "delta": "live token",
+                    "mode": "append",
+                },
             },
             db=db,
         )
     finally:
-        run_control.unsubscribe_session(subscription_id=first_subscription_id)
-        run_control.unsubscribe_session(subscription_id=second_subscription_id)
+        run_control.unsubscribe_activity(subscription_id=first_subscription_id)
+        run_control.unsubscribe_activity(subscription_id=second_subscription_id)
         db.close()
 
     delivered_events = [
@@ -1234,8 +1183,9 @@ def test_run_control_replaces_duplicate_team_mission_subscriptions_per_transport
         for item in delivered
         if item.get("method") == "event"
     ]
-    assert [event["type"] for event in delivered_events] == ["team_mission.runtime.event"]
-    assert delivered_events[0]["payload"]["source_event"]["payload"]["delta"] == "live token"
+    assert [event["type"] for event in delivered_events] == ["message.delta"]
+    assert delivered_events[0]["activity_id"] == "mission:mission-1"
+    assert delivered_events[0]["payload"]["delta"] == "live token"
 
 
 def test_control_plane_session_list_is_not_proxied_to_runtime_worker():

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from pathlib import Path
 
 from .common import *
@@ -13,60 +12,6 @@ from hermes_state_participants import leader_participant_id, member_participant_
 from hermes_team_mission.domain.run_context import RunContext
 from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command
 from tui_gateway.services.transcript_projector import conversation_user_message_id_for
-
-
-def _team_chain_log(stage: str, **fields) -> None:
-    try:
-        _log.warning("[dovie-team-chain] %s %s", stage, json.dumps(fields, ensure_ascii=False, sort_keys=True, default=str))
-    except Exception:
-        pass
-
-
-def _dovie_profile_log_summary(profile: dict) -> dict:
-    profile = profile if isinstance(profile, dict) else {}
-    return {
-        "id": str(profile.get("id") or profile.get("agentProfileId") or profile.get("agent_profile_id") or ""),
-        "runtime_scope_key": str(profile.get("runtimeScopeKey") or profile.get("runtime_scope_key") or ""),
-        "has_home": bool(profile.get("hermesHomePath") or profile.get("hermes_home_path") or profile.get("hermes_home")),
-    }
-
-
-def _team_mission_log_summary(submit_params: dict) -> dict:
-    product_context = (
-        submit_params.get("dovie_product_context")
-        if isinstance(submit_params.get("dovie_product_context"), dict)
-        else {}
-    )
-    team_mission = (
-        product_context.get("team_mission")
-        if isinstance(product_context.get("team_mission"), dict)
-        else {}
-    )
-    members = team_mission.get("members") if isinstance(team_mission.get("members"), list) else []
-    metadata = team_mission.get("metadata") if isinstance(team_mission.get("metadata"), dict) else {}
-    snapshot_meta = (
-        metadata.get("team_capability_snapshot")
-        if isinstance(metadata.get("team_capability_snapshot"), dict)
-        else {}
-    )
-    return {
-        "surface": str(team_mission.get("surface") or ""),
-        "conversation_id": str(team_mission.get("conversation_id") or ""),
-        "conversation_session_id": str(team_mission.get("conversation_session_id") or ""),
-        "mission_id": str(team_mission.get("mission_id") or ""),
-        "node_id": str(team_mission.get("node_id") or ""),
-        "node_kind": str(team_mission.get("node_kind") or ""),
-        "node_phase": str(team_mission.get("node_phase") or ""),
-        "node_role": str(team_mission.get("node_role") or ""),
-        "team_id": str(team_mission.get("team_id") or ""),
-        "member_count": len(members),
-        "has_members": bool(members),
-        "has_capability_snapshot": bool(
-            team_mission.get("team_capability_snapshot_id")
-            or team_mission.get("team_capability_snapshot_version")
-            or snapshot_meta
-        ),
-    }
 
 
 def _home_from_dovie_profile(dovie_profile: dict) -> str:
@@ -197,34 +142,10 @@ def _submit_run_via_worker_with_response(rid, submit_params: dict) -> dict:
     less broken than failing the run entirely. The diagnostic
     ``member-chat-proxy-fallback-in-process`` warning surfaces the
     fallback so we can spot any caller that should be routed."""
-    _team_chain_log(
-        "hermes-run-dispatch-start",
-        run_id=str(submit_params.get("run_id") or submit_params.get("client_run_id") or ""),
-        turn_id=str(submit_params.get("turn_id") or ""),
-        stored_session_id=str(submit_params.get("stored_session_id") or submit_params.get("session_id") or ""),
-        runtime_scope_key=str(submit_params.get("runtime_scope_key") or ""),
-        agent_profile_id=str(submit_params.get("agent_profile_id") or ""),
-        dovie_profile=_dovie_profile_log_summary(submit_params.get("dovie_profile")),
-        team_mission=_team_mission_log_summary(submit_params),
-    )
     proxied = _proxy_run_submit_via_worker(submit_params)
     if proxied.get("error"):
-        _team_chain_log(
-            "hermes-run-dispatch-error",
-            run_id=str(submit_params.get("run_id") or submit_params.get("client_run_id") or ""),
-            runtime_scope_key=str(submit_params.get("runtime_scope_key") or ""),
-            error=proxied.get("error") or "",
-        )
         return _err(rid, 5020, proxied["error"])
     if proxied.get("ok"):
-        _team_chain_log(
-            "hermes-run-dispatch-proxied",
-            run_id=str(submit_params.get("run_id") or submit_params.get("client_run_id") or ""),
-            turn_id=str(submit_params.get("turn_id") or ""),
-            stored_session_id=str(submit_params.get("stored_session_id") or submit_params.get("session_id") or ""),
-            runtime_scope_key=str(submit_params.get("runtime_scope_key") or ""),
-            agent_profile_id=str(submit_params.get("agent_profile_id") or ""),
-        )
         # primary_dispatch already acknowledged the request on the
         # transport with its own synthetic rid. Construct the
         # JSON-RPC envelope the original caller (with its own rid)
@@ -250,13 +171,6 @@ def _submit_run_via_worker_with_response(rid, submit_params: dict) -> dict:
     run_control._diagnostic_warning(  # noqa: SLF001
         "team-mission-run-proxy-fallback-in-process",
         stored_session_id=str(submit_params.get("stored_session_id") or ""),
-        runtime_scope_key=str(submit_params.get("runtime_scope_key") or ""),
-        reason=proxied.get("reason") or "",
-    )
-    _team_chain_log(
-        "hermes-run-dispatch-fallback-in-process",
-        run_id=str(submit_params.get("run_id") or submit_params.get("client_run_id") or ""),
-        stored_session_id=str(submit_params.get("stored_session_id") or submit_params.get("session_id") or ""),
         runtime_scope_key=str(submit_params.get("runtime_scope_key") or ""),
         reason=proxied.get("reason") or "",
     )
@@ -293,32 +207,12 @@ def _proxy_run_submit_via_worker(submit_params: dict) -> dict:
     )
 
     source_transport = current_transport()
-    run_id = str(submit_params.get("run_id") or submit_params.get("client_run_id") or "")
-    turn_id = str(submit_params.get("turn_id") or "")
-    stored_session_id = str(submit_params.get("stored_session_id") or submit_params.get("session_id") or "")
-    runtime_scope_key = str(submit_params.get("runtime_scope_key") or "")
-    dispatch_started = time.monotonic()
     loop = current_worker_runtime_loop()
     if loop is None:
         loop = getattr(source_transport, "_loop", None)
     if loop is None:
-        _team_chain_log(
-            "hermes-run-dispatch-proxy-no-runtime-loop",
-            run_id=run_id,
-            turn_id=turn_id,
-            stored_session_id=stored_session_id,
-            runtime_scope_key=runtime_scope_key,
-        )
         return {"ok": False, "reason": "no_runtime_loop"}
     if not loop.is_running():
-        _team_chain_log(
-            "hermes-run-dispatch-proxy-loop-unavailable",
-            run_id=run_id,
-            turn_id=turn_id,
-            stored_session_id=stored_session_id,
-            runtime_scope_key=runtime_scope_key,
-            source_transport=getattr(source_transport, "_diagnostics", lambda: {})(),
-        )
         return {"ok": False, "reason": "loop_not_running"}
     try:
         if asyncio.get_running_loop() is loop:
@@ -332,46 +226,11 @@ def _proxy_run_submit_via_worker(submit_params: dict) -> dict:
         "method": "run.submit",
         "params": dict(submit_params),
     }
-    _team_chain_log(
-        "hermes-run-dispatch-proxy-schedule",
-        request_id=req["id"],
-        run_id=run_id,
-        turn_id=turn_id,
-        stored_session_id=stored_session_id,
-        runtime_scope_key=runtime_scope_key,
-        transport=transport._diagnostics(),
-        source_transport=getattr(source_transport, "_diagnostics", lambda: {})(),
-    )
     fut = asyncio.run_coroutine_threadsafe(primary_dispatch(req, transport), loop)
     try:
         ok = fut.result(timeout=30.0)
     except Exception as exc:
-        _team_chain_log(
-            "hermes-run-dispatch-proxy-exception",
-            request_id=req["id"],
-            run_id=run_id,
-            turn_id=turn_id,
-            stored_session_id=stored_session_id,
-            runtime_scope_key=runtime_scope_key,
-            elapsed_ms=round((time.monotonic() - dispatch_started) * 1000, 1),
-            error_type=type(exc).__name__,
-            error=str(exc),
-            transport=transport._diagnostics(),
-            source_transport=getattr(source_transport, "_diagnostics", lambda: {})(),
-        )
         return {"error": f"member-chat dispatch failed: {exc}"}
-    _team_chain_log(
-        "hermes-run-dispatch-proxy-result",
-        request_id=req["id"],
-        run_id=run_id,
-        turn_id=turn_id,
-        stored_session_id=stored_session_id,
-        runtime_scope_key=runtime_scope_key,
-        elapsed_ms=round((time.monotonic() - dispatch_started) * 1000, 1),
-        ok=bool(ok),
-        transport=transport._diagnostics(),
-        response_frames=transport.frames,
-    )
     return {"ok": bool(ok)}
 
 
@@ -720,19 +579,6 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4006, "text required")
     conversation_id = _conversation_id_from_params(params, {})
     conversation_session_id = _conversation_session_id_from_params(params, {})
-    _team_chain_log(
-        "hermes-message-submit-entry",
-        mission_id=mission_id,
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        team_id=str(params.get("team_id") or params.get("teamId") or ""),
-        target_member_id=_target_member_id_from_params(params),
-        run_id=str(params.get("run_id") or params.get("client_run_id") or ""),
-        turn_id=str(params.get("turn_id") or params.get("turnId") or ""),
-        text_length=len(text),
-        attachment_count=len(_submitted_attachments(params)),
-        has_dovie_product_context=isinstance(params.get("dovie_product_context"), dict),
-    )
     if not mission_id and not conversation_id:
         return _err(rid, 4006, "mission_id or conversation_id required")
     graph = db.get_team_mission_graph(mission_id) if mission_id else {}
@@ -808,16 +654,6 @@ def _(rid, params: dict) -> dict:
     # Group-chat: route directly to a worker member, bypassing the leader.
     target_member_id = _target_member_id_from_params(params)
     if target_member_id:
-        _team_chain_log(
-            "hermes-message-submit-route-member",
-            conversation_id=conversation_id,
-            conversation_session_id=conversation_session_id,
-            target_member_id=target_member_id,
-            run_id=str(params.get("run_id") or params.get("client_run_id") or ""),
-            turn_id=str(params.get("turn_id") or params.get("turnId") or ""),
-            runtime_scope_key=str(params.get("runtime_scope_key") or ""),
-            mission_id=str((identity_mission or {}).get("mission_id") or mission_id or "") if isinstance(identity_mission, dict) else str(mission_id or ""),
-        )
         return _submit_message_to_member(
             rid,
             params,
@@ -945,23 +781,6 @@ def _(rid, params: dict) -> dict:
         control_home=control_home,
         execution_home=leader_run_home,
     )
-    _team_chain_log(
-        "hermes-message-submit-route-leader",
-        mission_id=mission_id,
-        activity_mission_id=activity_mission_id,
-        activity_kind=leader_activity_kind,
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        run_id=run_id,
-        turn_id=turn_id,
-        runtime_scope_key=runtime_scope_key,
-        agent_profile_id=str(profile_params.get("agent_profile_id") or ""),
-        profile_runtime_scope_key=str(profile_params.get("runtime_scope_key") or ""),
-        hermes_home=_home_from_profile_params(profile_params),
-        direct_reply=direct_reply,
-        toolsets=[] if direct_reply else _leader_message_toolsets(params),
-        disabled_toolsets=_leader_disabled_toolsets(params),
-    )
     try:
         _upsert_team_user_submission_message(
             db,
@@ -1015,28 +834,8 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5008, runtime_session_error)
     response = _submit_run_via_worker_with_response(rid, submit_params)
     if isinstance(response, dict) and response.get("error"):
-        _team_chain_log(
-            "hermes-message-submit-run-error",
-            conversation_id=conversation_id,
-            conversation_session_id=conversation_session_id,
-            run_id=run_id,
-            turn_id=turn_id,
-            runtime_scope_key=runtime_scope_key,
-            error=response.get("error"),
-        )
         return response
     result = response.get("result") if isinstance(response, dict) else {}
-    _team_chain_log(
-        "hermes-message-submit-run-returned",
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        run_id=str(result.get("run_id") or run_id),
-        turn_id=str(result.get("turn_id") or turn_id),
-        runtime_session_id=str(result.get("session_id") or ""),
-        stored_session_id=str(result.get("stored_session_id") or ""),
-        runtime_scope_key=str(result.get("runtime_scope_key") or runtime_scope_key),
-        status=str(result.get("status") or ""),
-    )
     if isinstance(mission, dict) and mission and submitted_attachments:
         _record_leader_input_attachment_artifacts(
             db,
@@ -1046,19 +845,6 @@ def _(rid, params: dict) -> dict:
             attachments=submitted_attachments,
         )
     ensure_team_leader_message_run_state(db, run_id=run_id, session_id=conversation_session_id, runtime_scope_key=runtime_scope_key, result=result)
-    _team_chain_log(
-        "hermes-message-submit-return",
-        mission_id=mission_id,
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        run_id=str(result.get("run_id") or run_id),
-        turn_id=str(result.get("turn_id") or turn_id),
-        runtime_session_id=str(result.get("session_id") or ""),
-        runtime_scope_key=str(result.get("runtime_scope_key") or runtime_scope_key),
-        graph_node_count=len((graph or {}).get("nodes") or []) if isinstance(graph, dict) else 0,
-        activity_mission_id=activity_mission_id,
-        direct_reply=direct_reply,
-    )
     return _ok(
         rid,
         {
@@ -1157,81 +943,6 @@ def _(rid, params: dict) -> dict:
             "auditOnly": True,
             "events": events,
             "last_event_seq": max([int(event.get("seq") or 0) for event in events], default=after_seq),
-            "has_more": has_more,
-            "approx_event_bytes": approx_event_bytes,
-        },
-    )
-
-
-@method("team_mission.subscribe")
-def _(rid, params: dict) -> dict:
-    db = _get_db()
-    if db is None:
-        return _db_unavailable_error(rid, code=5008)
-    mission_id = _mission_id_from_params(params)
-    if not mission_id:
-        return _err(rid, 4006, "mission_id required")
-    # Stale-run watchdog: clear any run left active under an already-terminal
-    # mission (cancel race / completion without a node terminal event / a run
-    # that stalled on a live gateway). Self-heals the spinning card + lingering
-    # runtime state when the conversation is opened/refreshed.
-    reaper = getattr(db, "reap_terminal_mission_runs", None)
-    if callable(reaper):
-        try:
-            reaper(mission_id)
-        except Exception:
-            pass
-    # Cap canonical-log growth: prune per-token stream deltas of a terminal
-    # mission (unbounded team_mission_events bloated the DB into the GBs, slowing
-    # session-list loads into timeouts). Lazy, idempotent, terminal-only.
-    pruner = getattr(db, "prune_team_mission_events", None)
-    if callable(pruner):
-        try:
-            pruner(mission_id)
-        except Exception:
-            pass
-    try:
-        after_seq = int(params.get("after_seq") or params.get("afterSeq") or 0)
-    except (TypeError, ValueError):
-        after_seq = 0
-    limit = _bounded_limit(params.get("limit"), default=2000, maximum=10000)
-    byte_limit = _bounded_byte_limit(params.get("byte_limit") or params.get("byteLimit"))
-    subscription_id, raw_events = run_control.subscribe_team_mission_with_id(
-        mission_id=mission_id,
-        transport=current_transport(),
-        after_seq=after_seq,
-        limit=min(limit + 1, 10000),
-        db=db,
-    )
-    events, has_more, approx_event_bytes = _team_mission_event_page(
-        raw_events,
-        after_seq=after_seq,
-        limit=limit,
-        byte_limit=byte_limit,
-    )
-    last_event_seq = max([int(event.get("seq") or 0) for event in events], default=after_seq)
-    _log.info(
-        "team_mission.subscribe replay mission_id=%s after_seq=%s limit=%s byte_limit=%s subscription_id=%s raw_count=%s replay_count=%s last_seq=%s has_more=%s approx_event_bytes=%s",
-        mission_id,
-        after_seq,
-        limit,
-        byte_limit,
-        subscription_id,
-        len(raw_events),
-        len(events),
-        last_event_seq,
-        has_more,
-        approx_event_bytes,
-    )
-    return _ok(
-        rid,
-        {
-            "mission_id": mission_id,
-            "subscription_id": subscription_id,
-            "audit_only": True,
-            "auditOnly": True,
-            "events": events,
-            "last_event_seq": last_event_seq,
             "has_more": has_more,
             "approx_event_bytes": approx_event_bytes,
         },

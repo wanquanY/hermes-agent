@@ -50,7 +50,6 @@ def gateway_state(db: SessionDB) -> Iterator[None]:
     with run_control._lock:
         run_control._subscriptions_by_id.clear()
         run_control._subscription_ids_by_session.clear()
-        run_control._subscription_ids_by_mission.clear()
         run_control._subscription_ids_by_activity.clear()
         run_control._subscription_ids_by_transport.clear()
     try:
@@ -59,7 +58,6 @@ def gateway_state(db: SessionDB) -> Iterator[None]:
         with run_control._lock:
             run_control._subscriptions_by_id.clear()
             run_control._subscription_ids_by_session.clear()
-            run_control._subscription_ids_by_mission.clear()
             run_control._subscription_ids_by_activity.clear()
             run_control._subscription_ids_by_transport.clear()
         server._db = previous_db

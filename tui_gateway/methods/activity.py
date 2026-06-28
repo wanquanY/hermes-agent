@@ -242,8 +242,8 @@ def runtime_activity_subscribe(rid, params: dict) -> dict:
 def runtime_activity_maintenance(rid, params: dict) -> dict:
     """ADR-0001 §Phase 2.E-1: explicit maintenance hook for activities.
 
-    Replaces the implicit reap/prune side-effects that lived inside
-    team_mission.subscribe (which is being removed in Phase 2.E-5).
+    Replaces the implicit reap/prune side-effects that lived inside the
+    removed legacy Team Mission subscription RPC.
     """
     params = params if isinstance(params, dict) else {}
     activity_id = str(

@@ -64,7 +64,6 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.graph" in response["result"]["methods"]
     assert "team_mission.graph.reduce" in response["result"]["methods"]
     assert "team_mission.events" in response["result"]["methods"]
-    assert "team_mission.subscribe" in response["result"]["methods"]
     assert "team_capability.snapshot.get" in response["result"]["methods"]
     assert "team_capability.snapshot.refresh" in response["result"]["methods"]
     assert "team_capability.snapshot.bind" in response["result"]["methods"]
@@ -119,7 +118,6 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.graph" in server._methods
     assert "team_mission.graph.reduce" in server._methods
     assert "team_mission.events" in server._methods
-    assert "team_mission.subscribe" in server._methods
     assert "team_capability.snapshot.get" in server._methods
     assert "team_capability.snapshot.refresh" in server._methods
     assert "team_capability.snapshot.bind" in server._methods
@@ -197,7 +195,6 @@ def test_extracted_gateway_methods_own_registered_handlers():
         "team_mission.graph": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.graph.reduce": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.events": "hermes_team_mission.gateway.runtime_methods",
-        "team_mission.subscribe": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.message.submit": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.cancel": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.node.create": "hermes_team_mission.gateway.runtime_methods",
@@ -987,7 +984,7 @@ def test_session_db_keeps_terminal_run_closed_after_late_delta(tmp_path):
 
         terminal = db.get_run("run-1")
         assert terminal["status"] == "completed"
-        assert terminal["last_seq"] == 3
+        assert terminal["last_seq"] == 2
         assert terminal["completed_at"] is not None
         assert db.list_run_events(
             "session-1",
