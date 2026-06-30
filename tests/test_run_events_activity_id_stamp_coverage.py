@@ -190,7 +190,7 @@ async def test_team_mission_node_message_complete_stamps_mission_prefix(tmp_path
         db.close()
 
 
-def test_team_mission_mirror_stamps_team_conversation_prefix(tmp_path: Path) -> None:
+def test_team_mission_live_conversation_mirror_is_disabled(tmp_path: Path) -> None:
     db = _db(tmp_path)
     try:
         _setup_mission(db)
@@ -208,8 +208,8 @@ def test_team_mission_mirror_stamps_team_conversation_prefix(tmp_path: Path) -> 
                 "payload": {"status": "complete", "text": "final deliverable"},
             },
         )
-        assert saved["activity_id"] == "team-conversation:conversation-1"
-        assert _last_activity_id(db, "team-session-1") == "team-conversation:conversation-1"
+        assert saved == {}
+        assert db.list_run_events("team-session-1") == []
     finally:
         db.close()
 

@@ -28,6 +28,7 @@ METHOD_MODULES = (
     "hermes_team_mission.gateway.common",
     "hermes_team_mission.gateway.conversation_methods",
     "hermes_team_mission.gateway.runtime_methods",
+    "hermes_team_mission.gateway.snapshot_methods",
     "hermes_team_mission.gateway.memory_methods",
     "hermes_team_mission.gateway.history_methods",
     "config",

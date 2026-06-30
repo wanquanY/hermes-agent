@@ -3,7 +3,128 @@ from __future__ import annotations
 
 from .common import *
 from .participant_autocreate import ensure_team_conversation_participants
+from hermes_team_mission.domain.activity import ACTIVITY_ID_FORMAT_PATTERN
 from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command
+
+
+def _activity_id_from_params(params: dict) -> str:
+    activity_id = str(params.get("activity_id") or params.get("activityId") or "").strip()
+    if activity_id and not ACTIVITY_ID_FORMAT_PATTERN.match(activity_id):
+        raise ValueError("activity_id malformed")
+    return activity_id
+
+
+def _list_field(source: dict, *keys: str) -> list:
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _mission_metadata_team_profile_snapshot(
+    mission: dict,
+    *,
+    mission_id: str = "",
+    team_id: str = "",
+) -> dict:
+    mission = mission if isinstance(mission, dict) else {}
+    metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+    members = metadata.get("members") if isinstance(metadata.get("members"), list) else []
+    member_profiles = []
+    for member in members:
+        if not isinstance(member, dict):
+            continue
+        status = str(member.get("status") or "").strip().lower()
+        if status in {"disabled", "removed"}:
+            continue
+        raw_dovie_profile = member.get("dovie_profile")
+        dovie_profile = raw_dovie_profile if isinstance(raw_dovie_profile, dict) else {}
+        member_id = str(
+            member.get("member_id") or member.get("memberId") or member.get("id") or ""
+        ).strip()
+        if not member_id:
+            continue
+        member_profiles.append({
+            "member_id": member_id,
+            "agent_profile_id": str(
+                member.get("profile_id")
+                or member.get("profileId")
+                or member.get("agent_profile_id")
+                or member.get("agentProfileId")
+                or ""
+            ).strip(),
+            "agent_profile_version_id": str(
+                member.get("profile_version_id")
+                or member.get("profileVersionId")
+                or member.get("agent_profile_version_id")
+                or member.get("agentProfileVersionId")
+                or ""
+            ).strip(),
+            "display_name": str(
+                member.get("display_name")
+                or member.get("displayName")
+                or dovie_profile.get("name")
+                or member_id
+            ).strip(),
+            "role": str(member.get("role") or "member").strip(),
+            "profile_description": str(
+                member.get("profile_summary")
+                or member.get("profileSummary")
+                or dovie_profile.get("description")
+                or member.get("description")
+                or ""
+            ).strip(),
+            "capability_tags": _list_field(member, "capability_tags", "capabilityTags"),
+            "best_for_tasks": _list_field(member, "best_for_tasks", "bestForTasks"),
+            "avoid_tasks": _list_field(member, "avoid_tasks", "avoidTasks"),
+            "strengths": _list_field(member, "strengths"),
+            "limitations": _list_field(member, "limitations"),
+            "default_toolsets": _list_field(member, "default_toolsets", "defaultToolsets"),
+            "recommended_skills": _list_field(member, "recommended_skills", "recommendedSkills"),
+            "radar_scores": _list_field(member, "radar_scores", "radarScores"),
+        })
+    if not member_profiles:
+        return {}
+    resolved_mission_id = str(
+        mission_id or mission.get("mission_id") or mission.get("missionId") or ""
+    ).strip()
+    resolved_team_id = str(
+        team_id or mission.get("team_id") or mission.get("teamId") or ""
+    ).strip()
+    snapshot_id = (
+        f"mission-metadata:{resolved_mission_id}"
+        if resolved_mission_id
+        else "mission-metadata"
+    )
+    return {
+        "snapshot_id": snapshot_id,
+        "team_id": resolved_team_id,
+        "version": 0,
+        "status": "ready",
+        "team_profile": {
+            "display_name": str(mission.get("title") or metadata.get("title") or "").strip(),
+            "collaboration_mode": str(mission.get("mode") or metadata.get("mode_strategy") or "").strip(),
+            "positioning": str(mission.get("objective") or metadata.get("objective") or "").strip(),
+        },
+        "member_profiles": member_profiles,
+    }
+
+
+def _mission_metadata_fallback_from_params(params: dict, *, mission_id: str, team_id: str) -> dict:
+    metadata = params.get("mission_metadata") if isinstance(params.get("mission_metadata"), dict) else {}
+    if not metadata:
+        return {}
+    return {
+        "mission_id": mission_id,
+        "team_id": team_id,
+        "title": str(params.get("mission_title") or params.get("missionTitle") or "").strip(),
+        "objective": str(
+            params.get("mission_objective") or params.get("missionObjective") or ""
+        ).strip(),
+        "mode": str(params.get("mission_mode") or params.get("missionMode") or "").strip(),
+        "metadata": metadata,
+    }
 
 
 @method("team_capability.snapshot.get")
@@ -112,10 +233,29 @@ def _(rid, params: dict) -> dict:
             snapshot = db.get_latest_team_capability_snapshot(team_id) if team_id else {}
             if snapshot:
                 source = "latest_team_snapshot"
+        registry_error = ""
         if not snapshot and team_id:
-            snapshot = _resolve_team_capability_snapshot_from_registry(db, params, team_id=team_id)
+            try:
+                snapshot = _resolve_team_capability_snapshot_from_registry(db, params, team_id=team_id)
+                if snapshot:
+                    source = "team_registry"
+            except Exception as exc:
+                registry_error = str(exc)
+        if not snapshot:
+            metadata_mission = mission or _mission_metadata_fallback_from_params(
+                params,
+                mission_id=mission_id,
+                team_id=team_id,
+            )
+            snapshot = _mission_metadata_team_profile_snapshot(
+                metadata_mission,
+                mission_id=mission_id,
+                team_id=team_id,
+            )
             if snapshot:
-                source = "team_registry"
+                source = "mission_metadata_members"
+        if not snapshot and registry_error:
+            return _err(rid, 5008, f"team profile unavailable: {registry_error}")
     except Exception as exc:
         return _err(rid, 5008, f"team profile unavailable: {exc}")
     if not snapshot:
@@ -218,6 +358,10 @@ def _(rid, params: dict) -> dict:
         })
     if not mission_id:
         return _err(rid, 4006, "mission_id required")
+    try:
+        request_activity_id = _activity_id_from_params(params)
+    except ValueError as exc:
+        return _err(rid, 4006, str(exc))
     if team_id:
         try:
             members = _team_runtime_members_from_registry(db, params, team_id=team_id)
@@ -254,13 +398,14 @@ def _(rid, params: dict) -> dict:
     # existing behavior; the legacy create flow proceeds unchanged.
     _legacy_activity_command_id = record_legacy_activity_command(
         db,
-        activity_id=f"mission:{mission_id}" if mission_id else "",
+        activity_id=request_activity_id or (f"mission:{mission_id}" if mission_id else ""),
         kind="create",
         payload={
             "mission_id": mission_id,
             "team_id": team_id,
             "conversation_id": str(params.get("conversation_id") or ""),
             "conversation_session_id": str(params.get("conversation_session_id") or ""),
+            **({"request_activity_id": request_activity_id} if request_activity_id else {}),
             "title": str(params.get("title") or ""),
         },
         source="team_mission.create",
@@ -314,12 +459,22 @@ def _(rid, params: dict) -> dict:
         except Exception as exc:
             return _err(rid, 5008, f"team capability snapshot bind failed: {exc}")
     try:
-        db.ensure_mission_activity(
-            conversation_id=conversation_session_id,
-            mission_id=mission_id,
-            status="running",
-            prompt_summary=str(params.get("title") or params.get("objective") or params.get("prompt") or ""),
-        )
+        if request_activity_id:
+            activity = db.bind_activity_to_mission(
+                activity_id=request_activity_id,
+                conversation_id=conversation_session_id,
+                mission_id=mission_id,
+                target_team_id=team_id,
+                status="running",
+                prompt_summary=str(params.get("title") or params.get("objective") or params.get("prompt") or ""),
+            )
+        else:
+            activity = db.ensure_mission_activity(
+                conversation_id=conversation_session_id,
+                mission_id=mission_id,
+                status="running",
+                prompt_summary=str(params.get("title") or params.get("objective") or params.get("prompt") or ""),
+            )
     except Exception as exc:
         return _err(rid, 5008, f"team mission activity create failed: {exc}")
     mission = graph.get("mission") if isinstance(graph, dict) else {}
@@ -380,8 +535,8 @@ def _(rid, params: dict) -> dict:
                 "use_strategy_prompt": True,
                 "record_user_task_message": params.get("record_user_task_message") if "record_user_task_message" in params else params.get("recordUserTaskMessage"),
                 "members": members,
-                "dispatch_activity_id": metadata.get("dispatch_activity_id"),
-                "parent_activity_id": metadata.get("parent_activity_id"),
+                "dispatch_activity_id": metadata.get("dispatch_activity_id") or request_activity_id,
+                "parent_activity_id": metadata.get("parent_activity_id") or request_activity_id,
                 "parent_conversation_id": metadata.get("parent_conversation_id"),
                 "parent_scope_key": metadata.get("parent_scope_key"),
                 "parent_hermes_home": metadata.get("parent_hermes_home"),
@@ -391,7 +546,13 @@ def _(rid, params: dict) -> dict:
         if isinstance(start_response, dict) and start_response.get("error"):
             return start_response
         graph = db.get_team_mission_graph(mission_id)
-    result = {"mission_id": mission_id, "conversation_id": conversation_id, "graph": graph}
+    activity_id = str((activity or {}).get("activity_id") or request_activity_id or f"mission:{mission_id}").strip()
+    result = {
+        "mission_id": mission_id,
+        "activity_id": activity_id,
+        "conversation_id": conversation_id,
+        "graph": graph,
+    }
     if isinstance(start_response, dict):
         result["leader_start"] = start_response.get("result") or {}
     return _ok(rid, result)

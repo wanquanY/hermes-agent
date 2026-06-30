@@ -360,6 +360,8 @@ class DiscussionStrategy(TeamMissionModeStrategy):
                 runtime_scope_key=f"team:{mission_id}:discussion:{member.member_id or index}",
                 output_contract={
                     "format": "discussion_contribution",
+                    "delivery_channel": "handoff",
+                    "requires_explicit_handoff": True,
                     "requires_process_events": True,
                     "requires_deliverable": True,
                 },
@@ -385,6 +387,8 @@ class DiscussionStrategy(TeamMissionModeStrategy):
                 runtime_scope_key=f"team:{mission_id}:synthesis",
                 output_contract={
                     "format": "final_answer",
+                    "delivery_channel": "handoff",
+                    "requires_explicit_handoff": True,
                     "requires_process_events": True,
                     "requires_deliverable": True,
                 },
@@ -525,7 +529,7 @@ class SupervisedMissionStrategy(TeamMissionModeStrategy):
             "",
             "Termination contract: every planning run MUST end in exactly one of these states:",
             "  (a) at least one clarify request is open and awaiting the user's answer, or",
-            "  (b) team_mission_plan_complete has been called with at least one worker node created.",
+            "  (b) team_mission_plan_complete has been called with at least one worker node plus explicit verifier and synthesis nodes.",
             "Ending with neither (writing a question or plan as prose and stopping) leaves the mission stuck running with nothing to approve — never do that.",
         ]).strip()
 
@@ -664,7 +668,7 @@ class AutonomousMissionStrategy(TeamMissionModeStrategy):
             "4. Include a stable idempotency_key for every node/edge mutation so retries cannot duplicate graph items.",
             "5. Use team_mission_edge_create to connect dependencies.",
             "6. Mark high-risk nodes with metadata.risk_level='high' or 'critical'.",
-            "7. When the graph is planned, call team_mission_plan_complete so DoXie can release low-risk ready nodes.",
+            "7. When the graph includes at least one worker node plus explicit verifier and synthesis nodes, call team_mission_plan_complete so DoXie can release low-risk ready nodes.",
             "",
             "Required node brief contract:",
             "- Every worker, verifier, and synthesis node MUST include task_brief in team_mission_node_create.",

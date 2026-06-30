@@ -146,7 +146,7 @@ def test_publish_recorded_event_includes_participant_id_in_payload(monkeypatch):
     assert delivered[0]["payload"]["participant_id"] == "member:publisher"
 
 
-def test_render_snapshot_messages_include_participant_id(tmp_path: Path, monkeypatch):
+def test_render_snapshot_messages_include_message_row_participant_id(tmp_path: Path, monkeypatch):
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
@@ -159,6 +159,7 @@ def test_render_snapshot_messages_include_participant_id(tmp_path: Path, monkeyp
             "team-session-1",
             role="assistant",
             content="member reply",
+            participant_id="member:renderer",
             metadata={"run_id": "run-render", "turn_id": "turn-render"},
         )
         db.append_run_event(
@@ -199,8 +200,6 @@ def test_render_snapshot_messages_include_participant_id(tmp_path: Path, monkeyp
         message = response["result"]["messages"][0]
         assert message["participant_id"] == "member:renderer"
         assert message["participantId"] == "member:renderer"
-        assert message["teamMission"]["participantId"] == "member:renderer"
-        assert message["metadata"]["team_mission"]["participant_id"] == "member:renderer"
     finally:
         db.close()
 

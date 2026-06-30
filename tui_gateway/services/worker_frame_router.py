@@ -58,6 +58,9 @@ _CLARIFY_APPROVAL_EVENT_STATES: dict[str, tuple[str, bool]] = {
     "approval.request": ("approval", True),
     "approval.resolved": ("approval", False),
 }
+def _payload_dict(params: dict[str, Any]) -> dict[str, Any]:
+    payload = params.get("payload")
+    return payload if isinstance(payload, dict) else {}
 
 
 @dataclass
@@ -272,10 +275,21 @@ class WorkerFrameRouter:
         if frame is None:
             return
         conversation = str(conversation_id or "")
+        request_id = str(frame.request_id or "").strip()
         if frame.kind not in _INTERACTIVE_KINDS:
             _log.warning(
                 "[worker-router] dropping interactive.request kind=%r request_id=%r",
-                frame.kind, frame.request_id,
+                frame.kind, request_id,
+            )
+            return
+        if not request_id:
+            _log.warning(
+                "[worker-router] dropping interactive.request without request_id "
+                "kind=%s scope_key=%s conversation_id=%s stored_session_id=%s",
+                frame.kind,
+                scope_key,
+                conversation,
+                frame.stored_session_id,
             )
             return
         stored = frame.stored_session_id
@@ -288,7 +302,7 @@ class WorkerFrameRouter:
             if not conversation:
                 conversation = stored
         with self._lock:
-            self._pending[frame.request_id] = _Pending(
+            self._pending[request_id] = _Pending(
                 scope_key=scope_key,
                 conversation_id=conversation,
                 kind=frame.kind,

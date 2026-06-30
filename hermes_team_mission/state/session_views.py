@@ -177,6 +177,10 @@ class SessionDBTeamMissionViewMixin:
                     ).fetchall()
                 ) if deliverable
             ]
+            result = self._team_mission_result_from_row(self._conn.execute(
+                "SELECT * FROM team_mission_results WHERE mission_id = ?",
+                (mission_id,),
+            ).fetchone())
         latest_deliverable_by_node: Dict[str, Dict[str, Any]] = {}
         for deliverable in deliverables:
             node_id = _text(deliverable.get("node_id") or deliverable.get("nodeId"))
@@ -200,6 +204,7 @@ class SessionDBTeamMissionViewMixin:
             "edges": edges,
             "run_bindings": run_bindings,
             "deliverables": deliverables,
+            "result": result,
         }
 
     def get_team_mission_conversation_graph(self, conversation_id: str) -> Dict[str, Any]:

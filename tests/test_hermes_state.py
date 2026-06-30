@@ -5,6 +5,8 @@ import time
 import pytest
 from pathlib import Path
 
+from hermes_conversation_message_identity import AssistantMessageIdentity
+from hermes_conversation_message_identity import assistant_conversation_message_id_for
 from hermes_state import SessionDB
 
 
@@ -872,6 +874,182 @@ def test_append_run_event_deduplicates_repeated_terminal_for_run(db):
     assert run["last_seq"] == 2
 
 
+def _create_team_conversation_session(db, session_id="team-session-team-conversation-test") -> str:
+    db.create_session(session_id, "dovie")
+    db.upsert_session_index(
+        session_id=session_id,
+        source="team_mission",
+        session_kind="team_mission",
+        conversation_kind="team",
+    )
+    return session_id
+
+
+def test_append_run_event_projects_team_member_message_complete_to_read_model(db):
+    session_id = _create_team_conversation_session(db)
+
+    event = db.append_run_event(
+        session_id,
+        {
+            "type": "message.complete",
+            "session_id": "runtime-member-1",
+            "stored_session_id": session_id,
+            "run_id": "team-member-run-1",
+            "turn_id": "team-member-turn-1",
+            "message_seq_in_run": 1,
+            "runtime_scope_key": "member-chat:team-conversation-test:member-1",
+            "participant_id": "member:member-1",
+            "seq": 10,
+            "timestamp": 1000,
+            "payload": {
+                "status": "complete",
+                "text": "member response",
+                "activity_id": f"act-member_chat:{session_id}:member-1",
+            },
+        },
+    )
+    conversation_message_id = assistant_conversation_message_id_for(
+        AssistantMessageIdentity(
+            session_id=session_id,
+            run_id="team-member-run-1",
+            message_seq_in_run="1",
+        )
+    )
+
+    messages = db.get_conversation_message_read_model(
+        session_id,
+        include_storage_metadata=True,
+    )
+
+    assert event["_projected_message_id"] == conversation_message_id
+    assert len(messages) == 1
+    assert messages[0]["role"] == "assistant"
+    assert messages[0]["content"] == "member response"
+    assert messages[0]["participant_id"] == "member:member-1"
+    assert messages[0]["conversation_message_id"] == conversation_message_id
+    assert messages[0]["metadata"]["transcript_activity_kind"] == "member_direct_chat"
+
+
+def test_team_message_complete_event_does_not_duplicate_late_worker_flush(db):
+    session_id = _create_team_conversation_session(db)
+    db.append_run_event(
+        session_id,
+        {
+            "type": "message.complete",
+            "session_id": "runtime-member-1",
+            "stored_session_id": session_id,
+            "run_id": "team-member-run-1",
+            "turn_id": "team-member-turn-1",
+            "message_seq_in_run": 1,
+            "runtime_scope_key": "member-chat:team-conversation-test:member-1",
+            "participant_id": "member:member-1",
+            "seq": 10,
+            "timestamp": 1000,
+            "payload": {
+                "status": "complete",
+                "text": "member response",
+                "activity_id": f"act-member_chat:{session_id}:member-1",
+            },
+        },
+    )
+    db.append_message(
+        session_id,
+        "assistant",
+        "member response",
+        participant_id="member:member-1",
+        metadata={
+            "run_id": "team-member-run-1",
+            "turn_id": "team-member-turn-1",
+        },
+    )
+
+    messages = db.get_conversation_message_read_model(
+        session_id,
+        include_storage_metadata=True,
+    )
+
+    assert [message["role"] for message in messages] == ["assistant"]
+    assert [message["content"] for message in messages] == ["member response"]
+    assert messages[0].get("conversation_message_id")
+
+
+def test_team_message_complete_event_does_not_claim_early_worker_flush(db):
+    session_id = _create_team_conversation_session(db)
+    legacy_message_id = db.append_message(
+        session_id,
+        "assistant",
+        "member response",
+        participant_id="member:member-1",
+        reasoning="native reasoning",
+        metadata={
+            "run_id": "team-member-run-1",
+            "turn_id": "team-member-turn-1",
+        },
+    )
+
+    event = db.append_run_event(
+        session_id,
+        {
+            "type": "message.complete",
+            "session_id": "runtime-member-1",
+            "stored_session_id": session_id,
+            "run_id": "team-member-run-1",
+            "turn_id": "team-member-turn-1",
+            "message_seq_in_run": 1,
+            "runtime_scope_key": "member-chat:team-conversation-test:member-1",
+            "participant_id": "member:member-1",
+            "seq": 10,
+            "timestamp": 1000,
+            "payload": {
+                "status": "complete",
+                "text": "member response",
+                "activity_id": f"act-member_chat:{session_id}:member-1",
+            },
+        },
+    )
+
+    messages = db.get_conversation_message_read_model(
+        session_id,
+        include_storage_metadata=True,
+    )
+
+    assert len(messages) == 1
+    assert messages[0]["message_id"] == str(legacy_message_id)
+    assert event.get("_projected_message_id")
+    assert messages[0].get("conversation_message_id")
+    assert messages[0]["content"] == "member response"
+    assert messages[0]["reasoning"] == "native reasoning"
+
+
+def test_append_run_event_does_not_project_team_mission_node_message_complete(db):
+    session_id = "team:mission-test:node:root"
+    db.create_session(session_id, "dovie")
+
+    event = db.append_run_event(
+        session_id,
+        {
+            "type": "message.complete",
+            "session_id": "runtime-node-1",
+            "stored_session_id": session_id,
+            "run_id": "node-run-1",
+            "turn_id": "node-turn-1",
+            "message_seq_in_run": 1,
+            "runtime_scope_key": "profile:agent-default",
+            "seq": 3,
+            "timestamp": 1000,
+            "payload": {"status": "complete", "text": "node result"},
+        },
+    )
+
+    messages = db.get_messages_as_conversation(
+        session_id,
+        include_storage_metadata=True,
+    )
+
+    assert "_projected_message_id" not in event
+    assert messages == []
+
+
 def test_append_run_event_ignores_stream_events_after_terminal_for_run(db):
     db.append_run_event(
         "stored-1",
@@ -1014,7 +1192,6 @@ def test_compact_run_events_prunes_terminal_stream_rows_from_old_database(db):
         '{"status":"complete","text":"final"}',
         "completed",
     )
-
     result = db.compact_run_events(session_id="stored-1")
     events = db.list_run_events("stored-1")
     run = db.get_run("run-1")
@@ -1090,7 +1267,6 @@ def test_compact_run_events_preserves_tool_complete_for_terminal_run(db):
                 status,
             ),
         )
-
     result = db.compact_run_events(session_id="stored-1")
     events = db.list_run_events("stored-1")
 

@@ -151,6 +151,22 @@ CREATE TABLE IF NOT EXISTS team_mission_deliverables (
     updated_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS team_mission_results (
+    result_id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL UNIQUE REFERENCES team_missions(mission_id) ON DELETE CASCADE,
+    activity_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    summary_text TEXT NOT NULL,
+    node_results_json TEXT NOT NULL,
+    artifact_refs_json TEXT,
+    leader_report_run_id TEXT,
+    leader_report_message_id TEXT,
+    metadata_json TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS team_mission_memory_items (
     id TEXT PRIMARY KEY,
     team_id TEXT NOT NULL,
@@ -215,6 +231,8 @@ CREATE INDEX IF NOT EXISTS idx_team_mission_deliverables_mission
     ON team_mission_deliverables(mission_id, node_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_deliverables_run
     ON team_mission_deliverables(run_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_mission_results_mission
+    ON team_mission_results(mission_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_mission
     ON team_mission_memory_items(mission_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_conversation

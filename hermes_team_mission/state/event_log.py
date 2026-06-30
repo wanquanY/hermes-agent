@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import sqlite3
 import threading
 import time
-import logging
 from typing import Any, Dict, List
 
 from hermes_team_mission.domain.identities import canonical_node_id as _canonical_graph_node_id
@@ -70,6 +71,27 @@ def event_payload(event: Dict[str, Any] | None) -> Dict[str, Any]:
     event = event if isinstance(event, dict) else {}
     payload = event.get("payload")
     return payload if isinstance(payload, dict) else {}
+
+
+def _emit_team_event_log_diagnostic(stage: str, **fields: Any) -> None:
+    try:
+        from agent.dovie_diagnostics import emit_dovie_diagnostic
+
+        emit_dovie_diagnostic("[dovie-team-event-log-debug]", {"stage": stage, **fields})
+    except Exception:
+        pass
+
+
+def _text_stream_summary(event: Dict[str, Any]) -> Dict[str, Any]:
+    payload = event_payload(event)
+    text_value = raw_text(payload.get("delta") or payload.get("text") or payload.get("snapshot"))
+    return {
+        "event_type": source_event_type(event),
+        "text_len": len(text_value),
+        "text_preview": text_value[:80].replace("\n", "\\n"),
+        "mode": text(payload.get("mode")),
+        "status": text(payload.get("status")),
+    }
 
 
 def _first_text(*values: Any) -> str:
@@ -439,6 +461,18 @@ def mission_event_kind(source_event: Dict[str, Any], identity: Dict[str, str] | 
         return "node.bound"
     if event_type == "mission.node.deliverable.recorded":
         return "node.deliverable.recorded"
+    if event_type == "mission.node.finished":
+        if status in {"blocked", "partial"}:
+            return "node.blocked"
+        if status in {"failed", "error"}:
+            return "node.failed"
+        if status in {"cancelled", "canceled", "interrupted"}:
+            return "node.interrupted"
+        return "node.completed"
+    if event_type == "mission.result.recorded":
+        return "mission.result.recorded"
+    if event_type == "mission.snapshot.updated":
+        return "mission.snapshot.updated"
     if event_type == "mission.node.blocked":
         return "node.blocked"
     if event_type == "mission.node.failed":
@@ -563,6 +597,9 @@ def _with_mission_seq(event: Dict[str, Any], seq: int) -> Dict[str, Any]:
 
 
 def runtime_dedupe_key(mission_id: str, run_id: str, source_event: Dict[str, Any]) -> str:
+    stream_delta_key = runtime_stream_delta_dedupe_key(mission_id, run_id, source_event)
+    if stream_delta_key:
+        return stream_delta_key
     return ":".join(
         [
             "runtime",
@@ -571,6 +608,41 @@ def runtime_dedupe_key(mission_id: str, run_id: str, source_event: Dict[str, Any
             text(source_event.get("stored_session_id") or source_event.get("session_id")),
             source_event_type(source_event),
             str(event_seq(source_event)),
+        ]
+    )
+
+
+def runtime_stream_delta_dedupe_key(mission_id: str, run_id: str, source_event: Dict[str, Any]) -> str:
+    event_type = source_event_type(source_event)
+    if event_type != "message.delta":
+        return ""
+    payload = event_payload(source_event)
+    mode = text(payload.get("mode")).lower()
+    if mode not in {"", "append"}:
+        return ""
+    offset = _payload_int(payload, "offset")
+    if offset is None:
+        return ""
+    fragment = _payload_stream_fragment(payload)
+    if fragment == "":
+        return ""
+    stream_id = _first_text(
+        payload.get("stream_id"),
+        payload.get("streamId"),
+        payload.get("client_message_id"),
+        payload.get("clientMessageId"),
+    )
+    fragment_hash = hashlib.sha256(fragment.encode("utf-8")).hexdigest()[:20]
+    return ":".join(
+        [
+            "runtime-stream-delta",
+            text(mission_id),
+            text(run_id) or text(source_event.get("run_id") or source_event.get("runId")),
+            text(source_event.get("stored_session_id") or source_event.get("session_id")),
+            event_type,
+            stream_id,
+            str(offset),
+            fragment_hash,
         ]
     )
 
@@ -713,15 +785,43 @@ def append_team_mission_runtime_event(
     identity: Dict[str, str],
 ) -> Dict[str, Any]:
     if _is_snapshot_message_delta(source_event):
+        _emit_team_event_log_diagnostic(
+            "runtime-event-skip-snapshot-delta",
+            mission_id=mission_id,
+            run_id=run_id,
+            source_seq=event_seq(source_event),
+            **_text_stream_summary(source_event),
+        )
         return {}
     source_seq = event_seq(source_event)
-    return append_team_mission_event(
+    projected = projection_event(source_event, identity, source_seq=source_seq)
+    stored = append_team_mission_event(
         db,
         mission_id=mission_id,
-        event=projection_event(source_event, identity, source_seq=source_seq),
+        event=projected,
         dedupe_key=runtime_dedupe_key(mission_id, run_id, source_event),
         source_event=source_event,
     )
+    payload = event_payload(stored)
+    subject = mapping(payload.get("subject"))
+    text_stream = mapping(payload.get("text_stream"))
+    _emit_team_event_log_diagnostic(
+        "runtime-event-appended",
+        mission_id=mission_id,
+        run_id=run_id,
+        source_seq=source_seq,
+        stored_seq=stored.get("seq"),
+        disposition=stored.get("_persistence_disposition", "inserted"),
+        kind=stored.get("kind") or payload.get("kind"),
+        source_event_type=payload.get("source_event_type") or payload.get("sourceEventType"),
+        subject_type=subject.get("type"),
+        subject_id=subject.get("id"),
+        subject_node_id=subject.get("node_id") or subject.get("nodeId"),
+        runtime_stable_session_id=subject.get("runtime_stable_session_id") or subject.get("runtimeStableSessionId"),
+        text_event=text_stream.get("event"),
+        text_len=len(raw_text(text_stream.get("delta") or text_stream.get("text"))),
+    )
+    return stored
 
 
 def append_team_mission_structural_event(
@@ -816,9 +916,19 @@ def append_team_mission_event_for_run(
 ) -> Dict[str, Any]:
     binding_getter = getattr(db, "get_team_mission_run_binding", None)
     if not callable(binding_getter):
+        _emit_team_event_log_diagnostic(
+            "runtime-event-drop-no-binding-getter",
+            run_id=run_id,
+            **_text_stream_summary(event),
+        )
         return {}
     binding = binding_getter(run_id)
     if not isinstance(binding, dict) or not binding:
+        _emit_team_event_log_diagnostic(
+            "runtime-event-drop-no-binding",
+            run_id=run_id,
+            **_text_stream_summary(event),
+        )
         return {}
     mission_id = text(binding.get("mission_id"))
     node = {}
@@ -839,8 +949,25 @@ def append_team_mission_event_for_run(
             mission = {"mission_id": mission_id}
     identity_builder = getattr(db, "_team_mission_runtime_event_identity", None)
     if not callable(identity_builder):
+        _emit_team_event_log_diagnostic(
+            "runtime-event-drop-no-identity-builder",
+            mission_id=mission_id,
+            run_id=run_id,
+            node_id=text(binding.get("node_id")),
+            **_text_stream_summary(event),
+        )
         return {}
     identity = identity_builder(mission=mission, node=node, binding=binding)
+    _emit_team_event_log_diagnostic(
+        "runtime-event-project-start",
+        mission_id=mission_id,
+        run_id=run_id,
+        node_id=text(binding.get("node_id")),
+        binding_session_id=text(binding.get("session_id")),
+        binding_runtime_scope_key=text(binding.get("runtime_scope_key")),
+        identity=identity,
+        **_text_stream_summary(event),
+    )
     return append_team_mission_runtime_event(
         db,
         mission_id=mission_id,

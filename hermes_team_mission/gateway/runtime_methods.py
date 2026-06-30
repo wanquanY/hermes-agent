@@ -7,11 +7,12 @@ from pathlib import Path
 
 from .common import *
 from .participant_autocreate import ensure_member_chat_participant
-from hermes_state.profile_dir import resolve_default_agent_dir
+from hermes_profile_dir import resolve_default_agent_dir
 from hermes_state_participants import leader_participant_id, member_participant_id
+from hermes_team_mission.domain.activity import ACTIVITY_ID_FORMAT_PATTERN
 from hermes_team_mission.domain.run_context import RunContext
 from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command
-from tui_gateway.services.transcript_projector import conversation_user_message_id_for
+from hermes_team_mission.runtime.team_transcript_writer import UserSubmissionWriter
 
 
 def _home_from_dovie_profile(dovie_profile: dict) -> str:
@@ -57,6 +58,60 @@ def _target_member_id_from_params(params: dict) -> str:
     return str(params.get("target_member_id") or params.get("targetMemberId") or "").strip()
 
 
+def _activity_id_from_params(params: dict) -> str:
+    activity_id = str(params.get("activity_id") or params.get("activityId") or "").strip()
+    if activity_id and not ACTIVITY_ID_FORMAT_PATTERN.match(activity_id):
+        raise ValueError("activity_id malformed")
+    return activity_id
+
+
+def _activity_kind_from_activity_id(activity_id: str, *, fallback: str = "chat") -> str:
+    normalized = str(activity_id or "").strip()
+    if normalized.startswith(("act-team_dispatch-", "act-team_dispatch:")):
+        return "team_dispatch"
+    if normalized.startswith(("act-member_chat-", "act-member_chat:")):
+        return "member_chat"
+    if normalized.startswith("mission:") or normalized.startswith("act-node:"):
+        return "mission"
+    if normalized.startswith("chat:"):
+        return "chat"
+    return fallback
+
+
+def _ensure_team_dispatch_activity(
+    db,
+    *,
+    activity_id: str,
+    conversation_id: str,
+    conversation_session_id: str,
+    team_id: str = "",
+    prompt_summary: str = "",
+) -> dict:
+    """Ensure the Activity-first request owner exists before Leader execution.
+
+    The row may be bound to a mission later by ``team_mission.create``. Until
+    then it is still the stable owner used by Dovie subscriptions.
+    """
+    normalized_activity_id = str(activity_id or "").strip()
+    if not normalized_activity_id:
+        return {}
+    existing = db.get_activity(normalized_activity_id) if callable(getattr(db, "get_activity", None)) else None
+    if isinstance(existing, dict) and existing:
+        return existing
+    create = getattr(db, "create_activity", None)
+    if not callable(create):
+        return {}
+    return create(
+        activity_id=normalized_activity_id,
+        conversation_id=conversation_session_id or conversation_id,
+        kind="team_dispatch",
+        target_team_id=team_id or None,
+        status="running",
+        prompt_summary=prompt_summary[:500] if prompt_summary else None,
+        notify_parent=True,
+    )
+
+
 def _find_team_member_by_id(members: list[dict], member_id: str) -> dict:
     member_id = str(member_id or "").strip()
     for member in members or []:
@@ -80,42 +135,21 @@ def _upsert_team_user_submission_message(
     display_name: str = "",
     client_message_id: str = "",
     source_kind: str,
+    transcript_activity_kind: str = "",
 ) -> dict:
     """Persist the user's visible team-conversation turn exactly once."""
-    if not hasattr(db, "upsert_projected_conversation_message"):
-        raise RuntimeError("SessionDB does not support projected conversation messages")
-    conversation_message_id = conversation_user_message_id_for(
-        session_id=conversation_session_id,
-        turn_id=turn_id,
+    return UserSubmissionWriter.write_user_submission(
+        db,
+        conversation_id=conversation_id,
+        conversation_session_id=conversation_session_id,
         run_id=run_id,
+        turn_id=turn_id,
+        text=text,
+        target_member_id=target_member_id,
+        display_name=display_name,
         client_message_id=client_message_id,
-    )
-    team_metadata = {
-        "kind": source_kind,
-        "conversation_id": conversation_id,
-        "conversation_session_id": conversation_session_id,
-    }
-    if target_member_id:
-        team_metadata["target_member_id"] = target_member_id
-    if display_name:
-        team_metadata["display_name"] = display_name
-    metadata = {
-        "source": "team_mission.message.submit",
-        "message_kind": "user_submission",
-        "run_id": run_id,
-        "turn_id": turn_id,
-        "team_mission": team_metadata,
-    }
-    if client_message_id:
-        metadata["client_message_id"] = client_message_id
-    return db.upsert_projected_conversation_message(
-        session_id=conversation_session_id,
-        conversation_message_id=conversation_message_id,
-        role="user",
-        content=text,
-        participant_id="",
-        metadata=metadata,
-        status="completed",
+        source_kind=source_kind,
+        transcript_activity_kind=transcript_activity_kind,
     )
 
 
@@ -232,6 +266,25 @@ def _proxy_run_submit_via_worker(submit_params: dict) -> dict:
     except Exception as exc:
         return {"error": f"member-chat dispatch failed: {exc}"}
     return {"ok": bool(ok)}
+
+
+def submit_mission_leader_report_run(**kwargs) -> dict:
+    from hermes_team_mission.gateway.leader_report_runtime import (
+        submit_mission_leader_report_run as _submit_leader_report_run,
+    )
+
+    return _submit_leader_report_run(
+        **kwargs,
+        run_submitter=_submit_run_via_worker_with_response,
+    )
+
+
+try:
+    from hermes_team_mission.runtime.leader_report_dispatch import register_leader_report_submitter
+
+    register_leader_report_submitter(submit_mission_leader_report_run)
+except Exception:
+    pass
 
 
 def _clear_stuck_member_session_run(db, stored_session_id: str) -> None:
@@ -449,6 +502,7 @@ def _submit_message_to_member(
             display_name=display_name,
             client_message_id=client_message_id,
             source_kind="member_chat_user",
+            transcript_activity_kind="member_direct_chat",
         )
     except Exception as exc:
         return _err(rid, 5008, f"team user message persistence failed: {exc}")
@@ -638,21 +692,40 @@ def _(rid, params: dict) -> dict:
     )
     if archived_team_error:
         return _err(rid, 4023, archived_team_error)
-    # ADR-0001 Phase 1.D: audit-only activity_command for leader conversation submit.
-    # Activity kind is chat; this starts a leader run, not a new mission.
+    try:
+        request_activity_id = _activity_id_from_params(params)
+    except ValueError as exc:
+        return _err(rid, 4006, str(exc))
+    target_member_id = _target_member_id_from_params(params)
+    if request_activity_id and not target_member_id:
+        try:
+            _ensure_team_dispatch_activity(
+                db,
+                activity_id=request_activity_id,
+                conversation_id=conversation_id,
+                conversation_session_id=conversation_session_id,
+                team_id=str(params.get("team_id") or params.get("teamId") or (identity_mission or {}).get("team_id") or ""),
+                prompt_summary=text,
+            )
+        except Exception as exc:
+            return _err(rid, 5008, f"team dispatch activity create failed: {exc}")
+    # ADR-0001 Activity-first: the leader turn belongs to a stable request
+    # activity when the frontend provides one. Legacy callers fall back to the
+    # chat activity; no task runtime owner is ever `team-conversation:*`.
+    legacy_submit_activity_id = request_activity_id or f"chat:{conversation_session_id}"
     _legacy_activity_command_id = record_legacy_activity_command(
         db,
-        activity_id=f"team-conversation:{conversation_id}" if conversation_id else "",
+        activity_id=legacy_submit_activity_id,
         kind="start",
         payload={
             "conversation_id": conversation_id,
             "conversation_session_id": str(params.get("conversation_session_id") or ""),
+            **({"request_activity_id": request_activity_id} if request_activity_id else {}),
             "text_len": len(str(params.get("text") or "")),
         },
         source="team_mission.message.submit",
     )
     # Group-chat: route directly to a worker member, bypassing the leader.
-    target_member_id = _target_member_id_from_params(params)
     if target_member_id:
         return _submit_message_to_member(
             rid,
@@ -759,17 +832,28 @@ def _(rid, params: dict) -> dict:
         team_context["team_capability_snapshot_id"] = snapshot_id
     if mission_id:
         team_context["mission_id"] = mission_id
-    activity_mission_id = str(
-        (identity_mission or {}).get("mission_id")
-        or (identity_mission or {}).get("missionId")
-        or mission_id
-        or ""
-    ).strip() if isinstance(identity_mission, dict) else str(mission_id or "").strip()
-    leader_activity_kind = "mission" if activity_mission_id else "chat"
-    if activity_mission_id:
+    if request_activity_id:
+        team_context["activity_id"] = request_activity_id
+        team_context["activityId"] = request_activity_id
+        team_context["request_activity_id"] = request_activity_id
+        team_context["requestActivityId"] = request_activity_id
+    # A conversation-only leader turn may include a historical mission in
+    # prompt context, but that mission must not own the new run. Otherwise a
+    # follow-up after cancel/retry is written to the old mission activity and
+    # the current team room never receives the leader's start-task event.
+    activity_mission_id = str(mission_id or "").strip() if explicit_mission_request else ""
+    if request_activity_id:
+        leader_activity_id = request_activity_id
+        leader_activity_kind = _activity_kind_from_activity_id(
+            request_activity_id,
+            fallback="team_dispatch",
+        )
+    elif activity_mission_id:
         leader_activity_id = f"mission:{activity_mission_id}"
+        leader_activity_kind = "mission"
     else:
         leader_activity_id = f"chat:{conversation_session_id}"
+        leader_activity_kind = "chat"
     leader_run_home = _home_from_profile_params(profile_params)
     control_home = _control_plane_home()
     run_context = RunContext(
@@ -791,6 +875,11 @@ def _(rid, params: dict) -> dict:
             text=draft_text,
             client_message_id=client_message_id,
             source_kind="leader_chat_user",
+            transcript_activity_kind=(
+                "mission_start"
+                if activity_mission_id or leader_activity_kind == "team_dispatch"
+                else "leader_chat"
+            ),
         )
     except Exception as exc:
         return _err(rid, 5008, f"team user message persistence failed: {exc}")
@@ -849,6 +938,7 @@ def _(rid, params: dict) -> dict:
         rid,
         {
             "mission_id": mission_id,
+            "activity_id": request_activity_id or leader_activity_id,
             "conversation_id": conversation_id,
             "conversation_session_id": conversation_session_id,
             "conversation": conversation,
@@ -1815,13 +1905,14 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4006, "mission_id required")
     if not node_id:
         return _err(rid, 4006, "node_id required")
+    node_activity_id = f"act-node:{mission_id}:{node_id}"
     node = db.get_team_mission_node(mission_id, node_id)
     if not node:
         return _err(rid, 4040, "team mission node not found")
     # ADR-0001 Phase 1.D: audit-only activity_command for node-start.
     _legacy_activity_command_id = record_legacy_activity_command(
         db,
-        activity_id=f"mission:{mission_id}" if mission_id else "",
+        activity_id=node_activity_id,
         kind="start",
         payload={
             "mission_id": mission_id,
@@ -1981,13 +2072,18 @@ def _(rid, params: dict) -> dict:
     run_context = RunContext(
         conversation_session_id=conversation_session_id,
         participant_id=node_participant_id,
-        activity_id=f"mission:{mission_id}",
+        activity_id=node_activity_id,
         activity_kind="mission",
         execution_scope_key=runtime_scope_key,
         control_home=_control_plane_home(),
         execution_home=_home_from_profile_params(profile_params),
     )
-    binding_metadata = {"turn_id": turn_id, "source": "team_mission.node.start"}
+    binding_metadata = {
+        "turn_id": turn_id,
+        "source": "team_mission.node.start",
+        "activity_id": node_activity_id,
+        "activityId": node_activity_id,
+    }
     if task_id:
         binding_metadata["task_id"] = task_id
     db.bind_team_mission_run(

@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
+from hermes_team_mission.domain.handoff_contract import deliverable_is_effective_handoff
+from hermes_team_mission.domain.handoff_contract import node_requires_authoritative_handoff
 from hermes_team_mission.domain.node_kinds import TEAM_MISSION_CONTROL_NODE_KINDS
 from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_kind
 
@@ -15,6 +17,44 @@ _ACTIVE_NODE_STATUSES = {"running", "starting", "waiting_approval"}
 _TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 _EXECUTION_MODES_REQUIRE_FINALIZERS = {"supervised_mission", "autonomous_mission", "manual_graph"}
 _NON_WORK_NODE_KINDS = TEAM_MISSION_CONTROL_NODE_KINDS
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on", "enabled"}
+
+
+def _mission_allows_auto_finalizers(mission: Dict[str, Any] | None) -> bool:
+    mission = mission if isinstance(mission, dict) else {}
+    metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+    return any(
+        _truthy(metadata.get(key))
+        for key in (
+            "allow_auto_finalizers",
+            "allowAutoFinalizers",
+            "legacy_auto_finalizers",
+            "legacyAutoFinalizers",
+        )
+    )
+
+
+def _node_handoff_deliverable(node: Dict[str, Any] | None) -> Dict[str, Any]:
+    node = node if isinstance(node, dict) else {}
+    for key in ("deliverable", "last_deliverable", "lastDeliverable"):
+        value = node.get(key)
+        if isinstance(value, dict) and value:
+            return value
+    return {}
+
+
+def _node_satisfies_dependency(node: Dict[str, Any] | None) -> bool:
+    node = node if isinstance(node, dict) else {}
+    if str(node.get("status") or "") not in _DEPENDENCY_SATISFIED_STATUSES:
+        return False
+    if not node_requires_authoritative_handoff(node):
+        return True
+    return deliverable_is_effective_handoff(_node_handoff_deliverable(node))
 
 
 def _task_id_from_metadata(metadata: Dict[str, Any] | None) -> str:
@@ -94,10 +134,7 @@ def _required_execution_completed(
         node for node in scoped_nodes
         if normalize_team_mission_node_kind(node.get("kind")) not in {"root", "approval_gate"}
     ]
-    return bool(required_nodes) and all(
-        str(node.get("status") or "") in _DEPENDENCY_SATISFIED_STATUSES
-        for node in required_nodes
-    )
+    return bool(required_nodes) and all(_node_satisfies_dependency(node) for node in required_nodes)
 
 
 def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
@@ -129,7 +166,7 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
             continue
         dependencies = dependency_sources_by_target.get(node_id, set())
         dependencies_satisfied = all(
-            str((nodes_by_id.get(dep) or {}).get("status") or "") in _DEPENDENCY_SATISFIED_STATUSES
+            _node_satisfies_dependency(nodes_by_id.get(dep) or {})
             for dep in dependencies
         )
         next_status = status
@@ -163,12 +200,14 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
             changed_nodes.append(node)
         if next_status in _STARTABLE_NODE_STATUSES and not bool(metadata.get("manual_start")):
             ready_node_ids.append(node_id)
-    finalizer_changes = ensure_team_mission_finalizers(
-        db,
-        mission=mission,
-        nodes=[node for node in db.get_team_mission_graph(mission_id).get("nodes", []) if isinstance(node, dict)],
-        edges=edges,
-    )
+    finalizer_changes = []
+    if _mission_allows_auto_finalizers(mission):
+        finalizer_changes = ensure_team_mission_finalizers(
+            db,
+            mission=mission,
+            nodes=[node for node in db.get_team_mission_graph(mission_id).get("nodes", []) if isinstance(node, dict)],
+            edges=edges,
+        )
     if finalizer_changes:
         changed_nodes.extend(finalizer_changes)
         graph_after_finalizers = db.get_team_mission_graph(mission_id)
@@ -239,6 +278,25 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
         )
         updated_graph = db.get_team_mission_graph(mission_id)
     if mission_status.lower() in _TERMINAL_MISSION_STATUSES:
+        finalized_result: Dict[str, Any] = {}
+        try:
+            from hermes_team_mission.runtime.mission_result import finalize_team_mission_result
+
+            finalized_result = finalize_team_mission_result(db, mission_id)
+        except Exception:
+            pass
+        try:
+            from hermes_team_mission.runtime.snapshot_events import append_team_mission_snapshot_updated
+
+            append_team_mission_snapshot_updated(
+                db,
+                mission_id=mission_id,
+                reason="mission_terminal",
+                status=mission_status,
+                result_id=str((finalized_result or {}).get("result_id") or ""),
+            )
+        except Exception:
+            pass
         linked_status = "cancelled" if mission_status.lower() in {"cancelled", "canceled", "interrupted"} else mission_status
         linker = getattr(db, "_set_linked_conversation_mission_status", None)
         if callable(linker):
@@ -294,6 +352,18 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
                 pruner(mission_id)
             except Exception:
                 pass
+    if changed_nodes or mission_status != prior_mission_status:
+        try:
+            from hermes_team_mission.runtime.snapshot_events import append_team_mission_snapshot_updated
+
+            append_team_mission_snapshot_updated(
+                db,
+                mission_id=mission_id,
+                reason="graph_reduced",
+                status=mission_status,
+            )
+        except Exception:
+            pass
     return {
         "mission_id": mission_id,
         "graph": updated_graph,
@@ -314,6 +384,8 @@ def ensure_team_mission_finalizers(
     mode = str((mission or {}).get("mode") or "").strip()
     if not mission_id or mode not in _EXECUTION_MODES_REQUIRE_FINALIZERS:
         return []
+    if not _mission_allows_auto_finalizers(mission):
+        return []
     mission_metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
     active_task_id = _task_id_from_metadata(mission_metadata)
     nodes_by_kind: Dict[str, List[Dict[str, Any]]] = {}
@@ -328,7 +400,7 @@ def ensure_team_mission_finalizers(
     ]
     if not work_nodes:
         return []
-    if not all(str(node.get("status") or "") in _DEPENDENCY_SATISFIED_STATUSES for node in work_nodes):
+    if not all(_node_satisfies_dependency(node) for node in work_nodes):
         return []
     changed: List[Dict[str, Any]] = []
     verifier_nodes = nodes_by_kind.get("verifier") or []
@@ -345,10 +417,15 @@ def ensure_team_mission_finalizers(
             runtime_scope_key=f"team:{mission_id}:{active_task_id + ':' if active_task_id else ''}verifier",
             output_contract={
                 "format": "verification_report",
+                "delivery_channel": "handoff",
+                "requires_explicit_handoff": True,
                 "requires_process_events": True,
                 "requires_deliverable": True,
             },
-            metadata=_metadata_with_task_id({"mode": mode, "phase": "verifying", "auto_finalizer": True}, active_task_id),
+            metadata=_metadata_with_task_id(
+                {"mode": mode, "phase": "verifying", "auto_finalizer": True, "system_generated": True},
+                active_task_id,
+            ),
             position_x=0,
             position_y=720,
         )
@@ -378,10 +455,7 @@ def ensure_team_mission_finalizers(
                     {"type": "mission.edge.created", "payload": {"edge": edge}},
                 )
         return changed
-    verifier_terminal = all(
-        str(node.get("status") or "") in _DEPENDENCY_SATISFIED_STATUSES
-        for node in verifier_nodes
-    )
+    verifier_terminal = all(_node_satisfies_dependency(node) for node in verifier_nodes)
     if verifier_terminal and not synthesis_nodes:
         synthesis_id = _task_scoped_node_id(mission_id, active_task_id, "synthesis")
         synthesis = db.upsert_team_mission_node(
@@ -394,10 +468,15 @@ def ensure_team_mission_finalizers(
             runtime_scope_key=f"team:{mission_id}:{active_task_id + ':' if active_task_id else ''}synthesis",
             output_contract={
                 "format": "final_deliverable",
+                "delivery_channel": "handoff",
+                "requires_explicit_handoff": True,
                 "requires_process_events": True,
                 "requires_deliverable": True,
             },
-            metadata=_metadata_with_task_id({"mode": mode, "phase": "synthesis", "auto_finalizer": True}, active_task_id),
+            metadata=_metadata_with_task_id(
+                {"mode": mode, "phase": "synthesis", "auto_finalizer": True, "system_generated": True},
+                active_task_id,
+            ),
             position_x=0,
             position_y=960,
         )

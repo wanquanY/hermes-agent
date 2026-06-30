@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
+from agent.dovie_diagnostics import emit_dovie_runtime_diagnostic
 from tui_gateway.run_worker import RunTerminalFrame
 from tui_gateway.services.runtime_proxy import RuntimeScope
 from tui_gateway.services.worker_supervisor import RunWorker, WorkerSupervisor
@@ -22,6 +23,11 @@ _log = logging.getLogger(__name__)
 
 _TerminalCallback = Callable[[str, str, RunTerminalFrame], Awaitable[None]]
 _StateKey = tuple[str, str]
+_EnvFingerprint = tuple[tuple[str, str], ...]
+
+
+def _worker_pool_log(stage: str, **fields: Any) -> None:
+    emit_dovie_runtime_diagnostic("dovie-worker-run", stage, fields)
 
 
 @dataclass(frozen=True)
@@ -58,6 +64,7 @@ class _LeaseState:
     worker: RunWorker
     created_at: float
     last_acquired_at: float
+    profile_env_fingerprint: _EnvFingerprint = field(default_factory=tuple)
     idle_since: Optional[float] = None
     inflight: dict[str, _RunRecord] = field(default_factory=dict)
 
@@ -108,26 +115,72 @@ class WorkerPool:
         self._ensure_reap_task()
         lease_lock = await self._lock_for(key)
         async with lease_lock:
+            profile_env = self._profile_env_overrides(profile_context)
+            profile_env_fingerprint = self._env_fingerprint(profile_env)
             state = self._states.get(key)
             if state is not None and state.worker.running():
-                now = time.time()
-                state.last_acquired_at = now
-                state.idle_since = None
-                state.worker.mark_used()
-                return WorkerLease(conversation_id=conv, worker=state.worker, acquired_at=now)
+                if state.profile_env_fingerprint != profile_env_fingerprint:
+                    if state.has_inflight():
+                        _log.warning(
+                            "[worker-pool] reusing worker with stale profile env while runs are active conv_id=%s scope_key=%s pid=%s",
+                            state.conversation_id,
+                            state.worker.scope_key,
+                            state.worker.process.pid if state.worker.process else None,
+                        )
+                    else:
+                        _worker_pool_log(
+                            "pool-lease-env-respawn",
+                            conversation_id=conv,
+                            scope_key=state.worker.scope_key,
+                            worker_conversation_id=state.worker.conversation_id,
+                            pid=state.worker.process.pid if state.worker.process else None,
+                            old_env_keys=[env_key for env_key, _value in state.profile_env_fingerprint],
+                            new_env_keys=sorted(profile_env),
+                        )
+                        self._states.pop(key, None)
+                        await self._supervisor.shutdown(
+                            state.worker.scope_key,
+                            state.worker.conversation_id,
+                        )
+                        state = None
+                if state is not None:
+                    now = time.time()
+                    state.last_acquired_at = now
+                    state.idle_since = None
+                    state.worker.mark_used()
+                    _worker_pool_log(
+                        "pool-lease-reuse",
+                        conversation_id=conv,
+                        scope_key=state.worker.scope_key,
+                        worker_conversation_id=state.worker.conversation_id,
+                        pid=state.worker.process.pid if state.worker.process else None,
+                        inflight_runs=sorted(state.inflight),
+                        worker_active_runs=sorted(state.worker.active_runs),
+                        profile_env_keys=sorted(profile_env),
+                    )
+                    return WorkerLease(conversation_id=conv, worker=state.worker, acquired_at=now)
             if state is not None:
                 await self._handle_dead_worker(key, state, reason="worker exited before acquire")
 
             scope = self._scope_for(conv, profile_context, scope_key=scope_key)
-            worker = await self._supervisor.ensure(scope)
+            worker = await self._supervisor.ensure(scope, env_overrides=profile_env)
             now = time.time()
             state = _LeaseState(
                 conversation_id=conv,
                 worker=worker,
                 created_at=now,
                 last_acquired_at=now,
+                profile_env_fingerprint=profile_env_fingerprint,
             )
             self._states[key] = state
+            _worker_pool_log(
+                "pool-lease-spawn",
+                conversation_id=conv,
+                scope_key=worker.scope_key,
+                worker_conversation_id=worker.conversation_id,
+                pid=worker.process.pid if worker.process else None,
+                profile_env_keys=sorted(profile_env),
+            )
             return WorkerLease(conversation_id=conv, worker=worker, acquired_at=now)
 
     async def release(self, conversation_id: str, scope_key: str | None = None) -> None:
@@ -243,12 +296,27 @@ class WorkerPool:
             return
         key = await self._state_key_for_run_record(conv, scope_key)
         if key is None:
+            _worker_pool_log(
+                "pool-record-start-miss",
+                conversation_id=conv,
+                scope_key=scope_key or "",
+                run_id=normalized_run_id,
+                reason="state_key_not_found",
+            )
             return
         lease_lock = await self._lock_for(key)
         async with lease_lock:
             state = self._states.get(key)
             if state is None:
+                _worker_pool_log(
+                    "pool-record-start-miss",
+                    conversation_id=conv,
+                    scope_key=scope_key or "",
+                    run_id=normalized_run_id,
+                    reason="state_not_found",
+                )
                 return
+            before_active_runs = sorted(set(state.inflight) | set(state.worker.active_runs))
             state.inflight[normalized_run_id] = _RunRecord(
                 run_id=normalized_run_id,
                 stored_session_id=str(stored_session_id or conv).strip(),
@@ -256,6 +324,16 @@ class WorkerPool:
             )
             state.worker.active_runs.add(normalized_run_id)
             self._run_to_state_key[normalized_run_id] = key
+            _worker_pool_log(
+                "pool-record-start",
+                conversation_id=conv,
+                scope_key=state.worker.scope_key,
+                worker_conversation_id=state.worker.conversation_id,
+                run_id=normalized_run_id,
+                turn_id=str(turn_id or "").strip(),
+                before_active_runs=before_active_runs,
+                after_active_runs=sorted(set(state.inflight) | set(state.worker.active_runs)),
+            )
 
     async def forget_run(self, run_id: str) -> None:
         """Drop a run from pool tracking without publishing a terminal event."""
@@ -265,14 +343,35 @@ class WorkerPool:
             return
         key = self._run_to_state_key.pop(normalized_run_id, None)
         if key is None:
+            _worker_pool_log(
+                "pool-forget-miss",
+                run_id=normalized_run_id,
+                reason="state_key_not_found",
+            )
             return
         lease_lock = await self._lock_for(key)
         async with lease_lock:
             state = self._states.get(key)
             if state is None:
+                _worker_pool_log(
+                    "pool-forget-miss",
+                    run_id=normalized_run_id,
+                    scope_key=key[1],
+                    conversation_id=key[0],
+                    reason="state_not_found",
+                )
                 return
+            before_active_runs = sorted(set(state.inflight) | set(state.worker.active_runs))
             state.inflight.pop(normalized_run_id, None)
             state.worker.active_runs.discard(normalized_run_id)
+            _worker_pool_log(
+                "pool-forget",
+                run_id=normalized_run_id,
+                scope_key=state.worker.scope_key,
+                conversation_id=state.conversation_id,
+                before_active_runs=before_active_runs,
+                after_active_runs=sorted(set(state.inflight) | set(state.worker.active_runs)),
+            )
 
     async def _reap_loop(self) -> None:
         try:
@@ -421,16 +520,40 @@ class WorkerPool:
                     key = candidate
                     break
         if key is None:
+            _worker_pool_log(
+                "pool-terminal-miss",
+                run_id=normalized_run_id,
+                scope_key=scope_key,
+                conversation_id=conversation_id,
+                reason="state_key_not_found",
+            )
             return
         lease_lock = await self._lock_for(key)
         async with lease_lock:
             state = self._states.get(key)
             if state is None:
+                _worker_pool_log(
+                    "pool-terminal-miss",
+                    run_id=normalized_run_id,
+                    scope_key=scope_key,
+                    conversation_id=conversation_id,
+                    reason="state_not_found",
+                )
                 return
+            before_active_runs = sorted(set(state.inflight) | set(state.worker.active_runs))
             state.inflight.pop(normalized_run_id, None)
             state.worker.active_runs.discard(normalized_run_id)
             if not state.has_inflight() and state.idle_since is None:
                 state.idle_since = time.time()
+            _worker_pool_log(
+                "pool-terminal",
+                run_id=normalized_run_id,
+                scope_key=state.worker.scope_key,
+                conversation_id=state.conversation_id,
+                before_active_runs=before_active_runs,
+                after_active_runs=sorted(set(state.inflight) | set(state.worker.active_runs)),
+                idle_since=state.idle_since,
+            )
 
     def _wrap_supervisor_terminal_callback(self) -> None:
         if self._terminal_callback is None:
@@ -570,3 +693,27 @@ class WorkerPool:
             conversation_id=conversation_id,
             hermes_home=hermes_home,
         )
+
+    @staticmethod
+    def _profile_env_overrides(profile_context: dict) -> dict[str, str]:
+        profile = profile_context if isinstance(profile_context, dict) else {}
+        dovie_profile = profile.get("dovie_profile")
+        if not isinstance(dovie_profile, dict):
+            dovie_profile = profile.get("dovieProfile")
+        if not isinstance(dovie_profile, dict):
+            dovie_profile = {}
+
+        env: dict[str, str] = {}
+        for source in (profile.get("env"), dovie_profile.get("env")):
+            if not isinstance(source, dict):
+                continue
+            for raw_key, raw_value in source.items():
+                key = str(raw_key or "").strip()
+                if not key or raw_value is None:
+                    continue
+                env[key] = str(raw_value)
+        return env
+
+    @staticmethod
+    def _env_fingerprint(env: dict[str, str]) -> _EnvFingerprint:
+        return tuple(sorted((str(key), str(value)) for key, value in env.items()))

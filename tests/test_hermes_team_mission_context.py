@@ -129,6 +129,35 @@ def test_worker_context_budget_keeps_handoff_protocol_before_optional_sections(m
     assert "graph_summary" in context["dropped_sections"] or "team_memory" in context["dropped_sections"]
 
 
+def test_worker_context_requires_deliverable_implies_handoff_protocol():
+    mission = {
+        "mission_id": "mission-1",
+        "title": "Mission",
+        "objective": "Verify the result.",
+        "status": "running",
+    }
+    node = {
+        "node_id": "node-verifier",
+        "kind": "verifier",
+        "title": "Verifier",
+        "objective": "Verify upstream work.",
+        "status": "ready",
+        "output_contract": {
+            "format": "verification_report",
+            "requires_deliverable": True,
+        },
+    }
+
+    context = build_team_mission_worker_context(
+        mission=mission,
+        node=node,
+        graph={"mission": mission, "nodes": [node], "edges": []},
+    )
+
+    assert "Handoff protocol:" in context["text"]
+    assert "call team_mission_submit_deliverable" in context["text"]
+
+
 def test_team_mission_graph_summary_never_returns_full_node_payload():
     graph = {
         "mission": {"mission_id": "mission-1", "title": "Mission", "objective": "Objective", "status": "planning"},
@@ -198,6 +227,7 @@ def test_worker_context_includes_upstream_handoff_deliverables_and_protocol():
     )
 
     assert "Upstream handoff deliverables" in context["text"]
+    assert "authoritative current-mission input" in context["text"]
     assert "Research handoff summary." in context["text"]
     assert "Use the native handoff channel." not in context["text"]
     assert "call team_mission_submit_deliverable" in context["text"]

@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from hermes_team_mission.gateway import runtime_methods
 from tui_gateway.services import worker_runtime
 from tui_gateway.services.runtime_proxy import RuntimeScope
 from tui_gateway.services.worker_frame_router import WorkerFrameRouter
@@ -77,6 +78,38 @@ def test_reset_for_tests_drops_singletons() -> None:
     sup = worker_runtime.worker_supervisor()
     worker_runtime._reset_for_tests()
     assert worker_runtime.worker_supervisor() is not sup
+
+
+@pytest.mark.asyncio
+async def test_team_mission_proxy_run_submit_uses_control_plane_transport(monkeypatch) -> None:
+    loop = asyncio.get_running_loop()
+    worker_runtime.remember_worker_runtime_loop(loop)
+    captured: dict[str, object] = {}
+
+    async def fake_primary_dispatch(req, transport):
+        captured["req"] = req
+        captured["transport"] = transport
+        await transport.write_async(
+            {"jsonrpc": "2.0", "id": req["id"], "result": {"status": "queued"}}
+        )
+        return True
+
+    monkeypatch.setattr(worker_runtime, "primary_dispatch", fake_primary_dispatch)
+
+    result = await asyncio.to_thread(
+        runtime_methods._proxy_run_submit_via_worker,
+        {
+            "stored_session_id": "team:mission-1:node:root",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "runtime_scope_key": "profile:agent-default",
+            "agent_profile_id": "agent-default",
+        },
+    )
+
+    assert result == {"ok": True}
+    assert isinstance(captured["transport"], worker_runtime.ControlPlaneTransport)
+    assert captured["req"]["method"] == "run.submit"
 
 
 # ── primary_dispatch (Phase 5c) ──────────────────────────────────────

@@ -21,6 +21,7 @@ import re
 import sqlite3
 import threading
 import time
+import warnings
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
@@ -4071,6 +4072,74 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         display_title = self._message_display_title_text(content) if role == "user" else ""
 
         def _do(conn):
+            def _select_projected_team_message_for_append():
+                if conversation_message_id or role not in {"assistant", "tool"}:
+                    return None
+                next_metadata = metadata if isinstance(metadata, dict) else {}
+                run_id = str(next_metadata.get("run_id") or next_metadata.get("runId") or "").strip()
+                if not run_id:
+                    return None
+                turn_id = str(next_metadata.get("turn_id") or next_metadata.get("turnId") or "").strip()
+                candidates = conn.execute(
+                    f"SELECT {self._conversation_message_columns()} "
+                    "FROM messages "
+                    "WHERE session_id = ? "
+                    "  AND role = ? "
+                    "  AND active = 1 "
+                    "  AND COALESCE(conversation_message_id, '') != '' "
+                    "ORDER BY id DESC "
+                    "LIMIT 128",
+                    (session_id, role),
+                ).fetchall()
+                for candidate in candidates:
+                    existing_metadata = self._decode_message_metadata_json(candidate["metadata_json"])
+                    if not (
+                        existing_metadata.get("team_mission")
+                        or existing_metadata.get("teamMission")
+                        or existing_metadata.get("transcript_activity_kind")
+                        or existing_metadata.get("transcriptActivityKind")
+                    ):
+                        continue
+                    if str(existing_metadata.get("run_id") or existing_metadata.get("runId") or "").strip() != run_id:
+                        continue
+                    existing_turn_id = str(
+                        existing_metadata.get("turn_id") or existing_metadata.get("turnId") or ""
+                    ).strip()
+                    if turn_id and existing_turn_id and existing_turn_id != turn_id:
+                        continue
+                    existing_participant_id = str(candidate["participant_id"] or "").strip()
+                    if participant_id and existing_participant_id and existing_participant_id != participant_id:
+                        continue
+                    if self._decode_content(candidate["content"]) != content:
+                        continue
+                    return candidate
+                return None
+
+            existing_projected = _select_projected_team_message_for_append()
+            if existing_projected is not None:
+                merged_metadata = self._merge_message_metadata(
+                    self._decode_message_metadata_json(existing_projected["metadata_json"]),
+                    metadata if isinstance(metadata, dict) else {},
+                )
+                next_reasoning = reasoning or str(existing_projected["reasoning"] or "")
+                conn.execute(
+                    """
+                    UPDATE messages
+                       SET participant_id = ?,
+                           metadata_json = ?,
+                           reasoning = ?,
+                           active = 1
+                     WHERE id = ?
+                    """,
+                    (
+                        participant_id or str(existing_projected["participant_id"] or ""),
+                        json.dumps(merged_metadata, ensure_ascii=False) if merged_metadata else None,
+                        next_reasoning,
+                        existing_projected["id"],
+                    ),
+                )
+                return existing_projected["id"]
+
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, participant_id, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
@@ -4433,107 +4502,6 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             or ""
         ).strip()
 
-    @classmethod
-    def _conversation_message_has_projector_id(cls, message: Dict[str, Any]) -> bool:
-        metadata = cls._conversation_message_metadata(message)
-        return bool(
-            str(
-                message.get("conversation_message_id")
-                or message.get("conversationMessageId")
-                or metadata.get("conversation_message_id")
-                or metadata.get("conversationMessageId")
-                or ""
-            ).strip()
-        )
-
-    @staticmethod
-    def _conversation_message_content_fingerprint(message: Dict[str, Any]) -> str:
-        content = message.get("content")
-        if isinstance(content, str):
-            return re.sub(r"\s+", "", content)
-        try:
-            return json.dumps(content, ensure_ascii=False, sort_keys=True)
-        except TypeError:
-            return str(content or "")
-
-    @classmethod
-    def _assistant_projection_shadow_keys(cls, message: Dict[str, Any]) -> set[Tuple[str, str, str, str]]:
-        if message.get("role") != "assistant" or not cls._conversation_message_has_projector_id(message):
-            return set()
-        run_id = cls._conversation_message_run_id(message)
-        fingerprint = cls._conversation_message_content_fingerprint(message)
-        if not run_id or not fingerprint:
-            return set()
-        turn_id = cls._conversation_message_turn_id(message)
-        participant_id = cls._conversation_message_participant_id(message)
-        return {
-            (run_id, turn_id, participant_id, fingerprint),
-            (run_id, "", participant_id, fingerprint),
-            (run_id, turn_id, "", fingerprint),
-        }
-
-    @classmethod
-    def _is_legacy_assistant_projection_shadow(
-        cls,
-        message: Dict[str, Any],
-        projected_keys: set[Tuple[str, str, str, str]],
-    ) -> bool:
-        if message.get("role") != "assistant":
-            return False
-        if cls._conversation_message_has_projector_id(message):
-            return False
-        run_id = cls._conversation_message_run_id(message)
-        fingerprint = cls._conversation_message_content_fingerprint(message)
-        if not run_id or not fingerprint:
-            return False
-        turn_id = cls._conversation_message_turn_id(message)
-        participant_id = cls._conversation_message_participant_id(message)
-        candidates = {
-            (run_id, turn_id, participant_id, fingerprint),
-            (run_id, "", participant_id, fingerprint),
-            (run_id, turn_id, "", fingerprint),
-        }
-        return any(candidate in projected_keys for candidate in candidates)
-
-    @classmethod
-    def _is_legacy_user_flush_shadow(
-        cls,
-        canonical_messages: List[Dict[str, Any]],
-        message: Dict[str, Any],
-    ) -> bool:
-        if message.get("role") != "user":
-            return False
-        if cls._conversation_message_has_projector_id(message):
-            return False
-        run_id = cls._conversation_message_run_id(message)
-        fingerprint = cls._conversation_message_content_fingerprint(message)
-        if not run_id or not fingerprint:
-            return False
-        current_id = cls._conversation_message_storage_id(message)
-        turn_id = cls._conversation_message_turn_id(message)
-        for previous in reversed(canonical_messages):
-            if not isinstance(previous, dict):
-                continue
-            previous_role = previous.get("role")
-            previous_run_id = cls._conversation_message_run_id(previous)
-            if previous_role == "user":
-                previous_id = cls._conversation_message_storage_id(previous)
-                if cls._conversation_message_content_fingerprint(previous) != fingerprint:
-                    return False
-                if previous_run_id:
-                    previous_turn_id = cls._conversation_message_turn_id(previous)
-                    return previous_run_id == run_id and (
-                        not turn_id or not previous_turn_id or previous_turn_id == turn_id
-                    )
-                if current_id and previous_id and current_id - previous_id > 4:
-                    return False
-                return True
-            if previous_role in {"assistant", "tool"}:
-                if previous_run_id == run_id:
-                    continue
-                return False
-        return False
-
     def _session_ids_are_team_conversation(self, session_ids: List[str]) -> bool:
         for sid in session_ids:
             try:
@@ -4544,27 +4512,6 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 return True
         return False
 
-    @classmethod
-    def _canonicalize_team_conversation_messages(
-        cls,
-        messages: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        projected_keys: set[Tuple[str, str, str, str]] = set()
-        for message in messages:
-            if isinstance(message, dict):
-                projected_keys.update(cls._assistant_projection_shadow_keys(message))
-
-        canonical: List[Dict[str, Any]] = []
-        for message in messages:
-            if not isinstance(message, dict):
-                continue
-            if cls._is_legacy_assistant_projection_shadow(message, projected_keys):
-                continue
-            if cls._is_legacy_user_flush_shadow(canonical, message):
-                continue
-            canonical.append(message)
-        return canonical
-
     @staticmethod
     def _strip_storage_fields(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         stripped: List[Dict[str, Any]] = []
@@ -4574,6 +4521,37 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             next_message.pop("timestamp", None)
             stripped.append(next_message)
         return stripped
+
+    @staticmethod
+    def _team_main_transcript_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Return the canonical user-visible transcript projection for team sessions."""
+        try:
+            from hermes_team_mission.runtime.team_transcript_writer import is_main_transcript_message
+        except Exception:
+            return list(messages)
+        visible: List[Dict[str, Any]] = []
+        seen_stable_ids: set[str] = set()
+        for message in messages:
+            if not isinstance(message, dict) or not is_main_transcript_message(message):
+                continue
+            stable_id = SessionDB._team_transcript_stable_message_id(message)
+            if stable_id:
+                if stable_id in seen_stable_ids:
+                    continue
+                seen_stable_ids.add(stable_id)
+            visible.append(message)
+        return visible
+
+    @staticmethod
+    def _team_transcript_stable_message_id(message: Dict[str, Any]) -> str:
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        return str(
+            message.get("conversation_message_id")
+            or message.get("conversationMessageId")
+            or metadata.get("conversation_message_id")
+            or metadata.get("conversationMessageId")
+            or ""
+        ).strip()
 
     @staticmethod
     def _page_canonical_messages(
@@ -4646,8 +4624,9 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             include_storage_metadata=True,
         )
 
-    def upsert_projected_conversation_message(
+    def _upsert_team_message_by_id_locked(
         self,
+        conn: sqlite3.Connection,
         *,
         session_id: str,
         conversation_message_id: str,
@@ -4657,14 +4636,8 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         metadata: Dict[str, Any],
         status: str = "",
         reasoning: Any = "",
+        timestamp: float | None = None,
     ) -> Dict[str, Any]:
-        """Insert or update a projector-owned visible transcript row.
-
-        ``conversation_message_id`` is the idempotency key for runtime-event
-        projection. It is intentionally separate from ``append_message`` so
-        legacy append-only writers keep their semantics until they are
-        migrated to the projector.
-        """
         stable_session_id = str(session_id or "").strip()
         stable_message_id = str(conversation_message_id or "").strip()
         if not stable_session_id:
@@ -4683,9 +4656,9 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         metadata_json = json.dumps(next_metadata, ensure_ascii=False) if next_metadata else None
         stored_content = self._encode_content(content)
         stored_reasoning = str(reasoning or "")
-        message_timestamp = time.time()
+        message_timestamp = float(timestamp or time.time())
 
-        def _update_session_index(conn) -> None:
+        def _update_session_index() -> None:
             try:
                 conn.execute(
                     """
@@ -4708,7 +4681,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             except sqlite3.OperationalError:
                 pass
 
-        def _select_row(conn):
+        def _select_row():
             return conn.execute(
                 f"SELECT {self._conversation_message_columns()} "
                 "FROM messages "
@@ -4717,88 +4690,186 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 (stable_session_id, stable_message_id),
             ).fetchone()
 
-        def _do(conn):
-            existing = _select_row(conn)
-            if existing is None:
-                cursor = conn.execute(
-                    """
-                    INSERT INTO messages (
-                        session_id, role, content, participant_id, timestamp,
-                        conversation_message_id, metadata_json, reasoning
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        stable_session_id,
-                        normalized_role,
-                        stored_content,
-                        normalized_participant_id,
-                        message_timestamp,
-                        stable_message_id,
-                        metadata_json,
-                        stored_reasoning,
-                    ),
+        def _select_legacy_shadow_row():
+            run_id = str(next_metadata.get("run_id") or "").strip()
+            if not run_id:
+                return None
+            turn_id = str(next_metadata.get("turn_id") or "").strip()
+            candidates = conn.execute(
+                f"SELECT {self._conversation_message_columns()} "
+                "FROM messages "
+                "WHERE session_id = ? "
+                "  AND role = ? "
+                "  AND COALESCE(conversation_message_id, '') = '' "
+                "  AND active = 1 "
+                "ORDER BY id",
+                (stable_session_id, normalized_role),
+            ).fetchall()
+            for candidate in candidates:
+                metadata = self._decode_message_metadata_json(candidate["metadata_json"])
+                if str(metadata.get("run_id") or "").strip() != run_id:
+                    continue
+                candidate_turn_id = str(metadata.get("turn_id") or "").strip()
+                if turn_id and candidate_turn_id and candidate_turn_id != turn_id:
+                    continue
+                candidate_participant_id = str(candidate["participant_id"] or "").strip()
+                if (
+                    normalized_participant_id
+                    and candidate_participant_id
+                    and candidate_participant_id != normalized_participant_id
+                ):
+                    continue
+                if self._decode_content(candidate["content"]) != content:
+                    continue
+                return candidate
+            return None
+
+        existing = _select_row()
+        if existing is None:
+            existing = _select_legacy_shadow_row()
+        if existing is None:
+            cursor = conn.execute(
+                """
+                INSERT INTO messages (
+                    session_id, role, content, participant_id, timestamp,
+                    conversation_message_id, metadata_json, reasoning
                 )
-                conn.execute(
-                    """
-                    UPDATE sessions
-                       SET message_count = message_count + 1,
-                           last_active = ?
-                     WHERE id = ?
-                    """,
-                    (message_timestamp, stable_session_id),
-                )
-                _update_session_index(conn)
-                row_id = cursor.lastrowid
-            else:
-                merged_metadata = self._merge_message_metadata(
-                    self._decode_message_metadata_json(existing["metadata_json"]),
-                    next_metadata,
-                )
-                conn.execute(
-                    """
-                    UPDATE messages
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stable_session_id,
+                    normalized_role,
+                    stored_content,
+                    normalized_participant_id,
+                    message_timestamp,
+                    stable_message_id,
+                    metadata_json,
+                    stored_reasoning,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE sessions
+                   SET message_count = message_count + 1,
+                       last_active = ?
+                 WHERE id = ?
+                """,
+                (message_timestamp, stable_session_id),
+            )
+            _update_session_index()
+            row_id = cursor.lastrowid
+        else:
+            merged_metadata = self._merge_message_metadata(
+                self._decode_message_metadata_json(existing["metadata_json"]),
+                next_metadata,
+            )
+            next_reasoning = stored_reasoning or str(existing["reasoning"] or "")
+            conn.execute(
+                """
+                UPDATE messages
                        SET role = ?,
                            content = ?,
                            participant_id = ?,
                            timestamp = ?,
+                           conversation_message_id = ?,
                            metadata_json = ?,
                            reasoning = ?,
                            active = 1
                      WHERE id = ?
                     """,
-                    (
-                        normalized_role,
+                (
+                    normalized_role,
                         stored_content,
                         normalized_participant_id,
                         message_timestamp,
+                        stable_message_id,
                         json.dumps(merged_metadata, ensure_ascii=False),
-                        stored_reasoning,
+                        next_reasoning,
                         existing["id"],
-                    ),
-                )
-                conn.execute(
-                    """
-                    UPDATE sessions
-                       SET last_active = MAX(COALESCE(last_active, 0), ?)
-                     WHERE id = ?
-                    """,
-                    (message_timestamp, stable_session_id),
-                )
-                _update_session_index(conn)
-                row_id = existing["id"]
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE sessions
+                   SET last_active = MAX(COALESCE(last_active, 0), ?)
+                 WHERE id = ?
+                """,
+                (message_timestamp, stable_session_id),
+            )
+            _update_session_index()
+            row_id = existing["id"]
 
-            row = conn.execute(
-                f"SELECT {self._conversation_message_columns()} "
-                "FROM messages WHERE id = ?",
-                (row_id,),
-            ).fetchone()
-            return self._message_row_as_conversation(
-                row,
-                include_storage_metadata=True,
+        row = conn.execute(
+            f"SELECT {self._conversation_message_columns()} "
+            "FROM messages WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+        return self._message_row_as_conversation(
+            row,
+            include_storage_metadata=True,
+        )
+
+    def _upsert_team_message_by_id(
+        self,
+        *,
+        session_id: str,
+        conversation_message_id: str,
+        role: str,
+        content: Any,
+        participant_id: str,
+        metadata: Dict[str, Any],
+        status: str = "",
+        reasoning: Any = "",
+    ) -> Dict[str, Any]:
+        """Insert or update an explicitly owned team transcript row by id."""
+
+        def _do(conn):
+            return self._upsert_team_message_by_id_locked(
+                conn,
+                session_id=session_id,
+                conversation_message_id=conversation_message_id,
+                role=role,
+                content=content,
+                participant_id=participant_id,
+                metadata=metadata,
+                status=status,
+                reasoning=reasoning,
             )
 
         return self._execute_write(_do)
+
+    def upsert_projected_conversation_message(
+        self,
+        *,
+        session_id: str,
+        conversation_message_id: str,
+        role: str,
+        content: Any,
+        participant_id: str,
+        metadata: Dict[str, Any],
+        status: str = "",
+        reasoning: Any = "",
+    ) -> Dict[str, Any]:
+        """Deprecated compatibility shim for legacy DB RPC callers.
+
+        New team transcript writes must go through the explicit writer subsystem
+        in ``hermes_team_mission.runtime.team_transcript_writer``.
+        """
+        warnings.warn(
+            "upsert_projected_conversation_message is deprecated; use the team transcript writer",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._upsert_team_message_by_id(
+            session_id=session_id,
+            conversation_message_id=conversation_message_id,
+            role=role,
+            content=content,
+            participant_id=participant_id,
+            metadata=metadata,
+            status=status,
+            reasoning=reasoning,
+        )
 
     def merge_message_metadata(
         self,
@@ -5435,7 +5506,14 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 include_storage_metadata=True,
                 include_inactive=include_inactive,
             )
-            messages = self._canonicalize_team_conversation_messages(messages)
+            messages = self._team_main_transcript_messages(messages)
+            if include_ancestors:
+                filtered_messages: List[Dict[str, Any]] = []
+                for message in messages:
+                    if self._is_duplicate_replayed_user_message(filtered_messages, message):
+                        continue
+                    filtered_messages.append(message)
+                messages = filtered_messages
             if not include_storage_metadata:
                 messages = self._strip_storage_fields(messages)
             return messages
@@ -5497,7 +5575,14 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 )
                 for row in rows
             ]
-            messages = self._canonicalize_team_conversation_messages(messages)
+            messages = self._team_main_transcript_messages(messages)
+            if include_ancestors:
+                filtered_messages: List[Dict[str, Any]] = []
+                for message in messages:
+                    if self._is_duplicate_replayed_user_message(filtered_messages, message):
+                        continue
+                    filtered_messages.append(message)
+                messages = filtered_messages
             selected, page_info = self._page_canonical_messages(
                 messages,
                 direction=normalized_direction,

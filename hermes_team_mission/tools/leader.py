@@ -9,7 +9,6 @@ by the separate ``team_mission_planning`` toolset.
 from __future__ import annotations
 
 import json
-import logging
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -29,19 +28,17 @@ from hermes_team_mission.tools.profile import _leader_run_context
 _READ_TOOLSET = "team_mission_read"
 _CONVERSATION_TOOLSET = "team_mission_conversation_leader"
 _TEAM_TASK_PLANNING_MODES = {MODE_SUPERVISED_MISSION, MODE_AUTONOMOUS_MISSION}
-_START_TASK_HANDOFF_MESSAGE = (
-    "Team mission accepted; planning has started. This is the task-start "
-    "state, not the final result. The final deliverable will be written "
-    "back here when the mission graph completes."
+_START_TASK_RESULT_MESSAGE = (
+    "Team mission task accepted. A new asynchronous team task was created "
+    "and execution is now owned by the Team Mission runtime."
 )
-_log = logging.getLogger(__name__)
-
-
-def _team_chain_log(stage: str, **fields: Any) -> None:
-    try:
-        _log.warning("[dovie-team-chain] %s %s", stage, json.dumps(fields, ensure_ascii=False, sort_keys=True, default=str))
-    except Exception:
-        pass
+_START_TASK_FOLLOWUP_INSTRUCTION = (
+    "Reply naturally and briefly in the user's language. Tell the user the "
+    "team task has started and is being processed asynchronously, progress is "
+    "available on the canvas, and they can continue chatting or submit another "
+    "task. Do not continue task execution, do not create deliverables, and do "
+    "not call additional tools in this turn."
+)
 
 
 def _text(value: Any) -> str:
@@ -216,13 +213,11 @@ def _handle_status(args: dict[str, Any], parent_agent=None, **_kwargs) -> str:
 def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> str:
     ctx = _team_context()
     if isinstance(ctx, str):
-        _team_chain_log("start-task-tool-rejected-context", error=ctx)
         return tool_error(ctx)
     team_context = ctx
     db = _get_db(parent_agent)
     objective = _text(args.get("objective") or args.get("task") or args.get("prompt"))
     if not objective:
-        _team_chain_log("start-task-tool-rejected-objective", args_keys=sorted(str(key) for key in args.keys()))
         return tool_error("objective is required.")
     title = _text(args.get("title")) or objective[:80] or "Team task"
     task_id = _text(args.get("task_id") or args.get("taskId")) or f"task-{uuid.uuid4().hex[:12]}"
@@ -242,28 +237,13 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
         conversation = resolved.get("conversation") if isinstance(resolved, dict) and isinstance(resolved.get("conversation"), Mapping) else {}
         conversation_session_id = _text(conversation.get("stable_session_id")) or conversation_id
     if not conversation_id or not conversation_session_id:
-        _team_chain_log(
-            "start-task-tool-rejected-missing-conversation",
-            requested_mission_id=mission_id,
-            task_id=task_id,
-            conversation_id=conversation_id,
-            conversation_session_id=conversation_session_id,
-            team_context=team_context,
-        )
         return tool_error("Team Mission conversation context is not available for this Leader turn.")
     active_run_id = _active_run_id(parent_agent)
-    _team_chain_log(
-        "start-task-tool-entry",
-        requested_mission_id=mission_id,
-        task_id=task_id,
-        title=title,
-        objective_length=len(objective),
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        team_id=_text(team_context.get("team_id") or team_context.get("teamId")),
-        active_run_id=active_run_id,
-        workspace_id=_text(team_context.get("workspace_id") or team_context.get("workspaceId")),
-        workspace_path=_text(team_context.get("workspace_path") or team_context.get("workspacePath")),
+    request_activity_id = _text(
+        team_context.get("request_activity_id")
+        or team_context.get("requestActivityId")
+        or team_context.get("activity_id")
+        or team_context.get("activityId")
     )
     existing_mission_id, existing_graph = _active_mission_graph(db, {
         **team_context,
@@ -286,14 +266,6 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
     ):
         node = _root_leader_node(existing_graph)
         mission_status = _text(existing_mission.get("status")) or "planning"
-        _team_chain_log(
-            "start-task-tool-idempotent",
-            mission_id=existing_mission_id,
-            task_id=existing_task_id or task_id,
-            conversation_id=conversation_id,
-            active_run_id=active_run_id,
-            mission_status=mission_status,
-        )
         return tool_result(
             success=True,
             intent="start_team_task",
@@ -303,19 +275,22 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
             final_result_available=False,
             await_final_deliverable=True,
             mission_id=existing_mission_id,
+            activity_id=request_activity_id,
             conversation_id=conversation_id,
             task_id=existing_task_id or task_id,
             node=node or {},
             run={},
             graph_summary=_graph_summary(existing_graph),
-            message=_START_TASK_HANDOFF_MESSAGE,
+            message=_START_TASK_RESULT_MESSAGE,
+            assistant_followup_instruction=_START_TASK_FOLLOWUP_INSTRUCTION,
             idempotent=True,
             hermes_control={
                 "kind": "team_mission_started",
-                "end_current_turn": True,
+                "skip_remaining_tool_calls": True,
+                "require_followup_response": True,
                 "await_final_deliverable": True,
                 "mission_status": mission_status,
-                "assistant_response": _START_TASK_HANDOFF_MESSAGE,
+                "assistant_followup_instruction": _START_TASK_FOLLOWUP_INSTRUCTION,
             },
         )
     members = list(team_context.get("members") or []) if isinstance(team_context.get("members"), list) else []
@@ -330,19 +305,23 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
         "task_objective": objective,
         "conversation_mode": conversation_mode,
         "task_execution_mode": task_execution_mode,
+        **({"request_activity_id": request_activity_id} if request_activity_id else {}),
+        **({"dispatch_activity_id": request_activity_id} if request_activity_id else {}),
+        **({"parent_activity_id": request_activity_id} if request_activity_id else {}),
     }
     # ADR-0001 Phase 1.D: audit-only activity_command for leader-tool mission start.
     _db = _get_db(parent_agent)
     if _db is not None:
         record_legacy_activity_command(
             _db,
-            activity_id=f"mission:{mission_id}" if mission_id else "",
+            activity_id=request_activity_id or (f"mission:{mission_id}" if mission_id else ""),
             kind="create",
             payload={
                 "mission_id": mission_id,
                 "task_id": task_id,
                 "conversation_id": conversation_id,
                 "conversation_session_id": conversation_session_id,
+                **({"request_activity_id": request_activity_id} if request_activity_id else {}),
                 "title": title,
                 "objective": objective,
             },
@@ -364,37 +343,19 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
             },
             "members": members,
             "task_id": task_id,
+            **({"activity_id": request_activity_id} if request_activity_id else {}),
             "record_user_task_message": False,
             "metadata": metadata,
         },
     )
     created, error = _unwrap_response(create_response)
     if error:
-        _team_chain_log(
-            "start-task-tool-create-error",
-            requested_mission_id=mission_id,
-            task_id=task_id,
-            conversation_id=conversation_id,
-            conversation_session_id=conversation_session_id,
-            error=error,
-        )
         return tool_error(error)
     graph = db.get_team_mission_graph(mission_id)
     started = created.get("leader_start") if isinstance(created.get("leader_start"), Mapping) else {}
     node = started.get("node") if isinstance(started.get("node"), Mapping) else _root_leader_node(graph)
     mission = graph.get("mission") if isinstance(graph, dict) and isinstance(graph.get("mission"), Mapping) else {}
     mission_status = _text(mission.get("status")) or "planning"
-    _team_chain_log(
-        "start-task-tool-created",
-        mission_id=mission_id,
-        conversation_id=conversation_id,
-        conversation_session_id=conversation_session_id,
-        task_id=task_id,
-        mission_status=mission_status,
-        node_id=_text((node or {}).get("node_id") or (node or {}).get("nodeId")),
-        run=started.get("run") if isinstance(started, Mapping) else {},
-        graph_node_count=len(graph.get("nodes") or []) if isinstance(graph, dict) else 0,
-    )
     return tool_result(
         success=True,
         intent="start_team_task",
@@ -404,18 +365,21 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
         final_result_available=False,
         await_final_deliverable=True,
         mission_id=mission_id,
+        activity_id=request_activity_id,
         conversation_id=conversation_id,
         task_id=task_id,
         node=node or {},
         run=started.get("run") if isinstance(started, Mapping) else {},
         graph_summary=_graph_summary(graph),
-        message=_START_TASK_HANDOFF_MESSAGE,
+        message=_START_TASK_RESULT_MESSAGE,
+        assistant_followup_instruction=_START_TASK_FOLLOWUP_INSTRUCTION,
         hermes_control={
             "kind": "team_mission_started",
-            "end_current_turn": True,
+            "skip_remaining_tool_calls": True,
+            "require_followup_response": True,
             "await_final_deliverable": True,
             "mission_status": mission_status,
-            "assistant_response": _START_TASK_HANDOFF_MESSAGE,
+            "assistant_followup_instruction": _START_TASK_FOLLOWUP_INSTRUCTION,
         },
     )
 

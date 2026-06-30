@@ -9,7 +9,7 @@ def _payload(**overrides):
     payload = {
         "conversation_session_id": "team-session-1",
         "participant_id": "member:builder",
-        "activity_id": "member_chat",
+        "activity_id": "act-member_chat:team-session-1:builder",
         "activity_kind": "member_chat",
         "execution_scope_key": "member-chat:conversation-1:builder",
         "control_home": "/tmp/hermes-control",
@@ -31,6 +31,8 @@ def test_run_context_construct_and_serialise():
 
 def test_run_context_required_fields_raise_when_empty():
     for field_name in _payload():
+        if field_name == "activity_id":
+            continue
         payload = _payload(**{field_name: ""})
         with pytest.raises(ValueError, match=field_name):
             RunContext(**payload)
@@ -40,13 +42,13 @@ def test_run_context_activity_kind_validates():
     with pytest.raises(ValueError, match="activity_kind"):
         RunContext(**_payload(activity_kind="foo"))
 
-    for activity_kind in ("chat", "member_chat", "mission"):
+    for activity_kind in ("chat", "member_chat", "mission", "team_dispatch"):
         context = RunContext(**_payload(activity_kind=activity_kind))
         assert context.activity_kind == activity_kind
 
 
 def test_run_context_from_payload_accepts_json_string():
-    payload = _payload(activity_kind="mission", activity_id="mission-1")
+    payload = _payload(activity_kind="mission", activity_id="mission:mission-1")
 
     context = RunContext.from_payload(json.dumps(payload))
 

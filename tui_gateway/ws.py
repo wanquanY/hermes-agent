@@ -42,6 +42,7 @@ _log = logging.getLogger(__name__)
 # to flush a WS frame before we mark the transport dead. Protects handler
 # threads from a wedged socket.
 _WS_WRITE_TIMEOUT_S = 10.0
+_WS_SEND_TIMEOUT_S = 2.0
 _WS_LARGE_FRAME_BYTES = 512 * 1024
 _WS_DIAGNOSTIC_METHODS = frozenset(
     {
@@ -51,7 +52,6 @@ _WS_DIAGNOSTIC_METHODS = frozenset(
         "run.events",
         "team_mission.message.submit",
         "team_mission.node.history",
-        "team_mission.subscribe",
     }
 )
 _WS_CONTROL_METHODS = frozenset(
@@ -164,6 +164,9 @@ def _frame_meta(line: str) -> dict[str, Any]:
             "stored_session_id": params.get("stored_session_id")
             or payload.get("stored_session_id")
             or "",
+            "runtime_scope_key": params.get("runtime_scope_key")
+            or payload.get("runtime_scope_key")
+            or "",
             "run_id": params.get("run_id") or payload.get("run_id") or "",
             "turn_id": params.get("turn_id") or payload.get("turn_id") or "",
             "mission_id": params.get("mission_id") or payload.get("mission_id") or "",
@@ -179,6 +182,7 @@ def _should_log_frame(meta: dict[str, Any]) -> bool:
     if str(meta.get("response_to_method") or "") in _WS_DIAGNOSTIC_METHODS:
         return True
     return str(meta.get("method") or "") in _WS_DIAGNOSTIC_METHODS
+
 
 # Keep starlette optional at import time; handle_ws uses the real class when
 # it's available and falls back to a generic Exception sentinel otherwise.
@@ -269,6 +273,7 @@ class WSTransport:
             return False
 
         line = json.dumps(obj, ensure_ascii=False)
+        frame_meta = _frame_meta(line)
 
         try:
             on_loop = asyncio.get_running_loop() is self._loop
@@ -295,7 +300,6 @@ class WSTransport:
             return not self._closed
         except Exception as exc:
             self._closed = True
-            frame_meta = _frame_meta(line)
             _log.warning(
                 "gateway ws write failed: %s %s %s frame=%s",
                 type(exc).__name__,
@@ -303,21 +307,6 @@ class WSTransport:
                 self._diagnostics(),
                 frame_meta,
             )
-            if str(frame_meta.get("stored_session_id") or "").startswith("team-session-") or str(frame_meta.get("runtime_scope_key") or "").startswith("team:"):
-                _log.warning(
-                    "[dovie-team-chain] gateway-ws-write-failed %s",
-                    json.dumps(
-                        {
-                            "error_type": type(exc).__name__,
-                            "error": str(exc),
-                            "connection": self._diagnostics(),
-                            "frame": frame_meta,
-                        },
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        default=str,
-                    ),
-                )
             return False
 
     async def write_async(self, obj: dict) -> bool:
@@ -371,7 +360,10 @@ class WSTransport:
                 meta,
             )
         try:
-            await self._ws.send_text(line)
+            await asyncio.wait_for(
+                self._ws.send_text(line),
+                timeout=_WS_SEND_TIMEOUT_S,
+            )
             self._sent_count += 1
             self._bytes_sent += int(meta.get("bytes") or 0)
         except Exception as exc:

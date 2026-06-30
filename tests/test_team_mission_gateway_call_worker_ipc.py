@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from hermes_team_mission.runtime import profile_scope
+from tui_gateway.services.worker_supervisor import DB_RPC_ALLOWED_METHODS
 from tui_gateway.services.worker_rpc_proxy import set_default_worker_rpc_proxy
 
 
@@ -12,6 +15,14 @@ class _Proxy:
     def request(self, method, params=None):
         self.calls.append((method, params or {}))
         return self.response
+
+
+class _WorkerDBProxySentinel:
+    db_path = "worker-db-proxy:team-session-1"
+
+
+class _DirectDBSentinel:
+    db_path = "/profile/state.db"
 
 
 def test_team_mission_gateway_call_routes_from_worker_to_control_plane_rpc():
@@ -44,3 +55,30 @@ def test_team_mission_gateway_call_rejects_unknown_methods_inside_worker():
         "Gateway method session.resume is not allowed from Team Mission worker runtime."
     )
     assert proxy.calls == []
+
+
+def test_team_mission_control_db_prefers_worker_proxy_over_control_home(monkeypatch, tmp_path):
+    control_home = tmp_path / "control"
+    control_home.mkdir()
+    monkeypatch.setenv("DOVIE_HERMES_CONTROL_HOME", str(control_home))
+    proxy_db = _WorkerDBProxySentinel()
+
+    result = profile_scope.team_mission_control_db(SimpleNamespace(_session_db=proxy_db))
+
+    assert result is proxy_db
+
+
+def test_team_mission_control_db_keeps_control_home_for_direct_profile_db(monkeypatch, tmp_path):
+    control_home = tmp_path / "control"
+    control_home.mkdir()
+    monkeypatch.setenv("DOVIE_HERMES_CONTROL_HOME", str(control_home))
+
+    result = profile_scope.team_mission_control_db(SimpleNamespace(_session_db=_DirectDBSentinel()))
+    try:
+        assert str(result.db_path) == str(control_home / "state.db")
+    finally:
+        result.close()
+
+
+def test_team_mission_planning_completion_db_method_is_available_to_worker_ipc():
+    assert "complete_team_mission_plan" in DB_RPC_ALLOWED_METHODS

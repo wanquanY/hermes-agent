@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from hermes_team_mission.runtime.failure import classify_team_mission_failure
@@ -164,7 +163,38 @@ def test_team_mission_clean_exit_without_required_handoff_blocks_as_protocol_vio
     assert blocked_events[0]["payload"]["recoverability"] == "blocked"
 
 
-def test_team_mission_missing_handoff_derives_degraded_deliverable_from_structured_final_text(tmp_path: Path):
+def test_team_mission_requires_deliverable_implies_required_handoff(tmp_path: Path):
+    db = _bound_node_db(
+        tmp_path,
+        output_contract={
+            "format": "verification_report",
+            "requires_deliverable": True,
+        },
+    )
+
+    db.append_team_mission_run_event(
+        mission_id="mission-failure",
+        run_id="run-worker",
+        event={
+            "type": "message.complete",
+            "seq": 1,
+            "payload": {
+                "status": "complete",
+                "text": "Verifier report in visible text only.",
+            },
+        },
+    )
+
+    node = db.get_team_mission_node("mission-failure", "node-worker")
+    deliverable = db.latest_team_mission_deliverable_for_run("run-worker")
+
+    assert node["status"] == "blocked"
+    assert node["metadata"]["last_run_reason_code"] == "protocol_violation"
+    assert deliverable["source"] == "missing"
+    assert deliverable["payload"]["required_tool"] == "team_mission_submit_deliverable"
+
+
+def test_team_mission_missing_handoff_blocks_even_with_structured_final_text(tmp_path: Path):
     db = _bound_node_db(
         tmp_path,
         output_contract={
@@ -182,31 +212,23 @@ def test_team_mission_missing_handoff_derives_degraded_deliverable_from_structur
             "seq": 1,
             "payload": {
                 "status": "complete",
-                "text": json.dumps({
-                    "node_id": "node-worker",
-                    "status": "completed",
-                    "result": "PASS",
-                    "summary": "Structured final text had enough evidence to recover a degraded handoff.",
-                    "artifact_refs": [{"path": "/tmp/recovered.md", "kind": "file"}],
-                    "verification": [{"passed": True}],
-                }),
+                "text": '{"node_id":"node-worker","status":"completed","summary":"structured but visible only"}',
             },
         },
     )
 
     node = db.get_team_mission_node("mission-failure", "node-worker")
     deliverable = db.latest_team_mission_deliverable_for_run("run-worker")
-    deliverable_events = [
+    blocked_events = [
         event for event in db.list_team_mission_events("mission-failure")
-        if event.get("payload", {}).get("source_event_type") == "mission.node.deliverable.recorded"
+        if event.get("payload", {}).get("source_event_type") == "mission.node.blocked"
     ]
 
-    assert node["status"] == "completed"
-    assert deliverable["source"] == "derived_degraded"
-    assert deliverable["artifact_refs"][0]["path"] == "/tmp/recovered.md"
-    assert node["metadata"]["last_deliverable_source"] == "derived_degraded"
-    assert deliverable_events
-    assert deliverable_events[0]["payload"]["source_payload"]["visibility"] == "handoff"
+    assert node["status"] == "blocked"
+    assert deliverable["source"] == "missing"
+    assert deliverable["payload"]["required_tool"] == "team_mission_submit_deliverable"
+    assert node["metadata"]["last_run_reason_code"] == "protocol_violation"
+    assert blocked_events
 
 
 def test_team_mission_submit_deliverable_terminal_completes_without_failure(tmp_path: Path):

@@ -41,6 +41,7 @@ _LEADER_NODE_KINDS = {"root"}
 _MUTATION_PHASES = {"planning", "change_request"}
 _RESERVED_NODE_KINDS = {"root", "approval_gate"}
 _EXECUTABLE_NODE_KINDS = {"worker", "verifier", "synthesis"}
+_PLANNED_FINALIZER_NODE_KINDS = {"verifier", "synthesis"}
 _RUNNING_STATUSES = {"running", "starting", "completed", "verified", "failed", "cancelled", "interrupted"}
 _UNKNOWN_MARKERS = {
     "unknown",
@@ -463,6 +464,62 @@ def _metadata_with_task_context(
     if task_objective:
         result.setdefault("task_objective", task_objective)
     return result
+
+
+def _node_task_id(node: Mapping[str, Any]) -> str:
+    metadata = _metadata(node.get("metadata"))
+    task = metadata.get("active_task") if isinstance(metadata.get("active_task"), Mapping) else {}
+    return _text(
+        metadata.get("task_id")
+        or metadata.get("taskId")
+        or metadata.get("active_task_id")
+        or metadata.get("activeTaskId")
+        or task.get("task_id")
+        or task.get("taskId")
+    )
+
+
+def _node_matches_task(node: Mapping[str, Any], task_id: str) -> bool:
+    if not task_id:
+        return True
+    node_task_id = _node_task_id(node)
+    if node_task_id:
+        return node_task_id == task_id
+    return task_id in _text(node.get("node_id"))
+
+
+def _plan_finalizer_validation_error(graph: Mapping[str, Any], task_id: str) -> str:
+    nodes = graph.get("nodes") if isinstance(graph, Mapping) else []
+    scoped_nodes = [
+        node
+        for node in nodes
+        if isinstance(node, Mapping)
+        and _node_matches_task(node, task_id)
+        and normalize_team_mission_node_kind(node.get("kind")) not in {"root", "approval_gate"}
+    ]
+    work_nodes = [
+        node
+        for node in scoped_nodes
+        if normalize_team_mission_node_kind(node.get("kind")) not in _PLANNED_FINALIZER_NODE_KINDS
+    ]
+    finalizer_kinds = {
+        normalize_team_mission_node_kind(node.get("kind"))
+        for node in scoped_nodes
+        if normalize_team_mission_node_kind(node.get("kind")) in _PLANNED_FINALIZER_NODE_KINDS
+    }
+    missing = [kind for kind in ("verifier", "synthesis") if kind not in finalizer_kinds]
+    if not work_nodes:
+        return (
+            "team_mission_plan_complete requires at least one worker node. "
+            "Create concrete worker work before completing the plan."
+        )
+    if missing:
+        return (
+            "team_mission_plan_complete requires the Leader-planned graph to include "
+            "verifier and synthesis nodes. Missing: "
+            f"{', '.join(missing)}. Create these nodes explicitly and connect dependencies before completing the plan."
+        )
+    return ""
 
 
 def _authorized_context(args: dict[str, Any], parent_agent=None) -> tuple[Any, str, dict[str, Any], dict[str, Any], dict[str, Any], Any, dict[str, Any]] | str:
@@ -917,9 +974,12 @@ def _handle_plan_complete(args: dict[str, Any], parent_agent=None, **_kwargs) ->
     ctx = _authorized_context(args, parent_agent)
     if isinstance(ctx, str):
         return tool_error(ctx)
-    db, run_id, binding, _mission, _graph, _strategy, planning_node = ctx
+    db, run_id, binding, _mission, graph, _strategy, planning_node = ctx
     mission_id = _text(binding.get("mission_id"))
     task_id = _task_id_from_context(binding, planning_node)
+    finalizer_error = _plan_finalizer_validation_error(graph, task_id)
+    if finalizer_error:
+        return tool_error(finalizer_error)
     result = db.complete_team_mission_plan(
         mission_id=mission_id,
         run_id=run_id,
@@ -1121,6 +1181,7 @@ registry.register(
         "name": "team_mission_plan_complete",
         "description": (
             "Mark the current Hermes Team Mission graph planning phase complete. "
+            "The graph must already include at least one worker node plus explicit verifier and synthesis nodes. "
             "In supervised mode this creates the approval gate and stops execution until approval."
         ),
         "parameters": {

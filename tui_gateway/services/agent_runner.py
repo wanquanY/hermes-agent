@@ -141,7 +141,7 @@ def _should_project_member_perspective(run_context: Any) -> bool:
     execution_scope_key = str(getattr(run_context, "execution_scope_key", "") or "").strip()
     if activity_kind == "member_chat":
         return True
-    if activity_kind == "mission":
+    if activity_kind in {"mission", "team_dispatch"}:
         return True
     if participant_id.startswith(("leader:", "member:")):
         return True

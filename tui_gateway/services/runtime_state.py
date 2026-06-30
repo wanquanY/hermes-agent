@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_constants import get_hermes_home
-from hermes_state.profile_dir import resolve_default_agent_dir
+from hermes_profile_dir import resolve_default_agent_dir
 
 _DB_SPECS = (
     {

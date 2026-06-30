@@ -83,6 +83,43 @@ class SessionDBTeamMissionContextMixin:
     def team_mission_run_has_deliverable(self, run_id: str) -> bool:
         return _deliverable_state.team_mission_run_has_deliverable(self, run_id)
 
+    def upsert_team_mission_result(
+        self,
+        *,
+        result_id: str = "",
+        mission_id: str,
+        activity_id: str = "",
+        status: str,
+        outcome: str,
+        summary_text: str,
+        node_results: List[Dict[str, Any]] | None = None,
+        artifact_refs: List[Dict[str, Any]] | None = None,
+        leader_report_run_id: str = "",
+        leader_report_message_id: str = "",
+        metadata: Dict[str, Any] | None = None,
+        created_at: float | None = None,
+        updated_at: float | None = None,
+    ) -> Dict[str, Any]:
+        return _result_state.upsert_team_mission_result(
+            self,
+            result_id=result_id,
+            mission_id=mission_id,
+            activity_id=activity_id,
+            status=status,
+            outcome=outcome,
+            summary_text=summary_text,
+            node_results=node_results,
+            artifact_refs=artifact_refs,
+            leader_report_run_id=leader_report_run_id,
+            leader_report_message_id=leader_report_message_id,
+            metadata=metadata,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+
+    def get_team_mission_result(self, mission_id: str) -> Dict[str, Any]:
+        return _result_state.get_team_mission_result(self, mission_id)
+
     def upsert_team_mission_memory_item(
         self,
         *,
@@ -267,4 +304,3 @@ class SessionDBTeamMissionContextMixin:
             limit=limit,
             include_team_scope=include_team_scope,
         )
-

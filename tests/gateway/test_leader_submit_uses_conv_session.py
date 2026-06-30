@@ -57,6 +57,7 @@ def _submit_leader(
     *,
     mission_id: str = "",
     conversation_ensure_index_only: bool = False,
+    request_activity_id: str = "",
 ) -> tuple[SessionDB, dict[str, Any], dict[str, Any]]:
     team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
@@ -129,6 +130,8 @@ def _submit_leader(
             "runtime_scope_key": f"team:{CONVERSATION_ID}:leader-conversation",
             "workspace": _workspace_payload(tmp_path),
         }
+    if request_activity_id:
+        params["activity_id"] = request_activity_id
 
     response = team_mission._methods["team_mission.message.submit"](  # noqa: SLF001
         "rid-leader",
@@ -165,9 +168,31 @@ def test_leader_spawn_payload_carries_run_context_json(monkeypatch: pytest.Monke
     run_context = RunContext.from_payload(captured["run_context_json"])
 
     assert run_context.conversation_session_id == CONVERSATION_SESSION_ID
-    assert run_context.activity_kind in {"mission", "chat"}
     assert run_context.activity_kind == "chat"
     assert run_context.execution_scope_key == captured["runtime_scope_key"]
+
+
+def test_leader_team_dispatch_request_uses_team_dispatch_run_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    db, captured, _response = _submit_leader(
+        monkeypatch,
+        tmp_path,
+        request_activity_id="act-team_dispatch-create",
+    )
+
+    run_context = RunContext.from_payload(captured["run_context_json"])
+
+    assert run_context.conversation_session_id == CONVERSATION_SESSION_ID
+    assert run_context.activity_id == "act-team_dispatch-create"
+    assert run_context.activity_kind == "team_dispatch"
+    messages = db.get_conversation_message_read_model(
+        CONVERSATION_SESSION_ID,
+        include_storage_metadata=True,
+    )
+    assert [message["role"] for message in messages] == ["user"]
+    assert messages[0]["metadata"]["transcript_activity_kind"] == "mission_start"
 
 
 def test_leader_spawn_stored_session_id_is_conv_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

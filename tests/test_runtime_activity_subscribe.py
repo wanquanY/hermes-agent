@@ -146,10 +146,14 @@ def test_subscribe_returns_5008_when_db_missing(monkeypatch: pytest.MonkeyPatch)
     assert response["error"]["code"] == 5008
 
 
-def test_subscribe_returns_4040_when_activity_has_no_events() -> None:
-    response = _call("runtime.activity.subscribe", {"activity_id": "act-test-empty"})
+def test_subscribe_allows_future_activity_with_empty_replay() -> None:
+    result = _assert_ok(
+        _call("runtime.activity.subscribe", {"activity_id": "act-test-empty"})
+    )
 
-    assert response["error"]["code"] == 4040
+    assert result["subscription_id"]
+    assert result["events"] == []
+    assert result["after_seq"] == 0
 
 
 def test_unsubscribe_returns_zero_when_subscription_missing() -> None:
@@ -170,6 +174,83 @@ def test_subscribe_returns_events_for_activity_id(db: SessionDB) -> None:
     assert result["subscription_id"]
     assert [event["payload"]["command_id"] for event in result["events"]] == ["cmd-replay-1"]
     assert result["after_seq"] == result["events"][-1]["seq"]
+
+
+def test_subscribe_returns_events_for_team_conversation_activity_id(db: SessionDB) -> None:
+    _record_activity_event(
+        db,
+        activity_id="team-conversation:conversation-1",
+        command_id="cmd-conversation-1",
+    )
+
+    result = _assert_ok(
+        _call("runtime.activity.subscribe", {"activity_id": "team-conversation:conversation-1"})
+    )
+
+    assert result["subscription_id"]
+    assert [event["activity_id"] for event in result["events"]] == [
+        "team-conversation:conversation-1",
+    ]
+    assert [event["payload"]["command_id"] for event in result["events"]] == [
+        "cmd-conversation-1",
+    ]
+
+
+def test_team_dispatch_activity_waits_for_mission_event_log_binding(db: SessionDB) -> None:
+    """Activity-first team dispatch subscriptions must not mix run_events and mission event seqs."""
+    activity_id = "act-team_dispatch-subscribe-e2e"
+    _record_activity_event(
+        db,
+        activity_id=activity_id,
+        command_id="cmd-leader-run-event",
+    )
+
+    unbound = _assert_ok(
+        _call("runtime.activity.subscribe", {"activity_id": activity_id})
+    )
+
+    assert unbound["events"] == []
+    assert unbound["after_seq"] == 0
+
+    db.upsert_team_mission(
+        mission_id="mission-dispatch-subscribe",
+        conversation_id="conversation-dispatch-subscribe",
+        title="Dispatch subscription",
+        mode="supervised_mission",
+        leader_session_id="team-session-dispatch-subscribe",
+        metadata={"task_id": "task-dispatch-subscribe"},
+    )
+    db.bind_activity_to_mission(
+        activity_id=activity_id,
+        conversation_id="team-session-dispatch-subscribe",
+        mission_id="mission-dispatch-subscribe",
+        target_team_id="team-1",
+        status="running",
+    )
+    stored = db.append_team_mission_structural_event(
+        mission_id="mission-dispatch-subscribe",
+        source_event={
+            "type": "mission.node.created",
+            "payload": {
+                "mission_id": "mission-dispatch-subscribe",
+                "node": {
+                    "node_id": "node-worker",
+                    "kind": "worker",
+                    "title": "Worker",
+                    "status": "pending",
+                },
+            },
+        },
+    )
+
+    rebound = _assert_ok(
+        _call("runtime.activity.subscribe", {"activity_id": activity_id, "after_seq": 2294})
+    )
+
+    assert stored["seq"] == 1
+    assert [event["activity_id"] for event in rebound["events"]] == [activity_id]
+    assert rebound["events"][0]["seq"] == 1
+    assert rebound["events"][0]["payload"]["source_event_type"] == "mission.node.created"
 
 
 def test_subscribe_after_seq_filters_correctly(db: SessionDB) -> None:
@@ -254,6 +335,177 @@ def test_record_event_pushes_to_activity_subscribers(db: SessionDB) -> None:
 
     delivered = _event_frames(transport)
     assert [event["payload"]["command_id"] for event in delivered] == ["cmd-live-2"]
+
+
+def test_future_activity_subscription_receives_first_event(db: SessionDB) -> None:
+    transport = _CaptureTransport()
+    result = _assert_ok(
+        _call(
+            "runtime.activity.subscribe",
+            {"activity_id": "act-test-future"},
+            transport=transport,
+        )
+    )
+    assert result["events"] == []
+
+    _record_activity_event(
+        db,
+        activity_id="act-test-future",
+        command_id="cmd-future-1",
+        publish=True,
+    )
+
+    delivered = _event_frames(transport)
+    assert [event["payload"]["command_id"] for event in delivered] == ["cmd-future-1"]
+
+
+def test_future_team_mission_activity_subscription_receives_first_event_after_graph_created(
+    db: SessionDB,
+) -> None:
+    from hermes_team_mission.state import event_log
+
+    with event_log._listener_lock:
+        event_log._event_listeners.clear()
+    run_control._team_mission_event_listener_registered = False
+
+    transport = _CaptureTransport()
+    result = _assert_ok(
+        _call(
+            "runtime.activity.subscribe",
+            {"activity_id": "mission:mission-future"},
+            transport=transport,
+        )
+    )
+    assert result["events"] == []
+    assert run_control._team_mission_event_listener_registered is True
+
+    db.initialize_team_mission_from_strategy(
+        mission_id="mission-future",
+        title="Future mission",
+        objective="deliver the first live event",
+        mode="supervised_mission",
+    )
+    root_node_id = db.get_team_mission_graph("mission-future")["nodes"][0]["node_id"]
+    db.upsert_run(
+        run_id="run-future",
+        session_id="team:mission-future:node:root",
+        runtime_scope_key="team:mission-future:node:root",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-future",
+        node_id=root_node_id,
+        run_id="run-future",
+        session_id="team:mission-future:node:root",
+        runtime_scope_key="team:mission-future:node:root",
+        role="worker",
+    )
+
+    run_control.publish_recorded_event(
+        {
+            "type": "message.delta",
+            "session_id": "runtime-node-future",
+            "stored_session_id": "team:mission-future:node:root",
+            "run_id": "run-future",
+            "runtime_scope_key": "team:mission-future:node:root",
+            "activity_id": f"act-node:mission-future:{root_node_id}",
+            "seq": 1,
+            "payload": {
+                "activity_id": f"act-node:mission-future:{root_node_id}",
+                "delta": "first live event",
+            },
+        },
+        db=db,
+    )
+
+    delivered = _event_frames(transport)
+    assert [event["type"] for event in delivered] == ["team_mission.runtime.event"]
+    assert delivered[0]["activity_id"] == "mission:mission-future"
+    assert delivered[0]["payload"]["source_event_type"] == "message.delta"
+    assert delivered[0]["payload"]["text_stream"]["delta"] == "first live event"
+
+
+def test_team_dispatch_raw_cursor_does_not_block_bound_mission_graph_event(
+    db: SessionDB,
+) -> None:
+    from hermes_team_mission.state import event_log
+
+    with event_log._listener_lock:
+        event_log._event_listeners.clear()
+    run_control._team_mission_event_listener_registered = False
+
+    activity_id = "act-team_dispatch-client-turn-1"
+    transport = _CaptureTransport()
+    result = _assert_ok(
+        _call(
+            "runtime.activity.subscribe",
+            {"activity_id": activity_id},
+            transport=transport,
+        )
+    )
+    subscription_id = result["subscription_id"]
+
+    run_control.publish_recorded_event(
+        {
+            "type": "message.delta",
+            "session_id": "leader-runtime",
+            "stored_session_id": "team-session-live",
+            "run_id": "leader-run",
+            "runtime_scope_key": "team-session-live",
+            "activity_id": activity_id,
+            "seq": 2294,
+            "payload": {
+                "activity_id": activity_id,
+                "delta": "leader planning",
+            },
+        },
+        db=db,
+    )
+
+    subscription = run_control._subscriptions_by_id[subscription_id]
+    assert subscription["last_seq"] == 0
+    assert subscription["activity_event_last_seq"] == 0
+
+    db.upsert_team_mission(
+        mission_id="mission-live-graph",
+        conversation_id="conversation-live-graph",
+        title="Live graph mission",
+        mode="supervised_mission",
+        leader_session_id="team-session-live",
+        metadata={"task_id": "task-live-graph"},
+    )
+    db.bind_activity_to_mission(
+        activity_id=activity_id,
+        conversation_id="team-session-live",
+        mission_id="mission-live-graph",
+        target_team_id="team-1",
+        status="running",
+    )
+    transport.frames.clear()
+
+    db.append_team_mission_structural_event(
+        mission_id="mission-live-graph",
+        source_event={
+            "type": "mission.node.created",
+            "payload": {
+                "mission_id": "mission-live-graph",
+                "node": {
+                    "node_id": "worker-node-1",
+                    "title": "Create test file",
+                    "kind": "worker",
+                    "status": "pending",
+                },
+            },
+        },
+    )
+
+    delivered = _event_frames(transport)
+    assert [event["type"] for event in delivered] == ["team_mission.runtime.event"]
+    assert delivered[0]["activity_id"] == activity_id
+    activity_event_seq = int(delivered[0]["activity_event_seq"])
+    assert 0 < activity_event_seq < 2294
+    assert delivered[0]["payload"]["source_event_type"] == "mission.node.created"
+    assert run_control._subscriptions_by_id[subscription_id]["activity_event_last_seq"] == activity_event_seq
 
 
 def test_record_event_does_not_double_push_when_transport_subscribed_by_session_and_activity(

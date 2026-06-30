@@ -94,7 +94,7 @@ def _append_handoff_skip_messages(agent, tool_calls, messages: list) -> None:
             skipped_name,
             (
                 "[Tool execution skipped - a Team Mission task was accepted "
-                "and this leader turn was handed off to the mission runtime]"
+                "and the Leader must now reply with a brief startup confirmation]"
             ),
             skipped_tc.id,
         ))

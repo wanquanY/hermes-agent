@@ -17,13 +17,16 @@ def _run_context(
     *,
     conversation_session_id: str = "conv-X",
     participant_id: str = "member:alice",
+    activity_id: str = "act-member_chat:conv-X:alice",
+    activity_kind: str = "member_chat",
+    execution_scope_key: str = "member-chat:alice",
 ) -> RunContext:
     return RunContext(
         conversation_session_id=conversation_session_id,
         participant_id=participant_id,
-        activity_id="act-member_chat:conv-X:alice",
-        activity_kind="member_chat",
-        execution_scope_key="member-chat:alice",
+        activity_id=activity_id,
+        activity_kind=activity_kind,
+        execution_scope_key=execution_scope_key,
         control_home="/tmp/hermes-control",
         execution_home="/tmp/hermes-execution",
     )
@@ -33,6 +36,7 @@ def _db(tmp_path: Path) -> SessionDB:
     db = SessionDB(tmp_path / "state.db")
     db.create_session("conv-X", source="team_mission", transient=False)
     db.create_session("memberchat:Y", source="team_mission", transient=False)
+    db.create_session("team:mission-1:node:root", source="team_mission", transient=False)
     db.create_session("legacy-session", source="team_mission", transient=False)
     return db
 
@@ -63,6 +67,30 @@ def test_record_event_with_run_context_forces_conversation_session_id(tmp_path: 
     assert member_events == []
     assert conv_events[0]["stored_session_id"] == "conv-X"
     assert (conv_events[0]["payload"] or {})["run_context"]["conversation_session_id"] == "conv-X"
+
+
+def test_record_event_with_node_run_context_preserves_node_runtime_session(tmp_path: Path):
+    db = _db(tmp_path)
+    context = _run_context(
+        participant_id="leader:conv-X",
+        activity_id="act-node:mission-1:team-mission:mission-1:root",
+        activity_kind="mission",
+        execution_scope_key="profile:agent-default",
+    )
+
+    record_event(
+        _frame(stored_session_id="team:mission-1:node:root"),
+        db=db,
+        run_context=context,
+    )
+
+    node_events = db.list_run_events("team:mission-1:node:root", run_id="run-1")
+    conv_events = db.list_run_events("conv-X", run_id="run-1")
+    assert len(node_events) == 1
+    assert conv_events == []
+    assert node_events[0]["stored_session_id"] == "team:mission-1:node:root"
+    assert node_events[0]["activity_id"] == "act-node:mission-1:team-mission:mission-1:root"
+    assert (node_events[0]["payload"] or {})["run_context"]["conversation_session_id"] == "conv-X"
 
 
 def test_record_event_with_run_context_stamps_participant_id_if_missing(tmp_path: Path):

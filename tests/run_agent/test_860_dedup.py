@@ -12,6 +12,7 @@ import os
 import sqlite3
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -26,20 +27,32 @@ class TestFlushDeduplication:
 
     def _make_agent(self, session_db):
         """Create a minimal AIAgent with a real session DB."""
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
-            from run_agent import AIAgent
-            agent = AIAgent(
-                api_key="test-key",
-                base_url="https://openrouter.ai/api/v1",
-                model="test/model",
-                quiet_mode=True,
-                session_db=session_db,
-                session_id="test-session-860",
-                skip_context_files=True,
-                skip_memory=True,
-            )
+        agent = self._make_uninitialized_agent(session_db)
         # Simulate lazy session creation (normally done by run_conversation)
         agent._ensure_db_session()
+        return agent
+
+    def _make_uninitialized_agent(self, session_db, *, session_id="test-session-860"):
+        """Create a minimal AIAgent without initializing model transports."""
+        from run_agent import AIAgent
+
+        agent = object.__new__(AIAgent)
+        agent.session_id = session_id
+        agent.platform = "test"
+        agent.model = "test/model"
+        agent._session_db = session_db
+        agent._session_db_created = False
+        agent._session_init_model_config = None
+        agent._cached_system_prompt = None
+        agent._parent_session_id = None
+        agent._last_flushed_db_idx = 0
+        agent._persist_user_message_idx = None
+        agent._persist_user_message_override = None
+        agent._hermes_active_run_id = ""
+        agent._hermes_active_turn_id = ""
+        agent._hermes_active_runtime_scope_key = ""
+        agent.run_context = None
+        agent._run_context = None
         return agent
 
     def test_flush_writes_only_new_messages(self):
@@ -101,31 +114,549 @@ class TestFlushDeduplication:
             rows = db.get_messages(agent.session_id)
             assert len(rows) == 3, f"Expected 3 total messages, got {len(rows)}"
 
-    def test_team_conversation_flush_is_owned_by_projector(self):
-        """Team transcripts are projected from run_events, not worker flush."""
+    def test_team_conversation_flush_uses_active_run_identity(self):
+        """Team worker flush must not inherit run ids from projected history."""
         from hermes_state import SessionDB
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             db = SessionDB(db_path=db_path)
 
-            agent = self._make_agent(db)
+            visible_session_id = "team-session-team-conversation-test"
+            agent = self._make_uninitialized_agent(db, session_id="runtime-member-session")
+            db.create_session(visible_session_id, source="team_mission", transient=False)
             db.upsert_session_index(
-                session_id=agent.session_id,
+                session_id=visible_session_id,
                 source="team_mission",
                 conversation_kind="team",
                 started_at=1.0,
                 updated_at=1.0,
             )
 
+            agent._hermes_active_run_id = "team-member-run-current"
+            agent._hermes_active_turn_id = "team-member-turn-current"
+            agent._hermes_active_runtime_scope_key = "member-chat:team-conversation-1:member-1"
+            agent.run_context = SimpleNamespace(
+                conversation_session_id=visible_session_id,
+                activity_id="act-member-chat-1",
+                activity_kind="member_chat",
+                execution_scope_key="member-chat:team-conversation-1:member-1",
+                participant_id="member:member-1",
+                to_payload=lambda: {
+                    "conversation_session_id": visible_session_id,
+                    "activity_id": "act-member-chat-1",
+                    "activity_kind": "member_chat",
+                    "execution_scope_key": "member-chat:team-conversation-1:member-1",
+                    "participant_id": "member:member-1",
+                },
+            )
+            history = [
+                {
+                    "role": "user",
+                    "content": "[Leader] prior visible speech",
+                    "metadata": {
+                        "run_id": "team-leader-run-stale",
+                        "turn_id": "team-leader-turn-stale",
+                    },
+                }
+            ]
+            messages = history + [
+                {"role": "assistant", "content": "member answer", "reasoning": "thinking"},
+                {
+                    "role": "tool",
+                    "content": "{}",
+                    "tool_name": "search_files",
+                    "tool_call_id": "call-member-1",
+                },
+            ]
+
+            agent._flush_messages_to_session_db(messages, history)
+
+            rows = db.get_messages(visible_session_id)
+            assert [row["role"] for row in rows] == ["assistant", "tool"]
+            for row in rows:
+                metadata = row["metadata"]
+                assert metadata["run_id"] == "team-member-run-current"
+                assert metadata["turn_id"] == "team-member-turn-current"
+                assert metadata["participant_id"] == "member:member-1"
+                assert metadata["execution_scope_key"] == "member-chat:team-conversation-1:member-1"
+                assert metadata["run_id"] != "team-leader-run-stale"
+            assert rows[0]["participant_id"] == "member:member-1"
+            assert rows[0]["reasoning"] == "thinking"
+            assert agent._last_flushed_db_idx == len(messages)
+
+    def test_team_conversation_flush_does_not_use_history_len_when_history_is_not_prefix(self):
+        """Team worker messages may be current-turn-only, not history + new turn."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = SessionDB(db_path=db_path)
+
+            visible_session_id = "team-session-team-conversation-test"
+            agent = self._make_uninitialized_agent(db, session_id=visible_session_id)
+            db.create_session(visible_session_id, source="team_mission", transient=False)
+            db.upsert_session_index(
+                session_id=visible_session_id,
+                source="team_mission",
+                conversation_kind="team",
+                started_at=1.0,
+                updated_at=1.0,
+            )
+
+            agent._hermes_active_run_id = "team-member-run-current"
+            agent._hermes_active_turn_id = "team-member-turn-current"
+            agent._hermes_active_runtime_scope_key = "member-chat:team-conversation-1:member-1"
+            agent.run_context = SimpleNamespace(
+                conversation_session_id=visible_session_id,
+                activity_id="act-member-chat-1",
+                activity_kind="member_chat",
+                execution_scope_key="member-chat:team-conversation-1:member-1",
+                participant_id="member:member-1",
+                to_payload=lambda: {
+                    "conversation_session_id": visible_session_id,
+                    "activity_id": "act-member-chat-1",
+                    "activity_kind": "member_chat",
+                    "execution_scope_key": "member-chat:team-conversation-1:member-1",
+                    "participant_id": "member:member-1",
+                },
+            )
+            history = [
+                {"role": "user", "content": "prior user"},
+                {"role": "assistant", "content": "prior leader"},
+                {"role": "user", "content": "current submitted user"},
+            ]
             messages = [
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "projector should own this"},
+                {"role": "user", "content": "current submitted user"},
+                {
+                    "role": "assistant",
+                    "content": "text before search",
+                    "tool_calls": [
+                        {
+                            "id": "call-search",
+                            "type": "function",
+                            "function": {"name": "search_files", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": "{}",
+                    "tool_name": "search_files",
+                    "tool_call_id": "call-search",
+                },
+                {
+                    "role": "assistant",
+                    "content": "text before terminal",
+                    "tool_calls": [
+                        {
+                            "id": "call-terminal",
+                            "type": "function",
+                            "function": {"name": "terminal", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": "{}",
+                    "tool_name": "terminal",
+                    "tool_call_id": "call-terminal",
+                },
+                {"role": "assistant", "content": "final answer"},
+            ]
+
+            agent._flush_messages_to_session_db(messages, history)
+
+            rows = db.get_messages(visible_session_id)
+            assert [row["role"] for row in rows] == [
+                "assistant",
+                "tool",
+                "assistant",
+                "tool",
+                "assistant",
+            ]
+            assert [row.get("tool_name") for row in rows if row["role"] == "tool"] == [
+                "search_files",
+                "terminal",
+            ]
+            assert all(row["participant_id"] == "member:member-1" for row in rows)
+            assert all(row["metadata"]["run_id"] == "team-member-run-current" for row in rows)
+            assert agent._last_flushed_db_idx == len(messages)
+
+    def test_team_mission_start_flush_persists_main_transcript_tools(self):
+        """Leader mission-start messages are main conversation history."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = SessionDB(db_path=db_path)
+
+            visible_session_id = "team-session-team-conversation-test"
+            agent = self._make_uninitialized_agent(db, session_id="runtime-mission-session")
+            db.create_session(visible_session_id, source="team_mission", transient=False)
+            db.upsert_session_index(
+                session_id=visible_session_id,
+                source="team_mission",
+                conversation_kind="team",
+                started_at=1.0,
+                updated_at=1.0,
+            )
+
+            agent._hermes_active_run_id = "team-mission-run-current"
+            agent._hermes_active_turn_id = "team-mission-turn-current"
+            agent._hermes_active_runtime_scope_key = "team:conversation-1"
+            agent.run_context = SimpleNamespace(
+                conversation_session_id=visible_session_id,
+                activity_id="mission:mission-1",
+                activity_kind="mission",
+                execution_scope_key="team:conversation-1",
+                participant_id="leader:conversation-1",
+                to_payload=lambda: {
+                    "conversation_session_id": visible_session_id,
+                    "activity_id": "mission:mission-1",
+                    "activity_kind": "mission",
+                    "execution_scope_key": "team:conversation-1",
+                    "participant_id": "leader:conversation-1",
+                },
+            )
+            messages = [
+                {"role": "user", "content": "创建一个文件"},
+                {
+                    "role": "assistant",
+                    "content": "运行期规划",
+                    "tool_calls": [
+                        {
+                            "id": "call-plan",
+                            "type": "function",
+                            "function": {"name": "team_mission_node_create", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": "{}",
+                    "tool_name": "team_mission_node_create",
+                    "tool_call_id": "call-plan",
+                },
+                {"role": "assistant", "content": "运行期状态更新"},
             ]
 
             agent._flush_messages_to_session_db(messages, [])
 
-            assert db.get_messages(agent.session_id) == []
+            rows = db.get_messages(visible_session_id)
+            assert [row["role"] for row in rows] == ["assistant", "tool", "assistant"]
+            assert [row.get("tool_name") for row in rows] == [None, "team_mission_node_create", None]
+            assert all(row["metadata"]["transcript_activity_kind"] == "mission_start" for row in rows)
+            assert agent._last_flushed_db_idx == len(messages)
+
+    def test_team_mission_node_flush_does_not_persist_node_rows_to_visible_transcript(self):
+        """Mission node execution belongs to the task graph, not the main conversation."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = SessionDB(db_path=db_path)
+
+            visible_session_id = "team-session-team-conversation-test"
+            agent = self._make_uninitialized_agent(db, session_id="runtime-mission-session")
+            db.create_session(visible_session_id, source="team_mission", transient=False)
+            db.upsert_session_index(
+                session_id=visible_session_id,
+                source="team_mission",
+                conversation_kind="team",
+                started_at=1.0,
+                updated_at=1.0,
+            )
+
+            agent._hermes_active_run_id = "team-mission-run-current"
+            agent._hermes_active_turn_id = "team-mission-turn-current"
+            agent._hermes_active_runtime_scope_key = "team:conversation-1"
+            agent.run_context = SimpleNamespace(
+                conversation_session_id=visible_session_id,
+                activity_id="act-node:mission-1:node-1",
+                activity_kind="mission",
+                execution_scope_key="team:conversation-1",
+                participant_id="leader:conversation-1",
+                to_payload=lambda: {
+                    "conversation_session_id": visible_session_id,
+                    "activity_id": "act-node:mission-1:node-1",
+                    "activity_kind": "mission",
+                    "execution_scope_key": "team:conversation-1",
+                    "participant_id": "leader:conversation-1",
+                },
+            )
+            messages = [
+                {"role": "user", "content": "执行节点"},
+                {
+                    "role": "assistant",
+                    "content": "节点内部规划",
+                    "tool_calls": [
+                        {
+                            "id": "call-plan",
+                            "type": "function",
+                            "function": {"name": "team_mission_node_create", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": "{}",
+                    "tool_name": "team_mission_node_create",
+                    "tool_call_id": "call-plan",
+                },
+                {"role": "assistant", "content": "节点内部状态更新"},
+            ]
+
+            agent._flush_messages_to_session_db(messages, [])
+
+            assert db.get_messages(visible_session_id) == []
+            runtime_rows = db.get_messages("runtime-mission-session")
+            assert [row["role"] for row in runtime_rows] == ["user", "assistant", "tool", "assistant"]
+            assert [row.get("tool_name") for row in runtime_rows] == [None, None, "team_mission_node_create", None]
+            assert all(row["metadata"]["transcript_activity_kind"] == "mission_node" for row in runtime_rows)
+            assert agent._last_flushed_db_idx == len(messages)
+            for message in messages[1:]:
+                assert message["metadata"]["transcript_activity_kind"] == "mission_node"
+
+    def test_team_dispatch_flush_persists_main_transcript_tools(self):
+        """Team dispatch leader/tool messages are main conversation history."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = SessionDB(db_path=db_path)
+
+            visible_session_id = "team-session-team-conversation-test"
+            agent = self._make_uninitialized_agent(db, session_id="runtime-dispatch-session")
+            db.create_session(visible_session_id, source="team_mission", transient=False)
+            db.upsert_session_index(
+                session_id=visible_session_id,
+                source="team_mission",
+                conversation_kind="team",
+                started_at=1.0,
+                updated_at=1.0,
+            )
+
+            agent._hermes_active_run_id = "team-dispatch-run-current"
+            agent._hermes_active_turn_id = "team-dispatch-turn-current"
+            agent._hermes_active_runtime_scope_key = "team:conversation-1"
+            agent.run_context = SimpleNamespace(
+                conversation_session_id=visible_session_id,
+                activity_id="act-team_dispatch-1",
+                activity_kind="team_dispatch",
+                execution_scope_key="team:conversation-1",
+                participant_id="leader:conversation-1",
+                to_payload=lambda: {
+                    "conversation_session_id": visible_session_id,
+                    "activity_id": "act-team_dispatch-1",
+                    "activity_kind": "team_dispatch",
+                    "execution_scope_key": "team:conversation-1",
+                    "participant_id": "leader:conversation-1",
+                },
+            )
+            messages = [
+                {"role": "user", "content": "启动团队任务"},
+                {
+                    "role": "assistant",
+                    "content": "准备启动团队任务",
+                    "tool_calls": [
+                        {
+                            "id": "call-start",
+                            "type": "function",
+                            "function": {"name": "team_mission_start_task", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": "{}",
+                    "tool_name": "team_mission_start_task",
+                    "tool_call_id": "call-start",
+                },
+                {"role": "assistant", "content": "任务已经进入规划"},
+            ]
+
+            agent._flush_messages_to_session_db(messages, [])
+
+            rows = db.get_messages(visible_session_id)
+            assert [row["role"] for row in rows] == ["assistant", "tool", "assistant"]
+            assert [row.get("tool_name") for row in rows] == [None, "team_mission_start_task", None]
+            assert all(row["metadata"]["transcript_activity_kind"] == "team_dispatch" for row in rows)
+            assert agent._last_flushed_db_idx == len(messages)
+
+    def test_turn_message_buffer_boundary_keeps_history_out_when_history_arg_is_lost(self):
+        """Loaded history is never reclassified as current output by DB flush."""
+        from agent.turn_message_buffer import TurnMessageBuffer
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = SessionDB(db_path=db_path)
+
+            visible_session_id = "team-session-team-conversation-test"
+            agent = self._make_uninitialized_agent(db, session_id="runtime-dispatch-session")
+            db.create_session(visible_session_id, source="team_mission", transient=False)
+            db.upsert_session_index(
+                session_id=visible_session_id,
+                source="team_mission",
+                conversation_kind="team",
+                started_at=1.0,
+                updated_at=1.0,
+            )
+
+            agent._hermes_active_run_id = "team-dispatch-run-current"
+            agent._hermes_active_turn_id = "team-dispatch-turn-current"
+            agent._hermes_active_runtime_scope_key = "team:conversation-1"
+            agent.run_context = SimpleNamespace(
+                conversation_session_id=visible_session_id,
+                activity_id="act-team_dispatch-current",
+                activity_kind="team_dispatch",
+                execution_scope_key="team:conversation-1",
+                participant_id="leader:conversation-1",
+                to_payload=lambda: {
+                    "conversation_session_id": visible_session_id,
+                    "activity_id": "act-team_dispatch-current",
+                    "activity_kind": "team_dispatch",
+                    "execution_scope_key": "team:conversation-1",
+                    "participant_id": "leader:conversation-1",
+                },
+            )
+            messages = TurnMessageBuffer.from_history(
+                [
+                    {"role": "user", "content": "旧用户消息"},
+                    {
+                        "role": "assistant",
+                        "content": "旧工具调用前文本",
+                        "tool_calls": [
+                            {
+                                "id": "call-old-search",
+                                "type": "function",
+                                "function": {"name": "search_files", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "content": "{}",
+                        "tool_name": "search_files",
+                        "tool_call_id": "call-old-search",
+                    },
+                    {"role": "assistant", "content": "旧工具测试总结"},
+                ]
+            )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "启动团队任务",
+                    "metadata": {
+                        "run_id": "team-dispatch-run-current",
+                        "turn_id": "team-dispatch-turn-current",
+                    },
+                }
+            )
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "准备启动团队任务",
+                    "tool_calls": [
+                        {
+                            "id": "call-start",
+                            "type": "function",
+                            "function": {"name": "team_mission_start_task", "arguments": "{}"},
+                        }
+                    ],
+                }
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "content": "{}",
+                    "tool_name": "team_mission_start_task",
+                    "tool_call_id": "call-start",
+                }
+            )
+            messages.append({"role": "assistant", "content": "任务已经进入规划"})
+
+            agent._flush_messages_to_session_db(messages, None)
+
+            rows = db.get_messages(visible_session_id)
+            assert [row["content"] for row in rows] == [
+                "准备启动团队任务",
+                "{}",
+                "任务已经进入规划",
+            ]
+            assert [row.get("tool_name") for row in rows] == [None, "team_mission_start_task", None]
+            assert all(row["metadata"]["run_id"] == "team-dispatch-run-current" for row in rows)
+            assert all(row["metadata"]["activity_id"] == "act-team_dispatch-current" for row in rows)
+            assert "search_files" not in {row.get("tool_name") for row in rows}
+            assert agent._last_flushed_db_idx == len(messages)
+
+    def test_team_projected_summary_is_not_reflushed_by_generic_writer(self):
+        """Stable team projection rows are owned by their upsert writer."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = SessionDB(db_path=db_path)
+
+            visible_session_id = "team-session-team-conversation-test"
+            stable_id = "team-mission-summary:mission-1:completed"
+            agent = self._make_uninitialized_agent(db, session_id="runtime-summary-session")
+            db.create_session(visible_session_id, source="team_mission", transient=False)
+            db.upsert_session_index(
+                session_id=visible_session_id,
+                source="team_mission",
+                conversation_kind="team",
+                started_at=1.0,
+                updated_at=1.0,
+            )
+            db.append_message(
+                visible_session_id,
+                role="assistant",
+                content="最终汇总",
+                conversation_message_id=stable_id,
+                metadata={
+                    "conversation_message_id": stable_id,
+                    "transcript_activity_kind": "mission_summary",
+                    "team_mission": {"kind": "mission_summary", "mission_id": "mission-1"},
+                },
+            )
+
+            agent._hermes_active_run_id = "team-dispatch-run-current"
+            agent._hermes_active_turn_id = "team-dispatch-turn-current"
+            agent._hermes_active_runtime_scope_key = "team:conversation-1"
+            agent.run_context = SimpleNamespace(
+                conversation_session_id=visible_session_id,
+                activity_id="act-team_dispatch-1",
+                activity_kind="team_dispatch",
+                execution_scope_key="team:conversation-1",
+                participant_id="leader:conversation-1",
+                to_payload=lambda: {
+                    "conversation_session_id": visible_session_id,
+                    "activity_id": "act-team_dispatch-1",
+                    "activity_kind": "team_dispatch",
+                    "execution_scope_key": "team:conversation-1",
+                    "participant_id": "leader:conversation-1",
+                },
+            )
+            messages = [
+                {
+                    "role": "assistant",
+                    "content": "最终汇总",
+                    "conversation_message_id": stable_id,
+                    "metadata": {
+                        "conversation_message_id": stable_id,
+                        "transcript_activity_kind": "mission_summary",
+                        "team_mission": {"kind": "mission_summary", "mission_id": "mission-1"},
+                    },
+                }
+            ]
+
+            agent._flush_messages_to_session_db(messages, [])
+
+            rows = db.get_messages(visible_session_id)
+            assert len(rows) == 1
+            assert rows[0]["conversation_message_id"] == stable_id
             assert agent._last_flushed_db_idx == len(messages)
 
     def test_persist_session_multiple_calls_no_duplication(self):
@@ -257,32 +788,36 @@ class TestAppendToTranscriptSkipDb:
 class TestFlushIdxInit:
     """Verify _last_flushed_db_idx is properly initialized."""
 
+    def _make_agent(self, *, session_db=None):
+        from run_agent import AIAgent
+
+        agent = object.__new__(AIAgent)
+        agent.session_id = "test-session-860"
+        agent.platform = "test"
+        agent.model = "test/model"
+        agent._session_db = session_db
+        agent._session_db_created = False
+        agent._session_init_model_config = None
+        agent._cached_system_prompt = None
+        agent._parent_session_id = None
+        agent._last_flushed_db_idx = 0
+        agent._persist_user_message_idx = None
+        agent._persist_user_message_override = None
+        agent._hermes_active_run_id = ""
+        agent._hermes_active_turn_id = ""
+        agent._hermes_active_runtime_scope_key = ""
+        agent.run_context = None
+        agent._run_context = None
+        return agent
+
     def test_init_zero(self):
         """Agent starts with _last_flushed_db_idx = 0."""
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
-            from run_agent import AIAgent
-            agent = AIAgent(
-                api_key="test-key",
-                base_url="https://openrouter.ai/api/v1",
-                model="test/model",
-                quiet_mode=True,
-                skip_context_files=True,
-                skip_memory=True,
-            )
+        agent = self._make_agent()
         assert agent._last_flushed_db_idx == 0
 
     def test_no_session_db_noop(self):
         """Without session_db, flush is a no-op and doesn't crash."""
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
-            from run_agent import AIAgent
-            agent = AIAgent(
-                api_key="test-key",
-                base_url="https://openrouter.ai/api/v1",
-                model="test/model",
-                quiet_mode=True,
-                skip_context_files=True,
-                skip_memory=True,
-            )
+        agent = self._make_agent()
         messages = [{"role": "user", "content": "test"}]
         agent._flush_messages_to_session_db(messages, [])
         # Should not crash, idx should remain 0

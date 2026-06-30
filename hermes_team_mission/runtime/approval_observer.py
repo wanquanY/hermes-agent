@@ -15,15 +15,10 @@ from typing import Any, Optional
 _log = logging.getLogger(__name__)
 
 
-def _stderr_log(msg: str) -> None:
-    """Belt + suspenders write that survives early-startup logging-not-yet-configured."""
-    import sys as _sys
+def _observer_log(msg: str, *, level: int = logging.DEBUG) -> None:
+    """Route observer diagnostics through Hermes logging, not stderr."""
     try:
-        print(msg, file=_sys.stderr, flush=True)
-    except Exception:
-        pass
-    try:
-        _log.warning(msg)
+        _log.log(level, msg)
     except Exception:
         pass
 
@@ -56,24 +51,24 @@ def _project_state(session_key: str, *, present: bool, source_event_type: str) -
     try:
         from tui_gateway import server as _server
     except Exception as exc:
-        _stderr_log(f"[doxie-approval-observer] server import FAILED: {exc}")
+        _observer_log(f"[doxie-approval-observer] server import FAILED: {exc}", level=logging.WARNING)
         return
     try:
         db = _server._get_db()
     except Exception as exc:
-        _stderr_log(f"[doxie-approval-observer] _get_db FAILED: {exc}")
+        _observer_log(f"[doxie-approval-observer] _get_db FAILED: {exc}", level=logging.WARNING)
         db = None
     if db is None:
-        _stderr_log(f"[doxie-approval-observer] db is None for session_key={session_key}")
+        _observer_log(
+            f"[doxie-approval-observer] db is None for session_key={session_key}",
+            level=logging.WARNING,
+        )
         return
 
     pending_updater = getattr(db, "update_session_index_pending_state_for_session_key", None)
     if callable(pending_updater):
         try:
-            rows = pending_updater(session_key, waiting_approval=present)
-            _stderr_log(
-                f"[doxie-approval-observer] index_update session_key={session_key} waiting={present} rows={rows}"
-            )
+            pending_updater(session_key, waiting_approval=present)
         except Exception as exc:
             _log.warning(
                 "[doxie-approval-observer] db.%s FAILED session_key=%s waiting=%s error_type=%s error=%s",
@@ -85,19 +80,20 @@ def _project_state(session_key: str, *, present: bool, source_event_type: str) -
                 exc_info=True,
             )
     else:
-        _stderr_log(
-            "[doxie-approval-observer] db.update_session_index_pending_state_for_session_key missing (older backend?)"
+        _observer_log(
+            "[doxie-approval-observer] db.update_session_index_pending_state_for_session_key missing (older backend?)",
+            level=logging.WARNING,
         )
 
     mission_ids = _missions_for_session_key(db, session_key)
-    _stderr_log(
-        f"[doxie-approval-observer] session_key={session_key} resolved missions={mission_ids} event={source_event_type}"
-    )
     if not mission_ids:
         return
     appender = getattr(db, "append_team_mission_conversation_status_event", None)
     if not callable(appender):
-        _stderr_log("[doxie-approval-observer] db.append_team_mission_conversation_status_event missing")
+        _observer_log(
+            "[doxie-approval-observer] db.append_team_mission_conversation_status_event missing",
+            level=logging.WARNING,
+        )
         return
     source_event = {
         "type": source_event_type,
@@ -105,10 +101,7 @@ def _project_state(session_key: str, *, present: bool, source_event_type: str) -
     }
     for mission_id in mission_ids:
         try:
-            result = appender(mission_id=mission_id, source_event=source_event, source_mission_seq=0)
-            _stderr_log(
-                f"[doxie-approval-observer] appended status event mission={mission_id} result_type={type(result).__name__}"
-            )
+            appender(mission_id=mission_id, source_event=source_event, source_mission_seq=0)
         except Exception as exc:
             _log.warning(
                 "[doxie-approval-observer] db.%s FAILED session_key=%s mission=%s error_type=%s error=%s",

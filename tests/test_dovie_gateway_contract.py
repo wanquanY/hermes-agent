@@ -63,6 +63,8 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.create" in response["result"]["methods"]
     assert "team_mission.graph" in response["result"]["methods"]
     assert "team_mission.graph.reduce" in response["result"]["methods"]
+    assert "team_mission.snapshot.get" in response["result"]["methods"]
+    assert "team_mission.result.get" in response["result"]["methods"]
     assert "team_mission.events" in response["result"]["methods"]
     assert "team_capability.snapshot.get" in response["result"]["methods"]
     assert "team_capability.snapshot.refresh" in response["result"]["methods"]
@@ -117,6 +119,8 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.create" in server._methods
     assert "team_mission.graph" in server._methods
     assert "team_mission.graph.reduce" in server._methods
+    assert "team_mission.snapshot.get" in server._methods
+    assert "team_mission.result.get" in server._methods
     assert "team_mission.events" in server._methods
     assert "team_capability.snapshot.get" in server._methods
     assert "team_capability.snapshot.refresh" in server._methods
@@ -194,6 +198,8 @@ def test_extracted_gateway_methods_own_registered_handlers():
         "team_mission.conversation.delete": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.graph": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.graph.reduce": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.snapshot.get": "hermes_team_mission.gateway.snapshot_methods",
+        "team_mission.result.get": "hermes_team_mission.gateway.snapshot_methods",
         "team_mission.events": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.message.submit": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.cancel": "hermes_team_mission.gateway.runtime_methods",
@@ -569,7 +575,7 @@ def test_conversation_render_snapshot_cap_drops_oversized_single_items():
     assert capped["runEvents"] == []
 
 
-def test_conversation_render_snapshot_normalizes_duplicate_team_assistant_run_ids(tmp_path, monkeypatch):
+def test_conversation_render_snapshot_preserves_team_assistant_run_ids(tmp_path, monkeypatch):
     import importlib
 
     from hermes_state import SessionDB
@@ -648,12 +654,90 @@ def test_conversation_render_snapshot_normalizes_duplicate_team_assistant_run_id
             if message["role"] == "assistant"
         ]
         assert len(assistant_run_ids) == 2
-        assert len(set(assistant_run_ids)) == 2
-        assert all(run_id.startswith(f"{shared_run_id}:render:") for run_id in assistant_run_ids)
-        assert messages[0]["metadata"]["original_run_id"] == shared_run_id
-        assert messages[0]["metadata"]["team_mission"]["sourceRunId"] == "run-synthesis"
-        assert messages[2]["metadata"]["team_mission"]["sourceSeq"] == "202"
+        assert assistant_run_ids == [shared_run_id, shared_run_id]
+        assert "original_run_id" not in messages[0]["metadata"]
+        assert messages[0]["metadata"]["team_mission"]["source_run_id"] == "run-synthesis"
+        assert messages[2]["metadata"]["team_mission"]["source_seq"] == "202"
         assert response["result"]["runEvents"] == []
+    finally:
+        db.close()
+
+
+def test_conversation_render_snapshot_filters_node_transcript_but_keeps_mission_summary(tmp_path, monkeypatch):
+    import importlib
+
+    from hermes_state import SessionDB
+    from tui_gateway import server
+
+    conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    team_mission = team_mission_gateway()
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session(session_id="team-session-1", source="team_mission")
+        db.append_message(
+            "team-session-1",
+            role="user",
+            content="开始团队任务。",
+            metadata={"transcript_activity_kind": "mission_start"},
+        )
+        db.append_message(
+            "team-session-1",
+            role="assistant",
+            content="节点内部细节。",
+            metadata={"transcript_activity_kind": "mission_node"},
+        )
+        db.append_message(
+            "team-session-1",
+            role="assistant",
+            content="最终汇总。",
+            metadata={
+                "transcript_activity_kind": "mission_summary",
+                "team_mission": {
+                    "kind": "mission_summary",
+                    "mission_id": "mission-1",
+                },
+            },
+        )
+        db.upsert_team_mission_conversation(
+            conversation_id="conversation-1",
+            stable_session_id="team-session-1",
+            team_id="team-1",
+            title="团队会话",
+            active_mission_id="mission-1",
+        )
+        db.upsert_team_mission(
+            mission_id="mission-1",
+            conversation_id="conversation-1",
+            team_id="team-1",
+            title="团队任务",
+            objective="测试",
+            status="completed",
+            metadata={"stableTeamSessionId": "team-session-1"},
+        )
+        monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
+        monkeypatch.setattr(session_methods, "_get_db", lambda: db)
+        monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+
+        response = server._methods["conversation.render_snapshot"](
+            1,
+            {
+                "kind": "team_mission",
+                "conversation_id": "conversation-1",
+                "includeRunEvents": True,
+            },
+        )
+
+        assert [message["text"] for message in response["result"]["messages"]] == [
+            "开始团队任务。",
+            "最终汇总。",
+        ]
+        assert [message["text"] for message in response["result"]["graph"]["recent_messages"]] == [
+            "开始团队任务。",
+            "最终汇总。",
+        ]
+        assert response["result"]["runEvents"] == []
+        assert response["result"]["toolEvents"] == []
     finally:
         db.close()
 
@@ -731,12 +815,10 @@ def test_conversation_render_snapshot_normalizes_same_turn_team_assistant_tool_m
             if message["role"] == "assistant"
         ]
         assert len(assistant_run_ids) == 2
-        assert len(set(assistant_run_ids)) == 2
-        assert assistant_run_ids[0] == f"{shared_run_id}:render:{shared_turn_id}"
-        assert assistant_run_ids[1].startswith(f"{shared_run_id}:render:{shared_turn_id}:index-")
+        assert assistant_run_ids == [shared_run_id, shared_run_id]
         assert [message["role"] for message in messages] == ["user", "assistant", "tool", "assistant"]
-        assert messages[1]["metadata"]["original_run_id"] == shared_run_id
-        assert messages[3]["metadata"]["original_run_id"] == shared_run_id
+        assert "original_run_id" not in messages[1]["metadata"]
+        assert "original_run_id" not in messages[3]["metadata"]
     finally:
         db.close()
 

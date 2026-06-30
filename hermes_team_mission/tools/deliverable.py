@@ -14,13 +14,14 @@ from collections.abc import Mapping
 from typing import Any
 
 from hermes_team_mission.context.worker_context import TOOL_ARGS_BUDGET_CHARS
+from hermes_team_mission.runtime.node_finish import finish_team_mission_node_run
 from tools.registry import registry, tool_error, tool_result
 from hermes_team_mission.tools.planning import TOOL_RESULT_BUDGET_CHARS
 from hermes_team_mission.tools.planning import _active_run_id
 from hermes_team_mission.tools.planning import _get_db
 
 
-_TOOLSET = "team_mission_planning"
+_TOOLSET = "team_mission_handoff"
 _MAX_DELIVERABLE_PAYLOAD_CHARS = 16 * 1024
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,13 @@ def _mark_event_emit_failed(
     upsert = getattr(db, "upsert_team_mission_node", None)
     if not callable(upsert):
         return
+    mission_id = _text(mission_id)
+    node_id = _text(node.get("node_id") or node.get("id"))
+    node_getter = getattr(db, "get_team_mission_node", None)
+    if callable(node_getter):
+        current_node = node_getter(mission_id, node_id) or {}
+        if isinstance(current_node, Mapping) and current_node:
+            node = current_node
     metadata = _metadata(node.get("metadata"))
     metadata.update({
         "deliverable_event_emit_failed": True,
@@ -152,7 +160,7 @@ def _mark_event_emit_failed(
     })
     upsert(
         mission_id=mission_id,
-        node_id=_text(node.get("node_id") or node.get("id")),
+        node_id=node_id,
         kind=_text(node.get("kind") or "worker"),
         title=_text(node.get("title")),
         objective=_text(node.get("objective")),
@@ -204,12 +212,11 @@ def _handle_submit_deliverable(args: dict[str, Any], parent_agent=None, **_kwarg
     )
     next_context = _metadata(args.get("next_context") or args.get("nextContext") or payload.get("next_context") or payload.get("nextContext"))
     output_contract = _metadata(node.get("output_contract"))
-    task_id = _task_id_for_node(mission, node, binding)
-    deliverable = db.upsert_team_mission_deliverable(
-        mission_id=_text(binding.get("mission_id")),
-        node_id=node_id,
-        run_id=run_id,
-        task_id=task_id,
+    finish = finish_team_mission_node_run(
+        db=db,
+        mission=mission,
+        node=node,
+        binding=binding,
         status=status,
         result=result,
         summary=summary,
@@ -221,45 +228,21 @@ def _handle_submit_deliverable(args: dict[str, Any], parent_agent=None, **_kwarg
         confidence=_confidence(args.get("confidence")),
         visibility="handoff",
     )
+    deliverable = finish.get("deliverable") if isinstance(finish, Mapping) else {}
     if not deliverable:
         return tool_error("Failed to persist Team Mission handoff deliverable.")
-    event_payload = {
-        "mission_id": _text(binding.get("mission_id")),
-        "missionId": _text(binding.get("mission_id")),
-        "node_id": node_id,
-        "nodeId": node_id,
-        "run_id": run_id,
-        "runId": run_id,
-        "task_id": task_id,
-        "taskId": task_id,
-        "deliverable_id": deliverable.get("deliverable_id") or "",
-        "deliverableId": deliverable.get("deliverable_id") or "",
-        "status": deliverable.get("status") or status,
-        "result": deliverable.get("result") or result,
-        "summary": deliverable.get("summary") or summary,
-        "artifact_refs": deliverable.get("artifact_refs") or [],
-        "artifactRefs": deliverable.get("artifact_refs") or [],
-        "source": deliverable.get("source") or "authoritative",
-        "visibility": "handoff",
-        "channel": "handoff",
-    }
     mission_id = _text(binding.get("mission_id"))
-    try:
-        db.append_team_mission_run_event(
-            mission_id=mission_id,
-            run_id=run_id,
-            event={
-                "type": "mission.node.deliverable.recorded",
-                "payload": event_payload,
-            },
-        )
-    except Exception as exc:
-        logger.exception(
-            "Failed to emit Team Mission deliverable event mission_id=%s node_id=%s run_id=%s deliverable_id=%s",
+    task_id = _text(finish.get("task_id") if isinstance(finish, Mapping) else "") or _task_id_for_node(mission, node, binding)
+    event_errors = finish.get("event_errors") if isinstance(finish, Mapping) else []
+    if event_errors:
+        exc = event_errors[0]
+        logger.error(
+            "Failed to emit Team Mission deliverable event mission_id=%s node_id=%s run_id=%s deliverable_id=%s error=%s",
             mission_id,
             node_id,
             run_id,
             deliverable.get("deliverable_id") or "",
+            exc,
         )
         _mark_event_emit_failed(
             db=db,

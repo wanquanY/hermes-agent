@@ -23,11 +23,13 @@ Tests pass a stub so unit tests don't need to spin up the LLM stack.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from agent.dovie_diagnostics import emit_dovie_runtime_diagnostic
 from tui_gateway.run_worker import (
     Emit,
     LogFrame,
@@ -38,6 +40,21 @@ from tui_gateway.run_worker import (
 from tui_gateway.services.worker_publish_bridge import WorkerPublishBridge
 
 _log = logging.getLogger(__name__)
+
+
+def _json_for_worker_log(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return repr(value)
+
+
+def _worker_run_log_text(stage: str, **fields: Any) -> str:
+    return f"[dovie-worker-run] {stage} {_json_for_worker_log(fields)}"
+
+
+def _worker_run_log(stage: str, **fields: Any) -> None:
+    emit_dovie_runtime_diagnostic("dovie-worker-run", stage, fields)
 
 
 # Sync callable run on a background thread. Returns whatever the agent
@@ -105,21 +122,41 @@ class AgentRunBackend(WorkerRunBackend):
         loop = self._loop_provider() if self._loop_provider else asyncio.get_running_loop()
         cancel_event = threading.Event()
 
+        active_refusal: _ActiveRun | None = None
         with self._lock:
             if self._active is not None and self._active.thread.is_alive():
-                # Refuse concurrent runs — the legacy worker is single-run
-                # per process and the agent libraries assume the same.
-                await emit(
-                    RunTerminalFrame(
-                        run_id=frame.run_id,
-                        status="failed",
-                        stored_session_id=frame.stored_session_id,
-                        turn_id=frame.turn_id,
-                        message="another run already active in this worker",
-                    )
-                )
-                return
+                active_refusal = self._active
 
+        if active_refusal is not None:
+            await emit(
+                LogFrame(
+                    level="warning",
+                    text=_worker_run_log_text(
+                        "agent-backend-refuse-active",
+                        requested_run_id=frame.run_id,
+                        requested_turn_id=frame.turn_id,
+                        requested_stored_session_id=frame.stored_session_id,
+                        active_run_id=active_refusal.run_id,
+                        active_turn_id=active_refusal.frame.turn_id,
+                        active_stored_session_id=active_refusal.frame.stored_session_id,
+                        active_thread_alive=active_refusal.thread.is_alive(),
+                    ),
+                )
+            )
+            # Refuse concurrent runs — the legacy worker is single-run
+            # per process and the agent libraries assume the same.
+            await emit(
+                RunTerminalFrame(
+                    run_id=frame.run_id,
+                    status="failed",
+                    stored_session_id=frame.stored_session_id,
+                    turn_id=frame.turn_id,
+                    message="another run already active in this worker",
+                )
+            )
+            return
+
+        with self._lock:
             run_context = _run_context_from_frame(frame)
             bridge = WorkerPublishBridge(emit=emit, loop=loop)
             bridge.install(
@@ -151,6 +188,13 @@ class AgentRunBackend(WorkerRunBackend):
             )
             self._active = active
             thread.start()
+        _worker_run_log(
+            "agent-backend-started",
+            run_id=frame.run_id,
+            turn_id=frame.turn_id,
+            stored_session_id=frame.stored_session_id,
+            thread_name=thread.name,
+        )
 
         try:
             # Yield the event loop until the agent thread exits. ``join``
@@ -158,15 +202,35 @@ class AgentRunBackend(WorkerRunBackend):
             # stays drained.
             await asyncio.get_running_loop().run_in_executor(None, thread.join)
         finally:
+            cleared_active = False
             with self._lock:
                 if self._active is active:
                     self._active = None
+                    cleared_active = True
+            if cleared_active:
+                _worker_run_log(
+                    "agent-backend-cleared-active",
+                    run_id=frame.run_id,
+                    turn_id=frame.turn_id,
+                    stored_session_id=frame.stored_session_id,
+                    thread_alive=thread.is_alive(),
+                )
             try:
                 bridge.uninstall()
             except Exception:
                 _log.exception("[agent-run-backend] bridge uninstall failed")
 
         status, message = _classify_outcome(result["exc"], cancel_event)
+        _worker_run_log(
+            "agent-backend-terminal",
+            run_id=frame.run_id,
+            turn_id=frame.turn_id,
+            stored_session_id=frame.stored_session_id,
+            status=status,
+            message=message,
+            cancelled=cancel_event.is_set(),
+            error=repr(result["exc"]) if result["exc"] is not None else "",
+        )
         await emit(
             RunTerminalFrame(
                 run_id=frame.run_id,
@@ -183,7 +247,18 @@ class AgentRunBackend(WorkerRunBackend):
         with self._lock:
             active = self._active
         if active is None or active.run_id != run_id:
+            _worker_run_log(
+                "agent-backend-cancel-miss",
+                requested_run_id=run_id,
+                active_run_id=active.run_id if active is not None else "",
+            )
             return
+        _worker_run_log(
+            "agent-backend-cancel",
+            run_id=run_id,
+            turn_id=active.frame.turn_id,
+            stored_session_id=active.frame.stored_session_id,
+        )
         active.cancel_event.set()
 
     async def shutdown(self) -> None:

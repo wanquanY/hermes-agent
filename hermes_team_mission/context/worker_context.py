@@ -15,6 +15,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from hermes_team_mission.domain.handoff_contract import output_contract_requires_handoff
 from hermes_state_run_event_codec import payload_from_run_event_row
 
 
@@ -586,6 +587,7 @@ def build_team_mission_worker_context(
         sections.append((5, "upstream_handoffs", [
             "Upstream handoff deliverables:",
             _safe_json(handoffs[:3], limit=WORKER_CONTEXT_FIELD_MAX_CHARS),
+            "Treat these upstream handoff deliverables as the authoritative current-mission input. Use team memory or session search only as background, artifact lookup, or verification; never as a replacement for a required handoff.",
             "",
         ]))
     deliverable_lines: list[str] = []
@@ -603,7 +605,7 @@ def build_team_mission_worker_context(
     sections.append((2, "acceptance", acceptance_lines))
     if output_contract:
         sections.append((2, "output_contract", ["Output contract:", _safe_json(output_contract), ""]))
-        if text(output_contract.get("delivery_channel") or output_contract.get("deliveryChannel")).lower() == "handoff":
+        if output_contract_requires_handoff(output_contract):
             sections.append((1, "handoff_protocol", [
                 "Handoff protocol:",
                 "- Stream normal user-visible progress and conclusions in natural language.",

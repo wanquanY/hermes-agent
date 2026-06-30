@@ -5,87 +5,6 @@ from .session_common import *
 
 
 class SessionDBTeamMissionEventMixin:
-    def _derive_missing_team_mission_handoff(
-        self,
-        *,
-        binding: Dict[str, Any],
-        node: Dict[str, Any],
-        run_id: str,
-        event: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        payload = event.get("payload") if isinstance((event or {}).get("payload"), dict) else {}
-        terminal_text = primary_deliverable_text(payload)
-        if not terminal_text:
-            return {}
-        mission_id = _text(binding.get("mission_id"))
-        node_id = _text(binding.get("node_id"))
-        derived = _deliverable_state.derived_degraded_deliverable_from_text(
-            terminal_text,
-            node_id=node_id,
-            status="completed",
-            result="",
-        )
-        if not derived:
-            return {}
-        node_metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
-        task_id = _text(
-            node_metadata.get("task_id")
-            or node_metadata.get("taskId")
-            or (binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}).get("task_id")
-            or (binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}).get("taskId")
-        )
-        deliverable = self.upsert_team_mission_deliverable(
-            mission_id=mission_id,
-            node_id=node_id,
-            run_id=run_id,
-            task_id=task_id,
-            status=derived.get("status") or "completed",
-            result=derived.get("result") or "",
-            summary=derived.get("summary") or "",
-            payload=derived.get("payload") if isinstance(derived.get("payload"), dict) else {},
-            artifact_refs=derived.get("artifact_refs") if isinstance(derived.get("artifact_refs"), list) else [],
-            next_context=derived.get("next_context") if isinstance(derived.get("next_context"), dict) else {},
-            output_contract=dict(node.get("output_contract") or {}),
-            source=_text(derived.get("source")) or _deliverable_state.DELIVERABLE_SOURCE_DERIVED_DEGRADED,
-            confidence=float(derived.get("confidence") or 0.5),
-            visibility=_deliverable_state.DELIVERABLE_VISIBILITY_HANDOFF,
-        )
-        if deliverable:
-            try:
-                _event_log.append_team_mission_structural_event(
-                    self,
-                    mission_id=mission_id,
-                    source_event={
-                        "type": "mission.node.deliverable.recorded",
-                        "run_id": run_id,
-                        "seq": _event_seq(event),
-                        "payload": {
-                            "mission_id": mission_id,
-                            "missionId": mission_id,
-                            "node_id": node_id,
-                            "nodeId": node_id,
-                            "run_id": run_id,
-                            "runId": run_id,
-                            "task_id": task_id,
-                            "taskId": task_id,
-                            "deliverable_id": deliverable.get("deliverable_id") or "",
-                            "deliverableId": deliverable.get("deliverable_id") or "",
-                            "status": deliverable.get("status") or "completed",
-                            "result": deliverable.get("result") or "",
-                            "summary": deliverable.get("summary") or "",
-                            "artifact_refs": deliverable.get("artifact_refs") or [],
-                            "artifactRefs": deliverable.get("artifact_refs") or [],
-                            "source": _text(derived.get("source")) or _deliverable_state.DELIVERABLE_SOURCE_DERIVED_DEGRADED,
-                            "visibility": "handoff",
-                            "channel": "handoff",
-                        },
-                    },
-                    dedupe_key=f"node-deliverable-derived:{mission_id}:{node_id}:{run_id}",
-                )
-            except Exception:
-                pass
-        return deliverable
-
     def _record_missing_team_mission_handoff(
         self,
         *,
@@ -171,25 +90,18 @@ class SessionDBTeamMissionEventMixin:
             and _node_requires_explicit_handoff(node)
             and not self.team_mission_run_has_deliverable(run_id)
         ):
-            derived_handoff = self._derive_missing_team_mission_handoff(
+            self._record_missing_team_mission_handoff(
                 binding=binding,
                 node=node,
                 run_id=run_id,
                 event=event,
             )
-            if not derived_handoff:
-                self._record_missing_team_mission_handoff(
-                    binding=binding,
-                    node=node,
-                    run_id=run_id,
-                    event=event,
-                )
-                next_status = "blocked"
-                missing_required_handoff = True
-                missing_handoff_failure = _classify_team_mission_failure(
-                    "error",
-                    {"error": "protocol violation: Team Mission node ended without calling team_mission_submit_deliverable"},
-                )
+            next_status = "blocked"
+            missing_required_handoff = True
+            missing_handoff_failure = _classify_team_mission_failure(
+                "error",
+                {"error": "protocol violation: Team Mission node ended without calling team_mission_submit_deliverable"},
+            )
         metadata = dict(node.get("metadata") or {})
         failure = _classify_team_mission_failure(event_type, payload)
         event_seq = _event_seq(event)
@@ -204,6 +116,10 @@ class SessionDBTeamMissionEventMixin:
         except (TypeError, ValueError):
             existing_terminal_seq = 0
         if existing_terminal_run_id == run_id and existing_terminal_status in _TERMINAL_NODE_STATUSES:
+            if _text(metadata.get("last_run_terminal_event")) == "mission.node.finished":
+                preferred_status = _prefer_terminal_node_status(existing_terminal_status, next_status)
+                if preferred_status == existing_terminal_status:
+                    return node
             if event_seq > 0 and existing_terminal_seq >= event_seq:
                 return node
             preferred_status = _prefer_terminal_node_status(existing_terminal_status, next_status)

@@ -38,7 +38,7 @@ def _member_run_context() -> RunContext:
     return RunContext(
         conversation_session_id=CONV_SESSION,
         participant_id=member_participant_id("member-alice"),
-        activity_id="member_chat",
+        activity_id="act-member_chat:conv-1:member-alice",
         activity_kind="member_chat",
         execution_scope_key="member-chat:conv-1:member-alice",
         control_home="/tmp/hermes-member-alice",

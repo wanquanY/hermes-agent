@@ -308,6 +308,9 @@ def leave_team_mission_control_home(token: Any) -> None:
 
 
 def team_mission_control_db(parent_agent: Any = None) -> Any:
+    db = getattr(parent_agent, "_session_db", None) if parent_agent is not None else None
+    if _is_worker_db_proxy(db):
+        return db
     explicit_control_home = text(os.getenv("DOVIE_HERMES_CONTROL_HOME"))
     if explicit_control_home:
         try:
@@ -316,7 +319,6 @@ def team_mission_control_db(parent_agent: Any = None) -> Any:
             return SessionDB(db_path=Path(explicit_control_home).expanduser().resolve() / "state.db")
         except Exception:
             pass
-    db = getattr(parent_agent, "_session_db", None) if parent_agent is not None else None
     if db is not None:
         return db
     try:
@@ -336,6 +338,10 @@ def team_mission_control_db(parent_agent: Any = None) -> Any:
     from hermes_state import SessionDB
 
     return SessionDB()
+
+
+def _is_worker_db_proxy(db: Any) -> bool:
+    return str(getattr(db, "db_path", "") or "").startswith("worker-db-proxy")
 
 
 def unwrap_response(response: dict[str, Any]) -> tuple[dict[str, Any], str]:

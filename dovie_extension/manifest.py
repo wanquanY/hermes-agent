@@ -64,6 +64,8 @@ REQUIRED_METHODS = [
     "profile.draft.discard",
     "team_mission.graph",
     "team_mission.graph.reduce",
+    "team_mission.snapshot.get",
+    "team_mission.result.get",
     "team_mission.events",
     "team_capability.snapshot.get",
     "team_capability.snapshot.refresh",
@@ -158,6 +160,8 @@ REQUIRED_STATE_FEATURES = [
     "state:run_event_log",
     "state:agent_profile_registry",
     "state:team_mission_graph",
+    "state:team_mission_snapshot",
+    "state:team_mission_result",
     "state:team_registry",
     "state:team_mission_conversation",
     "state:team_mission_memory",
@@ -225,6 +229,8 @@ METHOD_MODULES = {
     "profile.draft.discard": "tui_gateway.methods.profile_registry",
     "team_mission.graph": "hermes_team_mission.gateway.runtime_methods",
     "team_mission.graph.reduce": "hermes_team_mission.gateway.runtime_methods",
+    "team_mission.snapshot.get": "hermes_team_mission.gateway.snapshot_methods",
+    "team_mission.result.get": "hermes_team_mission.gateway.snapshot_methods",
     "team_mission.events": "hermes_team_mission.gateway.runtime_methods",
     "team_capability.snapshot.get": "hermes_team_mission.gateway.conversation_methods",
     "team_capability.snapshot.refresh": "hermes_team_mission.gateway.conversation_methods",
@@ -381,6 +387,22 @@ def _state_features_present() -> set[str]:
         )
     ):
         present.add("state:team_mission_graph")
+    if all(
+        _session_db_method(name)
+        for name in (
+            "get_team_mission_graph",
+            "list_team_mission_events",
+        )
+    ) and _module_exists("hermes_team_mission.gateway.snapshot_methods"):
+        present.add("state:team_mission_snapshot")
+    if all(
+        _session_db_method(name)
+        for name in (
+            "upsert_team_mission_result",
+            "get_team_mission_result",
+        )
+    ) and _session_db_schema_contains("team_mission_results"):
+        present.add("state:team_mission_result")
     if all(
         _session_db_method(name)
         for name in (

@@ -72,6 +72,14 @@ def _block_event_interactive_kind(event_type: str) -> Optional[str]:
     return _BLOCK_EVENT_KINDS.get(event_type)
 
 
+def _payload_keys(payload: dict[str, Any]) -> list[str]:
+    return sorted(str(key) for key in payload.keys())[:24]
+
+
+def _choices_count(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
 @dataclass
 class _PatchHandle:
     """Records what was patched so ``uninstall`` can undo it. One
@@ -314,6 +322,25 @@ class WorkerPublishBridge:
                                 stored_session_id=stored,
                             )
                         )
+                    else:
+                        _log.warning(
+                            "[worker-publish-bridge] interactive request missing request_id "
+                            "kind=%s event_type=%s stored_session_id=%s session_id=%s "
+                            "run_id=%s turn_id=%s payload_keys=%s has_question=%s choices_count=%s",
+                            interactive_kind,
+                            event_type,
+                            str(
+                                params.get("stored_session_id")
+                                or params.get("session_key")
+                                or ""
+                            ).strip(),
+                            str(params.get("session_id") or "").strip(),
+                            str(params.get("run_id") or "").strip(),
+                            str(params.get("turn_id") or "").strip(),
+                            _payload_keys(payload_dict),
+                            bool(str(payload_dict.get("question") or "").strip()),
+                            _choices_count(payload_dict.get("choices")),
+                        )
             return original(params, *args, **kwargs)
 
         run_control.publish_recorded_event = wrapped  # type: ignore[assignment]
@@ -345,17 +372,30 @@ class WorkerPublishBridge:
 
         def wrapped(clarify_id, session_key, question, choices):
             entry = original(clarify_id, session_key, question, choices)
+            request_id = str(clarify_id)
             payload: dict[str, Any] = {
                 "clarify_id": clarify_id,
+                "request_id": request_id,
                 "session_key": session_key,
                 "question": question,
             }
             if choices:
                 payload["choices"] = list(choices)
+            _log.info(
+                "[worker-publish-bridge] clarify gateway request registered "
+                "request_id=%s session_key=%s stored_session_id=%s payload_keys=%s "
+                "has_question=%s choices_count=%s",
+                request_id,
+                str(session_key or "").strip(),
+                bridge._stored_session_id or str(session_key or "").strip(),
+                _payload_keys(payload),
+                bool(str(question or "").strip()),
+                _choices_count(payload.get("choices")),
+            )
             bridge.emit_threadsafe(
                 InteractiveRequestFrame(
                     kind="clarify",
-                    request_id=str(clarify_id),
+                    request_id=request_id,
                     payload=payload,
                     stored_session_id=bridge._stored_session_id or str(session_key or ""),
                 )

@@ -15,6 +15,10 @@ from tui_gateway.methods.session import (
 _server = bind_server_globals(globals())
 
 
+def _text(value) -> str:
+    return str(value or "").strip()
+
+
 def _get_db():
     return _session_methods._get_db()
 
@@ -76,6 +80,7 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as exc:
         return _err(rid, 5000, f"messages page failed: {exc}")
+    activity_id = str(params.get("activity_id") or params.get("activityId") or "").strip()
     include_run_events = bool(params.get("include_run_events", params.get("includeRunEvents", False)))
     run_events = []
     if include_run_events:
@@ -85,11 +90,12 @@ def _(rid, params: dict) -> dict:
                 run_events = list_run_events(
                     target,
                     runtime_scope_key=_requested_runtime_scope_key(params),
+                    activity_id=activity_id,
                     limit=_bounded_page_limit(params.get("run_events_limit", params.get("runEventsLimit")), default=2000, maximum=5000),
                 )
         except Exception as exc:
             return _err(rid, 5000, f"run event page failed: {exc}")
-    include_tool_events = bool(params.get("include_tool_events", params.get("includeToolEvents", True)))
+    include_tool_events = bool(params.get("include_tool_events", params.get("includeToolEvents", False)))
     tool_events = []
     if include_tool_events:
         try:
@@ -109,6 +115,7 @@ def _(rid, params: dict) -> dict:
     raw_messages = _history_to_messages(page.get("messages") or [])
     sanitized_messages = sanitize_transcript_messages(raw_messages)
     page_info = _message_page_info(page.get("pageInfo"))
+    branch_info = db.get_session_branch_info(target) if hasattr(db, "get_session_branch_info") else None
     return _ok(
         rid,
         {
@@ -117,7 +124,7 @@ def _(rid, params: dict) -> dict:
             "toolEvents": tool_events,
             "runEvents": run_events,
             "pageInfo": page_info,
-            "branchInfo": db.get_session_branch_info(target) if hasattr(db, "get_session_branch_info") else None,
+            "branchInfo": branch_info,
         },
     )
 

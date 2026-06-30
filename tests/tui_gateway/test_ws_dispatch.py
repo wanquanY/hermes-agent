@@ -987,9 +987,10 @@ def test_run_control_fans_out_team_mission_activity_event_after_persist(tmp_path
         if item.get("method") == "event"
     ]
     assert len(delivered_events) == 1
-    assert delivered_events[0]["type"] == "message.delta"
+    assert delivered_events[0]["type"] == "team_mission.runtime.event"
     assert delivered_events[0]["activity_id"] == "mission:mission-1"
-    assert delivered_events[0]["payload"]["delta"] == "live token"
+    assert delivered_events[0]["payload"]["source_event_type"] == "message.delta"
+    assert delivered_events[0]["payload"]["text_stream"]["delta"] == "live token"
 
 
 def test_run_control_session_subscription_ignores_team_mission_projection_events(tmp_path):
@@ -1183,9 +1184,10 @@ def test_run_control_replaces_duplicate_activity_subscriptions_per_transport(tmp
         for item in delivered
         if item.get("method") == "event"
     ]
-    assert [event["type"] for event in delivered_events] == ["message.delta"]
+    assert [event["type"] for event in delivered_events] == ["team_mission.runtime.event"]
     assert delivered_events[0]["activity_id"] == "mission:mission-1"
-    assert delivered_events[0]["payload"]["delta"] == "live token"
+    assert delivered_events[0]["payload"]["source_event_type"] == "message.delta"
+    assert delivered_events[0]["payload"]["text_stream"]["delta"] == "live token"
 
 
 def test_control_plane_session_list_is_not_proxied_to_runtime_worker():

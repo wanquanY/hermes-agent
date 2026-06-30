@@ -23,6 +23,8 @@ Scope (what we expose):
   - kanban_* (complete/block/comment/    — kanban worker + orchestrator
     heartbeat/show/list/create/            handoff (stateless: read env var,
     unblock/link)                          write ~/.hermes/kanban.db)
+  - team_mission_submit_deliverable /
+    team_mission_node_heartbeat          — DoXie Team Mission node handoff
 
 What we DO NOT expose:
   - terminal / shell                     — codex's own shell tool
@@ -102,6 +104,11 @@ EXPOSED_TOOLS: tuple[str, ...] = (
     "kanban_create",
     "kanban_unblock",
     "kanban_link",
+    # DoXie Team Mission node lifecycle tools. These are internal Hermes
+    # control-plane callbacks, not shell/file tools. Worker prompts can require
+    # them when the node output contract uses the hidden handoff channel.
+    "team_mission_submit_deliverable",
+    "team_mission_node_heartbeat",
 )
 
 
@@ -135,9 +142,16 @@ def _build_server() -> Any:
 
     # Pull authoritative Hermes tool schemas for the ones we expose, so
     # MCP clients see the same parameter docs Hermes gives the model.
+    tool_defs = list(get_tool_definitions(quiet_mode=True) or [])
+    tool_defs.extend(
+        get_tool_definitions(
+            enabled_toolsets=["team_mission_handoff"],
+            quiet_mode=True,
+        ) or []
+    )
     all_defs = {
         td["function"]["name"]: td["function"]
-        for td in (get_tool_definitions(quiet_mode=True) or [])
+        for td in tool_defs
         if isinstance(td, dict) and td.get("type") == "function"
     }
 

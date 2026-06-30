@@ -17,7 +17,7 @@ CONTROL_FIELD = "hermes_control"
 
 
 def extract_tool_handoff(tool_name: str, tool_result: Any) -> dict[str, Any] | None:
-    """Return a handoff contract embedded in a tool result, if present."""
+    """Return a turn-control contract embedded in a tool result, if present."""
     payload = _parse_json_object(tool_result)
     if not payload:
         return None
@@ -31,13 +31,18 @@ def extract_tool_handoff(tool_name: str, tool_result: Any) -> dict[str, Any] | N
         return None
     if payload.get("success") is not True:
         return None
-    if control.get("end_current_turn") is not True:
+    end_current_turn = control.get("end_current_turn") is True
+    skip_remaining_tool_calls = end_current_turn or control.get("skip_remaining_tool_calls") is True
+    if not skip_remaining_tool_calls:
         return None
 
     node = payload.get("node") if isinstance(payload.get("node"), Mapping) else {}
     return {
         "kind": kind,
         "tool_name": "team_mission_start_task",
+        "end_current_turn": end_current_turn,
+        "skip_remaining_tool_calls": skip_remaining_tool_calls,
+        "require_followup_response": bool(control.get("require_followup_response")),
         "mission_id": _text(payload.get("mission_id")),
         "conversation_id": _text(payload.get("conversation_id")),
         "task_id": _text(payload.get("task_id")),
@@ -52,6 +57,10 @@ def extract_tool_handoff(tool_name: str, tool_result: Any) -> dict[str, Any] | N
             control.get("assistant_response")
             or payload.get("assistant_response")
             or payload.get("message")
+        ),
+        "assistant_followup_instruction": _text(
+            control.get("assistant_followup_instruction")
+            or payload.get("assistant_followup_instruction")
         ),
     }
 
@@ -82,9 +91,7 @@ def format_tool_handoff_response(handoff: Mapping[str, Any] | None) -> str:
 
     if _text(data.get("kind")) == TEAM_MISSION_HANDOFF_KIND:
         return (
-            "Team mission accepted; planning has started. This is the task-start "
-            "state, not the final result. The final deliverable will be written "
-            "back here when the mission graph completes."
+            "团队任务已启动，正在后台处理。你可以在右侧画布查看进度，也可以继续发送新的任务。"
         )
 
     return "The task was handed off to another runtime and this turn is now waiting for its final result."

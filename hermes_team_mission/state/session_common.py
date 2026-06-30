@@ -32,9 +32,11 @@ import hermes_team_mission.state.memory as _memory_state
 import hermes_team_mission.state.graph as _graph_state
 import hermes_team_mission.state.event_log as _event_log
 import hermes_team_mission.state.deliverables as _deliverable_state
+import hermes_team_mission.state.results as _result_state
 from hermes_team_mission.domain.assignees import assignee_public_fields as _assignee_public_fields
 from hermes_team_mission.domain.assignees import mission_metadata_with_members as _mission_metadata_with_members
 from hermes_team_mission.domain.assignees import resolve_node_assignee as _resolve_node_assignee
+from hermes_team_mission.domain.handoff_contract import node_requires_authoritative_handoff as _node_requires_authoritative_handoff
 from hermes_team_mission.domain.identities import canonical_node_id as _canonical_node_id
 from hermes_team_mission.domain.node_kinds import TEAM_MISSION_CONTROL_NODE_KINDS
 from hermes_team_mission.domain.node_kinds import metadata_with_normalized_node_kind as _metadata_with_normalized_node_kind
@@ -145,6 +147,8 @@ _TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES = {
     "mission.node.started",
     "mission.node.run.bound",
     "mission.edge.created",
+    "mission.node.finished",
+    "mission.result.recorded",
 }
 _RUNNING_MISSION_STATUSES = {
     "planning",
@@ -199,16 +203,7 @@ def _event_has_deliverable_text(event_type: str, payload: Dict[str, Any] | None)
 
 
 def _node_requires_explicit_handoff(node: Dict[str, Any] | None) -> bool:
-    node = node if isinstance(node, dict) else {}
-    output_contract = node.get("output_contract") if isinstance(node.get("output_contract"), dict) else {}
-    if output_contract.get("requires_explicit_handoff") is True:
-        return True
-    if output_contract.get("requiresExplicitHandoff") is True:
-        return True
-    delivery_channel = _text(output_contract.get("delivery_channel") or output_contract.get("deliveryChannel")).lower()
-    if delivery_channel in {"handoff", "internal_handoff"}:
-        return True
-    return False
+    return _node_requires_authoritative_handoff(node)
 
 
 def _terminal_run_status_for_event(event_type: str, payload: Dict[str, Any] | None) -> str | None:

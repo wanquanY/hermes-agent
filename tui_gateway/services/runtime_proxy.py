@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Tuple
 
 from hermes_constants import get_hermes_home
-from hermes_state.profile_dir import resolve_default_agent_dir
+from hermes_profile_dir import resolve_default_agent_dir
 
 _log = logging.getLogger(__name__)
 
@@ -78,6 +78,8 @@ _CONTROL_PLANE_METHODS = frozenset(
         "team_mission.events",
         "team_mission.graph",
         "team_mission.graph.reduce",
+        "team_mission.snapshot.get",
+        "team_mission.result.get",
         "team_mission.message.submit",
         "team_mission.node.history",
     }

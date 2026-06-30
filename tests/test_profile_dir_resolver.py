@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hermes_state.profile_dir import (
+from hermes_profile_dir import (
     is_legacy_default_agent_dir,
     resolve_default_agent_dir,
 )

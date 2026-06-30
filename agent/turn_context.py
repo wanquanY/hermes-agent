@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.iteration_budget import IterationBudget
 from agent.model_metadata import estimate_request_tokens_rough
+from agent.turn_message_buffer import TurnMessageBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -194,8 +195,9 @@ def build_turn_context(
         _msg_preview,
     )
 
-    # Initialize conversation (copy to avoid mutating the caller's list).
-    messages = list(conversation_history) if conversation_history else []
+    # Keep the history/current-turn boundary with the working list so
+    # persistence never has to infer it from an optional history argument.
+    messages = TurnMessageBuffer.from_history(conversation_history)
 
     # Hydrate todo store from conversation history.
     if conversation_history and not agent._todo_store.has_items():

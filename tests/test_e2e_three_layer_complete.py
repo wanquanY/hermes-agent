@@ -687,10 +687,12 @@ async def test_e2e_speaker_displays_member_name_not_leader_fallback(
         team["session_id"],
         role="assistant",
         content="Alpha should render as the speaker.",
+        participant_id=MEMBER_PARTICIPANT_ID,
         metadata={
             "run_id": captured_submit["run_id"],
             "turn_id": captured_submit["turn_id"],
             "team_mission": {
+                "participant_id": MEMBER_PARTICIPANT_ID,
                 "display_name": "Leader",
                 "canonical_node_id": "mission-three-layer:leader-looking-node",
             },
@@ -702,7 +704,6 @@ async def test_e2e_speaker_displays_member_name_not_leader_fallback(
     participants = {item["participant_id"]: item for item in snapshot["participants"]}
 
     assert message["participant_id"] == MEMBER_PARTICIPANT_ID
-    assert message["teamMission"]["participantId"] == MEMBER_PARTICIPANT_ID
-    assert message["teamMission"]["display_name"] == "Leader"
+    assert message["metadata"]["team_mission"]["display_name"] == "Leader"
     assert participants[message["participant_id"]]["display_name"] == "Alpha"
     assert participants[message["participant_id"]]["display_name"] != "Leader"

@@ -189,6 +189,19 @@ def _leader_run_profile_params(
     team_id = _text(mission.get("team_id"))
     if team_id:
         params["team_id"] = team_id
+    mission_metadata = _metadata(mission.get("metadata"))
+    mission_members = mission_metadata.get("members")
+    if isinstance(mission_members, list) and mission_members:
+        params["mission_metadata"] = {"members": mission_members}
+        title = _text(mission.get("title"))
+        objective = _text(mission.get("objective"))
+        mode = _text(mission.get("mode") or mission_metadata.get("mode_strategy"))
+        if title:
+            params["mission_title"] = title
+        if objective:
+            params["mission_objective"] = objective
+        if mode:
+            params["mission_mode"] = mode
     node_id = _text(node.get("node_id"))
     if node_id:
         params["node_id"] = node_id

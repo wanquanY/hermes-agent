@@ -82,6 +82,7 @@ from agent.process_bootstrap import (
     _get_proxy_for_base_url,
 )
 from agent.iteration_budget import IterationBudget
+from agent.turn_message_buffer import message_persist_boundary
 
 
 from hermes_cli.env_loader import load_hermes_dotenv
@@ -1319,21 +1320,314 @@ class AIAgent:
         from agent.agent_runtime_helpers import repair_message_sequence
         return repair_message_sequence(self, messages)
 
-    def _team_conversation_projector_owns_transcript(self) -> bool:
-        session_id = str(getattr(self, "session_id", "") or "").strip()
-        db = getattr(self, "_session_db", None)
-        if not session_id or db is None:
-            return False
-        getter = getattr(db, "get_session_index", None)
-        if not callable(getter):
-            return False
+    def _active_run_context(self):
+        for context in (
+            getattr(self, "run_context", None),
+            getattr(self, "_run_context", None),
+        ):
+            if context is not None:
+                return context
         try:
-            row = getter(session_id)
+            from tui_gateway.services.worker_publish_bridge import get_active_run_context
+
+            return get_active_run_context()
         except Exception:
+            return None
+
+    def _visible_transcript_session_id(self) -> str:
+        context = self._active_run_context()
+        conversation_session_id = str(
+            getattr(context, "conversation_session_id", "") if context is not None else ""
+        ).strip()
+        return conversation_session_id or str(getattr(self, "session_id", "") or "").strip()
+
+    def _run_context_message_metadata(self, role: str) -> Dict[str, Any]:
+        context = self._active_run_context()
+        if context is None:
+            metadata: Dict[str, Any] = {}
+        else:
+            metadata = {}
+            for attr, key in (
+                ("conversation_session_id", "conversation_session_id"),
+                ("activity_id", "activity_id"),
+                ("activity_kind", "activity_kind"),
+                ("execution_scope_key", "execution_scope_key"),
+            ):
+                value = str(getattr(context, attr, "") or "").strip()
+                if value:
+                    metadata[key] = value
+            if role in {"assistant", "tool"}:
+                participant_id = str(getattr(context, "participant_id", "") or "").strip()
+                if participant_id:
+                    metadata["participant_id"] = participant_id
+                    metadata["participantId"] = participant_id
+            to_payload = getattr(context, "to_payload", None)
+            if callable(to_payload):
+                try:
+                    payload = to_payload()
+                    if isinstance(payload, dict):
+                        metadata["run_context"] = payload
+                except Exception:
+                    pass
+            runtime_activity_kind = str(metadata.get("activity_kind") or "").strip()
+            runtime_activity_id = str(metadata.get("activity_id") or "").strip()
+            try:
+                from hermes_team_mission.runtime.team_transcript_writer import (
+                    transcript_activity_kind_for_run_context,
+                )
+
+                transcript_activity_kind = transcript_activity_kind_for_run_context(
+                    activity_kind=runtime_activity_kind,
+                    activity_id=runtime_activity_id,
+                )
+            except Exception:
+                transcript_activity_kind = runtime_activity_kind
+            if transcript_activity_kind:
+                metadata["runtime_activity_kind"] = runtime_activity_kind
+                metadata["transcript_activity_kind"] = transcript_activity_kind
+                self._emit_transcript_flush_diagnostic(
+                    "run-context-transcript-classified",
+                    role=role,
+                    visible_session_id=str(metadata.get("conversation_session_id") or ""),
+                    runtime_scope_key=str(metadata.get("execution_scope_key") or ""),
+                    participant_id=str(getattr(context, "participant_id", "") or ""),
+                    run_id=str(getattr(self, "_hermes_active_run_id", "") or ""),
+                    turn_id=str(getattr(self, "_hermes_active_turn_id", "") or ""),
+                    runtime_activity_kind=runtime_activity_kind,
+                    runtime_activity_id=runtime_activity_id,
+                    transcript_activity_kind=transcript_activity_kind,
+                    classification_reason=(
+                        "mission_node_activity"
+                        if runtime_activity_id.startswith("act-node:")
+                        else "team_dispatch_activity"
+                        if runtime_activity_kind == "team_dispatch"
+                        else "mission_activity_without_node_id"
+                        if runtime_activity_kind == "mission"
+                        else "chat_activity"
+                    ),
+                )
+        if role in {"assistant", "tool"}:
+            active_run_id = str(getattr(self, "_hermes_active_run_id", "") or "").strip()
+            active_turn_id = str(getattr(self, "_hermes_active_turn_id", "") or "").strip()
+            if active_run_id:
+                metadata["run_id"] = active_run_id
+            if active_turn_id:
+                metadata["turn_id"] = active_turn_id
+        return metadata
+
+    def _active_turn_metadata(self) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {}
+        run_id = str(getattr(self, "_hermes_active_run_id", "") or "").strip()
+        turn_id = str(getattr(self, "_hermes_active_turn_id", "") or "").strip()
+        if run_id:
+            metadata["run_id"] = run_id
+        if turn_id:
+            metadata["turn_id"] = turn_id
+        return metadata
+
+    @staticmethod
+    def _merge_message_metadata(*items: Dict[str, Any]) -> Dict[str, Any]:
+        merged: Dict[str, Any] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for key, value in item.items():
+                if value in (None, ""):
+                    continue
+                if key not in merged or merged.get(key) in (None, ""):
+                    merged[key] = value
+        return merged
+
+    def _ensure_visible_transcript_session(self, session_id: str) -> None:
+        session_id = str(session_id or "").strip()
+        if not session_id or not self._session_db:
+            return
+        try:
+            self._session_db.create_session(session_id, source="team_mission", transient=False)
+        except Exception:
+            # create_session is INSERT OR IGNORE for the real DB; proxy/test
+            # doubles may still raise. The append path below will surface any
+            # real missing-parent failure.
+            pass
+
+    @staticmethod
+    def _message_role_counts(messages: List[Dict]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for message in messages or []:
+            role = str(message.get("role", "unknown") if isinstance(message, dict) else "unknown")
+            counts[role] = counts.get(role, 0) + 1
+        return counts
+
+    @staticmethod
+    def _message_content_fingerprint(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        except Exception:
+            return str(value)
+
+    @classmethod
+    def _conversation_history_is_message_prefix(
+        cls,
+        messages: List[Dict],
+        conversation_history: List[Dict] | None,
+    ) -> bool:
+        if not conversation_history:
+            return True
+        if not messages or len(conversation_history) > len(messages):
             return False
-        if not isinstance(row, dict):
-            return False
-        return str(row.get("conversation_kind") or "").strip().lower() == "team"
+        for index, history_message in enumerate(conversation_history):
+            message = messages[index] if index < len(messages) else None
+            if not isinstance(message, dict) or not isinstance(history_message, dict):
+                return False
+            if str(message.get("role") or "") != str(history_message.get("role") or ""):
+                return False
+            if cls._message_content_fingerprint(message.get("content")) != cls._message_content_fingerprint(
+                history_message.get("content")
+            ):
+                return False
+        return True
+
+    @staticmethod
+    def _is_team_visible_transcript_context(
+        visible_session_id: str,
+        runtime_scope_key: str,
+        participant_id: str,
+    ) -> bool:
+        return (
+            str(visible_session_id or "").startswith(
+                ("team-session-team-conversation-", "team:mission-")
+            )
+            or str(runtime_scope_key or "").startswith(("team:", "member-chat:"))
+            or str(participant_id or "").startswith(("leader:", "member:"))
+        )
+
+    @staticmethod
+    def _is_main_team_transcript_message(message: Dict[str, Any]) -> bool:
+        try:
+            from hermes_team_mission.runtime.team_transcript_writer import is_main_transcript_message
+        except Exception:
+            return True
+        return bool(is_main_transcript_message(message))
+
+    @staticmethod
+    def _team_projected_transcript_message_id(message: Dict[str, Any]) -> str:
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        return str(
+            message.get("conversation_message_id")
+            or message.get("conversationMessageId")
+            or metadata.get("conversation_message_id")
+            or metadata.get("conversationMessageId")
+            or ""
+        ).strip()
+
+    @staticmethod
+    def _diagnostic_text_preview(value: Any, *, limit: int = 96) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, list):
+            preview_parts: list[str] = []
+            for part in value[:4]:
+                if isinstance(part, dict):
+                    part_type = str(part.get("type") or "").strip()
+                    text = str(part.get("text") or part.get("content") or "").strip()
+                    preview_parts.append(f"{part_type}:{text[:24]}" if text else part_type or "dict")
+                else:
+                    preview_parts.append(type(part).__name__)
+            text = f"list[{len(value)}] " + ",".join(preview_parts)
+        elif isinstance(value, dict):
+            text = "dict keys=" + ",".join(sorted(str(key) for key in value.keys())[:8])
+        else:
+            text = str(value)
+        text = text.replace("\n", "\\n")
+        return text[:limit]
+
+    @staticmethod
+    def _diagnostic_tool_calls_summary(message: Dict[str, Any]) -> list[Dict[str, str]]:
+        raw_tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if not isinstance(raw_tool_calls, list):
+            return []
+        summary: list[Dict[str, str]] = []
+        for index, tool_call in enumerate(raw_tool_calls[:6]):
+            if not isinstance(tool_call, dict):
+                summary.append({"index": str(index), "type": type(tool_call).__name__})
+                continue
+            function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+            summary.append(
+                {
+                    "index": str(index),
+                    "id": str(tool_call.get("id") or tool_call.get("tool_call_id") or "")[:48],
+                    "name": str(tool_call.get("name") or function.get("name") or "")[:80],
+                }
+            )
+        return summary
+
+    def _diagnostic_message_sample(self, idx: int, message: Any) -> Dict[str, Any]:
+        if not isinstance(message, dict):
+            return {"idx": idx, "type": type(message).__name__}
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        content = message.get("content")
+        role = str(message.get("role") or "unknown")
+        return {
+            "idx": idx,
+            "role": role,
+            "synthetic": bool(message.get("_synthetic_continuation")),
+            "keys": sorted(str(key) for key in message.keys())[:20],
+            "content_type": type(content).__name__,
+            "content_len": len(str(content or "")),
+            "content_preview": self._diagnostic_text_preview(content),
+            "reasoning_len": len(str(message.get("reasoning") or "")) if role == "assistant" else 0,
+            "tool_name": str(message.get("tool_name") or message.get("name") or ""),
+            "tool_call_id": str(message.get("tool_call_id") or ""),
+            "tool_calls": self._diagnostic_tool_calls_summary(message),
+            "participant_id": str(
+                message.get("participant_id")
+                or message.get("participantId")
+                or metadata.get("participant_id")
+                or metadata.get("participantId")
+                or ""
+            ),
+            "run_id": str(metadata.get("run_id") or ""),
+            "turn_id": str(metadata.get("turn_id") or ""),
+            "client_message_id": str(metadata.get("client_message_id") or ""),
+        }
+
+    def _diagnostic_message_samples(
+        self,
+        messages: List[Dict],
+        *,
+        start_idx: int = 0,
+        limit: int = 24,
+    ) -> list[Dict[str, Any]]:
+        samples: list[Dict[str, Any]] = []
+        for offset, message in enumerate(messages or []):
+            if len(samples) >= limit:
+                break
+            samples.append(self._diagnostic_message_sample(start_idx + offset, message))
+        return samples
+
+    def _emit_transcript_flush_diagnostic(self, stage: str, **fields: Any) -> None:
+        visible_session_id = str(fields.get("visible_session_id") or "").strip()
+        runtime_scope_key = str(
+            fields.get("runtime_scope_key")
+            or getattr(self, "_hermes_active_runtime_scope_key", "")
+            or ""
+        ).strip()
+        participant_id = str(fields.get("participant_id") or "").strip()
+        if not (
+            visible_session_id.startswith("team-session-team-conversation-")
+            or visible_session_id.startswith("team:mission-")
+            or runtime_scope_key.startswith(("team:", "member-chat:"))
+            or participant_id.startswith(("leader:", "member:"))
+        ):
+            return
+        try:
+            from agent.dovie_diagnostics import emit_dovie_diagnostic
+
+            emit_dovie_diagnostic("[dovie-team-transcript-debug]", {"stage": stage, **fields})
+        except Exception:
+            pass
 
     def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Persist any un-flushed messages to the SQLite session store.
@@ -1345,15 +1639,87 @@ class AIAgent:
         if not self._session_db:
             return
         self._apply_persist_user_message_override(messages)
+        visible_session_id = ""
         try:
-            if self._team_conversation_projector_owns_transcript():
-                self._last_flushed_db_idx = len(messages or [])
+            visible_session_id = self._visible_transcript_session_id()
+            if not visible_session_id:
                 return
             # Retry row creation if the earlier attempt failed transiently.
-            if not self._session_db_created:
+            if visible_session_id == self.session_id:
                 self._ensure_db_session()
-            start_idx = len(conversation_history) if conversation_history else 0
+            else:
+                self._ensure_visible_transcript_session(visible_session_id)
+            explicit_boundary = message_persist_boundary(messages)
+            if explicit_boundary is not None:
+                history_is_prefix = True
+                start_idx = explicit_boundary
+                history_boundary_source = "turn_message_buffer"
+            else:
+                history_is_prefix = self._conversation_history_is_message_prefix(
+                    messages,
+                    conversation_history,
+                )
+                start_idx = len(conversation_history) if history_is_prefix else 0
+                history_boundary_source = (
+                    "conversation_history_prefix" if history_is_prefix else "no_explicit_boundary"
+                )
             flush_from = max(start_idx, self._last_flushed_db_idx)
+            runtime_scope_key = str(getattr(self, "_hermes_active_runtime_scope_key", "") or "")
+            context = self._active_run_context()
+            context_participant_id = str(
+                getattr(context, "participant_id", "") if context is not None else ""
+            ).strip()
+            active_run_id = str(getattr(self, "_hermes_active_run_id", "") or "").strip()
+            active_turn_id = str(getattr(self, "_hermes_active_turn_id", "") or "").strip()
+            active_activity_id = str(
+                getattr(context, "activity_id", "") if context is not None else ""
+            ).strip()
+            team_visible_transcript = self._is_team_visible_transcript_context(
+                visible_session_id,
+                runtime_scope_key,
+                context_participant_id,
+            )
+            slice_messages = messages[flush_from:]
+            append_counts: Dict[str, int] = {}
+            append_samples: list[Dict[str, Any]] = []
+            skipped_samples: list[Dict[str, Any]] = []
+            append_attempts = 0
+            self._emit_transcript_flush_diagnostic(
+                "flush-start",
+                visible_session_id=visible_session_id,
+                agent_session_id=str(getattr(self, "session_id", "") or ""),
+                runtime_scope_key=runtime_scope_key,
+                participant_id=context_participant_id,
+                run_id=active_run_id,
+                turn_id=active_turn_id,
+                active_activity_id=active_activity_id,
+                db_type=type(self._session_db).__name__,
+                history_len=start_idx,
+                history_boundary_source=history_boundary_source,
+                raw_history_len=len(conversation_history or []),
+                history_is_prefix=history_is_prefix,
+                messages_len=len(messages or []),
+                last_flushed_db_idx=self._last_flushed_db_idx,
+                flush_from=flush_from,
+                slice_len=len(slice_messages),
+                team_visible_transcript=team_visible_transcript,
+                all_role_counts=self._message_role_counts(messages),
+                slice_role_counts=self._message_role_counts(slice_messages),
+                pre_storage_role_sequence=[
+                    f"{sample.get('idx')}:{sample.get('role')}"
+                    + (f":{sample.get('tool_name')}" if sample.get("tool_name") else "")
+                for sample in self._diagnostic_message_samples(
+                    slice_messages,
+                    start_idx=flush_from,
+                    limit=40,
+                )
+            ],
+            pre_storage_message_samples=self._diagnostic_message_samples(
+                slice_messages,
+                start_idx=flush_from,
+                limit=24,
+            ),
+        )
 
             def _turn_metadata(value):
                 if not isinstance(value, dict):
@@ -1382,21 +1748,89 @@ class AIAgent:
                 # gets stamped with the OUTER turn's ids (the synthetic doesn't
                 # define a new turn).
                 if isinstance(msg, dict) and msg.get("_synthetic_continuation"):
+                    if len(skipped_samples) < 12:
+                        skipped_samples.append(
+                            {
+                                **self._diagnostic_message_sample(msg_idx, msg),
+                                "skip_reason": "synthetic_continuation",
+                            }
+                        )
                     continue
                 role = msg.get("role", "unknown")
                 msg_metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+                context_metadata = self._run_context_message_metadata(role)
+                active_turn_metadata = self._active_turn_metadata()
+                target_session_id = visible_session_id
                 if role == "user":
                     current_turn_metadata = _turn_metadata(msg_metadata)
-                elif role in {"assistant", "tool"} and current_turn_metadata:
-                    merged_metadata = dict(msg_metadata)
-                    changed_metadata = False
-                    for key, value in current_turn_metadata.items():
-                        if not str(merged_metadata.get(key) or "").strip():
-                            merged_metadata[key] = value
-                            changed_metadata = True
-                    if changed_metadata:
-                        msg["metadata"] = merged_metadata
-                        msg_metadata = merged_metadata
+                elif role in {"assistant", "tool"}:
+                    if active_turn_metadata:
+                        msg_metadata = self._merge_message_metadata(msg_metadata, active_turn_metadata)
+                    elif current_turn_metadata:
+                        msg_metadata = self._merge_message_metadata(msg_metadata, current_turn_metadata)
+                if context_metadata:
+                    msg_metadata = self._merge_message_metadata(msg_metadata, context_metadata)
+                    for identity_key in ("run_id", "turn_id"):
+                        identity_value = str(context_metadata.get(identity_key) or "").strip()
+                        if identity_value:
+                            msg_metadata[identity_key] = identity_value
+                if msg_metadata and msg.get("metadata") != msg_metadata:
+                    msg["metadata"] = msg_metadata
+                if team_visible_transcript and role in {"user", "assistant", "tool"}:
+                    transcript_probe = dict(msg)
+                    transcript_probe["metadata"] = msg_metadata
+                    if role in {"assistant", "tool"} and self._team_projected_transcript_message_id(transcript_probe):
+                        if len(skipped_samples) < 12:
+                            skipped_samples.append(
+                                {
+                                    **self._diagnostic_message_sample(msg_idx, transcript_probe),
+                                    "skip_reason": "team_projected_transcript_owned_by_writer",
+                                }
+                            )
+                        continue
+                    is_main_team_transcript_message = self._is_main_team_transcript_message(transcript_probe)
+                    if role == "user" and is_main_team_transcript_message:
+                        if len(skipped_samples) < 12:
+                            skipped_samples.append(
+                                {
+                                    **self._diagnostic_message_sample(msg_idx, transcript_probe),
+                                    "skip_reason": "team_user_owned_by_submit",
+                                }
+                            )
+                        continue
+                    if not is_main_team_transcript_message:
+                        runtime_session_id = str(getattr(self, "session_id", "") or "").strip()
+                        if runtime_session_id:
+                            target_session_id = runtime_session_id
+                            self._ensure_visible_transcript_session(target_session_id)
+                        else:
+                            if len(skipped_samples) < 12:
+                                skipped_samples.append(
+                                    {
+                                        **self._diagnostic_message_sample(msg_idx, transcript_probe),
+                                        "skip_reason": "team_runtime_session_missing",
+                                    }
+                                )
+                            continue
+                    if role in {"assistant", "tool"} and not is_main_team_transcript_message:
+                        if len(skipped_samples) < 12:
+                            skipped_samples.append(
+                                {
+                                    **self._diagnostic_message_sample(msg_idx, transcript_probe),
+                                    "skip_reason": "team_runtime_transcript_routed_to_runtime_session",
+                                    "target_session_id": target_session_id,
+                                    "transcript_activity_kind": str(
+                                        msg_metadata.get("transcript_activity_kind")
+                                        or msg_metadata.get("transcriptActivityKind")
+                                        or ""
+                                    ),
+                                    "activity_kind": str(
+                                        msg_metadata.get("activity_kind")
+                                        or msg_metadata.get("activityKind")
+                                        or ""
+                                    ),
+                                }
+                            )
                 content = msg.get("content")
                 # Persist multimodal tool results as their text summary only —
                 # base64 images would bloat the session DB and aren't useful
@@ -1421,8 +1855,9 @@ class AIAgent:
                 elif isinstance(msg.get("tool_calls"), list):
                     tool_calls_data = msg["tool_calls"]
                 msg_participant_id = self._flush_message_participant_id(role, msg, msg_metadata)
-                self._session_db.append_message(
-                    session_id=self.session_id,
+                append_attempts += 1
+                appended_id = self._session_db.append_message(
+                    session_id=target_session_id,
                     role=role,
                     content=content,
                     participant_id=msg_participant_id,
@@ -1437,8 +1872,60 @@ class AIAgent:
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
                     metadata=msg_metadata,
                 )
+                append_counts[role] = append_counts.get(role, 0) + 1
+                if len(append_samples) < 12:
+                    append_samples.append(
+                        {
+                            "idx": msg_idx,
+                            "row_id": appended_id,
+                            "role": role,
+                            "session_id": target_session_id,
+                            "participant_id": msg_participant_id,
+                            "raw_participant_id": str(
+                                msg.get("participant_id")
+                                or msg.get("participantId")
+                                or ""
+                            ),
+                            "metadata_participant_id": str(
+                                msg_metadata.get("participant_id")
+                                or msg_metadata.get("participantId")
+                                or ""
+                            ),
+                            "run_id": str(msg_metadata.get("run_id") or ""),
+                            "turn_id": str(msg_metadata.get("turn_id") or ""),
+                            "content_len": len(str(content or "")),
+                            "content_preview": self._diagnostic_text_preview(content),
+                            "has_tool_calls": bool(tool_calls_data),
+                            "tool_call_id": str(msg.get("tool_call_id") or ""),
+                            "tool_name": str(msg.get("tool_name") or ""),
+                            "tool_calls": self._diagnostic_tool_calls_summary(msg),
+                            "reasoning_len": len(str(msg.get("reasoning") or "")) if role == "assistant" else 0,
+                        }
+                    )
             self._last_flushed_db_idx = len(messages)
+            self._emit_transcript_flush_diagnostic(
+                "flush-finished",
+                visible_session_id=visible_session_id,
+                runtime_scope_key=runtime_scope_key,
+                participant_id=context_participant_id,
+                run_id=str(getattr(self, "_hermes_active_run_id", "") or ""),
+                turn_id=str(getattr(self, "_hermes_active_turn_id", "") or ""),
+                append_attempts=append_attempts,
+                append_counts=append_counts,
+                append_samples=append_samples,
+                skipped_samples=skipped_samples,
+                next_last_flushed_db_idx=self._last_flushed_db_idx,
+            )
         except Exception as e:
+            self._emit_transcript_flush_diagnostic(
+                "flush-error",
+                visible_session_id=visible_session_id,
+                runtime_scope_key=str(getattr(self, "_hermes_active_runtime_scope_key", "") or ""),
+                run_id=str(getattr(self, "_hermes_active_run_id", "") or ""),
+                turn_id=str(getattr(self, "_hermes_active_turn_id", "") or ""),
+                error_type=type(e).__name__,
+                error=str(e),
+            )
             logger.warning("Session DB append_message failed: %s", e)
 
     def _flush_message_participant_id(

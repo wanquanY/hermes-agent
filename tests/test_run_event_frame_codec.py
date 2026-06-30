@@ -3,12 +3,10 @@ from __future__ import annotations
 import json
 import time
 
+from hermes_conversation_message_identity import AssistantMessageIdentity
+from hermes_conversation_message_identity import assistant_conversation_message_id_for
 from hermes_state import SessionDB
 from hermes_state_run_event_codec import decode_run_event_row
-from tui_gateway.services.transcript_projector import (
-    ProjectionKey,
-    conversation_message_id_for,
-)
 
 
 def _message_delta(seq: int, text: str = "hello") -> dict:
@@ -100,10 +98,10 @@ def test_reference_run_event_payloads_slim_message_complete_and_rehydrates_from_
             "payload": {"text": large_text, "status": "complete"},
         }
         db.append_run_event("session-1", event)
-        conversation_message_id = conversation_message_id_for(
-            ProjectionKey("session-1", "run-1", "1")
+        conversation_message_id = assistant_conversation_message_id_for(
+            AssistantMessageIdentity("session-1", "run-1", "1")
         )
-        db.upsert_projected_conversation_message(
+        db._upsert_team_message_by_id(  # noqa: SLF001
             session_id="session-1",
             conversation_message_id=conversation_message_id,
             role="assistant",

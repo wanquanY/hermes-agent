@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any
 
+from hermes_team_mission.runtime.team_transcript_writer import main_transcript_message_decision
 from tui_gateway.methods._shared import bind_server_globals
 
 _server = bind_server_globals(globals())
@@ -74,23 +76,6 @@ def _structural_run_events(events: list[Any]) -> list[dict[str, Any]]:
 def _run_ids_from_render_messages(messages: list[dict[str, Any]]) -> list[str]:
     run_ids = sorted(item for item in _covered_render_run_ids(messages) if item)
     return run_ids
-
-
-def _missing_complete_render_messages(
-    *,
-    messages: list[dict[str, Any]],
-    raw_run_events: list[Any],
-) -> list[dict[str, Any]]:
-    covered = _covered_render_run_ids(messages)
-    complete_messages = _team_render_messages_from_run_events(raw_run_events)
-    missing: list[dict[str, Any]] = []
-    for message in complete_messages:
-        metadata = _message_metadata(message)
-        run_id = _text(metadata.get("run_id") or metadata.get("runId") or _message_source_run_id(message))
-        if run_id and run_id in covered:
-            continue
-        missing.append(message)
-    return missing
 
 
 def _mark_transport_truncated(result: dict[str, Any]) -> None:
@@ -309,6 +294,10 @@ def _message_params(params: dict[str, Any], session_id: str) -> dict[str, Any]:
             default=True,
         ),
         "include_run_events": include_run_events,
+        "include_tool_events": _truthy(
+            params.get("include_tool_events", params.get("includeToolEvents")),
+            default=False,
+        ),
         "run_events_limit": _bounded_limit(
             params.get("run_events_limit", params.get("runEventsLimit")),
             default=2000,
@@ -403,6 +392,51 @@ def _message_metadata(message: dict[str, Any]) -> dict[str, Any]:
 
 def _message_text(message: dict[str, Any]) -> str:
     return str(message.get("text") or message.get("content") or "")
+
+
+def _diagnostic_text_summary(value: Any) -> dict[str, Any]:
+    text = str(value or "")
+    return {
+        "len": len(text),
+        "sha1": hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:12],
+        "preview": text[:80].replace("\n", "\\n"),
+    }
+
+
+def _diagnostic_message_summary(index: int, message: dict[str, Any]) -> dict[str, Any]:
+    metadata = _message_metadata(message)
+    team_mission = _record(metadata.get("team_mission") or metadata.get("teamMission"))
+    decision = main_transcript_message_decision(message)
+    return {
+        "idx": index,
+        "role": _text(message.get("role")),
+        "message_id": _message_id(message),
+        "conversation_message_id": _text(
+            message.get("conversation_message_id") or message.get("conversationMessageId")
+        ),
+        "participant_id": _text(message.get("participant_id") or message.get("participantId")),
+        "run_id": _text(metadata.get("run_id") or metadata.get("runId")),
+        "turn_id": _text(metadata.get("turn_id") or metadata.get("turnId")),
+        "activity_id": _text(metadata.get("activity_id") or metadata.get("activityId")),
+        "activity_kind": _text(metadata.get("activity_kind") or metadata.get("activityKind")),
+        "runtime_activity_kind": _text(metadata.get("runtime_activity_kind") or metadata.get("runtimeActivityKind")),
+        "transcript_activity_kind": _text(
+            metadata.get("transcript_activity_kind") or metadata.get("transcriptActivityKind")
+        ),
+        "team_mission_kind": _text(team_mission.get("kind")),
+        "team_mission_source_node_id": _text(team_mission.get("source_node_id") or team_mission.get("sourceNodeId")),
+        "decision": decision,
+        "text": _diagnostic_text_summary(_message_text(message)),
+    }
+
+
+def _emit_team_render_diagnostic(stage: str, **fields: Any) -> None:
+    try:
+        from agent.dovie_diagnostics import emit_dovie_diagnostic
+
+        emit_dovie_diagnostic("[dovie-team-render-debug]", {"stage": stage, **fields})
+    except Exception:
+        pass
 
 
 def _message_id(message: dict[str, Any]) -> str:
@@ -531,114 +565,6 @@ def _with_message_participant_id(message: dict[str, Any], participant_id: str) -
     return next_message
 
 
-def _message_render_identity(message: dict[str, Any], index: int) -> str:
-    message_id = _message_id(message)
-    if message_id:
-        return f"message:{message_id}"
-    metadata = _message_metadata(message)
-    parts = [
-        _text(message.get("role")),
-        _text(message.get("timestamp")),
-        _text(metadata.get("run_id") or metadata.get("runId")),
-        _text(metadata.get("turn_id") or metadata.get("turnId")),
-        _text(metadata.get("client_message_id") or metadata.get("clientMessageId")),
-        _message_source_seq(message),
-        _message_text(message),
-    ]
-    if any(parts):
-        return "|".join(parts)
-    return f"index:{index}"
-
-
-def _team_conversation_run_suffix(message: dict[str, Any], index: int) -> str:
-    return (
-        _message_source_seq(message)
-        or _message_id(message)
-        or _text(_message_metadata(message).get("turn_id") or _message_metadata(message).get("turnId"))
-        or _text(message.get("timestamp"))
-        or str(index)
-    )
-
-
-def _with_unique_team_render_run_id(
-    message: dict[str, Any],
-    *,
-    run_id: str,
-    index: int,
-    suffix: str = "",
-) -> dict[str, Any]:
-    next_message = dict(message)
-    metadata = dict(_message_metadata(next_message))
-    team_mission = dict(_record(metadata.get("team_mission") or metadata.get("teamMission")))
-    source_run_id = _message_source_run_id(next_message)
-    if source_run_id:
-        team_mission.setdefault("sourceRunId", source_run_id)
-        team_mission.setdefault("source_run_id", source_run_id)
-    source_seq = _message_source_seq(next_message)
-    if source_seq:
-        team_mission.setdefault("sourceSeq", source_seq)
-        team_mission.setdefault("source_seq", source_seq)
-    if team_mission:
-        metadata["team_mission"] = team_mission
-    metadata.setdefault("original_run_id", run_id)
-    metadata["run_id"] = f"{run_id}:render:{suffix or _team_conversation_run_suffix(next_message, index)}"
-    next_message["metadata"] = metadata
-    return next_message
-
-
-def _normalize_team_render_messages(
-    messages: list[Any],
-    *,
-    run_events: list[Any] | None = None,
-) -> list[dict[str, Any]]:
-    event_participants = _run_event_participant_index(list(run_events or []))
-    unique_messages: list[dict[str, Any]] = []
-    seen_message_keys: set[str] = set()
-    for index, raw in enumerate(messages):
-        if not isinstance(raw, dict):
-            continue
-        message = dict(raw)
-        # CR-P3.3: graph identity only; for speaker use participant_id.
-        message = _with_message_participant_id(
-            message,
-            _participant_id_for_message_from_events(message, event_participants),
-        )
-        key = _message_render_identity(message, index)
-        if key in seen_message_keys:
-            continue
-        seen_message_keys.add(key)
-        unique_messages.append(message)
-
-    assistant_run_counts: dict[str, int] = {}
-    for message in unique_messages:
-        if _text(message.get("role")) != "assistant":
-            continue
-        run_id = _text(_message_metadata(message).get("run_id") or _message_metadata(message).get("runId"))
-        if run_id:
-            assistant_run_counts[run_id] = assistant_run_counts.get(run_id, 0) + 1
-
-    normalized: list[dict[str, Any]] = []
-    render_run_ids: set[str] = set()
-    for index, message in enumerate(unique_messages):
-        if _text(message.get("role")) != "assistant":
-            normalized.append(message)
-            continue
-        run_id = _text(_message_metadata(message).get("run_id") or _message_metadata(message).get("runId"))
-        if run_id and assistant_run_counts.get(run_id, 0) > 1:
-            suffix = _team_conversation_run_suffix(message, index)
-            render_run_id = f"{run_id}:render:{suffix}"
-            if render_run_id in render_run_ids:
-                suffix = f"{suffix}:index-{index}"
-                render_run_id = f"{run_id}:render:{suffix}"
-            render_run_ids.add(render_run_id)
-            normalized.append(_with_unique_team_render_run_id(message, run_id=run_id, index=index, suffix=suffix))
-        else:
-            if run_id:
-                render_run_ids.add(run_id)
-            normalized.append(message)
-    return normalized
-
-
 def _covered_render_run_ids(messages: list[dict[str, Any]]) -> set[str]:
     covered: set[str] = set()
     for message in messages:
@@ -660,63 +586,6 @@ def _event_run_id(event: Any) -> str:
         return ""
     payload = _record(event.get("payload"))
     return _text(event.get("run_id") or payload.get("run_id") or payload.get("runId"))
-
-
-def _run_event_to_render_message(event: Any) -> dict[str, Any]:
-    if not isinstance(event, dict) or _text(event.get("type")) != "message.complete":
-        return {}
-    payload = _record(event.get("payload"))
-    text = _text(
-        payload.get("text")
-        or payload.get("content")
-        or payload.get("output")
-        or payload.get("final_response")
-        or payload.get("finalResponse")
-    )
-    if not text:
-        return {}
-    run_id = _event_run_id(event)
-    turn_id = _text(event.get("turn_id") or event.get("turnId") or payload.get("turn_id") or payload.get("turnId"))
-    seq = _text(event.get("seq") or payload.get("seq"))
-    participant_id = _event_participant_id(event)
-    metadata = {
-        "run_id": run_id,
-        "turn_id": turn_id,
-        "source_seq": seq,
-        "source": "run_events",
-    }
-    if participant_id:
-        metadata["participant_id"] = participant_id
-        metadata["participantId"] = participant_id
-    message_id = _text(payload.get("message_id") or payload.get("messageId")) or (
-        f"run-event:{run_id}:{seq}" if run_id and seq else ""
-    )
-    message = {
-        "id": message_id,
-        "message_id": message_id,
-        "messageId": message_id,
-        "role": _text(payload.get("role")) or "assistant",
-        "content": text,
-        "text": text,
-        "timestamp": event.get("timestamp") or payload.get("timestamp") or 0,
-        "metadata": metadata,
-    }
-    if participant_id:
-        message["participant_id"] = participant_id
-        message["participantId"] = participant_id
-    return message
-
-
-def _team_render_messages_from_run_events(run_events: list[Any]) -> list[dict[str, Any]]:
-    messages = [
-        message
-        for event in sorted(
-            [event for event in run_events if isinstance(event, dict)],
-            key=lambda item: int(item.get("seq") or 0),
-        )
-        if (message := _run_event_to_render_message(event))
-    ]
-    return _normalize_team_render_messages(messages, run_events=run_events)
 
 
 def _team_snapshot_active_run_ids(conversation: dict[str, Any], mission: dict[str, Any]) -> set[str]:
@@ -749,6 +618,95 @@ def _filter_team_render_run_events(
             continue
         filtered.append(event)
     return filtered
+
+
+def _team_conversation_status_projection(conversation_id: str) -> dict[str, Any]:
+    conversation_id = _text(conversation_id)
+    if not conversation_id:
+        return {}
+    try:
+        db = _get_db()
+        projector = getattr(db, "get_team_mission_conversation_status_projection", None) if db is not None else None
+        if not callable(projector):
+            return {}
+        projection = projector(conversation_id) or {}
+        return dict(projection) if isinstance(projection, dict) else {}
+    except Exception as exc:
+        logger.warning(
+            "conversation.render_snapshot status projection skipped conversation_id=%s: %s",
+            conversation_id,
+            exc,
+        )
+        return {}
+
+
+def _team_conversation_is_running(
+    *,
+    conversation: dict[str, Any],
+    mission: dict[str, Any],
+) -> bool:
+    conversation_id = _text(conversation.get("conversation_id") or conversation.get("conversationId"))
+    projection = _team_conversation_status_projection(conversation_id)
+    if projection:
+        return bool(projection.get("running")) or _text(
+            projection.get("projected_state")
+            or projection.get("run_state")
+            or projection.get("runState")
+            or projection.get("activity_state")
+            or projection.get("activityState")
+        ).lower() == "running"
+    return bool(
+        conversation.get("running")
+        or conversation.get("active_run_id")
+        or conversation.get("activeRunId")
+        or mission.get("active_run_id")
+        or mission.get("activeRunId")
+    )
+
+
+def _filter_main_transcript_messages(messages: list[Any]) -> list[dict[str, Any]]:
+    return [
+        dict(message)
+        for message in messages
+        if isinstance(message, dict) and main_transcript_message_decision(message).get("include")
+    ]
+
+
+def _team_page_info_for_visible_messages(
+    page_info: Any,
+    *,
+    raw_messages: list[Any],
+    visible_messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    info = dict(page_info) if isinstance(page_info, dict) else {}
+    raw_count = len([message for message in raw_messages if isinstance(message, dict)])
+    visible_count = len(visible_messages)
+    if raw_count == visible_count:
+        return info
+    for key in ("totalCount", "total_count", "returnedCount", "returned_count"):
+        if key in info:
+            info[key] = visible_count
+    info["filteredByTranscriptActivity"] = True
+    info["visibleCount"] = visible_count
+    return info
+
+
+def _team_graph_with_visible_messages(
+    graph: dict[str, Any],
+    *,
+    messages: list[dict[str, Any]],
+    page_info: dict[str, Any],
+) -> dict[str, Any]:
+    next_graph = dict(graph) if isinstance(graph, dict) else {}
+    visible_messages = [dict(message) for message in messages]
+    next_graph["recent_messages"] = visible_messages
+    next_graph["recentMessages"] = visible_messages
+    next_graph["message_page_info"] = dict(page_info)
+    next_graph["messagePageInfo"] = dict(page_info)
+    last_message = dict(visible_messages[-1]) if visible_messages else {}
+    next_graph["last_message"] = last_message
+    next_graph["lastMessage"] = last_message
+    return next_graph
 
 
 def _team_conversation_snapshot(
@@ -795,65 +753,65 @@ def _team_conversation_snapshot(
     page, error = _messages_page(session_id, params, required=False)
     if error:
         return error
-    messages = list(page.get("messages") or []) if isinstance(page, dict) else []
-    page_messages = list(messages)
-    graph_recent_messages = list(graph.get("recent_messages") or graph.get("recentMessages") or [])
-    if not messages:
-        messages = graph_recent_messages
+    raw_messages = list(page.get("messages") or []) if isinstance(page, dict) else []
+    messages = _filter_main_transcript_messages(raw_messages)
+    raw_message_summaries = [
+        _diagnostic_message_summary(index, message)
+        for index, message in enumerate(raw_messages)
+        if isinstance(message, dict)
+    ]
+    filtered_message_summaries = [
+        summary for summary in raw_message_summaries
+        if not _record(summary.get("decision")).get("include")
+    ]
     raw_run_events = list(page.get("runEvents") or []) if isinstance(page, dict) else []
     tool_events = list(page.get("toolEvents") or []) if isinstance(page, dict) else []
-    fallback_from_run_events = False
-    if not messages:
-        # CR-P2.4: team timeline rendering must not fall back to
-        # team_mission_events. If no durable message rows exist yet, derive
-        # renderable assistant messages from authoritative run_events.seq.
-        messages = _team_render_messages_from_run_events(raw_run_events)
-        fallback_from_run_events = True
-    messages = _normalize_team_render_messages(messages, run_events=raw_run_events)
-    missing_complete_messages = _missing_complete_render_messages(
-        messages=messages,
-        raw_run_events=raw_run_events,
-    )
-    # BUG-6 fix: when the persisted messages cover only part of the
-    # ``run_events.message.complete`` set, fill the gap from run_events
-    # so the rendered transcript matches the canonical event log. This
-    # protects against:
-    #   - TranscriptProjector race / transient failure left a half-state
-    #   - Legacy conversations created before the projector landed
-    #   - Phase-4 backfill not yet run
-    # Read-time only: nothing is written back to the ``messages`` table.
-    # Persisted messages take precedence (their content/metadata is
-    # canonical); the fill-in is appended and ``_normalize_team_render_messages``
-    # dedupes by render identity. ``filled_missing_complete_run_ids`` remains
-    # available in the render summary for targeted inspection.
-    filled_missing_complete_messages: list[dict[str, Any]] = []
-    if missing_complete_messages and not fallback_from_run_events:
-        filled_missing_complete_messages = list(missing_complete_messages)
-        messages = _normalize_team_render_messages(
-            list(messages) + filled_missing_complete_messages,
-            run_events=raw_run_events,
-        )
-        # Recompute missing now that we have filled — keeps the trace
-        # field honest about what is still unrenderable.
-        missing_complete_messages = _missing_complete_render_messages(
-            messages=messages,
-            raw_run_events=raw_run_events,
-        )
     page_info = (
         page.get("pageInfo")
         if isinstance(page, dict) and isinstance(page.get("pageInfo"), dict)
         else graph.get("message_page_info") or graph.get("messagePageInfo") or {}
     )
+    page_info = _team_page_info_for_visible_messages(
+        page_info,
+        raw_messages=raw_messages,
+        visible_messages=messages,
+    )
+    graph = _team_graph_with_visible_messages(
+        graph,
+        messages=messages,
+        page_info=page_info,
+    )
     mission = resolved.get("mission") if isinstance(resolved.get("mission"), dict) else {}
     mission_present = bool(_text(mission.get("mission_id") or mission.get("missionId")))
     if not mission_present:
         mission = {}
-    run_events = _filter_team_render_run_events(
-        raw_run_events,
-        conversation=conversation,
-        mission=mission,
-        messages=messages,
+    is_running = _team_conversation_is_running(conversation=conversation, mission=mission)
+    _emit_team_render_diagnostic(
+        "team-conversation-snapshot-filter",
+        request_id=str(rid),
+        identifier=identifier,
+        conversation_id=_text(conversation.get("conversation_id") or conversation.get("conversationId")),
+        session_id=session_id,
+        mission_id=_text(mission.get("mission_id") or mission.get("missionId")),
+        raw_message_count=len(raw_message_summaries),
+        visible_message_count=len(messages),
+        filtered_message_count=len(filtered_message_summaries),
+        raw_run_event_count=len(raw_run_events),
+        tool_event_count=len(tool_events),
+        is_running=is_running,
+        filtered_samples=filtered_message_summaries[:16],
+        raw_samples=raw_message_summaries[:24],
     )
+    if is_running:
+        run_events = _filter_team_render_run_events(
+            raw_run_events,
+            conversation=conversation,
+            mission=mission,
+            messages=messages,
+        )
+    else:
+        run_events = []
+        tool_events = []
     branch_info = page.get("branchInfo") if isinstance(page, dict) else None
     return _ok(
         rid,

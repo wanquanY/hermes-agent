@@ -37,10 +37,12 @@ def _worker(scope: RuntimeScope) -> RunWorker:
 class _Supervisor:
     def __init__(self) -> None:
         self.ensure_calls: list[RuntimeScope] = []
+        self.ensure_envs: list[dict[str, str]] = []
         self.sent: list[tuple[str, str, Any]] = []
 
-    async def ensure(self, scope: RuntimeScope) -> RunWorker:
+    async def ensure(self, scope: RuntimeScope, *, env_overrides=None) -> RunWorker:
         self.ensure_calls.append(scope)
+        self.ensure_envs.append(dict(env_overrides or {}))
         return _worker(scope)
 
     async def send(self, scope_key: str, conversation_id: str, frame: Any) -> bool:
@@ -96,11 +98,19 @@ async def test_run_submit_with_dovie_profile_id_propagates_to_worker_context(
             "dovie_profile": {
                 "id": "agent-a",
                 "hermesHomePath": "/tmp/agent-a-home",
+                "env": {
+                    "DOVIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/dovie/invoke",
+                    "DOVIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
+                },
             },
         },
     )
 
     scope = supervisor.ensure_calls[0]
+    assert supervisor.ensure_envs[0] == {
+        "DOVIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/dovie/invoke",
+        "DOVIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
+    }
     assert scope.agent_profile_id == "agent-a"
     assert scope.runtime_scope_key == "profile:agent-a"
     assert scope.conversation_id == "conv-1"

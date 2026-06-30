@@ -5,6 +5,7 @@ from typing import Any
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
 from hermes_state_run_event_codec import decode_run_event_row
+from hermes_team_mission.runtime.team_transcript_writer import is_node_transcript_message
 
 
 def _text(value: Any) -> str:
@@ -48,6 +49,36 @@ def _json_loads(value: Any, fallback: Any) -> Any:
     except (TypeError, ValueError, json.JSONDecodeError):
         return fallback
     return fallback if parsed is None else parsed
+
+
+def _node_activity_id(mission_id: str, node_id: str) -> str:
+    mission_id = _text(mission_id)
+    node_id = _text(node_id)
+    return f"act-node:{mission_id}:{node_id}" if mission_id and node_id else ""
+
+
+def _metadata_activity_id(metadata: Any) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    run_context = metadata.get("run_context") if isinstance(metadata.get("run_context"), dict) else {}
+    return _text(
+        metadata.get("activity_id")
+        or metadata.get("activityId")
+        or run_context.get("activity_id")
+        or run_context.get("activityId")
+    )
+
+
+def _metadata_node_id(metadata: Any) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    team_mission = metadata.get("team_mission") if isinstance(metadata.get("team_mission"), dict) else {}
+    return _text(
+        metadata.get("node_id")
+        or metadata.get("nodeId")
+        or team_mission.get("node_id")
+        or team_mission.get("nodeId")
+    )
 
 
 def _row_value(row: Any, key: str, fallback: Any = "") -> Any:
@@ -152,9 +183,20 @@ def _message_from_row(db: Any, row: Any) -> dict[str, Any]:
         "text": str(content or ""),
         "metadata": metadata if isinstance(metadata, dict) else {},
     }
+    conversation_message_id = _text(_row_value(row, "conversation_message_id", ""))
+    if conversation_message_id:
+        message["conversation_message_id"] = conversation_message_id
+    participant_id = _text(_row_value(row, "participant_id", ""))
+    if participant_id:
+        message["participant_id"] = participant_id
     tool_call_id = _text(_row_value(row, "tool_call_id", ""))
     if tool_call_id:
         message["tool_call_id"] = tool_call_id
+    tool_calls = _row_value(row, "tool_calls", "")
+    if tool_calls:
+        parsed_tool_calls = _json_loads(tool_calls, [])
+        if isinstance(parsed_tool_calls, list):
+            message["tool_calls"] = parsed_tool_calls
     reasoning = _text(
         _row_value(row, "reasoning", "")
         or _row_value(row, "reasoning_content", "")
@@ -171,7 +213,27 @@ def _message_from_row(db: Any, row: Any) -> dict[str, Any]:
     return message
 
 
-def _fetch_recent_messages(db: Any, session_id: str, *, limit: int) -> tuple[list[dict[str, Any]], int]:
+def _message_matches_node_filter(message: dict[str, Any], *, activity_id: str, node_id: str) -> bool:
+    if not is_node_transcript_message(message):
+        return False
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    if activity_id and _metadata_activity_id(metadata) != activity_id:
+        return False
+    if node_id:
+        message_node_id = _metadata_node_id(metadata)
+        if message_node_id and message_node_id != node_id:
+            return False
+    return True
+
+
+def _fetch_recent_messages(
+    db: Any,
+    session_id: str,
+    *,
+    limit: int,
+    activity_id: str = "",
+    node_id: str = "",
+) -> tuple[list[dict[str, Any]], int]:
     if not session_id or not hasattr(db, "_conn"):
         return [], 0
     bounded_limit = _bounded_int(limit, default=50, minimum=1, maximum=500)
@@ -179,6 +241,24 @@ def _fetch_recent_messages(db: Any, session_id: str, *, limit: int) -> tuple[lis
         active_column = db._conn.execute("PRAGMA table_info(messages)").fetchall()
         has_active = any(_text(_row_value(row, "name")) == "active" for row in active_column)
         active_clause = "AND active = 1" if has_active else ""
+        if activity_id:
+            rows = db._conn.execute(
+                f"""
+                SELECT *
+                FROM messages
+                WHERE session_id = ?
+                  {active_clause}
+                  AND metadata_json LIKE ?
+                ORDER BY id ASC
+                """,
+                (session_id, f"%{activity_id}%"),
+            ).fetchall()
+            filtered = [
+                message
+                for message in (_message_from_row(db, row) for row in rows)
+                if _message_matches_node_filter(message, activity_id=activity_id, node_id=node_id)
+            ]
+            return filtered[-bounded_limit:], len(filtered)
         total = db._conn.execute(
             f"SELECT count(*) AS count FROM messages WHERE session_id = ? {active_clause}",
             (session_id,),
@@ -229,6 +309,7 @@ def _fetch_recent_run_events(
     include_control_events: bool = False,
     event_types: set[str] | None = None,
     exclude_event_types: set[str] | None = None,
+    activity_id: str = "",
 ) -> list[dict[str, Any]]:
     if not session_id or not hasattr(db, "_conn"):
         return []
@@ -250,6 +331,10 @@ def _fetch_recent_run_events(
     if exclude_types:
         clauses.append(f"event_type NOT IN ({','.join('?' for _ in exclude_types)})")
         params.extend(exclude_types)
+    normalized_activity_id = _text(activity_id)
+    if normalized_activity_id:
+        clauses.append("activity_id = ?")
+        params.append(normalized_activity_id)
     params.append(bounded_limit)
     where_clause = "\n                  AND ".join(clauses)
     with db._lock:
@@ -330,7 +415,69 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
         )
         return {"error": "team mission not found", "code": 4040}
     binding = _select_binding(graph, node_id=node_id, session_id=requested_session_id) if graph else {}
-    session_id = _text(binding.get("session_id")) or requested_session_id
+    resolved_node_id = _text(binding.get("node_id")) or node_id
+    binding_metadata = _json_loads(binding.get("metadata_json") or binding.get("metadata"), {})
+    if not isinstance(binding_metadata, dict):
+        binding_metadata = {}
+    node_activity_id = (
+        _text(params.get("activity_id") or params.get("activityId"))
+        or _text(binding_metadata.get("activity_id") or binding_metadata.get("activityId"))
+        or _node_activity_id(mission_id, resolved_node_id)
+    )
+    mission_metadata: dict[str, Any] = {}
+    if isinstance(graph, dict):
+        mission = graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
+        mission_metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+    candidate_session_ids: list[str] = []
+
+    def _add_candidate(value: Any) -> None:
+        candidate = _text(value)
+        if candidate and candidate not in candidate_session_ids:
+            candidate_session_ids.append(candidate)
+
+    _add_candidate(requested_session_id)
+    _add_candidate(binding.get("session_id"))
+    _add_candidate(binding.get("runtime_session_id"))
+    _add_candidate(conversation_session_id)
+    _add_candidate(mission_metadata.get("conversation_session_id") or mission_metadata.get("conversationSessionId"))
+    _add_candidate(mission_metadata.get("stable_session_id") or mission_metadata.get("stableSessionId"))
+    run_id = _text(binding.get("run_id") or params.get("run_id") or params.get("runId"))
+    include_control_events = bool(params.get("include_control_events") or params.get("includeControlEvents"))
+    session_id = ""
+    messages: list[dict[str, Any]] = []
+    total_count = 0
+    for candidate_session_id in candidate_session_ids:
+        candidate_messages, candidate_total_count = _fetch_recent_messages(
+            db,
+            candidate_session_id,
+            limit=requested_limit,
+            activity_id=node_activity_id,
+            node_id=resolved_node_id,
+        )
+        if candidate_messages:
+            session_id = candidate_session_id
+            messages = candidate_messages
+            total_count = candidate_total_count
+            break
+    run_events: list[dict[str, Any]] = []
+    if not session_id and include_run_events:
+        for candidate_session_id in candidate_session_ids:
+            candidate_run_events = _fetch_recent_run_events(
+                db,
+                candidate_session_id,
+                run_id=run_id,
+                limit=requested_run_events_limit,
+                include_control_events=include_control_events,
+                event_types=run_event_types,
+                exclude_event_types=exclude_run_event_types,
+                activity_id=node_activity_id,
+            )
+            if candidate_run_events:
+                session_id = candidate_session_id
+                run_events = candidate_run_events
+                break
+    if not session_id and candidate_session_ids:
+        session_id = candidate_session_ids[0]
     _trace_history(
         "resolved",
         mission_id=mission_id,
@@ -339,9 +486,11 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
         graph_binding_count=len(graph.get("run_bindings") or []) if isinstance(graph, dict) else 0,
         binding_found=bool(binding),
         node_id=node_id,
-        resolved_node_id=_text(binding.get("node_id")) or node_id,
+        resolved_node_id=resolved_node_id,
+        activity_id=node_activity_id,
         requested_session_id=requested_session_id,
         resolved_session_id=session_id,
+        candidate_session_ids=candidate_session_ids,
         run_id=_text(binding.get("run_id")),
         runtime_session_id=_text(binding.get("runtime_session_id")),
         runtime_scope_key=_text(binding.get("runtime_scope_key")),
@@ -357,23 +506,38 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
             "source": {"session_id": "", "runtime_session_id": "", "runtime_scope_key": "", "run_id": ""},
         }
 
-    messages, total_count = _fetch_recent_messages(
-        db,
-        session_id,
-        limit=requested_limit,
-    )
-    include_control_events = bool(params.get("include_control_events") or params.get("includeControlEvents"))
-    run_id = _text(binding.get("run_id") or params.get("run_id") or params.get("runId"))
-    run_events = _fetch_recent_run_events(
-        db,
-        session_id,
-        run_id=run_id,
-        limit=requested_run_events_limit,
-        include_control_events=include_control_events,
-        event_types=run_event_types,
-        exclude_event_types=exclude_run_event_types,
-    ) if include_run_events else []
-    resolved_node_id = _text(binding.get("node_id")) or node_id
+    if not messages:
+        messages, total_count = _fetch_recent_messages(
+            db,
+            session_id,
+            limit=requested_limit,
+            activity_id=node_activity_id,
+            node_id=resolved_node_id,
+        )
+    if include_run_events and not run_events:
+        run_events = _fetch_recent_run_events(
+            db,
+            session_id,
+            run_id=run_id,
+            limit=requested_run_events_limit,
+            include_control_events=include_control_events,
+            event_types=run_event_types,
+            exclude_event_types=exclude_run_event_types,
+            activity_id=node_activity_id,
+        )
+    page_info = {
+        "total_count": total_count,
+        "has_more_before": total_count > len(messages),
+        "has_more_after": False,
+    }
+    source = {
+        "session_id": session_id,
+        "runtime_session_id": _text(binding.get("runtime_session_id")),
+        "runtime_scope_key": _text(binding.get("runtime_scope_key")),
+        "run_id": _text(binding.get("run_id")),
+        "node_id": resolved_node_id,
+        "activity_id": node_activity_id,
+    }
     _trace_history(
         "result",
         mission_id=mission_id,
@@ -392,16 +556,7 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
         "node_id": resolved_node_id,
         "messages": messages,
         "run_events": run_events,
-        "page_info": {
-            "total_count": total_count,
-            "has_more_before": total_count > len(messages),
-            "has_more_after": False,
-        },
-        "source": {
-            "session_id": session_id,
-            "runtime_session_id": _text(binding.get("runtime_session_id")),
-            "runtime_scope_key": _text(binding.get("runtime_scope_key")),
-            "run_id": _text(binding.get("run_id")),
-            "node_id": resolved_node_id,
-        },
+        "tool_events": [],
+        "page_info": page_info,
+        "source": source,
     }

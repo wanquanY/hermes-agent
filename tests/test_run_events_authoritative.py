@@ -98,7 +98,7 @@ def test_run_events_seq_monotonic_across_leader_and_member_runs_same_conv(
         db.close()
 
 
-def test_team_render_messages_from_run_events_only(
+def test_team_render_does_not_synthesize_messages_from_run_events(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -112,9 +112,7 @@ def test_team_render_messages_from_run_events_only(
 
         result = _render_team()
 
-        assert [message["text"] for message in result["messages"]] == ["rendered from run_events"]
-        assert result["messages"][0]["metadata"]["source"] == "run_events"
-        assert result["messages"][0]["participant_id"] == "member:builder"
+        assert result["messages"] == []
     finally:
         db.close()
 
@@ -177,13 +175,19 @@ def test_team_mission_events_still_appended_for_audit(
         db.close()
 
 
-def test_dedup_no_duplicate_messages_in_render(
+def test_run_events_do_not_duplicate_explicit_transcript_messages_in_render(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
     db = _install_db(monkeypatch, tmp_path)
     try:
         _seed_team_conversation(db)
+        db.append_message(
+            "team-session-1",
+            role="assistant",
+            content="same final",
+            metadata={"transcript_activity_kind": "mission_summary"},
+        )
         db.append_run_event(
             "team-session-1",
             _message_complete("run-a", "same final", message_id="msg-final"),
@@ -207,6 +211,13 @@ def test_event_ordering_by_run_events_seq(
     db = _install_db(monkeypatch, tmp_path)
     try:
         _seed_team_conversation(db)
+        for text in ("first", "second", "third"):
+            db.append_message(
+                "team-session-1",
+                role="assistant",
+                content=text,
+                metadata={"transcript_activity_kind": "mission_summary"},
+            )
         for run_id, text in (
             ("run-leader", "first"),
             ("run-member", "second"),

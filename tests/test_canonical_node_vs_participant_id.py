@@ -140,7 +140,12 @@ def test_render_snapshot_messages_speaker_field_uses_participant_id(tmp_path: Pa
             "team-session-render",
             role="assistant",
             content="Alpha rendered from run events.",
-            metadata={"run_id": "run-alpha", "turn_id": "turn-run-alpha"},
+            participant_id="member:member-alpha",
+            metadata={
+                "run_id": "run-alpha",
+                "turn_id": "turn-run-alpha",
+                "team_mission": {"canonical_node_id": "mission-A:member:member-beta"},
+            },
         )
         db.append_run_event(
             "team-session-render",
@@ -182,7 +187,6 @@ def test_render_snapshot_messages_speaker_field_uses_participant_id(tmp_path: Pa
         assert message["participant_id"] == "member:member-alpha"
         assert message["participantId"] == "member:member-alpha"
         assert message["participant_id"] != "mission-A:member:member-beta"
-        assert message["metadata"]["team_mission"]["participant_id"] == "member:member-alpha"
     finally:
         db.close()
 

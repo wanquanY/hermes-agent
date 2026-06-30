@@ -11,6 +11,7 @@ import pytest
 
 from hermes_state import SessionDB
 from tui_gateway.run_worker import DBRpcRequestFrame
+from tui_gateway import server
 from tui_gateway.services.worker_db_proxy import (
     WorkerDBProxy,
     WorkerDBProxyDisconnectedError,
@@ -343,6 +344,50 @@ def test_proxy_handles_main_process_disconnect() -> None:
     proxy.close()
     thread.join(timeout=1)
     assert isinstance(error_box["error"], WorkerDBProxyDisconnectedError)
+
+
+@pytest.mark.asyncio
+async def test_team_mission_gateway_call_runs_sync_gateway_method_off_runtime_loop(monkeypatch):
+    loop = asyncio.get_running_loop()
+    supervisor = WorkerSupervisor(
+        on_event=_noop,
+        on_interactive_request=_noop,
+        on_run_terminal=_noop,
+        on_log=_noop,
+    )
+    observed: dict[str, Any] = {}
+
+    async def marker() -> str:
+        return "runtime-loop-free"
+
+    def fake_team_mission_create(rid, params):
+        observed["thread"] = threading.current_thread().name
+        future = asyncio.run_coroutine_threadsafe(marker(), loop)
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "marker": future.result(timeout=1),
+                "params": dict(params),
+            },
+        }
+
+    monkeypatch.setitem(server._methods, "team_mission.create", fake_team_mission_create)
+    reply = await supervisor._execute_team_mission_gateway_call_rpc(
+        DBRpcRequestFrame(
+            id="gateway-call-1",
+            method="worker.team_mission_gateway_call",
+            params={
+                "method": "team_mission.create",
+                "params": {"mission_id": "mission-1"},
+            },
+        )
+    )
+
+    assert reply.error is None
+    assert reply.result["result"]["marker"] == "runtime-loop-free"
+    assert reply.result["result"]["params"] == {"mission_id": "mission-1"}
+    assert observed["thread"] != threading.current_thread().name
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,7 @@ class _FakeSupervisor:
     def __init__(self, *, ensure_delay_s: float = 0.0) -> None:
         self.ensure_delay_s = ensure_delay_s
         self.ensure_calls: list[RuntimeScope] = []
+        self.ensure_envs: list[dict[str, str]] = []
         self.shutdown_calls: list[tuple[str, str]] = []
         self.shutdown_all_called = False
         self.workers: dict[tuple[str, str], RunWorker] = {}
@@ -35,6 +36,7 @@ class _FakeSupervisor:
 
     async def ensure(self, scope: RuntimeScope, *, env_overrides=None) -> RunWorker:
         self.ensure_calls.append(scope)
+        self.ensure_envs.append(dict(env_overrides or {}))
         if self.ensure_delay_s:
             await asyncio.sleep(self.ensure_delay_s)
         existing = self.workers.get(scope.worker_identity)
@@ -74,10 +76,15 @@ class _FakeSupervisor:
         self.terminal_events.append((scope_key, conversation_id, frame))
 
 
-def _profile() -> dict:
+def _profile(env: dict[str, str] | None = None) -> dict:
     return {
         "agent_profile_id": "profile-1",
         "hermes_home": "/tmp/hermes-profile-1",
+        "dovie_profile": {
+            "id": "profile-1",
+            "hermesHomePath": "/tmp/hermes-profile-1",
+            "env": dict(env or {}),
+        },
     }
 
 
@@ -113,6 +120,59 @@ async def test_get_or_spawn_reuses_existing_worker_same_conv() -> None:
         assert second.worker is first.worker
         assert len(supervisor.ensure_calls) == 1
         assert pool.stats()["workerCount"] == 1
+    finally:
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_get_or_spawn_passes_profile_env_to_worker_supervisor() -> None:
+    supervisor = _FakeSupervisor()
+    pool = WorkerPool(supervisor, reap_tick_s=60)
+    try:
+        await pool.get_or_spawn(
+            "conv-1",
+            _profile({
+                "DOVIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/dovie/invoke",
+                "DOVIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
+            }),
+        )
+
+        assert supervisor.ensure_envs == [
+            {
+                "DOVIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/dovie/invoke",
+                "DOVIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
+            }
+        ]
+    finally:
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_get_or_spawn_respawns_idle_worker_when_profile_env_changes() -> None:
+    supervisor = _FakeSupervisor()
+    pool = WorkerPool(supervisor, reap_tick_s=60)
+    try:
+        first = await pool.get_or_spawn("conv-1", _profile())
+        await pool.release("conv-1")
+
+        second = await pool.get_or_spawn(
+            "conv-1",
+            _profile({
+                "DOVIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/dovie/invoke",
+                "DOVIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
+            }),
+        )
+
+        assert second.worker is not first.worker
+        assert not first.running()
+        assert supervisor.shutdown_calls == [("profile:profile-1", "conv-1")]
+        assert supervisor.ensure_envs == [
+            {},
+            {
+                "DOVIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/dovie/invoke",
+                "DOVIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
+            },
+        ]
     finally:
         await pool.shutdown()
 

@@ -37,6 +37,7 @@ from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
 from agent.memory_manager import build_memory_context_block
 from agent.tool_handoff import format_tool_handoff_response, pop_tool_handoff
+from agent.turn_message_buffer import TurnMessageBuffer
 from agent.message_sanitization import (
     _repair_tool_call_arguments,
     _sanitize_messages_non_ascii,
@@ -684,8 +685,9 @@ def run_conversation(
         has_stream_callback=bool(stream_callback),
     )
 
-    # Initialize conversation (copy to avoid mutating the caller's list)
-    messages = list(conversation_history) if conversation_history else []
+    # The model needs historical context and current-turn output in one ordered
+    # list, but persistence must not rediscover that boundary by diffing history.
+    messages = TurnMessageBuffer.from_history(conversation_history)
 
     # Hydrate todo store from conversation history (gateway creates a fresh
     # AIAgent per message, so the in-memory store is empty -- we need to
@@ -4060,7 +4062,7 @@ def run_conversation(
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 
                 tool_handoff = pop_tool_handoff(agent)
-                if tool_handoff is not None:
+                if tool_handoff is not None and tool_handoff.get("end_current_turn") is True:
                     _turn_exit_reason = f"tool_handoff({tool_handoff.get('kind') or 'unknown'})"
                     final_response = format_tool_handoff_response(tool_handoff)
                     messages.append({

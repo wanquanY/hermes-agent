@@ -214,10 +214,6 @@ def runtime_activity_subscribe(rid, params: dict) -> dict:
     if not callable(list_by_activity):
         return _err(rid, 5008, "state.db unavailable")
 
-    existing = list_by_activity(activity_id, after_seq=0, limit=1)
-    if not existing:
-        return _err(rid, 4040, "activity has no run_events")
-
     subscription_id, replay = run_control.subscribe_activity(
         activity_id=activity_id,
         transport=current_transport(),

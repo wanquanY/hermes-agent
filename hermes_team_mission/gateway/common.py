@@ -24,9 +24,11 @@ from hermes_team_mission.gateway.leader_policy import TEAM_LEADER_DIRECT_REPLY_S
 from hermes_team_mission.gateway.leader_policy import TEAM_LEADER_DISABLED_TOOLSETS as _TEAM_LEADER_DISABLED_TOOLSETS
 from hermes_team_mission.gateway.leader_policy import TEAM_LEADER_START_TASK_MARKERS as _TEAM_LEADER_START_TASK_MARKERS
 from hermes_team_mission.gateway.leader_policy import TEAM_LEADER_TOOLSET_SCOPE as _TEAM_LEADER_TOOLSET_SCOPE
+from hermes_team_mission.domain.handoff_contract import node_requires_authoritative_handoff
 from hermes_team_mission.domain.modes import MODE_AUTONOMOUS_MISSION
 from hermes_team_mission.domain.modes import MODE_SUPERVISED_MISSION
 from hermes_team_mission.domain.modes import strategy_for_mode
+from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_kind
 from hermes_team_mission.runtime.profile_scope import team_mission_control_db as _team_mission_control_db
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.methods.team_registry import _team_for_projection as _registry_team_for_projection
@@ -696,7 +698,14 @@ def _team_leader_tool_policy(*, surface: str) -> dict:
 
 
 def _is_team_leader_control_node(node: dict) -> bool:
+    node = node if isinstance(node, dict) else {}
+    if normalize_team_mission_node_kind((node or {}).get("kind")) in {"verifier", "synthesis"}:
+        return False
     return _node_role(node) in {"leader", "lead", "root"} or str(node.get("kind") or "").strip() == "root"
+
+
+def _node_requires_handoff_toolset(node: dict) -> bool:
+    return node_requires_authoritative_handoff(node)
 
 
 def _truthy(value) -> bool:
@@ -995,6 +1004,9 @@ def _start_toolsets(params: dict, mission: dict, node: dict, *, profile_params: 
     if _should_use_strategy_start_text(params, mission, node) and _node_phase(node) in {"planning", "change_request"}:
         if "team_mission_planning" not in toolsets:
             toolsets.append("team_mission_planning")
+    if not _is_team_leader_control_node(node) and _node_requires_handoff_toolset(node):
+        if "team_mission_handoff" not in toolsets:
+            toolsets.append("team_mission_handoff")
     if not _is_team_leader_control_node(node) and "clarify" not in toolsets:
         toolsets.append("clarify")
     return toolsets
@@ -1795,8 +1807,9 @@ def _leader_router_prompt(*, user_text: str, graph: dict, memory_text: str = "")
         "- Call team_mission_start_task only when the user is asking to start a new substantive executable team task that benefits from planning, multi-agent work, workspace changes, research, verification, or a deliverable.",
         "- Do not call team_mission_start_task for greetings, lightweight Q&A, status checks, or discussion that can be answered directly.",
         "- Do not call delegate_task or ordinary subagents. In Dovie team mode, the Leader coordinates the user conversation, task graph, and member nodes.",
-        "- If you start a task, keep your visible reply brief and tell the user that planning has started.",
-        "- After team_mission_start_task succeeds, stop the current turn. Do not continue with research, file work, terminal commands, or deliverable execution.",
+        "- If you decide a team task is needed, call team_mission_start_task naturally after any brief understanding or routing you need. Do not promise that the task was created before the tool result returns.",
+        "- After team_mission_start_task succeeds, read the tool result and then reply naturally and briefly in the user's language. Tell the user the team task has started, it is being processed asynchronously, progress is available on the canvas, and they can continue chatting or submit another task.",
+        "- After that confirmation, stop the current turn. Do not call more tools, do not continue with research, file work, terminal commands, or deliverable execution.",
         "- Reply in the user's language.",
         "",
         "Current team conversation context. The active mission may be empty until a team task is started:",

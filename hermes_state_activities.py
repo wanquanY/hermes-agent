@@ -224,6 +224,111 @@ class ActivitiesMixin:
 
         return self._execute_write(_do)  # type: ignore[attr-defined]
 
+    def bind_activity_to_mission(
+        self,
+        *,
+        activity_id: str,
+        conversation_id: str,
+        mission_id: str,
+        target_team_id: str | None = None,
+        prompt_summary: str | None = None,
+        status: str = "running",
+    ) -> dict:
+        """Bind a pre-existing request Activity to the mission it spawned.
+
+        Activity-first team tasks create a stable request activity before the
+        Leader has decided whether a mission is needed. Once the Leader calls
+        ``team_mission_start_task``, the mission becomes the activity target;
+        the activity id remains the subscription owner.
+        """
+        normalized_activity_id = _text(activity_id)
+        normalized_conversation_id = _text(conversation_id)
+        normalized_mission_id = _text(mission_id)
+        normalized_status = _text(status) or "running"
+        if not normalized_activity_id:
+            raise ValueError("activity_id required")
+        if not normalized_conversation_id:
+            raise ValueError("conversation_id required")
+        if not normalized_mission_id:
+            raise ValueError("mission_id required")
+        if normalized_status not in {"pending", "running", "completed", "failed", "cancelled"}:
+            normalized_status = "running"
+        now = time.time()
+        started_at = now if normalized_status == "running" else None
+
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            row = conn.execute(
+                "SELECT * FROM activities WHERE activity_id = ?",
+                (normalized_activity_id,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO activities (
+                        activity_id, conversation_id, parent_activity_id, kind,
+                        target_profile_id, target_team_id, target_mission_id, status,
+                        prompt_summary, result_summary, result_json,
+                        started_at, completed_at, notify_parent, read_at,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, NULL, 'team_dispatch', NULL, ?, ?, ?, ?, NULL, NULL, ?, NULL, 1, NULL, ?, ?)
+                    """,
+                    (
+                        normalized_activity_id,
+                        normalized_conversation_id,
+                        _optional_text(target_team_id),
+                        normalized_mission_id,
+                        normalized_status,
+                        _optional_text(prompt_summary),
+                        started_at,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE activities
+                       SET conversation_id = ?,
+                           kind = CASE
+                               WHEN kind IN ('team_dispatch', 'mission') THEN kind
+                               ELSE 'team_dispatch'
+                           END,
+                           target_team_id = COALESCE(?, target_team_id),
+                           target_mission_id = ?,
+                           status = CASE
+                               WHEN status IN ('completed', 'failed', 'cancelled') THEN status
+                               WHEN ? = 'running' THEN 'running'
+                               ELSE status
+                           END,
+                           prompt_summary = COALESCE(NULLIF(?, ''), prompt_summary),
+                           started_at = CASE
+                               WHEN ? = 'running' THEN COALESCE(started_at, ?)
+                               ELSE started_at
+                           END,
+                           updated_at = ?
+                     WHERE activity_id = ?
+                    """,
+                    (
+                        normalized_conversation_id,
+                        _optional_text(target_team_id),
+                        normalized_mission_id,
+                        normalized_status,
+                        _optional_text(prompt_summary),
+                        normalized_status,
+                        started_at,
+                        now,
+                        normalized_activity_id,
+                    ),
+                )
+            bound = conn.execute(
+                "SELECT * FROM activities WHERE activity_id = ?",
+                (normalized_activity_id,),
+            ).fetchone()
+            return self._activity_row_to_dict(bound) if bound else {}
+
+        return self._execute_write(_do)  # type: ignore[attr-defined]
+
     def get_activity_for_mission(self, mission_id: str) -> Optional[dict]:
         """Fetch the mission activity row by target mission id."""
         normalized_mission_id = _text(mission_id)

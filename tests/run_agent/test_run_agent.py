@@ -1863,7 +1863,8 @@ class TestExecuteToolCalls:
             "message": "Planning started.",
             "hermes_control": {
                 "kind": "team_mission_started",
-                "end_current_turn": True,
+                "skip_remaining_tool_calls": True,
+                "require_followup_response": True,
                 "await_final_deliverable": True,
             },
         })
@@ -1878,7 +1879,10 @@ class TestExecuteToolCalls:
         assert messages[1]["role"] == "tool"
         assert messages[1]["tool_call_id"] == "c2"
         assert "Team Mission task was accepted" in messages[1]["content"]
+        assert "brief startup confirmation" in messages[1]["content"]
         assert agent._tool_handoff_exit["kind"] == "team_mission_started"
+        assert agent._tool_handoff_exit["end_current_turn"] is False
+        assert agent._tool_handoff_exit["require_followup_response"] is True
 
     def test_invalid_json_args_defaults_empty(self, agent):
         tc = _mock_tool_call(
@@ -2756,7 +2760,7 @@ class TestRunConversation:
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
 
-    def test_team_mission_start_task_handoff_ends_turn_without_second_model_call(self, agent):
+    def test_team_mission_start_task_returns_to_leader_for_natural_confirmation(self, agent):
         self._setup_agent(agent)
         agent.valid_tool_names.add("team_mission_start_task")
         tc = _mock_tool_call(
@@ -2764,8 +2768,12 @@ class TestRunConversation:
             arguments='{"objective":"plan the work"}',
             call_id="c1",
         )
-        resp = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
-        agent.client.chat.completions.create.return_value = resp
+        start_response = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
+        confirmation_response = _mock_response(
+            content="团队任务已经启动，正在后台处理。你可以在右侧画布查看进度，也可以继续发送新的任务。",
+            finish_reason="stop",
+        )
+        agent.client.chat.completions.create.side_effect = [start_response, confirmation_response]
         handoff_result = json.dumps({
             "success": True,
             "mission_id": "mission-1",
@@ -2775,9 +2783,12 @@ class TestRunConversation:
             "message": "Planning started.",
             "hermes_control": {
                 "kind": "team_mission_started",
-                "end_current_turn": True,
+                "skip_remaining_tool_calls": True,
+                "require_followup_response": True,
                 "await_final_deliverable": True,
-                "assistant_response": "Planning started.",
+                "assistant_followup_instruction": (
+                    "Reply naturally and briefly in the user's language."
+                ),
             },
         })
 
@@ -2789,10 +2800,10 @@ class TestRunConversation:
         ):
             result = agent.run_conversation("start a team task")
 
-        assert result["final_response"] == "Planning started."
-        assert result["turn_exit_reason"] == "tool_handoff(team_mission_started)"
-        assert result["api_calls"] == 1
-        assert agent.client.chat.completions.create.call_count == 1
+        assert result["final_response"] == "团队任务已经启动，正在后台处理。你可以在右侧画布查看进度，也可以继续发送新的任务。"
+        assert str(result["turn_exit_reason"]).startswith("text_response")
+        assert result["api_calls"] == 2
+        assert agent.client.chat.completions.create.call_count == 2
         assert mock_handle_function_call.call_count == 1
 
     def test_request_scoped_api_hooks_fire_for_each_api_call(self, agent):

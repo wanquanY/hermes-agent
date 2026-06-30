@@ -223,6 +223,75 @@ def _event_activity_id(event: Dict[str, Any], fallback: str = "") -> str:
     ).strip()
 
 
+def _event_message_seq_in_run(event: Dict[str, Any]) -> str:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    seq = str(
+        event.get("message_seq_in_run")
+        or event.get("messageSeqInRun")
+        or payload.get("message_seq_in_run")
+        or payload.get("messageSeqInRun")
+        or ""
+    ).strip()
+    if seq:
+        return seq
+    source_seq = str(event.get("seq") or payload.get("seq") or "").strip()
+    return f"legacy-source-seq:{source_seq}" if source_seq else ""
+
+
+def _event_message_text(payload: Dict[str, Any]) -> str:
+    for key in ("text", "content", "output", "final_response", "finalResponse", "summary"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _event_reasoning_text(payload: Dict[str, Any]) -> str:
+    for key in ("reasoning", "reasoning_content", "reasoningContent", "thinking", "thought"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _looks_like_team_visible_transcript(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    event: Dict[str, Any],
+    runtime_scope_key: str,
+    participant_id: str,
+) -> bool:
+    if session_id.startswith(("team-session-team-conversation-", "team:mission-")):
+        return True
+    if runtime_scope_key.startswith(("team:", "member-chat:")):
+        return True
+    if participant_id.startswith(("leader:", "member:")):
+        return True
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    for value in (
+        event.get("conversation_session_id"),
+        event.get("conversationSessionId"),
+        payload.get("conversation_session_id"),
+        payload.get("conversationSessionId"),
+    ):
+        if str(value or "").strip().startswith("team-session-team-conversation-"):
+            return True
+    try:
+        row = conn.execute(
+            """
+            SELECT conversation_kind
+            FROM session_index
+            WHERE session_id = ?
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    return str(_row_value(row, "conversation_kind", "") or "").strip().lower() == "team"
+
+
 def _recovery_activity_id_for_run(conn: sqlite3.Connection, row: sqlite3.Row) -> str:
     """Return a non-empty activity id for internally synthesized run recovery events."""
     run_id = str(_row_value(row, "run_id", "") or "").strip()
@@ -1479,6 +1548,59 @@ class SessionDBRunMixin:
                         seq,
                         exc,
                     )
+            if event_type == "message.complete" and not ignored_after_terminal and inserted_row is not None:
+                try:
+                    from hermes_team_mission.runtime.team_transcript_writer import RuntimeTranscriptWriter
+
+                    projected_message = RuntimeTranscriptWriter.project_message_complete_event_locked(
+                        self,
+                        conn,
+                        session_id=stable,
+                        event=inserted_event,
+                    )
+                    conversation_message_id = ""
+                    if isinstance(projected_message, dict):
+                        conversation_message_id = str(
+                            projected_message.get("conversation_message_id")
+                            or projected_message.get("conversationMessageId")
+                            or ""
+                        ).strip()
+                    if conversation_message_id:
+                        inserted_event = dict(inserted_event)
+                        inserted_event["_projected_message_id"] = conversation_message_id
+                        conn.execute(
+                            """
+                            UPDATE run_events
+                            SET projected_message_id = ?,
+                                projection_state = 'projected'
+                            WHERE id = ?
+                            """,
+                            (
+                                conversation_message_id,
+                                int(inserted_row["id"]),
+                            ),
+                        )
+                except Exception as exc:
+                    logger.debug(
+                        "team transcript message projection skipped for %s/%s/%s: %s",
+                        stable,
+                        run_id,
+                        seq,
+                        exc,
+                    )
+            if not ignored_after_terminal:
+                projector = getattr(self, "_project_timeline_block_event_locked", None)
+                if callable(projector):
+                    try:
+                        projector(conn, session_id=stable, event=inserted_event)
+                    except Exception as exc:
+                        logger.debug(
+                            "timeline block projection skipped for %s/%s/%s: %s",
+                            stable,
+                            run_id,
+                            seq,
+                            exc,
+                        )
             if run_id:
                 if ignored_after_terminal:
                     return inserted_event
@@ -2487,6 +2609,15 @@ class SessionDBRunMixin:
         def _delete_rows(conn: sqlite3.Connection, rows: List[sqlite3.Row], reason: str) -> int:
             if not rows:
                 return 0
+            retention_gate = getattr(self, "_run_event_row_can_be_retention_deleted_locked", None)
+            if callable(retention_gate):
+                rows = [
+                    row
+                    for row in rows
+                    if retention_gate(conn, row)
+                ]
+                if not rows:
+                    return 0
             self._archive_run_event_rows(conn, rows, reason=reason)
             ids = [int(row["id"]) for row in rows]
             for start in range(0, len(ids), 500):
@@ -2590,6 +2721,13 @@ class SessionDBRunMixin:
                 for row in rows
                 if RUN_EVENT_RETENTION_POLICY.can_delete_terminal_stream_row(conn, row)
             ]
+            retention_gate = getattr(self, "_run_event_row_can_be_retention_deleted_locked", None)
+            if callable(retention_gate):
+                rows = [
+                    row
+                    for row in rows
+                    if retention_gate(conn, row)
+                ]
             if not rows:
                 return {"deleted_events": 0, "event_types": list(normalized_types)}
             self._archive_run_event_rows(conn, rows, reason="terminal_run_stream_events")
@@ -2678,6 +2816,13 @@ class SessionDBRunMixin:
                     for row in rows_to_delete
                     if RUN_EVENT_RETENTION_POLICY.can_delete_terminal_stream_row(conn, row)
                 ]
+                retention_gate = getattr(self, "_run_event_row_can_be_retention_deleted_locked", None)
+                if callable(retention_gate):
+                    rows_to_delete = [
+                        row
+                        for row in rows_to_delete
+                        if retention_gate(conn, row)
+                    ]
                 if not rows_to_delete:
                     return
                 self._archive_run_event_rows(conn, rows_to_delete, reason="terminal_run_stream_events")
@@ -2748,6 +2893,9 @@ class SessionDBRunMixin:
                         ),
                     ).fetchall()
                     if len(rows_for_group) <= 1:
+                        continue
+                    retention_gate = getattr(self, "_run_event_row_can_be_retention_deleted_locked", None)
+                    if callable(retention_gate) and not all(retention_gate(conn, row) for row in rows_for_group[:-1]):
                         continue
                     keep_row = rows_for_group[-1]
                     canonical_seq = int(rows_for_group[0]["seq"] or keep_row["seq"] or 0)
@@ -2832,6 +2980,9 @@ class SessionDBRunMixin:
                 nonlocal compacted_segments, deleted_events, updated_events
                 pending = pending_by_key.pop(key, [])
                 if len(pending) <= 1:
+                    return
+                retention_gate = getattr(self, "_run_event_row_can_be_retention_deleted_locked", None)
+                if callable(retention_gate) and not all(retention_gate(conn, row) for row, _ in pending[:-1]):
                     return
                 merged_event = pending[0][1]
                 for _, event in pending[1:]:

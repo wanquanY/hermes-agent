@@ -76,6 +76,7 @@ def _submit_message(
     *,
     mission_id: str = "",
     target_member_id: str = "",
+    request_activity_id: str = "",
 ) -> tuple[SessionDB, dict[str, Any], dict[str, Any]]:
     team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
@@ -133,6 +134,8 @@ def _submit_message(
             "DOVIE_HERMES_RUNTIME_SCOPE_KEY",
             f"team:{CONVERSATION_ID}:leader-conversation",
         )
+    if request_activity_id:
+        params["activity_id"] = request_activity_id
 
     response = team_mission._methods["team_mission.message.submit"](  # noqa: SLF001
         "rid-submit",
@@ -171,6 +174,16 @@ def test_run_context_accepts_act_prefix_activity_id() -> None:
     ))
 
     assert context.activity_id == "act-member_chat:session-1:member-1"
+
+
+def test_run_context_accepts_team_dispatch_activity_kind() -> None:
+    context = RunContext(**_run_context_payload(
+        activity_id="act-team_dispatch-create",
+        activity_kind="team_dispatch",
+    ))
+
+    assert context.activity_id == "act-team_dispatch-create"
+    assert context.activity_kind == "team_dispatch"
 
 
 def test_run_context_rejects_bare_mission_id() -> None:
@@ -223,6 +236,29 @@ def test_runtime_methods_submit_writes_chat_prefix_when_chat_only(
         run_context = json.loads(captured["run_context_json"])
         assert run_context["activity_kind"] == "chat"
         assert run_context["activity_id"] == f"chat:{CONVERSATION_SESSION_ID}"
+    finally:
+        db.close()
+
+
+def test_runtime_methods_submit_writes_team_dispatch_kind_for_request_activity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db, captured, _response = _submit_message(
+        monkeypatch,
+        tmp_path,
+        request_activity_id="act-team_dispatch-create",
+    )
+    try:
+        run_context = json.loads(captured["run_context_json"])
+        assert run_context["activity_kind"] == "team_dispatch"
+        assert run_context["activity_id"] == "act-team_dispatch-create"
+        messages = db.get_conversation_message_read_model(
+            CONVERSATION_SESSION_ID,
+            include_storage_metadata=True,
+        )
+        assert [message["role"] for message in messages] == ["user"]
+        assert messages[0]["metadata"]["transcript_activity_kind"] == "mission_start"
     finally:
         db.close()
 

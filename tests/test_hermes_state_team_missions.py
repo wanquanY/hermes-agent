@@ -1365,6 +1365,77 @@ def test_team_mission_runtime_events_reuse_ordinary_run_event_coalescing(tmp_pat
     assert [row["seq"] for row in rows] == [event["seq"] for event in events]
 
 
+def test_team_mission_runtime_log_dedupes_same_offset_append_delta(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        title="Mission",
+        mode="supervised_mission",
+        leader_session_id="team-session-1",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-leader",
+        kind="root",
+        title="Plan",
+        status="running",
+        metadata={"task_id": "task-1"},
+    )
+    db.upsert_run(
+        run_id="run-leader",
+        session_id="session-leader",
+        runtime_scope_key="team:mission-1:leader",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="node-leader",
+        run_id="run-leader",
+        session_id="session-leader",
+        runtime_scope_key="team:mission-1:leader",
+        role="leader",
+    )
+
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-leader",
+        event={
+            "type": "message.delta",
+            "seq": 1,
+            "payload": {"mode": "append", "delta": "好", "text": "好", "offset": 0, "stream_id": "stream-1"},
+        },
+    )
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-leader",
+        event={
+            "type": "message.delta",
+            "seq": 2,
+            "payload": {"mode": "append", "delta": "好", "text": "好", "offset": 0, "stream_id": "stream-1"},
+        },
+    )
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-leader",
+        event={
+            "type": "message.delta",
+            "seq": 3,
+            "payload": {"mode": "append", "delta": "好", "text": "好", "offset": 1, "stream_id": "stream-1"},
+        },
+    )
+
+    events = [
+        event
+        for event in db.list_team_mission_run_events("mission-1")
+        if event["payload"]["source_event_type"] == "message.delta"
+    ]
+
+    assert [event["payload"]["text_stream"]["delta"] for event in events] == ["好", "好"]
+    assert [event["payload"]["text_stream"]["offset"] for event in events] == [0, 1]
+    assert [event["source_seq"] for event in events] == [1, 3]
+
+
 def test_team_mission_structural_events_use_subject_node_identity_not_bound_runtime_node(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(
@@ -1491,6 +1562,36 @@ def test_team_mission_run_events_include_conversation_status_projection(tmp_path
         kind="worker",
         title="Worker",
         status="running",
+        metadata={"task_id": "task-1"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-verifier",
+        kind="verifier",
+        title="Verify",
+        status="waiting_dependency",
+        metadata={"task_id": "task-1"},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-synthesis",
+        kind="synthesis",
+        title="Synthesis",
+        status="waiting_dependency",
+        metadata={"task_id": "task-1"},
+    )
+    db.upsert_team_mission_edge(
+        mission_id="mission-1",
+        from_node_id="node-worker",
+        to_node_id="node-verifier",
+        kind="depends_on",
+        metadata={"task_id": "task-1"},
+    )
+    db.upsert_team_mission_edge(
+        mission_id="mission-1",
+        from_node_id="node-verifier",
+        to_node_id="node-synthesis",
+        kind="depends_on",
         metadata={"task_id": "task-1"},
     )
     db.upsert_run(
@@ -1778,6 +1879,92 @@ def test_team_mission_runtime_projection_uses_structured_final_node_contract(tmp
     assert synthesis_complete["payload"]["kind"] == "final.completed"
     assert synthesis_complete["payload"]["subject"]["node_id"] == "team-mission:mission-1:synthesis"
     assert synthesis_complete["payload"]["text_stream"]["text"] == "final text"
+
+
+def test_team_mission_terminal_reduce_records_canonical_result(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-result",
+        team_id="team-1",
+        title="Result mission",
+        objective="Create a durable result",
+        mode="supervised_mission",
+        status="running",
+    )
+    for node_id, kind, title in (
+        ("node-worker", "worker", "Worker"),
+        ("node-verifier", "verifier", "Verifier"),
+        ("node-synthesis", "synthesis", "Synthesis"),
+    ):
+        db.upsert_team_mission_node(
+            mission_id="mission-result",
+            node_id=node_id,
+            kind=kind,
+            title=title,
+            objective=title,
+            status="completed",
+            output_contract={"format": "final_deliverable"} if kind == "synthesis" else {"format": "structured_deliverable"},
+        )
+    db.upsert_team_mission_edge(
+        mission_id="mission-result",
+        from_node_id="node-worker",
+        to_node_id="node-verifier",
+    )
+    db.upsert_team_mission_edge(
+        mission_id="mission-result",
+        from_node_id="node-verifier",
+        to_node_id="node-synthesis",
+    )
+    db.upsert_team_mission_deliverable(
+        mission_id="mission-result",
+        node_id="node-worker",
+        run_id="run-worker",
+        status="completed",
+        result="PASS",
+        summary="Worker finished the file.",
+        payload={"facts": ["file-created"]},
+        artifact_refs=[{"path": "/tmp/result.txt", "kind": "file", "visibility": "report"}],
+    )
+    db.upsert_team_mission_deliverable(
+        mission_id="mission-result",
+        node_id="node-verifier",
+        run_id="run-verifier",
+        status="completed",
+        result="PASS",
+        summary="Verifier confirmed the file.",
+        payload={"verification": "PASS"},
+    )
+    db.upsert_team_mission_deliverable(
+        mission_id="mission-result",
+        node_id="node-synthesis",
+        run_id="run-synthesis",
+        status="completed",
+        result="PASS",
+        summary="Final conclusion: PASS.",
+        payload={"final": "PASS"},
+    )
+
+    reduced = db.reduce_team_mission_graph("mission-result")
+    result = db.get_team_mission_result("mission-result")
+    graph = db.get_team_mission_graph("mission-result")
+    result_events = [
+        event for event in db.list_team_mission_events("mission-result")
+        if event.get("payload", {}).get("source_event_type") == "mission.result.recorded"
+    ]
+    snapshot_events = [
+        event for event in db.list_team_mission_events("mission-result")
+        if event.get("payload", {}).get("source_event_type") == "mission.snapshot.updated"
+    ]
+
+    assert reduced["mission_status"] == "completed"
+    assert result["outcome"] == "completed"
+    assert result["summary_text"] == "Final conclusion: PASS."
+    assert result["artifact_refs"][0]["path"] == "/tmp/result.txt"
+    assert graph["result"]["result_id"] == result["result_id"]
+    assert result_events
+    assert result_events[0]["payload"]["kind"] == "mission.result.recorded"
+    assert snapshot_events
+    assert snapshot_events[-1]["payload"]["kind"] == "mission.snapshot.updated"
 
 
 def test_team_mission_event_cursor_is_global_across_node_sessions(tmp_path: Path):
@@ -2773,6 +2960,50 @@ def test_team_mission_graph_reducer_unlocks_dependency_after_parent_completion(t
     assert db.get_team_mission_node("mission-1", "node-b")["status"] == "ready"
 
 
+def test_team_mission_graph_reducer_requires_effective_handoff_before_unlocking_child(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-a",
+        kind="worker",
+        title="A",
+        status="completed",
+        output_contract={"format": "structured_deliverable", "requires_deliverable": True},
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-b",
+        kind="worker",
+        title="B",
+        status="todo",
+    )
+    db.upsert_team_mission_edge(
+        mission_id="mission-1",
+        from_node_id="node-a",
+        to_node_id="node-b",
+        kind="depends_on",
+    )
+
+    first = db.reduce_team_mission_graph("mission-1")
+    assert first["ready_node_ids"] == []
+    assert db.get_team_mission_node("mission-1", "node-b")["status"] == "blocked_waiting_dependency"
+
+    db.upsert_team_mission_deliverable(
+        mission_id="mission-1",
+        node_id="node-a",
+        run_id="run-a",
+        status="completed",
+        result="PASS",
+        summary="Authoritative handoff submitted.",
+        payload={"status": "completed"},
+    )
+    second = db.reduce_team_mission_graph("mission-1")
+
+    assert second["ready_node_ids"] == ["node-b"]
+    assert db.get_team_mission_node("mission-1", "node-b")["status"] == "ready"
+
+
 def test_team_mission_graph_reducer_marks_dependency_waiting_mission_without_blocking(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
@@ -2855,13 +3086,47 @@ def test_team_mission_node_start_claim_is_atomic(tmp_path: Path):
     assert db.get_team_mission_node("mission-1", "node-a")["metadata"]["scheduler_trigger"] == "test"
 
 
-def test_team_mission_graph_reducer_creates_verifier_and_synthesis_for_execution_modes(tmp_path: Path):
+def test_team_mission_graph_reducer_does_not_auto_create_finalizers_by_default(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        title="Mission",
+        mode="autonomous_mission",
+        status="running",
+        metadata={
+            "members": [
+                {"member_id": "leader", "profile_id": "profile-leader", "role": "leader"},
+                {"member_id": "builder", "profile_id": "profile-builder", "role": "builder"},
+            ],
+        },
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-a",
+        kind="worker",
+        title="A",
+        status="completed",
+    )
+
+    reduced = db.reduce_team_mission_graph("mission-1")
+    finalizer_nodes = [
+        node for node in reduced["graph"]["nodes"]
+        if node["kind"] in {"verifier", "synthesis"}
+    ]
+
+    assert finalizer_nodes == []
+    assert reduced["ready_node_ids"] == []
+    assert reduced["mission_status"] == "running"
+
+
+def test_team_mission_graph_reducer_creates_legacy_auto_finalizers_when_enabled(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         title="Mission",
         mode="autonomous_mission",
         metadata={
+            "allow_auto_finalizers": True,
             "members": [
                 {"member_id": "leader", "profile_id": "profile-leader", "role": "leader"},
                 {"member_id": "builder", "profile_id": "profile-builder", "role": "builder"},
@@ -2889,6 +3154,10 @@ def test_team_mission_graph_reducer_creates_verifier_and_synthesis_for_execution
     assert verifier_nodes[0]["status"] == "ready"
     assert verifier_nodes[0]["assignee_member_id"] == "leader"
     assert verifier_nodes[0]["assignee_profile_id"] == "profile-leader"
+    assert verifier_nodes[0]["output_contract"]["delivery_channel"] == "handoff"
+    assert verifier_nodes[0]["output_contract"]["requires_explicit_handoff"] is True
+    assert verifier_nodes[0]["output_contract"]["requires_deliverable"] is True
+    assert verifier_nodes[0]["metadata"]["system_generated"] is True
     assert verifier_step["ready_node_ids"] == ["team-mission:mission-1:verifier"]
     assert {
         (edge["from_node_id"], edge["to_node_id"])
@@ -2911,6 +3180,16 @@ def test_team_mission_graph_reducer_creates_verifier_and_synthesis_for_execution
         kind="verifier",
         title="验收执行结果",
         status="completed",
+        output_contract=verifier_nodes[0]["output_contract"],
+    )
+    db.upsert_team_mission_deliverable(
+        mission_id="mission-1",
+        node_id="team-mission:mission-1:verifier",
+        run_id="run-verifier",
+        status="completed",
+        result="PASS",
+        summary="Verifier handoff submitted.",
+        payload={"status": "completed"},
     )
     synthesis_step = db.reduce_team_mission_graph("mission-1")
     synthesis_nodes = [node for node in synthesis_step["graph"]["nodes"] if node["kind"] == "synthesis"]
@@ -2919,6 +3198,10 @@ def test_team_mission_graph_reducer_creates_verifier_and_synthesis_for_execution
     assert synthesis_nodes[0]["status"] == "ready"
     assert synthesis_nodes[0]["assignee_member_id"] == "leader"
     assert synthesis_nodes[0]["assignee_profile_id"] == "profile-leader"
+    assert synthesis_nodes[0]["output_contract"]["delivery_channel"] == "handoff"
+    assert synthesis_nodes[0]["output_contract"]["requires_explicit_handoff"] is True
+    assert synthesis_nodes[0]["output_contract"]["requires_deliverable"] is True
+    assert synthesis_nodes[0]["metadata"]["system_generated"] is True
     assert synthesis_step["ready_node_ids"] == ["team-mission:mission-1:synthesis"]
     synthesis_events = db.list_team_mission_events("mission-1")
     finalizer_node_events = [
@@ -2947,6 +3230,7 @@ def test_team_mission_node_upsert_normalizes_kind_and_replaces_invalid_member_as
         title="Mission",
         mode="autonomous_mission",
         metadata={
+            "allow_auto_finalizers": True,
             "members": [
                 {"member_id": "leader", "profile_id": "profile-leader", "role": "leader"},
                 {"member_id": "builder", "profile_id": "profile-builder", "role": "builder"},
@@ -2982,6 +3266,7 @@ def test_team_mission_graph_read_resolves_legacy_invalid_member_assignee(tmp_pat
         title="Mission",
         mode="autonomous_mission",
         metadata={
+            "allow_auto_finalizers": True,
             "members": [
                 {"member_id": "leader", "profile_id": "profile-leader", "role": "leader"},
                 {"member_id": "builder", "profile_id": "profile-builder", "role": "builder"},
@@ -3038,6 +3323,7 @@ def test_team_mission_graph_reducer_treats_verification_kind_as_worker_work_type
         title="Mission",
         mode="autonomous_mission",
         metadata={
+            "allow_auto_finalizers": True,
             "members": [
                 {"member_id": "leader", "profile_id": "profile-leader", "role": "leader"},
                 {"member_id": "builder", "profile_id": "profile-builder", "role": "builder"},
@@ -3102,7 +3388,7 @@ def test_team_mission_graph_reducer_scopes_finalizers_to_active_task(tmp_path: P
         title="创建文件扫描工具",
         objective="创建 filescan.py",
         mode="autonomous_mission",
-        metadata={"active_task_id": "task-2", "task_id": "task-2"},
+        metadata={"active_task_id": "task-2", "task_id": "task-2", "allow_auto_finalizers": True},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",

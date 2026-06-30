@@ -508,6 +508,50 @@ def test_team_mission_create_writes_legacy_audit_row(
     assert row["payload"]["mission_id"] == "mission-1"
 
 
+def test_team_mission_create_binds_request_activity_to_mission(
+    gateway_db: SessionDB,
+    tmp_path: Path,
+) -> None:
+    """team_mission.create binds the stable request Activity to its spawned mission."""
+    from tui_gateway.services.team_mission_activity_events import mission_id_for_activity
+
+    _seed_registry_team(gateway_db, tmp_path)
+
+    result = _assert_ok(
+        _call(
+            "team_mission.create",
+            {
+                "mission_id": "mission-activity-first",
+                "conversation_id": "conversation-activity-first",
+                "conversation_session_id": "team-session-activity-first",
+                "team_id": "team-1",
+                "activity_id": "act-team_dispatch-create-e2e",
+                "title": "Activity-first mission",
+                "objective": "Validate request Activity binding.",
+                "mode": "supervised_mission",
+                "workspace": _workspace_payload(tmp_path, "workspace-activity-first"),
+                "metadata": {"start_leader": False},
+                "record_user_task_message": False,
+            },
+        )
+    )
+
+    assert result["activity_id"] == "act-team_dispatch-create-e2e"
+    activity = gateway_db.get_activity("act-team_dispatch-create-e2e")
+    assert activity
+    assert activity["kind"] == "team_dispatch"
+    assert activity["target_mission_id"] == "mission-activity-first"
+    assert activity["conversation_id"] == "team-session-activity-first"
+    assert activity["status"] == "running"
+    assert mission_id_for_activity("act-team_dispatch-create-e2e", db=gateway_db) == "mission-activity-first"
+    row = _command_by_source(
+        gateway_db,
+        "act-team_dispatch-create-e2e",
+        "team_mission.create",
+    )
+    assert row["payload"]["request_activity_id"] == "act-team_dispatch-create-e2e"
+
+
 def test_team_mission_cancel_writes_legacy_audit_row_and_returns_4040_for_unknown(
     gateway_db: SessionDB,
 ) -> None:
@@ -549,7 +593,11 @@ def test_team_mission_node_start_writes_legacy_audit_row(
     )
 
     assert response["error"]["code"] in {4004, 5000, 5008}
-    row = _command_by_source(gateway_db, "mission:mission-1", "team_mission.node.start")
+    row = _command_by_source(
+        gateway_db,
+        f"act-node:mission-1:{node_id}",
+        "team_mission.node.start",
+    )
     assert row["kind"] == "start"
     assert row["payload"]["node_id"] == node_id
 
@@ -558,7 +606,7 @@ def test_team_mission_message_submit_writes_legacy_audit_row_kind_start(
     gateway_db: SessionDB,
 ) -> None:
     """call team_mission.message.submit -> activity_commands 行 kind=start
-    activity_id=team-conversation:<conversation_id>."""
+    activity_id=chat:<conversation_session_id> for callers without a request Activity."""
     response = _call(
         "team_mission.message.submit",
         {
@@ -573,11 +621,42 @@ def test_team_mission_message_submit_writes_legacy_audit_row_kind_start(
     assert response["error"]["code"] in {4004, 4094, 5008}
     row = _command_by_source(
         gateway_db,
-        "team-conversation:conversation-message-e2e",
+        "chat:team-session-message-e2e",
         "team_mission.message.submit",
     )
     assert row["kind"] == "start"
     assert row["payload"]["conversation_session_id"] == "team-session-message-e2e"
+
+
+def test_team_mission_message_submit_uses_request_activity_owner(
+    gateway_db: SessionDB,
+) -> None:
+    """Activity-first team task requests use the client request Activity as owner."""
+    response = _call(
+        "team_mission.message.submit",
+        {
+            "conversation_id": "conversation-message-e2e",
+            "conversation_session_id": "team-session-message-e2e",
+            "team_id": "team-1",
+            "activity_id": "act-team_dispatch-submit-e2e",
+            "text": "hello leader",
+            "workspace": {"workspace_id": "bad", "workspace_path": ""},
+        },
+    )
+
+    assert response["error"]["code"] in {4004, 4094, 5008}
+    activity = gateway_db.get_activity("act-team_dispatch-submit-e2e")
+    assert activity
+    assert activity["kind"] == "team_dispatch"
+    assert activity["conversation_id"] == "team-session-message-e2e"
+    assert activity["status"] == "running"
+    row = _command_by_source(
+        gateway_db,
+        "act-team_dispatch-submit-e2e",
+        "team_mission.message.submit",
+    )
+    assert row["kind"] == "start"
+    assert row["payload"]["request_activity_id"] == "act-team_dispatch-submit-e2e"
 
 
 def test_prompt_submit_writes_legacy_audit_row_with_chat_activity_id(

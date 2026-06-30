@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from hermes_team_mission.domain.activity import ACTIVITY_ID_FORMAT_PATTERN
+from hermes_team_mission.domain.activity import ACTIVITY_KINDS
 
 
-_ACTIVITY_KINDS = frozenset({"chat", "member_chat", "mission"})
+_ACTIVITY_KINDS = ACTIVITY_KINDS
 
 
 @dataclass(frozen=True)

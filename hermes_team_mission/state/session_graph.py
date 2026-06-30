@@ -51,18 +51,34 @@ class SessionDBTeamMissionGraphMixin:
         mission: Dict[str, Any] | None = None,
         status: str,
     ) -> None:
+        normalized_status = _text(status).lower()
         for conversation_id in self._linked_conversation_ids_for_mission(mission_id, mission):
             if self.set_conversation_mission_status(
                 conversation_id=conversation_id,
                 mission_id=mission_id,
                 status=status,
             ):
+                pass
+            else:
+                self.add_mission_to_conversation(
+                    conversation_id=conversation_id,
+                    mission_id=mission_id,
+                    status=status,
+                )
+            if normalized_status not in _TERMINAL_MISSION_STATUSES:
                 continue
-            self.add_mission_to_conversation(
-                conversation_id=conversation_id,
-                mission_id=mission_id,
-                status=status,
-            )
+            try:
+                from hermes_team_mission.runtime.team_transcript_writer import MissionSummaryWriter
+
+                conversation = self.get_team_mission_conversation(conversation_id)
+                MissionSummaryWriter.emit_mission_summary(
+                    self,
+                    mission_id=mission_id,
+                    conversation_session_id=_text(conversation.get("stable_session_id")),
+                    outcome=normalized_status,
+                )
+            except Exception:
+                pass
 
     def upsert_team_mission(
         self,

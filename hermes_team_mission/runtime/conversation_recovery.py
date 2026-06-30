@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hermes_team_mission.runtime.conversation_mirror import recover_final_deliverable_messages
+from hermes_team_mission.runtime.conversation_mirror import recover_legacy_final_deliverables
 from tui_gateway.services import run_control
 
 
@@ -39,7 +39,7 @@ def recover_conversation_active_run(
     if not stable_session_id:
         return {}
     try:
-        recover_final_deliverable_messages(db, conversation)
+        recover_legacy_final_deliverables(db, conversation)
     except Exception:
         pass
     run_state = run_control.session_status(

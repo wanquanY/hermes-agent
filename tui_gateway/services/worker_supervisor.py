@@ -22,6 +22,7 @@ deleted in Phase 6.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import sys
@@ -29,6 +30,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional, Tuple
 
+from agent.dovie_diagnostics import emit_dovie_runtime_diagnostic
 from tui_gateway.run_worker import (
     DBRpcReplyFrame,
     DBRpcRequestFrame,
@@ -40,6 +42,7 @@ from tui_gateway.run_worker import (
     OutgoingFrame,
     RuntimeEnvUpdateFrame,
     RunCancelFrame,
+    RunStartFrame,
     RunTerminalFrame,
     ShutdownFrame,
     decode_outgoing,
@@ -49,6 +52,36 @@ from tui_gateway.services.runtime_proxy import RuntimeScope
 from tui_gateway.services.worker_db_proxy import serialize_db_value
 
 _log = logging.getLogger(__name__)
+
+
+def _worker_supervisor_log(stage: str, **fields: Any) -> None:
+    emit_dovie_runtime_diagnostic("dovie-worker-run", stage, fields)
+
+
+def _background_task_context() -> contextvars.Context:
+    """Create background worker tasks without request-scoped transports."""
+    ctx = contextvars.copy_context()
+    try:
+        from tui_gateway.transport import bind_transport
+        ctx.run(bind_transport, None)
+    except Exception:
+        pass
+    return ctx
+
+
+def _create_worker_task(coro, *, name: str) -> asyncio.Task:
+    try:
+        return asyncio.create_task(coro, name=name, context=_background_task_context())
+    except TypeError:  # pragma: no cover - Python < 3.11 compatibility
+        try:
+            from tui_gateway.transport import bind_transport, reset_transport
+            token = bind_transport(None)
+            try:
+                return asyncio.create_task(coro, name=name)
+            finally:
+                reset_transport(token)
+        except Exception:
+            return asyncio.create_task(coro, name=name)
 
 
 # Callback types. Each receives the UI routing ``scope_key`` and the
@@ -95,6 +128,7 @@ DB_RPC_ALLOWED_METHODS = frozenset(
         "append_team_mission_run_event",
         "append_team_mission_structural_event",
         "claim_team_mission_node_start",
+        "complete_team_mission_plan",
         "create_activity",
         "create_run_if_session_idle",
         "create_session",
@@ -312,8 +346,35 @@ class WorkerSupervisor:
         running. Caller decides whether to ``ensure()`` first."""
         worker = self._workers.get((scope_key, conversation_id or ""))
         if worker is None or not worker.running():
+            _worker_supervisor_log(
+                "supervisor-send-miss",
+                scope_key=scope_key,
+                conversation_id=conversation_id,
+                frame_type=type(frame).__name__,
+                run_id=str(getattr(frame, "run_id", "") or ""),
+                reason="worker_not_running",
+            )
             return False
+        if isinstance(frame, (RunStartFrame, RunCancelFrame)):
+            _worker_supervisor_log(
+                "supervisor-send",
+                scope_key=scope_key,
+                conversation_id=conversation_id,
+                frame_type=type(frame).__name__,
+                run_id=str(getattr(frame, "run_id", "") or ""),
+                turn_id=str(getattr(frame, "turn_id", "") or ""),
+                worker_pid=worker.process.pid if worker.process else None,
+                worker_active_runs=sorted(worker.active_runs),
+            )
         if not await self._send_frame_to_worker(worker, frame):
+            _worker_supervisor_log(
+                "supervisor-send-write-failed",
+                scope_key=scope_key,
+                conversation_id=conversation_id,
+                frame_type=type(frame).__name__,
+                run_id=str(getattr(frame, "run_id", "") or ""),
+                worker_pid=worker.process.pid if worker.process else None,
+            )
             return False
         worker.mark_used()
         return True
@@ -450,11 +511,11 @@ class WorkerSupervisor:
             created_at=now,
             last_used_at=now,
         )
-        worker.read_task = asyncio.create_task(
+        worker.read_task = _create_worker_task(
             self._read_loop(worker),
             name=f"run-worker-read[{scope.runtime_scope_key}:{scope.conversation_id}]",
         )
-        worker.dispatch_task = asyncio.create_task(
+        worker.dispatch_task = _create_worker_task(
             self._dispatch_loop(worker),
             name=f"run-worker-dispatch[{scope.runtime_scope_key}:{scope.conversation_id}]",
         )
@@ -567,7 +628,20 @@ class WorkerSupervisor:
             elif isinstance(frame, InteractiveRequestFrame):
                 await self._on_interactive_request(scope_key, worker.conversation_id, frame)
             elif isinstance(frame, RunTerminalFrame):
+                before_active_runs = sorted(worker.active_runs)
                 worker.active_runs.discard(frame.run_id)
+                _worker_supervisor_log(
+                    "supervisor-terminal-received",
+                    scope_key=scope_key,
+                    conversation_id=worker.conversation_id,
+                    run_id=frame.run_id,
+                    status=frame.status,
+                    turn_id=frame.turn_id,
+                    stored_session_id=frame.stored_session_id,
+                    message=frame.message,
+                    before_active_runs=before_active_runs,
+                    after_active_runs=sorted(worker.active_runs),
+                )
                 await self._on_run_terminal(scope_key, worker.conversation_id, frame)
             elif isinstance(frame, LogFrame):
                 if self._on_log is not None:
@@ -705,12 +779,33 @@ class WorkerSupervisor:
             sorted(gateway_params.keys()),
         )
         try:
+            try:
+                from tui_gateway.services.worker_runtime import remember_worker_runtime_loop
+                remember_worker_runtime_loop(asyncio.get_running_loop())
+            except Exception:
+                pass
             from tui_gateway import server as _server
 
             target = _server._methods.get(gateway_method)
             if not callable(target):
                 raise RuntimeError(f"Gateway method {gateway_method} is unavailable.")
-            result = target(f"worker-team-mission:{req_id}", dict(gateway_params))
+            def _invoke_gateway_method():
+                try:
+                    from tui_gateway.transport import bind_transport, reset_transport
+                    token = bind_transport(None)
+                except Exception:
+                    token = None
+                    reset_transport = None  # type: ignore[assignment]
+                try:
+                    return target(f"worker-team-mission:{req_id}", dict(gateway_params))
+                finally:
+                    if token is not None and reset_transport is not None:
+                        try:
+                            reset_transport(token)
+                        except Exception:
+                            pass
+
+            result = await asyncio.to_thread(_invoke_gateway_method)
             return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
         except Exception as exc:
             return _db_rpc_error(

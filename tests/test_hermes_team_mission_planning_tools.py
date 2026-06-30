@@ -211,6 +211,26 @@ def test_team_mission_planning_tools_reject_unbound_run(tmp_path: Path):
     assert "not bound" in result["error"]
 
 
+def test_team_mission_handoff_toolset_is_separate_from_planning():
+    import tools.team_mission_deliverable_tools  # noqa: F401
+    import tools.team_mission_planning_tools  # noqa: F401
+    from model_tools import get_tool_definitions
+
+    planning_tools = {
+        item["function"]["name"]
+        for item in get_tool_definitions(enabled_toolsets=["team_mission_planning"], quiet_mode=True)
+    }
+    handoff_tools = {
+        item["function"]["name"]
+        for item in get_tool_definitions(enabled_toolsets=["team_mission_handoff"], quiet_mode=True)
+    }
+
+    assert {"team_mission_node_create", "team_mission_edge_create", "team_mission_plan_complete"} <= planning_tools
+    assert "team_mission_submit_deliverable" not in planning_tools
+    assert "team_mission_node_heartbeat" not in planning_tools
+    assert {"team_mission_submit_deliverable", "team_mission_node_heartbeat"} <= handoff_tools
+
+
 def test_team_mission_submit_deliverable_persists_hidden_handoff_and_returns_ack_only(tmp_path: Path):
     import tools.team_mission_deliverable_tools  # noqa: F401
 
@@ -273,8 +293,21 @@ def test_team_mission_submit_deliverable_persists_hidden_handoff_and_returns_ack
     assert stored["payload"]["verification"]["passed"] is True
     assert stored["confidence"] == 0.9
     assert stored["artifact_refs"][0]["path"] == "/tmp/workspace/output.md"
+    assert node["status"] == "completed"
+    assert node["metadata"]["last_run_terminal_event"] == "mission.node.finished"
     assert node["metadata"]["last_deliverable_id"] == stored["deliverable_id"]
     assert "mission.node.deliverable.recorded" in source_event_types
+    assert "mission.node.finished" in source_event_types
+    assert "mission.snapshot.updated" in source_event_types
+
+    db.append_team_mission_run_event(
+        mission_id="mission-1",
+        run_id="run-worker",
+        event={"type": "message.complete", "seq": 100, "payload": {"status": "complete", "text": "visible final"}},
+    )
+    after_visible_complete = db.get_team_mission_node("mission-1", "node-worker")
+    assert after_visible_complete["status"] == "completed"
+    assert after_visible_complete["metadata"]["last_run_terminal_event"] == "mission.node.finished"
 
 
 def test_team_mission_submit_deliverable_marks_event_emit_failure(monkeypatch, tmp_path: Path):
@@ -327,6 +360,7 @@ def test_team_mission_submit_deliverable_marks_event_emit_failure(monkeypatch, t
     node = db.get_team_mission_node("mission-1", "node-worker")
     assert result["success"] is True
     assert stored["deliverable_id"] == result["deliverable_id"]
+    assert node["status"] == "completed"
     assert node["metadata"]["deliverable_event_emit_failed"] is True
     assert node["metadata"]["pending_deliverable_event_id"] == stored["deliverable_id"]
     assert "event log unavailable" in node["metadata"]["deliverable_event_emit_error"]

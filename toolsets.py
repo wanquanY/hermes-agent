@@ -163,6 +163,15 @@ TOOLSETS = {
         "includes": ["team_mission_read"]
     },
 
+    "team_mission_handoff": {
+        "description": "Internal DoXie team task worker handoff tools",
+        "tools": [
+            "team_mission_submit_deliverable",
+            "team_mission_node_heartbeat",
+        ],
+        "includes": []
+    },
+
     "team_mission_conversation_leader": {
         "description": "DoXie team Leader conversation tools that may start new team tasks",
         "tools": [
@@ -639,7 +648,7 @@ TOOLSETS = {
     }
 }
 
-INTERNAL_TOOLSETS = {"dovie", "team_mission_read", "team_mission_planning"}
+INTERNAL_TOOLSETS = {"dovie", "team_mission_read", "team_mission_planning", "team_mission_handoff"}
 
 
 def is_internal_toolset(name: str) -> bool:

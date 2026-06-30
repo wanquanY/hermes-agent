@@ -28,14 +28,17 @@ adds the ``*.respond`` fast-path via ``router.respond``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
+import time
 from typing import Optional
 
 import uuid
 from typing import Any
 
+from agent.dovie_diagnostics import emit_dovie_runtime_diagnostic
 from tui_gateway.run_worker import RunCancelFrame, RunStartFrame
 from tui_gateway.services.runtime_proxy import (
     RuntimeScope,
@@ -53,6 +56,65 @@ _singleton_lock = threading.RLock()
 _supervisor_singleton: Optional[WorkerSupervisor] = None
 _router_singleton: Optional[WorkerFrameRouter] = None
 _pool_singleton: Optional[WorkerPool] = None
+_runtime_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _worker_run_log(stage: str, **fields: Any) -> None:
+    emit_dovie_runtime_diagnostic("dovie-worker-run", stage, fields)
+
+
+class ControlPlaneTransport:
+    """In-process transport for internal control-plane dispatch.
+
+    Worker runtime commands such as Team Mission node starts need the
+    ``primary_dispatch`` worker-spawn path, but they are not UI JSON-RPCs and
+    must not depend on a WebSocket staying connected long enough to receive an
+    acknowledgement. This transport captures ack frames for diagnostics while
+    making command acceptance independent from renderer connection lifetime.
+    """
+
+    def __init__(self, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        self._loop = loop
+        self._created_at = time.time()
+        self._frames: list[dict[str, Any]] = []
+
+    def _diagnostics(self) -> dict[str, Any]:
+        return {
+            "transport": "ControlPlaneTransport",
+            "age_s": round(time.time() - self._created_at, 3),
+            "closed": False,
+            "sent_count": len(self._frames),
+        }
+
+    @property
+    def frames(self) -> list[dict[str, Any]]:
+        return list(self._frames)
+
+    def write(self, obj: dict) -> bool:
+        self._frames.append(dict(obj or {}))
+        return True
+
+    async def write_async(self, obj: dict) -> bool:
+        self._frames.append(dict(obj or {}))
+        return True
+
+
+def remember_worker_runtime_loop(loop: asyncio.AbstractEventLoop | None = None) -> None:
+    """Record the event loop that owns ``WorkerSupervisor`` operations."""
+    global _runtime_loop
+    try:
+        candidate = loop or asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if candidate.is_running() and not candidate.is_closed():
+        _runtime_loop = candidate
+
+
+def current_worker_runtime_loop() -> asyncio.AbstractEventLoop | None:
+    loop = _runtime_loop
+    if loop is not None and loop.is_running() and not loop.is_closed():
+        return loop
+    return None
 
 
 def worker_supervisor() -> WorkerSupervisor:
@@ -208,7 +270,7 @@ async def shutdown_run_worker_runtime() -> None:
     process exits. Sync atexit handlers can't drive this — they have
     no event loop — so this function is exposed for explicit wiring.
     """
-    global _supervisor_singleton, _router_singleton, _pool_singleton
+    global _supervisor_singleton, _router_singleton, _pool_singleton, _runtime_loop
     supervisor: Optional[WorkerSupervisor]
     pool: Optional[WorkerPool]
     with _singleton_lock:
@@ -217,6 +279,7 @@ async def shutdown_run_worker_runtime() -> None:
         _pool_singleton = None
         _supervisor_singleton = None
         _router_singleton = None
+        _runtime_loop = None
     if pool is not None:
         try:
             await pool.shutdown()
@@ -245,6 +308,7 @@ async def primary_dispatch(req: Any, transport: Any) -> bool:
     The env flag check is the caller's responsibility — this function
     assumes it's only called when primary mode is on. Centralizing the
     flag check here would require parsing every request twice."""
+    remember_worker_runtime_loop()
     if not isinstance(req, dict):
         return False
     method = str(req.get("method") or "").strip()
@@ -470,6 +534,20 @@ async def _dispatch_prompt_submit(
 
     pool = worker_pool()
     router = worker_frame_router()
+    _worker_run_log(
+        "dispatch-start",
+        method=str(req.get("method") or ""),
+        request_id=rid,
+        scope_key=scope.runtime_scope_key,
+        agent_profile_id=scope.agent_profile_id,
+        stored_session_id=stored_session_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        source=str(params.get("source") or ""),
+        dispatch_activity_id=str(params.get("dispatch_activity_id") or ""),
+        prompt_len=len(prompt_text),
+        param_keys=sorted(str(key) for key in params.keys()),
+    )
 
     try:
         lease = await pool.get_or_spawn(
@@ -478,6 +556,14 @@ async def _dispatch_prompt_submit(
             scope_key=scope.runtime_scope_key,
         )
     except Exception as exc:
+        _worker_run_log(
+            "dispatch-spawn-error",
+            request_id=rid,
+            scope_key=scope.runtime_scope_key,
+            stored_session_id=stored_session_id,
+            run_id=run_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
         _log.exception(
             "[worker-runtime] worker_pool.get_or_spawn failed scope=%s conversation=%s",
             scope.runtime_scope_key,
@@ -488,7 +574,19 @@ async def _dispatch_prompt_submit(
             message=f"primary worker spawn failed: {exc}",
         )
         return True
-
+    _worker_run_log(
+        "dispatch-lease-acquired",
+        request_id=rid,
+        requested_scope_key=scope.runtime_scope_key,
+        lease_scope_key=lease.scope_key,
+        stored_session_id=stored_session_id,
+        worker_conversation_id=lease.worker_conversation_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        worker_pid=lease.worker.process.pid if lease.worker.process else None,
+        worker_running=lease.worker.running(),
+        worker_active_runs=sorted(lease.worker.active_runs),
+    )
     run_start_kwargs = {
         "scope_key": lease.scope_key,
         "conversation_id": stored_session_id,
@@ -511,10 +609,28 @@ async def _dispatch_prompt_submit(
     if params.get("parent_hermes_home") is not None:
         run_start_kwargs["parent_hermes_home"] = params.get("parent_hermes_home")
     router.record_run_start(**run_start_kwargs)
+    _worker_run_log(
+        "router-record-run-start",
+        request_id=rid,
+        stored_session_id=stored_session_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        scope_key=lease.scope_key,
+        activity_kind=str(run_start_kwargs.get("activity_kind") or ""),
+        dispatch_activity_id=str(run_start_kwargs.get("dispatch_activity_id") or ""),
+    )
     await pool.record_run_start(
         conversation_id=stored_session_id,
         run_id=run_id,
         stored_session_id=stored_session_id,
+        turn_id=turn_id,
+        scope_key=lease.scope_key,
+    )
+    _worker_run_log(
+        "pool-record-run-start-complete",
+        request_id=rid,
+        stored_session_id=stored_session_id,
+        run_id=run_id,
         turn_id=turn_id,
         scope_key=lease.scope_key,
     )
@@ -536,6 +652,15 @@ async def _dispatch_prompt_submit(
         frame_params.setdefault("agent_profile_id", scope.agent_profile_id)
         frame_params.setdefault("agentProfileId", scope.agent_profile_id)
 
+    _worker_run_log(
+        "supervisor-send-start",
+        request_id=rid,
+        stored_session_id=stored_session_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        scope_key=lease.scope_key,
+        frame_param_keys=sorted(str(key) for key in frame_params.keys()),
+    )
     ok = await worker_supervisor().send(
         lease.scope_key,
         stored_session_id,
@@ -551,6 +676,15 @@ async def _dispatch_prompt_submit(
         ),
     )
     await pool.release(stored_session_id, scope_key=lease.scope_key)
+    _worker_run_log(
+        "supervisor-send-result",
+        request_id=rid,
+        stored_session_id=stored_session_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        scope_key=lease.scope_key,
+        ok=ok,
+    )
     if not ok:
         router.forget_run(run_id)
         await pool.forget_run(run_id)
@@ -560,6 +694,14 @@ async def _dispatch_prompt_submit(
         )
         return True
 
+    _worker_run_log(
+        "dispatch-ack-ok",
+        request_id=rid,
+        stored_session_id=stored_session_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        scope_key=lease.scope_key,
+    )
     await _ack_ok(
         transport, rid,
         result={
@@ -625,8 +767,9 @@ def _reset_for_tests() -> None:
     running subprocesses (use ``shutdown_run_worker_runtime`` for that).
     Use sparingly — only when a test needs a fresh router/supervisor
     pair AND has already torn down any spawned workers itself."""
-    global _supervisor_singleton, _router_singleton, _pool_singleton
+    global _supervisor_singleton, _router_singleton, _pool_singleton, _runtime_loop
     with _singleton_lock:
         _pool_singleton = None
         _supervisor_singleton = None
         _router_singleton = None
+        _runtime_loop = None

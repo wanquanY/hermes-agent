@@ -145,17 +145,16 @@ class _MirrorDb:
         return len(self.appended_messages)
 
 
-def test_record_event_propagates_participant_id_to_append_message():
+def test_record_event_preserves_participant_id_on_run_event_without_writing_transcript():
     db = _MirrorDb()
 
     run_control.record_event(_message_event(), db=db)
 
-    assert db.appended_messages
-    message = db.appended_messages[0]
-    assert message["session_id"] == "team-session-1"
-    assert message["participant_id"] == "member:writer"
-    assert message["metadata"]["participant_id"] == "member:writer"
-    assert message["metadata"]["team_mission"]["participant_id"] == "member:writer"
+    assert db.appended_messages == []
+    assert db.appended_events
+    event = db.appended_events[0]
+    assert event["participant_id"] == "member:writer"
+    assert event["payload"]["participant_id"] == "member:writer"
 
 
 def _create_legacy_v29_db(path: Path) -> None:
@@ -266,7 +265,5 @@ def test_team_conversation_render_history_messages_have_participant_id(tmp_path:
         message = response["result"]["messages"][0]
         assert message["participant_id"] == "member:renderer"
         assert message["participantId"] == "member:renderer"
-        assert message["teamMission"]["participantId"] == "member:renderer"
-        assert message["metadata"]["team_mission"]["participant_id"] == "member:renderer"
     finally:
         db.close()

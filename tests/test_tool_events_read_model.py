@@ -31,7 +31,7 @@ def _tool_event(
     return body
 
 
-def test_append_run_event_projects_tool_timeline_read_model(tmp_path):
+def test_append_run_event_projects_tool_events_index(tmp_path):
     db = SessionDB(tmp_path / "state.db")
     try:
         db.create_session("session-1", "dovie")

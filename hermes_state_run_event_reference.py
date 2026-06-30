@@ -5,6 +5,8 @@ import json
 import sqlite3
 from typing import Any
 
+from hermes_conversation_message_identity import AssistantMessageIdentity
+from hermes_conversation_message_identity import assistant_conversation_message_id_for
 from hermes_state_run_event_codec import decode_run_event_row
 from hermes_state_run_event_codec import encode_run_event_frame
 from hermes_state_run_event_index import (
@@ -53,12 +55,6 @@ def _sha256_text(value: str) -> str:
 
 def _string_value(value: Any) -> str:
     return value if isinstance(value, str) else ""
-
-
-def _conversation_message_id_for(*, session_id: str, run_id: str, message_seq_in_run: str) -> str:
-    raw = f"{session_id}\0{run_id}\0{message_seq_in_run}"
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
-    return f"msg_{digest}"
 
 
 def _message_seq_in_run(event: dict[str, Any]) -> str:
@@ -111,10 +107,12 @@ def _message_row_for_event(conn: sqlite3.Connection, event: dict[str, Any]) -> s
         or event.get("conversationMessageId")
         or payload.get("conversation_message_id")
         or payload.get("conversationMessageId")
-    ) or _conversation_message_id_for(
-        session_id=session_id,
-        run_id=run_id,
-        message_seq_in_run=message_seq,
+    ) or assistant_conversation_message_id_for(
+        AssistantMessageIdentity(
+            session_id=session_id,
+            run_id=run_id,
+            message_seq_in_run=message_seq,
+        )
     )
     return conn.execute(
         """

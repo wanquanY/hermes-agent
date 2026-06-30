@@ -342,3 +342,6 @@ class SessionDBTeamMissionRowsMixin:
 
     def _team_mission_deliverable_from_row(self, row: sqlite3.Row | None) -> Dict[str, Any]:
         return _deliverable_state.row_to_deliverable(row)
+
+    def _team_mission_result_from_row(self, row: sqlite3.Row | None) -> Dict[str, Any]:
+        return _result_state.row_to_mission_result(row)

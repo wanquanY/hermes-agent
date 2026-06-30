@@ -13,7 +13,7 @@ from hermes_constants import (
     reset_hermes_home_override,
     set_hermes_home_override,
 )
-from hermes_state.profile_dir import resolve_default_agent_dir
+from hermes_profile_dir import resolve_default_agent_dir
 
 
 @dataclass

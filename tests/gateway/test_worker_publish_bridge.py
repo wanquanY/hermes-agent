@@ -203,7 +203,13 @@ async def test_clarify_hook_emits_interactive_request(fake_clarify) -> None:
         InteractiveRequestFrame(
             kind="clarify",
             request_id="clr-1",
-            payload={"clarify_id": "clr-1", "session_key": "sess-1", "question": "Pick one", "choices": ["A", "B"]},
+            payload={
+                "clarify_id": "clr-1",
+                "request_id": "clr-1",
+                "session_key": "sess-1",
+                "question": "Pick one",
+                "choices": ["A", "B"],
+            },
             stored_session_id="sess-1",
         )
     ]

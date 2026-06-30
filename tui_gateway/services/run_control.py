@@ -22,7 +22,8 @@ from typing import Any, TYPE_CHECKING
 
 from hermes_runtime_event_payloads import primary_deliverable_text
 from hermes_state_participants import agent_participant_id, leader_participant_id, member_participant_id
-from agent.dovie_diagnostics import emit_dovie_diagnostic
+from agent.dovie_diagnostics import emit_dovie_diagnostic, emit_dovie_runtime_diagnostic
+from tui_gateway.services import team_mission_activity_events as _team_activity_events
 from tui_gateway.services.run_control_events import (
     delta_event_for_subscription as _delta_event_for_subscription,
     event_run_id as _event_run_id,
@@ -33,10 +34,6 @@ from tui_gateway.services.run_control_events import (
     stable_session_id as _stable_session_id,
     stream_text_delta as _stream_text_delta,
     terminal_delivery_identity as _terminal_delivery_identity,
-)
-from tui_gateway.services.transcript_projector import (
-    SessionDBTranscriptProjectionStore,
-    TranscriptProjector,
 )
 from tui_gateway.transport import Transport
 
@@ -104,13 +101,6 @@ _STREAM_TRACE_EVENT_TYPES = {
     "reasoning.delta",
     "thinking.delta",
 }
-_TRANSCRIPT_PROJECTOR_EVENT_TYPES = {
-    "message.start",
-    "message.delta",
-    "message.complete",
-    "reasoning.delta",
-}
-
 
 def _transport_debug_id(transport: Any) -> str:
     if transport is None:
@@ -134,6 +124,14 @@ def _trace_stream_route(stage: str, **fields: Any) -> None:
     emit_dovie_diagnostic("[dovie-stream-route]", {"stage": stage, **fields})
 
 
+def _trace_team_runtime_chain(stage: str, **fields: Any) -> None:
+    emit_dovie_diagnostic("[dovie-team-runtime-chain]", {"stage": stage, **fields})
+
+
+def _team_activity_terminal_log(stage: str, **fields: Any) -> None:
+    emit_dovie_runtime_diagnostic("dovie-team-activity", stage, fields)
+
+
 _lock = threading.RLock()
 _events_by_session: dict[str, deque[dict[str, Any]]] = defaultdict(
     lambda: deque(maxlen=_MAX_EVENTS_PER_SESSION)
@@ -148,6 +146,7 @@ _run_ids_by_session: dict[str, list[str]] = defaultdict(list)
 _last_seq_by_session: dict[str, int] = defaultdict(int)
 _subscription_poller_thread: threading.Thread | None = None
 _team_mission_ready_scheduler: Any = None
+_team_mission_event_listener_registered = False
 
 
 def _db_method(db: Any, name: str):
@@ -171,101 +170,6 @@ def _json_for_log(value: Any) -> str:
 
 def _diagnostic_warning(label: str, **fields: Any) -> None:
     logger.warning("[dovie-run-control] %s %s", label, _json_for_log(fields))
-
-
-def _session_conversation_kind(db: Any, stable: str) -> str:
-    getter = _db_method(db, "get_session_index")
-    if getter is None or not stable:
-        return ""
-    try:
-        row = getter(stable)
-    except Exception as exc:
-        _diagnostic_warning(
-            "transcript-projector-session-kind-failed",
-            db=_db_label(db),
-            session_id=stable,
-            error=str(exc),
-        )
-        return ""
-    if not isinstance(row, dict):
-        return ""
-    return str(row.get("conversation_kind") or "").strip().lower()
-
-
-def _is_team_conversation_session(db: Any, stable: str) -> bool:
-    return _session_conversation_kind(db, stable) == "team"
-
-
-def _project_team_transcript_event(
-    *,
-    db: Any,
-    stable: str,
-    event: dict[str, Any],
-) -> dict[str, Any]:
-    event_type = str((event or {}).get("type") or "").strip()
-    if event_type not in _TRANSCRIPT_PROJECTOR_EVENT_TYPES:
-        return {"attempted": False, "reason": "non-message-event"}
-    if not stable or not _is_team_conversation_session(db, stable):
-        return {"attempted": False, "reason": "not-team-conversation"}
-    if not (
-        _db_method(db, "get_message_by_conversation_message_id")
-        and _db_method(db, "upsert_projected_conversation_message")
-    ):
-        _diagnostic_warning(
-            "transcript-projector-store-unavailable",
-            db=_db_label(db),
-            session_id=stable,
-            event_type=event_type,
-            run_id=_event_run_id(event),
-            turn_id=_event_turn_id(event),
-            seq=int((event or {}).get("seq") or 0),
-        )
-        return {"attempted": False, "reason": "store-unavailable"}
-    try:
-        result = TranscriptProjector(SessionDBTranscriptProjectionStore(db)).reduce(event)
-    except Exception as exc:
-        _diagnostic_warning(
-            "transcript-projector-failed",
-            db=_db_label(db),
-            session_id=stable,
-            event_type=event_type,
-            run_id=_event_run_id(event),
-            turn_id=_event_turn_id(event),
-            seq=int((event or {}).get("seq") or 0),
-            error=str(exc),
-        )
-        return {"attempted": True, "applied": False, "error": str(exc)}
-
-    diagnostics = [
-        {
-            "code": diagnostic.code,
-            "message": diagnostic.message,
-            "fields": diagnostic.fields,
-        }
-        for diagnostic in result.diagnostics
-    ]
-    if not result.applied and diagnostics:
-        _diagnostic_warning(
-            "transcript-projector-skipped",
-            db=_db_label(db),
-            session_id=stable,
-            event_type=event_type,
-            run_id=_event_run_id(event),
-            turn_id=_event_turn_id(event),
-            seq=int((event or {}).get("seq") or 0),
-            diagnostics=diagnostics,
-        )
-    return {
-        "attempted": True,
-        "applied": result.applied,
-        "action": result.action,
-        "diagnostics": diagnostics,
-        "conversation_message_id": (
-            result.message.conversation_message_id
-            if result.message is not None
-            else ""
-        ),
-    }
 
 
 def _run_summary(run: dict[str, Any] | None) -> dict[str, Any]:
@@ -397,12 +301,9 @@ def _remember_subscription_delivery(
     *,
     direct: bool = False,
 ) -> None:
-    try:
-        seq = int(event.get("seq") or 0)
-    except (TypeError, ValueError):
-        seq = 0
-    if seq > 0:
-        subscription["last_seq"] = max(int(subscription.get("last_seq") or 0), seq)
+    cursor_field, seq = _subscription_event_cursor(subscription, event)
+    if cursor_field and seq > 0:
+        subscription[cursor_field] = max(int(subscription.get(cursor_field) or 0), seq)
     _remember_subscription_run(subscription, event)
     if direct or _terminal_delivery_identity(event):
         _remember_direct_terminal_delivery(subscription, event)
@@ -422,14 +323,127 @@ def _event_activity_id(event: dict[str, Any]) -> str:
     ).strip()
 
 
+def _raw_event_seq(event: dict[str, Any]) -> int:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    try:
+        return max(0, int(event.get("seq") or payload.get("seq") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _event_activity_seq(event: dict[str, Any]) -> int:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    try:
+        return max(
+            0,
+            int(
+                event.get("activity_event_seq")
+                or event.get("activityEventSeq")
+                or payload.get("activity_event_seq")
+                or payload.get("activityEventSeq")
+                or 0
+            ),
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def _activity_subscription_uses_event_log_cursor(subscription: dict[str, Any]) -> bool:
+    activity_id = str(subscription.get("activity_id") or "").strip()
+    if not activity_id:
+        return False
+    if _team_activity_events.is_team_dispatch_activity_id(activity_id):
+        return True
+    return _team_activity_events.uses_event_log(activity_id, db=subscription.get("db"))
+
+
+def _subscription_event_cursor(
+    subscription: dict[str, Any],
+    event: dict[str, Any],
+) -> tuple[str, int]:
+    if str(subscription.get("kind") or "session") == "activity":
+        activity_seq = _event_activity_seq(event)
+        if activity_seq > 0:
+            return "activity_event_last_seq", activity_seq
+        if _activity_subscription_uses_event_log_cursor(subscription):
+            return "", 0
+    return "last_seq", _raw_event_seq(event)
+
+
+def _subscription_after_seq(subscription: dict[str, Any]) -> int:
+    if (
+        str(subscription.get("kind") or "session") == "activity"
+        and _team_activity_events.uses_event_log(
+            str(subscription.get("activity_id") or "").strip(),
+            db=subscription.get("db"),
+        )
+    ):
+        return int(subscription.get("activity_event_last_seq") or 0)
+    return int(subscription.get("last_seq") or 0)
+
+
+def _event_has_team_mission_run_binding(event: dict[str, Any], db: Any = None) -> bool:
+    run_id = _event_run_id(event)
+    if not run_id:
+        return False
+    binding_getter = _db_method(db, "get_team_mission_run_binding")
+    if binding_getter is None:
+        return False
+    try:
+        binding = binding_getter(run_id)
+    except Exception:
+        return False
+    return isinstance(binding, dict) and bool(binding)
+
+
+def _on_team_mission_event_appended(mission_id: str, event: dict[str, Any]) -> None:
+    _team_activity_terminal_log(
+        "event-log-appended",
+        mission_id=str(mission_id or "").strip(),
+        event_type=str(event.get("type") or "") if isinstance(event, dict) else "",
+        seq=event.get("seq") if isinstance(event, dict) else None,
+        subscription_activity_count=len(_subscription_ids_by_activity),
+    )
+    _team_activity_events.deliver_appended_event(
+        mission_id,
+        event,
+        lock=_lock,
+        subscription_ids_by_activity=_subscription_ids_by_activity,
+        subscriptions_by_id=_subscriptions_by_id,
+        delta_event_for_subscription=_delta_event_for_subscription,
+        reserve_subscription_delivery=_reserve_subscription_delivery,
+        live_status_event_for_subscription=_team_mission_live_status_event_for_subscription,
+        write_event=_write_event,
+        remember_transport_delivery=lambda transport, projected: remember_transport_delivery(
+            transport,
+            projected,
+            direct=False,
+        ),
+    )
+
+
+def _ensure_team_mission_event_listener_registered() -> None:
+    global _team_mission_event_listener_registered
+    if _team_mission_event_listener_registered:
+        return
+    try:
+        from hermes_team_mission.state.event_log import register_team_mission_event_listener
+    except Exception as exc:
+        _team_activity_terminal_log(
+            "listener-register-failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return
+    register_team_mission_event_listener(_on_team_mission_event_appended)
+    _team_mission_event_listener_registered = True
+    _team_activity_terminal_log("listener-registered")
+
+
 def _reserve_subscription_delivery(
     subscription: dict[str, Any],
     event: dict[str, Any],
 ) -> bool:
-    try:
-        seq = int(event.get("seq") or 0)
-    except (TypeError, ValueError):
-        seq = 0
+    cursor_field, seq = _subscription_event_cursor(subscription, event)
     if seq <= 0:
         return True
     subscription_id = str(subscription.get("id") or "").strip()
@@ -439,9 +453,9 @@ def _reserve_subscription_delivery(
         current = _subscriptions_by_id.get(subscription_id)
         if current is None:
             return False
-        if seq <= int(current.get("last_seq") or 0):
+        if seq <= int(current.get(cursor_field) or 0):
             return False
-        current["last_seq"] = seq
+        current[cursor_field] = seq
     return True
 
 
@@ -784,14 +798,18 @@ def _poll_subscription_events() -> None:
         for subscription in subscriptions:
             db = subscription.get("db")
             subscription_kind = str(subscription.get("kind") or "session")
-            if subscription_kind == "activity":
-                method = _db_method(db, "list_run_events_by_activity")
-            else:
-                method = _db_method(db, "list_run_events")
-            if method is None:
-                continue
             stable = str(subscription.get("stored_session_id") or "").strip()
             activity_id = str(subscription.get("activity_id") or "").strip()
+            if subscription_kind == "activity":
+                method = None
+                if not _team_activity_events.uses_event_log(activity_id, db=db):
+                    method = _db_method(db, "list_run_events_by_activity")
+                    if method is None:
+                        continue
+            else:
+                method = _db_method(db, "list_run_events")
+                if method is None:
+                    continue
             transport = subscription.get("transport")
             if transport is None:
                 continue
@@ -799,7 +817,7 @@ def _poll_subscription_events() -> None:
                 continue
             if subscription_kind != "activity" and not stable:
                 continue
-            last_seq = int(subscription.get("last_seq") or 0)
+            last_seq = _subscription_after_seq(subscription)
             active_only = bool(subscription.get("active_only"))
             runtime_scope_key = str(subscription.get("runtime_scope_key") or "").strip()
             active_run_ids = set(subscription.get("active_run_ids") or set())
@@ -807,10 +825,12 @@ def _poll_subscription_events() -> None:
                 active_run_ids.update(_active_run_ids_for_session(stable, db=db))
             try:
                 if subscription_kind == "activity":
-                    events = method(
+                    events = _team_activity_events.list_activity_events(
+                        db,
                         activity_id,
                         after_seq=last_seq,
                         limit=_MAX_EVENTS_PER_SESSION,
+                        event_activity_id=_event_activity_id,
                     )
                 else:
                     events = method(
@@ -894,7 +914,15 @@ def _poll_subscription_events() -> None:
             with _lock:
                 current = _subscriptions_by_id.get(str(subscription.get("id") or ""))
                 if current is not None:
-                    current["last_seq"] = max(int(current.get("last_seq") or 0), delivered_seq)
+                    cursor_field = (
+                        "activity_event_last_seq"
+                        if (
+                            subscription_kind == "activity"
+                            and _team_activity_events.uses_event_log(activity_id, db=db)
+                        )
+                        else "last_seq"
+                    )
+                    current[cursor_field] = max(int(current.get(cursor_field) or 0), delivered_seq)
                     if active_only:
                         current_active_run_ids = set(current.get("active_run_ids") or set())
                         current_active_run_ids.update(active_run_ids)
@@ -1145,12 +1173,27 @@ def _apply_run_context_to_frame(
     if not isinstance(payload, dict):
         payload = {}
         frame["payload"] = payload
-    frame["stored_session_id"] = run_context.conversation_session_id
+    activity_id = str(getattr(run_context, "activity_id", "") or "").strip()
+    activity_kind = str(getattr(run_context, "activity_kind", "") or "").strip()
+    existing_stored_session_id = str(
+        frame.get("stored_session_id")
+        or payload.get("stored_session_id")
+        or payload.get("storedSessionId")
+        or payload.get("session_key")
+        or ""
+    ).strip()
+    # Mission node activity raw runtime events are owned by the node runtime
+    # session. The visible team conversation consumes the canonical
+    # team_mission.runtime.event projection and final summary only.
+    if activity_kind == "mission" and activity_id.startswith("act-node:"):
+        if existing_stored_session_id:
+            frame["stored_session_id"] = existing_stored_session_id
+    else:
+        frame["stored_session_id"] = run_context.conversation_session_id
     if not str(frame.get("participant_id") or "").strip():
         frame["participant_id"] = run_context.participant_id
     # ADR-0001: surface activity_id at frame top-level so append_run_event
     # picks it up via _event_activity_id() and writes it into the column.
-    activity_id = str(getattr(run_context, "activity_id", "") or "").strip()
     if activity_id and not str(frame.get("activity_id") or "").strip():
         frame["activity_id"] = activity_id
     payload["run_context"] = run_context.to_payload()
@@ -1442,7 +1485,12 @@ def record_event(
                     subscribers.add(transport)
             subscribers.update(_subscribers_by_session.get(stable, set()))
         activity_id = _event_activity_id(frame)
-        if activity_id:
+        skip_raw_team_mission_activity_delivery = bool(
+            activity_id
+            and _team_activity_events.is_activity_id(activity_id)
+            and _event_has_team_mission_run_binding(frame, db=db)
+        )
+        if activity_id and not skip_raw_team_mission_activity_delivery:
             for subscription_id in list(_subscription_ids_by_activity.get(activity_id, set())):
                 subscription = _subscriptions_by_id.get(subscription_id)
                 transport = subscription.get("transport") if isinstance(subscription, dict) else None
@@ -1469,13 +1517,11 @@ def record_event(
     if persist and stable and (method := _db_method(db, "append_run_event")):
         prev_projecting = getattr(db, "_team_mission_projecting", False)
         try:
-            # record_event performs its own canonical projection (canonicalize +
-            # reduce + mirror) below, so suppress append_run_event's write-time
-            # projection hook for this call and for the mirror's nested
-            # append_run_event — otherwise the event would be projected twice.
+            # record_event performs the team mission event-domain reduce + mirror
+            # below, so suppress append_run_event's write-time mission-event hook
+            # for this call and for the mirror's nested append_run_event.
             setattr(db, "_team_mission_projecting", True)
             saved = method(stable, frame, participant_id=participant_id)
-            event_for_projection = saved if isinstance(saved, dict) else frame
             if (
                 isinstance(saved, dict)
                 and saved.get("_persistence_disposition") in {
@@ -1514,11 +1560,6 @@ def record_event(
                     stable, run_id, frame.get("seq"), len(result),
                 )
                 return result
-            _project_team_transcript_event(
-                db=db,
-                stable=stable,
-                event=event_for_projection,
-            )
             if terminal_event:
                 _diagnostic_warning(
                     "terminal-event-persisted",
@@ -1552,6 +1593,32 @@ def record_event(
                         and not candidate_event.get("_persistence_disposition")
                     ):
                         mission_event = candidate_event
+                    _trace_team_runtime_chain(
+                        "record-event-projection",
+                        event_type=event_type,
+                        session_id=stable,
+                        runtime_session_id=runtime_session_id,
+                        run_id=run_id,
+                        turn_id=turn_id,
+                        runtime_scope_key=str(frame.get("runtime_scope_key") or ""),
+                        seq=int(frame.get("seq") or 0),
+                        projection_created=bool(mission_event),
+                        projection_disposition=(
+                            candidate_event.get("_persistence_disposition", "inserted")
+                            if isinstance(candidate_event, dict) and candidate_event
+                            else "none"
+                        ),
+                        projection_seq=(
+                            candidate_event.get("seq")
+                            if isinstance(candidate_event, dict)
+                            else None
+                        ),
+                        projection_type=(
+                            candidate_event.get("type")
+                            if isinstance(candidate_event, dict)
+                            else ""
+                        ),
+                    )
                 reduced_node = reducer(run_id=run_id, event=event_for_reduce)
                 scheduler_mission_id = ""
                 binding: dict[str, Any] = {}
@@ -1838,7 +1905,47 @@ def subscribe_activity(
         normalized_after_seq = 0
 
     normalized_subscription_id = uuid.uuid4().hex
+    is_team_mission_activity = _team_activity_events.is_activity_id(normalized_activity_id)
+    uses_team_mission_event_log = _team_activity_events.uses_event_log(normalized_activity_id, db=db)
+    is_team_dispatch_activity = _team_activity_events.is_team_dispatch_activity_id(normalized_activity_id)
+    raw_initial_seq = (
+        0
+        if is_team_dispatch_activity
+        else normalized_after_seq
+    )
+    activity_event_initial_seq = (
+        0
+        if is_team_dispatch_activity
+        else normalized_after_seq if uses_team_mission_event_log else 0
+    )
+    replay_after_seq = activity_event_initial_seq if uses_team_mission_event_log else normalized_after_seq
+    _team_activity_terminal_log(
+        "subscribe-start",
+        activity_id=normalized_activity_id,
+        after_seq=normalized_after_seq,
+        limit=bounded_limit,
+        is_team_mission_activity=is_team_mission_activity,
+        uses_team_mission_event_log=uses_team_mission_event_log,
+        mission_id=_team_activity_events.mission_id_for_activity(normalized_activity_id, db=db),
+        node_selector=_team_activity_events.node_selector(normalized_activity_id),
+        has_transport=transport is not None,
+        db=_db_label(db),
+    )
+    _trace_team_runtime_chain(
+        "subscribe-activity",
+        activity_id=normalized_activity_id,
+        after_seq=normalized_after_seq,
+        limit=bounded_limit,
+        is_team_mission_activity=is_team_mission_activity,
+        uses_team_mission_event_log=uses_team_mission_event_log,
+        mission_id=_team_activity_events.mission_id_for_activity(normalized_activity_id, db=db),
+        node_selector=_team_activity_events.node_selector(normalized_activity_id),
+        has_transport=transport is not None,
+    )
+    if is_team_mission_activity:
+        _ensure_team_mission_event_listener_registered()
     with _lock:
+        duplicate_subscription_count = 0
         if transport is not None:
             duplicate_subscription_ids = {
                 sub_id
@@ -1849,6 +1956,7 @@ def subscribe_activity(
                     == normalized_activity_id
                 )
             }
+            duplicate_subscription_count = len(duplicate_subscription_ids)
             _remove_subscription_ids_locked(duplicate_subscription_ids)
             _subscriptions_by_id[normalized_subscription_id] = {
                 "id": normalized_subscription_id,
@@ -1859,36 +1967,77 @@ def subscribe_activity(
                 "active_only": False,
                 "runtime_scope_key": "",
                 "active_run_ids": set(),
-                "last_seq": normalized_after_seq,
+                "last_seq": raw_initial_seq,
+                "activity_event_last_seq": activity_event_initial_seq,
                 "db": db,
                 "created_at": time.time(),
             }
             _subscription_ids_by_activity[normalized_activity_id].add(normalized_subscription_id)
             _subscription_ids_by_transport[transport].add(normalized_subscription_id)
-            if _db_method(db, "list_run_events_by_activity") is not None:
+            if uses_team_mission_event_log or _db_method(db, "list_run_events_by_activity") is not None:
                 _start_subscription_poller_locked()
+        _team_activity_terminal_log(
+            "subscribe-registered",
+            activity_id=normalized_activity_id,
+            subscription_id=normalized_subscription_id,
+            duplicate_subscription_count=duplicate_subscription_count,
+            listener_registered=_team_mission_event_listener_registered,
+            active_subscription_count=len(_subscription_ids_by_activity.get(normalized_activity_id, set())),
+            has_transport=transport is not None,
+            poller_alive=bool(_subscription_poller_thread and _subscription_poller_thread.is_alive()),
+        )
 
-    events: list[dict[str, Any]] = []
-    if method := _db_method(db, "list_run_events_by_activity"):
-        try:
-            events = method(
-                normalized_activity_id,
-                after_seq=normalized_after_seq,
-                limit=bounded_limit,
-            )
-        except Exception:
-            events = []
+    events = _team_activity_events.list_activity_events(
+        db,
+        normalized_activity_id,
+        after_seq=replay_after_seq,
+        limit=bounded_limit,
+        event_activity_id=_event_activity_id,
+    )
     events = [event for event in events if isinstance(event, dict)]
     events = [
         event
         for event in events
         if _event_activity_id(event) == normalized_activity_id
-        and int(event.get("seq") or 0) > normalized_after_seq
+        and int(event.get("seq") or 0) > replay_after_seq
     ]
+    _trace_team_runtime_chain(
+        "subscribe-activity-replay",
+        activity_id=normalized_activity_id,
+        after_seq=replay_after_seq,
+        requested_after_seq=normalized_after_seq,
+        event_count=len(events),
+        first_seq=int(events[0].get("seq") or 0) if events else 0,
+        last_seq=int(events[-1].get("seq") or 0) if events else 0,
+        event_types=[str(event.get("type") or "") for event in events[:12]],
+    )
+    _team_activity_terminal_log(
+        "subscribe-replay",
+        activity_id=normalized_activity_id,
+        subscription_id=normalized_subscription_id,
+        after_seq=replay_after_seq,
+        requested_after_seq=normalized_after_seq,
+        event_count=len(events),
+        first_seq=int(events[0].get("seq") or 0) if events else 0,
+        last_seq=int(events[-1].get("seq") or 0) if events else 0,
+        event_types=[str(event.get("type") or "") for event in events[:12]],
+    )
     with _lock:
         subscription = _subscriptions_by_id.get(normalized_subscription_id)
         if subscription is not None:
-            subscription["last_seq"] = _max_event_seq(events, normalized_after_seq)
+            if events:
+                for event in events:
+                    _remember_subscription_delivery(subscription, event)
+            elif uses_team_mission_event_log:
+                subscription["activity_event_last_seq"] = max(
+                    int(subscription.get("activity_event_last_seq") or 0),
+                    activity_event_initial_seq,
+                )
+            else:
+                subscription["last_seq"] = max(
+                    int(subscription.get("last_seq") or 0),
+                    raw_initial_seq,
+                )
     return normalized_subscription_id, events
 
 
@@ -2007,10 +2156,29 @@ def unsubscribe_activity(subscription_id: str) -> int:
     with _lock:
         subscription = _subscriptions_by_id.get(normalized_subscription_id)
         if not isinstance(subscription, dict):
+            _team_activity_terminal_log(
+                "unsubscribe-miss",
+                subscription_id=normalized_subscription_id,
+                reason="not_found",
+            )
             return 0
         if str(subscription.get("kind") or "") != "activity":
+            _team_activity_terminal_log(
+                "unsubscribe-miss",
+                subscription_id=normalized_subscription_id,
+                reason="not_activity",
+            )
             return 0
-        return _remove_subscription_ids_locked({normalized_subscription_id})
+        activity_id = str(subscription.get("activity_id") or "").strip()
+        removed = _remove_subscription_ids_locked({normalized_subscription_id})
+        _team_activity_terminal_log(
+            "unsubscribe",
+            subscription_id=normalized_subscription_id,
+            activity_id=activity_id,
+            removed=removed,
+            remaining_activity_subscription_count=len(_subscription_ids_by_activity.get(activity_id, set())),
+        )
+        return removed
 
 
 def unsubscribe_session(
