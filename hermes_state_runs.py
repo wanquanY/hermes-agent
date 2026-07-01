@@ -1568,6 +1568,8 @@ class SessionDBRunMixin:
                     if conversation_message_id:
                         inserted_event = dict(inserted_event)
                         inserted_event["_projected_message_id"] = conversation_message_id
+                        if isinstance(projected_message, dict) and isinstance(projected_message.get("_team_mission_report_ready"), dict):
+                            inserted_event["_team_mission_report_ready"] = dict(projected_message["_team_mission_report_ready"])
                         conn.execute(
                             """
                             UPDATE run_events
@@ -1768,6 +1770,34 @@ class SessionDBRunMixin:
         ):
             if hasattr(self, "_project_team_mission_run_event"):
                 self._project_team_mission_run_event(run_id=run_id, saved=saved)
+            report_ready = saved.get("_team_mission_report_ready") if isinstance(saved, dict) else None
+            if not isinstance(report_ready, dict) and event_type == "message.complete":
+                try:
+                    from hermes_team_mission.runtime.team_transcript_writer import leader_report_ready_context_for_run
+
+                    report_ready = leader_report_ready_context_for_run(
+                        self,
+                        run_id=run_id,
+                        projected_message_id=str((saved or {}).get("_projected_message_id") or "") if isinstance(saved, dict) else "",
+                    )
+                except Exception as exc:
+                    logger.debug("team mission report-ready context lookup skipped for %s/%s: %s", stable, run_id, exc)
+            if isinstance(report_ready, dict):
+                try:
+                    from hermes_team_mission.runtime.team_transcript_writer import _append_leader_report_ready_event
+
+                    _append_leader_report_ready_event(
+                        self,
+                        mission_id=str(report_ready.get("mission_id") or report_ready.get("missionId") or ""),
+                        run_id=str(report_ready.get("run_id") or report_ready.get("runId") or run_id or ""),
+                        conversation_message_id=str(
+                            report_ready.get("leader_report_message_id")
+                            or report_ready.get("leaderReportMessageId")
+                            or ""
+                        ),
+                    )
+                except Exception as exc:
+                    logger.debug("team mission report-ready projection skipped for %s/%s: %s", stable, run_id, exc)
             # Decoupled group-chat (member-chat) mirroring is performed at the
             # record_event layer instead — that layer can both broadcast the
             # mirrored frame to the conversation's live subscribers AND

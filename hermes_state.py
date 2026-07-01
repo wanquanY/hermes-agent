@@ -4504,6 +4504,8 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
 
     def _session_ids_are_team_conversation(self, session_ids: List[str]) -> bool:
         for sid in session_ids:
+            if str(sid or "").strip().startswith("team-session-team-conversation-"):
+                return True
             try:
                 row = self.get_session_index(str(sid or ""))
             except Exception:
@@ -4511,6 +4513,34 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             if isinstance(row, dict) and str(row.get("conversation_kind") or "").strip().lower() == "team":
                 return True
         return False
+
+    def _backfill_team_transcript_projections(self, session_ids: List[str]) -> int:
+        target_session_ids = [
+            str(session_id or "").strip()
+            for session_id in session_ids
+            if str(session_id or "").strip()
+        ]
+        if not target_session_ids:
+            return 0
+        try:
+            from hermes_team_mission.runtime.team_transcript_writer import (
+                backfill_unprojected_message_complete_events_locked,
+            )
+        except Exception:
+            return 0
+
+        def _do(conn: sqlite3.Connection) -> int:
+            return backfill_unprojected_message_complete_events_locked(
+                self,
+                conn,
+                session_ids=target_session_ids,
+            )
+
+        try:
+            return int(self._execute_write(_do) or 0)
+        except Exception as exc:
+            logger.debug("team transcript projection backfill skipped: %s", exc)
+            return 0
 
     @staticmethod
     def _strip_storage_fields(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -5500,6 +5530,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         if include_ancestors:
             session_ids = self._session_lineage_root_to_tip(session_id)
         if self._session_ids_are_team_conversation(session_ids):
+            self._backfill_team_transcript_projections(session_ids)
             messages = self.get_messages_as_conversation(
                 session_id,
                 include_ancestors=include_ancestors,
@@ -5559,6 +5590,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             normalized_direction = "tail"
 
         if self._session_ids_are_team_conversation(session_ids):
+            self._backfill_team_transcript_projections(session_ids)
             with self._lock:
                 placeholders = ",".join("?" for _ in session_ids)
                 active_clause = "" if include_inactive else " AND active = 1"

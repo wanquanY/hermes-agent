@@ -1680,6 +1680,34 @@ def record_event(
                             )
                         except Exception:
                             pass
+                    if event_type == "message.complete":
+                        try:
+                            from hermes_team_mission.runtime.team_transcript_writer import (
+                                _append_leader_report_ready_event,
+                                leader_report_ready_context_for_run,
+                            )
+
+                            projected_message_id = ""
+                            if isinstance(saved, dict):
+                                projected_message_id = str(saved.get("_projected_message_id") or "").strip()
+                            report_ready = leader_report_ready_context_for_run(
+                                db,
+                                run_id=run_id,
+                                projected_message_id=projected_message_id,
+                            )
+                            if report_ready:
+                                _append_leader_report_ready_event(
+                                    db,
+                                    mission_id=str(report_ready.get("mission_id") or report_ready.get("missionId") or ""),
+                                    run_id=str(report_ready.get("run_id") or report_ready.get("runId") or run_id or ""),
+                                    conversation_message_id=str(
+                                        report_ready.get("leader_report_message_id")
+                                        or report_ready.get("leaderReportMessageId")
+                                        or ""
+                                    ),
+                                )
+                        except Exception:
+                            logger.debug("failed to append Team Mission report-ready event", exc_info=True)
         except Exception as exc:
             _diagnostic_warning(
                 "run-event-persist-failed",

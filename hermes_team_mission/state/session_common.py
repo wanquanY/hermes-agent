@@ -149,6 +149,7 @@ _TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES = {
     "mission.edge.created",
     "mission.node.finished",
     "mission.result.recorded",
+    "mission.report.ready",
 }
 _RUNNING_MISSION_STATUSES = {
     "planning",

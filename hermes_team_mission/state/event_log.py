@@ -471,6 +471,8 @@ def mission_event_kind(source_event: Dict[str, Any], identity: Dict[str, str] | 
         return "node.completed"
     if event_type == "mission.result.recorded":
         return "mission.result.recorded"
+    if event_type == "mission.report.ready":
+        return "mission.report.ready"
     if event_type == "mission.snapshot.updated":
         return "mission.snapshot.updated"
     if event_type == "mission.node.blocked":

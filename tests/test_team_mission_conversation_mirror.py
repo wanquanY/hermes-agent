@@ -155,6 +155,13 @@ def test_leader_report_completion_uses_canonical_result_and_records_message_id(m
         leader_session_id="team-session-1",
         metadata={"stableTeamSessionId": "team-session-1"},
     )
+    db.ensure_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        mission_id="mission-report",
+        title="生成市场报告",
+        objective="生成市场报告",
+    )
     result = db.upsert_team_mission_result(
         mission_id="mission-report",
         activity_id="mission:mission-report",
@@ -242,6 +249,21 @@ def test_leader_report_completion_uses_canonical_result_and_records_message_id(m
     assert projected["metadata"]["artifacts"][0]["path"] == "/tmp/market-report.md"
     assert saved_result["leader_report_run_id"] == "leader-report-run-1"
     assert saved_result["leader_report_message_id"] == projected["conversation_message_id"]
+    events = db.list_team_mission_run_events("mission-report")
+    report_ready = next(
+        event for event in events
+        if event["type"] == "team_mission.runtime.event"
+        and event["payload"]["source_event_type"] == "mission.report.ready"
+    )
+    status_events = [
+        event for event in events
+        if event["type"] == "team_mission.conversation.status"
+        and event["payload"]["source_event_type"] == "mission.report.ready"
+    ]
+    assert status_events
+    assert status_events[-1]["seq"] > report_ready["seq"]
+    assert status_events[-1]["payload"]["conversation"]["leaderReportStatus"] == "ready"
+    assert status_events[-1]["payload"]["conversation"]["leaderReportMessageId"] == projected["conversation_message_id"]
 
 
 def test_synthesis_append_deltas_are_not_mirrored_to_conversation_stream(tmp_path: Path):
@@ -1102,3 +1124,169 @@ def test_conversation_list_recovers_completed_mission_with_active_mirror_run(
     assert resolved_conversation["running"] is False
     assert resolved_conversation["active_run_id"] == ""
     assert resolved_conversation["run_state"] == "completed"
+
+
+def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp_path: Path):
+    from hermes_state import SessionDB
+    from hermes_state_participants import leader_participant_id
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    conversation_id = "team-conversation-progress"
+    session_id = f"team-session-{conversation_id}"
+    activity_id = f"chat:{session_id}"
+    participant_id = leader_participant_id(conversation_id)
+    run_id = "team-leader-run-progress"
+    turn_id = "team-leader-turn-progress"
+
+    db.create_session(session_id, source="team_mission", transient=False)
+    db.upsert_team_mission_conversation(
+        conversation_id=conversation_id,
+        stable_session_id=session_id,
+        team_id="team-1",
+        title="团队会话",
+        active_mission_id="mission-progress",
+    )
+
+    run_control.record_event(
+        {
+            "type": "message.complete",
+            "session_id": "runtime-leader-progress",
+            "stored_session_id": session_id,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "runtime_scope_key": "profile:leader",
+            "activity_id": activity_id,
+            "activityId": activity_id,
+            "participant_id": participant_id,
+            "participantId": participant_id,
+            "seq": 7,
+            "payload": {
+                "text": "当前任务进度：Worker 正在执行，验证节点等待中。",
+                "status": "complete",
+                "message_seq_in_run": 1,
+                "messageSeqInRun": 1,
+                "activity_id": activity_id,
+                "activityId": activity_id,
+                "participant_id": participant_id,
+                "participantId": participant_id,
+            },
+        },
+        db=db,
+    )
+
+    [message] = db.get_messages(session_id)
+    assert message["role"] == "assistant"
+    assert message["content"] == "当前任务进度：Worker 正在执行，验证节点等待中。"
+    assert message["participant_id"] == participant_id
+    assert message["metadata"]["activity_kind"] == "leader_chat"
+    assert message["metadata"]["transcript_activity_kind"] == "leader_chat"
+    assert message["metadata"]["team_mission"]["kind"] == "leader_chat"
+
+    row = db._conn.execute(  # noqa: SLF001 - regression verifies projection wiring.
+        """
+        SELECT projected_message_id, projection_state
+        FROM run_events
+        WHERE run_id = ? AND event_type = 'message.complete'
+        """,
+        (run_id,),
+    ).fetchone()
+    assert row["projected_message_id"] == message["conversation_message_id"]
+    assert row["projection_state"] == "projected"
+
+
+def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path: Path):
+    import json
+
+    from hermes_state import SessionDB
+    from hermes_state_participants import leader_participant_id
+
+    db = SessionDB(tmp_path / "state.db")
+    conversation_id = "team-conversation-backfill"
+    session_id = f"team-session-{conversation_id}"
+    activity_id = f"chat:{session_id}"
+    participant_id = leader_participant_id(conversation_id)
+    run_id = "team-leader-run-backfill"
+    event = {
+        "type": "message.complete",
+        "session_id": "runtime-leader-backfill",
+        "stored_session_id": session_id,
+        "run_id": run_id,
+        "turn_id": "team-leader-turn-backfill",
+        "runtime_scope_key": "profile:leader",
+        "activity_id": activity_id,
+        "activityId": activity_id,
+        "participant_id": participant_id,
+        "participantId": participant_id,
+        "seq": 3,
+        "timestamp": 123.0,
+        "payload": {
+            "text": "历史 Leader 回复应该被恢复。",
+            "status": "complete",
+            "message_seq_in_run": 1,
+            "messageSeqInRun": 1,
+            "activity_id": activity_id,
+            "activityId": activity_id,
+            "participant_id": participant_id,
+            "participantId": participant_id,
+        },
+    }
+
+    db.create_session(session_id, source="team_mission", transient=False)
+    db.upsert_team_mission_conversation(
+        conversation_id=conversation_id,
+        stable_session_id=session_id,
+        team_id="team-1",
+        title="团队会话",
+        active_mission_id="mission-backfill",
+    )
+
+    def insert_raw_event(conn):
+        conn.execute(
+            """
+            INSERT INTO run_events (
+                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                activity_id, event_type, seq, timestamp, payload_json, event_json,
+                status, participant_id, projection_state, runtime_source_seq
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                run_id,
+                event["turn_id"],
+                event["session_id"],
+                event["runtime_scope_key"],
+                activity_id,
+                "message.complete",
+                3,
+                123.0,
+                json.dumps(event["payload"], ensure_ascii=False),
+                json.dumps(event, ensure_ascii=False),
+                "completed",
+                participant_id,
+                "raw",
+                3,
+            ),
+        )
+
+    db._execute_write(insert_raw_event)  # noqa: SLF001 - regression seeds a legacy raw row.
+    assert db.get_messages(session_id) == []
+
+    messages = db.get_conversation_message_read_model(
+        session_id,
+        include_storage_metadata=True,
+    )
+
+    assert [message["content"] for message in messages] == ["历史 Leader 回复应该被恢复。"]
+    assert messages[0]["metadata"]["transcript_activity_kind"] == "leader_chat"
+    row = db._conn.execute(  # noqa: SLF001 - regression verifies repaired projection metadata.
+        """
+        SELECT projected_message_id, projection_state
+        FROM run_events
+        WHERE run_id = ? AND event_type = 'message.complete'
+        """,
+        (run_id,),
+    ).fetchone()
+    assert row["projected_message_id"] == messages[0]["conversation_message_id"]
+    assert row["projection_state"] == "projected"

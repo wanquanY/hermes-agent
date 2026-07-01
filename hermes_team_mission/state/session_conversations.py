@@ -1255,6 +1255,15 @@ class SessionDBTeamMissionConversationMixin:
                 """,
                 tuple(mission_ids),
             ).fetchall() if mission_ids else []
+            result_rows = self._conn.execute(
+                f"""
+                SELECT *
+                FROM team_mission_results
+                WHERE mission_id IN ({placeholders})
+                ORDER BY updated_at ASC, mission_id ASC
+                """,
+                tuple(mission_ids),
+            ).fetchall() if mission_ids else []
 
         if not missions:
             deliverable_projection = self._team_mission_conversation_deliverable_projection(conversation, [])
@@ -1289,6 +1298,12 @@ class SessionDBTeamMissionConversationMixin:
         bindings_by_mission: Dict[str, List[Dict[str, Any]]] = {}
         run_session_ids: List[str] = []
         seen_run_session_ids: set[str] = set()
+        results_by_mission: Dict[str, Dict[str, Any]] = {}
+        for row in result_rows:
+            result = self._team_mission_result_from_row(row)
+            mission_id = _text(result.get("mission_id") or result.get("missionId"))
+            if mission_id:
+                results_by_mission[mission_id] = result
         for row in binding_rows:
             binding = self._team_mission_run_binding_from_row(row)
             if not binding:
@@ -1314,6 +1329,10 @@ class SessionDBTeamMissionConversationMixin:
             latest_mission,
         )
         active_mission_id = _text(active_mission.get("mission_id")) or active_mission_id
+        active_result = results_by_mission.get(active_mission_id) or {}
+        leader_report_run_id = _text(active_result.get("leader_report_run_id") or active_result.get("leaderReportRunId"))
+        leader_report_message_id = _text(active_result.get("leader_report_message_id") or active_result.get("leaderReportMessageId"))
+        leader_report_status = "ready" if leader_report_message_id else "pending" if leader_report_run_id else ""
         deliverable_projection = self._team_mission_conversation_deliverable_projection(conversation, missions)
         deliverables_by_mission = deliverable_projection.get("final_deliverables_by_mission") or {}
         deliverables_by_task = deliverable_projection.get("final_deliverables_by_task") or {}
@@ -1405,6 +1424,21 @@ class SessionDBTeamMissionConversationMixin:
                 "artifactRefs": frame_artifact_refs,
                 "artifact_refs": frame_artifact_refs,
             }
+            mission_result = results_by_mission.get(mission_id) or {}
+            mission_leader_report_run_id = _text(mission_result.get("leader_report_run_id") or mission_result.get("leaderReportRunId"))
+            mission_leader_report_message_id = _text(mission_result.get("leader_report_message_id") or mission_result.get("leaderReportMessageId"))
+            if mission_result:
+                report_status = "ready" if mission_leader_report_message_id else "pending" if mission_leader_report_run_id else ""
+                frame.update({
+                    "missionResult": mission_result,
+                    "mission_result": mission_result,
+                    "leaderReportRunId": mission_leader_report_run_id,
+                    "leader_report_run_id": mission_leader_report_run_id,
+                    "leaderReportMessageId": mission_leader_report_message_id,
+                    "leader_report_message_id": mission_leader_report_message_id,
+                    "leaderReportStatus": report_status,
+                    "leader_report_status": report_status,
+                })
             if final_deliverable:
                 frame.update({
                     "finalDeliverable": final_deliverable,
@@ -1493,6 +1527,14 @@ class SessionDBTeamMissionConversationMixin:
             "task_frames": task_frames,
             "task_frame_count": len(task_frames),
             "active_task_frame": active_task_frame,
+            "active_result": active_result,
+            "activeResult": active_result,
+            "leader_report_run_id": leader_report_run_id,
+            "leaderReportRunId": leader_report_run_id,
+            "leader_report_message_id": leader_report_message_id,
+            "leaderReportMessageId": leader_report_message_id,
+            "leader_report_status": leader_report_status,
+            "leaderReportStatus": leader_report_status,
             "pending_approvals": pending_approvals,
             "pending_approval_count": len(pending_approvals),
             "active_node_count": active_node_count,
@@ -1683,6 +1725,14 @@ class SessionDBTeamMissionConversationMixin:
             "last_message_at": last_message_at,
             "final_deliverables": list(summary.get("final_deliverables") or []),
             "artifact_refs": list(summary.get("artifact_refs") or []),
+            "active_result": summary.get("active_result") if isinstance(summary.get("active_result"), dict) else {},
+            "activeResult": summary.get("activeResult") if isinstance(summary.get("activeResult"), dict) else {},
+            "leader_report_run_id": _text(summary.get("leader_report_run_id") or summary.get("leaderReportRunId")),
+            "leaderReportRunId": _text(summary.get("leader_report_run_id") or summary.get("leaderReportRunId")),
+            "leader_report_message_id": _text(summary.get("leader_report_message_id") or summary.get("leaderReportMessageId")),
+            "leaderReportMessageId": _text(summary.get("leader_report_message_id") or summary.get("leaderReportMessageId")),
+            "leader_report_status": _text(summary.get("leader_report_status") or summary.get("leaderReportStatus")),
+            "leaderReportStatus": _text(summary.get("leader_report_status") or summary.get("leaderReportStatus")),
             "message_count": int(conversation.get("message_count") or 0) or self._team_mission_conversation_message_count(stable_session_id),
             "updated_at": updated_at,
         }

@@ -140,6 +140,10 @@ def transcript_activity_kind_for_run_context(
 ) -> str:
     kind = _text(activity_kind)
     activity = _text(activity_id)
+    if activity.startswith("chat:team-session-team-conversation-"):
+        return "leader_chat"
+    if activity.startswith("team-conversation:"):
+        return "leader_chat"
     if activity.startswith("act-member_chat:"):
         return "member_direct_chat"
     if activity.startswith("act-team_dispatch"):
@@ -458,13 +462,13 @@ def _update_leader_report_message_id_locked(
     mission_id: str,
     run_id: str,
     conversation_message_id: str,
-) -> None:
+) -> bool:
     mission_id = _text(mission_id)
     conversation_message_id = _text(conversation_message_id)
     if not mission_id or not conversation_message_id:
-        return
+        return False
     try:
-        conn.execute(
+        cursor = conn.execute(
             """
             UPDATE team_mission_results
                SET leader_report_run_id = COALESCE(NULLIF(leader_report_run_id, ''), ?),
@@ -474,8 +478,104 @@ def _update_leader_report_message_id_locked(
             """,
             (_text(run_id), conversation_message_id, time.time(), mission_id),
         )
+        return bool(getattr(cursor, "rowcount", 0))
+    except Exception:
+        return False
+
+
+def _append_leader_report_ready_event(
+    db: Any,
+    *,
+    mission_id: str,
+    run_id: str,
+    conversation_message_id: str,
+) -> None:
+    mission_id = _text(mission_id)
+    run_id = _text(run_id)
+    conversation_message_id = _text(conversation_message_id)
+    if not mission_id or not conversation_message_id:
+        return
+    source_event = {
+        "type": "mission.report.ready",
+        "timestamp": time.time(),
+        "run_id": run_id,
+        "payload": {
+            "mission_id": mission_id,
+            "missionId": mission_id,
+            "leader_report_run_id": run_id,
+            "leaderReportRunId": run_id,
+            "leader_report_message_id": conversation_message_id,
+            "leaderReportMessageId": conversation_message_id,
+            "status": "ready",
+        },
+    }
+    append_structural = getattr(db, "append_team_mission_structural_event", None)
+    append_status = getattr(db, "append_team_mission_conversation_status_event", None)
+    if not callable(append_structural) or not callable(append_status):
+        return
+    try:
+        stored = append_structural(
+            mission_id=mission_id,
+            source_event=source_event,
+            identity={"mission_id": mission_id, "missionId": mission_id},
+            dedupe_key=f"mission-report-ready:{mission_id}:{conversation_message_id}",
+        )
+        try:
+            source_seq = int((stored or {}).get("seq") or (stored or {}).get("team_mission_event_seq") or 0)
+        except (TypeError, ValueError):
+            source_seq = 0
+        if source_seq > 0:
+            append_status(
+                mission_id=mission_id,
+                source_event=source_event,
+                source_mission_seq=source_seq,
+            )
     except Exception:
         pass
+
+
+def leader_report_ready_context_for_run(
+    db: Any,
+    *,
+    run_id: str,
+    projected_message_id: str = "",
+) -> dict[str, Any]:
+    run_id = _text(run_id)
+    if not run_id:
+        return {}
+    binding_getter = getattr(db, "get_team_mission_run_binding", None)
+    result_getter = getattr(db, "get_team_mission_result", None)
+    if not callable(binding_getter) or not callable(result_getter):
+        return {}
+    try:
+        binding = _mapping(binding_getter(run_id))
+    except Exception:
+        binding = {}
+    metadata = _mapping(binding.get("metadata"))
+    if _text(metadata.get("kind") or metadata.get("team_mission_kind")) != "leader_report":
+        return {}
+    mission_id = _text(binding.get("mission_id") or metadata.get("mission_id") or metadata.get("missionId"))
+    if not mission_id:
+        return {}
+    try:
+        result = _mapping(result_getter(mission_id))
+    except Exception:
+        result = {}
+    conversation_message_id = _text(
+        projected_message_id
+        or result.get("leader_report_message_id")
+        or result.get("leaderReportMessageId")
+    )
+    if not conversation_message_id:
+        return {}
+    return {
+        "mission_id": mission_id,
+        "missionId": mission_id,
+        "run_id": run_id,
+        "runId": run_id,
+        "leader_report_message_id": conversation_message_id,
+        "leaderReportMessageId": conversation_message_id,
+    }
 
 
 class UserSubmissionWriter:
@@ -656,12 +756,23 @@ class RuntimeTranscriptWriter:
             timestamp=float(event.get("timestamp") or 0) or None,
         )
         if report_context:
+            report_mission_id = _text(report_context.get("mission_id"))
             _update_leader_report_message_id_locked(
                 conn,
-                mission_id=_text(report_context.get("mission_id")),
+                mission_id=report_mission_id,
                 run_id=run_id,
                 conversation_message_id=conversation_message_id,
             )
+            if report_mission_id and conversation_message_id:
+                saved = dict(saved)
+                saved["_team_mission_report_ready"] = {
+                    "mission_id": report_mission_id,
+                    "missionId": report_mission_id,
+                    "run_id": run_id,
+                    "runId": run_id,
+                    "leader_report_message_id": conversation_message_id,
+                    "leaderReportMessageId": conversation_message_id,
+                }
         _emit_transcript_writer_diagnostic(
             "runtime-message-complete-projected",
             conversation_session_id=conversation_session_id,
@@ -674,6 +785,68 @@ class RuntimeTranscriptWriter:
             message=_message_diagnostic_summary(saved),
         )
         return saved
+
+
+def backfill_unprojected_message_complete_events_locked(
+    db: Any,
+    conn: Any,
+    *,
+    session_ids: list[str],
+    limit: int = 200,
+) -> int:
+    target_session_ids = [
+        _text(session_id)
+        for session_id in session_ids
+        if _text(session_id)
+    ]
+    if not target_session_ids:
+        return 0
+    bounded_limit = max(1, min(int(limit or 200), 1000))
+    placeholders = ",".join("?" for _ in target_session_ids)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT id, session_id, event_json
+            FROM run_events
+            WHERE session_id IN ({placeholders})
+              AND event_type = 'message.complete'
+              AND COALESCE(projected_message_id, '') = ''
+              AND COALESCE(projection_state, '') != 'projected'
+            ORDER BY seq
+            LIMIT ?
+            """,
+            (*target_session_ids, bounded_limit),
+        ).fetchall()
+    except Exception:
+        return 0
+    repaired = 0
+    for row in rows:
+        event = _json_loads(_row_value(row, "event_json"), {})
+        if not isinstance(event, dict):
+            continue
+        projected = RuntimeTranscriptWriter.project_message_complete_event_locked(
+            db,
+            conn,
+            session_id=_text(_row_value(row, "session_id")),
+            event=event,
+        )
+        conversation_message_id = _text(
+            _mapping(projected).get("conversation_message_id")
+            or _mapping(projected).get("conversationMessageId")
+        )
+        if not conversation_message_id:
+            continue
+        conn.execute(
+            """
+            UPDATE run_events
+               SET projected_message_id = ?,
+                   projection_state = 'projected'
+             WHERE id = ?
+            """,
+            (conversation_message_id, int(_row_value(row, "id") or 0)),
+        )
+        repaired += 1
+    return repaired
 
 
 def _conversation_session_id_from_mission(mission: dict[str, Any] | None) -> str:
