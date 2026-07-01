@@ -593,7 +593,14 @@ class UserSubmissionWriter:
         client_message_id: str = "",
         source_kind: str,
         transcript_activity_kind: str = "",
+        draft_text: str = "",
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        normalized_attachments = [
+            dict(item) for item in (attachments or [])
+            if isinstance(item, dict)
+        ]
+        visible_text = _text(draft_text) or text
         conversation_message_id = user_conversation_message_id_for(
             session_id=conversation_session_id,
             turn_id=turn_id,
@@ -613,6 +620,8 @@ class UserSubmissionWriter:
             team_metadata["target_member_id"] = target_member_id
         if display_name:
             team_metadata["display_name"] = display_name
+        if normalized_attachments:
+            team_metadata["attachment_count"] = len(normalized_attachments)
         metadata = {
             "source": "team_mission.message.submit",
             "message_kind": "user_submission",
@@ -622,6 +631,10 @@ class UserSubmissionWriter:
             "transcript_activity_kind": inferred_kind,
             "team_mission": team_metadata,
         }
+        if normalized_attachments:
+            metadata["draft_text"] = visible_text
+            metadata["attachments"] = normalized_attachments
+            metadata["attachment_count"] = len(normalized_attachments)
         if client_message_id:
             metadata["client_message_id"] = client_message_id
         saved = _upsert_team_message_by_id(
@@ -629,7 +642,7 @@ class UserSubmissionWriter:
             session_id=conversation_session_id,
             conversation_message_id=conversation_message_id,
             role="user",
-            content=text,
+            content=visible_text,
             participant_id="",
             metadata=metadata,
             status="completed",

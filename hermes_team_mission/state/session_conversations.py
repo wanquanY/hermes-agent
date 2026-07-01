@@ -126,6 +126,135 @@ class SessionDBTeamMissionConversationMixin:
             )
         """
 
+    def _repair_session_index_active_team_runtime_scope_locked(self, conn: sqlite3.Connection) -> int:
+        """Backfill the runtime identity for active team conversation rows.
+
+        ``session_index`` must expose team conversation running state as one
+        atomic fact: running/status plus a routable runtime scope, and run ids
+        when an active run exists. Older projections could mark a team row
+        running from ``conversation_missions`` without carrying the run/scope
+        identity, which left clients unable to subscribe to background runtime
+        events.
+        """
+        try:
+            active_mission_exists = self._session_index_active_mission_exists_sql("si")
+            rows = conn.execute(
+                f"""
+                SELECT si.session_id, si.conversation_id, si.mission_id,
+                       si.runtime_scope_key, si.active_run_id,
+                       si.active_runtime_session_id
+                  FROM session_index si
+                 WHERE si.conversation_kind = 'team'
+                   AND COALESCE(si.conversation_id, '') != ''
+                   AND (
+                       si.running = 1
+                       OR ({active_mission_exists})
+                   )
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return 0
+
+        active_statuses = tuple(sorted(_ACTIVE_RUN_STATUSES))
+        status_placeholders = ",".join("?" for _ in active_statuses)
+        updated = 0
+        for row in rows:
+            session_id = _text(_row_value(row, "session_id", ""))
+            conversation_id = _text(_row_value(row, "conversation_id", ""))
+            mission_id = _text(_row_value(row, "mission_id", ""))
+            if not session_id or not conversation_id:
+                continue
+            canonical_scope = f"team:{conversation_id}:leader-conversation"
+            run = conn.execute(
+                f"""
+                SELECT r.run_id, r.runtime_session_id, r.runtime_scope_key
+                  FROM runs r
+                 WHERE LOWER(COALESCE(r.status, '')) IN ({status_placeholders})
+                   AND (
+                       r.session_id = ?
+                       OR r.session_id = ?
+                       OR r.runtime_scope_key = ?
+                       OR EXISTS (
+                           SELECT 1
+                             FROM team_mission_run_bindings rb
+                             JOIN team_missions tm
+                               ON tm.mission_id = rb.mission_id
+                            WHERE rb.run_id = r.run_id
+                              AND tm.conversation_id = ?
+                       )
+                       OR (
+                           ? != ''
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM team_mission_run_bindings rb
+                                WHERE rb.run_id = r.run_id
+                                  AND rb.mission_id = ?
+                           )
+                       )
+                   )
+                 ORDER BY
+                   CASE
+                     WHEN r.runtime_scope_key = ? THEN 0
+                     WHEN r.session_id = ? THEN 1
+                     WHEN r.session_id = ? THEN 2
+                     ELSE 3
+                   END,
+                   r.updated_at DESC, r.started_at DESC, r.run_id DESC
+                 LIMIT 1
+                """,
+                (
+                    *active_statuses,
+                    session_id,
+                    conversation_id,
+                    canonical_scope,
+                    conversation_id,
+                    mission_id,
+                    mission_id,
+                    canonical_scope,
+                    session_id,
+                    conversation_id,
+                ),
+            ).fetchone()
+            run_id = _text(_row_value(run, "run_id", ""))
+            runtime_session_id = _text(_row_value(run, "runtime_session_id", ""))
+            run_scope = _text(_row_value(run, "runtime_scope_key", ""))
+            next_scope = canonical_scope or run_scope
+            existing_scope = _text(_row_value(row, "runtime_scope_key", ""))
+            existing_run_id = _text(_row_value(row, "active_run_id", ""))
+            if existing_scope and (existing_run_id or not run_id):
+                continue
+            cursor = conn.execute(
+                """
+                UPDATE session_index
+                   SET runtime_scope_key = COALESCE(NULLIF(runtime_scope_key, ''), ?),
+                       active_run_id = CASE
+                         WHEN active_run_id = '' THEN ?
+                         ELSE active_run_id
+                       END,
+                       active_runtime_session_id = CASE
+                         WHEN active_runtime_session_id = '' THEN ?
+                         ELSE active_runtime_session_id
+                       END
+                 WHERE session_id = ?
+                   AND (
+                       runtime_scope_key = ''
+                       OR (? != '' AND active_run_id = '')
+                       OR (? != '' AND active_runtime_session_id = '')
+                   )
+                """,
+                (
+                    next_scope,
+                    run_id,
+                    runtime_session_id,
+                    session_id,
+                    run_id,
+                    runtime_session_id,
+                ),
+            )
+            if int(cursor.rowcount or 0):
+                updated += int(cursor.rowcount or 0)
+        return updated
+
     def _canonicalize_team_mission_conversation(
         self,
         conversation: Dict[str, Any],
@@ -324,6 +453,7 @@ class SessionDBTeamMissionConversationMixin:
         if not mission_id and conversation_id:
             mission_ids = self.active_mission_ids(conversation_id)
             mission_id = mission_ids[0] if mission_ids else ""
+        runtime_scope_key = f"team:{conversation_id}:leader-conversation" if conversation_id else ""
         running = self.has_active_mission(conversation_id)
         message_count = int(record.get("message_count") or 0)
         started = float(record.get("created_at") or 0)
@@ -333,10 +463,11 @@ class SessionDBTeamMissionConversationMixin:
             conn.execute(
                 """
                 INSERT INTO session_index (
-                    session_id, title, source, session_kind, conversation_kind, team_id,
+                    session_id, runtime_scope_key, title, source, session_kind, conversation_kind, team_id,
                     conversation_id, mission_id, running, message_count, started_at, updated_at
-                ) VALUES (?, ?, 'team_mission', 'team_mission', 'team', ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, 'team_mission', 'team_mission', 'team', ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
+                    runtime_scope_key=COALESCE(NULLIF(session_index.runtime_scope_key, ''), excluded.runtime_scope_key),
                     title=excluded.title,
                     source=excluded.source,
                     session_kind=excluded.session_kind,
@@ -350,6 +481,7 @@ class SessionDBTeamMissionConversationMixin:
                 """,
                 (
                     sid,
+                    runtime_scope_key,
                     title,
                     team_id,
                     conversation_id,
@@ -595,7 +727,15 @@ class SessionDBTeamMissionConversationMixin:
             return int(conn.execute(
                 """
                 UPDATE session_index
-                   SET status = ?, running = 1, waiting_approval = ?
+                   SET status = ?, running = 1, waiting_approval = ?,
+                       runtime_scope_key = COALESCE(
+                           NULLIF(runtime_scope_key, ''),
+                           CASE
+                             WHEN COALESCE(conversation_id, '') != ''
+                             THEN 'team:' || conversation_id || ':leader-conversation'
+                             ELSE ''
+                           END
+                       )
                  WHERE mission_id = ?
                 """,
                 (str(status or "idle"), 1 if waiting_approval else 0, mid),

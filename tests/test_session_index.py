@@ -426,10 +426,76 @@ def test_update_session_index_for_mission_sets_running(tmp_path: Path):
     assert db.update_session_index_for_mission("mission-1", status="running", running=True) == 1
     it = db.list_session_index()["sessions"][0]
     assert it["running"] is True and it["status"] == "running"
+    assert it["runtime_scope_key"] == "team:conv-1:leader-conversation"
 
     db.update_session_index_for_mission("mission-1", status="waiting_approval", running=False, waiting_approval=True)
     it = db.list_session_index()["sessions"][0]
     assert it["waiting_approval"] is True and it["status"] == "waiting_approval"
+
+
+def test_team_conversation_projection_carries_canonical_runtime_scope(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-scope",
+        team_id="team-1",
+        stable_session_id="team-session-scope",
+        title="团队任务",
+    )
+
+    item = db.list_session_index()["sessions"][0]
+    assert item["session_id"] == "team-session-scope"
+    assert item["runtime_scope_key"] == "team:conv-scope:leader-conversation"
+
+
+def test_list_session_index_repairs_active_team_runtime_identity_from_leader_run(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-repair",
+        team_id="team-1",
+        stable_session_id="team-session-repair",
+        title="团队任务",
+        active_mission_id="mission-repair",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-repair",
+        conversation_id="conv-repair",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="running",
+        leader_session_id="team-session-repair",
+    )
+    db.upsert_run(
+        run_id="leader-run-repair",
+        session_id="team-session-repair",
+        runtime_scope_key="team:conv-repair:leader-conversation",
+        runtime_session_id="runtime-leader-repair",
+        status="running",
+    )
+    db._conn.execute(  # noqa: SLF001 - simulate legacy production projection.
+        """
+        UPDATE session_index
+           SET running = 1,
+               status = 'running',
+               runtime_scope_key = '',
+               active_run_id = '',
+               active_runtime_session_id = ''
+         WHERE session_id = ?
+        """,
+        ("team-session-repair",),
+    )
+    db._conn.commit()  # noqa: SLF001 - make the simulated stale row visible.
+
+    item = next(
+        session for session in db.list_session_index()["sessions"]
+        if session["session_id"] == "team-session-repair"
+    )
+
+    assert item["running"] is True
+    assert item["runtime_scope_key"] == "team:conv-repair:leader-conversation"
+    assert item["active_run_id"] == "leader-run-repair"
+    assert item["active_runtime_session_id"] == "runtime-leader-repair"
 
 
 def test_team_conversation_touch_preserves_live_mission_status(tmp_path: Path):

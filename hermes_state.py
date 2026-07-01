@@ -3608,6 +3608,13 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         params.append(capped + 1)
         with self._lock:
             self._repair_session_index_terminal_active_runs_locked(self._conn)
+            repair_team_runtime_scope = getattr(
+                self,
+                "_repair_session_index_active_team_runtime_scope_locked",
+                None,
+            )
+            if callable(repair_team_runtime_scope):
+                repair_team_runtime_scope(self._conn)
             rows = self._conn.execute(sql, tuple(params)).fetchall()
         has_more = len(rows) > capped
         page = rows[:capped]

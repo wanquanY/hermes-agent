@@ -58,6 +58,7 @@ def _submit_leader(
     mission_id: str = "",
     conversation_ensure_index_only: bool = False,
     request_activity_id: str = "",
+    extra_params: dict[str, Any] | None = None,
 ) -> tuple[SessionDB, dict[str, Any], dict[str, Any]]:
     team_mission = team_mission_gateway()
     db = SessionDB(tmp_path / "state.db")
@@ -132,6 +133,8 @@ def _submit_leader(
         }
     if request_activity_id:
         params["activity_id"] = request_activity_id
+    if extra_params:
+        params.update(extra_params)
 
     response = team_mission._methods["team_mission.message.submit"](  # noqa: SLF001
         "rid-leader",
@@ -221,6 +224,53 @@ def test_leader_submit_persists_visible_user_message_before_worker(
     assert messages[0]["metadata"]["message_kind"] == "user_submission"
     assert messages[0]["metadata"]["run_id"] == captured["run_id"]
     assert messages[0]["metadata"]["turn_id"] == captured["turn_id"]
+
+
+def test_leader_submit_persists_attachment_metadata_for_history(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    attachments = [
+        {
+            "id": "image-1",
+            "name": "architecture.png",
+            "fileName": "architecture.png",
+            "mimeType": "image/png",
+            "size": 2048,
+            "path": "/tmp/architecture.png",
+            "kind": "image",
+        },
+        {
+            "id": "pdf-1",
+            "name": "report.pdf",
+            "fileName": "report.pdf",
+            "mimeType": "application/pdf",
+            "size": 4096,
+            "path": "/tmp/report.pdf",
+            "kind": "file",
+        },
+    ]
+    db, captured, _response = _submit_leader(
+        monkeypatch,
+        tmp_path,
+        extra_params={
+            "text": "请总结这两个文件\n\n[Attachment Context]\n- report.pdf",
+            "draft_text": "请总结这两个文件",
+            "attachments": attachments,
+        },
+    )
+
+    messages = db.get_conversation_message_read_model(
+        CONVERSATION_SESSION_ID,
+        include_storage_metadata=True,
+    )
+
+    assert messages[0]["content"] == "请总结这两个文件"
+    assert messages[0]["metadata"]["draft_text"] == "请总结这两个文件"
+    assert messages[0]["metadata"]["attachments"] == attachments
+    assert messages[0]["metadata"]["attachment_count"] == 2
+    assert captured["draft_text"] == "请总结这两个文件"
+    assert captured["attachments"] == attachments
 
 
 def test_leader_submit_materializes_canonical_session_when_index_exists_without_session(

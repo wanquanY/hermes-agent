@@ -855,6 +855,7 @@ class SessionDBRunMixin:
                 conn,
                 session_id=session_id,
                 run_id=run_id,
+                runtime_scope_key=str(runtime_scope_key or ""),
                 runtime_session_id=runtime_session_id,
                 status=str((row["status"] if row else normalized_status) or ""),
                 updated_at=updated,
@@ -872,6 +873,7 @@ class SessionDBRunMixin:
         runtime_session_id: str,
         status: str,
         updated_at: float,
+        runtime_scope_key: str = "",
     ) -> None:
         """Write-time projection of run state into the control-plane session_index.
 
@@ -884,15 +886,17 @@ class SessionDBRunMixin:
         if not sid:
             return
         is_active = str(status or "") not in TERMINAL_RUN_STATUSES
+        run_scope_key = str(runtime_scope_key or "").strip()
         # Resolve the bound team-mission conversation row, if this run belongs to
         # a team mission. A node run uses session_id = "team:mission-X:node:Y"
         # which is NOT the conversation row the sidebar reads, so without this
         # extra hop a worker/verifier/synthesis run never reaches the sidebar.
         conv_sid = ""
+        conv_scope_key = ""
         try:
             row = conn.execute(
                 """
-                SELECT tmc.stable_session_id
+                SELECT tmc.stable_session_id, tmc.conversation_id
                   FROM team_mission_run_bindings tmrb
                   JOIN team_missions tm
                     ON tm.mission_id = tmrb.mission_id
@@ -904,8 +908,12 @@ class SessionDBRunMixin:
             ).fetchone()
             if row:
                 conv_sid = str(row[0] or "").strip()
+                conversation_id = str(row[1] or "").strip()
+                if conversation_id:
+                    conv_scope_key = f"team:{conversation_id}:leader-conversation"
         except sqlite3.OperationalError:
             conv_sid = ""
+            conv_scope_key = ""
         try:
             if is_active:
                 # Asymmetric design: this hook is the "lit" signal — set running
@@ -921,14 +929,39 @@ class SessionDBRunMixin:
                         UPDATE session_index
                            SET running = 1, status = 'running',
                                active_run_id = ?, active_runtime_session_id = ?,
+                               runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
                                updated_at = MAX(updated_at, ?)
-                         WHERE session_id IN (?, ?)
+                         WHERE session_id = ?
                         """,
-                        (run_id, str(runtime_session_id or ""), float(updated_at or 0), sid, conv_sid),
+                        (
+                            run_id,
+                            str(runtime_session_id or ""),
+                            run_scope_key,
+                            float(updated_at or 0),
+                            sid,
+                        ),
+                    )
+                    conv_cur = conn.execute(
+                        """
+                        UPDATE session_index
+                           SET running = 1, status = 'running',
+                               active_run_id = ?, active_runtime_session_id = ?,
+                               runtime_scope_key = COALESCE(NULLIF(?, ''), NULLIF(?, ''), runtime_scope_key),
+                               updated_at = MAX(updated_at, ?)
+                         WHERE session_id = ?
+                        """,
+                        (
+                            run_id,
+                            str(runtime_session_id or ""),
+                            conv_scope_key,
+                            run_scope_key,
+                            float(updated_at or 0),
+                            conv_sid,
+                        ),
                     )
                     logger.debug(
                         "[doxie-session-index] project_run set_running session_id=%s conv_session_id=%s run_id=%s status=%s rows=%s",
-                        sid, conv_sid, run_id, status, cur.rowcount,
+                        sid, conv_sid, run_id, status, int(cur.rowcount or 0) + int(conv_cur.rowcount or 0),
                     )
                 else:
                     cur = conn.execute(
@@ -936,10 +969,17 @@ class SessionDBRunMixin:
                         UPDATE session_index
                            SET running = 1, status = 'running',
                                active_run_id = ?, active_runtime_session_id = ?,
+                               runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
                                updated_at = MAX(updated_at, ?)
                          WHERE session_id = ?
                         """,
-                        (run_id, str(runtime_session_id or ""), float(updated_at or 0), sid),
+                        (
+                            run_id,
+                            str(runtime_session_id or ""),
+                            conv_scope_key or run_scope_key,
+                            float(updated_at or 0),
+                            sid,
+                        ),
                     )
                     logger.debug(
                         "[doxie-session-index] project_run set_running session_id=%s run_id=%s status=%s rows=%s",
@@ -1738,6 +1778,7 @@ class SessionDBRunMixin:
                         conn,
                         session_id=stable,
                         run_id=run_id,
+                        runtime_scope_key=runtime_scope_key,
                         runtime_session_id=runtime_session_id,
                         status=next_status,
                         updated_at=timestamp,

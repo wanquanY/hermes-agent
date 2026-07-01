@@ -136,6 +136,8 @@ def _upsert_team_user_submission_message(
     client_message_id: str = "",
     source_kind: str,
     transcript_activity_kind: str = "",
+    draft_text: str = "",
+    attachments: list[dict] | None = None,
 ) -> dict:
     """Persist the user's visible team-conversation turn exactly once."""
     return UserSubmissionWriter.write_user_submission(
@@ -150,6 +152,8 @@ def _upsert_team_user_submission_message(
         client_message_id=client_message_id,
         source_kind=source_kind,
         transcript_activity_kind=transcript_activity_kind,
+        draft_text=draft_text,
+        attachments=attachments,
     )
 
 
@@ -485,6 +489,8 @@ def _submit_message_to_member(
     run_id = optimistic_run_id or uuid.uuid4().hex
     turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
     client_message_id = str(params.get("client_message_id") or params.get("clientMessageId") or "").strip()
+    draft_text = str(params.get("draft_text") or params.get("draftText") or text)
+    submitted_attachments = _submitted_attachments(params)
 
     # 4. NOW it is safe to record the user's @-message into the shared
     # conversation transcript. The conv session row exists, FK satisfied. Use
@@ -503,6 +509,8 @@ def _submit_message_to_member(
             client_message_id=client_message_id,
             source_kind="member_chat_user",
             transcript_activity_kind="member_direct_chat",
+            draft_text=draft_text,
+            attachments=submitted_attachments,
         )
     except Exception as exc:
         return _err(rid, 5008, f"team user message persistence failed: {exc}")
@@ -545,10 +553,13 @@ def _submit_message_to_member(
         "dovie_profile": dovie_profile,
         "cwd": workspace_context["cwd"],
         "workspace": workspace_context["workspace"],
-        # Plain user text — the worker appends it as a real user turn on the
-        # conversation session it now runs on. No prompt stringification.
+        # The worker receives the enriched execution text, while the shared
+        # transcript row above keeps the user's clean draft text plus attachment
+        # metadata for history hydration.
         "text": text,
         "persist_user_message": "",
+        "draft_text": draft_text,
+        "attachments": submitted_attachments,
         "tool_progress_mode": "all",
         "cols": 120,
         "dovie_product_context": {
@@ -880,6 +891,8 @@ def _(rid, params: dict) -> dict:
                 if activity_mission_id or leader_activity_kind == "team_dispatch"
                 else "leader_chat"
             ),
+            draft_text=draft_text,
+            attachments=submitted_attachments,
         )
     except Exception as exc:
         return _err(rid, 5008, f"team user message persistence failed: {exc}")
