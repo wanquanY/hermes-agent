@@ -455,6 +455,16 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
         assert response["result"]["mission"]["mission_id"] == "mission-1"
         assert response["result"]["messages"][0]["text"] == "团队房间首屏消息。"
         assert response["result"]["runEvents"] == []
+        watermarks = response["result"]["projection"]["activityWatermarks"]
+        assert {item["activity_id"] for item in watermarks} >= {
+            "chat:team-session-1",
+            "mission:mission-1",
+        }
+        mission_watermark = next(
+            item for item in watermarks if item["activity_id"] == "mission:mission-1"
+        )
+        assert mission_watermark["terminal"] is True
+        assert mission_watermark["replay_policy"] == "cursor_only"
     finally:
         db.close()
 

@@ -282,6 +282,86 @@ def test_subscribe_limit_caps_replay_size(db: SessionDB) -> None:
     assert len(result["events"]) == 2
 
 
+def test_terminal_team_mission_subscribe_defaults_to_cursor_only(db: SessionDB) -> None:
+    db.upsert_team_mission(
+        mission_id="mission-terminal-subscribe",
+        conversation_id="conversation-terminal-subscribe",
+        title="Terminal mission",
+        mode="supervised_mission",
+        status="completed",
+    )
+    db.append_team_mission_structural_event(
+        mission_id="mission-terminal-subscribe",
+        source_event={
+            "type": "mission.node.created",
+            "payload": {
+                "mission_id": "mission-terminal-subscribe",
+                "node": {
+                    "node_id": "node-terminal",
+                    "kind": "worker",
+                    "title": "Done",
+                    "status": "completed",
+                },
+            },
+        },
+    )
+    last_seq = max(int(event.get("seq") or 0) for event in db.list_team_mission_events("mission-terminal-subscribe"))
+    transport = _CaptureTransport()
+
+    result = _assert_ok(
+        _call(
+            "runtime.activity.subscribe",
+            {"activity_id": "mission:mission-terminal-subscribe"},
+            transport=transport,
+        )
+    )
+
+    assert result["events"] == []
+    assert result["after_seq"] == last_seq
+    assert result["afterSeq"] == last_seq
+    subscription = run_control._subscriptions_by_id[result["subscription_id"]]
+    assert subscription["activity_event_last_seq"] == last_seq
+    assert subscription["cursor_only"] is True
+
+
+def test_terminal_team_mission_subscribe_allows_debug_audit_replay(db: SessionDB) -> None:
+    db.upsert_team_mission(
+        mission_id="mission-terminal-debug",
+        conversation_id="conversation-terminal-debug",
+        title="Terminal mission",
+        mode="supervised_mission",
+        status="completed",
+    )
+    db.append_team_mission_structural_event(
+        mission_id="mission-terminal-debug",
+        source_event={
+            "type": "mission.node.created",
+            "payload": {
+                "mission_id": "mission-terminal-debug",
+                "node": {
+                    "node_id": "node-terminal",
+                    "kind": "worker",
+                    "title": "Done",
+                    "status": "completed",
+                },
+            },
+        },
+    )
+
+    result = _assert_ok(
+        _call(
+            "runtime.activity.subscribe",
+            {
+                "activity_id": "mission:mission-terminal-debug",
+                "debug_replay_audit": True,
+            },
+        )
+    )
+
+    assert len(result["events"]) >= 1
+    assert result["events"][0]["activity_id"] == "mission:mission-terminal-debug"
+
+
 def test_subscribe_returns_unique_subscription_id(db: SessionDB) -> None:
     _record_activity_event(db, activity_id="act-test-unique")
 

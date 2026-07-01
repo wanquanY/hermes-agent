@@ -1889,6 +1889,9 @@ def subscribe_activity(
     transport: Transport | None,
     after_seq: int = 0,
     limit: int = 2000,
+    replay_mode: str = "replay_live",
+    max_replay_events: int | None = None,
+    debug_replay_audit: bool = False,
     db: Any = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Register an activity-scoped subscription. Returns (subscription_id, replay_events)."""
@@ -1903,27 +1906,57 @@ def subscribe_activity(
         normalized_after_seq = max(0, int(after_seq or 0))
     except (TypeError, ValueError):
         normalized_after_seq = 0
+    normalized_replay_mode = str(replay_mode or "replay_live").strip().lower().replace("-", "_")
+    if normalized_replay_mode in {"", "default", "replay"}:
+        normalized_replay_mode = "replay_live"
+    if normalized_replay_mode not in {"replay_live", "live", "cursor_only"}:
+        normalized_replay_mode = "replay_live"
+    try:
+        normalized_max_replay_events = int(max_replay_events) if max_replay_events is not None else bounded_limit
+    except (TypeError, ValueError):
+        normalized_max_replay_events = bounded_limit
+    normalized_max_replay_events = max(0, min(normalized_max_replay_events, bounded_limit))
 
     normalized_subscription_id = uuid.uuid4().hex
     is_team_mission_activity = _team_activity_events.is_activity_id(normalized_activity_id)
     uses_team_mission_event_log = _team_activity_events.uses_event_log(normalized_activity_id, db=db)
     is_team_dispatch_activity = _team_activity_events.is_team_dispatch_activity_id(normalized_activity_id)
+    terminal_team_mission_activity = (
+        uses_team_mission_event_log
+        and _team_activity_events.is_terminal_activity(normalized_activity_id, db=db)
+    )
+    force_cursor_only = (
+        normalized_replay_mode in {"live", "cursor_only"}
+        or normalized_max_replay_events <= 0
+        or (terminal_team_mission_activity and not debug_replay_audit)
+    )
+    cursor_seq = max(
+        normalized_after_seq,
+        _team_activity_events.activity_last_seq(normalized_activity_id, db=db) if force_cursor_only else 0,
+    )
     raw_initial_seq = (
         0
         if is_team_dispatch_activity
-        else normalized_after_seq
+        else cursor_seq if force_cursor_only and not uses_team_mission_event_log else normalized_after_seq
     )
     activity_event_initial_seq = (
         0
         if is_team_dispatch_activity
+        else cursor_seq if force_cursor_only and uses_team_mission_event_log
         else normalized_after_seq if uses_team_mission_event_log else 0
     )
     replay_after_seq = activity_event_initial_seq if uses_team_mission_event_log else normalized_after_seq
+    replay_limit = 0 if force_cursor_only else normalized_max_replay_events
     _team_activity_terminal_log(
         "subscribe-start",
         activity_id=normalized_activity_id,
         after_seq=normalized_after_seq,
         limit=bounded_limit,
+        replay_mode=normalized_replay_mode,
+        max_replay_events=normalized_max_replay_events,
+        force_cursor_only=force_cursor_only,
+        cursor_seq=cursor_seq,
+        terminal_team_mission_activity=terminal_team_mission_activity,
         is_team_mission_activity=is_team_mission_activity,
         uses_team_mission_event_log=uses_team_mission_event_log,
         mission_id=_team_activity_events.mission_id_for_activity(normalized_activity_id, db=db),
@@ -1936,6 +1969,11 @@ def subscribe_activity(
         activity_id=normalized_activity_id,
         after_seq=normalized_after_seq,
         limit=bounded_limit,
+        replay_mode=normalized_replay_mode,
+        max_replay_events=normalized_max_replay_events,
+        force_cursor_only=force_cursor_only,
+        cursor_seq=cursor_seq,
+        terminal_team_mission_activity=terminal_team_mission_activity,
         is_team_mission_activity=is_team_mission_activity,
         uses_team_mission_event_log=uses_team_mission_event_log,
         mission_id=_team_activity_events.mission_id_for_activity(normalized_activity_id, db=db),
@@ -1969,6 +2007,8 @@ def subscribe_activity(
                 "active_run_ids": set(),
                 "last_seq": raw_initial_seq,
                 "activity_event_last_seq": activity_event_initial_seq,
+                "replay_mode": normalized_replay_mode,
+                "cursor_only": force_cursor_only,
                 "db": db,
                 "created_at": time.time(),
             }
@@ -1987,11 +2027,11 @@ def subscribe_activity(
             poller_alive=bool(_subscription_poller_thread and _subscription_poller_thread.is_alive()),
         )
 
-    events = _team_activity_events.list_activity_events(
+    events = [] if replay_limit <= 0 else _team_activity_events.list_activity_events(
         db,
         normalized_activity_id,
         after_seq=replay_after_seq,
-        limit=bounded_limit,
+        limit=replay_limit,
         event_activity_id=_event_activity_id,
     )
     events = [event for event in events if isinstance(event, dict)]
@@ -2007,6 +2047,8 @@ def subscribe_activity(
         after_seq=replay_after_seq,
         requested_after_seq=normalized_after_seq,
         event_count=len(events),
+        replay_limit=replay_limit,
+        cursor_only=force_cursor_only,
         first_seq=int(events[0].get("seq") or 0) if events else 0,
         last_seq=int(events[-1].get("seq") or 0) if events else 0,
         event_types=[str(event.get("type") or "") for event in events[:12]],
@@ -2018,6 +2060,8 @@ def subscribe_activity(
         after_seq=replay_after_seq,
         requested_after_seq=normalized_after_seq,
         event_count=len(events),
+        replay_limit=replay_limit,
+        cursor_only=force_cursor_only,
         first_seq=int(events[0].get("seq") or 0) if events else 0,
         last_seq=int(events[-1].get("seq") or 0) if events else 0,
         event_types=[str(event.get("type") or "") for event in events[:12]],

@@ -100,6 +100,7 @@ TEAM_MISSION_ACTIVITY_INTERACTIVE_PAYLOAD_FIELDS: tuple[tuple[str, tuple[str, ..
     ("tool_call_id", ("toolCallId", "tool_id", "toolId")),
     ("pattern_key", ("patternKey",)),
 )
+TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 
 
 def text(value: Any) -> str:
@@ -176,6 +177,29 @@ def _db_method(db: Any, name: str):
         return None
     method = getattr(db, name, None)
     return method if callable(method) else None
+
+
+def _sqlite_scalar(db: Any, sql: str, params: tuple[Any, ...]) -> Any:
+    conn = getattr(db, "_conn", None)
+    lock = getattr(db, "_lock", None)
+    if conn is None or lock is None:
+        return None
+    with lock:
+        row = conn.execute(sql, params).fetchone()
+    if row is None:
+        return None
+    try:
+        return row[0]
+    except Exception:
+        return None
+
+
+def _int_value(value: Any) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
 
 
 def mission_id(activity_id: str) -> str:
@@ -259,6 +283,50 @@ def uses_event_log(activity_id: str, db: Any = None) -> bool:
         return False
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     return isinstance(mission, dict) and bool(str(mission.get("mission_id") or "").strip())
+
+
+def mission_status_for_activity(activity_id: str, db: Any = None) -> str:
+    normalized_mission_id = mission_id_for_activity(activity_id, db=db)
+    if not normalized_mission_id:
+        return ""
+    graph_getter = _db_method(db, "get_team_mission_graph")
+    if graph_getter is not None:
+        try:
+            graph = graph_getter(normalized_mission_id)
+        except Exception:
+            graph = {}
+        mission = graph.get("mission") if isinstance(graph, dict) else {}
+        status = text(mission.get("status")) if isinstance(mission, dict) else ""
+        if status:
+            return status.lower()
+    status = _sqlite_scalar(
+        db,
+        "SELECT status FROM team_missions WHERE mission_id = ?",
+        (normalized_mission_id,),
+    )
+    return text(status).lower()
+
+
+def is_terminal_activity(activity_id: str, db: Any = None) -> bool:
+    return mission_status_for_activity(activity_id, db=db) in TERMINAL_MISSION_STATUSES
+
+
+def activity_last_seq(activity_id: str, db: Any = None) -> int:
+    normalized_activity_id = text(activity_id)
+    if not normalized_activity_id:
+        return 0
+    if uses_event_log(normalized_activity_id, db=db):
+        normalized_mission_id = mission_id_for_activity(normalized_activity_id, db=db)
+        return _int_value(_sqlite_scalar(
+            db,
+            "SELECT COALESCE(MAX(seq), 0) FROM team_mission_events WHERE mission_id = ?",
+            (normalized_mission_id,),
+        ))
+    return _int_value(_sqlite_scalar(
+        db,
+        "SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE activity_id = ?",
+        (normalized_activity_id,),
+    ))
 
 
 def event_subject(event: dict[str, Any]) -> dict[str, Any]:

@@ -20,6 +20,7 @@ from hermes_team_mission.domain.activity import (
 )
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
+from tui_gateway.services import team_mission_activity_events as _team_activity_events
 
 _server = bind_server_globals(globals())
 
@@ -116,6 +117,53 @@ def _validation_error(rid, message: str) -> dict[str, Any]:
     return _err(rid, 4006, message)
 
 
+def _replay_mode(params: dict[str, Any]) -> str:
+    mode = str(
+        params.get("mode")
+        or params.get("replay_mode")
+        or params.get("replayMode")
+        or ""
+    ).strip().lower().replace("-", "_")
+    replay = params.get("replay")
+    if isinstance(replay, bool):
+        return "replay_live" if replay else "cursor_only"
+    replay_text = str(
+        replay
+        or params.get("replay_policy")
+        or params.get("replayPolicy")
+        or ""
+    ).strip().lower().replace("-", "_")
+    if replay_text in {"none", "false", "0", "off", "cursor_only"}:
+        return "cursor_only"
+    if replay_text in {"live"}:
+        return "live"
+    if replay_text in {"replay", "replay_live", "true", "1", "on"}:
+        return "replay_live"
+    if mode in {"live", "cursor_only", "replay_live"}:
+        return mode
+    return "replay_live"
+
+
+def _max_replay_events(params: dict[str, Any], fallback_limit: int) -> int:
+    raw = (
+        params.get("max_replay_events")
+        if "max_replay_events" in params
+        else params.get("maxReplayEvents")
+    )
+    if raw is None:
+        return fallback_limit
+    try:
+        return max(0, min(int(raw), fallback_limit))
+    except (TypeError, ValueError):
+        return fallback_limit
+
+
+def _truthy_param(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _db_or_error(rid):
     db = _server._get_db()
     if db is None:
@@ -206,6 +254,11 @@ def runtime_activity_subscribe(rid, params: dict) -> dict:
         limit = max(1, min(int(params.get("limit") or 2000), 2000))
     except (TypeError, ValueError):
         limit = 2000
+    replay_mode = _replay_mode(params)
+    max_replay_events = _max_replay_events(params, limit)
+    debug_replay_audit = _truthy_param(
+        params.get("debug_replay_audit") or params.get("debugReplayAudit")
+    )
 
     db, err = _db_or_error(rid)
     if err:
@@ -219,17 +272,39 @@ def runtime_activity_subscribe(rid, params: dict) -> dict:
         transport=current_transport(),
         after_seq=after_seq,
         limit=limit,
+        replay_mode=replay_mode,
+        max_replay_events=max_replay_events,
+        debug_replay_audit=debug_replay_audit,
         db=db,
+    )
+    cursor_only_response = (
+        replay_mode in {"live", "cursor_only"}
+        or max_replay_events <= 0
+        or (
+            _team_activity_events.uses_event_log(activity_id, db=db)
+            and _team_activity_events.is_terminal_activity(activity_id, db=db)
+            and not debug_replay_audit
+        )
+    )
+    response_default_after_seq = max(
+        after_seq,
+        _team_activity_events.activity_last_seq(activity_id, db=db) if cursor_only_response else after_seq,
+    )
+    response_after_seq = max(
+        [int(event.get("seq") or 0) for event in replay],
+        default=response_default_after_seq,
     )
     return _ok(
         rid,
         {
             "subscription_id": subscription_id,
             "events": replay,
-            "after_seq": max(
-                [int(event.get("seq") or 0) for event in replay],
-                default=after_seq,
-            ),
+            "after_seq": response_after_seq,
+            "afterSeq": response_after_seq,
+            "replay_mode": replay_mode,
+            "replayMode": replay_mode,
+            "max_replay_events": max_replay_events,
+            "maxReplayEvents": max_replay_events,
         },
     )
 

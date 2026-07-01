@@ -54,6 +54,7 @@ _RENDER_NON_STRUCTURAL_RUN_EVENT_TYPES = {
     "agent_profile_test.output_delta",
     "agent_profile_test.thinking",
 }
+_TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 
 
 def _payload_byte_size(obj: Any) -> int:
@@ -380,6 +381,224 @@ def _mission_activities_for_session(session_id: str) -> list[dict[str, Any]]:
             exc,
         )
         return []
+
+
+def _sqlite_scalar(db: Any, sql: str, params: tuple[Any, ...]) -> Any:
+    conn = getattr(db, "_conn", None)
+    lock = getattr(db, "_lock", None)
+    if conn is None or lock is None:
+        return None
+    with lock:
+        row = conn.execute(sql, params).fetchone()
+    if row is None:
+        return None
+    try:
+        return row[0]
+    except Exception:
+        return None
+
+
+def _int_value(value: Any) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def _run_event_activity_last_seq(db: Any, activity_id: str) -> int:
+    activity_id = _text(activity_id)
+    if not activity_id:
+        return 0
+    return _int_value(_sqlite_scalar(
+        db,
+        "SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE activity_id = ?",
+        (activity_id,),
+    ))
+
+
+def _run_event_session_last_seq(db: Any, session_id: str) -> int:
+    session_id = _text(session_id)
+    if not session_id:
+        return 0
+    return _int_value(_sqlite_scalar(
+        db,
+        "SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE session_id = ?",
+        (session_id,),
+    ))
+
+
+def _team_mission_event_last_seq(db: Any, mission_id: str) -> int:
+    mission_id = _text(mission_id)
+    if not mission_id:
+        return 0
+    return _int_value(_sqlite_scalar(
+        db,
+        "SELECT COALESCE(MAX(seq), 0) FROM team_mission_events WHERE mission_id = ?",
+        (mission_id,),
+    ))
+
+
+def _activity_watermark(
+    *,
+    activity_id: str,
+    last_seq: int,
+    status: str,
+    terminal: bool,
+    replay_policy: str,
+    source: str,
+) -> dict[str, Any]:
+    normalized_activity_id = _text(activity_id)
+    normalized_status = _text(status) or ("completed" if terminal else "idle")
+    normalized_policy = _text(replay_policy) or ("cursor_only" if terminal else "replay_live")
+    normalized_source = _text(source)
+    seq = max(0, int(last_seq or 0))
+    return {
+        "activity_id": normalized_activity_id,
+        "activityId": normalized_activity_id,
+        "last_seq": seq,
+        "lastSeq": seq,
+        "status": normalized_status,
+        "terminal": bool(terminal),
+        "replay_policy": normalized_policy,
+        "replayPolicy": normalized_policy,
+        "source": normalized_source,
+    }
+
+
+def _mission_status_for_watermark(conversation: dict[str, Any], mission: dict[str, Any], is_running: bool) -> str:
+    mission_status = _text(
+        mission.get("status")
+        or conversation.get("mission_status")
+        or conversation.get("missionStatus")
+        or conversation.get("run_state")
+        or conversation.get("runState")
+        or conversation.get("activity_state")
+        or conversation.get("activityState")
+    ).lower()
+    if is_running:
+        return "running"
+    if mission_status in _TERMINAL_MISSION_STATUSES or mission_status == "waiting_approval":
+        return mission_status
+    return "idle"
+
+
+def _team_member_ids(team: dict[str, Any], participants: list[dict[str, Any]]) -> list[str]:
+    ids: list[str] = []
+    member_lists = (
+        team.get("members"),
+        team.get("teamMembers"),
+        team.get("team_members"),
+        team.get("agent_team_members"),
+    )
+    for members in member_lists:
+        if not isinstance(members, list):
+            continue
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            member_id = _text(
+                member.get("member_id")
+                or member.get("memberId")
+                or member.get("id")
+                or member.get("participant_id")
+                or member.get("participantId")
+            )
+            role = _text(member.get("role")).lower()
+            if member_id and role not in {"lead", "leader"}:
+                ids.append(member_id)
+    if not ids:
+        for participant in participants:
+            member_id = _text(
+                participant.get("member_id")
+                or participant.get("memberId")
+                or participant.get("participant_id")
+                or participant.get("participantId")
+                or participant.get("id")
+            )
+            role = _text(participant.get("role")).lower()
+            if member_id and role not in {"lead", "leader"}:
+                ids.append(member_id)
+    return list(dict.fromkeys(ids))
+
+
+def _team_activity_watermarks(
+    *,
+    session_id: str,
+    conversation: dict[str, Any],
+    mission: dict[str, Any],
+    team: dict[str, Any],
+    participants: list[dict[str, Any]],
+    mission_activities: list[dict[str, Any]],
+    is_running: bool,
+) -> list[dict[str, Any]]:
+    db = _get_db()
+    if db is None:
+        return []
+    normalized_session_id = _text(session_id)
+    status = _mission_status_for_watermark(conversation, mission, is_running)
+    terminal = status in _TERMINAL_MISSION_STATUSES or (not is_running and status == "idle")
+    replay_policy = "replay_live" if is_running else "cursor_only"
+    watermarks: list[dict[str, Any]] = []
+
+    chat_activity_id = f"chat:{normalized_session_id}" if normalized_session_id else ""
+    if chat_activity_id:
+        watermarks.append(_activity_watermark(
+            activity_id=chat_activity_id,
+            last_seq=max(
+                _run_event_activity_last_seq(db, chat_activity_id),
+                _run_event_session_last_seq(db, normalized_session_id),
+            ),
+            status=status,
+            terminal=terminal,
+            replay_policy=replay_policy,
+            source="run_events",
+        ))
+
+    mission_ids = []
+    mission_id = _text(mission.get("mission_id") or mission.get("missionId"))
+    if mission_id:
+        mission_ids.append(mission_id)
+    for activity in mission_activities:
+        if not isinstance(activity, dict):
+            continue
+        activity_mission_id = _text(
+            activity.get("target_mission_id")
+            or activity.get("targetMissionId")
+            or activity.get("mission_id")
+            or activity.get("missionId")
+        )
+        if activity_mission_id:
+            mission_ids.append(activity_mission_id)
+    for item in dict.fromkeys(mission_ids):
+        watermarks.append(_activity_watermark(
+            activity_id=f"mission:{item}",
+            last_seq=_team_mission_event_last_seq(db, item),
+            status=status if item == mission_id else "completed",
+            terminal=terminal if item == mission_id else True,
+            replay_policy="cursor_only" if (terminal or item != mission_id) else "replay_live",
+            source="team_mission_events",
+        ))
+
+    for member_id in _team_member_ids(team, participants):
+        activity_id = f"act-member_chat:{normalized_session_id}:{member_id}" if normalized_session_id else ""
+        if not activity_id:
+            continue
+        watermarks.append(_activity_watermark(
+            activity_id=activity_id,
+            last_seq=_run_event_activity_last_seq(db, activity_id),
+            status=status,
+            terminal=terminal,
+            replay_policy=replay_policy,
+            source="run_events",
+        ))
+
+    deduped: dict[str, dict[str, Any]] = {}
+    for watermark in watermarks:
+        activity_id = _text(watermark.get("activity_id"))
+        if activity_id:
+            deduped[activity_id] = watermark
+    return list(deduped.values())
 
 
 def _record(value: Any) -> dict[str, Any]:
@@ -786,6 +1005,17 @@ def _team_conversation_snapshot(
     if not mission_present:
         mission = {}
     is_running = _team_conversation_is_running(conversation=conversation, mission=mission)
+    participants = _participants_for_session(session_id)
+    mission_activities = _mission_activities_for_session(session_id)
+    activity_watermarks = _team_activity_watermarks(
+        session_id=session_id,
+        conversation=conversation,
+        mission=mission,
+        team=team,
+        participants=participants,
+        mission_activities=mission_activities,
+        is_running=is_running,
+    )
     _emit_team_render_diagnostic(
         "team-conversation-snapshot-filter",
         request_id=str(rid),
@@ -824,21 +1054,25 @@ def _team_conversation_snapshot(
             "session_id": session_id,
             "conversation": conversation,
             "mission": mission,
-            "missions": _mission_activities_for_session(session_id),
+            "missions": mission_activities,
             "missionPresent": mission_present,
             "mission_present": mission_present,
             "team": team,
             "graph": graph,
-            "participants": _participants_for_session(session_id),
+            "participants": participants,
             "messages": messages,
             "toolEvents": tool_events,
             "runEvents": run_events,
+            "activityWatermarks": activity_watermarks,
+            "activity_watermarks": activity_watermarks,
             "pageInfo": page_info if isinstance(page_info, dict) else {},
             "branchInfo": branch_info if isinstance(branch_info, dict) else None,
             "projection": {
                 "schemaVersion": _SNAPSHOT_SCHEMA_VERSION,
                 "source": projection_source,
                 "renderReady": True,
+                "activityWatermarks": activity_watermarks,
+                "activity_watermarks": activity_watermarks,
                 "visibleWindow": {
                     "direction": _text(params.get("direction")) or "tail",
                     "limit": _bounded_limit(params.get("limit"), default=50, maximum=200),
