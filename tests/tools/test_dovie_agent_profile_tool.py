@@ -256,7 +256,7 @@ def test_test_agent_profile_runs_draft_through_delegation(monkeypatch, tmp_path)
     def fake_delegate_task(**kwargs):
         calls.update(kwargs)
         assert kwargs["parent_agent"]._delegate_child_transient_session is True
-        assert kwargs["parent_agent"]._delegate_child_progress_suppressed is True
+        assert kwargs["parent_agent"]._delegate_child_progress_suppressed is False
         assert kwargs["parent_agent"]._delegate_child_output_delta_enabled is True
         assert kwargs["parent_agent"]._delegate_child_output_tool_name == "test_agent_profile"
         return json.dumps({"results": [{"status": "success", "summary": "这是 PRD 草稿。", "api_calls": 1}]})
@@ -287,7 +287,7 @@ def test_test_agent_profile_runs_draft_through_delegation(monkeypatch, tmp_path)
     assert not hasattr(parent_agent, "_delegate_child_output_tool_name")
 
 
-def test_test_agent_profile_does_not_expose_subagent_progress(monkeypatch, tmp_path):
+def test_test_agent_profile_exposes_subagent_progress(monkeypatch, tmp_path):
     draft_home = tmp_path / "drafts" / "draft-1"
     draft_home.mkdir(parents=True)
     (draft_home / "SOUL.md").write_text("# 市场分身\n你负责输出推广方案。", encoding="utf-8")
@@ -302,7 +302,14 @@ def test_test_agent_profile_does_not_expose_subagent_progress(monkeypatch, tmp_p
 
     def fake_delegate_task(**kwargs):
         assert kwargs["parent_agent"]._delegate_child_transient_session is True
-        assert kwargs["parent_agent"]._delegate_child_progress_suppressed is True
+        assert kwargs["parent_agent"]._delegate_child_progress_suppressed is False
+        kwargs["parent_agent"].tool_progress_callback(
+            "subagent.tool",
+            "terminal",
+            "python test_agent_validation.py",
+            {"command": "python test_agent_validation.py"},
+            delegation_tool_name="test_agent_profile",
+        )
         return json.dumps({"results": [{"status": "success", "summary": "完成。"}]})
 
     monkeypatch.setattr("tools.delegate_tool.delegate_task", fake_delegate_task)
@@ -316,4 +323,12 @@ def test_test_agent_profile_does_not_expose_subagent_progress(monkeypatch, tmp_p
     )
 
     assert result["status"] == "completed"
-    assert progress_events == []
+    assert progress_events == [(
+        (
+            "subagent.tool",
+            "terminal",
+            "python test_agent_validation.py",
+            {"command": "python test_agent_validation.py"},
+        ),
+        {"delegation_tool_name": "test_agent_profile"},
+    )]

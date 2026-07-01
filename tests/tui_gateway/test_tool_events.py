@@ -28,6 +28,32 @@ def test_agent_profile_test_uses_dedicated_stream_events():
     )
     bridge.on_tool_progress(
         "sid",
+        "subagent.spawn_requested",
+        None,
+        "hello",
+        None,
+        subagent_id="child-1",
+        goal="hello",
+        context="## SOUL.md\nhidden profile",
+        dispatch_message="hello\n\n## SOUL.md\nhidden profile",
+        delegation_tool_name="test_agent_profile",
+        tool_count=0,
+    )
+    bridge.on_tool_progress(
+        "sid",
+        "subagent.start",
+        None,
+        "hello",
+        None,
+        subagent_id="child-1",
+        goal="hello",
+        context="## SOUL.md\nhidden profile",
+        dispatch_message="hello\n\n## SOUL.md\nhidden profile",
+        delegation_tool_name="test_agent_profile",
+        tool_count=0,
+    )
+    bridge.on_tool_progress(
+        "sid",
         "subagent.output_delta",
         "test_agent_profile",
         "\npartial answer",
@@ -49,11 +75,12 @@ def test_agent_profile_test_uses_dedicated_stream_events():
     bridge.on_tool_progress(
         "sid",
         "subagent.tool",
-        "test_agent_profile",
-        "read draft memory",
-        None,
+        "terminal",
+        "python test_agent_validation.py",
+        {"command": "python test_agent_validation.py"},
         subagent_id="child-1",
         goal="hello",
+        delegation_tool_name="test_agent_profile",
         tool_count=1,
     )
     bridge.on_tool_progress(
@@ -84,6 +111,8 @@ def test_agent_profile_test_uses_dedicated_stream_events():
     assert [event["type"] for event in events] == [
         "tool.start",
         "agent_profile_test.start",
+        "agent_profile_test.progress",
+        "agent_profile_test.progress",
         "agent_profile_test.output_delta",
         "agent_profile_test.progress",
         "agent_profile_test.tool",
@@ -91,12 +120,20 @@ def test_agent_profile_test_uses_dedicated_stream_events():
         "tool.complete",
         "agent_profile_test.complete",
     ]
-    assert events[2]["payload"]["text"] == "\npartial answer"
-    assert events[2]["payload"]["tool_name"] == "test_agent_profile"
-    assert events[3]["payload"]["text"] == "preparing draft runtime"
-    assert events[4]["payload"]["tool_preview"] == "read draft memory"
-    assert events[5]["payload"]["text"] == "thinking"
-    assert events[7]["payload"]["result"]["dovie_event"] == "agent_profile_test_completed"
+    assert events[2]["payload"]["text"] == "hello"
+    assert "context" not in events[2]["payload"]
+    assert "dispatch_message" not in events[2]["payload"]
+    assert events[3]["payload"]["text"] == "hello"
+    assert "context" not in events[3]["payload"]
+    assert "dispatch_message" not in events[3]["payload"]
+    assert events[4]["payload"]["text"] == "\npartial answer"
+    assert events[4]["payload"]["tool_name"] == "test_agent_profile"
+    assert events[5]["payload"]["text"] == "preparing draft runtime"
+    assert events[6]["payload"]["tool_name"] == "terminal"
+    assert events[6]["payload"]["tool_preview"] == "python test_agent_validation.py"
+    assert events[6]["payload"]["arguments"] == {"command": "python test_agent_validation.py"}
+    assert events[7]["payload"]["text"] == "thinking"
+    assert events[9]["payload"]["result"]["dovie_event"] == "agent_profile_test_completed"
 
 
 def test_agent_profile_design_context_emits_structured_complete_when_tool_progress_disabled():

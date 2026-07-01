@@ -426,6 +426,7 @@ class GatewayToolEventBridge:
             "role",
             "context",
             "dispatch_message",
+            "delegation_tool_name",
             "delegate_call_id",
             "tool_call_id",
             "tool_id",
@@ -497,8 +498,13 @@ class GatewayToolEventBridge:
         if preview and event_type == "subagent.tool":
             payload["tool_preview"] = str(preview)
             payload["text"] = str(preview)
-        if name == "test_agent_profile":
+        delegation_tool_name = str(payload.get("delegation_tool_name") or "").strip()
+        if name == "test_agent_profile" or delegation_tool_name == "test_agent_profile":
+            payload.pop("context", None)
+            payload.pop("dispatch_message", None)
             mapped_type = {
+                "subagent.spawn_requested": "agent_profile_test.progress",
+                "subagent.start": "agent_profile_test.progress",
                 "subagent.output_delta": "agent_profile_test.output_delta",
                 "subagent.reasoning_delta": "agent_profile_test.thinking",
                 "subagent.thinking": "agent_profile_test.thinking",

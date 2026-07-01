@@ -1053,7 +1053,7 @@ def test_agent_profile(
         parent_agent, "_delegate_child_output_tool_name", None
     )
     setattr(parent_agent, "_delegate_child_transient_session", True)
-    setattr(parent_agent, "_delegate_child_progress_suppressed", True)
+    setattr(parent_agent, "_delegate_child_progress_suppressed", False)
     setattr(parent_agent, "_delegate_child_output_delta_enabled", True)
     setattr(parent_agent, "_delegate_child_output_tool_name", "test_agent_profile")
     try:

@@ -825,6 +825,12 @@ def _build_child_progress_callback(
     )
     normalized_delegate_call_id = str(delegate_call_id or "").strip()
     normalized_agent_name = _clean_subagent_name(agent_name)
+    raw_delegation_tool_name = getattr(parent_agent, "_delegate_child_output_tool_name", "")
+    delegation_tool_name = (
+        raw_delegation_tool_name.strip()
+        if isinstance(raw_delegation_tool_name, str)
+        else ""
+    )
 
     # Gateway: batch tool names, flush periodically
     _BATCH_SIZE = 5
@@ -852,6 +858,8 @@ def _build_child_progress_callback(
             kw["role"] = str(role)
         if normalized_agent_name:
             kw["agent_name"] = normalized_agent_name
+        if delegation_tool_name:
+            kw["delegation_tool_name"] = delegation_tool_name
         if context_text:
             kw["context"] = context_text
         if dispatch_message:
