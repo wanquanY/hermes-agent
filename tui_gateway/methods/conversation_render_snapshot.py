@@ -863,9 +863,12 @@ def _team_conversation_is_running(
     *,
     conversation: dict[str, Any],
     mission: dict[str, Any],
+    status_projection: dict[str, Any] | None = None,
 ) -> bool:
     conversation_id = _text(conversation.get("conversation_id") or conversation.get("conversationId"))
-    projection = _team_conversation_status_projection(conversation_id)
+    projection = status_projection if isinstance(status_projection, dict) else {}
+    if not projection:
+        projection = _team_conversation_status_projection(conversation_id)
     if projection:
         return bool(projection.get("running")) or _text(
             projection.get("projected_state")
@@ -1004,7 +1007,13 @@ def _team_conversation_snapshot(
     mission_present = bool(_text(mission.get("mission_id") or mission.get("missionId")))
     if not mission_present:
         mission = {}
-    is_running = _team_conversation_is_running(conversation=conversation, mission=mission)
+    conversation_id = _text(conversation.get("conversation_id") or conversation.get("conversationId"))
+    status_projection = _team_conversation_status_projection(conversation_id)
+    is_running = _team_conversation_is_running(
+        conversation=conversation,
+        mission=mission,
+        status_projection=status_projection,
+    )
     participants = _participants_for_session(session_id)
     mission_activities = _mission_activities_for_session(session_id)
     activity_watermarks = _team_activity_watermarks(
@@ -1068,6 +1077,7 @@ def _team_conversation_snapshot(
             "pageInfo": page_info if isinstance(page_info, dict) else {},
             "branchInfo": branch_info if isinstance(branch_info, dict) else None,
             "projection": {
+                **status_projection,
                 "schemaVersion": _SNAPSHOT_SCHEMA_VERSION,
                 "source": projection_source,
                 "renderReady": True,

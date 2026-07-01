@@ -1811,6 +1811,51 @@ def test_team_mission_conversation_status_projection_marks_terminal_result_repor
     assert active_frame["leaderReportMessageId"] == ""
 
 
+def test_team_mission_result_recorded_emits_pending_report_status_projection(tmp_path: Path):
+    from hermes_team_mission.runtime.mission_result import finalize_team_mission_result
+
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        active_mission_id="mission-1",
+        title="Mission",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="completed",
+        leader_session_id="team-session-1",
+    )
+
+    result = finalize_team_mission_result(db, "mission-1")
+    events = db.list_team_mission_events("mission-1")
+    result_event = next(
+        event for event in events
+        if event["type"] == "team_mission.runtime.event"
+        and event["payload"]["source_event_type"] == "mission.result.recorded"
+    )
+    status_events = [
+        event for event in events
+        if event["type"] == "team_mission.conversation.status"
+        and event["payload"]["source_event_type"] == "mission.result.recorded"
+    ]
+
+    assert result["status"] == "completed"
+    assert status_events
+    assert status_events[-1]["seq"] > result_event["seq"]
+    projection = status_events[-1]["payload"]["conversation"]
+    assert projection["mission_status"] == "completed"
+    assert projection["running"] is False
+    assert projection["leaderReportStatus"] == "pending"
+    assert projection["leaderReportRunId"] == ""
+    assert projection["leaderReportMessageId"] == ""
+
+
 def test_team_mission_runtime_projection_uses_structured_final_node_contract(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(

@@ -434,6 +434,15 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
             status="completed",
             metadata={"stableTeamSessionId": "team-session-1"},
         )
+        db.upsert_team_mission_result(
+            mission_id="mission-1",
+            activity_id="mission:mission-1",
+            status="completed",
+            outcome="completed",
+            summary_text="最终结论：PASS",
+            node_results=[],
+            artifact_refs=[],
+        )
         monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
         monkeypatch.setattr(session_methods, "_get_db", lambda: db)
         monkeypatch.setattr(team_mission, "_get_db", lambda: db)
@@ -453,6 +462,9 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
         assert response["result"]["stable_session_id"] == "team-session-1"
         assert response["result"]["conversation"]["conversation_id"] == "conversation-1"
         assert response["result"]["mission"]["mission_id"] == "mission-1"
+        assert response["result"]["projection"]["leaderReportStatus"] == "pending"
+        assert response["result"]["projection"]["leaderReportRunId"] == ""
+        assert response["result"]["projection"]["activeResult"]["status"] == "completed"
         assert response["result"]["messages"][0]["text"] == "团队房间首屏消息。"
         assert response["result"]["runEvents"] == []
         watermarks = response["result"]["projection"]["activityWatermarks"]

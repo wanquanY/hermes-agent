@@ -142,27 +142,40 @@ def finalize_team_mission_result(db: Any, mission_id: str) -> dict[str, Any]:
         artifact_refs=artifact_refs,
         metadata=metadata,
     )
+    source_event = {
+        "type": "mission.result.recorded",
+        "payload": {
+            "mission_id": mission_id,
+            "missionId": mission_id,
+            "result_id": result.get("result_id") or "",
+            "resultId": result.get("result_id") or "",
+            "status": result.get("status") or status,
+            "outcome": result.get("outcome") or status,
+            "summary_text": result.get("summary_text") or "",
+            "summaryText": result.get("summary_text") or "",
+            "artifact_refs": result.get("artifact_refs") or [],
+            "artifactRefs": result.get("artifact_refs") or [],
+        },
+    }
+    dedupe_key = f"mission-result-recorded:{mission_id}:{result.get('result_id') or ''}"
+    append_projection = getattr(db, "_append_team_mission_state_projection_event", None)
+    if callable(append_projection) and result:
+        try:
+            append_projection(
+                mission_id=mission_id,
+                event=source_event,
+                dedupe_key=dedupe_key,
+            )
+            return result
+        except Exception:
+            pass
     append = getattr(db, "append_team_mission_structural_event", None)
     if callable(append) and result:
         try:
             append(
                 mission_id=mission_id,
-                source_event={
-                    "type": "mission.result.recorded",
-                    "payload": {
-                        "mission_id": mission_id,
-                        "missionId": mission_id,
-                        "result_id": result.get("result_id") or "",
-                        "resultId": result.get("result_id") or "",
-                        "status": result.get("status") or status,
-                        "outcome": result.get("outcome") or status,
-                        "summary_text": result.get("summary_text") or "",
-                        "summaryText": result.get("summary_text") or "",
-                        "artifact_refs": result.get("artifact_refs") or [],
-                        "artifactRefs": result.get("artifact_refs") or [],
-                    },
-                },
-                dedupe_key=f"mission-result-recorded:{mission_id}:{result.get('result_id') or ''}",
+                source_event=source_event,
+                dedupe_key=dedupe_key,
             )
         except Exception:
             pass
