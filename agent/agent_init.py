@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, parse_qs, urlunparse
 
 from agent.context_compressor import ContextCompressor
+from agent.context_defaults import DEFAULT_COMPRESSION_THRESHOLD
 from agent.iteration_budget import IterationBudget
 from agent.memory_manager import StreamingContextScrubber
 from agent.model_metadata import (
@@ -1264,7 +1265,7 @@ def init_agent(
     _compression_cfg = _agent_cfg.get("compression", {})
     if not isinstance(_compression_cfg, dict):
         _compression_cfg = {}
-    compression_threshold = float(_compression_cfg.get("threshold", 0.50))
+    compression_threshold = float(_compression_cfg.get("threshold", DEFAULT_COMPRESSION_THRESHOLD))
     try:
         from agent.auxiliary_client import _compression_threshold_for_model as _cthresh_fn
         _model_cthresh = _cthresh_fn(agent.model)

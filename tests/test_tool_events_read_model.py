@@ -90,6 +90,39 @@ def test_append_run_event_projects_tool_events_index(tmp_path):
     ]
 
 
+def test_list_tool_events_tail_returns_latest_events_in_chronological_order(tmp_path):
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("session-1", "dovie")
+        db.append_run_event(
+            "session-1",
+            _tool_event(
+                "tool.complete",
+                seq=1,
+                tool_id="tool-old",
+                name="read_file",
+                payload={"result_text": "old"},
+            ),
+        )
+        db.append_run_event(
+            "session-1",
+            _tool_event(
+                "tool.complete",
+                seq=2,
+                tool_id="tool-new",
+                name="search_files",
+                payload={"result_text": "new"},
+            ),
+        )
+
+        tool_events = db.list_tool_events("session-1", direction="tail", limit=1)
+    finally:
+        db.close()
+
+    assert [tool["tool_call_id"] for tool in tool_events] == ["tool-new"]
+    assert tool_events[0]["seq_start"] == 2
+
+
 def test_tool_progress_without_id_attaches_to_latest_open_tool(tmp_path):
     db = SessionDB(tmp_path / "state.db")
     try:

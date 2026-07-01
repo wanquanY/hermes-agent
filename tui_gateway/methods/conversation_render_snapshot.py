@@ -304,6 +304,11 @@ def _message_params(params: dict[str, Any], session_id: str) -> dict[str, Any]:
             default=2000,
             maximum=5000,
         ),
+        "tool_events_limit": _bounded_limit(
+            params.get("tool_events_limit", params.get("toolEventsLimit")),
+            default=2000,
+            maximum=5000,
+        ),
     }
 
 
@@ -1050,7 +1055,6 @@ def _team_conversation_snapshot(
         )
     else:
         run_events = []
-        tool_events = []
     branch_info = page.get("branchInfo") if isinstance(page, dict) else None
     return _ok(
         rid,

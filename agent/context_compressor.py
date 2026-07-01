@@ -30,6 +30,7 @@ from agent.model_metadata import (
     get_model_context_length,
     estimate_messages_tokens_rough,
 )
+from agent.context_defaults import DEFAULT_COMPRESSION_THRESHOLD
 from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
@@ -693,7 +694,7 @@ class ContextCompressor(ContextEngine):
     def __init__(
         self,
         model: str,
-        threshold_percent: float = 0.50,
+        threshold_percent: float = DEFAULT_COMPRESSION_THRESHOLD,
         protect_first_n: int = 3,
         protect_last_n: int = 20,
         summary_target_ratio: float = 0.20,
@@ -729,7 +730,7 @@ class ContextCompressor(ContextEngine):
         )
         # Floor: never compress below MINIMUM_CONTEXT_LENGTH tokens even if
         # the percentage would suggest a lower value.  This prevents premature
-        # compression on large-context models at 50% while keeping the % sane
+        # compression on small-context models while keeping the percentage sane
         # for models right at the minimum.
         self.threshold_tokens = max(
             int(self.context_length * threshold_percent),

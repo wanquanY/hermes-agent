@@ -262,8 +262,8 @@ def test_leader_report_completion_uses_canonical_result_and_records_message_id(m
     ]
     assert status_events
     assert status_events[-1]["seq"] > report_ready["seq"]
-    assert status_events[-1]["payload"]["conversation"]["leaderReportStatus"] == "ready"
-    assert status_events[-1]["payload"]["conversation"]["leaderReportMessageId"] == projected["conversation_message_id"]
+    assert status_events[-1]["payload"]["projection"]["leaderReportStatus"] == "ready"
+    assert status_events[-1]["payload"]["projection"]["leaderReportMessageId"] == projected["conversation_message_id"]
 
 
 def test_synthesis_append_deltas_are_not_mirrored_to_conversation_stream(tmp_path: Path):

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from typing import Any
+
+from hermes_team_mission.state.conversation_status_event import (
+    compact_team_mission_conversation_status_event,
+)
 
 
 TEAM_MISSION_SCHEMA_SQL = """
@@ -374,7 +379,7 @@ def migrate_active_mission_id_to_conversation_missions(cursor: sqlite3.Cursor) -
 
 
 def compact_team_mission_event_json_storage(cursor: sqlite3.Cursor, logger: Any) -> None:
-    """Clear legacy duplicate JSON copies from team_mission_events."""
+    """Compact legacy duplicate JSON storage in team_mission_events."""
 
     try:
         cursor.execute(
@@ -388,3 +393,43 @@ def compact_team_mission_event_json_storage(cursor: sqlite3.Cursor, logger: Any)
         )
     except sqlite3.OperationalError as exc:
         logger.debug("team_mission_events JSON storage compaction skipped: %s", exc)
+        return
+
+    try:
+        rows = cursor.execute(
+            """
+            SELECT id, mission_id, event_json
+            FROM team_mission_events
+            WHERE event_type = 'team_mission.conversation.status'
+            """
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        logger.debug("team_mission_events status event compaction skipped: %s", exc)
+        return
+
+    compacted = 0
+    for row in rows:
+        try:
+            event = json.loads(row["event_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        next_event, changed = compact_team_mission_conversation_status_event(
+            event,
+            mission_id=str(row["mission_id"] or ""),
+        )
+        if not changed:
+            continue
+        cursor.execute(
+            """
+            UPDATE team_mission_events
+               SET event_json = ?
+             WHERE id = ?
+            """,
+            (
+                json.dumps(next_event, ensure_ascii=False, separators=(",", ":")),
+                row["id"],
+            ),
+        )
+        compacted += 1
+    if compacted:
+        logger.info("compacted %d legacy Team Mission conversation status event(s)", compacted)

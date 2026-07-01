@@ -22,6 +22,7 @@ import copy
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from agent.context_defaults import DEFAULT_COMPRESSION_THRESHOLD
 from hermes_cli.nous_subscription import get_nous_subscription_features
 from tools.tool_backend_helpers import managed_nous_tools_enabled
 from utils import base_url_hostname
@@ -1769,7 +1770,7 @@ def _apply_default_agent_settings(config: dict):
     config.setdefault("display", {})["tool_progress"] = "all"
 
     config.setdefault("compression", {})["enabled"] = True
-    config["compression"]["threshold"] = 0.50
+    config["compression"]["threshold"] = DEFAULT_COMPRESSION_THRESHOLD
 
     config.setdefault("session_reset", {}).update({
         "mode": "both",
@@ -1781,7 +1782,7 @@ def _apply_default_agent_settings(config: dict):
     print_success("Applied recommended defaults:")
     print_info("  Max iterations: 90")
     print_info("  Tool progress: all")
-    print_info("  Compression threshold: 0.50")
+    print_info(f"  Compression threshold: {DEFAULT_COMPRESSION_THRESHOLD:.2f}")
     print_info("  Session reset: inactivity (1440 min) + daily (4:00)")
     print_info("  Run `hermes setup agent` later to customize.")
 
@@ -1848,7 +1849,7 @@ def setup_agent_settings(config: dict):
 
     config.setdefault("compression", {})["enabled"] = True
 
-    current_threshold = cfg_get(config, "compression", "threshold", default=0.50)
+    current_threshold = cfg_get(config, "compression", "threshold", default=DEFAULT_COMPRESSION_THRESHOLD)
     threshold_str = prompt("Compression threshold (0.5-0.95)", str(current_threshold))
     try:
         threshold = float(threshold_str)
@@ -1858,7 +1859,7 @@ def setup_agent_settings(config: dict):
         pass
 
     print_success(
-        f"Context compression threshold set to {config['compression'].get('threshold', 0.50)}"
+        f"Context compression threshold set to {config['compression'].get('threshold', DEFAULT_COMPRESSION_THRESHOLD)}"
     )
 
     # ── Session Reset Policy ──

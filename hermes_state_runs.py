@@ -1971,12 +1971,14 @@ class SessionDBRunMixin:
         *,
         after_seq: int = 0,
         run_id: str = "",
+        direction: str = "after",
         limit: int = 2000,
     ) -> List[Dict[str, Any]]:
         stable = str(session_id or "").strip()
         if not stable:
             return []
         bounded_limit = max(1, min(int(limit or 2000), 5000))
+        normalized_direction = str(direction or "after").strip().lower()
         params: list[Any] = [stable, int(after_seq or 0)]
         run_clause = ""
         normalized_run_id = str(run_id or "").strip()
@@ -1984,19 +1986,33 @@ class SessionDBRunMixin:
             run_clause = "AND COALESCE(run_id, '') = ?"
             params.append(normalized_run_id)
         params.append(bounded_limit)
-        with self._lock:
-            rows = self._conn.execute(
-                f"""
+        order_expr = "COALESCE(seq_start, seq_last, id)"
+        if normalized_direction == "tail":
+            query = f"""
+                SELECT *
+                FROM (
+                    SELECT *
+                    FROM tool_events
+                    WHERE session_id = ?
+                      AND COALESCE(seq_last, seq_start, 0) > ?
+                      {run_clause}
+                    ORDER BY {order_expr} DESC, id DESC
+                    LIMIT ?
+                )
+                ORDER BY {order_expr} ASC, id ASC
+                """
+        else:
+            query = f"""
                 SELECT *
                 FROM tool_events
                 WHERE session_id = ?
                   AND COALESCE(seq_last, seq_start, 0) > ?
                   {run_clause}
-                ORDER BY COALESCE(seq_start, seq_last, id) ASC, id ASC
+                ORDER BY {order_expr} ASC, id ASC
                 LIMIT ?
-                """,
-                tuple(params),
-            ).fetchall()
+                """
+        with self._lock:
+            rows = self._conn.execute(query, tuple(params)).fetchall()
         return [
             item
             for row in rows

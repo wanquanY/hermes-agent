@@ -48,3 +48,20 @@ def run_team_mission_startup_maintenance(db: Any, logger: Any) -> None:
             "empty Team Mission conversation shell prune skipped: %s",
             prune_exc,
         )
+    try:
+        conn = getattr(db, "_conn", None)
+        lock = getattr(db, "_lock", None)
+        repairer = getattr(db, "_repair_session_index_terminal_active_runs_locked", None)
+        if conn is not None and lock is not None and callable(repairer):
+            with lock:
+                repaired_running = int(repairer(conn) or 0)
+            if repaired_running:
+                logger.info(
+                    "repaired %d stale Team Mission running session index row(s)",
+                    repaired_running,
+                )
+    except Exception as repair_running_exc:
+        logger.warning(
+            "stale Team Mission running session index repair skipped: %s",
+            repair_running_exc,
+        )

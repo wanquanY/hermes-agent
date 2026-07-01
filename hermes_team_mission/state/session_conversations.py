@@ -2,6 +2,9 @@ from __future__ import annotations
 
 # ruff: noqa: F401,F403,F405
 from .session_common import *
+from hermes_team_mission.state.conversation_status_event import (
+    slim_team_mission_conversation_status_payload as _slim_team_mission_conversation_status_payload,
+)
 from hermes_state_participants import leader_participant_id, member_participant_id
 
 
@@ -100,7 +103,11 @@ class SessionDBTeamMissionConversationMixin:
             EXISTS (
                 SELECT 1
                   FROM conversation_missions active_cm
+                  JOIN team_missions active_tm
+                    ON active_tm.mission_id = active_cm.mission_id
                  WHERE active_cm.status = 'active'
+                   AND LOWER(COALESCE(active_tm.status,'')) NOT IN
+                       ('completed','failed','cancelled','canceled','interrupted','draft','idle')
                    AND (
                        (
                            COALESCE({si}.conversation_id, '') != ''
@@ -1811,30 +1818,19 @@ class SessionDBTeamMissionConversationMixin:
         projection = self.get_team_mission_conversation_status_projection(conversation_id)
         if not projection:
             return {}
-        stable_session_id = _text(projection.get("stable_session_id"))
         source_type = _text(source_event.get("type"))
         source_run_id = _text(source_event.get("run_id") or source_event.get("runId"))
         timestamp = float(source_event.get("timestamp") or time.time())
-        payload = {
-            "conversation_id": conversation_id,
-            "conversationId": conversation_id,
-            "stable_session_id": stable_session_id,
-            "stableSessionId": stable_session_id,
-            "mission_id": mission_id,
-            "missionId": mission_id,
-            "active_mission_id": _text(projection.get("active_mission_id")) or mission_id,
-            "activeMissionId": _text(projection.get("active_mission_id")) or mission_id,
-            "source_event_type": source_type,
-            "sourceEventType": source_type,
-            "source_run_id": source_run_id,
-            "sourceRunId": source_run_id,
-            "source_seq": source_seq,
-            "sourceSeq": source_seq,
-            "team_mission_event_seq": projection_seq,
-            "teamMissionEventSeq": projection_seq,
-            "projection": projection,
-            "conversation": projection,
-        }
+        payload = _slim_team_mission_conversation_status_payload(
+            projection,
+            mission_id=mission_id,
+            conversation_id=conversation_id,
+            source_event_type=source_type,
+            source_run_id=source_run_id,
+            source_seq=source_seq,
+            team_mission_event_seq=projection_seq,
+        )
+        stable_session_id = _text(payload.get("stable_session_id"))
         return {
             "type": _TEAM_MISSION_CONVERSATION_STATUS_EVENT_TYPE,
             "seq": projection_seq,

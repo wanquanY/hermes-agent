@@ -1629,16 +1629,22 @@ def test_team_mission_run_events_include_conversation_status_projection(tmp_path
         )
     )
     status_event = next(event for event in events if event["type"] == "team_mission.conversation.status")
-    projection = status_event["payload"]["conversation"]
+    projection = status_event["payload"]["projection"]
 
     assert status_event["seq"] > complete_event["seq"]
     assert status_event["mission_id"] == "mission-1"
     assert status_event["conversation_id"] == "conversation-1"
     assert status_event["stable_session_id"] == "team-session-1"
+    assert status_event["payload"]["schemaVersion"] == 2
     assert status_event["payload"]["protocol"] == "team_mission.event.v1"
     assert status_event["payload"]["kind"] == "conversation.status.updated"
     assert status_event["payload"]["source_event_type"] == "message.complete"
     assert status_event["payload"]["source_event_seq"] == complete_event["seq"]
+    assert "conversation" not in status_event["payload"]
+    assert "task_frames" not in projection
+    assert "run_session_ids" not in projection
+    assert "final_deliverables" not in projection
+    assert len(json.dumps(status_event, ensure_ascii=False)) < 8192
     assert projection["conversation_id"] == "conversation-1"
     assert projection["stable_session_id"] == "team-session-1"
     assert projection["active_mission_id"] == "mission-1"
@@ -1848,7 +1854,7 @@ def test_team_mission_result_recorded_emits_pending_report_status_projection(tmp
     assert result["status"] == "completed"
     assert status_events
     assert status_events[-1]["seq"] > result_event["seq"]
-    projection = status_events[-1]["payload"]["conversation"]
+    projection = status_events[-1]["payload"]["projection"]
     assert projection["mission_status"] == "completed"
     assert projection["running"] is False
     assert projection["leaderReportStatus"] == "pending"

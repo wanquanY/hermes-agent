@@ -104,6 +104,7 @@ def _(rid, params: dict) -> dict:
                 tool_events = list_tool_events(
                     target,
                     run_id=str(params.get("run_id") or params.get("runId") or ""),
+                    direction=str(params.get("direction") or "tail"),
                     limit=_bounded_page_limit(
                         params.get("tool_events_limit", params.get("toolEventsLimit")),
                         default=2000,

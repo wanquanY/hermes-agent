@@ -68,7 +68,7 @@ DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 # allowing narrowly scoped submodules such as ``hermes_state.migrations``.
 __path__ = [str(Path(__file__).with_name("hermes_state"))]
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 CONVERSATION_PARTICIPANTS_BACKFILL_META_KEY = "conversation_participants_backfill_cr_p1_2"
 MISSION_ACTIVITIES_BACKFILL_META_KEY = "mission_activities_backfill_cr_p3_1"
 RUN_EVENT_RETENTION_POLICY = RunEventRetentionPolicy()
@@ -2079,7 +2079,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 self._backfill_session_list_summaries(cursor)
             if current_version < 20:
                 self._migrate_agent_profile_versions_to_latest_profiles(cursor)
-            if current_version < 24:
+            if current_version < 39:
                 compact_team_mission_event_json_storage(cursor, logger)
             if current_version < 28:
                 self._migrate_run_events_participant_id(cursor)

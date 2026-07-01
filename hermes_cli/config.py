@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
+from agent.context_defaults import DEFAULT_COMPRESSION_THRESHOLD
+
 logger = logging.getLogger(__name__)
 
 # Track which (config_path, mtime_ns, size) tuples we've already warned about
@@ -932,7 +934,7 @@ DEFAULT_CONFIG = {
 
     "compression": {
         "enabled": True,
-        "threshold": 0.50,            # compress when context usage exceeds this ratio
+        "threshold": DEFAULT_COMPRESSION_THRESHOLD,  # compress when context usage exceeds this ratio
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         "protect_last_n": 20,         # minimum recent messages to keep uncompressed
         "hygiene_hard_message_limit": 400,  # gateway session-hygiene force-compress threshold by message count
@@ -954,12 +956,11 @@ DEFAULT_CONFIG = {
                                       # True if you'd rather pause than silently lose
                                       # context turns when your aux model is flaky.
         "codex_gpt55_autoraise": True,  # When True, gpt-5.5 on the ChatGPT Codex OAuth
-                                      # route raises its compaction trigger to 85% (vs the
-                                      # global `threshold` above). Codex hard-caps gpt-5.5
-                                      # at a 272K window, so the default 50% would compact
-                                      # at ~136K and waste half the usable context. Set to
-                                      # False to opt back down to the global threshold
-                                      # (e.g. 0.50) for Codex gpt-5.5 sessions. Only this
+                                      # route raises its compaction trigger to 85% when the
+                                      # global `threshold` above is lower. Codex hard-caps
+                                      # gpt-5.5 at a 272K window, so early compression would
+                                      # waste usable context. Set to False to keep the global
+                                      # threshold exactly for Codex gpt-5.5 sessions. Only this
                                       # exact route is affected — gpt-5.5 on OpenAI's
                                       # direct API, OpenRouter, and Copilot keep the
                                       # global threshold regardless.
@@ -5469,7 +5470,7 @@ def show_config():
     enabled = compression.get('enabled', True)
     print(f"  Enabled:      {'yes' if enabled else 'no'}")
     if enabled:
-        print(f"  Threshold:    {compression.get('threshold', 0.50) * 100:.0f}%")
+        print(f"  Threshold:    {compression.get('threshold', DEFAULT_COMPRESSION_THRESHOLD) * 100:.0f}%")
         print(f"  Target ratio: {compression.get('target_ratio', 0.20) * 100:.0f}% of threshold preserved")
         print(f"  Protect last: {compression.get('protect_last_n', 20)} messages")
         print(f"  Protect first: {compression.get('protect_first_n', 3)} non-system head messages")

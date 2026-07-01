@@ -223,7 +223,7 @@ class TestEstimatedTokenThreshold:
     threshold to 85% * 1.4 = 119% of context, which exceeded the model's
     limit and prevented hygiene from ever firing for ~200K models (GLM-5).
     The fix removed the multiplier entirely — the 85% threshold already
-    provides ample headroom over the agent's 50% compressor.
+    provides ample request headroom without a separate estimate multiplier.
     """
 
     def test_threshold_below_context_for_200k_model(self):
@@ -254,8 +254,7 @@ class TestEstimatedTokenThreshold:
     def test_overestimate_fires_early_but_safely(self):
         """If rough estimate is 50% inflated, hygiene fires at ~57% actual usage.
 
-        That's between the agent's 50% threshold and the model's limit —
-        safe and harmless.
+        That still leaves substantial request headroom below the model's limit.
         """
         context_length = 200_000
         threshold = int(context_length * 0.85)  # 170K
@@ -263,7 +262,7 @@ class TestEstimatedTokenThreshold:
         # Hygiene fires when estimate hits 170K, actual is ~113K = 57% of ctx
         actual_when_fires = threshold / 1.5
         assert actual_when_fires > context_length * 0.50, (
-            "Early fire should still be above agent's 50% threshold"
+            "Early fire should still be above half the context window"
         )
         assert actual_when_fires < context_length, (
             "Early fire must be well below model limit"

@@ -551,7 +551,7 @@ def test_cancel_team_mission_sets_conversation_index_idle(tmp_path: Path):
     )
     status_events = [event for event in events if event.get("type") == "team_mission.conversation.status"]
     assert status_events
-    conversation = status_events[-1]["payload"]["conversation"]
+    conversation = status_events[-1]["payload"]["projection"]
     assert conversation["mission_status"] == "cancelled"
     assert conversation["run_state"] == "cancelled"
     assert conversation["waiting_approval"] is False
@@ -618,7 +618,7 @@ def test_reject_team_mission_plan_clears_conversation_approval_projection(tmp_pa
     )
     status_events = [event for event in events if event.get("type") == "team_mission.conversation.status"]
     assert status_events
-    conversation = status_events[-1]["payload"]["conversation"]
+    conversation = status_events[-1]["payload"]["projection"]
     assert conversation["mission_status"] == "draft"
     assert conversation["run_state"] == "idle"
     assert conversation["waiting_approval"] is False

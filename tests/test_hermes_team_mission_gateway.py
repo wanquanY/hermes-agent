@@ -3026,7 +3026,7 @@ def test_team_mission_plan_approve_starts_ready_worker_with_runtime_projection(m
     assert delta_event["payload"]["text_stream"]["delta"] == "worker-live"
     status_events = [event for event in events if event["type"] == "team_mission.conversation.status"]
     assert status_events
-    latest_status = status_events[-1]["payload"]["conversation"]
+    latest_status = status_events[-1]["payload"]["projection"]
     assert latest_status["conversation_id"] == "conversation-1"
     assert latest_status["active_mission_id"] == "mission-current"
     assert latest_status["running"] is True

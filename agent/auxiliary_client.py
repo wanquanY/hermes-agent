@@ -101,6 +101,7 @@ class _OpenAIProxy:
 OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 
 from agent.credential_pool import load_pool
+from agent.context_defaults import DEFAULT_COMPRESSION_THRESHOLD
 from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, normalize_proxy_env_vars
@@ -293,7 +294,7 @@ def _compression_threshold_for_model(model: Optional[str]) -> Optional[float]:
     config value, or ``None`` to leave the user's config value unchanged.
     """
     if _is_arcee_trinity_thinking(model):
-        return 0.75
+        return DEFAULT_COMPRESSION_THRESHOLD
     return None
 
 # Default auxiliary models for direct API-key providers (cheap/fast for side tasks)

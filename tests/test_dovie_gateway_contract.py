@@ -358,6 +358,7 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
             "team-session-1",
             {
                 "type": "tool.complete",
+                "seq": 3,
                 "session_id": "runtime-team-1",
                 "stored_session_id": "team-session-1",
                 "run_id": "team-run-1",
@@ -386,6 +387,7 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
                 "kind": "team_mission",
                 "conversation_id": "conversation-1",
                 "runtime_scope_key": "team:conversation-1:leader",
+                "includeToolEvents": True,
             },
         )
 
@@ -396,6 +398,10 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
         assert response["result"]["graph"]["recent_messages"][0]["text"] == "团队任务完成。"
         assert response["result"]["messages"][0]["text"] == "团队任务完成。"
         assert response["result"]["runEvents"] == []
+        assert len(response["result"]["toolEvents"]) == 1
+        assert response["result"]["toolEvents"][0]["type"] == "tool.complete"
+        assert response["result"]["toolEvents"][0]["payload"]["tool_id"] == "team-tool-1"
+        assert response["result"]["toolEvents"][0]["payload"]["name"] == "team_mission_start_task"
     finally:
         db.close()
 
@@ -417,6 +423,22 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
             role="assistant",
             content="团队房间首屏消息。",
             metadata={"run_id": "team-run-1", "turn_id": "team-turn-1"},
+        )
+        db.append_run_event(
+            "team-session-1",
+            {
+                "type": "tool.complete",
+                "seq": 5,
+                "session_id": "runtime-team-1",
+                "stored_session_id": "team-session-1",
+                "run_id": "team-run-1",
+                "turn_id": "team-turn-1",
+                "payload": {
+                    "tool_id": "team-tool-1",
+                    "name": "team_mission_start_task",
+                    "result_text": "accepted",
+                },
+            },
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
@@ -453,6 +475,8 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
                 "conversation_id": "conversation-1",
                 "limit": 100,
                 "includeRunEvents": True,
+                "includeToolEvents": True,
+                "toolEventsLimit": 50,
             },
         )
 
@@ -467,6 +491,9 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
         assert response["result"]["projection"]["activeResult"]["status"] == "completed"
         assert response["result"]["messages"][0]["text"] == "团队房间首屏消息。"
         assert response["result"]["runEvents"] == []
+        assert len(response["result"]["toolEvents"]) == 1
+        assert response["result"]["toolEvents"][0]["type"] == "tool.complete"
+        assert response["result"]["toolEvents"][0]["payload"]["tool_id"] == "team-tool-1"
         watermarks = response["result"]["projection"]["activityWatermarks"]
         assert {item["activity_id"] for item in watermarks} >= {
             "chat:team-session-1",
