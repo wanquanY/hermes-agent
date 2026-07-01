@@ -1480,6 +1480,9 @@ def _build_child_agent(
     child._subagent_toolsets = list(child_toolsets)
     child._subagent_tools = list(child_tool_names)
     child._subagent_tui_depth = tui_depth
+    if getattr(parent_agent, "_delegate_child_transient_session", False) is True:
+        child._session_persistence_disabled = True
+        child._session_db = None
 
     # Share a credential pool with the child when possible so subagents can
     # rotate credentials on rate limits instead of getting pinned to one key.

@@ -93,3 +93,27 @@ def test_session_search_lazily_opens_db_when_entrypoint_did_not_pass_one(monkeyp
     assert captured["db"] is sentinel_db
     assert captured["query"] == "Hermes"
     assert agent._session_db is sentinel_db
+
+
+def test_session_search_does_not_open_db_when_session_persistence_disabled(monkeypatch):
+    class UnexpectedSessionDB:
+        def __new__(cls):
+            raise AssertionError("transient agents must not open the default SessionDB")
+
+    hermes_state = ModuleType("hermes_state")
+    hermes_state.SessionDB = UnexpectedSessionDB
+    hermes_state.format_session_db_unavailable = lambda: "session db unavailable"
+    monkeypatch.setitem(sys.modules, "hermes_state", hermes_state)
+
+    session_search_mod = ModuleType("tools.session_search_tool")
+    session_search_mod.session_search = MagicMock()
+    monkeypatch.setitem(sys.modules, "tools.session_search_tool", session_search_mod)
+
+    agent = _make_agent(None, platform="acp")
+    agent._session_persistence_disabled = True
+
+    result = json.loads(agent._invoke_tool("session_search", {"query": "Hermes"}, "task-id"))
+
+    assert result == {"success": False, "error": "session db unavailable"}
+    assert agent._session_db is None
+    session_search_mod.session_search.assert_not_called()

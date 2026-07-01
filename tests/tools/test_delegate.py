@@ -2179,6 +2179,34 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
         self.assertEqual(kwargs["depth"], 0)
 
     @patch("tools.delegate_tool._load_config", return_value={})
+    def test_build_child_agent_disables_session_persistence_for_transient_child(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent._session_db = MagicMock()
+        parent._delegate_child_transient_session = True
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child._session_persistence_disabled = False
+            mock_child._session_db = parent._session_db
+            MockAgent.return_value = mock_child
+
+            child = _build_child_agent(
+                task_index=0,
+                goal="test draft profile",
+                context=None,
+                toolsets=["session_search"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        self.assertIs(child, mock_child)
+        self.assertIsNone(MockAgent.call_args[1]["session_db"])
+        self.assertTrue(child._session_persistence_disabled)
+        self.assertIsNone(child._session_db)
+
+    @patch("tools.delegate_tool._load_config", return_value={})
     def test_build_child_agent_relay_output_delta_by_default_for_gateway_parent(self, mock_cfg):
         parent = _make_mock_parent()
         parent.tool_progress_callback = MagicMock()

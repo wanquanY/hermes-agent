@@ -496,6 +496,8 @@ class AIAgent:
         opening the default state DB instead of making the advertised
         ``session_search`` tool unusable.
         """
+        if getattr(self, "_session_persistence_disabled", False):
+            return None
         if self._session_db is not None:
             return self._session_db
         try:
@@ -509,6 +511,8 @@ class AIAgent:
 
     def _ensure_db_session(self) -> None:
         """Create session DB row on first use. Disables _session_db on failure."""
+        if getattr(self, "_session_persistence_disabled", False):
+            return
         if self._session_db_created or not self._session_db:
             return
         try:
@@ -1256,6 +1260,9 @@ class AIAgent:
 
         Ensures conversations are never lost, even on errors or early returns.
         """
+        if getattr(self, "_session_persistence_disabled", False):
+            self._session_messages = messages
+            return
         self._drop_trailing_empty_response_scaffolding(messages)
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
@@ -2201,6 +2208,8 @@ class AIAgent:
         fewer messages") is preserved so resume + branch don't clobber a
         fuller existing snapshot.
         """
+        if getattr(self, "_session_persistence_disabled", False):
+            return
         if not getattr(self, "_session_json_enabled", False):
             return
         messages = messages or self._session_messages
