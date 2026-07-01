@@ -1766,6 +1766,51 @@ def test_team_mission_conversation_status_projection_terminal_mission_never_runn
     assert projection["mission_completed_at"] == 410
 
 
+def test_team_mission_conversation_status_projection_marks_terminal_result_report_pending(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        stable_session_id="team-session-1",
+        team_id="team-1",
+        active_mission_id="mission-1",
+        title="Mission",
+    )
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="completed",
+        leader_session_id="team-session-1",
+        created_at=100,
+        updated_at=400,
+        completed_at=410,
+    )
+    db.upsert_team_mission_result(
+        mission_id="mission-1",
+        activity_id="mission:mission-1",
+        status="completed",
+        outcome="completed",
+        summary_text="Final conclusion: PASS.",
+        node_results=[],
+        artifact_refs=[],
+    )
+
+    projection = db.get_team_mission_conversation_status_projection("conversation-1")
+    active_frame = projection["active_task_frame"]
+
+    assert projection["mission_status"] == "completed"
+    assert projection["running"] is False
+    assert projection["run_state"] == "completed"
+    assert projection["leaderReportStatus"] == "pending"
+    assert projection["leaderReportRunId"] == ""
+    assert projection["leaderReportMessageId"] == ""
+    assert active_frame["leaderReportStatus"] == "pending"
+    assert active_frame["leaderReportRunId"] == ""
+    assert active_frame["leaderReportMessageId"] == ""
+
+
 def test_team_mission_runtime_projection_uses_structured_final_node_contract(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(

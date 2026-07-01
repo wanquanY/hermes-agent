@@ -5,6 +5,28 @@ from .session_common import *
 from hermes_state_participants import leader_participant_id, member_participant_id
 
 
+def _team_mission_leader_report_status(
+    result: Dict[str, Any] | None,
+    mission_status: str = "",
+) -> str:
+    result = result if isinstance(result, dict) else {}
+    if not result:
+        return ""
+    leader_report_run_id = _text(result.get("leader_report_run_id") or result.get("leaderReportRunId"))
+    leader_report_message_id = _text(
+        result.get("leader_report_message_id") or result.get("leaderReportMessageId")
+    )
+    if leader_report_message_id:
+        return "ready"
+    if leader_report_run_id:
+        return "pending"
+    result_status = _text(result.get("status") or result.get("outcome")).lower()
+    mission_terminal = _text(mission_status).lower() in _TERMINAL_MISSION_STATUSES
+    if mission_terminal or result_status in _TERMINAL_MISSION_STATUSES:
+        return "pending"
+    return ""
+
+
 class SessionDBTeamMissionConversationMixin:
     _PROJECTED_ACTIVE_MISSION_ID_SQL = """
         COALESCE((
@@ -1332,7 +1354,10 @@ class SessionDBTeamMissionConversationMixin:
         active_result = results_by_mission.get(active_mission_id) or {}
         leader_report_run_id = _text(active_result.get("leader_report_run_id") or active_result.get("leaderReportRunId"))
         leader_report_message_id = _text(active_result.get("leader_report_message_id") or active_result.get("leaderReportMessageId"))
-        leader_report_status = "ready" if leader_report_message_id else "pending" if leader_report_run_id else ""
+        leader_report_status = _team_mission_leader_report_status(
+            active_result,
+            _text(active_mission.get("status")),
+        )
         deliverable_projection = self._team_mission_conversation_deliverable_projection(conversation, missions)
         deliverables_by_mission = deliverable_projection.get("final_deliverables_by_mission") or {}
         deliverables_by_task = deliverable_projection.get("final_deliverables_by_task") or {}
@@ -1428,7 +1453,7 @@ class SessionDBTeamMissionConversationMixin:
             mission_leader_report_run_id = _text(mission_result.get("leader_report_run_id") or mission_result.get("leaderReportRunId"))
             mission_leader_report_message_id = _text(mission_result.get("leader_report_message_id") or mission_result.get("leaderReportMessageId"))
             if mission_result:
-                report_status = "ready" if mission_leader_report_message_id else "pending" if mission_leader_report_run_id else ""
+                report_status = _team_mission_leader_report_status(mission_result, mission_status)
                 frame.update({
                     "missionResult": mission_result,
                     "mission_result": mission_result,
