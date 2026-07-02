@@ -1630,6 +1630,24 @@ class SessionDBRunMixin:
                         seq,
                         exc,
                     )
+            if event_type == "artifact.created" and not ignored_after_terminal and inserted_row is not None:
+                try:
+                    from hermes_team_mission.runtime.team_transcript_writer import RuntimeTranscriptWriter
+
+                    RuntimeTranscriptWriter.merge_artifact_event_into_projected_message_locked(
+                        self,
+                        conn,
+                        session_id=stable,
+                        event=inserted_event,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "team transcript artifact merge skipped for %s/%s/%s: %s",
+                        stable,
+                        run_id,
+                        seq,
+                        exc,
+                    )
             if not ignored_after_terminal:
                 projector = getattr(self, "_project_timeline_block_event_locked", None)
                 if callable(projector):

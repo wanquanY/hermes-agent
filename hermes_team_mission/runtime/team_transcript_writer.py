@@ -50,6 +50,12 @@ def _json_loads(value: Any, fallback: Any) -> Any:
         return fallback
 
 
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
 def _row_value(row: Any, key: str, default: Any = None) -> Any:
     if row is None:
         return default
@@ -93,6 +99,126 @@ def _mission_report_artifact_cards(artifact_refs: list[dict[str, Any]]) -> list[
         if _text(card.get("path")):
             cards.append(card)
     return dedupe_artifact_refs(cards)
+
+
+def _run_artifact_cards_locked(
+    conn: Any,
+    *,
+    session_id: str,
+    run_id: str,
+    turn_id: str = "",
+) -> list[dict[str, Any]]:
+    session_id = _text(session_id)
+    run_id = _text(run_id)
+    turn_id = _text(turn_id)
+    if not session_id or not run_id:
+        return []
+    if turn_id:
+        params = (session_id, run_id, turn_id)
+        turn_filter = "AND (turn_id = ? OR COALESCE(turn_id, '') = '')"
+    else:
+        params = (session_id, run_id)
+        turn_filter = ""
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT event_json
+            FROM run_events
+            WHERE session_id = ?
+              AND run_id = ?
+              AND event_type = 'artifact.created'
+              {turn_filter}
+            ORDER BY seq, id
+            """,
+            params,
+        ).fetchall()
+    except Exception:
+        return []
+    cards: list[dict[str, Any]] = []
+    for row in rows:
+        event = _json_loads(_row_value(row, "event_json"), {})
+        if not isinstance(event, dict):
+            continue
+        for ref in artifact_refs_from_event(event):
+            card = _artifact_card(ref)
+            if _text(card.get("path")):
+                cards.append(card)
+    return dedupe_artifact_refs(cards)
+
+
+def _merge_artifact_cards_into_metadata(
+    metadata: dict[str, Any],
+    artifact_cards: list[dict[str, Any]],
+) -> dict[str, Any]:
+    cards = dedupe_artifact_refs([
+        *_dict_list(metadata.get("artifacts")),
+        *artifact_cards,
+    ])
+    if not cards:
+        return metadata
+    metadata = dict(metadata)
+    metadata["artifacts"] = cards
+    team_metadata = _mapping(metadata.get("team_mission") or metadata.get("teamMission"))
+    if team_metadata:
+        team_cards = dedupe_artifact_refs([
+            *_dict_list(team_metadata.get("artifact_refs")),
+            *_dict_list(team_metadata.get("artifactRefs")),
+            *cards,
+        ])
+        team_metadata["artifact_refs"] = team_cards
+        team_metadata["artifactRefs"] = team_cards
+        metadata["team_mission"] = team_metadata
+        metadata["teamMission"] = team_metadata
+    return metadata
+
+
+def _merge_artifact_cards_into_message_locked(
+    conn: Any,
+    *,
+    session_id: str,
+    conversation_message_id: str,
+    artifact_cards: list[dict[str, Any]],
+) -> dict[str, Any]:
+    session_id = _text(session_id)
+    conversation_message_id = _text(conversation_message_id)
+    if not session_id or not conversation_message_id or not artifact_cards:
+        return {}
+    try:
+        row = conn.execute(
+            """
+            SELECT id, metadata_json
+            FROM messages
+            WHERE session_id = ?
+              AND conversation_message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (session_id, conversation_message_id),
+        ).fetchone()
+    except Exception:
+        return {}
+    if row is None:
+        return {}
+    metadata = _json_loads(_row_value(row, "metadata_json"), {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    next_metadata = _merge_artifact_cards_into_metadata(metadata, artifact_cards)
+    previous_signature = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+    next_signature = json.dumps(next_metadata, ensure_ascii=False, sort_keys=True)
+    if next_signature == previous_signature:
+        return {}
+    conn.execute(
+        """
+        UPDATE messages
+           SET metadata_json = ?
+         WHERE id = ?
+        """,
+        (json.dumps(next_metadata, ensure_ascii=False), int(_row_value(row, "id") or 0)),
+    )
+    return {
+        "conversation_message_id": conversation_message_id,
+        "metadata": next_metadata,
+    }
 
 
 def _emit_transcript_writer_diagnostic(stage: str, **fields: Any) -> None:
@@ -705,17 +831,23 @@ class RuntimeTranscriptWriter:
         }
         if activity_id:
             team_metadata["activity_id"] = activity_id
-        artifact_cards: list[dict[str, Any]] = []
+        artifact_cards = _run_artifact_cards_locked(
+            conn,
+            session_id=conversation_session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+        )
         if report_context:
             mission_id = _text(report_context.get("mission_id"))
             result_id = _text(report_context.get("result_id"))
             source_node_id = _text(report_context.get("source_node_id"))
             outcome = _text(report_context.get("outcome"))
-            artifact_cards = [
+            report_artifact_cards = [
                 dict(item)
                 for item in report_context.get("artifact_cards") or []
                 if isinstance(item, dict)
             ]
+            artifact_cards = dedupe_artifact_refs([*artifact_cards, *report_artifact_cards])
             team_metadata.update({
                 "kind": "mission_report",
                 "mission_id": mission_id,
@@ -726,12 +858,12 @@ class RuntimeTranscriptWriter:
                 "sourceNodeId": source_node_id,
                 "outcome": outcome,
             })
-            if artifact_cards:
-                team_metadata["artifact_refs"] = artifact_cards
-                team_metadata["artifactRefs"] = artifact_cards
             if not activity_id and mission_id:
                 activity_id = f"mission-report:{mission_id}"
                 team_metadata["activity_id"] = activity_id
+        if artifact_cards:
+            team_metadata["artifact_refs"] = artifact_cards
+            team_metadata["artifactRefs"] = artifact_cards
         metadata = {
             "source": "team_mission.runtime_event",
             "message_kind": "assistant_reply",
@@ -741,11 +873,11 @@ class RuntimeTranscriptWriter:
             "transcript_activity_kind": transcript_activity_kind,
             "team_mission": team_metadata,
         }
+        if artifact_cards:
+            metadata["artifacts"] = artifact_cards
         if report_context:
             metadata["kind"] = "mission_report"
             metadata["source"] = "team_mission.leader_report_run"
-            if artifact_cards:
-                metadata["artifacts"] = artifact_cards
         if activity_id:
             metadata["activity_id"] = activity_id
         if client_message_id:
@@ -798,6 +930,83 @@ class RuntimeTranscriptWriter:
             message=_message_diagnostic_summary(saved),
         )
         return saved
+
+    @staticmethod
+    def merge_artifact_event_into_projected_message_locked(
+        _db: Any,
+        conn: Any,
+        *,
+        session_id: str,
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(event, dict) or _text(event.get("type")) != "artifact.created":
+            return {}
+        payload = _event_payload(event)
+        run_id = _event_run_id(event, payload)
+        if not run_id:
+            return {}
+        turn_id = _event_turn_id(event, payload)
+        conversation_session_id = _event_conversation_session_id(event, payload, session_id)
+        if not conversation_session_id or conversation_session_id.startswith("team:mission:"):
+            return {}
+        artifact_cards = _run_artifact_cards_locked(
+            conn,
+            session_id=conversation_session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+        )
+        if not artifact_cards:
+            event_cards: list[dict[str, Any]] = []
+            for ref in artifact_refs_from_event(event):
+                card = _artifact_card(ref)
+                if _text(card.get("path")):
+                    event_cards.append(card)
+            artifact_cards = dedupe_artifact_refs(event_cards)
+        if not artifact_cards:
+            return {}
+        params: tuple[Any, ...]
+        if turn_id:
+            turn_filter = "AND turn_id = ?"
+            params = (conversation_session_id, run_id, turn_id)
+        else:
+            turn_filter = ""
+            params = (conversation_session_id, run_id)
+        try:
+            row = conn.execute(
+                f"""
+                SELECT projected_message_id
+                FROM run_events
+                WHERE session_id = ?
+                  AND run_id = ?
+                  AND event_type = 'message.complete'
+                  AND COALESCE(projected_message_id, '') != ''
+                  {turn_filter}
+                ORDER BY seq DESC, id DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        except Exception:
+            return {}
+        conversation_message_id = _text(_row_value(row, "projected_message_id"))
+        if not conversation_message_id:
+            return {}
+        merged = _merge_artifact_cards_into_message_locked(
+            conn,
+            session_id=conversation_session_id,
+            conversation_message_id=conversation_message_id,
+            artifact_cards=artifact_cards,
+        )
+        if merged:
+            _emit_transcript_writer_diagnostic(
+                "runtime-artifact-merged-into-message",
+                conversation_session_id=conversation_session_id,
+                run_id=run_id,
+                turn_id=turn_id,
+                conversation_message_id=conversation_message_id,
+                artifact_count=len(artifact_cards),
+            )
+        return merged
 
 
 def backfill_unprojected_message_complete_events_locked(
@@ -859,6 +1068,77 @@ def backfill_unprojected_message_complete_events_locked(
             (conversation_message_id, int(_row_value(row, "id") or 0)),
         )
         repaired += 1
+    return repaired
+
+
+def backfill_projected_message_artifacts_locked(
+    _db: Any,
+    conn: Any,
+    *,
+    session_ids: list[str],
+    limit: int = 500,
+) -> int:
+    target_session_ids = [
+        _text(session_id)
+        for session_id in session_ids
+        if _text(session_id)
+    ]
+    if not target_session_ids:
+        return 0
+    bounded_limit = max(1, min(int(limit or 500), 1000))
+    placeholders = ",".join("?" for _ in target_session_ids)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT message_event.session_id,
+                   message_event.run_id,
+                   message_event.turn_id,
+                   message_event.projected_message_id
+            FROM run_events AS message_event
+            WHERE message_event.session_id IN ({placeholders})
+              AND message_event.event_type = 'message.complete'
+              AND COALESCE(message_event.projected_message_id, '') != ''
+              AND EXISTS (
+                  SELECT 1
+                    FROM run_events AS artifact_event
+                   WHERE artifact_event.session_id = message_event.session_id
+                     AND artifact_event.run_id = message_event.run_id
+                     AND artifact_event.event_type = 'artifact.created'
+                     AND (
+                         COALESCE(message_event.turn_id, '') = ''
+                         OR COALESCE(artifact_event.turn_id, '') = ''
+                         OR artifact_event.turn_id = message_event.turn_id
+                     )
+              )
+            ORDER BY message_event.seq DESC, message_event.id DESC
+            LIMIT ?
+            """,
+            (*target_session_ids, bounded_limit),
+        ).fetchall()
+    except Exception:
+        return 0
+    repaired = 0
+    for row in rows:
+        session_id = _text(_row_value(row, "session_id"))
+        run_id = _text(_row_value(row, "run_id"))
+        turn_id = _text(_row_value(row, "turn_id"))
+        conversation_message_id = _text(_row_value(row, "projected_message_id"))
+        artifact_cards = _run_artifact_cards_locked(
+            conn,
+            session_id=session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+        )
+        if not artifact_cards:
+            continue
+        merged = _merge_artifact_cards_into_message_locked(
+            conn,
+            session_id=session_id,
+            conversation_message_id=conversation_message_id,
+            artifact_cards=artifact_cards,
+        )
+        if merged:
+            repaired += 1
     return repaired
 
 

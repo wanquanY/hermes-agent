@@ -4531,17 +4531,24 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             return 0
         try:
             from hermes_team_mission.runtime.team_transcript_writer import (
+                backfill_projected_message_artifacts_locked,
                 backfill_unprojected_message_complete_events_locked,
             )
         except Exception:
             return 0
 
         def _do(conn: sqlite3.Connection) -> int:
-            return backfill_unprojected_message_complete_events_locked(
+            projected = backfill_unprojected_message_complete_events_locked(
                 self,
                 conn,
                 session_ids=target_session_ids,
             )
+            artifacts = backfill_projected_message_artifacts_locked(
+                self,
+                conn,
+                session_ids=target_session_ids,
+            )
+            return projected + artifacts
 
         try:
             return int(self._execute_write(_do) or 0)

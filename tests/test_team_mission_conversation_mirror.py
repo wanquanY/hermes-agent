@@ -1195,6 +1195,149 @@ def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp
     assert row["projection_state"] == "projected"
 
 
+def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_path: Path):
+    from hermes_state import SessionDB
+    from hermes_state_participants import leader_participant_id
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    conversation_id = "team-conversation-artifacts"
+    session_id = f"team-session-{conversation_id}"
+    activity_id = f"chat:{session_id}"
+    participant_id = leader_participant_id(conversation_id)
+    run_id = "team-leader-run-artifacts"
+    turn_id = "team-leader-turn-artifacts"
+
+    db.create_session(session_id, source="team_mission", transient=False)
+    db.upsert_team_mission_conversation(
+        conversation_id=conversation_id,
+        stable_session_id=session_id,
+        team_id="team-1",
+        title="团队会话",
+    )
+
+    run_control.record_event(
+        {
+            "type": "artifact.created",
+            "session_id": "runtime-leader-artifacts",
+            "stored_session_id": session_id,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "runtime_scope_key": "profile:leader",
+            "activity_id": activity_id,
+            "participant_id": participant_id,
+            "seq": 6,
+            "payload": {
+                "id": "artifact-report",
+                "path": "/tmp/workspace/report.md",
+                "title": "report.md",
+                "mime_type": "text/markdown",
+                "size_bytes": 128,
+            },
+        },
+        db=db,
+    )
+    run_control.record_event(
+        {
+            "type": "message.complete",
+            "session_id": "runtime-leader-artifacts",
+            "stored_session_id": session_id,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "runtime_scope_key": "profile:leader",
+            "activity_id": activity_id,
+            "participant_id": participant_id,
+            "seq": 7,
+            "payload": {
+                "text": "Created report.md",
+                "status": "complete",
+                "message_seq_in_run": 1,
+                "activity_id": activity_id,
+                "participant_id": participant_id,
+            },
+        },
+        db=db,
+    )
+
+    [message] = db.get_messages(session_id)
+    assert message["content"] == "Created report.md"
+    assert message["metadata"]["artifacts"][0]["path"] == "/tmp/workspace/report.md"
+    assert message["metadata"]["artifacts"][0]["mimeType"] == "text/markdown"
+    assert message["metadata"]["team_mission"]["artifactRefs"][0]["path"] == "/tmp/workspace/report.md"
+
+
+def test_late_artifact_event_merges_into_projected_leader_chat_message(tmp_path: Path):
+    from hermes_state import SessionDB
+    from hermes_state_participants import leader_participant_id
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    conversation_id = "team-conversation-late-artifact"
+    session_id = f"team-session-{conversation_id}"
+    activity_id = f"chat:{session_id}"
+    participant_id = leader_participant_id(conversation_id)
+    run_id = "team-leader-run-late-artifact"
+    turn_id = "team-leader-turn-late-artifact"
+
+    db.create_session(session_id, source="team_mission", transient=False)
+    db.upsert_team_mission_conversation(
+        conversation_id=conversation_id,
+        stable_session_id=session_id,
+        team_id="team-1",
+        title="团队会话",
+    )
+
+    run_control.record_event(
+        {
+            "type": "message.complete",
+            "session_id": "runtime-leader-late-artifact",
+            "stored_session_id": session_id,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "runtime_scope_key": "profile:leader",
+            "activity_id": activity_id,
+            "participant_id": participant_id,
+            "seq": 7,
+            "payload": {
+                "text": "Created report.md",
+                "status": "complete",
+                "message_seq_in_run": 1,
+                "activity_id": activity_id,
+                "participant_id": participant_id,
+            },
+        },
+        db=db,
+    )
+    [message_before] = db.get_messages(session_id)
+    assert "artifacts" not in message_before["metadata"]
+
+    run_control.record_event(
+        {
+            "type": "artifact.created",
+            "session_id": "runtime-leader-late-artifact",
+            "stored_session_id": session_id,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "runtime_scope_key": "profile:leader",
+            "activity_id": activity_id,
+            "participant_id": participant_id,
+            "seq": 8,
+            "payload": {
+                "id": "artifact-report",
+                "path": "/tmp/workspace/report.md",
+                "title": "report.md",
+                "mime_type": "text/markdown",
+                "size_bytes": 128,
+            },
+        },
+        db=db,
+    )
+
+    [message_after] = db.get_messages(session_id)
+    assert message_after["metadata"]["artifacts"][0]["path"] == "/tmp/workspace/report.md"
+    assert message_after["metadata"]["team_mission"]["artifactRefs"][0]["path"] == "/tmp/workspace/report.md"
+
+
 def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path: Path):
     import json
 
@@ -1290,3 +1433,111 @@ def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path
     ).fetchone()
     assert row["projected_message_id"] == messages[0]["conversation_message_id"]
     assert row["projection_state"] == "projected"
+
+
+def test_team_conversation_read_model_backfills_projected_leader_artifacts(tmp_path: Path):
+    import json
+
+    from hermes_state import SessionDB
+    from hermes_state_participants import leader_participant_id
+    from tui_gateway.services import run_control
+
+    db = SessionDB(tmp_path / "state.db")
+    conversation_id = "team-conversation-projected-artifact-backfill"
+    session_id = f"team-session-{conversation_id}"
+    activity_id = f"chat:{session_id}"
+    participant_id = leader_participant_id(conversation_id)
+    run_id = "team-leader-run-projected-artifact-backfill"
+    turn_id = "team-leader-turn-projected-artifact-backfill"
+
+    db.create_session(session_id, source="team_mission", transient=False)
+    db.upsert_team_mission_conversation(
+        conversation_id=conversation_id,
+        stable_session_id=session_id,
+        team_id="team-1",
+        title="团队会话",
+    )
+
+    run_control.record_event(
+        {
+            "type": "artifact.created",
+            "session_id": "runtime-leader-projected-artifact-backfill",
+            "stored_session_id": session_id,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "runtime_scope_key": "profile:leader",
+            "activity_id": activity_id,
+            "participant_id": participant_id,
+            "seq": 2,
+            "payload": {
+                "id": "artifact-json",
+                "path": "/tmp/workspace/test_file_3.json",
+                "title": "test_file_3.json",
+                "mime_type": "application/json",
+                "size_bytes": 130,
+            },
+        },
+        db=db,
+    )
+    run_control.record_event(
+        {
+            "type": "message.complete",
+            "session_id": "runtime-leader-projected-artifact-backfill",
+            "stored_session_id": session_id,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "runtime_scope_key": "profile:leader",
+            "activity_id": activity_id,
+            "participant_id": participant_id,
+            "seq": 3,
+            "payload": {
+                "text": "已创建 1 个文件。",
+                "status": "complete",
+                "message_seq_in_run": 1,
+                "activity_id": activity_id,
+                "participant_id": participant_id,
+            },
+        },
+        db=db,
+    )
+
+    [projected_message] = db.get_messages(session_id)
+    assert projected_message["metadata"]["artifacts"][0]["path"] == "/tmp/workspace/test_file_3.json"
+
+    def strip_persisted_artifacts(conn):
+        row = conn.execute(
+            """
+            SELECT id, metadata_json
+            FROM messages
+            WHERE session_id = ?
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+        metadata = json.loads(row["metadata_json"])
+        metadata.pop("artifacts", None)
+        team_metadata = dict(metadata["team_mission"])
+        team_metadata.pop("artifact_refs", None)
+        team_metadata.pop("artifactRefs", None)
+        metadata["team_mission"] = team_metadata
+        conn.execute(
+            "UPDATE messages SET metadata_json = ? WHERE id = ?",
+            (json.dumps(metadata, ensure_ascii=False), row["id"]),
+        )
+
+    db._execute_write(strip_persisted_artifacts)  # noqa: SLF001 - regression seeds a legacy projected row.
+    [legacy_message] = db.get_messages(session_id)
+    assert "artifacts" not in legacy_message["metadata"]
+    assert "artifactRefs" not in legacy_message["metadata"]["team_mission"]
+
+    messages = db.get_conversation_message_read_model(
+        session_id,
+        include_storage_metadata=True,
+    )
+
+    assert messages[0]["metadata"]["artifacts"][0]["path"] == "/tmp/workspace/test_file_3.json"
+    assert messages[0]["metadata"]["artifacts"][0]["mimeType"] == "application/json"
+    assert (
+        messages[0]["metadata"]["team_mission"]["artifactRefs"][0]["path"]
+        == "/tmp/workspace/test_file_3.json"
+    )
