@@ -6699,3 +6699,49 @@ def test_recall_turn_path_A_leader_direct_cancels_leader_run(monkeypatch, tmp_pa
         "stored_session_id": "team-session-1",
         "reason": "Recalled by user.",
     }]
+
+
+def test_leader_turn_for_this_submit_forces_per_submission_identity():
+    # Regression (2026-07-02 real-device log): run.submit answered a queued
+    # leader prompt with the still-open member turn's descriptor; the desktop
+    # reconciled its optimistic leader run against that already-terminal
+    # member run and instantly settled (瞬间完成, no live output).
+    from hermes_team_mission.gateway.runtime_methods import _leader_turn_for_this_submit
+
+    stale_member_result = {
+        "run_id": "team-member-run-c1319601-c40a-4e81-afee-86946d595946",
+        "turn_id": "team-member-turn-38d5523b-0308-47fa-be33-ed7b7dda8d32",
+        "session_id": "member-runtime-session-1",
+        "runtime_scope_key": "member-chat:team-conversation-ea11b9d6:2ab899df",
+        "status": "streaming",
+    }
+    leader_turn = _leader_turn_for_this_submit(
+        stale_member_result,
+        run_id="team-leader-run-fef9fb80-6941-4e2d-ab29-821799d48477",
+        turn_id="team-leader-turn-9e654e48-0000-4000-8000-000000000000",
+        conversation_session_id="team-session-team-conversation-ea11b9d6",
+        runtime_scope_key="team:team-conversation-ea11b9d6:leader-conversation",
+    )
+    assert leader_turn["run_id"] == "team-leader-run-fef9fb80-6941-4e2d-ab29-821799d48477"
+    assert leader_turn["turn_id"] == "team-leader-turn-9e654e48-0000-4000-8000-000000000000"
+    assert leader_turn["stored_session_id"] == "team-session-team-conversation-ea11b9d6"
+    assert leader_turn["runtime_scope_key"] == "team:team-conversation-ea11b9d6:leader-conversation"
+    # The foreign member turn's runtime session must not leak onto this submit.
+    assert leader_turn["session_id"] == "team-session-team-conversation-ea11b9d6"
+    assert leader_turn.get("status") != "streaming"
+
+    # Matching worker result keeps its extras but identity stays canonical.
+    matching_result = {
+        "run_id": "team-leader-run-fef9fb80-6941-4e2d-ab29-821799d48477",
+        "session_id": "leader-runtime-session-9",
+        "status": "streaming",
+    }
+    leader_turn = _leader_turn_for_this_submit(
+        matching_result,
+        run_id="team-leader-run-fef9fb80-6941-4e2d-ab29-821799d48477",
+        turn_id="team-leader-turn-9e654e48-0000-4000-8000-000000000000",
+        conversation_session_id="team-session-team-conversation-ea11b9d6",
+        runtime_scope_key="team:team-conversation-ea11b9d6:leader-conversation",
+    )
+    assert leader_turn["session_id"] == "leader-runtime-session-9"
+    assert leader_turn["status"] == "streaming"

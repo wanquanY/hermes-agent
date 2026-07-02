@@ -947,6 +947,13 @@ def _(rid, params: dict) -> dict:
             attachments=submitted_attachments,
         )
     ensure_team_leader_message_run_state(db, run_id=run_id, session_id=conversation_session_id, runtime_scope_key=runtime_scope_key, result=result)
+    leader_turn = _leader_turn_for_this_submit(
+        result,
+        run_id=run_id,
+        turn_id=turn_id,
+        conversation_session_id=conversation_session_id,
+        runtime_scope_key=runtime_scope_key,
+    )
     return _ok(
         rid,
         {
@@ -955,12 +962,47 @@ def _(rid, params: dict) -> dict:
             "conversation_id": conversation_id,
             "conversation_session_id": conversation_session_id,
             "conversation": conversation,
-            "leader_turn": result or {},
+            "leader_turn": leader_turn,
             "leader_runtime_context": leader_runtime_context,
             "leaderRuntimeContext": leader_runtime_context,
             "graph": db.get_team_mission_graph(mission_id) if mission_id else graph,
         },
     )
+
+
+def _leader_turn_for_this_submit(
+    result: dict | None,
+    *,
+    run_id: str,
+    turn_id: str,
+    conversation_session_id: str,
+    runtime_scope_key: str,
+) -> dict:
+    """Build the leader_turn descriptor for THIS submission.
+
+    run.submit may answer with the session's currently-streaming turn (e.g. a
+    still-open member-chat turn when the leader prompt gets queued behind it).
+    The submit reply contract is per-submission identity: the client keys its
+    optimistic run reconciliation on these fields, so echoing another turn's
+    run_id/turn_id makes the desktop settle the fresh leader run against an
+    already-terminal run (instant-complete regression, 2026-07-02 real-device
+    log). Force the identity fields; keep worker-result extras only when they
+    describe this run.
+    """
+    worker_result = dict(result) if isinstance(result, dict) else {}
+    worker_run_id = str(worker_result.get("run_id") or "").strip()
+    if worker_run_id and worker_run_id != run_id:
+        # Foreign turn descriptor — its session/runtime fields belong to the
+        # other run; drop them instead of leaking them onto this submission.
+        worker_result = {}
+    return {
+        **worker_result,
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "stored_session_id": conversation_session_id,
+        "session_id": worker_result.get("session_id") or conversation_session_id,
+        "runtime_scope_key": runtime_scope_key,
+    }
 
 
 @method("team_mission.graph")
