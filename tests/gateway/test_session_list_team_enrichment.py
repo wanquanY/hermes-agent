@@ -5,6 +5,7 @@ from pathlib import Path
 
 from hermes_state import SessionDB
 from tui_gateway import server
+from tui_gateway.services.workspace import bind_session_workspace
 
 
 def _setup(monkeypatch, tmp_path: Path) -> SessionDB:
@@ -138,3 +139,82 @@ def test_session_index_list_also_enriched_for_consistency(monkeypatch, tmp_path:
     assert direct_item["team_id"] == ""
     assert direct_item["team_conversation_title"] == ""
     assert direct_item["mission_status"] == ""
+
+
+def test_session_index_list_embeds_workspace_team_context_and_derived_state(
+    monkeypatch,
+    tmp_path: Path,
+):
+    db = _setup(monkeypatch, tmp_path)
+    workspace_path = str(tmp_path)
+    db.upsert_team_mission(
+        mission_id="mission-index-contract",
+        conversation_id="conversation-index-contract",
+        team_id="team-index-contract",
+        title="Mission",
+        mode="supervised_mission",
+        status="running",
+    )
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-index-contract",
+        stable_session_id="team-session-index-contract",
+        team_id="team-index-contract",
+        title="Indexed Team",
+        active_mission_id="mission-index-contract",
+        workspace_id="workspace-index-contract",
+        workspace_path=workspace_path,
+        created_at=100,
+        updated_at=200,
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-index-contract",
+        node_id="approval",
+        kind="approval_gate",
+        title="Approve",
+        status="waiting_approval",
+    )
+    db.upsert_session_index(
+        session_id="plain-session-index-contract",
+        title="Plain",
+        source="cli",
+        conversation_kind="direct",
+        started_at=50,
+        updated_at=50,
+    )
+    bind_session_workspace(
+        session_id="team-session-index-contract",
+        cwd=workspace_path,
+        workspace={
+            "id": "workspace-index-contract",
+            "name": "Workspace",
+            "path": workspace_path,
+            "kind": "local",
+        },
+    )
+
+    by_id = {item["id"]: item for item in _session_index_list()}
+    team_item = by_id["team-session-index-contract"]
+    plain_item = by_id["plain-session-index-contract"]
+
+    assert team_item["workspace_binding"] == {
+        "workspace_id": "workspace-index-contract",
+        "workspace_path": workspace_path,
+    }
+    assert team_item["team_context"] == {
+        "team_id": "team-index-contract",
+        "team_conversation_id": "conversation-index-contract",
+        "mission_id": "mission-index-contract",
+        "member_id": "",
+    }
+    assert team_item["derived_state"] == {
+        "running": False,
+        "waiting_approval": True,
+        "terminal_status": None,
+    }
+    assert plain_item["workspace_binding"] is None
+    assert plain_item["team_context"] is None
+    assert plain_item["derived_state"] == {
+        "running": False,
+        "waiting_approval": False,
+        "terminal_status": None,
+    }

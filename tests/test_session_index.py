@@ -32,6 +32,146 @@ def test_upsert_and_list_roundtrip(tmp_path: Path):
     assert item["active_run_id"] == "run-1"
 
 
+def test_session_index_aggregation_plain_session_has_null_context(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_session_index(
+        session_id="plain-session",
+        source="cli",
+        conversation_kind="direct",
+        title="Plain",
+        started_at=1.0,
+        updated_at=1.0,
+    )
+
+    item = db.list_session_index()["sessions"][0]
+
+    assert item["team_context"] is None
+    assert item["derived_state"] == {
+        "running": False,
+        "waiting_approval": False,
+        "terminal_status": None,
+    }
+
+
+def test_session_index_aggregation_team_context_from_mission_tables(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        conversation_id="conversation-1",
+        team_id="team-1",
+        title="Mission",
+        mode="supervised_mission",
+        status="running",
+    )
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        team_id="team-1",
+        stable_session_id="team-session-1",
+        title="Team",
+        active_mission_id="mission-1",
+        created_at=1.0,
+        updated_at=2.0,
+    )
+
+    item = db.list_session_index()["sessions"][0]
+
+    assert item["team_context"] == {
+        "team_id": "team-1",
+        "team_conversation_id": "conversation-1",
+        "mission_id": "mission-1",
+        "member_id": "",
+    }
+    assert item["derived_state"] == {
+        "running": True,
+        "waiting_approval": False,
+        "terminal_status": None,
+    }
+
+
+def test_session_index_aggregation_member_context_from_participants(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-member",
+        conversation_id="conversation-member",
+        team_id="team-member",
+        title="Mission",
+        mode="supervised_mission",
+        status="running",
+    )
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-member",
+        team_id="team-member",
+        stable_session_id="team-session-member",
+        title="Team",
+        active_mission_id="mission-member",
+        created_at=1.0,
+        updated_at=2.0,
+    )
+    db.upsert_conversation_participant(
+        conversation_session_id="team-session-member",
+        participant_id="member:m-alice",
+        role="member",
+        member_id="m-alice",
+        runtime_scope_key="member-chat:conversation-member:m-alice",
+    )
+    db.upsert_session_index(
+        session_id="member-session",
+        source="team_mission",
+        session_kind="team_mission",
+        conversation_kind="team",
+        team_id="team-member",
+        mission_id="mission-member",
+        conversation_id="conversation-member",
+        runtime_scope_key="member-chat:conversation-member:m-alice",
+        title="Member",
+        started_at=3.0,
+        updated_at=3.0,
+    )
+
+    by_id = {item["session_id"]: item for item in db.list_session_index()["sessions"]}
+
+    assert by_id["member-session"]["team_context"] == {
+        "team_id": "team-member",
+        "team_conversation_id": "conversation-member",
+        "mission_id": "mission-member",
+        "member_id": "m-alice",
+    }
+
+
+def test_session_index_aggregation_waiting_approval_from_pending_gate(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-approval",
+        conversation_id="conversation-approval",
+        team_id="team-approval",
+        title="Mission",
+        mode="supervised_mission",
+        status="running",
+    )
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-approval",
+        team_id="team-approval",
+        stable_session_id="team-session-approval",
+        title="Team",
+        active_mission_id="mission-approval",
+        created_at=1.0,
+        updated_at=2.0,
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-approval",
+        node_id="approval",
+        kind="approval_gate",
+        title="Approve",
+        status="waiting_approval",
+    )
+
+    item = db.list_session_index()["sessions"][0]
+
+    assert item["waiting_approval"] is False
+    assert item["derived_state"]["waiting_approval"] is True
+    assert item["derived_state"]["running"] is False
+
+
 def test_upsert_is_idempotent_by_id(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_session_index(session_id="s1", title="v1", started_at=1.0, updated_at=1.0)

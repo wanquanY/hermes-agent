@@ -233,6 +233,28 @@ class GatewayStateStore:
             ).fetchall()
         return [self._session_workspace_row_to_payload(row) for row in rows]
 
+    def list_session_workspaces_by_ids(self, session_ids: list[str]) -> list[dict[str, Any]]:
+        normalized = [str(session_id or "").strip() for session_id in session_ids]
+        normalized = [session_id for session_id in dict.fromkeys(normalized) if session_id]
+        if not normalized:
+            return []
+        placeholders = ",".join("?" for _ in normalized)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT sw.session_id, sw.cwd, sw.metadata_json,
+                       sw.created_at AS binding_created_at,
+                       sw.updated_at AS binding_updated_at,
+                       sw.workspace_id AS id,
+                       w.name, w.path, w.kind, w.created_at, w.updated_at
+                FROM gateway_session_workspaces sw
+                JOIN gateway_workspaces w ON w.id = sw.workspace_id
+                WHERE sw.session_id IN ({placeholders})
+                """,
+                tuple(normalized),
+            ).fetchall()
+        return [self._session_workspace_row_to_payload(row) for row in rows]
+
     def delete_session_workspaces(self, session_ids: list[str]) -> list[dict[str, Any]]:
         normalized = [str(session_id or "").strip() for session_id in session_ids]
         normalized = [session_id for session_id in dict.fromkeys(normalized) if session_id]

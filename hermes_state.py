@@ -3295,8 +3295,12 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
     @staticmethod
     def _session_index_row_to_item(row: sqlite3.Row) -> Dict[str, Any]:
         item = {key: row[key] for key in row.keys()}
-        for flag in ("transient", "running", "waiting_approval"):
-            item[flag] = bool(item.get(flag))
+        for flag in (
+            "transient", "running", "waiting_approval",
+            "derived_running", "derived_waiting_approval",
+        ):
+            if flag in item:
+                item[flag] = bool(item.get(flag))
         for count_field in ("active_activity_count", "unread_completion_count"):
             item[count_field] = int(item.get(count_field) or 0)
         if (
@@ -3306,6 +3310,22 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         ):
             item["running"] = bool(item.get("conversation_has_active_mission"))
         item.pop("conversation_has_active_mission", None)
+        team_context = {
+            "team_id": str(item.get("team_context_team_id") or ""),
+            "team_conversation_id": str(item.get("team_context_conversation_id") or ""),
+            "mission_id": str(item.get("team_context_mission_id") or ""),
+            "member_id": str(item.get("team_context_member_id") or ""),
+        }
+        item["team_context"] = (
+            team_context
+            if any(team_context.values()) or item.get("conversation_kind") == "team"
+            else None
+        )
+        item["derived_state"] = {
+            "running": bool(item.get("derived_running")),
+            "waiting_approval": bool(item.get("derived_waiting_approval")),
+            "terminal_status": item.get("derived_terminal_status") or None,
+        }
         item["_page_cursor"] = {
             "updated_at": row["updated_at"],
             "started_at": row["started_at"],
@@ -3497,7 +3517,40 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         # and the mergeSidebarSessionsById heuristic. LEFT JOINs so plain chat
         # rows (no team_id) are unaffected.
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        waiting_expr = (
+            "(COALESCE(si.waiting_approval, 0) != 0 "
+            "OR COALESCE(si.pending_approval_count, 0) > 0 "
+            "OR COALESCE(team_pending_approvals.pending_approval_count, 0) > 0 "
+            "OR LOWER(COALESCE(am.mission_runtime_status, '')) = 'waiting_approval')"
+        )
+        terminal_expr = (
+            "LOWER(COALESCE(NULLIF(am.mission_runtime_status, ''), NULLIF(si.status, ''), ''))"
+        )
         sql = (
+            "WITH active_missions_ranked AS ("
+            "    SELECT cm.conversation_id, cm.mission_id, cm.status AS link_status, "
+            "           tm.team_id, tm.status AS mission_runtime_status, "
+            "           ROW_NUMBER() OVER ("
+            "               PARTITION BY cm.conversation_id "
+            "               ORDER BY cm.updated_at DESC, cm.added_at DESC, cm.mission_id DESC"
+            "           ) AS rn "
+            "      FROM conversation_missions cm "
+            "      LEFT JOIN team_missions tm ON tm.mission_id = cm.mission_id "
+            "     WHERE cm.status = 'active'"
+            "), active_missions AS ("
+            "    SELECT conversation_id, mission_id, link_status, team_id, mission_runtime_status "
+            "      FROM active_missions_ranked "
+            "     WHERE rn = 1"
+            "), team_pending_approvals AS ("
+            "    SELECT tm.conversation_id AS conversation_id, COUNT(*) AS pending_approval_count "
+            "      FROM team_mission_nodes n "
+            "      JOIN team_missions tm ON tm.mission_id = n.mission_id "
+            "     WHERE LOWER(COALESCE(n.kind, '')) = 'approval_gate' "
+            "       AND LOWER(COALESCE(n.status, '')) = 'waiting_approval' "
+            "       AND LOWER(COALESCE(tm.status, '')) NOT IN "
+            "           ('completed','failed','cancelled','canceled','interrupted','draft','idle') "
+            "     GROUP BY tm.conversation_id"
+            ") "
             "SELECT si.*, "
             "       at.name AS team_name, "
             "       at.avatar_json AS team_avatar_json, "
@@ -3514,26 +3567,24 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             "       '' AS team_conversation_active_mission_id, "
             "       COUNT(CASE WHEN act.status IN ('pending','running') THEN 1 END) AS active_activity_count, "
             "       COUNT(CASE WHEN act.status IN ('completed','failed') AND act.read_at IS NULL THEN 1 END) AS unread_completion_count, "
-            "       COALESCE(("
-            "           SELECT cm.mission_id FROM conversation_missions cm"
-            "            WHERE cm.conversation_id = si.conversation_id"
-            "              AND cm.status = 'active'"
-            "            ORDER BY cm.updated_at DESC, cm.added_at DESC, cm.mission_id DESC"
-            "            LIMIT 1"
-            "       ), '') AS active_mission_id, "
-            "       ("
-            "           SELECT cm.status FROM conversation_missions cm"
-            "            WHERE cm.conversation_id = si.conversation_id"
-            "              AND cm.status = 'active'"
-            "            ORDER BY cm.updated_at DESC, cm.added_at DESC, cm.mission_id DESC"
-            "            LIMIT 1"
-            "       ) AS mission_status, "
-            "       EXISTS ("
-            "           SELECT 1 FROM conversation_missions cm"
-            "            WHERE cm.conversation_id = si.conversation_id"
-            "              AND cm.status = 'active'"
-            "            LIMIT 1"
-            "       ) AS conversation_has_active_mission "
+            "       COALESCE(am.mission_id, '') AS active_mission_id, "
+            "       am.link_status AS mission_status, "
+            "       CASE WHEN COALESCE(am.mission_id, '') != '' THEN 1 ELSE 0 END AS conversation_has_active_mission, "
+            "       COALESCE(NULLIF(si.team_id, ''), tmc.team_id, am.team_id, '') AS team_context_team_id, "
+            "       COALESCE(NULLIF(si.conversation_id, ''), tmc.conversation_id, am.conversation_id, '') AS team_context_conversation_id, "
+            "       COALESCE(NULLIF(si.mission_id, ''), am.mission_id, '') AS team_context_mission_id, "
+            "       COALESCE(member_participant.member_id, '') AS team_context_member_id, "
+            f"       CASE WHEN {waiting_expr} THEN 0 "
+            "            WHEN si.conversation_kind = 'team' THEN "
+            "                CASE WHEN COALESCE(am.mission_id, '') != '' "
+            "                       AND LOWER(COALESCE(am.mission_runtime_status, '')) NOT IN "
+            "                           ('completed','failed','cancelled','canceled','interrupted','draft','idle') "
+            "                     THEN 1 ELSE 0 END "
+            "            WHEN COALESCE(si.running, 0) != 0 THEN 1 "
+            "            ELSE 0 END AS derived_running, "
+            f"       CASE WHEN {waiting_expr} THEN 1 ELSE 0 END AS derived_waiting_approval, "
+            f"       CASE WHEN {terminal_expr} IN ('completed','failed','cancelled','canceled','interrupted') "
+            f"            THEN {terminal_expr} ELSE NULL END AS derived_terminal_status "
             "  FROM session_index si "
             "  LEFT JOIN agent_teams at ON at.id = si.team_id "
             "  LEFT JOIN agent_profiles ap ON ap.id = at.lead_agent_profile_id "
@@ -3599,6 +3650,14 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             "       GROUP BY ranked.team_id"
             "  ) team_members ON team_members.team_id = si.team_id "
             "  LEFT JOIN team_mission_conversations tmc ON tmc.conversation_id = si.conversation_id "
+            "  LEFT JOIN active_missions am ON am.conversation_id = si.conversation_id "
+            "  LEFT JOIN team_pending_approvals "
+            "    ON team_pending_approvals.conversation_id = si.conversation_id "
+            "  LEFT JOIN conversation_participants member_participant "
+            "    ON member_participant.conversation_session_id = COALESCE(NULLIF(tmc.stable_session_id, ''), NULLIF(si.conversation_id, ''), si.session_id) "
+            "   AND member_participant.runtime_scope_key = si.runtime_scope_key "
+            "   AND member_participant.member_id != '' "
+            "   AND LOWER(COALESCE(member_participant.role, '')) = 'member' "
             "  LEFT JOIN activities act "
             "    ON act.conversation_id = COALESCE(NULLIF(si.conversation_id, ''), si.session_id)"
             + where_sql +

@@ -14,6 +14,7 @@ from tui_gateway.services import run_control
 from tui_gateway.services.workspace import (
     bind_session_workspace as _bind_session_workspace,
     normalize_session_cwd as _normalize_session_cwd,
+    session_workspace_bindings_by_session_ids as _session_workspace_bindings_by_session_ids,
     workspace_for_session as _workspace_for_session,
     workspace_from_params as _workspace_from_params,
 )
@@ -1181,6 +1182,11 @@ def _session_index_list_item(row: dict) -> dict:
         "mission_id": row.get("mission_id") or active_mission_id or "",
         "active_mission_id": active_mission_id,
         "mission_status": row.get("mission_status") or "",
+        "workspace_binding": _session_index_workspace_binding_contract(
+            row.get("workspace_binding")
+        ),
+        "team_context": _session_index_team_context_contract(row),
+        "derived_state": _session_index_derived_state_contract(row),
     }
     if is_team_conversation:
         if active_mission_id:
@@ -1249,6 +1255,91 @@ def _session_index_list_item(row: dict) -> dict:
         if active_mission_id and not item.get("active_mission_id"):
             item["active_mission_id"] = active_mission_id
     return item
+
+
+def _session_index_workspace_binding_contract(binding: object) -> dict | None:
+    if not isinstance(binding, dict):
+        return None
+    workspace_id = str(binding.get("workspace_id") or binding.get("id") or "").strip()
+    workspace_path = str(
+        binding.get("workspace_path")
+        or binding.get("path")
+        or ((binding.get("workspace") or {}).get("path") if isinstance(binding.get("workspace"), dict) else "")
+        or ""
+    ).strip()
+    if not workspace_id and not workspace_path:
+        return None
+    return {
+        "workspace_id": workspace_id,
+        "workspace_path": workspace_path,
+    }
+
+
+def _session_index_team_context_contract(row: dict) -> dict | None:
+    raw_context = row.get("team_context")
+    if isinstance(raw_context, dict):
+        context = {
+            "team_id": str(raw_context.get("team_id") or "").strip(),
+            "team_conversation_id": str(raw_context.get("team_conversation_id") or "").strip(),
+            "mission_id": str(raw_context.get("mission_id") or "").strip(),
+            "member_id": str(raw_context.get("member_id") or "").strip(),
+        }
+    else:
+        context = {
+            "team_id": str(row.get("team_context_team_id") or row.get("team_id") or "").strip(),
+            "team_conversation_id": str(
+                row.get("team_context_conversation_id") or row.get("conversation_id") or ""
+            ).strip(),
+            "mission_id": str(
+                row.get("team_context_mission_id")
+                or row.get("mission_id")
+                or row.get("active_mission_id")
+                or ""
+            ).strip(),
+            "member_id": str(row.get("team_context_member_id") or "").strip(),
+        }
+    return context if any(context.values()) else None
+
+
+def _session_index_derived_state_contract(row: dict) -> dict:
+    raw_state = row.get("derived_state")
+    if isinstance(raw_state, dict):
+        return {
+            "running": bool(raw_state.get("running")),
+            "waiting_approval": bool(raw_state.get("waiting_approval")),
+            "terminal_status": (
+                str(raw_state.get("terminal_status")).strip()
+                if raw_state.get("terminal_status") is not None
+                else None
+            ) or None,
+        }
+    return {
+        "running": bool(row.get("derived_running", row.get("running"))),
+        "waiting_approval": bool(
+            row.get("derived_waiting_approval", row.get("waiting_approval"))
+        ),
+        "terminal_status": (
+            str(row.get("derived_terminal_status")).strip()
+            if row.get("derived_terminal_status") is not None
+            else None
+        ) or None,
+    }
+
+
+def _session_index_workspace_bindings_for_rows(rows: list[dict]) -> dict[str, dict]:
+    session_ids = [
+        str(row.get("session_id") or row.get("id") or "").strip()
+        for row in rows
+        if isinstance(row, dict)
+    ]
+    session_ids = [session_id for session_id in dict.fromkeys(session_ids) if session_id]
+    if not session_ids:
+        return {}
+    try:
+        bindings = _session_workspace_bindings_by_session_ids(session_ids)
+    except Exception:
+        return {}
+    return bindings if isinstance(bindings, dict) else {}
 
 
 def _session_index_row_with_active_mission_running(db, row: dict) -> dict:
@@ -1346,9 +1437,16 @@ def _(rid, params: dict) -> dict:
             for row in rows
             if not _is_hidden_empty_index_draft(row)
         ]
+        workspace_bindings = _session_index_workspace_bindings_for_rows(visible_rows)
+        enriched_rows = []
+        for row in visible_rows:
+            item = dict(row)
+            session_id = str(item.get("session_id") or item.get("id") or "").strip()
+            item["workspace_binding"] = workspace_bindings.get(session_id)
+            enriched_rows.append(item)
         items = [
             sanitize_session_list_item(_session_index_list_item(row))
-            for row in visible_rows
+            for row in enriched_rows
         ]
         page = result.get("pageInfo") or {}
         next_cursor = _encode_page_cursor(page.get("nextCursor")) if page.get("nextCursor") else ""

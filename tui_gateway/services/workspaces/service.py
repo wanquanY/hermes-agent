@@ -235,6 +235,29 @@ def list_session_workspace_bindings(limit: int = 200) -> list[dict[str, Any]]:
     return bindings
 
 
+def session_workspace_bindings_by_session_ids(session_ids: list[str]) -> dict[str, dict[str, Any]]:
+    store = get_gateway_state_store(create_if_missing=False)
+    if store is None:
+        return {}
+    bindings: dict[str, dict[str, Any]] = {}
+    for row in store.list_session_workspaces_by_ids(session_ids):
+        workspace = _workspace_payload_from_row(row)
+        session_id = str(workspace.get("session_id") or "").strip()
+        if not session_id:
+            continue
+        metadata = workspace.get("metadata") if isinstance(workspace.get("metadata"), dict) else {}
+        bindings[session_id] = {
+            "session_id": session_id,
+            "workspace_id": workspace["id"],
+            "workspace_path": workspace["path"],
+            "cwd": workspace.get("cwd") or workspace["path"],
+            "workspace": workspace,
+            "metadata": metadata,
+            **metadata,
+        }
+    return bindings
+
+
 def delete_session_workspace_bindings(session_ids: list[str]) -> list[dict[str, Any]]:
     store = get_gateway_state_store(create_if_missing=False)
     if store is None:
