@@ -16,6 +16,49 @@ def _bridge(events, *, tool_progress_enabled=True, before_tool_boundary=None):
     )
 
 
+def test_tool_complete_emits_deleted_artifact_event(monkeypatch):
+    events = []
+
+    def fake_record_artifacts_from_tool_complete(**_kwargs):
+        return [
+            {
+                "id": "artifact-old",
+                "path": "/tmp/old.md",
+                "relative_path": "old.md",
+                "title": "old.md",
+                "mime_type": "text/markdown",
+                "size_bytes": 12,
+                "workspace": {"id": "workspace-test", "path": "/tmp"},
+                "origin": {
+                    "event": "tool.complete",
+                    "tool_id": "tool-delete",
+                    "tool_name": "patch",
+                    "operation": "deleted",
+                },
+                "operation": "deleted",
+                "availability": "missing",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "tui_gateway.services.tool_events.record_artifacts_from_tool_complete",
+        fake_record_artifacts_from_tool_complete,
+    )
+    bridge = _bridge(events, tool_progress_enabled=False)
+
+    bridge.on_tool_complete(
+        "sid",
+        "tool-delete",
+        "patch",
+        {"mode": "patch"},
+        json.dumps({"success": True, "files_deleted": ["/tmp/old.md"]}),
+    )
+
+    assert [event["type"] for event in events] == ["artifact.deleted"]
+    assert events[0]["payload"]["operation"] == "deleted"
+    assert events[0]["payload"]["origin"]["operation"] == "deleted"
+
+
 def test_agent_profile_test_uses_dedicated_stream_events():
     events = []
     bridge = _bridge(events)

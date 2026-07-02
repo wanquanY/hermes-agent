@@ -5,10 +5,19 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import os
+import time
 from typing import Any
 
 from tui_gateway.services.artifact_registry.domain import ArtifactRecord
-from tui_gateway.services.artifact_registry.extractors import artifact_target_paths
+from tui_gateway.services.artifact_registry.extractors import (
+    ArtifactTarget,
+    artifact_target_changes,
+    artifact_target_paths,
+)
+from tui_gateway.services.artifact_registry.workspace_diff import (
+    WorkspaceArtifactSnapshot,
+    changed_workspace_artifacts,
+)
 from tui_gateway.services.persistence.gateway_store import get_gateway_state_store
 from tui_gateway.services.workspaces import (
     bind_session_workspace,
@@ -35,6 +44,50 @@ def _artifact_id(workspace_id: str, artifact_path: str) -> str:
     return "artifact:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
+def _artifact_kind(mime_type: str) -> str:
+    mime_type = str(mime_type or "").lower()
+    if mime_type.startswith("image/"):
+        return "image"
+    if mime_type.startswith("video/"):
+        return "video"
+    if mime_type.startswith("audio/"):
+        return "audio"
+    if mime_type.startswith("text/") or mime_type in {"application/json", "application/xml"}:
+        return "text"
+    return "file"
+
+
+def _artifact_payload_contract(payload: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(payload)
+    mime_type = str(payload.get("mime_type") or "application/octet-stream")
+    try:
+        size_bytes = int(payload.get("size_bytes") or 0)
+    except (TypeError, ValueError):
+        size_bytes = 0
+    workspace_payload = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
+    payload["workspace"] = dict(workspace_payload)
+    payload["relativePath"] = payload.get("relative_path") or ""
+    payload["mime"] = mime_type
+    payload["mimeType"] = mime_type
+    payload["kind"] = _artifact_kind(mime_type)
+    payload["size"] = size_bytes
+    payload["size_bytes"] = size_bytes
+    payload["sizeBytes"] = size_bytes
+    payload["workspacePayload"] = payload["workspace"]
+    payload["workspace_payload"] = payload["workspace"]
+    origin = payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
+    produced_by_run_id = str(
+        origin.get("run_id")
+        or origin.get("runId")
+        or origin.get("produced_by_run_id")
+        or origin.get("producedByRunId")
+        or ""
+    )
+    payload["produced_by_run_id"] = produced_by_run_id
+    payload["producedByRunId"] = produced_by_run_id
+    return payload
+
+
 def _workspace_payload(workspace: dict[str, Any] | None, cwd: str) -> dict[str, Any]:
     return workspace_from_params({"workspace": dict(workspace or {})}, cwd)
 
@@ -48,18 +101,23 @@ def _artifact_records_from_tool_complete(
     cwd: str,
     workspace: dict[str, Any] | None,
     origin: dict[str, Any] | None = None,
+    workspace_snapshot: WorkspaceArtifactSnapshot | None = None,
 ) -> list[ArtifactRecord]:
     workspace_payload = _workspace_payload(workspace, cwd)
     workspace_path = normalize_session_cwd(workspace_payload["path"])
     records: list[ArtifactRecord] = []
 
-    for raw_path in artifact_target_paths(name, args, result):
-        artifact_path = resolve_artifact_path(raw_path, cwd)
+    terminal_changes = changed_workspace_artifacts(workspace_snapshot)
+    terminal_operations = {change.path: change.operation for change in terminal_changes}
+    target_changes = [
+        ArtifactTarget(path=change.path, operation=change.operation)
+        for change in terminal_changes
+    ] or artifact_target_changes(name, args, result)
+
+    for target in target_changes:
+        artifact_path = resolve_artifact_path(target.path, cwd)
         if not is_path_inside(artifact_path, workspace_path):
             continue
-        if not os.path.isfile(artifact_path):
-            continue
-        stat = os.stat(artifact_path)
         mime_type = mimetypes.guess_type(artifact_path)[0] or "application/octet-stream"
         artifact_origin = {
             "event": "tool.complete",
@@ -67,6 +125,35 @@ def _artifact_records_from_tool_complete(
             "tool_name": name,
             **dict(origin or {}),
         }
+        operation = str(target.operation or "")
+        is_workspace_diff = artifact_path in terminal_operations
+        if operation and (operation == "deleted" or is_workspace_diff):
+            artifact_origin["operation"] = operation
+        if is_workspace_diff:
+            artifact_origin["source"] = "workspace_diff"
+        if operation == "deleted":
+            records.append(
+                ArtifactRecord(
+                    id=_artifact_id(workspace_payload["id"], artifact_path),
+                    workspace_id=workspace_payload["id"],
+                    path=artifact_path,
+                    relative_path=_relative_artifact_path(artifact_path, workspace_path),
+                    title=os.path.basename(artifact_path),
+                    mime_type=mime_type,
+                    size_bytes=0,
+                    workspace=workspace_payload,
+                    origin=artifact_origin,
+                    operation="deleted",
+                )
+            )
+            continue
+        if not os.path.isfile(artifact_path):
+            continue
+        stat = os.stat(artifact_path)
+        operation = terminal_operations.get(artifact_path)
+        if operation:
+            artifact_origin["operation"] = operation
+            artifact_origin["source"] = "workspace_diff"
         records.append(
             ArtifactRecord(
                 id=_artifact_id(workspace_payload["id"], artifact_path),
@@ -84,6 +171,43 @@ def _artifact_records_from_tool_complete(
     return records
 
 
+def _artifact_payload_from_record(record: ArtifactRecord) -> dict[str, Any]:
+    payload = record.to_payload()
+    if record.operation == "deleted":
+        payload = _artifact_payload_contract(payload)
+        payload["availability"] = "missing"
+        now = time.time()
+        payload.setdefault("created_at", now)
+        payload.setdefault("updated_at", now)
+    return payload
+
+
+def artifact_payloads_from_tool_complete(
+    *,
+    tool_call_id: str,
+    name: str,
+    args: dict,
+    result: str,
+    cwd: str,
+    workspace: dict[str, Any] | None,
+    origin: dict[str, Any] | None = None,
+    workspace_snapshot: WorkspaceArtifactSnapshot | None = None,
+) -> list[dict]:
+    return [
+        _artifact_payload_from_record(record)
+        for record in _artifact_records_from_tool_complete(
+            tool_call_id=tool_call_id,
+            name=name,
+            args=args,
+            result=result,
+            cwd=normalize_session_cwd(cwd),
+            workspace=workspace,
+            origin=origin,
+            workspace_snapshot=workspace_snapshot,
+        )
+    ]
+
+
 def artifact_created_payloads_from_tool_complete(
     *,
     tool_call_id: str,
@@ -93,9 +217,10 @@ def artifact_created_payloads_from_tool_complete(
     cwd: str,
     workspace: dict[str, Any] | None,
     origin: dict[str, Any] | None = None,
+    workspace_snapshot: WorkspaceArtifactSnapshot | None = None,
 ) -> list[dict]:
     return [
-        record.to_payload()
+        _artifact_payload_from_record(record)
         for record in _artifact_records_from_tool_complete(
             tool_call_id=tool_call_id,
             name=name,
@@ -104,8 +229,34 @@ def artifact_created_payloads_from_tool_complete(
             cwd=normalize_session_cwd(cwd),
             workspace=workspace,
             origin=origin,
+            workspace_snapshot=workspace_snapshot,
         )
+        if record.operation != "deleted"
     ]
+
+
+def _deleted_artifact_payload(
+    *,
+    store,
+    session_id: str,
+    record: ArtifactRecord,
+) -> dict[str, Any]:
+    base_payload = _artifact_payload_from_record(record)
+    deleted = store.delete_artifact(
+        session_id=session_id,
+        artifact_id=record.id,
+        path=record.path,
+        workspace_id=record.workspace_id,
+    )
+    existing = deleted.get("artifact") if isinstance(deleted, dict) else None
+    if isinstance(existing, dict) and existing:
+        payload = dict(existing)
+        payload["origin"] = dict(record.origin)
+        payload["operation"] = "deleted"
+        payload["availability"] = "missing"
+        payload["updated_at"] = time.time()
+        return _artifact_payload_contract(payload)
+    return base_payload
 
 
 def record_artifacts_from_tool_complete(
@@ -118,6 +269,7 @@ def record_artifacts_from_tool_complete(
     cwd: str,
     workspace: dict[str, Any] | None,
     origin: dict[str, Any] | None = None,
+    workspace_snapshot: WorkspaceArtifactSnapshot | None = None,
 ) -> list[dict]:
     cwd = normalize_session_cwd(cwd)
     workspace_payload = _workspace_payload(workspace, cwd)
@@ -136,7 +288,17 @@ def record_artifacts_from_tool_complete(
         cwd=cwd,
         workspace=persisted_workspace,
         origin=origin,
+        workspace_snapshot=workspace_snapshot,
     ):
+        if record.operation == "deleted":
+            payloads.append(
+                _deleted_artifact_payload(
+                    store=store,
+                    session_id=session_id,
+                    record=record,
+                )
+            )
+            continue
         persisted = store.upsert_artifact(
             artifact=record.to_payload(),
             session_id=session_id,

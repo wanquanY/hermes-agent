@@ -2,7 +2,9 @@ import json
 
 from tui_gateway.services.artifacts import (
     artifact_created_payloads_from_tool_complete,
+    artifact_payloads_from_tool_complete,
     artifact_target_paths,
+    capture_workspace_artifact_snapshot,
     delete_session_artifacts,
     list_artifacts,
     prune_artifacts,
@@ -25,6 +27,48 @@ def test_artifact_target_paths_extracts_successful_patch_targets():
         {"mode": "patch", "patch": patch_body},
         json.dumps({"success": True}),
     ) == ["report.md", "nested/file.txt"]
+
+
+def test_artifact_payloads_extract_patch_files_deleted(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    deleted = workspace / "old.md"
+
+    payloads = artifact_payloads_from_tool_complete(
+        tool_call_id="tool-delete",
+        name="patch",
+        args={"mode": "patch"},
+        result=json.dumps({
+            "success": True,
+            "files_deleted": [str(deleted)],
+        }),
+        cwd=str(workspace),
+        workspace={"id": "workspace-test", "path": str(workspace)},
+    )
+
+    assert len(payloads) == 1
+    assert artifact_created_payloads_from_tool_complete(
+        tool_call_id="tool-delete",
+        name="patch",
+        args={"mode": "patch"},
+        result=json.dumps({
+            "success": True,
+            "files_deleted": [str(deleted)],
+        }),
+        cwd=str(workspace),
+        workspace={"id": "workspace-test", "path": str(workspace)},
+    ) == []
+    assert payloads[0]["operation"] == "deleted"
+    assert payloads[0]["path"] == str(deleted)
+    assert payloads[0]["relative_path"] == "old.md"
+    assert payloads[0]["relativePath"] == "old.md"
+    assert payloads[0]["availability"] == "missing"
+    assert payloads[0]["origin"] == {
+        "event": "tool.complete",
+        "tool_id": "tool-delete",
+        "tool_name": "patch",
+        "operation": "deleted",
+    }
 
 
 def test_artifact_created_payloads_are_limited_to_workspace(tmp_path):
@@ -57,6 +101,70 @@ def test_artifact_created_payloads_are_limited_to_workspace(tmp_path):
         "tool_id": "tool-1",
         "tool_name": "patch",
     }
+
+
+def test_terminal_tool_complete_payloads_use_workspace_diff(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    existing = workspace / "existing.md"
+    existing.write_text("# before\n", encoding="utf-8")
+
+    snapshot = capture_workspace_artifact_snapshot(
+        name="terminal",
+        cwd=str(workspace),
+        workspace={"id": "workspace-test", "path": str(workspace)},
+    )
+
+    existing.write_text("# after\n", encoding="utf-8")
+    created = workspace / "created.txt"
+    created.write_text("hello\n", encoding="utf-8")
+
+    payloads = artifact_created_payloads_from_tool_complete(
+        tool_call_id="tool-terminal",
+        name="terminal",
+        args={"command": "printf hello > created.txt"},
+        result=json.dumps({"output": "", "exit_code": 0, "error": None}),
+        cwd=str(workspace),
+        workspace={"id": "workspace-test", "path": str(workspace)},
+        workspace_snapshot=snapshot,
+    )
+
+    by_path = {item["path"]: item for item in payloads}
+    assert set(by_path) == {str(created), str(existing)}
+    assert by_path[str(created)]["origin"]["operation"] == "created"
+    assert by_path[str(existing)]["origin"]["operation"] == "modified"
+    assert by_path[str(created)]["origin"]["source"] == "workspace_diff"
+
+
+def test_terminal_tool_complete_payloads_include_deleted_workspace_diff(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    deleted = workspace / "deleted.md"
+    deleted.write_text("# before\n", encoding="utf-8")
+
+    snapshot = capture_workspace_artifact_snapshot(
+        name="terminal",
+        cwd=str(workspace),
+        workspace={"id": "workspace-test", "path": str(workspace)},
+    )
+
+    deleted.unlink()
+
+    payloads = artifact_payloads_from_tool_complete(
+        tool_call_id="tool-terminal",
+        name="terminal",
+        args={"command": "rm deleted.md"},
+        result=json.dumps({"output": "", "exit_code": 0, "error": None}),
+        cwd=str(workspace),
+        workspace={"id": "workspace-test", "path": str(workspace)},
+        workspace_snapshot=snapshot,
+    )
+
+    assert len(payloads) == 1
+    assert payloads[0]["operation"] == "deleted"
+    assert payloads[0]["path"] == str(deleted)
+    assert payloads[0]["origin"]["operation"] == "deleted"
+    assert payloads[0]["origin"]["source"] == "workspace_diff"
 
 
 def test_record_artifacts_persists_and_deduplicates_by_workspace_path(
@@ -97,6 +205,46 @@ def test_record_artifacts_persists_and_deduplicates_by_workspace_path(
     assert listed[0]["path"] == str(artifact)
     assert listed[0]["workspace"]["id"] == "workspace-test"
     assert listed[0]["origin"]["tool_id"] == "tool-2"
+
+
+def test_record_artifacts_removes_deleted_file_from_registry(monkeypatch, tmp_path):
+    monkeypatch.setattr(gateway_store, "get_hermes_home", lambda: tmp_path)
+    gateway_store._DEFAULT_STORES.clear()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "old.md"
+    artifact.write_text("# old\n", encoding="utf-8")
+
+    [created] = record_artifacts_from_tool_complete(
+        session_id="session-1",
+        tool_call_id="tool-create",
+        name="write_file",
+        args={"path": "old.md"},
+        result=json.dumps({"bytes_written": artifact.stat().st_size}),
+        cwd=str(workspace),
+        workspace={"id": "workspace-test", "path": str(workspace)},
+    )
+    artifact.unlink()
+
+    [deleted] = record_artifacts_from_tool_complete(
+        session_id="session-1",
+        tool_call_id="tool-delete",
+        name="patch",
+        args={"mode": "patch"},
+        result=json.dumps({
+            "success": True,
+            "files_deleted": [str(artifact)],
+        }),
+        cwd=str(workspace),
+        workspace={"id": "workspace-test", "path": str(workspace)},
+    )
+
+    assert deleted["id"] == created["id"]
+    assert deleted["operation"] == "deleted"
+    assert deleted["availability"] == "missing"
+    assert deleted["origin"]["tool_id"] == "tool-delete"
+    assert deleted["origin"]["operation"] == "deleted"
+    assert list_artifacts(session_id="session-1") == []
 
 
 def test_record_artifacts_preserves_turn_origin(monkeypatch, tmp_path):

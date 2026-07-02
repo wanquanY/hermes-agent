@@ -5,7 +5,10 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from tui_gateway.services.artifacts import record_artifacts_from_tool_complete
+from tui_gateway.services.artifacts import (
+    capture_workspace_artifact_snapshot,
+    record_artifacts_from_tool_complete,
+)
 from tui_gateway.services.transcript_messages import (
     serializable_tool_args as default_tool_args_payload,
     tool_context as default_tool_context,
@@ -265,6 +268,16 @@ class GatewayToolEventBridge:
                     session.setdefault("edit_snapshots", {})[tool_call_id] = snapshot
             except Exception:
                 pass
+            try:
+                artifact_snapshot = capture_workspace_artifact_snapshot(
+                    name=name,
+                    cwd=self._session_cwd(session),
+                    workspace=dict(session.get("workspace") or {}),
+                )
+                if artifact_snapshot is not None:
+                    session.setdefault("artifact_snapshots", {})[tool_call_id] = artifact_snapshot
+            except Exception:
+                pass
             session.setdefault("tool_started_at", {})[tool_call_id] = time.time()
         if enabled:
             payload = {
@@ -300,9 +313,11 @@ class GatewayToolEventBridge:
             "arguments": self._tool_args_payload(args),
         }
         snapshot = None
+        artifact_snapshot = None
         started_at = None
         if session is not None:
             snapshot = session.setdefault("edit_snapshots", {}).pop(tool_call_id, None)
+            artifact_snapshot = session.setdefault("artifact_snapshots", {}).pop(tool_call_id, None)
             started_at = session.setdefault("tool_started_at", {}).pop(tool_call_id, None)
         duration_s = time.time() - started_at if started_at else None
         if duration_s is not None:
@@ -343,7 +358,14 @@ class GatewayToolEventBridge:
             self._emit("tool.complete", sid, payload)
             if name == "test_agent_profile":
                 self._emit("agent_profile_test.complete", sid, payload)
-        self.emit_artifacts_from_tool_complete(sid, tool_call_id, name, args, result)
+        self.emit_artifacts_from_tool_complete(
+            sid,
+            tool_call_id,
+            name,
+            args,
+            result,
+            artifact_snapshot=artifact_snapshot,
+        )
 
     def emit_artifacts_from_tool_complete(
         self,
@@ -352,6 +374,7 @@ class GatewayToolEventBridge:
         name: str,
         args: dict,
         result: str,
+        artifact_snapshot=None,
     ) -> None:
         session = self._sessions.get(sid)
         if not session or session_interrupted(session) or session.get("transient"):
@@ -376,8 +399,10 @@ class GatewayToolEventBridge:
             cwd=self._session_cwd(session),
             workspace=workspace,
             origin=origin,
+            workspace_snapshot=artifact_snapshot,
         ):
-            self._emit("artifact.created", sid, payload)
+            event_type = "artifact.deleted" if payload.get("operation") == "deleted" else "artifact.created"
+            self._emit(event_type, sid, payload)
 
     def on_tool_progress(
         self,

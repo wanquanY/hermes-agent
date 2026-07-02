@@ -143,6 +143,7 @@ REQUIRED_EVENTS = [
     "secret.request",
     "clarify.request",
     "artifact.created",
+    "artifact.deleted",
     "subagent.output_delta",
     "subagent.reasoning_delta",
     "agent_profile_test.start",
