@@ -377,20 +377,38 @@ def _(rid, params: dict) -> dict:
         state = run_control.get_run(run_id, db=db)
         if state is None:
             return _err(rid, 4040, "run not found")
+        stable_session_id = str(
+            state.get("stored_session_id")
+            or state.get("session_id")
+            or ""
+        ).strip()
+        session_state = {}
         if str(state.get("status") or "") in run_control.ACTIVE_RUN_STATUSES:
-            stable_session_id = str(
-                state.get("stored_session_id")
-                or state.get("session_id")
-                or ""
-            ).strip()
             if stable_session_id:
-                run_control.session_status(
+                session_state = run_control.session_status(
                     stable_session_id,
                     db=db,
                     current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
                 )
                 state = run_control.get_run(run_id, db=db) or state
-        return _ok(rid, {"run": state})
+        run_status = str(state.get("status") or "").strip()
+        result = dict(session_state) if isinstance(session_state, dict) else {}
+        result["run"] = state
+        result["run_id"] = str(state.get("run_id") or run_id)
+        result["stored_session_id"] = stable_session_id
+        result["status"] = run_status
+        result["last_event_seq"] = int(
+            result.get("last_event_seq")
+            or state.get("last_seq")
+            or 0
+        )
+        result.setdefault("running", run_status in run_control.ACTIVE_RUN_STATUSES)
+        result.setdefault("active_run_id", result["run_id"] if result["running"] else "")
+        result.setdefault("active_turn_id", str(state.get("turn_id") or ""))
+        result.setdefault("runtime_scope_key", str(state.get("runtime_scope_key") or ""))
+        result.setdefault("run_started_at", float(state.get("started_at") or 0))
+        result.setdefault("run_updated_at", float(state.get("updated_at") or 0))
+        return _ok(rid, result)
 
     stable_session_id = str(
         params.get("stored_session_id")
@@ -401,14 +419,24 @@ def _(rid, params: dict) -> dict:
     if not stable_session_id:
         return _err(rid, 4006, "run_id or stored_session_id required")
     db = _run_db_for_stable_session(stable_session_id)
-    return _ok(
-        rid,
-        run_control.session_status(
-            stable_session_id,
-            db=db,
-            current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
-        ),
+    result = run_control.session_status(
+        stable_session_id,
+        db=db,
+        current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
     )
+    result = dict(result) if isinstance(result, dict) else {}
+    active_run_id = str(result.get("active_run_id") or "").strip()
+    active_run = run_control.get_run(active_run_id, db=db) if active_run_id else None
+    active_status = str((active_run or {}).get("status") or "").strip()
+    result["stored_session_id"] = stable_session_id
+    result["run_id"] = active_run_id
+    result["status"] = active_status or ("running" if result.get("running") else "idle")
+    result["last_event_seq"] = int(
+        result.get("last_event_seq")
+        or (active_run or {}).get("last_seq")
+        or 0
+    )
+    return _ok(rid, result)
 
 
 @method("run.list")
