@@ -202,3 +202,41 @@ def test_session_list_returns_dovie_sanitized_title_and_preview(monkeypatch):
     assert "error" not in response
     assert response["result"]["sessions"][0]["title"] == "创建自动化任务"
     assert response["result"]["sessions"][0]["preview"] == "创建自动化任务"
+
+
+def test_history_to_messages_preserves_storage_message_id():
+    # Regression: get_messages_page_as_conversation exposes the sqlite row id as
+    # "message_id" (not "id"). history_to_messages must pass it through so the
+    # desktop can attach persisted artifact links by their message_id anchor
+    # after a restart (real-device loss: session 20260703_011656_2c8a39).
+    from tui_gateway.services.transcript_messages import history_to_messages
+
+    messages = history_to_messages(
+        [
+            {
+                "role": "user",
+                "content": "重新测试，再随便创建几个文件",
+                "message_id": "8099",
+                "timestamp": 1783012699.89,
+                "metadata": {"run_id": "run-1", "turn_id": "turn-1"},
+            },
+            {
+                "role": "assistant",
+                "content": "测试完成，全部正常",
+                "message_id": "8113",
+                "timestamp": 1783012699.91,
+                "metadata": {"run_id": "run-1", "turn_id": "turn-1"},
+            },
+            {
+                "role": "tool",
+                "content": "ok",
+                "tool_call_id": "call-1",
+                "tool_name": "write_file",
+                "message_id": "8111",
+            },
+            # Legacy JSONL transcript shape keeps working via the "id" fallback.
+            {"role": "assistant", "content": "旧格式", "id": 42},
+        ]
+    )
+
+    assert [m.get("message_id") for m in messages] == ["8099", "8113", "8111", "42"]

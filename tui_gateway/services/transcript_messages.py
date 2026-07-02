@@ -101,8 +101,9 @@ def history_to_messages(history: list[dict]) -> list[dict]:
                 item["arguments"] = serializable_tool_args(args)
             if content_text.strip():
                 item["result_text"] = content_text
-            if message.get("id") is not None:
-                item["message_id"] = str(message.get("id"))
+            message_id = message.get("message_id") if message.get("message_id") is not None else message.get("id")
+            if message_id is not None:
+                item["message_id"] = str(message_id)
             if message.get("timestamp") is not None:
                 item["timestamp"] = message.get("timestamp")
             participant_id = str(message.get("participant_id") or message.get("participantId") or "").strip()
@@ -116,8 +117,9 @@ def history_to_messages(history: list[dict]) -> list[dict]:
         if not content_text.strip() and not reasoning_text.strip():
             continue
         item = {"role": role, "text": content_text}
-        if message.get("id") is not None:
-            item["message_id"] = str(message.get("id"))
+        message_id = message.get("message_id") if message.get("message_id") is not None else message.get("id")
+        if message_id is not None:
+            item["message_id"] = str(message_id)
         if message.get("timestamp") is not None:
             item["timestamp"] = message.get("timestamp")
         participant_id = str(message.get("participant_id") or message.get("participantId") or "").strip()
