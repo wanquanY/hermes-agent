@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from .common import *
+from hermes_team_mission.read_model import build_team_mission_read_model
 
 
 SNAPSHOT_SCHEMA_VERSION = "2026-06-29"
@@ -139,7 +140,7 @@ def _canonical_team_conversation_snapshot(
     }
     if team:
         graph_payload["team"] = team
-    return {
+    snapshot = {
         "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "schemaVersion": SNAPSHOT_SCHEMA_VERSION,
         "mission_id": "",
@@ -165,6 +166,8 @@ def _canonical_team_conversation_snapshot(
         "pendingApprovals": [],
         "graph": graph_payload,
     }
+    snapshot["read_model"] = build_team_mission_read_model(snapshot)
+    return snapshot
 
 
 def _canonical_team_mission_snapshot(db: Any, mission_id: str, graph: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -186,7 +189,7 @@ def _canonical_team_mission_snapshot(db: Any, mission_id: str, graph: dict[str, 
     latest_seq = _latest_team_mission_event_seq(db, mission_id)
     activity_id = f"mission:{mission_id}"
     version = _snapshot_version(mission_id, latest_seq, graph, result)
-    return {
+    snapshot = {
         "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "schemaVersion": SNAPSHOT_SCHEMA_VERSION,
         "mission_id": mission_id,
@@ -214,6 +217,8 @@ def _canonical_team_mission_snapshot(db: Any, mission_id: str, graph: dict[str, 
             "result": result,
         },
     }
+    snapshot["read_model"] = build_team_mission_read_model(snapshot)
+    return snapshot
 
 
 def _graph_for_params(db: Any, params: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any]]:
@@ -256,6 +261,7 @@ def _(rid, params: dict) -> dict:
                     "activity_id": "",
                     "conversation_id": snapshot["conversation_id"],
                     "snapshot": snapshot,
+                    "read_model": snapshot["read_model"],
                     "snapshot_version": snapshot["snapshot_version"],
                     "last_event_seq": snapshot["last_event_seq"],
                 },
@@ -268,6 +274,7 @@ def _(rid, params: dict) -> dict:
         "mission_id": mission_id,
         "activity_id": snapshot["activity_id"],
         "snapshot": snapshot,
+        "read_model": snapshot["read_model"],
         "snapshot_version": snapshot["snapshot_version"],
         "last_event_seq": snapshot["last_event_seq"],
     }

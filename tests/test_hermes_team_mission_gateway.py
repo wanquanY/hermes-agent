@@ -651,6 +651,11 @@ def test_team_mission_snapshot_and_result_rpc_return_canonical_read_models(monke
     assert snapshot["graph"]["mission"]["mission_id"] == "mission-snapshot"
     assert snapshot["graph"]["team"]["id"] == "team-1"
     assert snapshot["nodes"]
+    assert snapshot_response["result"]["read_model"] == snapshot["read_model"]
+    assert snapshot["read_model"]["schema_version"] == 1
+    assert snapshot["read_model"]["mission"]["mission_id"] == "mission-snapshot"
+    assert snapshot["read_model"]["mission"]["status"] == "planning"
+    assert snapshot["read_model"]["nodes"][0]["node_id"] == snapshot["nodes"][0]["node_id"]
 
     db.upsert_team_mission_result(
         mission_id="mission-snapshot",
@@ -705,6 +710,12 @@ def test_team_mission_snapshot_get_returns_conversation_snapshot_without_active_
     assert snapshot["conversation"]["conversation_id"] == "conversation-only"
     assert snapshot["graph"]["mission"] == {}
     assert snapshot["graph"]["conversation"]["conversation_id"] == "conversation-only"
+    assert result["read_model"] == snapshot["read_model"]
+    assert snapshot["read_model"]["schema_version"] == 1
+    assert snapshot["read_model"]["mission"]["entity_kind"] == "conversation_shell"
+    assert snapshot["read_model"]["mission"]["conversation_id"] == "conversation-only"
+    assert snapshot["read_model"]["nodes"] == []
+    assert snapshot["read_model"]["edges"] == []
 
 
 def test_team_mission_create_rejects_autonomous_override_for_supervised_team(monkeypatch, tmp_path: Path):
