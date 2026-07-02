@@ -606,6 +606,8 @@ def _team_mission_live_status_event_for_subscription(
 def _terminal_status(event_type: str, payload: dict[str, Any]) -> str | None:
     if event_type == "error":
         return "failed"
+    if event_type == "session.recalled":
+        return "interrupted"
     if event_type != "message.complete":
         return None
     status = str(payload.get("status") or "").strip().lower()

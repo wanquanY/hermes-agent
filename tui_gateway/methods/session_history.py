@@ -278,6 +278,26 @@ def _draft_from_turn_message(message: dict | None, pending_turn: dict | None = N
     }
 
 
+def _recall_event_payload(
+    *,
+    turn_id: str,
+    removed_messages: int,
+    draft: dict,
+    messages: list[dict],
+    run_id: str = "",
+) -> dict:
+    payload = {
+        "turn_id": turn_id,
+        "removed_messages": removed_messages,
+        "draft": draft,
+        "messages": messages,
+    }
+    normalized_run_id = str(run_id or "").strip()
+    if normalized_run_id:
+        payload["run_id"] = normalized_run_id
+    return payload
+
+
 def _rewrite_live_and_persisted_history(session: dict, history: list[dict]) -> None:
     session_key = str(session.get("session_key") or "")
     db = _get_db()
@@ -360,12 +380,12 @@ def _recall_stored_turn(rid, sid: str, target: dict[str, str]) -> dict | None:
     except Exception as exc:
         return _err(rid, 5036, f"recall failed: {exc}")
 
-    _emit("session.recalled", sid, {
-        "turn_id": turn_id,
-        "removed_messages": removed,
-        "draft": draft,
-        "messages": messages,
-    })
+    _emit("session.recalled", sid, _recall_event_payload(
+        turn_id=turn_id,
+        removed_messages=removed,
+        draft=draft,
+        messages=messages,
+    ))
     return _ok(rid, {
         "status": "recalled",
         "session_id": sid,
@@ -403,12 +423,13 @@ def _(rid, params: dict) -> dict:
     agent_to_interrupt = None
     with session["history_lock"]:
         active_turn_id = str(session.get("active_turn_id") or "")
+        active_run_id = str(session.get("active_run_id") or "").strip()
         running_target_matches = _session_active_turn_matches_recall_target(session, target)
         if session.get("running") and active_turn_id and not running_target_matches:
             return _err(rid, 4009, "session busy with a different turn")
         if session.get("running") and running_target_matches:
             interrupted = True
-            session["interrupted_run_id"] = str(session.get("active_run_id") or "")
+            session["interrupted_run_id"] = active_run_id
             session["interrupted_turn_id"] = turn_id
             session["interrupt_seq"] = int(session.get("interrupt_seq") or 0) + 1
             session.setdefault("recalled_turn_ids", set()).add(turn_id)
@@ -427,6 +448,7 @@ def _(rid, params: dict) -> dict:
         if recalled is None:
             if _pending_turn_matches_recall_target(pending_turn, target):
                 draft = _draft_from_turn_message(None, pending_turn)
+                recall_run_id = active_run_id or str((pending_turn or {}).get("run_id") or "").strip()
                 session.setdefault("recalled_turn_ids", set()).add(turn_id)
                 session["running"] = False
                 session["active_run_id"] = None
@@ -434,12 +456,13 @@ def _(rid, params: dict) -> dict:
                 session["pending_turn"] = None
                 session["run_updated_at"] = time.time()
                 messages = sanitize_transcript_messages(_history_to_messages(history))
-                _emit("session.recalled", sid, {
-                    "turn_id": turn_id,
-                    "removed_messages": 0,
-                    "draft": draft,
-                    "messages": messages,
-                })
+                _emit("session.recalled", sid, _recall_event_payload(
+                    turn_id=turn_id,
+                    removed_messages=0,
+                    draft=draft,
+                    messages=messages,
+                    run_id=recall_run_id,
+                ))
                 _emit("message.complete", sid, {"text": "", "status": "interrupted", "turn_id": turn_id})
                 return _ok(rid, {
                     "status": "recalled",
@@ -460,7 +483,13 @@ def _(rid, params: dict) -> dict:
         next_history, draft, removed = recalled
         _rewrite_live_and_persisted_history(session, next_history)
         session.setdefault("recalled_turn_ids", set()).add(turn_id)
-        if active_turn_id == turn_id or str(session.get("active_turn_id") or "") == turn_id:
+        recall_run_id = ""
+        if (
+            running_target_matches
+            or active_turn_id == turn_id
+            or str(session.get("active_turn_id") or "") == turn_id
+        ):
+            recall_run_id = active_run_id
             session["running"] = False
             session["active_run_id"] = None
             session["active_turn_id"] = None
@@ -468,12 +497,13 @@ def _(rid, params: dict) -> dict:
             session["run_updated_at"] = time.time()
         messages = sanitize_transcript_messages(_history_to_messages(next_history))
 
-    _emit("session.recalled", sid, {
-        "turn_id": turn_id,
-        "removed_messages": removed,
-        "draft": draft,
-        "messages": messages,
-    })
+    _emit("session.recalled", sid, _recall_event_payload(
+        turn_id=turn_id,
+        removed_messages=removed,
+        draft=draft,
+        messages=messages,
+        run_id=recall_run_id,
+    ))
     if interrupted:
         _emit("message.complete", sid, {"text": "", "status": "interrupted", "turn_id": turn_id})
     return _ok(rid, {

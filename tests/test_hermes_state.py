@@ -474,6 +474,49 @@ def test_append_run_event_preserves_message_deltas_across_tool_events(db):
     assert message_events[1]["payload"] == {"mode": "append", "text": "B", "delta": "B", "offset": 1}
 
 
+def test_append_run_event_treats_session_recalled_as_terminal_boundary(db):
+    db.append_run_event(
+        "stored-1",
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 1,
+            "payload": {"mode": "append", "text": "A", "delta": "A", "offset": 0},
+        },
+    )
+
+    recalled = db.append_run_event(
+        "stored-1",
+        {
+            "type": "session.recalled",
+            "session_id": "runtime-1",
+            "stored_session_id": "stored-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 2,
+            "payload": {
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "removed_messages": 2,
+                "messages": [],
+            },
+        },
+    )
+
+    events = db.list_run_events("stored-1", run_id="run-1")
+    run = db.get_run("run-1")
+
+    assert recalled["seq"] == 2
+    assert [event["type"] for event in events] == ["session.recalled"]
+    assert events[-1]["payload"]["run_id"] == "run-1"
+    assert run is not None
+    assert run["status"] == "interrupted"
+    assert run["last_seq"] == 2
+
+
 def test_append_run_event_does_not_coalesce_message_delta_when_offset_restarts(db):
     db.append_run_event(
         "stored-1",

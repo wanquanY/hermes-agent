@@ -707,6 +707,96 @@ def test_session_recall_turn_matches_live_pending_run_id(server, monkeypatch):
     live_agent.interrupt.assert_called_once()
 
 
+def test_session_recall_turn_records_recall_boundary_with_run_id_and_seq(server, monkeypatch):
+    class _DB:
+        def __init__(self):
+            self.events = [
+                {
+                    "type": "message.delta",
+                    "session_id": "runtime-live",
+                    "stored_session_id": "stored-live",
+                    "run_id": "run-canonical",
+                    "turn_id": "turn-canonical",
+                    "seq": 7,
+                    "payload": {"text": "old"},
+                }
+            ]
+            self.replaced = None
+
+        def replace_messages(self, sid, messages):
+            self.replaced = (sid, messages)
+
+        def next_run_event_seq(self, session_id, fallback_seq=0):
+            last = max(
+                [
+                    int(event.get("seq") or 0)
+                    for event in self.events
+                    if event.get("stored_session_id") == session_id
+                ],
+                default=0,
+            )
+            return max(last + 1, int(fallback_seq or 0))
+
+        def append_run_event(self, session_id, event, participant_id=""):
+            frame = dict(event)
+            payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+            frame["payload"] = dict(payload)
+            frame["stored_session_id"] = session_id
+            if not int(frame.get("seq") or 0):
+                frame["seq"] = self.next_run_event_seq(session_id)
+            self.events.append(frame)
+            return frame
+
+        def list_run_events(self, session_id, after_seq=0, **_kwargs):
+            return [
+                event
+                for event in self.events
+                if event.get("stored_session_id") == session_id
+                and int(event.get("seq") or 0) > int(after_seq or 0)
+            ]
+
+    db = _DB()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    live_agent = MagicMock()
+    server._sessions["runtime-live"] = {
+        "agent": live_agent,
+        "session_key": "stored-live",
+        "history": [
+            {
+                "role": "user",
+                "content": "old prompt",
+                "metadata": {"turn_id": "turn-canonical"},
+            },
+            {"role": "assistant", "content": "old answer", "metadata": {"turn_id": "turn-canonical"}},
+        ],
+        "history_lock": threading.Lock(),
+        "running": True,
+        "active_run_id": "run-canonical",
+        "active_turn_id": "turn-canonical",
+        "run_started_at": 10,
+        "run_updated_at": 20,
+    }
+
+    resp = server.handle_request(
+        {
+            "id": "r1",
+            "method": "session.recall_turn",
+            "params": {"session_id": "runtime-live", "turn_id": "turn-canonical"},
+        }
+    )
+
+    assert "error" not in resp
+    recall_events = [event for event in db.events if event["type"] == "session.recalled"]
+    assert len(recall_events) == 1
+    recall_event = recall_events[0]
+    assert recall_event["run_id"] == "run-canonical"
+    assert recall_event["payload"]["run_id"] == "run-canonical"
+    assert recall_event["seq"] == 8
+    assert recall_event["seq"] > db.events[0]["seq"]
+    assert server._sessions["runtime-live"]["active_run_id"] is None
+    live_agent.interrupt.assert_called_once()
+
+
 def test_session_status_returns_machine_readable_run_state(server):
     agent = MagicMock(model="gpt-test", provider="test-provider")
     agent.context_compressor = None

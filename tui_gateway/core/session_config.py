@@ -252,7 +252,7 @@ def _project_block_state(sid: str, *, present: bool) -> None:
             # lock contention must never disturb the clarify/approval
             # timing.
             continue
-        if rows and rows > 0:
+        if isinstance(rows, (int, float)) and rows > 0:
             # First candidate that resolved is the right one; stop so we
             # don't double-write across overlapping rows.
             return

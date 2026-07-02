@@ -334,6 +334,8 @@ def _event_with_participant_id(event: Dict[str, Any], participant_id: str = "") 
 def _event_status(event_type: str, payload: Dict[str, Any]) -> str | None:
     if event_type == "error":
         return "failed"
+    if event_type == "session.recalled":
+        return "interrupted"
     if event_type != "message.complete":
         return None
     status = str(payload.get("status") or "").strip().lower()
