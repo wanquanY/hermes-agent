@@ -1711,15 +1711,22 @@ def test_team_mission_conversation_status_projection_uses_active_member_run_bind
     projection = db.get_team_mission_conversation_status_projection("conversation-1")
 
     assert projection["mission_status"] == "ready"
+    # A running mission NODE keeps the sidebar spinner on…
     assert projection["running"] is True
     assert projection["run_state"] == "running"
-    assert projection["active_run_id"] == "run-verify"
-    assert projection["active_runtime_session_id"] == "runtime-verify"
-    assert projection["run_started_at"] == 250
+    assert projection["active_node_count"] == 1
+    # …but its run identity must NOT masquerade as the conversation's active
+    # run: desktop clients adopt these fields into the conversation response
+    # run pool, which locked the composer for the whole mission and left the
+    # session stuck running (real-device regression 2026-07-03).
+    assert projection["active_run_id"] == ""
+    assert projection["active_runtime_session_id"] == ""
+    assert projection["runtime_scope_key"] == ""
+    assert projection["run_started_at"] == 0
+    assert projection["run_updated_at"] == 300
     assert projection["mission_started_at"] == 100
     assert projection["mission_updated_at"] == 350
     assert projection["mission_completed_at"] == 0
-    assert projection["active_node_count"] == 1
 
 
 def test_team_mission_conversation_status_projection_terminal_mission_never_running(tmp_path: Path):

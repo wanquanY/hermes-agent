@@ -1848,7 +1848,13 @@ class SessionDBTeamMissionConversationMixin:
             else "cancelled" if mission_status in {"cancelled", "canceled", "interrupted"}
             else "idle"
         )
-        projected_active_run = active_run or active_node_run
+        # Run identity fields must describe a CONVERSATION-owned run only. A
+        # mission node run may drive the sidebar `running` flag (run_observed
+        # above), but publishing its run_id/scope as the conversation's active
+        # run makes desktop clients adopt a mission-domain run as a
+        # conversation response run (composer locked for the whole mission,
+        # session stuck running — real-device log 2026-07-03 01:06).
+        projected_active_run = active_run
         active_mission = summary.get("mission") if isinstance(summary.get("mission"), dict) else {}
         mission_started_at = float((active_mission or {}).get("created_at") or 0)
         mission_updated_at = float((active_mission or {}).get("updated_at") or 0)
