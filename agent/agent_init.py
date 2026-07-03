@@ -1046,7 +1046,11 @@ def init_agent(
     # SQLite session store (optional -- provided by CLI or gateway)
     agent._session_db = session_db
     agent._parent_session_id = parent_session_id
-    agent._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
+    agent._last_flushed_db_idx = 0  # per-message-buffer DB-write cursor
+    agent._last_flushed_db_buffer_id = None
+    agent._last_flushed_db_visible_session_id = ""
+    agent._last_flushed_db_run_id = ""
+    agent._last_flushed_db_turn_id = ""
     agent._session_db_created = False  # DB row deferred to run_conversation()
     agent._session_persistence_disabled = False
     # Most agents own their session row and should finalize it on close().

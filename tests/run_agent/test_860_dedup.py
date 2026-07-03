@@ -484,6 +484,187 @@ class TestFlushDeduplication:
             assert all(row["metadata"]["transcript_activity_kind"] == "team_dispatch" for row in rows)
             assert agent._last_flushed_db_idx == len(messages)
 
+    def test_team_dispatch_second_run_does_not_reuse_stale_memory_flush_cursor(self):
+        """A rebuilt leader history must not let the previous run's cursor skip rows."""
+        from hermes_state import SessionDB
+        from tui_gateway.services.run_control import record_event
+
+        def install_dispatch_context(agent, *, run_id: str, turn_id: str) -> None:
+            agent._hermes_active_run_id = run_id
+            agent._hermes_active_turn_id = turn_id
+            agent._hermes_active_runtime_scope_key = "team:conversation-1"
+            agent.run_context = SimpleNamespace(
+                conversation_session_id=visible_session_id,
+                activity_id=f"act-team_dispatch-{run_id}",
+                activity_kind="team_dispatch",
+                execution_scope_key="team:conversation-1",
+                participant_id="leader:conversation-1",
+                to_payload=lambda: {
+                    "conversation_session_id": visible_session_id,
+                    "activity_id": f"act-team_dispatch-{run_id}",
+                    "activity_kind": "team_dispatch",
+                    "execution_scope_key": "team:conversation-1",
+                    "participant_id": "leader:conversation-1",
+                },
+            )
+
+        def record_leader_event_shape(db, *, run_id: str, turn_id: str) -> None:
+            base = {
+                "stored_session_id": visible_session_id,
+                "session_id": visible_session_id,
+                "run_id": run_id,
+                "turn_id": turn_id,
+                "runtime_scope_key": "team:conversation-1",
+            }
+            for seq, event_type, payload in (
+                (1, "message.start", {"text": "准备启动团队任务"}),
+                (2, "tool.start", {"name": "team_mission_start_task", "tool_call_id": "call-start"}),
+                (3, "tool.complete", {"name": "team_mission_start_task", "tool_call_id": "call-start"}),
+                (4, "message.start", {"text": "任务已经进入规划"}),
+                (5, "tool.start", {"name": "session.info", "tool_call_id": "call-info"}),
+                (6, "tool.complete", {"name": "session.info", "tool_call_id": "call-info"}),
+                (7, "session.info", {"status": "running"}),
+                (8, "session.info", {"status": "completed"}),
+                (9, "message.complete", {"text": "任务已经进入规划", "status": "complete"}),
+            ):
+                record_event({**base, "seq": seq, "type": event_type, "payload": payload}, db=db)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = SessionDB(db_path=db_path)
+
+            visible_session_id = "team-session-team-conversation-test"
+            agent = self._make_uninitialized_agent(db, session_id="runtime-dispatch-session")
+            db.create_session(visible_session_id, source="team_mission", transient=False)
+            db.upsert_session_index(
+                session_id=visible_session_id,
+                source="team_mission",
+                conversation_kind="team",
+                started_at=1.0,
+                updated_at=1.0,
+            )
+
+            install_dispatch_context(agent, run_id="team-leader-run-first", turn_id="team-leader-turn-first")
+            record_leader_event_shape(db, run_id="team-leader-run-first", turn_id="team-leader-turn-first")
+            first_history = [{"role": "user", "content": "会话创建"}]
+            first_messages = list(first_history) + [
+                {"role": "user", "content": "第一次启动团队任务"},
+                {
+                    "role": "assistant",
+                    "content": "第一轮准备启动",
+                    "tool_calls": [
+                        {
+                            "id": "call-first-start",
+                            "type": "function",
+                            "function": {"name": "team_mission_start_task", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": "{}",
+                    "tool_name": "team_mission_start_task",
+                    "tool_call_id": "call-first-start",
+                },
+                {"role": "assistant", "content": "第一轮任务已经进入规划"},
+            ]
+            agent._flush_messages_to_session_db(first_messages, first_history)
+            assert agent._last_flushed_db_idx == 5
+
+            install_dispatch_context(agent, run_id="team-leader-run-second", turn_id="team-leader-turn-second")
+            record_leader_event_shape(db, run_id="team-leader-run-second", turn_id="team-leader-turn-second")
+            rebuilt_history = [
+                {"role": "user", "content": "会话创建"},
+                {"role": "assistant", "content": "第一轮任务已经进入规划"},
+            ]
+            second_messages = list(rebuilt_history) + [
+                {"role": "user", "content": "第二次启动团队任务"},
+                {
+                    "role": "assistant",
+                    "content": "第二轮准备启动",
+                    "tool_calls": [
+                        {
+                            "id": "call-second-start",
+                            "type": "function",
+                            "function": {"name": "team_mission_start_task", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": "{}",
+                    "tool_name": "team_mission_start_task",
+                    "tool_call_id": "call-second-start",
+                },
+                {"role": "assistant", "content": "第二轮任务已经进入规划"},
+            ]
+            agent._flush_messages_to_session_db(second_messages, rebuilt_history)
+
+            rows = db.get_messages(visible_session_id)
+            assert [row["content"] for row in rows] == [
+                "第一轮准备启动",
+                "{}",
+                "第一轮任务已经进入规划",
+                "第二轮准备启动",
+                "{}",
+                "第二轮任务已经进入规划",
+            ]
+            second_rows = [
+                row for row in rows
+                if row["metadata"].get("run_id") == "team-leader-run-second"
+            ]
+            assert [row["role"] for row in second_rows] == ["assistant", "tool", "assistant"]
+            assert [row.get("tool_name") for row in second_rows] == [
+                None,
+                "team_mission_start_task",
+                None,
+            ]
+            assert [row["metadata"]["turn_message_index"] for row in second_rows] == [1, 2, 3]
+            assert all(row["metadata"].get("persist_message_key") for row in second_rows)
+            assert {
+                tuple(event["type"] for event in db.list_run_events(visible_session_id, run_id=run_id))
+                for run_id in ("team-leader-run-first", "team-leader-run-second")
+            } == {
+                (
+                    "message.start",
+                    "tool.start",
+                    "tool.complete",
+                    "message.start",
+                    "tool.start",
+                    "tool.complete",
+                    "session.info",
+                    "session.info",
+                    "message.complete",
+                )
+            }
+
+            # A fresh rebuilt buffer for the same run must be de-duplicated by
+            # persisted run/turn/message-index keys, not by Python list identity.
+            second_messages_rebuilt_again = list(rebuilt_history) + [
+                {"role": "user", "content": "第二次启动团队任务"},
+                {
+                    "role": "assistant",
+                    "content": "第二轮准备启动",
+                    "tool_calls": [
+                        {
+                            "id": "call-second-start",
+                            "type": "function",
+                            "function": {"name": "team_mission_start_task", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": "{}",
+                    "tool_name": "team_mission_start_task",
+                    "tool_call_id": "call-second-start",
+                },
+                {"role": "assistant", "content": "第二轮任务已经进入规划"},
+            ]
+            agent._flush_messages_to_session_db(second_messages_rebuilt_again, rebuilt_history)
+
+            assert len(db.get_messages(visible_session_id)) == len(rows)
+
     def test_turn_message_buffer_boundary_keeps_history_out_when_history_arg_is_lost(self):
         """Loaded history is never reclassified as current output by DB flush."""
         from agent.turn_message_buffer import TurnMessageBuffer

@@ -4138,6 +4138,65 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         display_title = self._message_display_title_text(content) if role == "user" else ""
 
         def _do(conn):
+            def _metadata_text(meta: Dict[str, Any], *keys: str) -> str:
+                if not isinstance(meta, dict):
+                    return ""
+                for key in keys:
+                    if key not in meta:
+                        continue
+                    value = meta.get(key)
+                    if value is None:
+                        continue
+                    text = str(value).strip()
+                    if text:
+                        return text
+                return ""
+
+            def _select_existing_message_for_persist_key():
+                next_metadata = metadata if isinstance(metadata, dict) else {}
+                persist_key = _metadata_text(next_metadata, "persist_message_key", "persistMessageKey")
+                run_id = _metadata_text(next_metadata, "run_id", "runId")
+                turn_id = _metadata_text(next_metadata, "turn_id", "turnId")
+                turn_message_index = _metadata_text(
+                    next_metadata,
+                    "turn_message_index",
+                    "turnMessageIndex",
+                )
+                if not persist_key and not (run_id and turn_id and turn_message_index):
+                    return None
+                # Filter in SQL via json_extract — this runs on the hot
+                # per-message persist path, so decoding hundreds of metadata
+                # blobs in Python per append is not acceptable.
+                if persist_key:
+                    candidate = conn.execute(
+                        f"SELECT {self._conversation_message_columns()} "
+                        "FROM messages "
+                        "WHERE session_id = ? "
+                        "  AND role = ? "
+                        "  AND active = 1 "
+                        "  AND COALESCE(json_extract(metadata_json, '$.persist_message_key'), json_extract(metadata_json, '$.persistMessageKey')) = ? "
+                        "ORDER BY id DESC "
+                        "LIMIT 1",
+                        (session_id, role, persist_key),
+                    ).fetchone()
+                    if candidate is not None:
+                        return candidate
+                if run_id and turn_id and turn_message_index:
+                    return conn.execute(
+                        f"SELECT {self._conversation_message_columns()} "
+                        "FROM messages "
+                        "WHERE session_id = ? "
+                        "  AND role = ? "
+                        "  AND active = 1 "
+                        "  AND COALESCE(json_extract(metadata_json, '$.run_id'), json_extract(metadata_json, '$.runId')) = ? "
+                        "  AND COALESCE(json_extract(metadata_json, '$.turn_id'), json_extract(metadata_json, '$.turnId')) = ? "
+                        "  AND CAST(COALESCE(json_extract(metadata_json, '$.turn_message_index'), json_extract(metadata_json, '$.turnMessageIndex')) AS TEXT) = ? "
+                        "ORDER BY id DESC "
+                        "LIMIT 1",
+                        (session_id, role, run_id, turn_id, turn_message_index),
+                    ).fetchone()
+                return None
+
             def _select_projected_team_message_for_append():
                 if conversation_message_id or role not in {"assistant", "tool"}:
                     return None
@@ -4180,6 +4239,10 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                         continue
                     return candidate
                 return None
+
+            existing_for_persist_key = _select_existing_message_for_persist_key()
+            if existing_for_persist_key is not None:
+                return existing_for_persist_key["id"]
 
             existing_projected = _select_projected_team_message_for_append()
             if existing_projected is not None:

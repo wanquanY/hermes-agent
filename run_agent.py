@@ -1598,7 +1598,76 @@ class AIAgent:
             "run_id": str(metadata.get("run_id") or ""),
             "turn_id": str(metadata.get("turn_id") or ""),
             "client_message_id": str(metadata.get("client_message_id") or ""),
+            "turn_message_index": str(metadata.get("turn_message_index") or ""),
+            "persist_message_key": str(metadata.get("persist_message_key") or ""),
         }
+
+    @staticmethod
+    def _message_persist_identity_metadata(
+        metadata: Dict[str, Any],
+        *,
+        turn_message_index: int,
+    ) -> Dict[str, Any]:
+        """Stamp a stable per-run key used by SessionDB for idempotent append."""
+        if not isinstance(metadata, dict):
+            return metadata
+        run_id = str(metadata.get("run_id") or metadata.get("runId") or "").strip()
+        turn_id = str(metadata.get("turn_id") or metadata.get("turnId") or "").strip()
+        if not run_id or not turn_id:
+            return metadata
+        try:
+            index = max(0, int(turn_message_index))
+        except (TypeError, ValueError):
+            index = 0
+        if "turn_message_index" not in metadata:
+            metadata["turn_message_index"] = index
+        if "persist_message_key" not in metadata:
+            metadata["persist_message_key"] = f"run:{run_id}|turn:{turn_id}|idx:{index}"
+        return metadata
+
+    def _session_db_matches_message_prefix(
+        self,
+        session_id: str,
+        messages: List[Dict],
+        prefix_len: int,
+    ) -> bool:
+        """Return true when the DB already contains the in-memory prefix."""
+        try:
+            prefix_len = int(prefix_len)
+        except (TypeError, ValueError):
+            return False
+        if prefix_len <= 0:
+            return True
+        if not session_id or not self._session_db or not messages or prefix_len > len(messages):
+            return False
+        get_messages = getattr(self._session_db, "get_messages", None)
+        if not callable(get_messages):
+            return False
+        try:
+            rows = get_messages(session_id)
+        except Exception:
+            return False
+        if len(rows or []) < prefix_len:
+            return False
+
+        def _row_value(row: Any, key: str) -> Any:
+            if hasattr(row, "get"):
+                return row.get(key)
+            try:
+                return row[key]
+            except Exception:
+                return None
+
+        for index, message in enumerate(messages[:prefix_len]):
+            row = rows[index]
+            row_role = str(_row_value(row, "role") or "")
+            if not isinstance(message, dict) or row_role != str(message.get("role") or ""):
+                return False
+            row_content_hash = self._message_content_fingerprint(_row_value(row, "content"))
+            message_content_hash = self._message_content_fingerprint(message.get("content"))
+            if row_content_hash != message_content_hash:
+                return False
+        return True
 
     def _diagnostic_message_samples(
         self,
@@ -1639,9 +1708,9 @@ class AIAgent:
     def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Persist any un-flushed messages to the SQLite session store.
 
-        Uses _last_flushed_db_idx to track which messages have already been
-        written, so repeated calls (from multiple exit paths) only write
-        truly new messages — preventing the duplicate-write bug (#860).
+        The in-memory cursor is scoped to the current message buffer/run/turn.
+        Rebuilt histories fall back to the explicit turn boundary and rely on
+        SessionDB's persisted run-message key for idempotency.
         """
         if not self._session_db:
             return
@@ -1666,18 +1735,58 @@ class AIAgent:
                     messages,
                     conversation_history,
                 )
-                start_idx = len(conversation_history) if history_is_prefix else 0
+                start_idx = len(conversation_history or []) if history_is_prefix else 0
                 history_boundary_source = (
                     "conversation_history_prefix" if history_is_prefix else "no_explicit_boundary"
                 )
-            flush_from = max(start_idx, self._last_flushed_db_idx)
+            active_run_id = str(getattr(self, "_hermes_active_run_id", "") or "").strip()
+            active_turn_id = str(getattr(self, "_hermes_active_turn_id", "") or "").strip()
+            messages_buffer_id = id(messages)
+            last_flushed_idx = int(getattr(self, "_last_flushed_db_idx", 0) or 0)
+            last_flushed_buffer_id = getattr(self, "_last_flushed_db_buffer_id", None)
+            last_flushed_visible_session_id = str(
+                getattr(self, "_last_flushed_db_visible_session_id", "") or ""
+            )
+            last_flushed_run_id = str(getattr(self, "_last_flushed_db_run_id", "") or "")
+            last_flushed_turn_id = str(getattr(self, "_last_flushed_db_turn_id", "") or "")
+            cursor_run_matches = (
+                not (active_run_id or active_turn_id or last_flushed_run_id or last_flushed_turn_id)
+                or (
+                    last_flushed_run_id == active_run_id
+                    and last_flushed_turn_id == active_turn_id
+                )
+            )
+            legacy_cursor_matches_db_prefix = (
+                last_flushed_buffer_id is None
+                and not last_flushed_visible_session_id
+                and cursor_run_matches
+                and self._session_db_matches_message_prefix(
+                    visible_session_id,
+                    messages,
+                    last_flushed_idx,
+                )
+            )
+            cursor_matches_current_buffer = (
+                last_flushed_buffer_id == messages_buffer_id
+                and last_flushed_visible_session_id == visible_session_id
+                and cursor_run_matches
+                and last_flushed_idx <= len(messages or [])
+            ) or legacy_cursor_matches_db_prefix
+            if cursor_matches_current_buffer:
+                flush_from = max(start_idx, last_flushed_idx)
+                flush_cursor_source = (
+                    "db_verified_legacy_cursor"
+                    if legacy_cursor_matches_db_prefix
+                    else "same_buffer_cursor"
+                )
+            else:
+                flush_from = start_idx
+                flush_cursor_source = "db_idempotent_boundary"
             runtime_scope_key = str(getattr(self, "_hermes_active_runtime_scope_key", "") or "")
             context = self._active_run_context()
             context_participant_id = str(
                 getattr(context, "participant_id", "") if context is not None else ""
             ).strip()
-            active_run_id = str(getattr(self, "_hermes_active_run_id", "") or "").strip()
-            active_turn_id = str(getattr(self, "_hermes_active_turn_id", "") or "").strip()
             active_activity_id = str(
                 getattr(context, "activity_id", "") if context is not None else ""
             ).strip()
@@ -1706,7 +1815,14 @@ class AIAgent:
                 raw_history_len=len(conversation_history or []),
                 history_is_prefix=history_is_prefix,
                 messages_len=len(messages or []),
-                last_flushed_db_idx=self._last_flushed_db_idx,
+                last_flushed_db_idx=last_flushed_idx,
+                last_flushed_db_buffer_id=str(last_flushed_buffer_id or ""),
+                current_db_buffer_id=str(messages_buffer_id),
+                last_flushed_visible_session_id=last_flushed_visible_session_id,
+                last_flushed_run_id=last_flushed_run_id,
+                last_flushed_turn_id=last_flushed_turn_id,
+                legacy_cursor_matches_db_prefix=legacy_cursor_matches_db_prefix,
+                flush_cursor_source=flush_cursor_source,
                 flush_from=flush_from,
                 slice_len=len(slice_messages),
                 team_visible_transcript=team_visible_transcript,
@@ -1781,6 +1897,11 @@ class AIAgent:
                         identity_value = str(context_metadata.get(identity_key) or "").strip()
                         if identity_value:
                             msg_metadata[identity_key] = identity_value
+                if role in {"user", "assistant", "tool"}:
+                    msg_metadata = self._message_persist_identity_metadata(
+                        msg_metadata,
+                        turn_message_index=msg_idx - start_idx,
+                    )
                 if msg_metadata and msg.get("metadata") != msg_metadata:
                     msg["metadata"] = msg_metadata
                 if team_visible_transcript and role in {"user", "assistant", "tool"}:
@@ -1900,6 +2021,8 @@ class AIAgent:
                             ),
                             "run_id": str(msg_metadata.get("run_id") or ""),
                             "turn_id": str(msg_metadata.get("turn_id") or ""),
+                            "turn_message_index": str(msg_metadata.get("turn_message_index") or ""),
+                            "persist_message_key": str(msg_metadata.get("persist_message_key") or ""),
                             "content_len": len(str(content or "")),
                             "content_preview": self._diagnostic_text_preview(content),
                             "has_tool_calls": bool(tool_calls_data),
@@ -1910,6 +2033,10 @@ class AIAgent:
                         }
                     )
             self._last_flushed_db_idx = len(messages)
+            self._last_flushed_db_buffer_id = messages_buffer_id
+            self._last_flushed_db_visible_session_id = visible_session_id
+            self._last_flushed_db_run_id = active_run_id
+            self._last_flushed_db_turn_id = active_turn_id
             self._emit_transcript_flush_diagnostic(
                 "flush-finished",
                 visible_session_id=visible_session_id,
@@ -1933,7 +2060,7 @@ class AIAgent:
                 error_type=type(e).__name__,
                 error=str(e),
             )
-            logger.warning("Session DB append_message failed: %s", e)
+            logger.warning("Session DB append_message failed: %s", e, exc_info=True)
 
     def _flush_message_participant_id(
         self,
