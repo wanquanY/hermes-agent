@@ -79,6 +79,15 @@ def _load_openai_cls() -> type:
     return _OPENAI_CLS_CACHE
 
 
+def _attach_dovie_attribution(client: Any) -> Any:
+    try:
+        from agent.dovie_attribution import attach_dovie_attribution_request_hook
+
+        return attach_dovie_attribution_request_hook(client)
+    except Exception:
+        return client
+
+
 class _OpenAIProxy:
     """Module-level proxy that looks like the ``openai.OpenAI`` class.
 
@@ -89,7 +98,7 @@ class _OpenAIProxy:
     __slots__ = ()
 
     def __call__(self, *args, **kwargs):
-        return _load_openai_cls()(*args, **kwargs)
+        return _attach_dovie_attribution(_load_openai_cls()(*args, **kwargs))
 
     def __instancecheck__(self, obj):
         return isinstance(obj, _load_openai_cls())
@@ -3188,7 +3197,7 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
                     async_kwargs["default_headers"] = dict(_ph_async.default_headers)
         except Exception:
             pass
-    return AsyncOpenAI(**async_kwargs), model
+    return _attach_dovie_attribution(AsyncOpenAI(**async_kwargs)), model
 
 
 def _normalize_resolved_model(model_name: Optional[str], provider: str) -> Optional[str]:

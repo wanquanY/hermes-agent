@@ -870,6 +870,12 @@ def init_agent(
         agent.base_url = client_kwargs.get("base_url", agent.base_url)
         try:
             agent.client = agent._create_openai_client(client_kwargs, reason="agent_init", shared=True)
+            try:
+                from agent.dovie_attribution import attach_dovie_attribution_request_hook
+
+                attach_dovie_attribution_request_hook(agent.client)
+            except Exception:
+                pass
             if not agent.quiet_mode:
                 print(f"🤖 AI Agent initialized with model: {agent.model}")
                 if base_url:

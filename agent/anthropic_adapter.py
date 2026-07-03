@@ -609,6 +609,12 @@ def _build_anthropic_client_with_bearer_hook(
         normalized_base_url = _re.sub(r"/v1/?$", "", normalized_base_url.rstrip("/"))
 
     http_client = build_bearer_http_client(token_provider, timeout=timeout_obj)
+    try:
+        from agent.dovie_attribution import attach_dovie_attribution_request_hook
+
+        attach_dovie_attribution_request_hook(http_client)
+    except Exception:
+        pass
 
     kwargs = {
         "timeout": timeout_obj,
@@ -634,7 +640,14 @@ def _build_anthropic_client_with_bearer_hook(
     if common_betas:
         kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
 
-    return _anthropic_sdk.Anthropic(**kwargs)
+    client = _anthropic_sdk.Anthropic(**kwargs)
+    try:
+        from agent.dovie_attribution import attach_dovie_attribution_request_hook
+
+        attach_dovie_attribution_request_hook(client)
+    except Exception:
+        pass
+    return client
 
 
 def build_anthropic_client(
@@ -754,7 +767,14 @@ def build_anthropic_client(
         if common_betas:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
 
-    return _anthropic_sdk.Anthropic(**kwargs)
+    client = _anthropic_sdk.Anthropic(**kwargs)
+    try:
+        from agent.dovie_attribution import attach_dovie_attribution_request_hook
+
+        attach_dovie_attribution_request_hook(client)
+    except Exception:
+        pass
+    return client
 
 
 def build_anthropic_bedrock_client(region: str):
