@@ -64,6 +64,40 @@ def test_build_headers_maps_full_context_to_all_dovie_headers():
         clear_session_vars(tokens)
 
 
+def test_build_headers_uses_explicit_root_executing_and_agent_role():
+    payload = {
+        **_context(),
+        "root_agent_profile_id": "profile-root-team",
+        "executing_agent_profile_id": "profile-member-1",
+        "agent_role": "team_member",
+    }
+    tokens = _set_dovie_context(payload)
+    try:
+        headers = build_dovie_attribution_headers()
+    finally:
+        clear_session_vars(tokens)
+
+    assert headers["X-Dovie-Root-Agent-Profile-Id"] == "profile-root-team"
+    assert headers["X-Dovie-Executing-Agent-Profile-Id"] == "profile-member-1"
+    assert headers["X-Dovie-Agent-Role"] == "team_member"
+
+
+def test_build_headers_executing_profile_falls_back_to_source_profile():
+    payload = {
+        **_context(),
+        "root_agent_profile_id": "profile-root-team",
+    }
+    tokens = _set_dovie_context(payload)
+    try:
+        headers = build_dovie_attribution_headers()
+    finally:
+        clear_session_vars(tokens)
+
+    assert headers["X-Dovie-Root-Agent-Profile-Id"] == "profile-root-team"
+    assert headers["X-Dovie-Executing-Agent-Profile-Id"] == "profile-root-1"
+    assert "X-Dovie-Agent-Role" not in headers
+
+
 def test_build_headers_accepts_snake_case_top_level_ids():
     tokens = _set_dovie_context(
         {

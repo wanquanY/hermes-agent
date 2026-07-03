@@ -562,15 +562,18 @@ def _submit_message_to_member(
         "attachments": submitted_attachments,
         "tool_progress_mode": "all",
         "cols": 120,
-        "dovie_product_context": {
-            "team_mission": {
+        "dovie_product_context": _team_dovie_product_context(
+            params,
+            team_mission={
                 "kind": "member_chat",
                 "surface": "member_chat",
                 "conversation_id": conversation_id,
                 "conversation_session_id": conversation_session_id,
                 "member_id": target_member_id,
             },
-        },
+            executing_agent_profile_id=agent_profile_id,
+            agent_role="team_member",
+        ),
     }
     # Dispatch run.submit through the runtime-proxy path so the worker spawns
     # on the member-chat execution scope and runs inside the member's profile home
@@ -924,10 +927,17 @@ def _(rid, params: dict) -> dict:
         "enabled_toolsets": [] if direct_reply else _leader_message_toolsets(params),
         "disabled_toolsets": _leader_disabled_toolsets(params),
         "toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE,
-        "dovie_product_context": {
-            **(params.get("dovie_product_context") if isinstance(params.get("dovie_product_context"), dict) else {}),
-            "team_mission": team_context,
-        },
+        "dovie_product_context": _team_dovie_product_context(
+            params,
+            team_mission=team_context,
+            executing_agent_profile_id=str(
+                profile_params.get("agent_profile_id")
+                or params.get("agent_profile_id")
+                or params.get("agentProfileId")
+                or ""
+            ),
+            agent_role="team_leader",
+        ),
     }
     if direct_reply:
         submit_params["reasoning_config"] = dict(_TEAM_LEADER_DIRECT_REPLY_REASONING_CONFIG)
@@ -2090,6 +2100,14 @@ def _(rid, params: dict) -> dict:
         or node.get("assignee_profile_version_id")
         or ""
     ).strip()
+    node_context_params = params
+    if not _dovie_product_context_from_params(node_context_params):
+        mission_dovie_context = (
+            mission_metadata.get("dovie_product_context")
+            or mission_metadata.get("dovieProductContext")
+        )
+        if mission_dovie_context:
+            node_context_params = {**params, "dovie_product_context": mission_dovie_context}
     task_id = str(
         metadata.get("task_id")
         or metadata.get("taskId")
@@ -2169,9 +2187,9 @@ def _(rid, params: dict) -> dict:
         "enabled_toolsets": enabled_toolsets,
         **({"disabled_toolsets": _leader_disabled_toolsets(params)} if leader_control_node else {}),
         **({"toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE} if leader_control_node or enabled_toolsets else {}),
-        "dovie_product_context": {
-            **(params.get("dovie_product_context") if isinstance(params.get("dovie_product_context"), dict) else {}),
-            "team_mission": {
+        "dovie_product_context": _team_dovie_product_context(
+            node_context_params,
+            team_mission={
                 "kind": "leader_planning_node" if leader_control_node else "mission_node",
                 "surface": "mission_node",
                 "mission_id": mission_id,
@@ -2198,7 +2216,9 @@ def _(rid, params: dict) -> dict:
                 "delegate_inherits_parent_tools": not leader_control_node,
                 **({"tool_policy": _team_leader_tool_policy(surface="leader_node")} if leader_control_node else {}),
             },
-        },
+            executing_agent_profile_id=agent_profile_id,
+            agent_role="team_leader" if leader_control_node else "team_member",
+        ),
     }
     response = _submit_run_via_worker_with_response(rid, submit_params)
     if isinstance(response, dict) and response.get("error"):

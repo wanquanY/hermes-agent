@@ -70,12 +70,42 @@ def build_dovie_attribution_headers() -> dict[str, str]:
             (
                 "sourceAgentProfileId",
                 "source_agent_profile_id",
-                "rootAgentProfileId",
-                "root_agent_profile_id",
             ),
         )
-        _put_header(headers, "X-Dovie-Root-Agent-Profile-Id", source_profile_id)
-        _put_header(headers, "X-Dovie-Executing-Agent-Profile-Id", source_profile_id)
+        root_profile_id = (
+            _first_present(
+                parsed,
+                (
+                    "root_agent_profile_id",
+                    "rootAgentProfileId",
+                ),
+            )
+            or source_profile_id
+        )
+        executing_profile_id = (
+            _first_present(
+                parsed,
+                (
+                    "executing_agent_profile_id",
+                    "executingAgentProfileId",
+                ),
+            )
+            or source_profile_id
+            or root_profile_id
+        )
+        _put_header(headers, "X-Dovie-Root-Agent-Profile-Id", root_profile_id)
+        _put_header(headers, "X-Dovie-Executing-Agent-Profile-Id", executing_profile_id)
+        _put_header(
+            headers,
+            "X-Dovie-Agent-Role",
+            _first_present(
+                parsed,
+                (
+                    "agent_role",
+                    "agentRole",
+                ),
+            ),
+        )
 
         _put_header(
             headers,

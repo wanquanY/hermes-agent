@@ -18,6 +18,7 @@ from hermes_team_mission.gateway.common import _leader_disabled_toolsets
 from hermes_team_mission.gateway.common import _leader_profile_params
 from hermes_team_mission.gateway.common import _leader_runtime_owner_error
 from hermes_team_mission.gateway.common import _resolve_team_leader_runtime_params_for_request
+from hermes_team_mission.gateway.common import _team_dovie_product_context
 from hermes_team_mission.gateway.common import _TEAM_LEADER_TOOLSET_SCOPE
 from hermes_team_mission.gateway.common import bind_team_mission_session_workspace
 from hermes_team_mission.gateway.common import get_hermes_home
@@ -204,6 +205,12 @@ def submit_mission_leader_report_run(
         "workspace_path": workspace_path,
         "workspacePath": workspace_path,
     }
+    mission_dovie_context = (
+        metadata.get("dovie_product_context")
+        or metadata.get("dovieProductContext")
+    )
+    if mission_dovie_context:
+        params["dovie_product_context"] = mission_dovie_context
     try:
         params, leader_runtime_context = _resolve_team_leader_runtime_params_for_request(params, graph, db)
     except ValueError as exc:
@@ -315,9 +322,9 @@ def submit_mission_leader_report_run(
         "enabled_toolsets": [],
         "disabled_toolsets": _leader_disabled_toolsets(params),
         "toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE,
-        "dovie_product_context": {
-            **(params.get("dovie_product_context") if isinstance(params.get("dovie_product_context"), dict) else {}),
-            "team_mission": {
+        "dovie_product_context": _team_dovie_product_context(
+            params,
+            team_mission={
                 "kind": "leader_report",
                 "surface": "mission_report",
                 "mission_id": mission_id,
@@ -334,7 +341,14 @@ def submit_mission_leader_report_run(
                 "artifact_refs": artifact_refs,
                 "artifactRefs": artifact_refs,
             },
-        },
+            executing_agent_profile_id=str(
+                profile_params.get("agent_profile_id")
+                or params.get("agent_profile_id")
+                or params.get("agentProfileId")
+                or ""
+            ),
+            agent_role="team_leader",
+        ),
     }
     runtime_session_error = _ensure_team_mission_runtime_session_shell(conversation_session_id)
     if runtime_session_error:

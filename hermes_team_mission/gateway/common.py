@@ -699,6 +699,64 @@ def _team_leader_tool_policy(*, surface: str) -> dict:
     }
 
 
+def _dovie_product_context_from_params(params: dict) -> dict:
+    params = params if isinstance(params, dict) else {}
+    raw = params.get("dovie_product_context")
+    if raw is None:
+        raw = params.get("dovieProductContext")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _dovie_first_text(mapping: dict, *keys: str) -> str:
+    mapping = mapping if isinstance(mapping, dict) else {}
+    for key in keys:
+        value = str(mapping.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _team_dovie_product_context(
+    params: dict,
+    *,
+    team_mission: dict,
+    executing_agent_profile_id: str = "",
+    agent_role: str = "",
+) -> dict:
+    context = _dovie_product_context_from_params(params)
+    if "cloud_query" not in context and isinstance(context.get("cloudQuery"), dict):
+        context["cloud_query"] = dict(context["cloudQuery"])
+
+    root_agent_profile_id = _dovie_first_text(
+        context,
+        "root_agent_profile_id",
+        "rootAgentProfileId",
+        "sourceAgentProfileId",
+        "source_agent_profile_id",
+    )
+    executing_agent_profile_id = str(executing_agent_profile_id or "").strip()
+    agent_role = str(agent_role or "").strip()
+    if not root_agent_profile_id and agent_role == "team_leader":
+        root_agent_profile_id = executing_agent_profile_id
+
+    if root_agent_profile_id:
+        context["root_agent_profile_id"] = root_agent_profile_id
+    if executing_agent_profile_id:
+        context["executing_agent_profile_id"] = executing_agent_profile_id
+    if agent_role:
+        context["agent_role"] = agent_role
+    context["team_mission"] = dict(team_mission) if isinstance(team_mission, dict) else {}
+    return context
+
+
 def _is_team_leader_control_node(node: dict) -> bool:
     node = node if isinstance(node, dict) else {}
     if normalize_team_mission_node_kind((node or {}).get("kind")) in {"verifier", "synthesis"}:

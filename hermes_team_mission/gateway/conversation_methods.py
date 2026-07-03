@@ -289,6 +289,16 @@ def _(rid, params: dict) -> dict:
     if not isinstance(metadata, dict):
         return _err(rid, 4004, "metadata must be an object")
     metadata = _normalize_mission_metadata(params, metadata)
+    incoming_dovie_context = _dovie_product_context_from_params(params)
+    if not incoming_dovie_context:
+        incoming_dovie_context = _dovie_product_context_from_params({
+            "dovie_product_context": (
+                metadata.get("dovie_product_context")
+                or metadata.get("dovieProductContext")
+            ),
+        })
+    if incoming_dovie_context:
+        metadata = {**metadata, "dovie_product_context": incoming_dovie_context}
     conversation_id = _conversation_id_from_params(params, metadata) or mission_id
     leader_session_id = str(params.get("leader_session_id") or params.get("leaderSessionId") or "").strip()
     if not leader_session_id:
@@ -527,22 +537,22 @@ def _(rid, params: dict) -> dict:
         )
     start_response = None
     if root_node and metadata.get("start_leader") is True:
-        start_response = _methods["team_mission.node.start"](
-            rid,
-            {
-                "mission_id": mission_id,
-                "node_id": str(root_node.get("node_id") or ""),
-                "use_strategy_prompt": True,
-                "record_user_task_message": params.get("record_user_task_message") if "record_user_task_message" in params else params.get("recordUserTaskMessage"),
-                "members": members,
-                "dispatch_activity_id": metadata.get("dispatch_activity_id") or request_activity_id,
-                "parent_activity_id": metadata.get("parent_activity_id") or request_activity_id,
-                "parent_conversation_id": metadata.get("parent_conversation_id"),
-                "parent_scope_key": metadata.get("parent_scope_key"),
-                "parent_hermes_home": metadata.get("parent_hermes_home"),
-                "source": metadata.get("source") or "team_dispatch",
-            },
-        )
+        start_params = {
+            "mission_id": mission_id,
+            "node_id": str(root_node.get("node_id") or ""),
+            "use_strategy_prompt": True,
+            "record_user_task_message": params.get("record_user_task_message") if "record_user_task_message" in params else params.get("recordUserTaskMessage"),
+            "members": members,
+            "dispatch_activity_id": metadata.get("dispatch_activity_id") or request_activity_id,
+            "parent_activity_id": metadata.get("parent_activity_id") or request_activity_id,
+            "parent_conversation_id": metadata.get("parent_conversation_id"),
+            "parent_scope_key": metadata.get("parent_scope_key"),
+            "parent_hermes_home": metadata.get("parent_hermes_home"),
+            "source": metadata.get("source") or "team_dispatch",
+        }
+        if incoming_dovie_context:
+            start_params["dovie_product_context"] = incoming_dovie_context
+        start_response = _methods["team_mission.node.start"](rid, start_params)
         if isinstance(start_response, dict) and start_response.get("error"):
             return start_response
         graph = db.get_team_mission_graph(mission_id)

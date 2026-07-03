@@ -39,6 +39,26 @@ _START_TASK_FOLLOWUP_INSTRUCTION = (
     "task. Do not continue task execution, do not create deliverables, and do "
     "not call additional tools in this turn."
 )
+_DOVIE_ATTRIBUTION_CONTEXT_KEYS = (
+    "cloud_query",
+    "cloudQuery",
+    "sourceAgentProfileId",
+    "source_agent_profile_id",
+    "sourceSessionId",
+    "source_session_id",
+    "sourceRunId",
+    "source_run_id",
+    "sourceTurnId",
+    "source_turn_id",
+    "sourceClientMessageId",
+    "source_client_message_id",
+    "root_agent_profile_id",
+    "rootAgentProfileId",
+    "executing_agent_profile_id",
+    "executingAgentProfileId",
+    "agent_role",
+    "agentRole",
+)
 
 
 def _text(value: Any) -> str:
@@ -80,6 +100,17 @@ def _team_context() -> dict[str, Any] | str:
     ):
         return "Team Mission conversation context is not available for this Leader turn."
     return dict(team)
+
+
+def _session_dovie_attribution_context() -> dict[str, Any]:
+    context = _session_context()
+    carried: dict[str, Any] = {}
+    for key in _DOVIE_ATTRIBUTION_CONTEXT_KEYS:
+        value = context.get(key)
+        if value in (None, "", {}, []):
+            continue
+        carried[key] = dict(value) if isinstance(value, Mapping) else value
+    return carried
 
 
 def _active_mission_graph(db, team_context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -327,6 +358,7 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
             },
             source="team_mission_start_task",
         )
+    product_context = _session_dovie_attribution_context()
     create_response = _gateway_call(
         "team_mission.create",
         {
@@ -346,6 +378,7 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
             **({"activity_id": request_activity_id} if request_activity_id else {}),
             "record_user_task_message": False,
             "metadata": metadata,
+            **({"dovie_product_context": product_context} if product_context else {}),
         },
     )
     created, error = _unwrap_response(create_response)
