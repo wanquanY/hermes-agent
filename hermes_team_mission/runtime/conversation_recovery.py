@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from hermes_team_mission.domain.statuses import terminal_run_status_for_mission
 from hermes_team_mission.runtime.conversation_mirror import recover_legacy_final_deliverables
 from tui_gateway.services import run_control
-
-
-_TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled"}
 
 
 def _text(value: Any) -> str:
@@ -14,14 +12,7 @@ def _text(value: Any) -> str:
 
 
 def _terminal_run_status(mission_status: str) -> str:
-    status = _text(mission_status).lower()
-    if status == "completed":
-        return "completed"
-    if status == "failed":
-        return "failed"
-    if status in {"cancelled", "canceled"}:
-        return "cancelled"
-    return ""
+    return terminal_run_status_for_mission(mission_status)
 
 
 def recover_conversation_active_run(

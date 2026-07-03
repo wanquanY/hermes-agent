@@ -29,6 +29,8 @@ from hermes_team_mission.domain.modes import MODE_AUTONOMOUS_MISSION
 from hermes_team_mission.domain.modes import MODE_SUPERVISED_MISSION
 from hermes_team_mission.domain.modes import strategy_for_mode
 from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_kind
+from hermes_team_mission.domain.statuses import is_terminal_mission_status
+from hermes_team_mission.domain.statuses import projected_state_for_mission_status
 from hermes_team_mission.runtime.profile_scope import team_mission_control_db as _team_mission_control_db
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.methods.team_registry import _team_for_projection as _registry_team_for_projection
@@ -1196,7 +1198,6 @@ _TEAM_MISSION_ACTIVE_STATUSES = {
     "verifying",
     "waiting_approval",
 }
-_TEAM_MISSION_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "canceled"}
 _TEAM_MISSION_ACTIVE_NODE_STATUSES = {"starting", "running", "waiting_approval"}
 _TEAM_MISSION_ACTIVE_RUN_STATUSES = {
     "queued",
@@ -1308,7 +1309,7 @@ def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
     leader_running = bool(run_state.get("running"))
     node_running = bool(active_node_run)
     mission_running = bool(active_node_count) or mission_status in _TEAM_MISSION_ACTIVE_STATUSES
-    terminal = mission_status in _TEAM_MISSION_TERMINAL_STATUSES
+    terminal = is_terminal_mission_status(mission_status)
     observed_runtime = bool(leader_running or node_running or mission_running)
     running = (
         observed_runtime and not terminal and has_active_mission
@@ -1340,11 +1341,12 @@ def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
     mission_started_at = _timestamp(mission.get("created_at"))
     mission_updated_at = _timestamp(mission.get("updated_at"))
     mission_completed_at = _timestamp(mission.get("completed_at"))
-    projected_state = "waiting_approval" if waiting_approval else "running" if running else (
-        "completed" if mission_status == "completed"
-        else "failed" if mission_status == "failed"
-        else "cancelled" if mission_status in {"cancelled", "canceled"}
-        else "idle"
+    projected_state = (
+        "waiting_approval"
+        if waiting_approval
+        else "running"
+        if running
+        else projected_state_for_mission_status(mission_status) or "idle"
     )
     projection = {
         "running": running,

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from tests.team_mission_gateway_test_support import team_mission_gateway
 
 
@@ -1047,9 +1049,23 @@ def test_conversation_projection_exposes_final_deliverable_artifacts_to_list_and
     assert graph["task_frames"][0]["artifactRefs"] == artifact_refs
 
 
-def test_conversation_list_recovers_completed_mission_with_active_mirror_run(
+@pytest.mark.parametrize(
+    ("mission_status", "expected_run_status", "expected_run_state"),
+    [
+        ("completed", "completed", "completed"),
+        ("failed", "failed", "failed"),
+        ("cancelled", "cancelled", "cancelled"),
+        ("canceled", "cancelled", "cancelled"),
+        ("interrupted", "interrupted", "interrupted"),
+        ("blocked", "failed", "blocked"),
+    ],
+)
+def test_conversation_list_recovers_terminal_mission_with_active_mirror_run(
     monkeypatch,
     tmp_path: Path,
+    mission_status: str,
+    expected_run_status: str,
+    expected_run_state: str,
 ):
     import importlib
 
@@ -1074,7 +1090,7 @@ def test_conversation_list_recovers_completed_mission_with_active_mirror_run(
         title="监督执行",
         objective="规划审批后执行",
         mode="supervised_mission",
-        status="completed",
+        status=mission_status,
         metadata={"stableTeamSessionId": "team-session-1"},
     )
     mirror_run_id = "team-mission:mission-1:conversation:run-synthesis"
@@ -1105,8 +1121,8 @@ def test_conversation_list_recovers_completed_mission_with_active_mirror_run(
     assert conversation["conversation_id"] == "conversation-1"
     assert conversation["running"] is False
     assert conversation["active_run_id"] == ""
-    assert conversation["run_state"] == "completed"
-    assert db.get_run(mirror_run_id)["status"] == "completed"
+    assert conversation["run_state"] == expected_run_state
+    assert db.get_run(mirror_run_id)["status"] == expected_run_status
     streamed = [
         frame.get("params") or {}
         for frame in transport.frames
@@ -1123,7 +1139,7 @@ def test_conversation_list_recovers_completed_mission_with_active_mirror_run(
     resolved_conversation = resolved["result"]["conversation"]
     assert resolved_conversation["running"] is False
     assert resolved_conversation["active_run_id"] == ""
-    assert resolved_conversation["run_state"] == "completed"
+    assert resolved_conversation["run_state"] == expected_run_state
 
 
 def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp_path: Path):
@@ -1193,6 +1209,70 @@ def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp
     ).fetchone()
     assert row["projected_message_id"] == message["conversation_message_id"]
     assert row["projection_state"] == "projected"
+
+
+def test_participant_only_team_chat_events_project_to_transcript(tmp_path: Path):
+    from hermes_state import SessionDB
+    from hermes_state_participants import leader_participant_id
+    from hermes_state_participants import member_participant_id
+
+    db = SessionDB(tmp_path / "state.db")
+    conversation_id = "team-conversation-participant-only"
+    session_id = f"team-session-{conversation_id}"
+    leader_pid = leader_participant_id(conversation_id)
+    member_pid = member_participant_id("member-builder")
+
+    db.create_session(session_id, source="team_mission", transient=False)
+    db.upsert_team_mission_conversation(
+        conversation_id=conversation_id,
+        stable_session_id=session_id,
+        team_id="team-1",
+        title="团队会话",
+    )
+
+    db.append_run_event(
+        session_id,
+        {
+            "type": "message.complete",
+            "session_id": "runtime-leader",
+            "run_id": "run-leader",
+            "turn_id": "turn-leader",
+            "runtime_scope_key": "team:conversation",
+            "participant_id": leader_pid,
+            "seq": 1,
+            "payload": {
+                "text": "leader reply without activity kind",
+                "status": "complete",
+            },
+        },
+    )
+    db.append_run_event(
+        session_id,
+        {
+            "type": "message.complete",
+            "session_id": "runtime-member",
+            "run_id": "run-member",
+            "turn_id": "turn-member",
+            "runtime_scope_key": "team:conversation",
+            "participant_id": member_pid,
+            "seq": 2,
+            "payload": {
+                "text": "member reply without activity kind",
+                "status": "complete",
+            },
+        },
+    )
+
+    messages = db.get_messages(session_id)
+    assert [message["content"] for message in messages] == [
+        "leader reply without activity kind",
+        "member reply without activity kind",
+    ]
+    assert [message["participant_id"] for message in messages] == [leader_pid, member_pid]
+    assert [message["metadata"]["transcript_activity_kind"] for message in messages] == [
+        "leader_chat",
+        "member_direct_chat",
+    ]
 
 
 def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_path: Path):

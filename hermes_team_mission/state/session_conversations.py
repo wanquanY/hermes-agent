@@ -24,8 +24,7 @@ def _team_mission_leader_report_status(
     if leader_report_run_id:
         return "pending"
     result_status = _text(result.get("status") or result.get("outcome")).lower()
-    mission_terminal = _text(mission_status).lower() in _TERMINAL_MISSION_STATUSES
-    if mission_terminal or result_status in _TERMINAL_MISSION_STATUSES:
+    if _is_terminal_mission_status(mission_status) or _is_terminal_mission_status(result_status):
         return "pending"
     return ""
 
@@ -99,6 +98,7 @@ class SessionDBTeamMissionConversationMixin:
     def _session_index_active_mission_exists_sql(self, session_alias: str = "session_index") -> str:
         """SQL predicate: the indexed team conversation still has active missions."""
         si = session_alias
+        inactive_statuses = _terminal_mission_sql_literals(include=("draft", "idle"))
         return f"""
             EXISTS (
                 SELECT 1
@@ -107,7 +107,7 @@ class SessionDBTeamMissionConversationMixin:
                     ON active_tm.mission_id = active_cm.mission_id
                  WHERE active_cm.status = 'active'
                    AND LOWER(COALESCE(active_tm.status,'')) NOT IN
-                       ('completed','failed','cancelled','canceled','interrupted','draft','idle')
+                       ({inactive_statuses})
                    AND (
                        (
                            COALESCE({si}.conversation_id, '') != ''
@@ -1517,7 +1517,7 @@ class SessionDBTeamMissionConversationMixin:
         for mission in missions:
             mission_id = _text(mission.get("mission_id"))
             mission_status = _text(mission.get("status")).lower()
-            mission_is_active_runtime_scope = mission_id == active_mission_id or mission_status not in _TERMINAL_MISSION_STATUSES
+            mission_is_active_runtime_scope = mission_id == active_mission_id or not _is_terminal_mission_status(mission_status)
             mission_nodes = nodes_by_mission.get(mission_id) or []
             node_ids: List[str] = []
             root_node_id = ""
@@ -1838,15 +1838,16 @@ class SessionDBTeamMissionConversationMixin:
         # - mission_terminal: terminal mission state wins over zombie running rows.
         # - has_active_mission: scopes the observed run to an active conversation
         #   mission link instead of any historical run binding.
-        mission_terminal = mission_status in _TERMINAL_MISSION_STATUSES
+        mission_terminal = _is_terminal_mission_status(mission_status)
         run_observed = bool(active_run) or bool(active_node_run)
         running = run_observed and not mission_terminal and has_active_mission
         waiting_approval = bool(pending_approvals) or mission_status == "waiting_approval"
-        projected_state = "waiting_approval" if waiting_approval else "running" if running else (
-            "completed" if mission_status == "completed"
-            else "failed" if mission_status == "failed"
-            else "cancelled" if mission_status in {"cancelled", "canceled", "interrupted"}
-            else "idle"
+        projected_state = (
+            "waiting_approval"
+            if waiting_approval
+            else "running"
+            if running
+            else _projected_state_for_mission_status(mission_status) or "idle"
         )
         # Run identity fields must describe a CONVERSATION-owned run only. A
         # mission node run may drive the sidebar `running` flag (run_observed

@@ -65,7 +65,7 @@ class SessionDBTeamMissionGraphMixin:
                     mission_id=mission_id,
                     status=status,
                 )
-            if normalized_status not in _TERMINAL_MISSION_STATUSES:
+            if not _is_terminal_mission_status(normalized_status):
                 continue
             try:
                 from hermes_team_mission.runtime.team_transcript_writer import MissionSummaryWriter
@@ -275,7 +275,7 @@ class SessionDBTeamMissionGraphMixin:
         # row). Result: starting a new team task left the sidebar idle until
         # synthesis finally landed.
         ms = str(patch.mission_status or "").lower()
-        if ms in _TERMINAL_MISSION_STATUSES:
+        if _is_terminal_mission_status(ms):
             idx_status, idx_running, idx_waiting = "idle", False, False
         elif ms == "waiting_approval":
             idx_status, idx_running, idx_waiting = "waiting_approval", False, True
@@ -1049,11 +1049,11 @@ class SessionDBTeamMissionGraphMixin:
                         },
                     )
 
-        if mission_status in _TERMINAL_MISSION_STATUSES:
+        if _is_terminal_mission_status(mission_status):
             # Mission is already terminal, but we still return (and have just
             # reaped) any runs that were left non-terminal so the gateway can
             # terminate the live worker runs and clear the zombie state.
-            if mission_status in {"cancelled", "canceled"}:
+            if _is_cancelled_mission_status(mission_status):
                 _mark_conversation_mission_cancelled()
             # Activity-scoped projection: this only clears the conversation row
             # when no sibling mission and no other active run remain.
@@ -1283,7 +1283,7 @@ class SessionDBTeamMissionGraphMixin:
                 if not mission_status:
                     mission_row = _mission_row_for_run(run_mission_id)
                     mission_status = _text(_row_value(mission_row, "status", "")).lower()
-                if mission_status not in _TERMINAL_MISSION_STATUSES:
+                if not _is_terminal_mission_status(mission_status):
                     continue
                 reap_reason = "terminal_mission_stale_run"
                 error = f"runtime run reaped: bound team mission {run_mission_id} already terminal"
@@ -1343,7 +1343,7 @@ class SessionDBTeamMissionGraphMixin:
             ).fetchone()
             if mission_row is None:
                 return 0
-            if _text(_row_value(mission_row, "status", "")).lower() not in _TERMINAL_MISSION_STATUSES:
+            if not _is_terminal_mission_status(_row_value(mission_row, "status", "")):
                 return 0
         placeholders = ",".join("?" for _ in _TEAM_MISSION_PRUNABLE_SOURCE_TYPES)
 

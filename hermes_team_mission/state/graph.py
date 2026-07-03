@@ -7,6 +7,8 @@ from hermes_team_mission.domain.handoff_contract import deliverable_is_effective
 from hermes_team_mission.domain.handoff_contract import node_requires_authoritative_handoff
 from hermes_team_mission.domain.node_kinds import TEAM_MISSION_CONTROL_NODE_KINDS
 from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_kind
+from hermes_team_mission.domain.statuses import is_cancelled_mission_status
+from hermes_team_mission.domain.statuses import is_terminal_mission_status
 
 
 _DEPENDENCY_EDGE_KINDS = {"depends_on", "dependency", "blocks", "delegates"}
@@ -14,7 +16,6 @@ _DEPENDENCY_SATISFIED_STATUSES = {"completed", "verified"}
 _STARTABLE_NODE_STATUSES = {"ready"}
 _WAITING_DEPENDENCY_STATUSES = {"todo", "waiting_dependency", "blocked_waiting_dependency"}
 _ACTIVE_NODE_STATUSES = {"running", "starting", "waiting_approval"}
-_TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 _EXECUTION_MODES_REQUIRE_FINALIZERS = {"supervised_mission", "autonomous_mission", "manual_graph"}
 _NON_WORK_NODE_KINDS = TEAM_MISSION_CONTROL_NODE_KINDS
 
@@ -277,7 +278,7 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
             metadata=dict(mission.get("metadata") or {}),
         )
         updated_graph = db.get_team_mission_graph(mission_id)
-    if mission_status.lower() in _TERMINAL_MISSION_STATUSES:
+    if is_terminal_mission_status(mission_status):
         finalized_result: Dict[str, Any] = {}
         try:
             from hermes_team_mission.runtime.mission_result import finalize_team_mission_result
@@ -297,7 +298,7 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
             )
         except Exception:
             pass
-        linked_status = "cancelled" if mission_status.lower() in {"cancelled", "canceled", "interrupted"} else mission_status
+        linked_status = "cancelled" if is_cancelled_mission_status(mission_status) else mission_status
         linker = getattr(db, "_set_linked_conversation_mission_status", None)
         if callable(linker):
             try:
@@ -321,7 +322,7 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
     index_updater = getattr(db, "update_session_index_for_mission", None)
     if callable(index_updater):
         ms = mission_status.lower()
-        if ms in _TERMINAL_MISSION_STATUSES:
+        if is_terminal_mission_status(ms):
             idx_status, idx_running, idx_waiting = "idle", False, False
         elif ms == "waiting_approval":
             idx_status, idx_running, idx_waiting = "waiting_approval", False, True
@@ -343,8 +344,8 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
     # accumulate unbounded across never-revisited missions. Gated on the
     # actual prior!=new transition so it still fires once per mission.
     if (
-        mission_status.lower() in _TERMINAL_MISSION_STATUSES
-        and prior_mission_status.lower() not in _TERMINAL_MISSION_STATUSES
+        is_terminal_mission_status(mission_status)
+        and not is_terminal_mission_status(prior_mission_status)
     ):
         pruner = getattr(db, "prune_team_mission_events", None)
         if callable(pruner):

@@ -5,9 +5,9 @@ from typing import Any
 
 from hermes_team_mission.context.artifact_refs import dedupe_artifact_refs
 from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_kind
+from hermes_team_mission.domain.statuses import is_terminal_mission_status
 
 
-TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 USER_VISIBLE_ARTIFACT_VISIBILITIES = {"", "user", "report", "public"}
 IGNORED_RESULT_NODE_KINDS = {"root", "approval_gate"}
 
@@ -96,7 +96,7 @@ def finalize_team_mission_result(db: Any, mission_id: str) -> dict[str, Any]:
     graph = graph_getter(mission_id) or {}
     mission = _mapping(graph.get("mission"))
     status = _text(mission.get("status")).lower()
-    if status not in TERMINAL_MISSION_STATUSES:
+    if not is_terminal_mission_status(status):
         return {}
     deliverables = [
         item for item in (graph.get("deliverables") or [])

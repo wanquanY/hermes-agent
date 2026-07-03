@@ -259,7 +259,7 @@ def test_e2e_team_conversation_creates_routes_renders_correctly_kind_team(
     assert snapshot["conversation"]["conversation_id"] == team["conversation_id"]
     assert snapshot["mission"]["mission_id"] == team["mission_id"]
     assert snapshot["messages"][0]["text"] == "leader complete"
-    assert snapshot["messages"][0]["metadata"]["source"] == "run_events"
+    assert snapshot["messages"][0]["metadata"]["source"] == "team_mission.runtime_event"
     assert db.get_session_index(team["session_id"])["conversation_kind"] == "team"
 
 

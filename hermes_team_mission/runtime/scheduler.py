@@ -9,11 +9,11 @@ from hermes_team_mission.runtime.failure import REASON_PROVIDER_RATE_LIMITED
 from hermes_team_mission.runtime.failure import classify_team_mission_failure
 from hermes_team_mission.domain.modes import strategy_for_mode
 from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_kind
+from hermes_team_mission.domain.statuses import is_terminal_mission_status
 
 logger = logging.getLogger(__name__)
 
 _TERMINAL_DEPENDENCY_STATUSES = {"completed", "verified"}
-_TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 _ACTIVE_EXECUTION_NODE_STATUSES = {"starting", "running", "waiting_approval"}
 _NON_EXECUTION_NODE_KINDS = {"root", "approval_gate"}
 _DEFAULT_MAX_PARALLEL_NODES = 3
@@ -197,7 +197,7 @@ class TeamMissionReadyScheduler:
             mission = graph.get("mission") if isinstance(graph, dict) else {}
             if not isinstance(mission, dict):
                 return {}
-        if _mission_status(mission) in _TERMINAL_MISSION_STATUSES:
+        if is_terminal_mission_status(_mission_status(mission)):
             return {
                 "mission_id": normalized_mission_id,
                 "ready_node_ids": [],

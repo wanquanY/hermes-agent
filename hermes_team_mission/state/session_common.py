@@ -41,6 +41,10 @@ from hermes_team_mission.domain.identities import canonical_node_id as _canonica
 from hermes_team_mission.domain.node_kinds import TEAM_MISSION_CONTROL_NODE_KINDS
 from hermes_team_mission.domain.node_kinds import metadata_with_normalized_node_kind as _metadata_with_normalized_node_kind
 from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_kind as _normalize_node_kind
+from hermes_team_mission.domain.statuses import is_cancelled_mission_status as _is_cancelled_mission_status
+from hermes_team_mission.domain.statuses import is_terminal_mission_status as _is_terminal_mission_status
+from hermes_team_mission.domain.statuses import projected_state_for_mission_status as _projected_state_for_mission_status
+from hermes_team_mission.domain.statuses import terminal_mission_sql_literals as _terminal_mission_sql_literals
 from hermes_team_mission.domain.modes import TeamMissionEdgeSpec
 from hermes_team_mission.domain.modes import TeamMissionNodeSpec
 from hermes_team_mission.domain.modes import TeamMissionStrategyActions
@@ -126,7 +130,6 @@ _TEAM_MISSION_PRUNABLE_SOURCE_TYPES = (
     "subagent.thinking",
     "subagent.progress",
 )
-_TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 _EXECUTION_MODES_REQUIRE_FINALIZERS = {"supervised_mission", "autonomous_mission", "manual_graph"}
 _NON_WORK_NODE_KINDS = TEAM_MISSION_CONTROL_NODE_KINDS
 _TEAM_MISSION_RUNTIME_EVENT_TYPE = "team_mission.runtime.event"

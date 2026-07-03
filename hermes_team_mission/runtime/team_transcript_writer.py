@@ -287,6 +287,15 @@ def transcript_activity_kind_for_run_context(
     return kind
 
 
+def transcript_activity_kind_for_participant(participant_id: str) -> str:
+    participant = _text(participant_id)
+    if participant.startswith("leader:"):
+        return "leader_chat"
+    if participant.startswith("member:"):
+        return "member_direct_chat"
+    return ""
+
+
 def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
     return _mapping(event.get("payload"))
 
@@ -313,7 +322,7 @@ def _event_transcript_activity_kind(event: dict[str, Any], payload: dict[str, An
     )
     if explicit:
         return explicit
-    return transcript_activity_kind_for_run_context(
+    inferred = transcript_activity_kind_for_run_context(
         activity_kind=_text(
             event.get("activity_kind")
             or event.get("activityKind")
@@ -324,6 +333,9 @@ def _event_transcript_activity_kind(event: dict[str, Any], payload: dict[str, An
         ),
         activity_id=_event_activity_id(event, payload),
     )
+    if inferred:
+        return inferred
+    return transcript_activity_kind_for_participant(_event_participant_id(event, payload))
 
 
 def _event_conversation_session_id(event: dict[str, Any], payload: dict[str, Any], fallback: str) -> str:
