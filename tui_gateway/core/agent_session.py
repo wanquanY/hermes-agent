@@ -385,6 +385,7 @@ def _make_agent(
     cwd: str | None = None,
     agent_context_mode: str | None = None,
     model_override: dict | None = None,
+    profile_context: dict | None = None,
 ):
     from run_agent import AIAgent
     from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -422,6 +423,48 @@ def _make_agent(
     # override (composer pick shipped on session.create).
     _override = model_override if isinstance(model_override, dict) else (_sessions.get(sid) or {}).get("model_override")
     _override = _override if isinstance(_override, dict) else None
+    session_context = dict(_sessions.get(sid) or {})
+    _profile_context = (
+        profile_context
+        if isinstance(profile_context, dict)
+        else session_context.get("profile_context")
+    )
+    if not isinstance(_profile_context, dict):
+        try:
+            from tui_gateway.services.profile_context import active_profile_context
+
+            _profile_context = active_profile_context()
+        except Exception:
+            _profile_context = None
+    _profile_context = _profile_context if isinstance(_profile_context, dict) else {}
+
+    def _first_text(*values) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    _runtime_executor = _first_text(
+        (_override or {}).get("runtime_executor"),
+        (_override or {}).get("runtimeExecutor"),
+        _profile_context.get("runtime_executor"),
+        _profile_context.get("runtimeExecutor"),
+    )
+    _codex_home = _first_text(
+        (_override or {}).get("codex_home"),
+        (_override or {}).get("codexHome"),
+        (_override or {}).get("codexHomePath"),
+        _profile_context.get("codex_home"),
+        _profile_context.get("codexHome"),
+        _profile_context.get("codexHomePath"),
+    )
+    _runtime_provider_override = _first_text(
+        (_override or {}).get("provider"),
+        _profile_context.get("provider"),
+        _profile_context.get("model_provider"),
+        _profile_context.get("modelProvider"),
+    )
     _override_model = str((_override or {}).get("model") or "").strip()
     if _override_model:
         model = _override_model
@@ -439,10 +482,17 @@ def _make_agent(
             requested_provider = _persisted_provider
         else:
             model, requested_provider = _resolve_startup_runtime()
-    runtime = resolve_runtime_provider(
-        requested=requested_provider,
-        target_model=model or None,
-    )
+    if _runtime_executor:
+        requested_provider = _runtime_provider_override or "openai-codex"
+    runtime_kwargs = {
+        "requested": requested_provider,
+        "target_model": model or None,
+    }
+    if _runtime_executor:
+        runtime_kwargs["runtime_executor"] = _runtime_executor
+    if _codex_home:
+        runtime_kwargs["codex_home"] = _codex_home
+    runtime = resolve_runtime_provider(**runtime_kwargs)
     # Concrete credentials from a completed in-session /model switch survive the
     # rebuild: when the override carries an explicit base_url / api_key / api_mode
     # (the switch already resolved them), use them verbatim instead of letting
@@ -460,7 +510,6 @@ def _make_agent(
         load_enabled_toolsets=_load_enabled_toolsets,
         load_disabled_toolsets=_load_disabled_toolsets,
     )
-    session_context = dict(_sessions.get(sid) or {})
     if agent_context_mode:
         session_context["agent_context_mode"] = agent_context_mode
     context_options = _agent_context_options_for_session(session_context)
@@ -492,6 +541,8 @@ def _make_agent(
     )
     if cwd:
         agent.session_cwd = cwd
+    if runtime.get("codex_home") is not None:
+        agent.codex_home = runtime.get("codex_home")
     remember_requested_runtime_provider(agent, runtime, requested_provider)
     return agent
 

@@ -167,6 +167,41 @@ def test_resolve_runtime_provider_codex(monkeypatch):
     assert resolved["requested_provider"] == "openai-codex"
 
 
+def test_resolve_runtime_provider_forced_codex_app_server_skips_codex_auth(monkeypatch):
+    def _unexpected_pool(provider):
+        raise AssertionError(f"load_pool should not be called for {provider}")
+
+    def _unexpected_codex_auth():
+        raise AssertionError("Hermes Codex auth should not be resolved")
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openai-codex")
+    monkeypatch.setattr(rp, "load_pool", _unexpected_pool)
+    monkeypatch.setattr(rp, "resolve_codex_runtime_credentials", _unexpected_codex_auth)
+
+    resolved = rp.resolve_runtime_provider(
+        requested="openai-codex",
+        runtime_executor="codex_app_server",
+        codex_home="/tmp/dovie/codex-home",
+    )
+
+    assert resolved["provider"] == "openai-codex"
+    assert resolved["api_mode"] == "codex_app_server"
+    assert resolved["codex_home"] == "/tmp/dovie/codex-home"
+    assert resolved["api_key"] == ""
+    assert resolved["source"] == "runtime_executor"
+
+
+def test_resolve_runtime_provider_forced_codex_app_server_rejects_non_openai(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+
+    with pytest.raises(ValueError, match="requires provider 'openai'"):
+        rp.resolve_runtime_provider(
+            requested="anthropic",
+            runtime_executor="codex_app_server",
+            codex_home="/tmp/dovie/codex-home",
+        )
+
+
 def test_resolve_runtime_provider_qwen_oauth(monkeypatch):
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "qwen-oauth")
     monkeypatch.setattr(

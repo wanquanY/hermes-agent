@@ -286,6 +286,42 @@ def _maybe_apply_codex_app_server_runtime(
     return api_mode
 
 
+def _normalize_runtime_executor(raw: Any) -> Optional[str]:
+    if not isinstance(raw, str):
+        return None
+    normalized = raw.strip().lower().replace("-", "_")
+    if normalized in {"codex", "codex_app_server"}:
+        return "codex_app_server"
+    return normalized or None
+
+
+def _codex_app_server_runtime(
+    *,
+    provider: str,
+    requested_provider: str,
+    codex_home: Optional[str],
+    base_url: str = "",
+    api_key: Any = "",
+    pool: Optional[CredentialPool] = None,
+    source: str = "runtime_executor",
+) -> Dict[str, Any]:
+    if provider not in {"openai", "openai-codex"}:
+        raise ValueError(
+            "runtime_executor=codex_app_server requires provider 'openai' "
+            f"or 'openai-codex', got {provider!r}."
+        )
+    return {
+        "provider": provider,
+        "api_mode": "codex_app_server",
+        "base_url": base_url,
+        "api_key": api_key,
+        "source": source,
+        "credential_pool": pool,
+        "requested_provider": requested_provider,
+        "codex_home": codex_home,
+    }
+
+
 def _resolve_runtime_from_pool_entry(
     *,
     provider: str,
@@ -294,6 +330,8 @@ def _resolve_runtime_from_pool_entry(
     model_cfg: Optional[Dict[str, Any]] = None,
     pool: Optional[CredentialPool] = None,
     target_model: Optional[str] = None,
+    runtime_executor: Optional[str] = None,
+    codex_home: Optional[str] = None,
 ) -> Dict[str, Any]:
     model_cfg = model_cfg or _get_model_config()
     # When the caller is resolving for a specific target model (e.g. a /model
@@ -306,6 +344,16 @@ def _resolve_runtime_from_pool_entry(
     base_url = (getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or "").rstrip("/")
     api_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
     api_mode = "chat_completions"
+    if _normalize_runtime_executor(runtime_executor) == "codex_app_server":
+        return _codex_app_server_runtime(
+            provider=provider,
+            requested_provider=requested_provider,
+            codex_home=codex_home,
+            base_url=base_url,
+            api_key=api_key,
+            pool=pool,
+            source=getattr(entry, "source", "pool"),
+        )
     if provider == "openai-codex":
         api_mode = "codex_responses"
         base_url = base_url or DEFAULT_CODEX_BASE_URL
@@ -1281,6 +1329,8 @@ def resolve_runtime_provider(
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
     target_model: Optional[str] = None,
+    runtime_executor: Optional[str] = None,
+    codex_home: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Resolve runtime provider credentials for agent execution.
 
@@ -1293,6 +1343,20 @@ def resolve_runtime_provider(
     behavior (api_mode derived from config).
     """
     requested_provider = resolve_requested_provider(requested)
+    normalized_runtime_executor = _normalize_runtime_executor(runtime_executor)
+
+    if normalized_runtime_executor == "codex_app_server":
+        provider = resolve_provider(
+            requested_provider,
+            explicit_api_key=explicit_api_key,
+            explicit_base_url=explicit_base_url,
+        )
+        return _codex_app_server_runtime(
+            provider=provider,
+            requested_provider=requested_provider,
+            codex_home=codex_home,
+            source="runtime_executor",
+        )
 
     # Azure Anthropic short-circuit: when explicitly targeting an Azure endpoint
     # with provider="anthropic", bypass _resolve_named_custom_runtime (which would
@@ -1432,6 +1496,8 @@ def resolve_runtime_provider(
                 model_cfg=model_cfg,
                 pool=pool,
                 target_model=target_model,
+                runtime_executor=normalized_runtime_executor,
+                codex_home=codex_home,
             )
 
     if provider == "nous":

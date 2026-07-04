@@ -56,7 +56,32 @@ def profile_context_for_params(params: dict | None = None) -> dict | None:
         or profile.get("runtime_scope_key")
         or ""
     ).strip()
-    if not any((profile_id, version_id, draft_id, hermes_home, runtime_scope_key)):
+    runtime_executor = str(
+        params.get("runtime_executor")
+        or params.get("runtimeExecutor")
+        or profile.get("runtimeExecutor")
+        or profile.get("runtime_executor")
+        or ""
+    ).strip()
+    codex_home = str(
+        params.get("codex_home")
+        or params.get("codexHome")
+        or params.get("codexHomePath")
+        or profile.get("codexHomePath")
+        or profile.get("codexHome")
+        or profile.get("codex_home")
+        or ""
+    ).strip()
+    provider = str(
+        params.get("provider")
+        or params.get("model_provider")
+        or params.get("modelProvider")
+        or profile.get("provider")
+        or profile.get("model_provider")
+        or profile.get("modelProvider")
+        or ""
+    ).strip()
+    if not any((profile_id, version_id, draft_id, hermes_home, runtime_scope_key, runtime_executor, codex_home)):
         return None
     if not runtime_scope_key:
         if draft_id:
@@ -69,7 +94,15 @@ def profile_context_for_params(params: dict | None = None) -> dict | None:
         "agent_profile_draft_id": draft_id,
         "hermes_home": hermes_home,
         "runtime_scope_key": runtime_scope_key,
+        "runtime_executor": runtime_executor,
+        "codex_home": codex_home,
+        "provider": provider,
     }
+
+
+def active_profile_context() -> dict | None:
+    profile_context = _active_profile_context.get()
+    return dict(profile_context) if isinstance(profile_context, dict) else None
 
 
 def enter_profile_context(profile_context: dict | None, *, apply_env: bool = True) -> Any:

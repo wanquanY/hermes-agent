@@ -102,6 +102,36 @@ def _requested_runtime_scope_key(params: dict | None = None) -> str:
     ).strip()
 
 
+def _requested_runtime_executor(params: dict | None = None) -> str:
+    params = params or {}
+    profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
+    if not isinstance(profile, dict):
+        profile = {}
+    return str(
+        params.get("runtime_executor")
+        or params.get("runtimeExecutor")
+        or profile.get("runtime_executor")
+        or profile.get("runtimeExecutor")
+        or ""
+    ).strip()
+
+
+def _requested_codex_home(params: dict | None = None) -> str:
+    params = params or {}
+    profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
+    if not isinstance(profile, dict):
+        profile = {}
+    return str(
+        params.get("codex_home")
+        or params.get("codexHome")
+        or params.get("codexHomePath")
+        or profile.get("codex_home")
+        or profile.get("codexHome")
+        or profile.get("codexHomePath")
+        or ""
+    ).strip()
+
+
 def _requested_agent_profile_id(params: dict | None = None) -> str:
     return str(
         (params or {}).get("agent_profile_id")
@@ -830,11 +860,17 @@ def _(rid, params: dict) -> dict:
     # session["model_override"]) so the session starts on its own model without
     # a post-build /model switch. Never a global config write.
     create_model = str(params.get("model") or "").strip()
-    session_model_override = (
-        {"model": create_model, "provider": str(params.get("provider") or "").strip() or None}
-        if create_model
-        else None
-    )
+    create_provider = str(params.get("provider") or "").strip()
+    create_runtime_executor = _requested_runtime_executor(params)
+    create_codex_home = _requested_codex_home(params)
+    session_model_override = None
+    if create_model or create_provider or create_runtime_executor or create_codex_home:
+        session_model_override = {
+            "model": create_model,
+            "provider": create_provider or None,
+            "runtime_executor": create_runtime_executor or None,
+            "codex_home": create_codex_home or None,
+        }
     create_reasoning_override = None
     if _effort := str(params.get("reasoning_effort") or "").strip():
         try:
@@ -1666,6 +1702,7 @@ def _(rid, params: dict) -> dict:
                     session_id=target,
                     cwd=cwd,
                     agent_context_mode=agent_context_mode,
+                    profile_context=profile_context,
                 )
             except TypeError as exc:
                 if "unexpected keyword argument" not in str(exc):
