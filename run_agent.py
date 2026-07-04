@@ -1216,7 +1216,12 @@ class AIAgent:
             review_memory=review_memory,
             review_skills=review_skills,
         )
-        t = threading.Thread(target=target, daemon=True, name="bg-review")
+        ctx = contextvars.copy_context()
+        t = threading.Thread(
+            target=lambda ctx=ctx: ctx.run(target),
+            daemon=True,
+            name="bg-review",
+        )
         t.start()
 
     def _build_memory_write_metadata(

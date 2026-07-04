@@ -13,7 +13,11 @@ before changing either side; ContextVars do not cross process boundaries.
 Worker-side agent runner threads propagate a ``copy_context()`` snapshot
 at ``AgentRunBackend.start``; do not rely on ``threading.Thread`` to
 inherit ContextVars when changing worker/agent_run_backend thread
-boundaries.
+boundaries. Agent-internal ``chat.completions.create`` calls spawn
+another ``threading.Thread`` for the real HTTP request in
+``chat_completion_helpers``; that layer also needs ``copy_context()``
+propagation, so check this constraint before changing those thread
+spawn points.
 """
 
 from __future__ import annotations

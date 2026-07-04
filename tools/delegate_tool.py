@@ -17,6 +17,7 @@ never the child's intermediate tool calls or reasoning.
 """
 
 import enum
+import contextvars
 import json
 import logging
 
@@ -1862,7 +1863,8 @@ def _run_single_child(
                 task_id=child_task_id,
             )
 
-        _child_future = _timeout_executor.submit(_run_with_thread_capture)
+        child_context = contextvars.copy_context()
+        _child_future = _timeout_executor.submit(child_context.run, _run_with_thread_capture)
         try:
             result = _wait_for_child_result_with_idle_timeout(
                 _child_future,
@@ -2577,7 +2579,9 @@ def delegate_task(
         with ThreadPoolExecutor(max_workers=max_children) as executor:
             futures = {}
             for i, t, child in children:
+                child_context = contextvars.copy_context()
                 future = executor.submit(
+                    child_context.run,
                     _run_single_child,
                     task_index=i,
                     goal=t["goal"],
