@@ -74,6 +74,8 @@ class TurnResult:
     token_usage_last: Optional[dict[str, Any]] = None
     token_usage_total: Optional[dict[str, Any]] = None
     model_context_window: Optional[int] = None
+    requested_model: Optional[str] = None
+    actual_model: Optional[str] = None
     # Hint to the caller that the underlying codex subprocess is likely
     # wedged (turn-level timeout fired, post-tool watchdog tripped, or
     # token-refresh failure killed the child). The caller should retire
@@ -217,6 +219,7 @@ class CodexAppServerSession:
 
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
+        self._protocol_model: Optional[str] = None
         # When set, ensure_started() calls thread/resume instead of thread/start
         # so the conversation transcript from a previous run continues in this
         # codex thread. Cleared to None once we've committed to a live thread
@@ -296,6 +299,9 @@ class CodexAppServerSession:
                     or self._prior_thread_id
                 )
                 resumed = bool(thread_id)
+                model = _extract_protocol_model(resume_result)
+                if model:
+                    self._protocol_model = model
             except Exception as exc:
                 # Rollout gone / thread expired / codex version change — fall
                 # through to thread/start so the caller isn't stuck. The
@@ -312,6 +318,9 @@ class CodexAppServerSession:
             _t_start = _dbg_time.monotonic()
             result = self._client.request("thread/start", params, timeout=15)
             _dbg_lg.getLogger().warning("[codex-perf][ensure_started] thread/start dt=%.3fs", _dbg_time.monotonic() - _t_start)
+            model = _extract_protocol_model(result)
+            if model:
+                self._protocol_model = model
             # Cross-fill thread.id/sessionId — different codex versions have
             # serialized this under either key. Mirrors openclaw beta.8's
             # tolerance fix so future codex drops/renames don't KeyError us
@@ -417,6 +426,7 @@ class CodexAppServerSession:
         notification_poll_timeout: float = 0.25,
         post_tool_quiet_timeout: float = 90.0,
         no_event_timeout: float = 90.0,
+        model_override: Optional[str] = None,
     ) -> TurnResult:
         """Send a user message and block until turn/completed, while
         forwarding server-initiated approval requests and projecting items
@@ -451,6 +461,7 @@ class CodexAppServerSession:
             return result
         assert self._client is not None and self._thread_id is not None
         result.thread_id = self._thread_id
+        result.actual_model = self._protocol_model
 
         self._interrupt_event.clear()
         projector = CodexEventProjector()
@@ -465,14 +476,22 @@ class CodexAppServerSession:
             self._first_delta_at = _first_delta_at  # picked up in event loop
             _dbg_lg.warning("[codex-flow][run_turn] SENDING turn/start thread=%s input_len=%s", self._thread_id, len(input_text))
             _t_ts = _dbg_time.monotonic()
+            turn_params: dict[str, Any] = {
+                "threadId": self._thread_id,
+                "input": [{"type": "text", "text": input_text}],
+            }
+            turn_model = str(model_override or "").strip()
+            if turn_model:
+                turn_params["model"] = turn_model
+                result.requested_model = turn_model
             ts = self._client.request(
                 "turn/start",
-                {
-                    "threadId": self._thread_id,
-                    "input": [{"type": "text", "text": input_text}],
-                },
+                turn_params,
                 timeout=10,
             )
+            model = _extract_protocol_model(ts)
+            if model:
+                result.actual_model = model
             _dbg_lg.warning("[codex-perf][run_turn] turn/start dt=%.3fs", _dbg_time.monotonic() - _t_ts)
             _dbg_lg.warning("[codex-flow][run_turn] turn/start REPLIED turn_id=%s ts_keys=%s", (ts.get("turn") or {}).get("id"), sorted(ts.keys()) if isinstance(ts, dict) else "?")
         except CodexAppServerError as exc:
@@ -598,6 +617,7 @@ class CodexAppServerSession:
                     if pending is None:
                         break
                     mark_notification(pending)
+                    _apply_protocol_model_notification(result, pending)
                     _apply_token_usage_notification(result, pending)
                     self._track_pending_file_change(pending)
                     proj = projector.project(pending)
@@ -654,6 +674,7 @@ class CodexAppServerSession:
                     _first_delta_at.append(_dbg_time.monotonic())  # sentinel
                     _dbg_lg.warning("[codex-flow][on_event] FIRST delta forwarded to hermes")
 
+            _apply_protocol_model_notification(result, note)
             _apply_token_usage_notification(result, note)
 
             # Track in-progress fileChange items so the approval bridge
@@ -931,6 +952,46 @@ class CodexAppServerSession:
         if not cached:
             return None
         return cached
+
+
+def _clean_protocol_model(value: Any) -> Optional[str]:
+    text = str(value or "").strip() if value is not None else ""
+    return text or None
+
+
+def _extract_protocol_model(payload: Any) -> Optional[str]:
+    """Return a model reported by Codex on stable response/event envelopes.
+
+    Current codex 0.142.3 schemas expose `model` on request params, but not on
+    TurnStartResponse, TurnStartedNotification, TurnCompletedNotification, or
+    ThreadTokenUsageUpdatedNotification. Keep this extractor narrow to those
+    response/event envelope locations so nested collab-tool `model` fields are
+    not mistaken for the actual model that ran the turn.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if model := _clean_protocol_model(payload.get("model")):
+        return model
+    for key in ("turn", "thread", "tokenUsage"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            if model := _clean_protocol_model(nested.get("model")):
+                return model
+    return None
+
+
+def _apply_protocol_model_notification(result: TurnResult, note: dict) -> None:
+    if not isinstance(note, dict):
+        return
+    if note.get("method") not in {
+        "turn/started",
+        "turn/completed",
+        "thread/tokenUsage/updated",
+    }:
+        return
+    model = _extract_protocol_model(note.get("params") or {})
+    if model:
+        result.actual_model = model
 
 
 def _apply_token_usage_notification(result: TurnResult, note: dict) -> None:

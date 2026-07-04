@@ -769,3 +769,84 @@ def test_apply_model_switch_does_not_leak_process_env():
     # Sibling session is completely untouched.
     assert sess_a["model_override"] is None
     assert sess_a["agent"].model == "minimax/m3"
+
+
+def test_apply_model_switch_records_platform_codex_explicit_model():
+    from tui_gateway import server
+
+    class _FakeAgent:
+        api_mode = "codex_app_server"
+        model = "glm-5.2-polluted"
+        provider = "openai-codex"
+        base_url = "https://should-not-change.invalid"
+        api_key = "should-not-change"
+        codex_home = "/tmp/dovie/platform-codex"
+        codex_account_mode = "platform"
+        codex_extra_env = {"DOXIE_PLATFORM_API_KEY": "rt-token"}
+
+    agent = _FakeAgent()
+    session = {
+        "agent": agent,
+        "session_key": "k-platform",
+        "model_override": {
+            "runtime_executor": "codex_app_server",
+            "codex_home": "/tmp/dovie/platform-codex",
+            "codex_account_mode": "platform",
+            "codex_extra_env": {"DOXIE_PLATFORM_API_KEY": "rt-token"},
+        },
+    }
+
+    with (
+        patch("hermes_cli.model_switch.parse_model_flags",
+              return_value=("glm-5.2", None, False, False, True)),
+        patch("hermes_cli.model_switch.resolve_persist_behavior",
+              return_value=False),
+        patch("hermes_cli.model_switch.switch_model") as mock_switch,
+    ):
+        result = server._apply_model_switch("sid-platform", session, "glm-5.2")
+
+    assert result["value"] == "glm-5.2"
+    assert session["model_override"]["model"] == "glm-5.2"
+    assert session["model_override"]["model_explicit"] is True
+    assert session["model_override"]["codex_account_mode"] == "platform"
+    assert agent.codex_explicit_model == "glm-5.2"
+    assert agent.provider == "openai-codex"
+    assert agent.base_url == "https://should-not-change.invalid"
+    assert agent.api_key == "should-not-change"
+    mock_switch.assert_not_called()
+
+
+def test_apply_model_switch_byo_codex_remains_noop():
+    from tui_gateway import server
+
+    class _FakeAgent:
+        api_mode = "codex_app_server"
+        model = "glm-5.2-polluted"
+        provider = "openai-codex"
+        base_url = ""
+        api_key = ""
+        codex_account_mode = "byo"
+
+    session = {
+        "agent": _FakeAgent(),
+        "session_key": "k-byo",
+        "model_override": {
+            "runtime_executor": "codex_app_server",
+            "codex_home": "/tmp/dovie/byo-codex",
+            "codex_account_mode": "byo",
+        },
+    }
+
+    with (
+        patch("hermes_cli.model_switch.parse_model_flags",
+              return_value=("glm-5.2", None, False, False, True)),
+        patch("hermes_cli.model_switch.resolve_persist_behavior",
+              return_value=False),
+        patch("hermes_cli.model_switch.switch_model") as mock_switch,
+    ):
+        result = server._apply_model_switch("sid-byo", session, "glm-5.2")
+
+    assert result["no_op"] is True
+    assert "model" not in session["model_override"]
+    assert not hasattr(session["agent"], "codex_explicit_model")
+    mock_switch.assert_not_called()

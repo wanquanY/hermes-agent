@@ -12,12 +12,62 @@ Verifies that:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 import run_agent
 from agent.transports.codex_app_server_session import CodexAppServerSession, TurnResult
+
+
+class _UsageDB:
+    def __init__(self):
+        self.calls = []
+
+    def update_token_counts(self, session_id, **kwargs):
+        self.calls.append({"session_id": session_id, **kwargs})
+
+
+def _usage_agent(*, account_mode: str, model: str = "glm-5.2-polluted"):
+    return SimpleNamespace(
+        api_mode="codex_app_server",
+        model=model,
+        provider="openai-codex",
+        base_url="",
+        api_key="",
+        codex_account_mode=account_mode,
+        session_id="session-usage",
+        _session_db=_UsageDB(),
+        _session_db_created=True,
+        _ensure_db_session=lambda: None,
+        context_compressor=None,
+        session_api_calls=0,
+        session_prompt_tokens=0,
+        session_completion_tokens=0,
+        session_total_tokens=0,
+        session_input_tokens=0,
+        session_output_tokens=0,
+        session_cache_read_tokens=0,
+        session_cache_write_tokens=0,
+        session_reasoning_tokens=0,
+        session_estimated_cost_usd=0.0,
+        session_cost_status="unknown",
+        session_cost_source="",
+    )
+
+
+def _usage_turn(**kwargs):
+    return TurnResult(
+        token_usage_last={
+            "totalTokens": 130,
+            "inputTokens": 80,
+            "cachedInputTokens": 20,
+            "outputTokens": 25,
+            "reasoningOutputTokens": 5,
+        },
+        **kwargs,
+    )
 
 
 @pytest.fixture
@@ -134,6 +184,69 @@ class TestRunConversationCodexPath:
         assert agent.context_compressor.last_completion_tokens == 25
         assert agent.context_compressor.last_total_tokens == 130
         assert agent.context_compressor.context_length == 200000
+
+    def test_run_turn_model_override_wired_from_account_mode(self, monkeypatch):
+        """run_conversation must derive turn/start's model_override from the
+        account-mode decision (codex_app_server_turn_model): BYO sends no
+        model even when a polluted explicit model is lingering on the agent,
+        platform sends the explicit model."""
+        captured: list = []
+
+        def fake_run_turn(self, user_input: str, **kwargs):
+            captured.append(kwargs.get("model_override"))
+            return TurnResult(
+                final_text="done",
+                projected_messages=[{"role": "assistant", "content": "done"}],
+                turn_id="turn-model-1",
+                thread_id="thread-model-1",
+            )
+
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+        monkeypatch.setattr(
+            CodexAppServerSession, "ensure_started", lambda self: "thread-model-1"
+        )
+
+        byo_agent = _make_codex_agent()
+        byo_agent.codex_account_mode = "byo"
+        byo_agent.codex_explicit_model = "glm-5.2"  # leftover must NOT leak
+        with patch.object(byo_agent, "_spawn_background_review", return_value=None):
+            byo_agent.run_conversation("hello")
+        assert captured[-1] == ""
+
+        platform_agent = _make_codex_agent()
+        platform_agent.codex_account_mode = "platform"
+        platform_agent.codex_explicit_model = "glm-5.2"
+        with patch.object(platform_agent, "_spawn_background_review", return_value=None):
+            platform_agent.run_conversation("hello")
+        assert captured[-1] == "glm-5.2"
+
+    def test_byo_usage_model_uses_codex_default_not_polluted_agent_model(self):
+        from agent.codex_runtime import _record_codex_app_server_usage
+        from tui_gateway.services.session_info import get_usage
+
+        agent = _usage_agent(account_mode="byo", model="glm-5.2")
+        result = _record_codex_app_server_usage(agent, _usage_turn())
+
+        assert result["model"] == "gpt-5.5"
+        assert agent.model == "gpt-5.5"
+        assert get_usage(agent)["model"] == "gpt-5.5"
+        assert agent._session_db.calls[-1]["model"] == "gpt-5.5"
+
+    def test_platform_usage_model_uses_explicit_turn_start_model(self):
+        from agent.codex_runtime import _record_codex_app_server_usage
+        from tui_gateway.services.session_info import get_usage
+
+        agent = _usage_agent(account_mode="platform", model="glm-5.2-polluted")
+        agent.codex_explicit_model = "glm-5.2"
+        result = _record_codex_app_server_usage(
+            agent,
+            _usage_turn(requested_model="glm-5.2"),
+        )
+
+        assert result["model"] == "glm-5.2"
+        assert agent.model == "glm-5.2"
+        assert get_usage(agent)["model"] == "glm-5.2"
+        assert agent._session_db.calls[-1]["model"] == "glm-5.2"
 
     def test_projected_messages_are_spliced(self, fake_session):
         agent = _make_codex_agent()

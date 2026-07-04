@@ -26,6 +26,90 @@ from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 
 
+# BYO Codex app-server sessions authenticate with the user's Codex/ChatGPT
+# account and do not send a model override. Keep this default aligned with the
+# desktop display contract for BYO sessions.
+CODEX_BYO_DEFAULT_MODEL = "gpt-5.5"
+
+
+def normalize_codex_account_mode(
+    value: Any = None,
+    *,
+    extra_env: Any = None,
+) -> str:
+    raw = str(value or "").strip().lower().replace("_", "-")
+    if raw in {"platform"}:
+        return "platform"
+    if raw in {"byo", "bring-your-own", "bring-your-own-account"}:
+        return "byo"
+    if not raw and isinstance(extra_env, dict):
+        if any(str(k) == "DOXIE_PLATFORM_API_KEY" for k in extra_env):
+            return "platform"
+    return raw
+
+
+def _clean_model(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _codex_agent_account_mode(agent: Any) -> str:
+    return normalize_codex_account_mode(
+        getattr(agent, "codex_account_mode", ""),
+        extra_env=getattr(agent, "codex_extra_env", None),
+    )
+
+
+def codex_app_server_turn_model(agent: Any) -> str:
+    """Model to send on turn/start, if this Codex session is platform-owned."""
+    if _codex_agent_account_mode(agent) != "platform":
+        return ""
+    return _clean_model(getattr(agent, "codex_explicit_model", ""))
+
+
+def resolve_codex_app_server_usage_model(agent: Any, turn: Any = None) -> str:
+    """Resolve the model label for Codex app-server accounting.
+
+    Order:
+      1. model reported by the Codex protocol for this turn,
+      2. explicit turn/start model sent by Hermes for platform sessions,
+      3. BYO default model constant when Codex did not report one.
+    """
+    account_mode = _codex_agent_account_mode(agent)
+    if turn is not None:
+        if model := _clean_model(getattr(turn, "actual_model", "")):
+            return model
+        if account_mode == "platform" and (
+            model := _clean_model(getattr(turn, "requested_model", ""))
+        ):
+            return model
+
+    if model := _clean_model(getattr(agent, "codex_actual_model", "")):
+        return model
+
+    if account_mode == "platform":
+        if model := _clean_model(getattr(agent, "codex_explicit_model", "")):
+            return model
+
+    if account_mode == "byo":
+        return CODEX_BYO_DEFAULT_MODEL
+
+    return ""
+
+
+def _align_codex_usage_model(agent: Any, model: str) -> None:
+    model = _clean_model(model)
+    if not model:
+        return
+    try:
+        agent.codex_actual_model = model
+    except Exception:
+        pass
+    try:
+        agent.model = model
+    except Exception:
+        pass
+
+
 def _codex_thread_map_path(agent: Any) -> str | None:
     """Return the path to the codex thread map file for this agent.
 
@@ -211,6 +295,8 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     as one API call for session/status accounting.
     """
     agent.session_api_calls += 1
+    usage_model = resolve_codex_app_server_usage_model(agent, turn)
+    _align_codex_usage_model(agent, usage_model)
 
     usage = getattr(turn, "token_usage_last", None)
     if not isinstance(usage, dict) or not usage:
@@ -220,7 +306,7 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
                     agent._ensure_db_session()
                 agent._session_db.update_token_counts(
                     agent.session_id,
-                    model=agent.model,
+                    model=usage_model or None,
                     api_call_count=1,
                 )
             except Exception as exc:
@@ -228,7 +314,7 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
                     "Codex app-server api-call persistence failed (session=%s): %s",
                     agent.session_id, exc,
                 )
-        return {}
+        return {"model": usage_model} if usage_model else {}
 
     from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
 
@@ -280,7 +366,7 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
 
     cost_result = estimate_usage_cost(
-        agent.model,
+        usage_model,
         canonical_usage,
         provider=agent.provider,
         base_url=agent.base_url,
@@ -310,7 +396,7 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
                 billing_base_url=agent.base_url,
                 billing_mode="subscription_included"
                 if cost_result.status == "included" else None,
-                model=agent.model,
+                model=usage_model or None,
                 api_call_count=1,
             )
         except Exception as exc:
@@ -321,6 +407,7 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
 
     return {
         **usage_dict,
+        "model": usage_model,
         "last_prompt_tokens": prompt_tokens,
         "estimated_cost_usd": float(cost_result.amount_usd)
         if cost_result.amount_usd is not None else None,
@@ -485,7 +572,10 @@ def run_codex_app_server_turn(
         _perf_before_run - _perf_turn_begin,
     )
     try:
-        turn = agent._codex_session.run_turn(user_input=user_message)
+        turn = agent._codex_session.run_turn(
+            user_input=user_message,
+            model_override=codex_app_server_turn_model(agent),
+        )
         _perf_log.getLogger().warning(
             "[codex-perf][turn] run_turn RETURNED dt=%.3fs (from run_turn start)",
             _perf_time.monotonic() - _perf_before_run,

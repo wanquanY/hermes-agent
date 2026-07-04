@@ -148,6 +148,20 @@ def _requested_codex_extra_env(params: dict | None = None) -> dict:
     return {}
 
 
+def _requested_codex_account_mode(params: dict | None = None) -> str:
+    params = params or {}
+    profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
+    if not isinstance(profile, dict):
+        profile = {}
+    return str(
+        params.get("codex_account_mode")
+        or params.get("codexAccountMode")
+        or profile.get("codex_account_mode")
+        or profile.get("codexAccountMode")
+        or ""
+    ).strip().lower()
+
+
 def _requested_agent_profile_id(params: dict | None = None) -> str:
     return str(
         (params or {}).get("agent_profile_id")
@@ -880,14 +894,17 @@ def _(rid, params: dict) -> dict:
     create_runtime_executor = _requested_runtime_executor(params)
     create_codex_home = _requested_codex_home(params)
     create_codex_extra_env = _requested_codex_extra_env(params)
+    create_codex_account_mode = _requested_codex_account_mode(params)
     session_model_override = None
-    if create_model or create_provider or create_runtime_executor or create_codex_home or create_codex_extra_env:
+    if create_model or create_provider or create_runtime_executor or create_codex_home or create_codex_extra_env or create_codex_account_mode:
         session_model_override = {
             "model": create_model,
             "provider": create_provider or None,
             "runtime_executor": create_runtime_executor or None,
             "codex_home": create_codex_home or None,
             "codex_extra_env": create_codex_extra_env or None,
+            "codex_account_mode": create_codex_account_mode or None,
+            "model_explicit": bool(create_model),
         }
     create_reasoning_override = None
     if _effort := str(params.get("reasoning_effort") or "").strip():
@@ -935,6 +952,8 @@ def _(rid, params: dict) -> dict:
         _re = str(session_model_override.get("runtime_executor") or "").strip()
         _ch = str(session_model_override.get("codex_home") or "").strip()
         _ce = session_model_override.get("codex_extra_env")
+        _cam = str(session_model_override.get("codex_account_mode") or "").strip()
+        _model_explicit = bool(session_model_override.get("model_explicit"))
         _prov = str(session_model_override.get("provider") or "").strip()
         if _re:
             codex_row_config["runtime_executor"] = _re
@@ -944,6 +963,10 @@ def _(rid, params: dict) -> dict:
             codex_row_config["codex_extra_env"] = {
                 str(k): str(v) for k, v in _ce.items() if v is not None
             }
+        if _cam:
+            codex_row_config["codex_account_mode"] = _cam
+        if _re or _ch or _cam:
+            codex_row_config["model_explicit"] = _model_explicit
         if _prov:
             codex_row_config["provider"] = _prov
     if db is not None:

@@ -56,6 +56,52 @@ def _cap_tui_verbose_text(text: str) -> str:
     return f"{label}{tail}"
 
 
+def _truthy_model_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _persisted_session_codex_metadata(session_key: str) -> dict:
+    key = str(session_key or "").strip()
+    if not key:
+        return {}
+    try:
+        db = _db_for_stable_session(key)
+        row = db.get_session(key) if db is not None else None
+    except Exception:
+        return {}
+    if not isinstance(row, dict):
+        return {}
+    raw_cfg = row.get("model_config")
+    cfg = raw_cfg if isinstance(raw_cfg, dict) else None
+    if cfg is None and isinstance(raw_cfg, str) and raw_cfg.strip():
+        try:
+            parsed = json.loads(raw_cfg)
+            cfg = parsed if isinstance(parsed, dict) else None
+        except Exception:
+            cfg = None
+    if not isinstance(cfg, dict):
+        return {}
+    result: dict = {}
+    mode = str(
+        cfg.get("codex_account_mode")
+        or cfg.get("codexAccountMode")
+        or ""
+    ).strip()
+    if mode:
+        result["codex_account_mode"] = mode
+    if "model_explicit" in cfg or "explicit_model" in cfg:
+        result["model_explicit"] = _truthy_model_flag(
+            cfg.get("model_explicit", cfg.get("explicit_model"))
+        )
+    return result
+
+
 def _redact_tui_verbose_text(text: str) -> str:
     try:
         from agent.redact import redact_sensitive_text
@@ -459,13 +505,15 @@ def _make_agent(
         _persisted_codex = {}
         import logging as _dbg_lg
         _dbg_lg.warning("[codex-flow][_make_agent] persisted_codex EXC sid=%s: %s", session_id or key, _pc_exc)
+    _persisted_codex_meta = _persisted_session_codex_metadata(session_id or key)
     import logging as _dbg_lg
     _dbg_lg.warning(
-        "[codex-flow][_make_agent] ENTER sid=%s override_keys=%s profile_ctx_keys=%s persisted_codex=%s",
+        "[codex-flow][_make_agent] ENTER sid=%s override_keys=%s profile_ctx_keys=%s persisted_codex=%s persisted_codex_meta=%s",
         session_id or key,
         sorted((_override or {}).keys()),
         sorted(_profile_context.keys()),
         _persisted_codex,
+        _persisted_codex_meta,
     )
     _runtime_executor = _first_text(
         (_override or {}).get("runtime_executor"),
@@ -498,6 +546,25 @@ def _make_agent(
         _profile_context.get("codex_extra_env"),
         _profile_context.get("codexExtraEnv"),
         _persisted_codex.get("codex_extra_env"),
+    )
+    from agent.codex_runtime import normalize_codex_account_mode
+
+    _codex_account_mode = normalize_codex_account_mode(
+        _first_text(
+            (_override or {}).get("codex_account_mode"),
+            (_override or {}).get("codexAccountMode"),
+            _profile_context.get("codex_account_mode"),
+            _profile_context.get("codexAccountMode"),
+            _persisted_codex_meta.get("codex_account_mode"),
+        ),
+        extra_env=_codex_extra_env,
+    )
+    _model_explicit = (
+        _truthy_model_flag((_override or {}).get("model_explicit"))
+        or _truthy_model_flag((_override or {}).get("explicit_model"))
+        or _truthy_model_flag(_profile_context.get("model_explicit"))
+        or _truthy_model_flag(_profile_context.get("explicit_model"))
+        or _truthy_model_flag(_persisted_codex_meta.get("model_explicit"))
     )
     _runtime_provider_override = _first_text(
         (_override or {}).get("provider"),
@@ -621,6 +688,11 @@ def _make_agent(
         agent.codex_home = runtime.get("codex_home")
     if _codex_extra_env:
         agent.codex_extra_env = _codex_extra_env
+    if _is_codex_app_server:
+        agent.codex_account_mode = _codex_account_mode
+        agent.codex_explicit_model = (
+            model if _codex_account_mode == "platform" and _model_explicit else ""
+        )
     remember_requested_runtime_provider(agent, runtime, requested_provider)
     return agent
 

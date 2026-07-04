@@ -7,8 +7,16 @@ from tui_gateway.services.workspace import session_cwd
 
 def get_usage(agent: Any) -> dict:
     g = lambda k, fb=None: getattr(agent, k, 0) or (getattr(agent, fb, 0) if fb else 0)
+    model = getattr(agent, "model", "") or ""
+    if str(getattr(agent, "api_mode", "") or "") == "codex_app_server":
+        try:
+            from agent.codex_runtime import resolve_codex_app_server_usage_model
+
+            model = resolve_codex_app_server_usage_model(agent)
+        except Exception:
+            model = ""
     usage = {
-        "model": getattr(agent, "model", "") or "",
+        "model": model,
         "input": g("session_input_tokens", "session_prompt_tokens"),
         "output": g("session_output_tokens", "session_completion_tokens"),
         "cache_read": g("session_cache_read_tokens"),
@@ -102,8 +110,9 @@ def session_info(agent: Any, session: dict | None = None) -> dict:
         reasoning_effort = str(reasoning_config.get("effort", "") or "")
     service_tier = getattr(agent, "service_tier", None) or ""
     cwd = session_cwd(session) if session else str(getattr(agent, "session_cwd", "") or "")
+    usage = get_usage(agent)
     info: dict = {
-        "model": getattr(agent, "model", ""),
+        "model": usage.get("model") or getattr(agent, "model", ""),
         "reasoning_effort": reasoning_effort,
         "service_tier": service_tier,
         "fast": service_tier == "priority",
@@ -116,7 +125,7 @@ def session_info(agent: Any, session: dict | None = None) -> dict:
         "release_date": "",
         "update_behind": None,
         "update_command": "",
-        "usage": get_usage(agent),
+        "usage": usage,
     }
     try:
         from hermes_cli import __release_date__, __version__
