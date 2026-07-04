@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from typing import Any
 
 import pytest
@@ -14,6 +15,7 @@ from tui_gateway.run_worker import (
     _build_default_handler,
     encode_incoming,
 )
+from tui_gateway.services.agent_run_backend import AgentRunBackend
 from tui_gateway.services import worker_runtime
 from tui_gateway.services.runtime_proxy import RuntimeScope
 from tui_gateway.services.worker_supervisor import RunWorker
@@ -210,6 +212,134 @@ async def test_worker_run_start_clears_dovie_context_after_turn() -> None:
     assert backend.seen_headers["X-Dovie-Query-Id"] == "query-clear"
     assert get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "default") == ""
     assert build_dovie_attribution_headers() == {}
+
+
+@pytest.mark.asyncio
+async def test_agent_run_backend_thread_sees_worker_handler_dovie_context() -> None:
+    seen: dict[str, Any] = {}
+
+    def runner(frame: RunStartFrame, _cancel: threading.Event) -> None:
+        seen["run_id"] = frame.run_id
+        seen["thread_name"] = threading.current_thread().name
+        seen["context"] = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
+        seen["headers"] = build_dovie_attribution_headers()
+
+    backend = AgentRunBackend(runner=runner)
+    proto = _Proto()
+    tokens = set_session_vars(dovie_product_context=_context_json("query-thread"))
+    try:
+        await backend.start(
+            RunStartFrame(
+                run_id="run-thread",
+                turn_id="turn-thread",
+                stored_session_id="conv-thread",
+                prompt="hello",
+                params={"dovie_product_context": _context_json("query-thread")},
+                dovie_product_context=_context_json("query-thread"),
+            ),
+            proto.emit,
+        )
+    finally:
+        clear_session_vars(tokens)
+
+    assert seen["run_id"] == "run-thread"
+    assert seen["thread_name"].startswith("agent-run[run-thread]")
+    assert seen["context"] == _context_json("query-thread")
+    assert seen["headers"]["X-Dovie-Query-Id"] == "query-thread"
+    assert seen["headers"]["X-Dovie-Root-Agent-Profile-Id"] == "profile-root"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_agent_run_backend_threads_keep_dovie_context_isolated() -> None:
+    barrier = threading.Barrier(2)
+    seen: dict[str, str] = {}
+    seen_lock = threading.Lock()
+
+    def runner(frame: RunStartFrame, _cancel: threading.Event) -> None:
+        barrier.wait(timeout=2.0)
+        headers = build_dovie_attribution_headers()
+        with seen_lock:
+            seen[frame.run_id] = headers["X-Dovie-Query-Id"]
+
+    async def run_turn(run_id: str, query_id: str) -> None:
+        backend = AgentRunBackend(runner=runner)
+        proto = _Proto()
+        tokens = set_session_vars(dovie_product_context=_context_json(query_id))
+        try:
+            await backend.start(
+                RunStartFrame(
+                    run_id=run_id,
+                    turn_id=f"turn-{query_id}",
+                    stored_session_id=f"conv-{query_id}",
+                    prompt="hello",
+                    params={"dovie_product_context": _context_json(query_id)},
+                    dovie_product_context=_context_json(query_id),
+                ),
+                proto.emit,
+            )
+        finally:
+            clear_session_vars(tokens)
+
+    await asyncio.gather(
+        run_turn("run-a-thread", "query-a-thread"),
+        run_turn("run-b-thread", "query-b-thread"),
+    )
+
+    assert seen == {
+        "run-a-thread": "query-a-thread",
+        "run-b-thread": "query-b-thread",
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_run_backend_thread_context_is_cleared_between_turns() -> None:
+    seen: list[tuple[str, str, dict[str, str]]] = []
+
+    def runner(frame: RunStartFrame, _cancel: threading.Event) -> None:
+        seen.append(
+            (
+                frame.run_id,
+                get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", ""),
+                build_dovie_attribution_headers(),
+            )
+        )
+
+    backend = AgentRunBackend(runner=runner)
+    proto = _Proto()
+    first_context = _context_json("query-first-thread")
+    tokens = set_session_vars(dovie_product_context=first_context)
+    try:
+        await backend.start(
+            RunStartFrame(
+                run_id="run-first-thread",
+                turn_id="turn-first-thread",
+                stored_session_id="conv-first-thread",
+                prompt="first",
+                params={"dovie_product_context": first_context},
+                dovie_product_context=first_context,
+            ),
+            proto.emit,
+        )
+    finally:
+        clear_session_vars(tokens)
+
+    assert get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "default") == ""
+
+    await backend.start(
+        RunStartFrame(
+            run_id="run-after-clear",
+            turn_id="turn-after-clear",
+            stored_session_id="conv-after-clear",
+            prompt="second",
+            params={},
+        ),
+        proto.emit,
+    )
+
+    assert seen[0][0] == "run-first-thread"
+    assert seen[0][1] == first_context
+    assert seen[0][2]["X-Dovie-Query-Id"] == "query-first-thread"
+    assert seen[1] == ("run-after-clear", "", {})
 
 
 class _ConcurrentBackend(WorkerRunBackend):

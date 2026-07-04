@@ -10,6 +10,10 @@ process sets this ContextVar in ``tui_gateway.methods.prompt`` through
 receive the same value on the ``run.start`` frame and set it in
 ``tui_gateway.run_worker`` before handling the turn. Review both paths
 before changing either side; ContextVars do not cross process boundaries.
+Worker-side agent runner threads propagate a ``copy_context()`` snapshot
+at ``AgentRunBackend.start``; do not rely on ``threading.Thread`` to
+inherit ContextVars when changing worker/agent_run_backend thread
+boundaries.
 """
 
 from __future__ import annotations
