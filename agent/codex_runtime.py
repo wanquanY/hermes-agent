@@ -209,6 +209,7 @@ def run_codex_app_server_turn(
             approval_callback = None
         agent._codex_session = CodexAppServerSession(
             cwd=cwd,
+            codex_home=getattr(agent, "codex_home", None),
             approval_callback=approval_callback,
         )
 

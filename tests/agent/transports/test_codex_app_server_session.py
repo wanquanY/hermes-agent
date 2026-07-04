@@ -417,6 +417,27 @@ class TestRunTurn:
         assert r.interrupted is True
         assert r.error and "timed out" in r.error
 
+    def test_no_event_watchdog_after_turn_started_closes_client(self):
+        client = FakeClient()
+        client.queue_notification("turn/started", threadId="t", turn={"id": "tu1"})
+        s = make_session(client)
+        r = s.run_turn(
+            "stream wedges",
+            turn_timeout=2.0,
+            notification_poll_timeout=0.005,
+            no_event_timeout=0.02,
+        )
+        assert r.interrupted is True
+        assert r.should_retire is True
+        assert r.error and "codex_app_server_no_event_timeout" in r.error
+        assert "Hint:" in r.error
+        assert client._closed is True
+        assert s._client is None
+        assert any(
+            method == "turn/interrupt" and params.get("turnId") == "turn-fake-001"
+            for (method, params) in client.requests
+        )
+
     def test_deadline_uses_monotonic_clock(self):
         client = FakeClient()
         s = make_session(client)

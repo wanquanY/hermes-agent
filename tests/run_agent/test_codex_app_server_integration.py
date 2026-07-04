@@ -66,7 +66,8 @@ def _make_codex_agent():
 
 class TestApiModeAccepted:
     def test_api_mode_is_codex_app_server(self):
-        agent = _make_codex_agent()
+        with patch("hermes_logging.setup_logging"):
+            agent = _make_codex_agent()
         assert agent.api_mode == "codex_app_server"
 
 
@@ -307,6 +308,7 @@ class TestRunConversationCodexPath:
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
         monkeypatch.setattr(CodexAppServerSession, "__init__", fake_init)
         monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
 
         agent = _make_codex_agent()
         assert not hasattr(agent, "session_cwd")
@@ -314,6 +316,37 @@ class TestRunConversationCodexPath:
             agent.run_conversation("hi")
 
         assert captured["cwd"] == str(tmp_path)
+
+    def test_agent_codex_home_seeds_codex_session(self, monkeypatch, tmp_path):
+        from agent.transports.codex_app_server_session import (
+            CodexAppServerSession, TurnResult,
+        )
+
+        captured: dict[str, str | None] = {}
+
+        def fake_init(self, **kwargs):
+            captured["codex_home"] = kwargs.get("codex_home")
+            self._thread_id = "thread-stub-1"
+
+        def fake_run_turn(self, user_input: str, **kwargs):
+            return TurnResult(
+                final_text="ok",
+                projected_messages=[{"role": "assistant", "content": "ok"}],
+                turn_id="turn-stub-1",
+                thread_id="thread-stub-1",
+            )
+
+        monkeypatch.setattr(CodexAppServerSession, "__init__", fake_init)
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+
+        with patch("hermes_logging.setup_logging"):
+            agent = _make_codex_agent()
+        agent.codex_home = str(tmp_path / "codex-home")
+        with patch.object(agent, "_spawn_background_review", return_value=None):
+            agent.run_conversation("hi")
+
+        assert captured["codex_home"] == str(tmp_path / "codex-home")
 
 
 class TestReviewForkApiModeDowngrade:

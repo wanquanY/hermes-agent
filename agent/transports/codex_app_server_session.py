@@ -90,6 +90,26 @@ class TurnResult:
 _TURN_ABORTED_MARKERS = ("<turn_aborted>", "<turn_aborted/>")
 
 
+def _coerce_turn_input_text(user_input: Any) -> str:
+    if isinstance(user_input, str):
+        return user_input
+    if isinstance(user_input, list):
+        parts: list[str] = []
+        for item in user_input:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip()
+            if item_type == "text":
+                text = str(item.get("text") or "").strip()
+                if text:
+                    parts.append(text)
+            elif item_type in {"image_url", "input_image", "image"}:
+                parts.append("[image attached]")
+        if parts:
+            return "\n\n".join(parts)
+    return str(user_input or "")
+
+
 # Substrings in codex stderr / JSON-RPC error messages that signal the
 # subprocess died because its OAuth credentials are no longer valid.
 # Kept conservative: we only redirect users to `codex login` when we're
@@ -335,6 +355,7 @@ class CodexAppServerSession:
         turn_timeout: float = 600.0,
         notification_poll_timeout: float = 0.25,
         post_tool_quiet_timeout: float = 90.0,
+        no_event_timeout: float = 90.0,
     ) -> TurnResult:
         """Send a user message and block until turn/completed, while
         forwarding server-initiated approval requests and projecting items
@@ -345,6 +366,11 @@ class CodexAppServerSession:
         `turn/completed`, fast-fail and mark the session for retirement.
         Mirrors openclaw beta.8's post-tool completion watchdog (#81697)
         so a wedged codex doesn't burn the full turn deadline.
+
+        no_event_timeout: after codex confirms `turn/started`, if no further
+        notification arrives within this many seconds, treat the stream as
+        wedged and retire the subprocess. This catches upstream stalls that
+        are not preceded by a tool result.
         """
         # Pre-create the result so startup failures (codex subprocess can't
         # spawn, initialize handshake rejects, thread/start blows up) surface
@@ -371,11 +397,12 @@ class CodexAppServerSession:
         # Send turn/start with the user input. Text-only for now (codex
         # supports rich content but Hermes' text path is the common case).
         try:
+            input_text = _coerce_turn_input_text(user_input)
             ts = self._client.request(
                 "turn/start",
                 {
                     "threadId": self._thread_id,
-                    "input": [{"type": "text", "text": user_input}],
+                    "input": [{"type": "text", "text": input_text}],
                 },
                 timeout=10,
             )
@@ -414,6 +441,19 @@ class CodexAppServerSession:
         # within post_tool_quiet_timeout and the turn hasn't completed, we
         # fast-fail and retire the session.
         last_tool_completion_at: Optional[float] = None
+        turn_started_at: Optional[float] = None
+        last_notification_at: Optional[float] = None
+
+        def mark_notification(note: dict) -> None:
+            nonlocal turn_started_at, last_notification_at
+            method = note.get("method")
+            if method != "turn/started" and turn_started_at is None:
+                return
+            now = time.monotonic()
+            if method == "turn/started" and turn_started_at is None:
+                turn_started_at = now
+            if turn_started_at is not None:
+                last_notification_at = now
 
         while time.monotonic() < deadline and not turn_complete:
             if self._interrupt_event.is_set():
@@ -436,6 +476,24 @@ class CodexAppServerSession:
                         tail_lines=20,
                     )
                 result.should_retire = True
+                break
+
+            if (
+                no_event_timeout > 0
+                and last_notification_at is not None
+                and (time.monotonic() - last_notification_at) > no_event_timeout
+            ):
+                self._issue_interrupt(result.turn_id)
+                result.interrupted = True
+                result.error = (
+                    "codex_app_server_no_event_timeout: no codex "
+                    f"notifications for {no_event_timeout:.0f}s after "
+                    "turn/started; retiring app-server session. Hint: the "
+                    "upstream stream may be wedged, so the next turn will "
+                    "start a fresh Codex app-server session."
+                )
+                result.should_retire = True
+                self.close()
                 break
 
             # Post-tool watchdog: if a tool completion was the most recent
@@ -468,6 +526,7 @@ class CodexAppServerSession:
                     pending = self._client.take_notification(timeout=0)
                     if pending is None:
                         break
+                    mark_notification(pending)
                     _apply_token_usage_notification(result, pending)
                     self._track_pending_file_change(pending)
                     proj = projector.project(pending)
@@ -498,6 +557,7 @@ class CodexAppServerSession:
                 continue
 
             method = note.get("method", "")
+            mark_notification(note)
             if self._on_event is not None:
                 try:
                     self._on_event(note)
