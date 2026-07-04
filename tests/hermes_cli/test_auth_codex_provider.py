@@ -15,6 +15,8 @@ from hermes_cli.auth import (
     PROVIDER_REGISTRY,
     _read_codex_tokens,
     _save_codex_tokens,
+    _codex_device_code_poll_once,
+    _codex_device_code_request,
     _import_codex_cli_tokens,
     _login_openai_codex,
     get_codex_auth_status,
@@ -184,6 +186,31 @@ def test_codex_tokens_not_written_to_shared_file(tmp_path, monkeypatch):
     assert data["tokens"]["access_token"] == "hermes-at"
 
 
+def test_save_codex_tokens_to_explicit_codex_home(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes"
+    codex_home = tmp_path / "employee-codex"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    _save_codex_tokens(
+        {
+            "access_token": "employee-at",
+            "refresh_token": "employee-rt",
+            "account_id": "acct_12345678",
+        },
+        "2026-07-04T00:00:00Z",
+        codex_home=str(codex_home),
+    )
+
+    assert not (hermes_home / "auth.json").exists()
+    payload = json.loads((codex_home / "auth.json").read_text())
+    assert payload["auth_mode"] == "chatgpt"
+    assert payload["tokens"]["access_token"] == "employee-at"
+    assert payload["account_id"] == "acct_12345678"
+    data = _read_codex_tokens(codex_home=str(codex_home))
+    assert data["tokens"]["refresh_token"] == "employee-rt"
+
+
 def test_resolve_returns_hermes_auth_store_source(tmp_path, monkeypatch):
     hermes_home = tmp_path / "hermes"
     _setup_hermes_auth(hermes_home)
@@ -193,6 +220,68 @@ def test_resolve_returns_hermes_auth_store_source(tmp_path, monkeypatch):
     assert creds["source"] == "hermes-auth-store"
     assert creds["provider"] == "openai-codex"
     assert creds["base_url"] == DEFAULT_CODEX_BASE_URL
+
+
+def test_codex_device_code_request_returns_nonblocking_payload(monkeypatch):
+    _patch_httpx(
+        monkeypatch,
+        _StubHTTPResponse(
+            200,
+            {
+                "user_code": "ABCD-EFGH",
+                "device_auth_id": "dev-123",
+                "interval": 5,
+                "expires_in": 900,
+            },
+        ),
+    )
+
+    payload = _codex_device_code_request("client-test")
+
+    assert payload == {
+        "user_code": "ABCD-EFGH",
+        "verification_uri": "https://auth.openai.com/codex/device",
+        "device_auth_id": "dev-123",
+        "poll_interval": 5,
+        "expires_in": 900,
+    }
+
+
+def test_codex_device_code_poll_once_pending(monkeypatch):
+    _patch_httpx(monkeypatch, _StubHTTPResponse(403, {"error": "authorization_pending"}))
+
+    assert _codex_device_code_poll_once("dev-123", "client-test") == {"state": "pending"}
+
+
+def test_codex_device_code_poll_once_exchanges_tokens(monkeypatch):
+    _patch_httpx_sequence(
+        monkeypatch,
+        [
+            _StubHTTPResponse(
+                200,
+                {
+                    "authorization_code": "auth-code",
+                    "code_verifier": "verifier",
+                },
+            ),
+            _StubHTTPResponse(
+                200,
+                {
+                    "access_token": "at",
+                    "refresh_token": "rt",
+                    "id_token": "id",
+                    "token_type": "Bearer",
+                },
+            ),
+        ],
+    )
+
+    result = _codex_device_code_poll_once("dev-123", "client-test")
+
+    assert result["state"] == "logged_in"
+    assert result["tokens"]["access_token"] == "at"
+    assert result["tokens"]["refresh_token"] == "rt"
+    assert result["auth_mode"] == "chatgpt"
 
 
 class _StubHTTPResponse:
@@ -224,6 +313,17 @@ class _StubHTTPClient:
 def _patch_httpx(monkeypatch, response):
     def _factory(*args, **kwargs):
         return _StubHTTPClient(response)
+
+    monkeypatch.setattr("hermes_cli.auth.httpx.Client", _factory)
+
+
+def _patch_httpx_sequence(monkeypatch, responses):
+    remaining = list(responses)
+
+    def _factory(*args, **kwargs):
+        if not remaining:
+            raise AssertionError("no stub HTTP responses left")
+        return _StubHTTPClient(remaining.pop(0))
 
     monkeypatch.setattr("hermes_cli.auth.httpx.Client", _factory)
 

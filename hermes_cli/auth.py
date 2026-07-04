@@ -892,6 +892,7 @@ def _auth_lock_path() -> Path:
 
 
 _auth_lock_holder = threading.local()
+_codex_home_auth_lock_holder = threading.local()
 
 
 @contextmanager
@@ -983,6 +984,78 @@ def _auth_store_lock(timeout_seconds: float = AUTH_LOCK_TIMEOUT_SECONDS):
         "Timed out waiting for auth store lock",
     ):
         yield
+
+
+def _codex_home_auth_path(codex_home: str | os.PathLike[str]) -> Path:
+    return Path(codex_home).expanduser() / "auth.json"
+
+
+@contextmanager
+def _codex_home_auth_lock(codex_home: str | os.PathLike[str]):
+    auth_path = _codex_home_auth_path(codex_home)
+    with _file_lock(
+        auth_path.with_suffix(".lock"),
+        _codex_home_auth_lock_holder,
+        AUTH_LOCK_TIMEOUT_SECONDS,
+        "Timed out waiting for Codex home auth lock",
+    ):
+        yield
+
+
+def _load_codex_home_auth(codex_home: str | os.PathLike[str]) -> Dict[str, Any]:
+    auth_path = _codex_home_auth_path(codex_home)
+    if not auth_path.exists():
+        return {}
+    try:
+        payload = json.loads(auth_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        corrupt_path = auth_path.with_suffix(".json.corrupt")
+        try:
+            shutil.copy2(auth_path, corrupt_path)
+        except Exception:
+            pass
+        logger.warning(
+            "codex auth: failed to parse %s (%s) — treating as missing. "
+            "Corrupt file preserved at %s",
+            auth_path, exc, corrupt_path,
+        )
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_codex_home_auth(
+    codex_home: str | os.PathLike[str],
+    payload: Dict[str, Any],
+) -> Path:
+    auth_path = _codex_home_auth_path(codex_home)
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    secure_parent_dir(auth_path)
+    payload = dict(payload)
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    serialized = json.dumps(payload, indent=2) + "\n"
+    tmp_path = auth_path.with_name(f"{auth_path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+    try:
+        fd = os.open(
+            str(tmp_path),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        atomic_replace(tmp_path, auth_path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+    try:
+        auth_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+    return auth_path
 
 
 def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
@@ -3062,12 +3135,60 @@ def _print_loopback_ssh_hint(redirect_uri: str, *, docs_url: str | None = None) 
 # where one app's refresh invalidates the other's session.
 # =============================================================================
 
-def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
+def _read_codex_tokens(
+    *,
+    _lock: bool = True,
+    codex_home: Optional[str] = None,
+) -> Dict[str, Any]:
     """Read Codex OAuth tokens from Hermes auth store (~/.hermes/auth.json).
     
     Returns dict with 'tokens' (access_token, refresh_token) and 'last_refresh'.
     Raises AuthError if no Codex tokens are stored.
     """
+    if codex_home is not None:
+        if _lock:
+            with _codex_home_auth_lock(codex_home):
+                state = _load_codex_home_auth(codex_home)
+        else:
+            state = _load_codex_home_auth(codex_home)
+        if not state:
+            raise AuthError(
+                "No Codex credentials stored in CODEX_HOME.",
+                provider="openai-codex",
+                code="codex_auth_missing",
+                relogin_required=True,
+            )
+        tokens = state.get("tokens")
+        if not isinstance(tokens, dict):
+            raise AuthError(
+                "Codex auth state is missing tokens.",
+                provider="openai-codex",
+                code="codex_auth_invalid_shape",
+                relogin_required=True,
+            )
+        access_token = tokens.get("access_token")
+        refresh_token = tokens.get("refresh_token")
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise AuthError(
+                "Codex auth is missing access_token.",
+                provider="openai-codex",
+                code="codex_auth_missing_access_token",
+                relogin_required=True,
+            )
+        if not isinstance(refresh_token, str) or not refresh_token.strip():
+            raise AuthError(
+                "Codex auth is missing refresh_token.",
+                provider="openai-codex",
+                code="codex_auth_missing_refresh_token",
+                relogin_required=True,
+            )
+        return {
+            "tokens": tokens,
+            "last_refresh": state.get("last_refresh") or state.get("updated_at"),
+            "auth_mode": state.get("auth_mode"),
+            "account_id": state.get("account_id") or tokens.get("account_id"),
+        }
+
     if _lock:
         with _auth_store_lock():
             auth_store = _load_auth_store()
@@ -3111,10 +3232,26 @@ def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
     }
 
 
-def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None) -> None:
+def _save_codex_tokens(
+    tokens: Dict[str, Any],
+    last_refresh: str = None,
+    *,
+    codex_home: Optional[str] = None,
+) -> None:
     """Save Codex OAuth tokens to Hermes auth store (~/.hermes/auth.json)."""
     if last_refresh is None:
         last_refresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    if codex_home is not None:
+        with _codex_home_auth_lock(codex_home):
+            state = _load_codex_home_auth(codex_home)
+            state["tokens"] = dict(tokens)
+            state["last_refresh"] = last_refresh
+            state["auth_mode"] = "chatgpt"
+            account_id = tokens.get("account_id") or state.get("account_id")
+            if account_id:
+                state["account_id"] = account_id
+            _save_codex_home_auth(codex_home, state)
+        return
     with _auth_store_lock():
         auth_store = _load_auth_store()
         state = _load_provider_state(auth_store, "openai-codex") or {}
@@ -3250,13 +3387,17 @@ def _refresh_codex_auth_tokens(
     return updated_tokens
 
 
-def _import_codex_cli_tokens() -> Optional[Dict[str, str]]:
+def _import_codex_cli_tokens(
+    source_codex_home: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
     """Try to read tokens from ~/.codex/auth.json (Codex CLI shared file).
     
     Returns tokens dict if valid and not expired, None otherwise.
     Does NOT write to the shared file.
     """
-    codex_home = os.getenv("CODEX_HOME", "").strip()
+    codex_home = str(source_codex_home or "").strip()
+    if not codex_home:
+        codex_home = os.getenv("CODEX_HOME", "").strip()
     if not codex_home:
         codex_home = str(Path.home() / ".codex")
     auth_path = Path(codex_home).expanduser() / "auth.json"
@@ -6662,16 +6803,14 @@ def _xai_oauth_loopback_login(
     }
 
 
-def _codex_device_code_login() -> Dict[str, Any]:
-    """Run the OpenAI device code login flow and return credentials dict."""
-    import time as _time
-
+def _codex_device_code_request(
+    client_id: str = CODEX_OAUTH_CLIENT_ID,
+    timeout: float = 15.0,
+) -> Dict[str, Any]:
+    """Request an OpenAI Codex device code without printing or polling."""
     issuer = "https://auth.openai.com"
-    client_id = CODEX_OAUTH_CLIENT_ID
-
-    # Step 1: Request device code
     try:
-        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+        with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
             resp = client.post(
                 f"{issuer}/api/accounts/deviceauth/usercode",
                 json={"client_id": client_id},
@@ -6693,6 +6832,7 @@ def _codex_device_code_login() -> Dict[str, Any]:
     user_code = device_data.get("user_code", "")
     device_auth_id = device_data.get("device_auth_id", "")
     poll_interval = max(3, int(device_data.get("interval", "5")))
+    expires_in = int(device_data.get("expires_in") or 15 * 60)
 
     if not user_code or not device_auth_id:
         raise AuthError(
@@ -6700,50 +6840,69 @@ def _codex_device_code_login() -> Dict[str, Any]:
             provider="openai-codex", code="device_code_incomplete",
         )
 
-    # Step 2: Show user the code
-    print("To continue, follow these steps:\n")
-    print("  1. Open this URL in your browser:")
-    print(f"     \033[94m{issuer}/codex/device\033[0m\n")
-    print("  2. Enter this code:")
-    print(f"     \033[94m{user_code}\033[0m\n")
-    print("Waiting for sign-in... (press Ctrl+C to cancel)")
+    return {
+        "user_code": user_code,
+        "verification_uri": f"{issuer}/codex/device",
+        "device_auth_id": device_auth_id,
+        "poll_interval": poll_interval,
+        "expires_in": expires_in,
+    }
 
-    # Step 3: Poll for authorization code
-    max_wait = 15 * 60  # 15 minutes
-    start = _time.monotonic()
-    code_resp = None
 
-    try:
-        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
-            while _time.monotonic() - start < max_wait:
-                _time.sleep(poll_interval)
-                poll_resp = client.post(
-                    f"{issuer}/api/accounts/deviceauth/token",
-                    json={"device_auth_id": device_auth_id, "user_code": user_code},
-                    headers={"Content-Type": "application/json"},
-                )
-
-                if poll_resp.status_code == 200:
-                    code_resp = poll_resp.json()
-                    break
-                elif poll_resp.status_code in {403, 404}:
-                    continue  # User hasn't completed login yet
-                else:
-                    raise AuthError(
-                        f"Device auth polling returned status {poll_resp.status_code}.",
-                        provider="openai-codex", code="device_code_poll_error",
-                    )
-    except KeyboardInterrupt:
-        print("\nLogin cancelled.")
-        raise SystemExit(130)
-
-    if code_resp is None:
+def _codex_device_code_poll_once(
+    device_auth_id: str,
+    client_id: str = CODEX_OAUTH_CLIENT_ID,
+    timeout: float = 15.0,
+) -> Dict[str, Any]:
+    """Poll Codex device auth once and exchange tokens if approved."""
+    issuer = "https://auth.openai.com"
+    device_auth_id = str(device_auth_id or "").strip()
+    if not device_auth_id:
         raise AuthError(
-            "Login timed out after 15 minutes.",
-            provider="openai-codex", code="device_code_timeout",
+            "device_auth_id is required.",
+            provider="openai-codex",
+            code="device_code_missing_device_auth_id",
         )
 
-    # Step 4: Exchange authorization code for tokens
+    try:
+        with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
+            poll_resp = client.post(
+                f"{issuer}/api/accounts/deviceauth/token",
+                json={"device_auth_id": device_auth_id, "client_id": client_id},
+                headers={"Content-Type": "application/json"},
+            )
+    except Exception as exc:
+        raise AuthError(
+            f"Device auth polling failed: {exc}",
+            provider="openai-codex", code="device_code_poll_failed",
+        )
+
+    if poll_resp.status_code in {403, 404}:
+        return {"state": "pending"}
+    if poll_resp.status_code != 200:
+        try:
+            err = poll_resp.json()
+        except Exception:
+            err = {}
+        err_code = ""
+        err_desc = ""
+        if isinstance(err, dict):
+            err_obj = err.get("error")
+            if isinstance(err_obj, str):
+                err_code = err_obj
+            elif isinstance(err_obj, dict):
+                err_code = str(err_obj.get("code") or err_obj.get("type") or "")
+                err_desc = str(err_obj.get("message") or "")
+            err_desc = err_desc or str(err.get("error_description") or err.get("message") or "")
+        if err_code in {"authorization_pending", "slow_down"}:
+            return {"state": "pending"}
+        raise AuthError(
+            f"Device auth polling returned status {poll_resp.status_code}.",
+            provider="openai-codex",
+            code=err_code or "device_code_poll_error",
+        )
+
+    code_resp = poll_resp.json()
     authorization_code = code_resp.get("authorization_code", "")
     code_verifier = code_resp.get("code_verifier", "")
     redirect_uri = f"{issuer}/deviceauth/callback"
@@ -6755,7 +6914,7 @@ def _codex_device_code_login() -> Dict[str, Any]:
         )
 
     try:
-        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+        with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
             token_resp = client.post(
                 CODEX_OAUTH_TOKEN_URL,
                 data={
@@ -6789,22 +6948,68 @@ def _codex_device_code_login() -> Dict[str, Any]:
             provider="openai-codex", code="token_exchange_no_access_token",
         )
 
-    # Return tokens for the caller to persist (no longer writes to ~/.codex/)
     base_url = (
         os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/")
         or DEFAULT_CODEX_BASE_URL
     )
-
     return {
+        "state": "logged_in",
         "tokens": {
-            "access_token": access_token,
-            "refresh_token": refresh_token,
+            key: value
+            for key, value in tokens.items()
+            if key in {
+                "access_token",
+                "refresh_token",
+                "id_token",
+                "expires_in",
+                "token_type",
+                "account_id",
+            }
+            and value is not None
+            and value != ""
         },
         "base_url": base_url,
         "last_refresh": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "auth_mode": "chatgpt",
         "source": "device-code",
     }
+
+
+def _codex_device_code_login() -> Dict[str, Any]:
+    """Run the OpenAI device code login flow and return credentials dict."""
+    import time as _time
+
+    client_id = CODEX_OAUTH_CLIENT_ID
+    device_data = _codex_device_code_request(client_id)
+    user_code = device_data["user_code"]
+    device_auth_id = device_data["device_auth_id"]
+    poll_interval = int(device_data["poll_interval"])
+
+    print("To continue, follow these steps:\n")
+    print("  1. Open this URL in your browser:")
+    print(f"     \033[94m{device_data['verification_uri']}\033[0m\n")
+    print("  2. Enter this code:")
+    print(f"     \033[94m{user_code}\033[0m\n")
+    print("Waiting for sign-in... (press Ctrl+C to cancel)")
+
+    max_wait = 15 * 60  # 15 minutes
+    start = _time.monotonic()
+
+    try:
+        while _time.monotonic() - start < max_wait:
+            _time.sleep(poll_interval)
+            poll_result = _codex_device_code_poll_once(device_auth_id, client_id)
+            if poll_result.get("state") == "pending":
+                continue
+            return poll_result
+    except KeyboardInterrupt:
+        print("\nLogin cancelled.")
+        raise SystemExit(130)
+
+    raise AuthError(
+        "Login timed out after 15 minutes.",
+        provider="openai-codex", code="device_code_timeout",
+    )
 
 
 # ==================== MiniMax Portal OAuth ====================
