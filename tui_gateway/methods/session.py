@@ -132,6 +132,22 @@ def _requested_codex_home(params: dict | None = None) -> str:
     ).strip()
 
 
+def _requested_codex_extra_env(params: dict | None = None) -> dict:
+    params = params or {}
+    profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
+    if not isinstance(profile, dict):
+        profile = {}
+    for candidate in (
+        params.get("codex_extra_env"),
+        params.get("codexExtraEnv"),
+        profile.get("codex_extra_env"),
+        profile.get("codexExtraEnv"),
+    ):
+        if isinstance(candidate, dict) and candidate:
+            return {str(k): str(v) for k, v in candidate.items() if v is not None}
+    return {}
+
+
 def _requested_agent_profile_id(params: dict | None = None) -> str:
     return str(
         (params or {}).get("agent_profile_id")
@@ -863,13 +879,15 @@ def _(rid, params: dict) -> dict:
     create_provider = str(params.get("provider") or "").strip()
     create_runtime_executor = _requested_runtime_executor(params)
     create_codex_home = _requested_codex_home(params)
+    create_codex_extra_env = _requested_codex_extra_env(params)
     session_model_override = None
-    if create_model or create_provider or create_runtime_executor or create_codex_home:
+    if create_model or create_provider or create_runtime_executor or create_codex_home or create_codex_extra_env:
         session_model_override = {
             "model": create_model,
             "provider": create_provider or None,
             "runtime_executor": create_runtime_executor or None,
             "codex_home": create_codex_home or None,
+            "codex_extra_env": create_codex_extra_env or None,
         }
     create_reasoning_override = None
     if _effort := str(params.get("reasoning_effort") or "").strip():

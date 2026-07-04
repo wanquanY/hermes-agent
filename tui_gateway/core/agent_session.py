@@ -459,6 +459,21 @@ def _make_agent(
         _profile_context.get("codexHome"),
         _profile_context.get("codexHomePath"),
     )
+    # Extra env bag for the Codex spawn — used by Dovie to inject the
+    # platform runtime token as DOXIE_PLATFORM_API_KEY when the employee is
+    # in platform-billing mode. BYO mode sends nothing here, so the codex
+    # subprocess falls back to its own ChatGPT auth.json.
+    def _first_mapping(*values) -> dict:
+        for value in values:
+            if isinstance(value, dict) and value:
+                return {str(k): str(v) for k, v in value.items() if v is not None}
+        return {}
+    _codex_extra_env = _first_mapping(
+        (_override or {}).get("codex_extra_env"),
+        (_override or {}).get("codexExtraEnv"),
+        _profile_context.get("codex_extra_env"),
+        _profile_context.get("codexExtraEnv"),
+    )
     _runtime_provider_override = _first_text(
         (_override or {}).get("provider"),
         _profile_context.get("provider"),
@@ -551,6 +566,8 @@ def _make_agent(
         agent.session_cwd = cwd
     if runtime.get("codex_home") is not None:
         agent.codex_home = runtime.get("codex_home")
+    if _codex_extra_env:
+        agent.codex_extra_env = _codex_extra_env
     remember_requested_runtime_provider(agent, runtime, requested_provider)
     return agent
 

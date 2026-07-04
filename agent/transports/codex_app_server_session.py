@@ -189,6 +189,7 @@ class CodexAppServerSession:
         cwd: Optional[str] = None,
         codex_bin: str = "codex",
         codex_home: Optional[str] = None,
+        extra_env: Optional[dict[str, str]] = None,
         permission_profile: Optional[str] = None,
         approval_callback: Optional[Callable[..., str]] = None,
         on_event: Optional[Callable[[dict], None]] = None,
@@ -198,6 +199,10 @@ class CodexAppServerSession:
         self._cwd = cwd or os.getcwd()
         self._codex_bin = codex_bin
         self._codex_home = codex_home
+        # Extra env vars merged into the codex subprocess spawn env — used
+        # by Dovie to inject DOXIE_PLATFORM_API_KEY for platform-mode
+        # employees. Deep-copied to avoid mutation after spawn.
+        self._extra_env = dict(extra_env) if extra_env else None
         self._permission_profile = (
             permission_profile or _HERMES_TO_CODEX_PERMISSION_PROFILE.get(
                 os.environ.get("HERMES_TERMINAL_SECURITY_MODE", "auto"),
@@ -229,9 +234,13 @@ class CodexAppServerSession:
         if self._thread_id is not None:
             return self._thread_id
         if self._client is None:
-            self._client = self._client_factory(
-                codex_bin=self._codex_bin, codex_home=self._codex_home
-            )
+            client_kwargs = {
+                "codex_bin": self._codex_bin,
+                "codex_home": self._codex_home,
+            }
+            if self._extra_env is not None:
+                client_kwargs["env"] = self._extra_env
+            self._client = self._client_factory(**client_kwargs)
         self._client.initialize(
             client_name="hermes",
             client_title="Hermes Agent",
