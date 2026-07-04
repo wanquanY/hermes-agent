@@ -39,6 +39,7 @@ METHOD_MODULES = (
     "billing",
     "paste",
     "complete",
+    "codex",
     "model",
     "slash",
     "voice",
