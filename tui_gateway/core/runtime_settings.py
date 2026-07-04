@@ -427,6 +427,27 @@ def _apply_model_switch(
         raise ValueError("model value required")
 
     agent = session.get("agent")
+    # Codex-employee session guard: when the session is running against a
+    # codex_app_server runtime (a codex CLI subprocess handles the whole
+    # turn, authenticating via its own CODEX_HOME), the desktop composer's
+    # per-turn `/model` switch would silently downgrade this to a plain
+    # `chat_completions` call against a platform-registered model_key —
+    # the codex account is never used, and the platform gateway responds
+    # with `模型 X 使用 codex_responses 格式,不能通过 chat_completions
+    # 调用`. Codex employees own their runtime; the model choice belongs
+    # to the codex CLI (BYO) or the CODEX_HOME/config.toml
+    # `[model_providers.doxie]` entry (platform mode). Refuse the switch
+    # here so the guard covers every caller of `_apply_model_switch`
+    # (prompt.submit, /model slash command, config.set, etc.) instead of
+    # patching each one.
+    _agent_api_mode = str(getattr(agent, "api_mode", "") or "").strip() if agent else ""
+    if _agent_api_mode == "codex_app_server":
+        return {
+            "success": True,
+            "no_op": True,
+            "reason": "codex_employee_owned_runtime",
+            "value": getattr(agent, "model", "") or model_input,
+        }
     if agent:
         current_provider = getattr(agent, "provider", "") or ""
         current_model = getattr(agent, "model", "") or ""

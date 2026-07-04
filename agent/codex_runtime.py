@@ -26,6 +26,161 @@ from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 
 
+def _codex_thread_map_path(agent: Any) -> str | None:
+    """Return the path to the codex thread map file for this agent.
+
+    The map is a JSON dict {hermes_session_id → codex_thread_id} stored inside
+    the per-employee CODEX_HOME so it stays with the codex install and moves
+    with it when the user migrates the employee.
+    """
+    codex_home = getattr(agent, "codex_home", None)
+    if not codex_home:
+        return None
+    try:
+        os.makedirs(codex_home, exist_ok=True)
+    except Exception:
+        return None
+    return os.path.join(codex_home, "hermes_thread_map.json")
+
+
+def _load_codex_thread_id_for_session(agent: Any) -> str | None:
+    """Read the previously-committed codex thread id for this hermes session.
+
+    Returns None on first-turn or when the map is missing/corrupt — caller
+    then falls back to thread/start. The lookup key is the AIAgent's
+    session_id (hermes conversation id), so different conversations for the
+    same employee resume independent codex threads (matching the mental model
+    of one codex thread per conversation).
+    """
+    path = _codex_thread_map_path(agent)
+    if not path or not os.path.isfile(path):
+        return None
+    session_id = str(getattr(agent, "session_id", "") or "").strip()
+    if not session_id:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            data = json.load(fp) or {}
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get(session_id)
+    return str(value).strip() if value else None
+
+
+def _save_codex_thread_id_for_session(agent: Any, thread_id: str) -> None:
+    """Persist the codex thread id so the next turn can thread/resume it."""
+    if not thread_id:
+        return
+    path = _codex_thread_map_path(agent)
+    if not path:
+        return
+    session_id = str(getattr(agent, "session_id", "") or "").strip()
+    if not session_id:
+        return
+    try:
+        data: Dict[str, Any] = {}
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fp:
+                    loaded = json.load(fp)
+                if isinstance(loaded, dict):
+                    data = loaded
+            except Exception:
+                data = {}
+        if data.get(session_id) == thread_id:
+            return
+        data[session_id] = thread_id
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fp:
+            json.dump(data, fp, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        logger.debug("codex thread-id persist failed", exc_info=True)
+
+
+def _codex_tool_summary(item: Dict[str, Any]) -> str:
+    """Best-effort short label for a codex tool item shown on the UI card."""
+    item_type = str(item.get("type") or "")
+    if item_type == "commandExecution":
+        cmd = item.get("command")
+        if isinstance(cmd, list) and cmd:
+            return " ".join(str(x) for x in cmd)[:160]
+        if isinstance(cmd, str):
+            return cmd[:160]
+        return "shell"
+    if item_type == "fileChange":
+        changes = item.get("changes") or []
+        if isinstance(changes, list) and changes:
+            paths = []
+            for change in changes[:4]:
+                if isinstance(change, dict):
+                    p = change.get("path") or change.get("filename")
+                    if p:
+                        paths.append(str(p))
+            if paths:
+                return "patch " + ", ".join(paths)
+        return "patch"
+    if item_type == "mcpToolCall":
+        return f"mcp:{item.get('name') or item.get('toolName') or ''}"
+    if item_type == "dynamicToolCall":
+        return f"tool:{item.get('name') or ''}"
+    return item_type or "tool"
+
+
+def _codex_tool_name(item: Dict[str, Any]) -> str:
+    item_type = str(item.get("type") or "")
+    if item_type == "commandExecution":
+        return "shell"
+    if item_type == "fileChange":
+        return "apply_patch"
+    if item_type == "mcpToolCall":
+        return f"mcp:{item.get('name') or item.get('toolName') or 'mcp'}"
+    if item_type == "dynamicToolCall":
+        return str(item.get("name") or "tool")
+    return item_type or "tool"
+
+
+def _forward_codex_tool_event(agent: Any, note: Dict[str, Any]) -> None:
+    """Bridge codex tool item events into hermes tool callbacks so the UI card strip renders."""
+    method = str(note.get("method", "") or "")
+    if method not in ("item/started", "item/completed"):
+        return
+    params = note.get("params") or {}
+    item = params.get("item") or {}
+    item_type = str(item.get("type") or "")
+    if item_type not in ("commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall"):
+        return
+    item_id = str(item.get("id") or "")
+    if not item_id:
+        return
+    tool_name = _codex_tool_name(item)
+    if method == "item/started":
+        cb = getattr(agent, "tool_start_callback", None)
+        if callable(cb):
+            try:
+                cb(item_id, tool_name, {"summary": _codex_tool_summary(item)})
+            except Exception:
+                logger.debug("codex tool_start forward raised", exc_info=True)
+        return
+    if method == "item/completed":
+        cb = getattr(agent, "tool_complete_callback", None)
+        if callable(cb):
+            output = ""
+            if item_type == "commandExecution":
+                output = str(item.get("aggregatedOutput") or "")[:2000]
+            elif item_type == "fileChange":
+                output = _codex_tool_summary(item)
+            elif item_type in ("mcpToolCall", "dynamicToolCall"):
+                r = item.get("result") or item.get("output") or ""
+                output = str(r)[:2000] if not isinstance(r, str) else r[:2000]
+            try:
+                cb(item_id, tool_name, {"summary": _codex_tool_summary(item)}, output)
+            except Exception:
+                logger.debug("codex tool_complete forward raised", exc_info=True)
+
+
 def _coerce_usage_int(value: Any) -> int:
     if isinstance(value, bool):
         return 0
@@ -190,6 +345,21 @@ def run_codex_app_server_turn(
     Called from run_conversation() when agent.api_mode == "codex_app_server".
     Returns the same dict shape as the chat_completions path.
     """
+    import time as _perf_time
+    _perf_turn_begin = _perf_time.monotonic()
+    import logging as _perf_log
+    _perf_log.getLogger().warning(
+        "[codex-perf][turn] BEGIN sid=%s codex_session_exists=%s stream_cb=%s",
+        getattr(agent, "session_id", "?"),
+        hasattr(agent, "_codex_session") and agent._codex_session is not None,
+        callable(getattr(agent, "_stream_callback", None)),
+    )
+    _perf_log.getLogger().warning(
+        "[codex-perf][turn] worker_env proxy: HTTP_PROXY=%r HTTPS_PROXY=%r NO_PROXY=%r",
+        os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy"),
+        os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"),
+        os.environ.get("NO_PROXY") or os.environ.get("no_proxy"),
+    )
     from agent.transports.codex_app_server_session import CodexAppServerSession
 
     # Lazy session: one CodexAppServerSession per AIAgent instance.
@@ -207,19 +377,119 @@ def run_codex_app_server_turn(
             approval_callback = _get_approval_callback()
         except Exception:
             approval_callback = None
+        prior_thread_id = _load_codex_thread_id_for_session(agent)
+
+        # Stream forwarder: pipe codex's agentMessage/delta events into the
+        # standard hermes stream callback so the UI sees text arrive
+        # token-by-token instead of waiting for the whole turn to land.
+        # Without this the projector only emits messages on item/completed
+        # and the run reads as "运行中" until codex finishes.
+        #
+        # ``agent._stream_callback`` is what tui_gateway.prompt wires the
+        # per-turn ``_stream`` closure onto via run_conversation(stream_callback=...);
+        # it's set *before* our branch runs (conversation_loop line ~611)
+        # so we can capture the live reference at session-construct time.
+
+        def _stream_cb() -> Any:
+            cb = getattr(agent, "_stream_callback", None)
+            if callable(cb):
+                return cb
+            cb = getattr(agent, "stream_delta_callback", None)
+            return cb if callable(cb) else None
+
+        # Turn-local counter: per-turn number of agentMessage items we've
+        # forwarded so far. Codex resets its turn state via turn/started so
+        # we key on that. Used to inject a "\n\n" separator between multi-
+        # part answers so the delta stream and projector's final_text (which
+        # joins segments with the same separator) stay in sync — otherwise
+        # the reconciliation pass sees a length mismatch and re-emits the
+        # full text as a duplicate delta.
+        _msg_state: Dict[str, int] = {"agent_message_started": 0}
+
+        def _forward_codex_stream(note: Dict[str, Any]) -> None:
+            method = str(note.get("method", "") or "")
+            params = note.get("params") or {}
+
+            if method == "turn/started":
+                _msg_state["agent_message_started"] = 0
+
+            # 1) Per-token streaming: pipe agentMessage delta text into hermes.
+            if method == "item/agentMessage/delta":
+                delta = params.get("delta")
+                if not isinstance(delta, str) or not delta:
+                    return
+                cb = _stream_cb()
+                if cb is None:
+                    return
+                try:
+                    cb(delta)
+                except Exception:
+                    logger.debug("codex stream forwarder raised", exc_info=True)
+                return
+
+            # 2) Separator between multi-agentMessage turns. Fires on the
+            #    second (and later) agentMessage/started so it never runs on
+            #    single-segment turns (which was the "duplicate reply" bug).
+            if method == "item/started":
+                item = params.get("item") or {}
+                if str(item.get("type") or "") == "agentMessage":
+                    _msg_state["agent_message_started"] += 1
+                    if _msg_state["agent_message_started"] > 1:
+                        cb = _stream_cb()
+                        if cb is not None:
+                            try:
+                                cb("\n\n")
+                            except Exception:
+                                logger.debug(
+                                    "codex segment-separator forward raised",
+                                    exc_info=True,
+                                )
+
+            # NOTE: earlier revisions called stream_callback(None) here to
+            # close the UI segment on every item/completed(agentMessage).
+            # That broke single-segment turns: hermes's
+            # ``final-response-reconciliation`` sees delta_normalizer reset,
+            # believes stream produced nothing, and re-emits the full text as
+            # a fresh delta — the frontend then renders the reply twice AND
+            # the turn state machine reads as still-running. Segment merging
+            # for multi-part turns is now handled projector-side by
+            # concatenating final_text across items so the reconciliation
+            # invariant (raw_text prefix/equals stream_text) holds naturally.
+
+            # Surface codex-side tools (shell commands, file patches, mcp
+            #    tool calls) as hermes tool events so the UI's tool card
+            #    strip populates the same way it does for chat_completions
+            #    tool calls. Without this the frontend shows "no tools ran"
+            #    even though codex just executed several shell commands and
+            #    wrote files.
+            _forward_codex_tool_event(agent, note)
+
+        agent._codex_stream_forward = _forward_codex_stream
+
         agent._codex_session = CodexAppServerSession(
             cwd=cwd,
             codex_home=getattr(agent, "codex_home", None),
             extra_env=getattr(agent, "codex_extra_env", None),
             approval_callback=approval_callback,
+            prior_thread_id=prior_thread_id,
+            on_event=_forward_codex_stream,
         )
 
     # NOTE: the user message is ALREADY appended to messages by the
     # standard run_conversation() flow (line ~11823) before the early
     # return reaches us. Do NOT append again — that would duplicate.
 
+    _perf_before_run = _perf_time.monotonic()
+    _perf_log.getLogger().warning(
+        "[codex-perf][turn] pre-session-setup dt=%.3fs, calling run_turn now",
+        _perf_before_run - _perf_turn_begin,
+    )
     try:
         turn = agent._codex_session.run_turn(user_input=user_message)
+        _perf_log.getLogger().warning(
+            "[codex-perf][turn] run_turn RETURNED dt=%.3fs (from run_turn start)",
+            _perf_time.monotonic() - _perf_before_run,
+        )
     except Exception as exc:
         logger.exception("codex app-server turn failed")
         # Crash → unconditionally drop the session so the next turn
@@ -262,6 +532,37 @@ def run_codex_app_server_turn(
     # is exactly what curator.py / sessions DB expect.
     if turn.projected_messages:
         messages.extend(turn.projected_messages)
+
+    # Persist the updated transcript to the sessions/messages tables. The
+    # chat_completions loop calls _persist_session on every iteration; we
+    # bypass that loop entirely, so without this write the assistant reply
+    # never reaches the messages table. The UI history reader falls back
+    # to messages after message.delta rows get pruned at terminal, so a
+    # missing write here surfaces as an empty assistant turn on reload.
+    #
+    # Pass the messages buffer as-is: it's a ``TurnMessageBuffer`` whose
+    # ``_hermes_persist_from_index`` marks where the current turn starts
+    # inside the history+turn concatenation. ``_flush_messages_to_session_db``
+    # reads that boundary to append ONLY this turn's new user/assistant rows.
+    # A ``list(messages)`` copy would drop the attribute — flush would then
+    # fall back to "no explicit boundary", start_idx=0, and re-insert every
+    # historical row on every codex turn (surface: sidebar shows N copies
+    # of every user message stacked before the current assistant reply).
+    try:
+        agent._persist_session(messages)
+    except Exception:
+        logger.debug("codex app-server _persist_session raised", exc_info=True)
+
+    # Persist the codex thread id so the next turn can thread/resume it and
+    # keep the conversation memory alive on the codex side (otherwise codex
+    # sees a fresh thread every turn and has no idea what the user said
+    # before). Skipped when the session was retired above (turn errored) —
+    # a broken thread should not be resumed on the next turn.
+    if turn.thread_id and getattr(agent, "_codex_session", None) is not None:
+        try:
+            _save_codex_thread_id_for_session(agent, str(turn.thread_id))
+        except Exception:
+            logger.debug("codex app-server thread-id persist raised", exc_info=True)
 
     # Counter ticks for the agent-improvement loop.
     # _turns_since_memory and _user_turn_count are ALREADY incremented
@@ -316,6 +617,15 @@ def run_codex_app_server_turn(
         except Exception:
             logger.debug("background review spawn raised", exc_info=True)
 
+    import logging as _dbg_log_mod
+    _dbg_log_mod.getLogger().warning(
+        "[codex-flow][run_conversation] RETURN final_text_len=%s final_text_preview=%r projected_msgs=%s completed=%s error=%r",
+        len(turn.final_text or ""),
+        (turn.final_text or "")[:120],
+        len(turn.projected_messages or []),
+        not turn.interrupted and turn.error is None,
+        turn.error,
+    )
     return {
         "final_response": turn.final_text,
         "messages": messages,

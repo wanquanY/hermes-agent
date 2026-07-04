@@ -355,6 +355,55 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
     return model, None
 
 
+def _persisted_session_codex_runtime(session_key: str) -> dict:
+    """Read a session's persisted Codex runtime fields from its DB row.
+
+    session.create writes `runtime_executor` / `codex_home` / `codex_extra_env`
+    into `sessions.model_config` alongside the model + provider so the runtime
+    worker subprocess — which only ever sees the DB row, not the sidecar's
+    in-memory session dict — can rebuild the agent with codex_app_server
+    api_mode instead of falling through to the openai-codex codex_responses
+    path (which then fails on missing OAuth token).
+
+    Returns {} when the row isn't a Codex session or when the DB is
+    unreachable; callers treat that as "no override" and follow their
+    normal fallback chain.
+    """
+    key = str(session_key or "").strip()
+    if not key:
+        return {}
+    try:
+        db = _db_for_stable_session(key)
+        row = db.get_session(key) if db is not None else None
+    except Exception:
+        return {}
+    if not isinstance(row, dict):
+        return {}
+    raw_cfg = row.get("model_config")
+    cfg = raw_cfg if isinstance(raw_cfg, dict) else None
+    if cfg is None and isinstance(raw_cfg, str) and raw_cfg.strip():
+        try:
+            parsed = json.loads(raw_cfg)
+            cfg = parsed if isinstance(parsed, dict) else None
+        except Exception:
+            cfg = None
+    if not isinstance(cfg, dict):
+        return {}
+    result: dict = {}
+    runtime_executor = str(cfg.get("runtime_executor") or "").strip()
+    codex_home = str(cfg.get("codex_home") or "").strip()
+    codex_extra_env = cfg.get("codex_extra_env")
+    if runtime_executor:
+        result["runtime_executor"] = runtime_executor
+    if codex_home:
+        result["codex_home"] = codex_home
+    if isinstance(codex_extra_env, dict) and codex_extra_env:
+        result["codex_extra_env"] = {
+            str(k): str(v) for k, v in codex_extra_env.items() if v is not None
+        }
+    return result
+
+
 def _persisted_session_runtime(session_key: str) -> tuple[str, str | None]:
     """Read a session's persisted model + provider from its DB row.
 

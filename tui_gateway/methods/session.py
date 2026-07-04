@@ -924,9 +924,34 @@ def _(rid, params: dict) -> dict:
     # global model until the first turn's switch lands. Falls back to the
     # global model when the client made no pick.
     model = create_model or _resolve_model()
+    # Assemble the row's initial model_config so the runtime-worker subprocess
+    # — which only reads the DB, never the sidecar's in-memory session dict —
+    # can rebuild an agent with api_mode=codex_app_server. Without this the
+    # worker builds an openai-codex codex_responses agent and dies on the
+    # missing OAuth token check ("Provider 'openai-codex' is set in
+    # config.yaml but no API key was found").
+    codex_row_config: dict = {}
+    if session_model_override:
+        _re = str(session_model_override.get("runtime_executor") or "").strip()
+        _ch = str(session_model_override.get("codex_home") or "").strip()
+        _ce = session_model_override.get("codex_extra_env")
+        _prov = str(session_model_override.get("provider") or "").strip()
+        if _re:
+            codex_row_config["runtime_executor"] = _re
+        if _ch:
+            codex_row_config["codex_home"] = _ch
+        if isinstance(_ce, dict) and _ce:
+            codex_row_config["codex_extra_env"] = {
+                str(k): str(v) for k, v in _ce.items() if v is not None
+            }
+        if _prov:
+            codex_row_config["provider"] = _prov
     if db is not None:
         try:
-            db.create_session(key, source="tui", model=model, transient=transient)
+            create_kwargs: dict = {"source": "tui", "model": model, "transient": transient}
+            if codex_row_config:
+                create_kwargs["model_config"] = codex_row_config
+            db.create_session(key, **create_kwargs)
         except Exception as exc:
             return _err(rid, 5000, f"session create failed: {exc}")
         try:

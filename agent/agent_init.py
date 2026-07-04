@@ -296,6 +296,11 @@ def init_agent(
     agent.provider = provider_name or ""
     agent.acp_command = acp_command or command
     agent.acp_args = list(acp_args or args or [])
+    import logging as _dbg_lg
+    _dbg_lg.warning(
+        "[codex-flow][agent_init] AIAgent.__init__ received api_mode=%r provider=%r base_url=%r api_key_empty=%s model=%r",
+        api_mode, provider, base_url, not api_key, model,
+    )
     if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse", "codex_app_server"}:
         agent.api_mode = api_mode
     elif agent.provider == "openai-codex":
@@ -692,17 +697,15 @@ def init_agent(
             print(f"🤖 AI Agent initialized with model: {agent.model} (AWS Bedrock, {agent._bedrock_region}{_gr_label})")
     elif agent.api_mode == "codex_app_server":
         # codex_app_server hands the entire turn to a codex CLI subprocess.
-        # That subprocess authenticates itself via CODEX_HOME/auth.json (BYO)
-        # or a `[model_providers.*]` entry in CODEX_HOME/config.toml (platform).
-        # Hermes never speaks the upstream API here — no OpenAI client needed,
-        # no provider auth check. Building one via resolve_provider_client()
-        # would fail on "openai-codex OAuth token not found" even though the
-        # employee has a perfectly valid auth.json in its isolated CODEX_HOME.
+        import logging as _dbg_lg
+        _dbg_lg.warning("[codex-flow][agent_init] taking codex_app_server BRANCH — api_mode=%r provider=%r", agent.api_mode, agent.provider)
         agent.client = None
         agent._client_kwargs = {}
         if not agent.quiet_mode:
             print(f"🤖 AI Agent initialized with model: {agent.model} (Codex app-server)")
     else:
+        import logging as _dbg_lg
+        _dbg_lg.warning("[codex-flow][agent_init] FALLING THROUGH to ELSE branch — api_mode=%r provider=%r api_key_empty=%s base_url=%r", agent.api_mode, agent.provider, not api_key, base_url)
         if api_key and base_url:
             # Explicit credentials from CLI/gateway — construct directly.
             # The runtime provider resolver already handled auth for us.

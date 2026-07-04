@@ -445,11 +445,34 @@ def _make_agent(
                 return text
         return ""
 
+    # Read the row's persisted codex fields once so worker subprocesses (which
+    # only see the DB, never the sidecar's in-memory _sessions dict) can pick
+    # up runtime_executor / codex_home / codex_extra_env recorded at
+    # session.create time. Sidecar in-process callers usually get these from
+    # _override or _profile_context and never touch the fallback below.
+    try:
+        from tui_gateway.core.session_config import (
+            _persisted_session_codex_runtime as _persisted_codex_runtime,
+        )
+        _persisted_codex = _persisted_codex_runtime(session_id or key)
+    except Exception as _pc_exc:
+        _persisted_codex = {}
+        import logging as _dbg_lg
+        _dbg_lg.warning("[codex-flow][_make_agent] persisted_codex EXC sid=%s: %s", session_id or key, _pc_exc)
+    import logging as _dbg_lg
+    _dbg_lg.warning(
+        "[codex-flow][_make_agent] ENTER sid=%s override_keys=%s profile_ctx_keys=%s persisted_codex=%s",
+        session_id or key,
+        sorted((_override or {}).keys()),
+        sorted(_profile_context.keys()),
+        _persisted_codex,
+    )
     _runtime_executor = _first_text(
         (_override or {}).get("runtime_executor"),
         (_override or {}).get("runtimeExecutor"),
         _profile_context.get("runtime_executor"),
         _profile_context.get("runtimeExecutor"),
+        _persisted_codex.get("runtime_executor"),
     )
     _codex_home = _first_text(
         (_override or {}).get("codex_home"),
@@ -458,6 +481,7 @@ def _make_agent(
         _profile_context.get("codex_home"),
         _profile_context.get("codexHome"),
         _profile_context.get("codexHomePath"),
+        _persisted_codex.get("codex_home"),
     )
     # Extra env bag for the Codex spawn — used by Dovie to inject the
     # platform runtime token as DOXIE_PLATFORM_API_KEY when the employee is
@@ -473,6 +497,7 @@ def _make_agent(
         (_override or {}).get("codexExtraEnv"),
         _profile_context.get("codex_extra_env"),
         _profile_context.get("codexExtraEnv"),
+        _persisted_codex.get("codex_extra_env"),
     )
     _runtime_provider_override = _first_text(
         (_override or {}).get("provider"),
@@ -515,18 +540,46 @@ def _make_agent(
         runtime_kwargs["runtime_executor"] = _runtime_executor
     if _codex_home:
         runtime_kwargs["codex_home"] = _codex_home
+    _dbg_lg.warning(
+        "[codex-flow][_make_agent] pre-resolve runtime_kwargs=%s _runtime_executor=%r _codex_home=%r",
+        {k: v for k, v in runtime_kwargs.items() if k != "explicit_api_key"},
+        _runtime_executor,
+        _codex_home,
+    )
     runtime = resolve_runtime_provider(**runtime_kwargs)
+    _dbg_lg.warning(
+        "[codex-flow][_make_agent] post-resolve runtime.api_mode=%r runtime.provider=%r runtime.codex_home=%r",
+        runtime.get("api_mode"),
+        runtime.get("provider"),
+        runtime.get("codex_home"),
+    )
     # Concrete credentials from a completed in-session /model switch survive the
     # rebuild: when the override carries an explicit base_url / api_key / api_mode
     # (the switch already resolved them), use them verbatim instead of letting
     # resolve_runtime_provider re-derive — re-resolution can return the global
     # endpoint and silently route the session to the wrong provider.
+    #
+    # EXCEPT for codex_app_server: the runtime dict we just resolved reflects
+    # the Codex-employee runtime (spawn a codex CLI subprocess reading its
+    # own CODEX_HOME). If the session's override still carries an old
+    # base_url / api_mode from a pre-switch chat_completions state (e.g. a
+    # persisted `[model_switch]` snapshot), letting them win here silently
+    # downgrades the runtime to chat_completions and dies looking for the
+    # OpenAI-codex OAuth token. Codex spawn doesn't use base_url / api_key /
+    # api_mode at all — they're read by the codex subprocess from
+    # CODEX_HOME/config.toml + auth.json.
+    _is_codex_app_server = str(runtime.get("api_mode") or "").strip() == "codex_app_server"
     _ov_base_url = str((_override or {}).get("base_url") or "").strip()
     _ov_api_key = (_override or {}).get("api_key")
     _ov_api_mode = str((_override or {}).get("api_mode") or "").strip()
-    _runtime_base_url = _ov_base_url or runtime.get("base_url")
-    _runtime_api_key = _ov_api_key if (isinstance(_ov_api_key, str) and _ov_api_key.strip()) else runtime.get("api_key")
-    _runtime_api_mode = _ov_api_mode or runtime.get("api_mode")
+    if _is_codex_app_server:
+        _runtime_base_url = runtime.get("base_url")
+        _runtime_api_key = runtime.get("api_key")
+        _runtime_api_mode = runtime.get("api_mode")
+    else:
+        _runtime_base_url = _ov_base_url or runtime.get("base_url")
+        _runtime_api_key = _ov_api_key if (isinstance(_ov_api_key, str) and _ov_api_key.strip()) else runtime.get("api_key")
+        _runtime_api_mode = _ov_api_mode or runtime.get("api_mode")
     enabled_toolsets, disabled_toolsets = resolve_session_toolsets(
         session=_sessions.get(sid),
         session_id=session_id or key,

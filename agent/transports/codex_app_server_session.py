@@ -195,6 +195,7 @@ class CodexAppServerSession:
         on_event: Optional[Callable[[dict], None]] = None,
         request_routing: Optional[_ServerRequestRouting] = None,
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
+        prior_thread_id: Optional[str] = None,
     ) -> None:
         self._cwd = cwd or os.getcwd()
         self._codex_bin = codex_bin
@@ -216,6 +217,13 @@ class CodexAppServerSession:
 
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
+        # When set, ensure_started() calls thread/resume instead of thread/start
+        # so the conversation transcript from a previous run continues in this
+        # codex thread. Cleared to None once we've committed to a live thread
+        # (either via successful resume or a fresh start after resume failed).
+        self._prior_thread_id: Optional[str] = (
+            str(prior_thread_id).strip() or None if prior_thread_id else None
+        )
         self._interrupt_event = threading.Event()
         # Pending file-change items, keyed by item id. Populated on
         # item/started for fileChange items; consumed by the approval
@@ -233,6 +241,9 @@ class CodexAppServerSession:
         return the same thread id."""
         if self._thread_id is not None:
             return self._thread_id
+        import logging as _dbg_lg, time as _dbg_time
+        _t0 = _dbg_time.monotonic()
+        _dbg_lg.getLogger().warning("[codex-perf][ensure_started] BEGIN prior=%s", (self._prior_thread_id or "")[:8])
         if self._client is None:
             client_kwargs = {
                 "codex_bin": self._codex_bin,
@@ -240,12 +251,16 @@ class CodexAppServerSession:
             }
             if self._extra_env is not None:
                 client_kwargs["env"] = self._extra_env
+            _t_before_spawn = _dbg_time.monotonic()
             self._client = self._client_factory(**client_kwargs)
+            _dbg_lg.getLogger().warning("[codex-perf][ensure_started] client spawned dt=%.3fs", _dbg_time.monotonic() - _t_before_spawn)
+        _t_before_init = _dbg_time.monotonic()
         self._client.initialize(
             client_name="hermes",
             client_title="Hermes Agent",
             client_version=_get_hermes_version(),
         )
+        _dbg_lg.getLogger().warning("[codex-perf][ensure_started] initialize dt=%.3fs", _dbg_time.monotonic() - _t_before_init)
         # Permission selection is intentionally NOT sent on thread/start.
         # Two reasons (live-tested against codex 0.130.0):
         #   1. `thread/start.permissions` is gated behind the experimentalApi
@@ -261,30 +276,67 @@ class CodexAppServerSession:
         # codex CLI workflow and avoids fighting codex's own validation.
         # Users who want a write-capable profile configure it in their
         # ~/.codex/config.toml the same way they would for any codex usage.
-        params: dict[str, Any] = {"cwd": self._cwd}
-        result = self._client.request("thread/start", params, timeout=15)
-        # Cross-fill thread.id/sessionId — different codex versions have
-        # serialized this under either key. Mirrors openclaw beta.8's
-        # tolerance fix so future codex drops/renames don't KeyError us
-        # at handshake time.
-        thread_obj = result.get("thread") or {}
-        thread_id = (
-            thread_obj.get("id")
-            or thread_obj.get("sessionId")
-            or result.get("sessionId")
-            or result.get("threadId")
-        )
+        thread_id: Optional[str] = None
+        resumed = False
+        if self._prior_thread_id:
+            try:
+                _t_resume = _dbg_time.monotonic()
+                resume_result = self._client.request(
+                    "thread/resume",
+                    {"threadId": self._prior_thread_id},
+                    timeout=15,
+                )
+                _dbg_lg.getLogger().warning("[codex-perf][ensure_started] thread/resume dt=%.3fs", _dbg_time.monotonic() - _t_resume)
+                thread_obj = resume_result.get("thread") or {}
+                thread_id = (
+                    thread_obj.get("id")
+                    or thread_obj.get("sessionId")
+                    or resume_result.get("sessionId")
+                    or resume_result.get("threadId")
+                    or self._prior_thread_id
+                )
+                resumed = bool(thread_id)
+            except Exception as exc:
+                # Rollout gone / thread expired / codex version change — fall
+                # through to thread/start so the caller isn't stuck. The
+                # transcript from the old thread is lost, but at least the
+                # session keeps working.
+                logger.warning(
+                    "codex thread/resume failed for %s (%s); falling back to thread/start",
+                    self._prior_thread_id[:8],
+                    exc,
+                )
+                thread_id = None
         if not thread_id:
-            raise CodexAppServerError(
-                code=-32603,
-                message=(
-                    "codex thread/start returned no thread id "
-                    f"(payload keys: {sorted(result.keys())})"
-                ),
+            params: dict[str, Any] = {"cwd": self._cwd}
+            _t_start = _dbg_time.monotonic()
+            result = self._client.request("thread/start", params, timeout=15)
+            _dbg_lg.getLogger().warning("[codex-perf][ensure_started] thread/start dt=%.3fs", _dbg_time.monotonic() - _t_start)
+            # Cross-fill thread.id/sessionId — different codex versions have
+            # serialized this under either key. Mirrors openclaw beta.8's
+            # tolerance fix so future codex drops/renames don't KeyError us
+            # at handshake time.
+            thread_obj = result.get("thread") or {}
+            thread_id = (
+                thread_obj.get("id")
+                or thread_obj.get("sessionId")
+                or result.get("sessionId")
+                or result.get("threadId")
             )
+            if not thread_id:
+                raise CodexAppServerError(
+                    code=-32603,
+                    message=(
+                        "codex thread/start returned no thread id "
+                        f"(payload keys: {sorted(result.keys())})"
+                    ),
+                )
         self._thread_id = thread_id
+        self._prior_thread_id = None
+        _dbg_lg.getLogger().warning("[codex-perf][ensure_started] END total_dt=%.3fs resumed=%s tid=%s", _dbg_time.monotonic() - _t0, resumed, self._thread_id[:8])
         logger.info(
-            "codex app-server thread started: id=%s profile=%s cwd=%s",
+            "codex app-server thread %s: id=%s profile=%s cwd=%s",
+            "resumed" if resumed else "started",
             self._thread_id[:8],
             self._permission_profile,
             self._cwd,
@@ -407,6 +459,12 @@ class CodexAppServerSession:
         # supports rich content but Hermes' text path is the common case).
         try:
             input_text = _coerce_turn_input_text(user_input)
+            import logging as _dbg_lg, time as _dbg_time
+            _t_turn_begin = _dbg_time.monotonic()
+            _first_delta_at: list[float] = []
+            self._first_delta_at = _first_delta_at  # picked up in event loop
+            _dbg_lg.warning("[codex-flow][run_turn] SENDING turn/start thread=%s input_len=%s", self._thread_id, len(input_text))
+            _t_ts = _dbg_time.monotonic()
             ts = self._client.request(
                 "turn/start",
                 {
@@ -415,6 +473,8 @@ class CodexAppServerSession:
                 },
                 timeout=10,
             )
+            _dbg_lg.warning("[codex-perf][run_turn] turn/start dt=%.3fs", _dbg_time.monotonic() - _t_ts)
+            _dbg_lg.warning("[codex-flow][run_turn] turn/start REPLIED turn_id=%s ts_keys=%s", (ts.get("turn") or {}).get("id"), sorted(ts.keys()) if isinstance(ts, dict) else "?")
         except CodexAppServerError as exc:
             # Classify auth/refresh failures so the user gets a clear
             # `codex login` pointer instead of a raw RPC error string.
@@ -527,6 +587,8 @@ class CodexAppServerSession:
             # reading notifications, so the codex side isn't blocked.
             sreq = self._client.take_server_request(timeout=0)
             if sreq is not None:
+                import logging as _dbg_lg
+                _dbg_lg.warning("[codex-flow][run_turn] SERVER_REQUEST method=%r keys=%s", sreq.get("method"), sorted(sreq.keys()))
                 # Drain any pending notifications first so per-turn state
                 # (e.g. _pending_file_changes for fileChange approvals) is
                 # up to date when we make the approval decision. Bounded
@@ -566,12 +628,31 @@ class CodexAppServerSession:
                 continue
 
             method = note.get("method", "")
+            import logging as _dbg_lg, time as _dbg_time, json as _dbg_json
+            _dbg_lg.warning("[codex-flow][run_turn] EVENT method=%r params_keys=%s", method, sorted((note.get("params") or {}).keys())[:8])
+            if method in ("error", "warning", "mcpServer/startupStatus/updated"):
+                try:
+                    _dbg_lg.warning("[codex-flow][run_turn] FULL_EVENT %s: %s", method, _dbg_json.dumps(note.get("params") or {}, ensure_ascii=False)[:600])
+                except Exception:
+                    pass
+            if method in ("item/started", "item/completed"):
+                try:
+                    _item = (note.get("params") or {}).get("item") or {}
+                    _dbg_lg.warning("[codex-flow][run_turn] ITEM %s type=%r keys=%s", method, _item.get("type"), sorted(_item.keys())[:8])
+                except Exception:
+                    pass
+            if method == "item/agentMessage/delta" and not _first_delta_at:
+                _first_delta_at.append(_dbg_time.monotonic())
+                _dbg_lg.warning("[codex-perf][run_turn] FIRST agentMessage/delta after turn_start dt=%.3fs", _first_delta_at[0] - _t_turn_begin)
             mark_notification(note)
             if self._on_event is not None:
                 try:
                     self._on_event(note)
                 except Exception:  # pragma: no cover - display callback
                     logger.debug("on_event callback raised", exc_info=True)
+                if method == "item/agentMessage/delta" and len(_first_delta_at) == 1:
+                    _first_delta_at.append(_dbg_time.monotonic())  # sentinel
+                    _dbg_lg.warning("[codex-flow][on_event] FIRST delta forwarded to hermes")
 
             _apply_token_usage_notification(result, note)
 
@@ -598,8 +679,19 @@ class CodexAppServerSession:
                     last_tool_completion_at = None
             if projection.final_text is not None:
                 # Codex can emit multiple agentMessage items in one turn
-                # (e.g. partial then final). Take the last one as canonical.
-                result.final_text = projection.final_text
+                # (message → shell → message → …). Concatenate all agentMessage
+                # texts (blank line between segments — matches what codex
+                # actually streams between items) so the returned final_text
+                # equals the delta stream the frontend accumulated. That
+                # keeps hermes's final-response-reconciliation invariant
+                # (raw_text prefix/equals stream_text) and stops it from
+                # re-emitting the tail as a duplicate delta on message.complete.
+                if result.final_text:
+                    result.final_text = (
+                        result.final_text + "\n\n" + projection.final_text
+                    )
+                else:
+                    result.final_text = projection.final_text
                 # Some codex builds tear a turn down by emitting a
                 # `<turn_aborted>` marker in the agent message text and
                 # never sending turn/completed. Treat the marker itself

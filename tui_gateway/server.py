@@ -806,6 +806,15 @@ def _emit(event: str, sid: str, payload: dict | None = None):
         session_transport = session.get("transport")
         context_transport = current_transport()
         direct_transport = session_transport or context_transport or _stdio_transport
+        if event in ("message.delta", "message.complete", "message.start"):
+            import logging as _dbg_lm
+            _dbg_lm.getLogger().warning(
+                "[codex-flow][_emit] event=%s sid=%s stable=%r run_id=%r turn_id=%r will_record=%s payload_keys=%s text_len=%s",
+                event, sid, stable_session_id, run_id, turn_id,
+                bool(stable_session_id and (run_id or event == "session.info")),
+                list((payload or {}).keys())[:12],
+                len(str((payload or {}).get("text") or (payload or {}).get("delta") or "")),
+            )
         if stable_session_id and (run_id or event == "session.info"):
             event_db = _db_for_stable_session(stable_session_id)
             frame = {
