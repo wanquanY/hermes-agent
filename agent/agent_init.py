@@ -690,6 +690,18 @@ def init_agent(
         if not agent.quiet_mode:
             _gr_label = " + Guardrails" if agent._bedrock_guardrail_config else ""
             print(f"🤖 AI Agent initialized with model: {agent.model} (AWS Bedrock, {agent._bedrock_region}{_gr_label})")
+    elif agent.api_mode == "codex_app_server":
+        # codex_app_server hands the entire turn to a codex CLI subprocess.
+        # That subprocess authenticates itself via CODEX_HOME/auth.json (BYO)
+        # or a `[model_providers.*]` entry in CODEX_HOME/config.toml (platform).
+        # Hermes never speaks the upstream API here — no OpenAI client needed,
+        # no provider auth check. Building one via resolve_provider_client()
+        # would fail on "openai-codex OAuth token not found" even though the
+        # employee has a perfectly valid auth.json in its isolated CODEX_HOME.
+        agent.client = None
+        agent._client_kwargs = {}
+        if not agent.quiet_mode:
+            print(f"🤖 AI Agent initialized with model: {agent.model} (Codex app-server)")
     else:
         if api_key and base_url:
             # Explicit credentials from CLI/gateway — construct directly.
