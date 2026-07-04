@@ -87,7 +87,7 @@ def test_codex_auth_login_poll_pending(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         "hermes_cli.auth._codex_device_code_poll_once",
-        lambda device_auth_id, client_id: {"state": "pending"},
+        lambda device_auth_id, client_id, user_code=None: {"state": "pending"},
     )
 
     resp = _call(
@@ -105,7 +105,7 @@ def test_codex_auth_login_poll_success_saves_to_codex_home(monkeypatch, tmp_path
 
     monkeypatch.setattr(
         "hermes_cli.auth._codex_device_code_poll_once",
-        lambda device_auth_id, client_id: {
+        lambda device_auth_id, client_id, user_code=None: {
             "state": "logged_in",
             "tokens": {
                 "access_token": access_token,
@@ -182,7 +182,7 @@ def test_codex_auth_poll_surfaces_auth_error(monkeypatch, tmp_path):
 
     codex_home = tmp_path / "codex"
 
-    def _boom(device_auth_id, client_id):
+    def _boom(device_auth_id, client_id, user_code=None):
         raise AuthError("expired", provider="openai-codex", code="expired_token")
 
     monkeypatch.setattr("hermes_cli.auth._codex_device_code_poll_once", _boom)

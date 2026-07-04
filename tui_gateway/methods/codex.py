@@ -135,6 +135,7 @@ def _(rid, params: dict) -> dict:
     device_auth_id = str((params or {}).get("device_auth_id") or (params or {}).get("deviceAuthId") or "").strip()
     if not device_auth_id:
         return _err(rid, 4002, "device_auth_id is required")
+    user_code = str((params or {}).get("user_code") or (params or {}).get("userCode") or "").strip()
     try:
         from hermes_cli.auth import (
             CODEX_OAUTH_CLIENT_ID,
@@ -142,7 +143,7 @@ def _(rid, params: dict) -> dict:
             _save_codex_tokens,
         )
 
-        poll = _codex_device_code_poll_once(device_auth_id, CODEX_OAUTH_CLIENT_ID)
+        poll = _codex_device_code_poll_once(device_auth_id, CODEX_OAUTH_CLIENT_ID, user_code=user_code)
         if poll.get("state") == "pending":
             return _ok(rid, {"state": "pending"})
         _save_codex_tokens(

@@ -6853,8 +6853,15 @@ def _codex_device_code_poll_once(
     device_auth_id: str,
     client_id: str = CODEX_OAUTH_CLIENT_ID,
     timeout: float = 15.0,
+    user_code: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Poll Codex device auth once and exchange tokens if approved."""
+    """Poll Codex device auth once and exchange tokens if approved.
+
+    OpenAI's device-auth token endpoint requires `user_code` in the request
+    body (in addition to device_auth_id + client_id). Callers that don't
+    thread it through will hit a 400 "user_code Field required" on every
+    poll before the user has authorized in the browser.
+    """
     issuer = "https://auth.openai.com"
     device_auth_id = str(device_auth_id or "").strip()
     if not device_auth_id:
@@ -6864,11 +6871,16 @@ def _codex_device_code_poll_once(
             code="device_code_missing_device_auth_id",
         )
 
+    body: Dict[str, Any] = {"device_auth_id": device_auth_id, "client_id": client_id}
+    user_code_clean = str(user_code or "").strip()
+    if user_code_clean:
+        body["user_code"] = user_code_clean
+
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
             poll_resp = client.post(
                 f"{issuer}/api/accounts/deviceauth/token",
-                json={"device_auth_id": device_auth_id, "client_id": client_id},
+                json=body,
                 headers={"Content-Type": "application/json"},
             )
     except Exception as exc:
@@ -6998,7 +7010,9 @@ def _codex_device_code_login() -> Dict[str, Any]:
     try:
         while _time.monotonic() - start < max_wait:
             _time.sleep(poll_interval)
-            poll_result = _codex_device_code_poll_once(device_auth_id, client_id)
+            poll_result = _codex_device_code_poll_once(
+                device_auth_id, client_id, user_code=user_code
+            )
             if poll_result.get("state") == "pending":
                 continue
             return poll_result
