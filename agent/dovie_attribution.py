@@ -4,20 +4,24 @@ The Dovie cloud query context is turn-local state carried in
 ``HERMES_DOVIE_PRODUCT_CONTEXT``.  Do not snapshot it into SDK
 ``default_headers``: provider clients are cached across turns.
 
-Context propagation has two process-local owners. The main gateway
-process sets this ContextVar in ``tui_gateway.methods.prompt`` through
-``_set_session_context`` for in-process consumers. Worker subprocesses
-receive the same value on the ``run.start`` frame and set it in
-``tui_gateway.run_worker`` before handling the turn. Review both paths
-before changing either side; ContextVars do not cross process boundaries.
-Worker-side agent runner threads propagate a ``copy_context()`` snapshot
-at ``AgentRunBackend.start``; do not rely on ``threading.Thread`` to
-inherit ContextVars when changing worker/agent_run_backend thread
-boundaries. Agent-internal ``chat.completions.create`` calls spawn
-another ``threading.Thread`` for the real HTTP request in
-``chat_completion_helpers``; that layer also needs ``copy_context()``
-propagation, so check this constraint before changing those thread
-spawn points.
+This side channel intentionally uses ``os.environ`` instead of
+``ContextVar``.  Worker subprocesses receive the context on the
+``run.start`` frame, set the process environment before handling the
+turn, and restore it when the turn exits.  All threads in that worker
+process therefore see the same value, including nested raw
+``threading.Thread`` calls inside agent/runtime code, without requiring
+per-boundary propagation.
+
+The correctness assumption is that a single worker subprocess handles
+only one turn at a time.  Hermes enforces that in ``AgentRunBackend`` by
+refusing a second active run in the same worker.  If that invariant ever
+changes, this process-level side channel must be re-evaluated: use
+per-turn subprocess isolation or a stronger per-turn isolation mechanism
+before allowing concurrent turns in one worker process.
+
+Changing Hermes' internal threading model does not require attribution
+propagation changes as long as the single-worker/single-turn invariant
+remains intact.
 """
 
 from __future__ import annotations

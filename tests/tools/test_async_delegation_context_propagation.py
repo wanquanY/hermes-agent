@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -35,13 +36,15 @@ def _drain_one(timeout: float = 5.0) -> dict[str, Any] | None:
     return None
 
 
-def test_async_delegation_worker_preserves_dispatch_dovie_context() -> None:
+def test_async_delegation_worker_reads_process_dovie_context_while_turn_active() -> None:
     seen: dict[str, str] = {}
+    read = threading.Event()
     tokens = set_session_vars(dovie_product_context="sentinel-async-single")
 
     def runner() -> dict[str, Any]:
         seen["context"] = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
         assert seen["context"] == "sentinel-async-single"
+        read.set()
         return {
             "status": "completed",
             "summary": "ok",
@@ -61,23 +64,25 @@ def test_async_delegation_worker_preserves_dispatch_dovie_context() -> None:
             runner=runner,
             max_async_children=1,
         )
+        assert result["status"] == "dispatched"
+        assert read.wait(timeout=2.0)
+        event = _drain_one()
+        assert event is not None
+        assert event["summary"] == "ok"
+        assert seen == {"context": "sentinel-async-single"}
     finally:
         clear_session_vars(tokens)
 
-    assert result["status"] == "dispatched"
-    event = _drain_one()
-    assert event is not None
-    assert event["summary"] == "ok"
-    assert seen == {"context": "sentinel-async-single"}
 
-
-def test_async_delegation_batch_worker_preserves_dispatch_dovie_context() -> None:
+def test_async_delegation_batch_worker_reads_process_dovie_context_while_turn_active() -> None:
     seen: dict[str, str] = {}
+    read = threading.Event()
     tokens = set_session_vars(dovie_product_context="sentinel-async-batch")
 
     def runner() -> dict[str, Any]:
         seen["context"] = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
         assert seen["context"] == "sentinel-async-batch"
+        read.set()
         return {
             "results": [
                 {
@@ -103,12 +108,12 @@ def test_async_delegation_batch_worker_preserves_dispatch_dovie_context() -> Non
             runner=runner,
             max_async_children=1,
         )
+        assert result["status"] == "dispatched"
+        assert read.wait(timeout=2.0)
+        event = _drain_one()
+        assert event is not None
+        assert event["is_batch"] is True
+        assert event["results"][0]["summary"] == "ok"
+        assert seen == {"context": "sentinel-async-batch"}
     finally:
         clear_session_vars(tokens)
-
-    assert result["status"] == "dispatched"
-    event = _drain_one()
-    assert event is not None
-    assert event["is_batch"] is True
-    assert event["results"][0]["summary"] == "ok"
-    assert seen == {"context": "sentinel-async-batch"}

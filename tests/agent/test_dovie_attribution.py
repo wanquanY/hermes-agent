@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 
 import httpx
@@ -167,12 +166,11 @@ def test_request_hook_does_not_overwrite_existing_header():
 
 
 @pytest.mark.asyncio
-async def test_request_hook_uses_task_local_context_for_concurrent_tasks():
-    seen: dict[str, str] = {}
+async def test_request_hook_reads_process_context_and_clear_removes_header():
+    seen: list[tuple[str, str]] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        await asyncio.sleep(0)
-        seen[request.url.path] = request.headers["X-Dovie-Query-Id"]
+        seen.append((request.url.path, request.headers.get("X-Dovie-Query-Id", "")))
         return httpx.Response(200, json={"ok": True})
 
     client = httpx.AsyncClient(
@@ -182,23 +180,18 @@ async def test_request_hook_uses_task_local_context_for_concurrent_tasks():
     attach_dovie_attribution_request_hook(client)
 
     async with client:
-        async def call(path: str, query_id: str) -> None:
-            tokens = _set_dovie_context(_context(query_id))
-            try:
-                await asyncio.sleep(0)
-                await client.get(path)
-            finally:
-                clear_session_vars(tokens)
+        tokens = _set_dovie_context(_context("query-a"))
+        try:
+            await client.get("/turn-a")
+        finally:
+            clear_session_vars(tokens)
 
-        await asyncio.gather(
-            call("/turn-a", "query-a"),
-            call("/turn-b", "query-b"),
-        )
+        await client.get("/after-clear")
 
-    assert seen == {
-        "/turn-a": "query-a",
-        "/turn-b": "query-b",
-    }
+    assert seen == [
+        ("/turn-a", "query-a"),
+        ("/after-clear", ""),
+    ]
 
 
 @pytest.mark.asyncio

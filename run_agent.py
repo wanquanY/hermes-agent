@@ -34,7 +34,6 @@ except ModuleNotFoundError:
 import asyncio
 import base64
 import concurrent.futures
-import contextvars
 import copy
 import hashlib
 import json
@@ -1216,9 +1215,8 @@ class AIAgent:
             review_memory=review_memory,
             review_skills=review_skills,
         )
-        ctx = contextvars.copy_context()
         t = threading.Thread(
-            target=lambda ctx=ctx: ctx.run(target),
+            target=target,
             daemon=True,
             name="bg-review",
         )

@@ -21,7 +21,6 @@ Strict invariants:
 
 from __future__ import annotations
 
-import contextvars
 import json
 import logging
 import os
@@ -1545,9 +1544,8 @@ def run_curator_review(
     if synchronous:
         _llm_pass()
     else:
-        ctx = contextvars.copy_context()
         t = threading.Thread(
-            target=lambda ctx=ctx: ctx.run(_llm_pass),
+            target=_llm_pass,
             daemon=True,
             name="curator-review",
         )

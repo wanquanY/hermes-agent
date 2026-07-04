@@ -23,7 +23,6 @@ Tests pass a stub so unit tests don't need to spin up the LLM stack.
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import json
 import logging
 import threading
@@ -175,16 +174,8 @@ class AgentRunBackend(WorkerRunBackend):
                 except BaseException as exc:  # noqa: BLE001 — capture & surface
                     result["exc"] = exc
 
-            # Raw ``threading.Thread`` does not inherit ContextVars. Capture
-            # the worker handler's turn context after it has called
-            # ``set_session_vars`` and run the agent inside that snapshot.
-            runner_context = contextvars.copy_context()
-
-            def _wrap() -> None:
-                runner_context.run(_wrap_inner)
-
             thread = threading.Thread(
-                target=_wrap,
+                target=_wrap_inner,
                 name=f"agent-run[{frame.run_id}]",
                 daemon=True,
             )

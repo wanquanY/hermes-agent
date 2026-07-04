@@ -1,9 +1,10 @@
 """
 Session-scoped context variables for the Hermes gateway.
 
-Replaces the previous ``os.environ``-based session state
-(``HERMES_SESSION_PLATFORM``, ``HERMES_SESSION_CHAT_ID``, etc.) with
-Python's ``contextvars.ContextVar``.
+Most session state (``HERMES_SESSION_PLATFORM``,
+``HERMES_SESSION_CHAT_ID``, etc.) is stored in Python
+``contextvars.ContextVar`` values instead of process-global
+``os.environ``.
 
 **Why this matters**
 
@@ -21,6 +22,15 @@ to the wrong thread.
 task (and any ``run_in_executor`` thread it spawns) gets its own copy,
 so concurrent messages never interfere.
 
+``HERMES_DOVIE_PRODUCT_CONTEXT`` is the deliberate exception.  Dovie
+attribution is turn-local inside a worker subprocess, and that subprocess
+is guarded to run only one turn at a time.  The agent code frequently
+creates raw ``threading.Thread`` instances; those threads do not inherit
+ContextVars.  Dovie therefore uses ``os.environ`` as a process-level
+side channel so every nested thread in the same worker can read the same
+turn context without additional propagation glue.  ``set_session_vars``
+snapshots and restores the previous environment value on clear.
+
 **Backward compatibility**
 
 The public helper ``get_session_env(name, default="")`` mirrors the old
@@ -36,7 +46,9 @@ needs to replace the import + call site:
     platform = get_session_env("HERMES_SESSION_PLATFORM", "")
 """
 
+import os
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 # Sentinel to distinguish "never set in this context" from "explicitly set to empty".
@@ -56,7 +68,6 @@ _SESSION_USER_ID: ContextVar = ContextVar("HERMES_SESSION_USER_ID", default=_UNS
 _SESSION_USER_NAME: ContextVar = ContextVar("HERMES_SESSION_USER_NAME", default=_UNSET)
 _SESSION_KEY: ContextVar = ContextVar("HERMES_SESSION_KEY", default=_UNSET)
 _SESSION_ID: ContextVar = ContextVar("HERMES_SESSION_ID", default=_UNSET)
-_DOVIE_PRODUCT_CONTEXT: ContextVar = ContextVar("HERMES_DOVIE_PRODUCT_CONTEXT", default=_UNSET)
 _DOVIE_BROWSER_SESSION_ID: ContextVar = ContextVar("DOVIE_BROWSER_SESSION_ID", default=_UNSET)
 _TERMINAL_CWD: ContextVar = ContextVar("TERMINAL_CWD", default=_UNSET)
 # ID of the message that triggered the current turn. Used as a reply anchor
@@ -91,6 +102,15 @@ _CRON_AUTO_DELIVER_PLATFORM: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_P
 _CRON_AUTO_DELIVER_CHAT_ID: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_CHAT_ID", default=_UNSET)
 _CRON_AUTO_DELIVER_THREAD_ID: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_THREAD_ID", default=_UNSET)
 
+_DOVIE_PRODUCT_CONTEXT_ENV = "HERMES_DOVIE_PRODUCT_CONTEXT"
+
+
+@dataclass(frozen=True)
+class _DovieEnvSnapshot:
+    existed: bool
+    value: str
+
+
 _VAR_MAP = {
     "HERMES_SESSION_PLATFORM": _SESSION_PLATFORM,
     "HERMES_SESSION_CHAT_ID": _SESSION_CHAT_ID,
@@ -100,7 +120,6 @@ _VAR_MAP = {
     "HERMES_SESSION_USER_NAME": _SESSION_USER_NAME,
     "HERMES_SESSION_KEY": _SESSION_KEY,
     "HERMES_SESSION_ID": _SESSION_ID,
-    "HERMES_DOVIE_PRODUCT_CONTEXT": _DOVIE_PRODUCT_CONTEXT,
     "DOVIE_BROWSER_SESSION_ID": _DOVIE_BROWSER_SESSION_ID,
     "TERMINAL_CWD": _TERMINAL_CWD,
     "HERMES_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
@@ -138,6 +157,11 @@ def set_session_vars(
     background completion back to the agent after the turn ends. Stateless
     request/response adapters (the API server) pass ``False``.
     """
+    dovie_snapshot = _DovieEnvSnapshot(
+        existed=_DOVIE_PRODUCT_CONTEXT_ENV in os.environ,
+        value=os.environ.get(_DOVIE_PRODUCT_CONTEXT_ENV, ""),
+    )
+    os.environ[_DOVIE_PRODUCT_CONTEXT_ENV] = dovie_product_context or ""
     tokens = [
         _SESSION_PLATFORM.set(platform),
         _SESSION_CHAT_ID.set(chat_id),
@@ -146,12 +170,12 @@ def set_session_vars(
         _SESSION_USER_ID.set(user_id),
         _SESSION_USER_NAME.set(user_name),
         _SESSION_KEY.set(session_key),
-        _DOVIE_PRODUCT_CONTEXT.set(dovie_product_context),
         _DOVIE_BROWSER_SESSION_ID.set(dovie_browser_session_id),
         _TERMINAL_CWD.set(terminal_cwd),
         _SESSION_ID.set(session_id),
         _SESSION_MESSAGE_ID.set(message_id),
         _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
+        dovie_snapshot,
     ]
     return tokens
 
@@ -175,13 +199,25 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_USER_ID,
         _SESSION_USER_NAME,
         _SESSION_KEY,
-        _DOVIE_PRODUCT_CONTEXT,
         _DOVIE_BROWSER_SESSION_ID,
         _TERMINAL_CWD,
         _SESSION_ID,
         _SESSION_MESSAGE_ID,
     ):
         var.set("")
+    dovie_snapshot = next(
+        (
+            token
+            for token in tokens or []
+            if isinstance(token, _DovieEnvSnapshot)
+        ),
+        None,
+    )
+    if dovie_snapshot is not None:
+        if dovie_snapshot.existed:
+            os.environ[_DOVIE_PRODUCT_CONTEXT_ENV] = dovie_snapshot.value
+        else:
+            os.environ.pop(_DOVIE_PRODUCT_CONTEXT_ENV, None)
     # Reset async-delivery capability to the "never set" sentinel rather than a
     # falsy value: a cleared context should fall back to the default-supported
     # behavior (CLI / unaware paths), not be mistaken for an opted-out
@@ -210,7 +246,8 @@ def get_session_env(name: str, default: str = "") -> str:
        don't use ``set_session_vars`` at all).
     3. *default*
     """
-    import os
+    if name == _DOVIE_PRODUCT_CONTEXT_ENV:
+        return os.environ.get(name, default)
 
     var = _VAR_MAP.get(name)
     if var is not None:

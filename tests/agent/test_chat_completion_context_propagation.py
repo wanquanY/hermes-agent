@@ -111,7 +111,7 @@ def _stream_chunk(content: str, *, finish_reason: str | None = None) -> SimpleNa
     return SimpleNamespace(choices=[choice], model="fake-model", usage=None)
 
 
-def test_non_stream_chat_completion_thread_preserves_dovie_context() -> None:
+def test_non_stream_chat_completion_thread_reads_process_dovie_context() -> None:
     seen: dict[str, str] = {}
 
     def create(**_kwargs: Any) -> SimpleNamespace:
@@ -130,7 +130,7 @@ def test_non_stream_chat_completion_thread_preserves_dovie_context() -> None:
     assert seen == {"context": "sentinel-non-stream"}
 
 
-def test_stream_chat_completion_thread_preserves_dovie_context() -> None:
+def test_stream_chat_completion_thread_reads_process_dovie_context() -> None:
     seen: dict[str, str] = {}
 
     def create(**_kwargs: Any) -> list[SimpleNamespace]:
@@ -152,45 +152,29 @@ def test_stream_chat_completion_thread_preserves_dovie_context() -> None:
     assert seen == {"context": "sentinel-stream"}
 
 
-def test_concurrent_chat_completion_threads_keep_dovie_context_isolated() -> None:
-    barrier = threading.Barrier(2)
+def test_nested_chat_completion_thread_reads_process_dovie_context() -> None:
     seen: dict[str, str] = {}
-    seen_lock = threading.Lock()
-    results: dict[str, Any] = {}
 
-    def run_call(label: str, sentinel: str) -> None:
-        def create(**_kwargs: Any) -> SimpleNamespace:
-            barrier.wait(timeout=2.0)
-            context = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
-            assert context == sentinel
-            with seen_lock:
-                seen[label] = context
-            return SimpleNamespace(id=f"response-{label}")
+    def nested_read() -> None:
+        def read() -> None:
+            seen["context"] = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
 
-        agent = _FakeAgent(create)
-        tokens = _set_dovie_context(sentinel)
-        try:
-            results[label] = interruptible_api_call(
-                agent,
-                {"model": "fake-model", "messages": []},
-            )
-        except BaseException as exc:  # noqa: BLE001 - surfaced by assertions below.
-            results[label] = exc
-        finally:
-            clear_session_vars(tokens)
+        thread = threading.Thread(target=read, daemon=True)
+        thread.start()
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
 
-    thread_a = threading.Thread(target=run_call, args=("a", "sentinel-a"))
-    thread_b = threading.Thread(target=run_call, args=("b", "sentinel-b"))
-    thread_a.start()
-    thread_b.start()
-    thread_a.join(timeout=5.0)
-    thread_b.join(timeout=5.0)
+    def create(**_kwargs: Any) -> SimpleNamespace:
+        nested_read()
+        assert seen["context"] == "sentinel-nested"
+        return SimpleNamespace(id="response-nested")
 
-    assert not thread_a.is_alive()
-    assert not thread_b.is_alive()
-    assert not any(isinstance(result, BaseException) for result in results.values())
-    assert {key: value.id for key, value in results.items()} == {
-        "a": "response-a",
-        "b": "response-b",
-    }
-    assert seen == {"a": "sentinel-a", "b": "sentinel-b"}
+    agent = _FakeAgent(create)
+    tokens = _set_dovie_context("sentinel-nested")
+    try:
+        response = interruptible_api_call(agent, {"model": "fake-model", "messages": []})
+    finally:
+        clear_session_vars(tokens)
+
+    assert response.id == "response-nested"
+    assert seen == {"context": "sentinel-nested"}

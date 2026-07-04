@@ -36,7 +36,6 @@ logic stays in one place.
 
 from __future__ import annotations
 
-import contextvars
 import logging
 import threading
 import time
@@ -248,8 +247,7 @@ def dispatch_async_delegation(
             _finalize(delegation_id, result, status)
 
     try:
-        worker_context = contextvars.copy_context()
-        executor.submit(worker_context.run, _worker)
+        executor.submit(_worker)
     except Exception as exc:  # pragma: no cover — pool submit failure is rare
         with _records_lock:
             _records.pop(delegation_id, None)
@@ -434,8 +432,7 @@ def dispatch_async_delegation_batch(
             _finalize_batch(delegation_id, combined, status)
 
     try:
-        worker_context = contextvars.copy_context()
-        executor.submit(worker_context.run, _worker)
+        executor.submit(_worker)
     except Exception as exc:  # pragma: no cover
         with _records_lock:
             _records.pop(delegation_id, None)
