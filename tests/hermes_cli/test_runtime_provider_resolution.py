@@ -191,15 +191,23 @@ def test_resolve_runtime_provider_forced_codex_app_server_skips_codex_auth(monke
     assert resolved["source"] == "runtime_executor"
 
 
-def test_resolve_runtime_provider_forced_codex_app_server_rejects_non_openai(monkeypatch):
-    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+def test_resolve_runtime_provider_forced_codex_app_server_normalizes_unrecognized_provider(monkeypatch):
+    """codex_app_server runs a codex subprocess that authenticates itself via
+    CODEX_HOME/config.toml + auth.json — hermes doesn't touch provider auth.
+    So an unrecognized provider (e.g. Dovie's platform-side slug that fell
+    through to 'custom') should be normalized, not rejected.
+    """
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "custom")
 
-    with pytest.raises(ValueError, match="requires provider 'openai'"):
-        rp.resolve_runtime_provider(
-            requested="anthropic",
-            runtime_executor="codex_app_server",
-            codex_home="/tmp/dovie/codex-home",
-        )
+    resolved = rp.resolve_runtime_provider(
+        requested="newapi-codex-poc",
+        runtime_executor="codex_app_server",
+        codex_home="/tmp/dovie/codex-home",
+    )
+
+    assert resolved["provider"] == "openai-codex"
+    assert resolved["api_mode"] == "codex_app_server"
+    assert resolved["codex_home"] == "/tmp/dovie/codex-home"
 
 
 def test_resolve_runtime_provider_qwen_oauth(monkeypatch):

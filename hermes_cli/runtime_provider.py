@@ -305,11 +305,17 @@ def _codex_app_server_runtime(
     pool: Optional[CredentialPool] = None,
     source: str = "runtime_executor",
 ) -> Dict[str, Any]:
+    # codex_app_server spawns a codex CLI subprocess that authenticates itself
+    # via CODEX_HOME/auth.json (BYO ChatGPT OAuth) or a `[model_providers.*]`
+    # entry in CODEX_HOME/config.toml (platform-token BYO via env_key). Hermes
+    # never touches the provider auth here — the requested_provider we resolved
+    # is only informational. When the caller resolved a provider hermes doesn't
+    # recognize (e.g. Dovie's platform-side provider slug like
+    # `newapi-codex-poc` fell through to `custom`), we normalize back to
+    # `openai-codex` so downstream code that assumes an openai-family provider
+    # (usage accounting, model catalog) sees something coherent.
     if provider not in {"openai", "openai-codex"}:
-        raise ValueError(
-            "runtime_executor=codex_app_server requires provider 'openai' "
-            f"or 'openai-codex', got {provider!r}."
-        )
+        provider = "openai-codex"
     return {
         "provider": provider,
         "api_mode": "codex_app_server",
