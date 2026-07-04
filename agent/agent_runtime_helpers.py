@@ -1287,6 +1287,15 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
         shared,
         agent._client_log_context(),
     )
+    # 归因头必须挂在每一个 OpenAI/httpx client 上,而不仅仅是 shared 的
+    # agent.client(agent_init.py 那处)。chat.completions.create 走的是
+    # per-request client(_create_request_openai_client → 此工厂 shared=False),
+    # 缺 hook 就一个 X-Dovie-* 头都发不出去,归因链路整条断掉。
+    try:
+        from agent.dovie_attribution import attach_dovie_attribution_request_hook
+        attach_dovie_attribution_request_hook(client)
+    except Exception:
+        pass
     return client
 
 
