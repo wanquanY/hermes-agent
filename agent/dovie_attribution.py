@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable, Mapping
 
-_HEADER_VALUE_LIMIT = 512
+_HEADER_VALUE_LIMIT = 2048  # HTTP header 允许约 8KB;JWT token 加上强 SECRET_KEY 后可达 500+ 字符,原 512 会截掉 signature 尾部导致 backend 校验失败
 
 _CLOUD_QUERY_HEADER_KEYS = {
     "query_id": "X-Dovie-Query-Id",

@@ -136,7 +136,8 @@ def test_build_headers_empty_or_bad_json_returns_empty_dict():
 
 
 def test_build_headers_sanitizes_newlines_and_caps_values():
-    payload = _context("query-1\r\nX-Injected: bad" + ("x" * 600))
+    # 上限 = 2048;600 个 x 触发不了截断,拉到 2500 以确保超过上限
+    payload = _context("query-1\r\nX-Injected: bad" + ("x" * 2500))
     tokens = _set_dovie_context(payload)
     try:
         header_value = build_dovie_attribution_headers()["X-Dovie-Query-Id"]
@@ -145,7 +146,7 @@ def test_build_headers_sanitizes_newlines_and_caps_values():
 
     assert "\r" not in header_value
     assert "\n" not in header_value
-    assert len(header_value) == 512
+    assert len(header_value) == 2048
     assert header_value.startswith("query-1  X-Injected: bad")
 
 
