@@ -484,6 +484,14 @@ def _make_agent(
             model, requested_provider = _resolve_startup_runtime()
     if _runtime_executor:
         requested_provider = _runtime_provider_override or "openai-codex"
+    # Guard: refuse to spawn a forced Codex app-server without an isolated
+    # employee CODEX_HOME. Silently falling back to the user's ~/.codex would
+    # blend platform-employee state with the user's personal Codex account.
+    from hermes_cli.runtime_provider import _normalize_runtime_executor as _norm_runtime_executor
+    if _norm_runtime_executor(_runtime_executor) == "codex_app_server" and not _codex_home:
+        raise ValueError(
+            "codex_app_server runtime requires codex_home; refusing to fall back to user home"
+        )
     runtime_kwargs = {
         "requested": requested_provider,
         "target_model": model or None,

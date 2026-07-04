@@ -575,6 +575,40 @@ def test_make_agent_codex_runtime_profile_defaults_provider():
     assert mock_agent.call_args.kwargs["provider"] == "openai-codex"
 
 
+def test_make_agent_rejects_forced_codex_runtime_without_codex_home():
+    """Guard: refusing to fall back to ~/.codex is a load-bearing invariant.
+
+    If the desktop drives runtime_executor=codex_app_server but forgets to
+    pass codex_home, the codex CLI would happily spawn against the user's
+    personal ~/.codex — bleeding platform employee state into the user's
+    ChatGPT account. _make_agent must refuse loudly.
+    """
+    import pytest
+
+    fake_cfg = {
+        "agent": {"system_prompt": ""},
+        "model": {"default": "gpt-5.5", "provider": "openai"},
+    }
+    profile_context = {"runtime_executor": "codex_app_server"}  # no codex_home
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider") as mock_resolve,
+        patch("run_agent.AIAgent"),
+    ):
+        from tui_gateway.server import _make_agent
+
+        with pytest.raises(ValueError, match="codex_home"):
+            _make_agent("sid-forced-no-home", "key-forced-no-home", profile_context=profile_context)
+
+    mock_resolve.assert_not_called()
+
+
 def test_apply_model_switch_does_not_leak_process_env():
     """Core fix for cross-session contamination: an in-session /model switch
     must mutate only the target session (record a per-session override + switch
