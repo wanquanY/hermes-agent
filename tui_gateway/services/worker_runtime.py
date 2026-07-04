@@ -39,7 +39,11 @@ import uuid
 from typing import Any
 
 from agent.dovie_diagnostics import emit_dovie_runtime_diagnostic
-from tui_gateway.run_worker import RunCancelFrame, RunStartFrame
+from tui_gateway.run_worker import (
+    RunCancelFrame,
+    RunStartFrame,
+    dovie_product_context_from_params,
+)
 from tui_gateway.services.runtime_proxy import (
     RuntimeScope,
     runtime_scope_from_request,
@@ -643,6 +647,9 @@ async def _dispatch_prompt_submit(
             "cwd", "workspace",
         }
     }
+    dovie_product_context = dovie_product_context_from_params(params)
+    if dovie_product_context:
+        frame_params["dovie_product_context"] = dovie_product_context
     if workspace_context:
         frame_params["cwd"] = workspace_context["cwd"]
         frame_params["workspace"] = workspace_context["workspace"]
@@ -673,6 +680,7 @@ async def _dispatch_prompt_submit(
             # large to send over the JSON-line pipe. The worker re-
             # resolves anything it needs from its own session state.
             params=frame_params,
+            dovie_product_context=dovie_product_context,
         ),
     )
     await pool.release(stored_session_id, scope_key=lease.scope_key)

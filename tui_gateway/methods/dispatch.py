@@ -7,7 +7,7 @@ import uuid
 from typing import Any
 
 from tui_gateway.methods._shared import bind_server_globals
-from tui_gateway.run_worker import RunStartFrame
+from tui_gateway.run_worker import RunStartFrame, dovie_product_context_from_params
 
 _server = bind_server_globals(globals())
 
@@ -320,6 +320,9 @@ async def dispatch_agent_async(
         "files": files,
         "source": "agent_dispatch",
     }
+    dovie_product_context = dovie_product_context_from_params(params)
+    if dovie_product_context:
+        frame_params["dovie_product_context"] = dovie_product_context
     send_error = ""
     try:
         ok = await supervisor.send(
@@ -331,6 +334,7 @@ async def dispatch_agent_async(
                 stored_session_id=conversation_id,
                 prompt=prompt,
                 params=frame_params,
+                dovie_product_context=dovie_product_context,
             ),
         )
     except Exception as exc:

@@ -9,7 +9,7 @@ Protocol (one JSON object per line, UTF-8, ``\\n``-terminated):
 
     inbound (main → worker)
       {"op":"run.start", "run_id", "turn_id", "stored_session_id",
-       "prompt", "params"}
+       "prompt", "params", "dovie_product_context"}
       {"op":"run.cancel", "run_id"}
       {"op":"interactive.response", "kind", "request_id", "answer"}
       {"op":"runtime.env.update", "env_updates": {"KEY": "value"}}
@@ -61,6 +61,7 @@ class RunStartFrame:
     stored_session_id: str
     prompt: str
     params: dict[str, Any] = field(default_factory=dict)
+    dovie_product_context: str = ""
 
 
 @dataclass(frozen=True)
@@ -200,6 +201,31 @@ def _optional_mapping(obj: dict, key: str) -> dict[str, Any]:
     return value
 
 
+def _normalize_dovie_product_context(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value or "").strip()
+
+
+def dovie_product_context_from_params(params: dict[str, Any]) -> str:
+    """Return the turn-local Dovie context as one JSON string.
+
+    The desktop and Team Mission paths may pass either an already-encoded
+    string or a structured dict. Strings are preserved verbatim so the
+    worker transport never double-encodes JSON.
+    """
+    if not isinstance(params, dict):
+        return ""
+    raw = params.get("dovie_product_context")
+    if raw in (None, ""):
+        raw = params.get("dovieProductContext")
+    return _normalize_dovie_product_context(raw)
+
+
+def dovie_product_context_from_frame(frame: RunStartFrame) -> str:
+    return frame.dovie_product_context or dovie_product_context_from_params(frame.params)
+
+
 def _string_mapping(obj: dict, key: str, *, op: str) -> dict[str, str]:
     value = obj.get(key)
     if not isinstance(value, dict):
@@ -240,12 +266,17 @@ def decode_incoming(line: str) -> IncomingFrame:
         raise FrameDecodeError("frame missing string field 'op'")
 
     if op == "run.start":
+        params = _optional_mapping(obj, "params")
+        dovie_product_context = _optional_str(obj, "dovie_product_context")
+        if not dovie_product_context:
+            dovie_product_context = dovie_product_context_from_params(params)
         return RunStartFrame(
             run_id=_require_str(obj, "run_id", op=op),
             turn_id=_require_str(obj, "turn_id", op=op),
             stored_session_id=_require_str(obj, "stored_session_id", op=op),
             prompt=_optional_str(obj, "prompt"),
-            params=_optional_mapping(obj, "params"),
+            params=params,
+            dovie_product_context=dovie_product_context,
         )
     if op == "run.cancel":
         return RunCancelFrame(run_id=_require_str(obj, "run_id", op=op))
@@ -291,6 +322,8 @@ def encode_incoming(frame: IncomingFrame) -> str:
             "prompt": frame.prompt,
             "params": frame.params,
         }
+        if frame.dovie_product_context:
+            body["dovie_product_context"] = frame.dovie_product_context
     elif isinstance(frame, RunCancelFrame):
         body = {"op": "run.cancel", "run_id": frame.run_id}
     elif isinstance(frame, InteractiveResponseFrame):
@@ -697,7 +730,22 @@ def _build_default_handler(
 
     async def handler(proto: WorkerProtocol, frame: IncomingFrame) -> None:
         if isinstance(frame, RunStartFrame):
+            session_tokens: list[Any] = []
+            clear_session_vars = None
             active_runs.add(frame.run_id)
+            try:
+                from gateway.session_context import (
+                    clear_session_vars as _clear_session_vars,
+                    set_session_vars,
+                )
+
+                clear_session_vars = _clear_session_vars
+                session_tokens = set_session_vars(
+                    dovie_product_context=dovie_product_context_from_frame(frame),
+                )
+            except Exception:
+                session_tokens = []
+                clear_session_vars = None
             try:
                 await backend.start(frame, proto.emit)
             except Exception as exc:
@@ -714,6 +762,11 @@ def _build_default_handler(
                     )
                 )
             finally:
+                if clear_session_vars is not None:
+                    try:
+                        clear_session_vars(session_tokens)
+                    except Exception:
+                        pass
                 active_runs.discard(frame.run_id)
         elif isinstance(frame, RunCancelFrame):
             await backend.cancel(frame.run_id)

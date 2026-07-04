@@ -3,6 +3,13 @@
 The Dovie cloud query context is turn-local state carried in
 ``HERMES_DOVIE_PRODUCT_CONTEXT``.  Do not snapshot it into SDK
 ``default_headers``: provider clients are cached across turns.
+
+Context propagation has two process-local owners. The main gateway
+process sets this ContextVar in ``tui_gateway.methods.prompt`` through
+``_set_session_context`` for in-process consumers. Worker subprocesses
+receive the same value on the ``run.start`` frame and set it in
+``tui_gateway.run_worker`` before handling the turn. Review both paths
+before changing either side; ContextVars do not cross process boundaries.
 """
 
 from __future__ import annotations
