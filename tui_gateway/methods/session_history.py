@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dovie_extension.display_transcript import sanitize_transcript_messages
+from hermes_state_tool_events import list_tool_events_as_canonical as _list_tool_events_as_canonical_fn
 from tui_gateway.methods import session as _session_methods
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.methods.session import (
@@ -21,6 +22,27 @@ def _text(value) -> str:
 
 def _get_db():
     return _session_methods._get_db()
+
+
+def _coerce_int(value, *, default: int = 0) -> int:
+    """Best-effort int coercion for cursor params; falls back to ``default``."""
+    try:
+        return int(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _max_seq(events: list) -> int:
+    """Return the highest ``seq`` among ``events`` (0 when empty)."""
+    best = 0
+    for event in events or []:
+        try:
+            seq = int((event or {}).get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        if seq > best:
+            best = seq
+    return best
 
 
 @method("session.history")
@@ -82,50 +104,163 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5000, f"messages page failed: {exc}")
     activity_id = str(params.get("activity_id") or params.get("activityId") or "").strip()
     include_run_events = bool(params.get("include_run_events", params.get("includeRunEvents", False)))
+    # PR-2 §4.2: run_events cursor.  after_seq is a forward cursor (only
+    # events with seq > after_seq); before_seq is a backward cursor for
+    # loading earlier history (only events with seq < before_seq).  The DB
+    # layer's list_run_events only supports after_seq natively, so before_seq
+    # is applied as a post-filter here.  These two are independent of the
+    # message-dimension cursor_id pagination above.
+    after_seq = _coerce_int(params.get("after_seq", params.get("afterSeq")), default=0)
+    before_seq = _coerce_int(params.get("before_seq", params.get("beforeSeq")), default=0)
+    cursor_active = after_seq > 0 or before_seq > 0
     run_events = []
+    run_events_warning = ""
     if include_run_events:
         try:
             list_run_events = getattr(db, "list_run_events", None)
             if callable(list_run_events):
                 run_events = list_run_events(
                     target,
+                    after_seq=after_seq,
                     runtime_scope_key=_requested_runtime_scope_key(params),
                     activity_id=activity_id,
                     limit=_bounded_page_limit(params.get("run_events_limit", params.get("runEventsLimit")), default=2000, maximum=5000),
                 )
+                # PR-2 §4.2: before_seq is not a DB-level filter — apply it
+                # as a Python post-filter so callers can page backwards.
+                if before_seq > 0:
+                    run_events = [e for e in run_events if int((e or {}).get("seq") or 0) < before_seq]
+                # PR-2 §4.2: when no cursor is supplied the legacy behavior
+                # returns the full event set.  Mark it deprecated so callers
+                # migrate to the cursor path.
+                if not cursor_active:
+                    run_events_warning = (
+                        "include_run_events without after_seq/before_seq returns the "
+                        "full event window and is deprecated; pass after_seq for "
+                        "cursor-based pagination."
+                    )
         except Exception as exc:
             return _err(rid, 5000, f"run event page failed: {exc}")
+    run_events_max_seq = _max_seq(run_events)
     include_tool_events = bool(params.get("include_tool_events", params.get("includeToolEvents", False)))
     tool_events = []
     if include_tool_events:
         try:
-            list_tool_events = getattr(db, "list_tool_events", None)
-            if callable(list_tool_events):
-                tool_events = list_tool_events(
+            # PR-3 §4.3: serve canonical tool-event shapes (tool.start /
+            # tool.complete with the real run_events.seq) so FE no longer
+            # reverse-derives events from the tool_events row model.  Resolve
+            # order:
+            #   1. db.list_tool_events_as_canonical — forward-compatible if a
+            #      future PR attaches the method to SessionDB.
+            #   2. module-level list_tool_events_as_canonical(db._conn, …) —
+            #      the implementation shipped in hermes_state_tool_events.
+            #   3. db.list_tool_events — legacy fallback (row model) for old
+            #      DBs / degraded environments without run_events access.
+            canonical_method = getattr(db, "list_tool_events_as_canonical", None)
+            if callable(canonical_method):
+                tool_events = canonical_method(
                     target,
-                    run_id=str(params.get("run_id") or params.get("runId") or ""),
-                    direction=str(params.get("direction") or "tail"),
+                    after_seq=after_seq,
                     limit=_bounded_page_limit(
                         params.get("tool_events_limit", params.get("toolEventsLimit")),
                         default=2000,
                         maximum=5000,
                     ),
                 )
+            elif callable(_list_tool_events_as_canonical_fn) and hasattr(db, "_conn"):
+                tool_events = _list_tool_events_as_canonical_fn(
+                    db._conn,  # noqa: SLF001 — canonical reader needs the raw connection.
+                    target,
+                    after_seq=after_seq,
+                    limit=_bounded_page_limit(
+                        params.get("tool_events_limit", params.get("toolEventsLimit")),
+                        default=2000,
+                        maximum=5000,
+                    ),
+                )
+            else:
+                list_tool_events = getattr(db, "list_tool_events", None)
+                if callable(list_tool_events):
+                    tool_events = list_tool_events(
+                        target,
+                        run_id=str(params.get("run_id") or params.get("runId") or ""),
+                        direction=str(params.get("direction") or "tail"),
+                        limit=_bounded_page_limit(
+                            params.get("tool_events_limit", params.get("toolEventsLimit")),
+                            default=2000,
+                            maximum=5000,
+                        ),
+                    )
         except Exception as exc:
             return _err(rid, 5000, f"tool event page failed: {exc}")
     raw_messages = _history_to_messages(page.get("messages") or [])
     sanitized_messages = sanitize_transcript_messages(raw_messages)
     page_info = _message_page_info(page.get("pageInfo"))
     branch_info = db.get_session_branch_info(target) if hasattr(db, "get_session_branch_info") else None
+    result = {
+        "session_id": target,
+        "messages": sanitized_messages,
+        "toolEvents": tool_events,
+        "runEvents": run_events,
+        "maxSeq": run_events_max_seq,
+        "pageInfo": page_info,
+        "branchInfo": branch_info,
+    }
+    if run_events_warning:
+        result["runEventsWarning"] = run_events_warning
+    return _ok(rid, result)
+
+
+@method("session.events")
+def _(rid, params: dict) -> dict:
+    """PR-2 §4.2: lightweight run_events cursor reader.
+
+    Returns only run_events (no messages), supporting forward pagination via
+    ``after_seq``.  ``maxSeq`` is the highest seq in the returned window and
+    serves as the next-page cursor; ``hasMore`` is true when the DB returned
+    a full page (i.e. the limit was the binding constraint).
+    """
+    target = str(params.get("session_id") or "").strip()
+    if not target:
+        return _err(rid, 4006, "session_id required")
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5000)
+    found = db.get_session(target)
+    if not found:
+        found = db.get_session_by_title(target)
+        if found:
+            target = found["id"]
+        else:
+            return _err(rid, 4007, "session not found")
+    after_seq = _coerce_int(params.get("after_seq", params.get("afterSeq")), default=0)
+    limit = _bounded_page_limit(
+        params.get("limit"),
+        default=200,
+        maximum=5000,
+    )
+    list_run_events = getattr(db, "list_run_events", None)
+    if not callable(list_run_events):
+        return _err(rid, 5000, "run_events are not available")
+    try:
+        events = list_run_events(
+            target,
+            after_seq=after_seq,
+            runtime_scope_key=_requested_runtime_scope_key(params),
+            activity_id=str(params.get("activity_id") or params.get("activityId") or "").strip(),
+            limit=limit,
+        )
+    except Exception as exc:
+        return _err(rid, 5000, f"events page failed: {exc}")
+    max_seq = _max_seq(events)
+    has_more = len(events) >= limit
     return _ok(
         rid,
         {
             "session_id": target,
-            "messages": sanitized_messages,
-            "toolEvents": tool_events,
-            "runEvents": run_events,
-            "pageInfo": page_info,
-            "branchInfo": branch_info,
+            "events": events,
+            "maxSeq": max_seq,
+            "hasMore": has_more,
         },
     )
 
