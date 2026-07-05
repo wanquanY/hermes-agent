@@ -659,6 +659,151 @@ def _event_opens_active_run(event_type: str) -> bool:
     return str(event_type or "").strip() in _RUN_OPENING_EVENT_TYPES
 
 
+# PR-1 identity contract: event families the frontend attributes to a
+# specific run lane (assistant text / reasoning / tool cards). Frames of
+# these types must never leave the main process without a run identity —
+# the FE timeline keys segments by (run_id, turn_id) and an empty run_id
+# historically caused cross-run reasoning-text absorption (triage
+# 2026-07, symptom two). Interaction requests (clarify/approval/...) are
+# keyed by request_id and handled by the PendingRegistry contract, so
+# they are intentionally NOT in this set.
+_RUN_IDENTITY_EVENT_TYPE_PREFIXES = (
+    "message.",
+    "reasoning.",
+    "thinking.",
+    "tool.",
+    "subagent.",
+    "artifact.",
+)
+_RUN_IDENTITY_EVENT_TYPES = {"error"}
+
+
+def _frame_requires_run_identity(event_type: str) -> bool:
+    normalized = str(event_type or "").strip()
+    if not normalized:
+        return False
+    if normalized in _RUN_IDENTITY_EVENT_TYPES:
+        return True
+    return normalized.startswith(_RUN_IDENTITY_EVENT_TYPE_PREFIXES)
+
+
+def _ensure_outbound_run_identity(params: dict[str, Any]) -> None:
+    """Main-side identity contract (PR-1 §4.1): run-scoped frames must not
+    leave the process with an empty ``run_id``.
+
+    Mutates ``params`` in place — callers (``publish_recorded_event``,
+    ``server._emit``) deliver that same dict to subscribers, so the
+    synthesized identity travels on the wire and into persistence.
+
+    ``synthetic_run_id`` marks frames whose run identity was invented
+    here: run/state bookkeeping (in-memory ``_run_state_by_id`` and the
+    ``runs`` table) skips them so a synthesized id can never open a
+    phantom "running" run, while the FE gets a stable orphan lane
+    instead of a runId-less frame.
+    """
+    if not isinstance(params, dict):
+        return
+    event_type = str(params.get("type") or "").strip()
+    if not _frame_requires_run_identity(event_type):
+        return
+    run_id = _event_run_id(params)
+    turn_id = _event_turn_id(params)
+    if run_id and turn_id:
+        return
+    stable = _stable_session_id(params)
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else None
+    if not run_id:
+        # Deterministic per (session, turn): every orphan frame of the same
+        # turn lands in one synthetic lane instead of fragmenting per event.
+        run_id = f"synthetic-run:{stable or 'unknown-session'}:{turn_id or 'orphan'}"
+        params["run_id"] = run_id
+        params["synthetic_run_id"] = True
+        if payload is not None:
+            payload["run_id"] = run_id
+        if not turn_id:
+            turn_id = f"synthetic-turn:{run_id}"
+            params["turn_id"] = turn_id
+            if payload is not None:
+                payload["turn_id"] = turn_id
+        logger.error(
+            "[dovie-run-control] run-event-missing-run-id synthesized identity %s",
+            _json_for_log(
+                {
+                    "event_type": event_type,
+                    "session_id": stable,
+                    "run_id": run_id,
+                    "turn_id": turn_id,
+                    "seq": params.get("seq"),
+                }
+            ),
+        )
+        return
+    # run_id present but turn_id missing: surface the contract gap without
+    # synthesizing. A synthetic turn would overwrite the real turn_id kept
+    # on the runs row (append_run_event backfills runs.turn_id via
+    # COALESCE(NULLIF(?, ''), ...)), which is worse than an empty turn the
+    # FE can still attach by run_id alone.
+    _diagnostic_warning(
+        "run-event-missing-turn-id",
+        event_type=event_type,
+        session_id=stable,
+        run_id=run_id,
+        seq=params.get("seq"),
+    )
+
+
+def _sync_canonical_frame_seq(
+    saved: Any,
+    *,
+    frame: dict[str, Any],
+    params: dict[str, Any],
+    stable: str,
+    run_id: str,
+    event_type: str = "",
+) -> None:
+    """Write the authoritative post-persist seq back into the outbound frame.
+
+    ``append_run_event`` may bump the requested seq (seq = max(requested,
+    MAX+1) per conversation) and duplicate dispositions return the canonical
+    already-persisted event. The FE event ledger is keyed by canonical
+    ``run_events.seq``, so the frame delivered to subscribers afterwards
+    must carry the persisted value — both ``frame`` (the copy retained in
+    ``_events_by_session``) and the caller's ``params`` (the dict
+    ``publish_recorded_event`` hands to transports after this returns).
+    """
+    if not isinstance(saved, dict):
+        return
+    canonical_seq = int(saved.get("seq") or 0)
+    outbound_seq = int(frame.get("seq") or 0)
+    if canonical_seq <= 0 or canonical_seq == outbound_seq:
+        return
+    frame["seq"] = canonical_seq
+    if isinstance(params, dict):
+        params["seq"] = canonical_seq
+        params_payload = params.get("payload")
+        if isinstance(params_payload, dict) and "seq" in params_payload:
+            params_payload["seq"] = canonical_seq
+    frame_payload = frame.get("payload")
+    if isinstance(frame_payload, dict) and "seq" in frame_payload:
+        frame_payload["seq"] = canonical_seq
+    with _lock:
+        if stable:
+            _last_seq_by_session[stable] = max(
+                int(_last_seq_by_session.get(stable) or 0), canonical_seq
+            )
+        state = _run_state_by_id.get(run_id) if run_id else None
+        if isinstance(state, dict):
+            state["last_seq"] = max(int(state.get("last_seq") or 0), canonical_seq)
+    _diagnostic_warning(
+        "run-event-seq-rewritten-to-canonical",
+        event_type=event_type,
+        session_id=stable,
+        run_id=run_id,
+        requested_seq=outbound_seq,
+        canonical_seq=canonical_seq,
+    )
+
+
 def _active_run_ids_for_session(stable: str, db: Any = None) -> set[str]:
     active_ids: set[str] = set()
     if method := _db_method(db, "list_runs"):
@@ -1378,8 +1523,17 @@ def record_event(
     # whatever the caller passed for persist — this is an architectural
     # invariant, not a caller-configurable knob.
     from tui_gateway.process_role import is_worker_process
-    if is_worker_process():
+    worker_process = is_worker_process()
+    if worker_process:
         persist = False
+    else:
+        # PR-1 identity contract: enforced on the caller's dict (not just
+        # our private copy) because publish_recorded_event delivers that
+        # same dict to transports after this call returns. Worker-side
+        # fanout never reaches FE subscribers, and worker frames re-enter
+        # here on the main side, so main-only enforcement covers all
+        # outbound frames without double-synthesis across processes.
+        _ensure_outbound_run_identity(params)
     frame = _apply_run_context_to_frame(dict(params), run_context)
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     stable = _stable_session_id(frame)
@@ -1407,10 +1561,29 @@ def record_event(
     )
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     terminal_event = _terminal_status(event_type, payload)
+    synthetic_run_identity = bool(frame.get("synthetic_run_id"))
+    # PR-1 transient contract: a frame that will never gain a canonical
+    # run_events.seq must say so explicitly — the FE ledger only admits
+    # canonical seqs, transient frames may only patch open segments.
+    # Worker processes skip the stamp: their frames re-enter record_event
+    # on the main side, which is the authority on whether they persist.
+    will_persist = bool(
+        persist and stable and _db_method(db, "append_run_event") is not None
+    )
+    if not worker_process and not will_persist:
+        frame["transient"] = True
+        if isinstance(params, dict):
+            params["transient"] = True
     scheduler_mission_id = ""
     persisted_run_checked = False
     persisted_terminal_reopen = False
-    if stable and run_id and terminal_event is None and _event_opens_active_run(event_type):
+    if (
+        stable
+        and run_id
+        and not synthetic_run_identity
+        and terminal_event is None
+        and _event_opens_active_run(event_type)
+    ):
         if getter := _db_method(db, "get_run"):
             persisted_run_checked = True
             try:
@@ -1435,7 +1608,7 @@ def record_event(
                 int(_last_seq_by_session.get(stable) or 0),
                 int(frame.get("seq") or 0),
             )
-        if stable and run_id:
+        if stable and run_id and not synthetic_run_identity:
             existing_state = _run_state_by_id.get(run_id)
             existing_state_stable = str((existing_state or {}).get("stored_session_id") or "").strip()
             memory_terminal_reopen = bool(
@@ -1538,6 +1711,19 @@ def record_event(
             # for this call and for the mirror's nested append_run_event.
             setattr(db, "_team_mission_projecting", True)
             saved = method(stable, frame, participant_id=participant_id)
+            # PR-1 seq write-back: persistence assigns the canonical seq
+            # BEFORE any transport sees the frame (delivery happens in
+            # publish_recorded_event after this function returns, and the
+            # poller reads from the DB). Sync it into the outbound dicts
+            # so what FE receives is byte-identical to what replay serves.
+            _sync_canonical_frame_seq(
+                saved,
+                frame=frame,
+                params=params,
+                stable=stable,
+                run_id=run_id,
+                event_type=event_type,
+            )
             if (
                 isinstance(saved, dict)
                 and saved.get("_persistence_disposition") in {
@@ -1725,6 +1911,13 @@ def record_event(
                         except Exception:
                             logger.debug("failed to append Team Mission report-ready event", exc_info=True)
         except Exception as exc:
+            # Persist failed → the frame has no canonical seq. Mark it
+            # transient so the FE ledger drops it instead of admitting a
+            # seq that replay/hydration will never serve (I10: degrade
+            # loudly, never corrupt the ledger).
+            frame["transient"] = True
+            if isinstance(params, dict):
+                params["transient"] = True
             _diagnostic_warning(
                 "run-event-persist-failed",
                 db=_db_label(db),
