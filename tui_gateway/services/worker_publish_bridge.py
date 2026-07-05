@@ -33,6 +33,7 @@ import asyncio
 import contextvars
 import logging
 import threading
+import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
@@ -66,6 +67,33 @@ _BLOCK_EVENT_KINDS = {
     "secret.request": "secret",
     "sudo.request": "sudo",
 }
+_INTERACTIVE_KINDS = frozenset(_BLOCK_EVENT_KINDS.values())
+
+# Process-active bridge. Approval notify callbacks registered via
+# ``register_gateway_notify`` outlive a single run (they live for the
+# session), so the wrappers installed around them must NOT capture the
+# bridge instance of the run they were registered under — they resolve
+# the currently-installed bridge at call time instead.
+_active_bridge_lock = threading.RLock()
+_active_bridge: "WorkerPublishBridge | None" = None
+
+
+def _current_bridge() -> "WorkerPublishBridge | None":
+    with _active_bridge_lock:
+        return _active_bridge
+
+
+def _set_active_bridge(bridge: "WorkerPublishBridge | None") -> None:
+    global _active_bridge
+    with _active_bridge_lock:
+        _active_bridge = bridge
+
+
+def _clear_active_bridge(bridge: "WorkerPublishBridge") -> None:
+    global _active_bridge
+    with _active_bridge_lock:
+        if _active_bridge is bridge:
+            _active_bridge = None
 
 
 def _block_event_interactive_kind(event_type: str) -> Optional[str]:
@@ -151,6 +179,11 @@ class WorkerPublishBridge:
         self._installed = False
         self._stored_session_id: str = ""
         self._active_context_handle: _RunContextHandle | None = None
+        # request_ids already shipped as InteractiveRequestFrame by THIS
+        # bridge. Multiple hooks can observe the same request (e.g. the
+        # wrapped notify callback fires AND the approval.request event
+        # flows through the publish hook) — the frame must go out once.
+        self._emitted_request_ids: set[str] = set()
 
     # ── public API ───────────────────────────────────────────────────
 
@@ -168,6 +201,7 @@ class WorkerPublishBridge:
             self._install_clarify_hook()
             self._install_approval_hooks()
             self._installed = True
+            _set_active_bridge(self)
 
     def uninstall(self) -> None:
         with self._lock:
@@ -187,6 +221,7 @@ class WorkerPublishBridge:
             _pop_active_run_context(self._active_context_handle)
             self._active_context_handle = None
             self._installed = False
+            _clear_active_bridge(self)
 
     @property
     def installed(self) -> bool:
@@ -210,6 +245,85 @@ class WorkerPublishBridge:
             pass
         except Exception:
             _log.exception("[worker-publish-bridge] emit_threadsafe failed")
+
+    # ── unified interactive-request egress (I7) ─────────────────────
+
+    def register_interactive_request(
+        self,
+        request_id: str,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        stored_session_id: str = "",
+    ) -> bool:
+        """Single egress hook for interactive requests: ship an
+        ``InteractiveRequestFrame`` so the main sidecar's PendingRegistry
+        learns ``request_id → (kind, scope, session)`` at creation time.
+
+        Every creation-path hook in this module funnels through here.
+        Idempotent per bridge: a request observed by multiple hooks (the
+        wrapped notify callback AND the mirrored ``*.request`` event on
+        the publish hook) goes out exactly once.
+
+        Returns True when the frame was emitted (or already had been),
+        False when the request is unaddressable (missing id / bad kind).
+        """
+        rid = str(request_id or "").strip()
+        normalized_kind = str(kind or "").strip()
+        if normalized_kind not in _INTERACTIVE_KINDS:
+            _log.warning(
+                "[worker-publish-bridge] refusing interactive request with "
+                "unknown kind=%r request_id=%r", normalized_kind, rid,
+            )
+            return False
+        if not rid:
+            _log.warning(
+                "[worker-publish-bridge] refusing interactive request without "
+                "request_id kind=%s payload_keys=%s",
+                normalized_kind,
+                _payload_keys(payload if isinstance(payload, dict) else {}),
+            )
+            return False
+        with self._lock:
+            if rid in self._emitted_request_ids:
+                return True
+            self._emitted_request_ids.add(rid)
+        self.emit_threadsafe(
+            InteractiveRequestFrame(
+                kind=normalized_kind,
+                request_id=rid,
+                payload=dict(payload) if isinstance(payload, dict) else {},
+                stored_session_id=str(stored_session_id or self._stored_session_id or ""),
+            )
+        )
+        return True
+
+    def _register_approval_request(self, session_key: Any, approval_data: Any) -> None:
+        """Shared body for the notify-callback / ``_await_gateway_decision``
+        wrappers: mint (backstop) + register the approval request."""
+        data = approval_data if isinstance(approval_data, dict) else {}
+        rid = str(data.get("request_id") or "").strip()
+        if not rid and isinstance(approval_data, dict):
+            # tools.approval mints at creation; this backstop only fires for
+            # callers that hand-rolled the dict without going through
+            # _ApprovalEntry / submit_pending.
+            rid = uuid.uuid4().hex
+            approval_data["request_id"] = rid
+        if not rid:
+            _log.warning(
+                "[worker-publish-bridge] approval request without request_id "
+                "and non-dict payload — cannot register (session_key=%s)",
+                str(session_key or ""),
+            )
+            return
+        payload = dict(data)
+        payload.setdefault("session_key", str(session_key or ""))
+        self.register_interactive_request(
+            rid,
+            "approval",
+            payload,
+            stored_session_id=self._stored_session_id or str(session_key or ""),
+        )
 
     # ── per-hook installers ─────────────────────────────────────────
 
@@ -314,13 +428,11 @@ class WorkerPublishBridge:
                             or bridge._stored_session_id
                             or ""
                         ).strip()
-                        bridge.emit_threadsafe(
-                            InteractiveRequestFrame(
-                                kind=interactive_kind,
-                                request_id=request_id,
-                                payload=dict(payload_dict) if payload_dict else {},
-                                stored_session_id=stored,
-                            )
+                        bridge.register_interactive_request(
+                            request_id,
+                            interactive_kind,
+                            payload_dict,
+                            stored_session_id=stored,
                         )
                     else:
                         _log.warning(
@@ -377,9 +489,11 @@ class WorkerPublishBridge:
 
         def wrapped(clarify_id, session_key, question, choices):
             entry = original(clarify_id, session_key, question, choices)
-            request_id = str(clarify_id)
+            # ``register`` backstop-mints when handed an empty clarify_id —
+            # the entry's id is the authoritative request identity.
+            request_id = str(getattr(entry, "clarify_id", "") or clarify_id)
             payload: dict[str, Any] = {
-                "clarify_id": clarify_id,
+                "clarify_id": request_id,
                 "request_id": request_id,
                 "session_key": session_key,
                 "question": question,
@@ -397,13 +511,11 @@ class WorkerPublishBridge:
                 bool(str(question or "").strip()),
                 _choices_count(payload.get("choices")),
             )
-            bridge.emit_threadsafe(
-                InteractiveRequestFrame(
-                    kind="clarify",
-                    request_id=request_id,
-                    payload=payload,
-                    stored_session_id=bridge._stored_session_id or str(session_key or ""),
-                )
+            bridge.register_interactive_request(
+                request_id,
+                "clarify",
+                payload,
+                stored_session_id=bridge._stored_session_id or str(session_key or ""),
             )
             return entry
 

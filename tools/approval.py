@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import unicodedata
+import uuid
 from typing import Optional
 from hermes_cli.config import cfg_get
 
@@ -660,6 +661,35 @@ def detect_dangerous_command(command: str) -> tuple:
 
 
 # =========================================================================
+# Interactive request identity (I7)
+# =========================================================================
+# Every interactive request (approval/clarify/sudo/secret) must carry a
+# globally unique request_id from the moment it is created, so the main
+# sidecar's PendingRegistry can address it without session_key guessing.
+
+
+def mint_request_id() -> str:
+    """Mint a globally unique interactive-request id."""
+    return uuid.uuid4().hex
+
+
+def ensure_request_id(approval_data: dict) -> str:
+    """Return ``approval_data['request_id']``, minting one in place if absent.
+
+    Mutates the dict on purpose: the same dict instance flows to the gateway
+    notify callback / pending registries, so minting here stamps every
+    downstream consumer at creation time.
+    """
+    if not isinstance(approval_data, dict):
+        return ""
+    request_id = str(approval_data.get("request_id") or "").strip()
+    if not request_id:
+        request_id = mint_request_id()
+        approval_data["request_id"] = request_id
+    return request_id
+
+
+# =========================================================================
 # Per-session approval state (thread-safe)
 # =========================================================================
 
@@ -680,16 +710,55 @@ _permanent_approved: set = set()
 
 class _ApprovalEntry:
     """One pending dangerous-command approval inside a gateway session."""
-    __slots__ = ("event", "data", "result")
+    __slots__ = ("event", "data", "result", "request_id")
 
     def __init__(self, data: dict):
         self.event = threading.Event()
         self.data = data          # command, description, pattern_keys, …
         self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
+        # Mint at creation (I7): mutates ``data`` so the notify callback and
+        # reconnect recovery (list_gateway_approvals) see the same id.
+        self.request_id = ensure_request_id(data)
 
 
 _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
 _gateway_notify_cbs: dict[str, object] = {}  # session_key → callable(approval_data)
+# request_id → (session_key, entry). Lets ``resolve_gateway_approval`` target
+# one specific blocked entry by request_id (registry-directed resolve) while
+# session_key FIFO addressing keeps working until PR-5 retires it.
+_gateway_request_index: dict[str, tuple] = {}
+
+
+def _index_gateway_entry_locked(session_key: str, entry: _ApprovalEntry) -> None:
+    """Register the entry in the queue AND the request_id index. Caller holds _lock."""
+    _gateway_queues.setdefault(session_key, []).append(entry)
+    if entry.request_id:
+        _gateway_request_index[entry.request_id] = (session_key, entry)
+
+
+def _unindex_gateway_entry_locked(entry: _ApprovalEntry) -> None:
+    """Drop the entry's request_id index record. Caller holds _lock."""
+    if entry.request_id:
+        indexed = _gateway_request_index.get(entry.request_id)
+        if indexed is not None and indexed[1] is entry:
+            _gateway_request_index.pop(entry.request_id, None)
+
+
+def find_gateway_approval_by_request_id(request_id: str) -> Optional[dict]:
+    """Return ``{"session_key", "data"}`` for a blocked gateway approval, or None.
+
+    PR-5 respond path uses this to locate which session's queue holds the
+    blocking primitive for a registry-addressed request_id.
+    """
+    rid = str(request_id or "").strip()
+    if not rid:
+        return None
+    with _lock:
+        indexed = _gateway_request_index.get(rid)
+        if indexed is None:
+            return None
+        session_key, entry = indexed
+        return {"session_key": session_key, "data": dict(entry.data)}
 
 
 def register_gateway_notify(session_key: str, cb) -> None:
@@ -713,6 +782,8 @@ def unregister_gateway_notify(session_key: str) -> None:
     with _lock:
         _gateway_notify_cbs.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
+        for entry in entries:
+            _unindex_gateway_entry_locked(entry)
     for entry in entries:
         entry.event.set()
 
@@ -722,23 +793,40 @@ def resolve_gateway_approval(session_key: str, choice: str,
     """Called by the gateway's /approve or /deny handler to unblock
     waiting agent thread(s).
 
-    When *resolve_all* is True every pending approval in the session is
-    resolved at once (``/approve all``).  Otherwise only the oldest one
-    is resolved (FIFO).
+    Accepts EITHER a session_key (legacy FIFO addressing: the oldest
+    pending approval in that session is resolved, or all of them when
+    *resolve_all* is True) OR a request_id minted at creation time —
+    the latter resolves exactly the one entry it identifies, which is
+    what the main sidecar's PendingRegistry-directed respond uses.
 
     Returns the number of approvals resolved (0 means nothing was pending).
     """
     with _lock:
         queue = _gateway_queues.get(session_key)
-        if not queue:
-            return 0
-        if resolve_all:
-            targets = list(queue)
-            queue.clear()
+        if queue:
+            if resolve_all:
+                targets = list(queue)
+                queue.clear()
+            else:
+                targets = [queue.pop(0)]
+            if not queue:
+                _gateway_queues.pop(session_key, None)
+            for entry in targets:
+                _unindex_gateway_entry_locked(entry)
         else:
-            targets = [queue.pop(0)]
-        if not queue:
-            _gateway_queues.pop(session_key, None)
+            # request_id addressing: the caller's key is not a session with a
+            # queue — check the request index for a specific blocked entry.
+            indexed = _gateway_request_index.get(str(session_key or "").strip())
+            if indexed is None:
+                return 0
+            owner_session_key, entry = indexed
+            owner_queue = _gateway_queues.get(owner_session_key, [])
+            if entry in owner_queue:
+                owner_queue.remove(entry)
+            if not owner_queue:
+                _gateway_queues.pop(owner_session_key, None)
+            _unindex_gateway_entry_locked(entry)
+            targets = [entry]
 
     for entry in targets:
         entry.result = choice
@@ -766,6 +854,7 @@ def list_gateway_approvals(session_key: str) -> list[dict]:
 
 def submit_pending(session_key: str, approval: dict):
     """Store a pending approval request for a session."""
+    ensure_request_id(approval)
     with _lock:
         _pending[session_key] = approval
 
@@ -821,6 +910,8 @@ def clear_session(session_key: str) -> None:
         _session_yolo.discard(session_key)
         _pending.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
+        for entry in entries:
+            _unindex_gateway_entry_locked(entry)
     for entry in entries:
         # Session-boundary cleanup should cancel any blocked approval waits
         # immediately so the old run can unwind instead of idling until timeout.
@@ -1392,7 +1483,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
 
     entry = _ApprovalEntry(approval_data)
     with _lock:
-        _gateway_queues.setdefault(session_key, []).append(entry)
+        _index_gateway_entry_locked(session_key, entry)
 
     def _drop_entry() -> None:
         with _lock:
@@ -1401,6 +1492,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
                 queue.remove(entry)
             if not queue:
                 _gateway_queues.pop(session_key, None)
+            _unindex_gateway_entry_locked(entry)
 
     # Notify plugins that an approval is being requested. Fires before the
     # gateway notify callback so observers get the event in real time.
@@ -1649,9 +1741,9 @@ def check_all_command_guards(command: str, env_type: str,
                 "pattern_keys": all_keys,
                 "description": combined_desc,
             }
-            entry = _ApprovalEntry(approval_data)
+            entry = _ApprovalEntry(approval_data)  # mints request_id into approval_data
             with _lock:
-                _gateway_queues.setdefault(session_key, []).append(entry)
+                _index_gateway_entry_locked(session_key, entry)
 
             # Notify plugins that an approval is being requested. Fires before
             # the gateway notify callback so observers (e.g. macOS notifier
@@ -1677,6 +1769,7 @@ def check_all_command_guards(command: str, env_type: str,
                         queue.remove(entry)
                     if not queue:
                         _gateway_queues.pop(session_key, None)
+                    _unindex_gateway_entry_locked(entry)
                 return {
                     "approved": False,
                     "message": (
@@ -1736,6 +1829,7 @@ def check_all_command_guards(command: str, env_type: str,
                     queue.remove(entry)
                 if not queue:
                     _gateway_queues.pop(session_key, None)
+                _unindex_gateway_entry_locked(entry)
 
             choice = entry.result
             # Normalize outcome for the post hook. Unresolved (timeout) and

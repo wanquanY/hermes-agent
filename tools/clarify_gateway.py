@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -58,6 +59,10 @@ class _ClarifyEntry:
     def signature(self) -> Dict[str, object]:
         return {
             "clarify_id": self.clarify_id,
+            # Unified interactive-request identity (I7): clarify_id IS the
+            # request_id for this path. Exposed under both names so the
+            # PendingRegistry / frontend can address by request_id alone.
+            "request_id": self.clarify_id,
             "session_key": self.session_key,
             "question": self.question,
             "choices": list(self.choices) if self.choices else None,
@@ -102,6 +107,10 @@ def register(
     The caller (gateway clarify_callback) will then send the prompt to the
     user and block on ``wait_for_response(clarify_id, timeout)``.
     """
+    # I7: every interactive request has an id from the moment it exists.
+    # Callers normally mint the clarify_id themselves; backstop-mint here so
+    # no registration path can produce an unaddressable request.
+    clarify_id = str(clarify_id or "").strip() or uuid.uuid4().hex
     entry = _ClarifyEntry(
         clarify_id=clarify_id,
         session_key=session_key,
