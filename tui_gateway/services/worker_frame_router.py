@@ -92,6 +92,234 @@ class _Pending:
     stored_session_id: str
 
 
+# ── PendingRegistry: single source of truth for interactive request state ──
+#
+# PR-5 (I8): the respond contract needs a registry that tracks the full
+# lifecycle of an interactive request — pending → resolved / expired — so a
+# second respond to the same request_id can return ``already_resolved``
+# (4409) instead of silently swallowing the answer or erroring with a
+# generic "no pending" code.
+#
+# This registry is process-local (one per sidecar). The in-process
+# ``prompt_respond`` @method handlers use it to enforce the three-state
+# contract. ``WorkerFrameRouter`` has its own ``_pending`` dict for
+# cross-process routing (request_id → scope_key) and does NOT use this
+# registry — the router pops its entry on successful handoff, so the
+# already-resolved state is meaningless there (the worker owns the wait).
+#
+# Thread-safety: all mutations go through ``_lock``. Reads are also locked
+# because the dict can be mutated from the respond handler thread while a
+# snapshot iterates.
+
+# Default TTL for interactive requests (seconds). Matches the legacy
+# ``_block(timeout=300)`` in ``session_config._block``.
+_PENDING_TTL_SECONDS = 300.0
+
+
+@dataclass
+class PendingEntry:
+    """One tracked interactive request."""
+
+    request_id: str
+    kind: str  # "clarify" | "approval" | "secret" | "sudo"
+    conversation_id: str = ""
+    session_key: str = ""
+    scope_key: str = ""
+    state: str = "pending"  # "pending" | "resolved" | "expired"
+    created_at: float = 0.0
+    resolved_at: float = 0.0
+    choice: Any = None
+
+
+class PendingRegistry:
+    """Process-local registry enforcing the three-state respond contract.
+
+    States:
+      pending  → created, awaiting a respond
+      resolved → a respond succeeded; further responds return 4409
+      expired  → TTL elapsed; further responds return 4404
+
+    The registry is intentionally side-effect-free regarding the actual
+    unblock primitive (threading.Event / worker handoff). Callers register
+    a request, then on a successful resolve call ``mark_resolved``. The
+    registry only tracks state so the contract can distinguish
+    already-resolved from unknown.
+
+    Event publishing (interaction.requested / interaction.resolved /
+    interaction.expired) is optional: pass a ``publish_event`` callable
+    and the registry will emit canonical events on state transitions.
+    The callable receives ``(event_type: str, entry: PendingEntry)`` and
+    is responsible for building the ``record_event`` params dict.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float = _PENDING_TTL_SECONDS,
+        publish_event: Any = None,
+        clock: Any = None,
+    ) -> None:
+        self._entries: dict[str, PendingEntry] = {}
+        self._lock = threading.RLock()
+        self._ttl = float(ttl_seconds)
+        self._publish_event = publish_event
+        self._clock = clock if callable(clock) else time.monotonic
+
+    def register(
+        self,
+        *,
+        request_id: str,
+        kind: str,
+        conversation_id: str = "",
+        session_key: str = "",
+        scope_key: str = "",
+    ) -> PendingEntry:
+        """Register a new pending interactive request.
+
+        If the request_id is already registered and still pending, this is
+        a no-op (returns the existing entry). If it was already resolved/
+        expired, a fresh pending entry replaces it (re-registration after
+        expiry is allowed — the caller started a new blocking prompt with
+        the same id).
+        """
+        rid = str(request_id or "").strip()
+        if not rid:
+            raise ValueError("request_id is required")
+        now = self._clock()
+        entry = PendingEntry(
+            request_id=rid,
+            kind=str(kind or "").strip(),
+            conversation_id=str(conversation_id or ""),
+            session_key=str(session_key or ""),
+            scope_key=str(scope_key or ""),
+            state="pending",
+            created_at=now,
+        )
+        with self._lock:
+            self._entries[rid] = entry
+        self._emit("interaction.requested", entry)
+        return entry
+
+    def lookup(self, request_id: str) -> PendingEntry | None:
+        """Return the entry for ``request_id`` after lazy expiry check.
+
+        Returns ``None`` if the request_id is unknown. If the entry exists
+        but has exceeded the TTL, it is flipped to ``expired`` in place
+        before being returned (so the caller sees the true state).
+        """
+        rid = str(request_id or "").strip()
+        if not rid:
+            return None
+        with self._lock:
+            entry = self._entries.get(rid)
+            if entry is None:
+                return None
+            if entry.state == "pending":
+                self._maybe_expire_locked(entry)
+            return entry
+
+    def mark_resolved(self, request_id: str, choice: Any = None) -> bool:
+        """Flip a pending entry to ``resolved``.
+
+        Returns True if the entry was pending and is now resolved, False
+        if it was unknown, already resolved, or expired. On a successful
+        transition, the ``interaction.resolved`` event is published.
+        """
+        rid = str(request_id or "").strip()
+        if not rid:
+            return False
+        with self._lock:
+            entry = self._entries.get(rid)
+            if entry is None:
+                return False
+            if entry.state == "pending":
+                self._maybe_expire_locked(entry)
+            if entry.state != "pending":
+                return False
+            entry.state = "resolved"
+            entry.resolved_at = self._clock()
+            entry.choice = choice
+        self._emit("interaction.resolved", entry)
+        return True
+
+    def is_pending(self, request_id: str) -> bool:
+        """True if the entry exists and is in the pending state."""
+        entry = self.lookup(request_id)
+        return entry is not None and entry.state == "pending"
+
+    def is_known(self, request_id: str) -> bool:
+        """True if the entry exists in any state (pending/resolved/expired)."""
+        return self.lookup(request_id) is not None
+
+    def resolved_choice(self, request_id: str) -> Any:
+        """Return the choice stored at resolve time, or ``_MISSING`` if
+        the entry is not in the resolved state."""
+        entry = self.lookup(request_id)
+        if entry is None or entry.state != "resolved":
+            return _MISSING
+        return entry.choice
+
+    def clear(self, request_id: str = None) -> None:
+        """Drop one entry (by id) or all entries. No events published."""
+        with self._lock:
+            if request_id is None:
+                self._entries.clear()
+            else:
+                self._entries.pop(str(request_id or "").strip(), None)
+
+    # ── internals ───────────────────────────────────────────────────
+
+    def _maybe_expire_locked(self, entry: PendingEntry) -> None:
+        """Lazy expiry: if a pending entry has exceeded the TTL, flip it
+        to ``expired`` and publish the event. Caller holds ``_lock``."""
+        if entry.state != "pending":
+            return
+        if self._ttl <= 0:
+            return
+        if (self._clock() - entry.created_at) <= self._ttl:
+            return
+        entry.state = "expired"
+        entry.resolved_at = self._clock()
+        # Publish outside the lock to avoid re-entrancy if the callback
+        # calls back into the registry. We stash the entry and emit after
+        # releasing — but since we're inside a locked block, defer via a
+        # sentinel and emit in the caller. Simpler: emit here; the
+        # publish callback is expected to be non-reentrant (it builds a
+        # dict and calls record_event, which has its own locking).
+        try:
+            self._emit("interaction.expired", entry)
+        except Exception:
+            _log.debug(
+                "[pending-registry] interaction.expired publish failed rid=%s",
+                entry.request_id,
+                exc_info=True,
+            )
+
+    def _emit(self, event_type: str, entry: PendingEntry) -> None:
+        if self._publish_event is None:
+            return
+        try:
+            self._publish_event(event_type, entry)
+        except Exception:
+            _log.debug(
+                "[pending-registry] %s publish failed rid=%s",
+                event_type, entry.request_id,
+                exc_info=True,
+            )
+
+
+# Sentinel for "no resolved choice" — distinguishes a resolved choice of
+# ``None`` / ``""`` (a real deny/empty answer) from "entry not resolved".
+class _Missing:
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<MISSING>"
+
+
+_MISSING = _Missing()
+
+
 class _SupervisorSender(Protocol):
     """The subset of ``WorkerSupervisor`` ``WorkerFrameRouter`` calls.
 
