@@ -212,6 +212,15 @@ def _recover_orphaned_active_runs(
     current_gateway_instance_id: str = "",
     stale_after_seconds: float = 300.0,
 ) -> int:
+    # S8: orphan-recovery is a main-process responsibility. When the main
+    # sidecar disconnects (crash/restart), worker processes keep polling
+    # ``session_status`` / ``create_run_if_session_idle``, and each call
+    # triggered a recovery scan that found no live main-side run owners —
+    # producing noise (triage counted 79 spurious scans in one session).
+    # Short-circuit in workers so only the main process runs the scan.
+    from tui_gateway.process_role import is_worker_process
+    if is_worker_process():
+        return 0
     method = _db_method(db, "fail_orphaned_active_runs")
     if method is None:
         return 0
@@ -1510,7 +1519,16 @@ def record_event(
     persist: bool = True,
     run_context: "RunContext | None" = None,
 ) -> list[Transport]:
-    """Persist an event frame and return live subscriber transports to notify."""
+    """Persist an event frame and return live subscriber transports to notify.
+
+    TODO(PR-6 §4.4): ``clarify.request`` is currently double-written to
+    ``run_events`` (same ``request_id`` produces two seqs). The dual
+    publish originates in ``tools/clarify_gateway.py`` +
+    ``tui_gateway/services/worker_publish_bridge.py`` +
+    ``tui_gateway/services/worker_frame_router.py``, all of which are
+    blacklisted for this PR. Converging to a single publish is deferred
+    to a follow-up that can touch those files.
+    """
     # R1: single-writer invariant. In a worker process this call is only
     # allowed to run the subscriber-fanout half; persistence of run_events
     # is the main sidecar's exclusive job (it re-invokes record_event with
@@ -1787,7 +1805,21 @@ def record_event(
                             run_id=run_id,
                             event=event_for_stream,
                         )
-                    except Exception:
+                    except Exception as _mission_append_exc:
+                        # S9: was silent ``candidate_event = {}`` with no log.
+                        # Emit ERROR so the Team Mission event-domain append
+                        # failure is visible and counted.
+                        logger.error(
+                            "[dovie-run-control] team-mission-event-append-failed "
+                            "%s",
+                            _json_for_log({
+                                "event_type": event_type,
+                                "session_id": stable,
+                                "run_id": run_id,
+                                "error": str(_mission_append_exc),
+                            }),
+                            exc_info=True,
+                        )
                         candidate_event = {}
                     if (
                         isinstance(candidate_event, dict)
@@ -1867,8 +1899,24 @@ def record_event(
                             for transport in mirror_subscribers:
                                 if _write_event(transport, mirrored):
                                     remember_transport_delivery(transport, mirrored)
-                    except Exception:
-                        logger.debug("failed to mirror Team Mission event", exc_info=True)
+                    except Exception as _mirror_exc:
+                        # S9: was logger.debug — silent degradation. The
+                        # mirror-to-conversation failure means the Team
+                        # Mission conversation lane lost an event; emit ERROR
+                        # with context (event_type, session_id, run_id,
+                        # mission_id) so it is visible and counted.
+                        logger.error(
+                            "[dovie-run-control] team-mission-mirror-failed "
+                            "%s",
+                            _json_for_log({
+                                "event_type": event_type,
+                                "session_id": stable,
+                                "run_id": run_id,
+                                "mission_id": scheduler_mission_id,
+                                "error": str(_mirror_exc),
+                            }),
+                            exc_info=True,
+                        )
                     if (
                         event_type in _TEAM_MISSION_STATUS_SOURCE_EVENT_TYPES
                         and mission_event
@@ -1880,8 +1928,23 @@ def record_event(
                                 source_event=event_for_reduce,
                                 source_mission_seq=int(mission_event.get("seq") or 0),
                             )
-                        except Exception:
-                            pass
+                        except Exception as _status_exc:
+                            # S9: was bare ``pass`` — silent degradation. Emit
+                            # ERROR with context so the mirror/reduce failure is
+                            # visible in logs and counted by the metrics pipeline.
+                            logger.error(
+                                "[dovie-run-control] team-mission-conversation-status-append-failed "
+                                "%s",
+                                _json_for_log({
+                                    "event_type": event_type,
+                                    "session_id": stable,
+                                    "run_id": run_id,
+                                    "mission_id": scheduler_mission_id,
+                                    "mission_seq": int(mission_event.get("seq") or 0) if isinstance(mission_event, dict) else 0,
+                                    "error": str(_status_exc),
+                                }),
+                                exc_info=True,
+                            )
                     if event_type == "message.complete":
                         try:
                             from hermes_team_mission.runtime.team_transcript_writer import (
@@ -1908,8 +1971,21 @@ def record_event(
                                         or ""
                                     ),
                                 )
-                        except Exception:
-                            logger.debug("failed to append Team Mission report-ready event", exc_info=True)
+                        except Exception as _report_ready_exc:
+                            # S9: was logger.debug — silent degradation.
+                            # Emit ERROR so the report-ready append failure is
+                            # visible and counted.
+                            logger.error(
+                                "[dovie-run-control] team-mission-report-ready-append-failed "
+                                "%s",
+                                _json_for_log({
+                                    "event_type": event_type,
+                                    "session_id": stable,
+                                    "run_id": run_id,
+                                    "error": str(_report_ready_exc),
+                                }),
+                                exc_info=True,
+                            )
         except Exception as exc:
             # Persist failed → the frame has no canonical seq. Mark it
             # transient so the FE ledger drops it instead of admitting a
@@ -1935,21 +2011,64 @@ def record_event(
         finally:
             try:
                 setattr(db, "_team_mission_projecting", prev_projecting)
-            except Exception:
-                pass
+            except Exception as _restore_exc:
+                # S9: was bare ``pass``. This is cleanup (restoring the
+                # projection flag) not a data path, so DEBUG is appropriate —
+                # but no longer fully silent.
+                logger.debug(
+                    "[dovie-run-control] team-mission-projecting-flag-restore-failed "
+                    "%s",
+                    _json_for_log({
+                        "event_type": event_type,
+                        "session_id": stable,
+                        "run_id": run_id,
+                        "error": str(_restore_exc),
+                    }),
+                    exc_info=True,
+                )
     elif terminal_event:
-        _diagnostic_warning(
-            "terminal-event-not-persisted-no-db-method",
-            db=_db_label(db),
-            event_type=event_type,
-            terminal_status=terminal_event,
-            session_id=stable,
-            run_id=run_id,
-            turn_id=turn_id,
-            runtime_scope_key=str(frame.get("runtime_scope_key") or ""),
-            runtime_session_id=runtime_session_id,
-            seq=int(frame.get("seq") or 0),
-        )
+        # S1: split the old single "terminal-event-not-persisted-no-db-method"
+        # label into two semantically distinct paths.
+        #   * Worker side (persist forced False by R1 invariant): the event
+        #     is intentionally NOT persisted here — the main sidecar will
+        #     persist it after ingesting the worker's stdout frame. This is
+        #     benign design noise, so emit DEBUG (not WARNING) and do NOT
+        #     route it to the error metrics pipeline.
+        #   * Main side (db method missing): genuine data loss — the
+        #     terminal event has no canonical seq and will never appear in
+        #     replay/hydration. Emit ERROR + a diagnostic so the metrics
+        #     pipeline counts it.
+        if worker_process:
+            logger.debug(
+                "[dovie-run-control] terminal-event-persist-deferred-to-main "
+                "%s",
+                _json_for_log({
+                    "event_type": event_type,
+                    "terminal_status": terminal_event,
+                    "session_id": stable,
+                    "run_id": run_id,
+                    "turn_id": turn_id,
+                    "runtime_scope_key": str(frame.get("runtime_scope_key") or ""),
+                    "runtime_session_id": runtime_session_id,
+                    "seq": int(frame.get("seq") or 0),
+                }),
+            )
+        else:
+            logger.error(
+                "[dovie-run-control] terminal-event-dropped-no-db "
+                "%s",
+                _json_for_log({
+                    "db": _db_label(db),
+                    "event_type": event_type,
+                    "terminal_status": terminal_event,
+                    "session_id": stable,
+                    "run_id": run_id,
+                    "turn_id": turn_id,
+                    "runtime_scope_key": str(frame.get("runtime_scope_key") or ""),
+                    "runtime_session_id": runtime_session_id,
+                    "seq": int(frame.get("seq") or 0),
+                }),
+            )
     if terminal_event and scheduler_mission_id:
         _dispatch_team_mission_ready_scheduler(
             mission_id=scheduler_mission_id,
