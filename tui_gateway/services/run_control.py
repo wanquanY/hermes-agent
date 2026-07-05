@@ -1366,6 +1366,20 @@ def record_event(
     run_context: "RunContext | None" = None,
 ) -> list[Transport]:
     """Persist an event frame and return live subscriber transports to notify."""
+    # R1: single-writer invariant. In a worker process this call is only
+    # allowed to run the subscriber-fanout half; persistence of run_events
+    # is the main sidecar's exclusive job (it re-invokes record_event with
+    # persist=True + RunContext after ingesting the worker's stdout frame,
+    # via WorkerFrameRouter._publish_event_with_db). If we let workers
+    # persist here, Phase 8b's unified state.db turns any raw event into
+    # two rows (one per writer) with divergent RunContext/activity/
+    # participant stamping — which is exactly the "team leader tool card
+    # loses its upper half" bug. See tui_gateway/process_role.py. Ignore
+    # whatever the caller passed for persist — this is an architectural
+    # invariant, not a caller-configurable knob.
+    from tui_gateway.process_role import is_worker_process
+    if is_worker_process():
+        persist = False
     frame = _apply_run_context_to_frame(dict(params), run_context)
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     stable = _stable_session_id(frame)

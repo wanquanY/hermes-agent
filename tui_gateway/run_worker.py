@@ -834,6 +834,15 @@ def _build_default_backend() -> WorkerRunBackend:
 
 
 async def _main_async() -> int:
+    # R1 architectural invariant: this process is a worker; the
+    # main sidecar is the sole writer of run_events. Flip the
+    # process-role bit BEFORE any agent code runs so record_event
+    # / publish_recorded_event refuse to persist even if some
+    # legacy call path passes persist=True. See tui_gateway/
+    # process_role.py for the rationale.
+    from tui_gateway.process_role import mark_as_worker_process
+    mark_as_worker_process()
+
     from agent.activity_event_bus import (
         ActivityEventBus,
         set_default_activity_event_bus,

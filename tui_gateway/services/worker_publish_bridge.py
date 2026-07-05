@@ -341,34 +341,11 @@ class WorkerPublishBridge:
                             bool(str(payload_dict.get("question") or "").strip()),
                             _choices_count(payload_dict.get("choices")),
                         )
-            # Phase 8b unified the DB: this worker process's default DB
-            # is the same physical ``state.db`` the main sidecar writes
-            # to (see ``server._is_control_plane_stable_session_id`` /
-            # ``server._get_control_plane_db``). If we let ``original``
-            # persist here it races the main-side ``WorkerFrameRouter``
-            # (``worker_runtime._publish_event_with_db``) which re-invokes
-            # ``publish_recorded_event(persist=True, run_context=...)``
-            # after receiving the stdout ``EventFrame`` above. Both writes
-            # land on the same ``(session_id)`` seq domain and produce a
-            # second ``run_events`` row per raw event — with the same
-            # ``run_id/turn_id/tool_call_id`` but MISSING the
-            # RunContext-derived fields (``payload.run_context`` /
-            # activity_id / participant_id stamping is done inside
-            # ``_apply_run_context_to_frame`` which only the main side
-            # calls, because ``_emit`` never passes ``run_context``).
-            # The existing ``duplicate_terminal`` branch in
-            # ``append_run_event`` only tolerates the race for TERMINAL
-            # events; non-terminal streams (``message.start`` /
-            # ``tool.start`` / ``tool.complete``) get zero dedup and both
-            # rows land — the frontend then sees two ``tool.start`` for
-            # one ``tool_call_id`` (one with args, one without) and either
-            # overlays the wrong copy or drops the card entirely.
-            # Route persistence exclusively to the main side and skip it
-            # here. ``persist=False`` still runs subscriber fanout and
-            # in-memory ``_events_by_session`` bookkeeping (worker rarely
-            # has subscriptions of its own; this is only a safety-net).
-            kwargs = dict(kwargs)
-            kwargs["persist"] = False
+            # R1: the single-writer invariant is enforced at
+            # ``record_event`` via ``tui_gateway.process_role``. This
+            # wrapper does not need to defensively strip ``persist``
+            # anymore — the worker-side ``record_event`` will refuse to
+            # persist regardless of what ``original`` is given.
             return original(params, *args, **kwargs)
 
         run_control.publish_recorded_event = wrapped  # type: ignore[assignment]
