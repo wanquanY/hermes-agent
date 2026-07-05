@@ -149,6 +149,72 @@ def _run_artifact_cards_locked(
     return dedupe_artifact_refs(cards)
 
 
+def _run_tool_calls_locked(
+    conn: Any,
+    *,
+    session_id: str,
+    run_id: str,
+    turn_id: str = "",
+) -> list[dict[str, Any]]:
+    """Rebuild the OpenAI-style ``tool_calls`` list for an assistant
+    message from the ``tool_events`` table.
+
+    Team-mission ``message.complete`` payloads carry only text/reasoning
+    metadata (``text_length`` / ``text_sha256`` / …) — they do NOT
+    include ``tool_calls``. Historically the team projection path
+    (``_upsert_team_message_by_id_locked``) never wrote the
+    ``messages.tool_calls`` column at all, so when the frontend
+    rehydrates a team leader turn from the ``messages`` table (on
+    reload / conversation switch) the assistant's tool calls disappear
+    — most visibly the ``team_mission_start_task`` card that was still
+    on screen a moment ago. Reconstruct the list from ``tool_events``
+    so the projection carries the full turn state.
+    """
+    session_id = _text(session_id)
+    run_id = _text(run_id)
+    turn_id = _text(turn_id)
+    if not session_id or not run_id:
+        return []
+    if turn_id:
+        params = (session_id, run_id, turn_id)
+        turn_filter = "AND (turn_id = ? OR COALESCE(turn_id, '') = '')"
+    else:
+        params = (session_id, run_id)
+        turn_filter = ""
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT tool_call_id, tool_name, arguments_json
+            FROM tool_events
+            WHERE session_id = ?
+              AND run_id = ?
+              {turn_filter}
+            ORDER BY seq_start, id
+            """,
+            params,
+        ).fetchall()
+    except Exception:
+        return []
+    calls: list[dict[str, Any]] = []
+    for row in rows:
+        tool_call_id = _text(_row_value(row, "tool_call_id"))
+        tool_name = _text(_row_value(row, "tool_name"))
+        arguments_json = _text(_row_value(row, "arguments_json"))
+        if not tool_call_id or not tool_name:
+            continue
+        # OpenAI-style shape — matches what ``_add_message`` writes for
+        # non-team assistant rows so the frontend uses the same reader.
+        calls.append({
+            "id": tool_call_id,
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "arguments": arguments_json or "{}",
+            },
+        })
+    return calls
+
+
 def _merge_artifact_cards_into_metadata(
     metadata: dict[str, Any],
     artifact_cards: list[dict[str, Any]],
@@ -1306,6 +1372,17 @@ class RuntimeTranscriptWriter:
         upsert_locked = getattr(db, "_upsert_team_message_by_id_locked", None)
         if not callable(upsert_locked):
             return {}
+        # Rebuild tool_calls from the tool_events read model so the
+        # projected assistant row carries the full turn — otherwise the
+        # frontend's rehydration path (which reads messages.tool_calls
+        # to render tool cards) silently drops the assistant's tool
+        # calls after streaming state is discarded.
+        tool_calls = _run_tool_calls_locked(
+            conn,
+            session_id=conversation_session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+        )
         saved = upsert_locked(
             conn,
             session_id=conversation_session_id,
@@ -1317,6 +1394,7 @@ class RuntimeTranscriptWriter:
             status=status,
             reasoning=payload.get("reasoning") or payload.get("reasoning_content") or "",
             timestamp=float(event.get("timestamp") or 0) or None,
+            tool_calls=tool_calls or None,
         )
         if report_context:
             report_mission_id = _text(report_context.get("mission_id"))
@@ -1557,6 +1635,84 @@ def backfill_projected_message_artifacts_locked(
         )
         if merged:
             repaired += 1
+    return repaired
+
+
+def backfill_projected_message_tool_calls_locked(
+    _db: Any,
+    conn: Any,
+    *,
+    session_ids: list[str],
+    limit: int = 500,
+) -> int:
+    """Heal historical team leader assistant rows whose ``tool_calls``
+    column is NULL/empty but whose owning run has entries in
+    ``tool_events``.
+
+    Prior to the fix, the team projection path (which is the ONLY writer
+    for team leader messages) never populated ``tool_calls`` at all —
+    the frontend's rehydration reads that column to render tool cards,
+    so the ``team_mission_start_task`` card silently vanished on
+    reload. This one-shot repair rebuilds the missing JSON from the
+    ``tool_events`` read model. Runs without associated tool events are
+    left untouched (their ``tool_calls`` should stay NULL).
+    """
+    target_session_ids = [
+        _text(session_id)
+        for session_id in session_ids
+        if _text(session_id)
+    ]
+    if not target_session_ids:
+        return 0
+    bounded_limit = max(1, min(int(limit or 500), 2000))
+    placeholders = ",".join("?" for _ in target_session_ids)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT m.id AS message_id,
+                   m.session_id AS session_id,
+                   json_extract(m.metadata_json, '$.run_id') AS run_id,
+                   json_extract(m.metadata_json, '$.turn_id') AS turn_id
+            FROM messages m
+            WHERE m.session_id IN ({placeholders})
+              AND m.role = 'assistant'
+              AND m.active = 1
+              AND COALESCE(m.tool_calls, '') = ''
+              AND json_extract(m.metadata_json, '$.run_id') IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM tool_events te
+                  WHERE te.session_id = m.session_id
+                    AND te.run_id = json_extract(m.metadata_json, '$.run_id')
+              )
+            ORDER BY m.id DESC
+            LIMIT ?
+            """,
+            (*target_session_ids, bounded_limit),
+        ).fetchall()
+    except Exception:
+        return 0
+    repaired = 0
+    for row in rows:
+        session_id = _text(_row_value(row, "session_id"))
+        run_id = _text(_row_value(row, "run_id"))
+        turn_id = _text(_row_value(row, "turn_id"))
+        message_id = _row_value(row, "message_id")
+        tool_calls = _run_tool_calls_locked(
+            conn,
+            session_id=session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+        )
+        if not tool_calls:
+            continue
+        try:
+            conn.execute(
+                "UPDATE messages SET tool_calls = ? WHERE id = ?",
+                (json.dumps(tool_calls, ensure_ascii=False), message_id),
+            )
+            repaired += 1
+        except Exception:
+            continue
     return repaired
 
 

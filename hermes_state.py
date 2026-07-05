@@ -4654,6 +4654,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         try:
             from hermes_team_mission.runtime.team_transcript_writer import (
                 backfill_projected_message_artifacts_locked,
+                backfill_projected_message_tool_calls_locked,
                 backfill_unprojected_message_complete_events_locked,
             )
         except Exception:
@@ -4670,7 +4671,19 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 conn,
                 session_ids=target_session_ids,
             )
-            return projected + artifacts
+            # Heal historical team leader assistant rows whose
+            # tool_calls column was NEVER populated (the projection path
+            # simply didn't write it — see
+            # ``_upsert_team_message_by_id_locked``). Without this
+            # backfill, existing conversations continue to render
+            # without the ``team_mission_start_task`` card even after
+            # the write path is fixed.
+            tool_calls = backfill_projected_message_tool_calls_locked(
+                self,
+                conn,
+                session_ids=target_session_ids,
+            )
+            return projected + artifacts + tool_calls
 
         try:
             return int(self._execute_write(_do) or 0)
@@ -4803,6 +4816,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         status: str = "",
         reasoning: Any = "",
         timestamp: float | None = None,
+        tool_calls: Any = None,
     ) -> Dict[str, Any]:
         stable_session_id = str(session_id or "").strip()
         stable_message_id = str(conversation_message_id or "").strip()
@@ -4823,6 +4837,21 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         stored_content = self._encode_content(content)
         stored_reasoning = str(reasoning or "")
         message_timestamp = float(timestamp or time.time())
+        # Preserve the same ``tool_calls`` JSON convention that
+        # ``_add_message`` uses so the frontend / rehydration path can
+        # reconstruct the assistant's tool calls without discovering
+        # this column was silently NULL for the entire team-mission
+        # transcript path. ``None`` when the caller has no tool calls to
+        # persist (typical for member replies, plain leader text turns).
+        if tool_calls is None:
+            stored_tool_calls = None
+        elif isinstance(tool_calls, str):
+            stored_tool_calls = tool_calls or None
+        else:
+            try:
+                stored_tool_calls = json.dumps(tool_calls, ensure_ascii=False)
+            except (TypeError, ValueError):
+                stored_tool_calls = None
 
         def _update_session_index() -> None:
             try:
@@ -4898,9 +4927,9 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 """
                 INSERT INTO messages (
                     session_id, role, content, participant_id, timestamp,
-                    conversation_message_id, metadata_json, reasoning
+                    conversation_message_id, metadata_json, reasoning, tool_calls
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stable_session_id,
@@ -4911,6 +4940,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                     stable_message_id,
                     metadata_json,
                     stored_reasoning,
+                    stored_tool_calls,
                 ),
             )
             conn.execute(
@@ -4930,6 +4960,16 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 next_metadata,
             )
             next_reasoning = stored_reasoning or str(existing["reasoning"] or "")
+            # tool_calls: preserve existing when caller passes None (an
+            # empty finalization pass shouldn't erase tool calls the
+            # streaming reduce already stored). When caller passes a
+            # value, it wins — this projection pass is the authoritative
+            # source for the finalized assistant turn.
+            next_tool_calls = (
+                stored_tool_calls
+                if stored_tool_calls is not None
+                else (existing["tool_calls"] if "tool_calls" in existing.keys() else None)
+            )
             conn.execute(
                 """
                 UPDATE messages
@@ -4940,6 +4980,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                            conversation_message_id = ?,
                            metadata_json = ?,
                            reasoning = ?,
+                           tool_calls = ?,
                            active = 1
                      WHERE id = ?
                     """,
@@ -4951,6 +4992,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                         stable_message_id,
                         json.dumps(merged_metadata, ensure_ascii=False),
                         next_reasoning,
+                        next_tool_calls,
                         existing["id"],
                 ),
             )
@@ -4986,6 +5028,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         metadata: Dict[str, Any],
         status: str = "",
         reasoning: Any = "",
+        tool_calls: Any = None,
     ) -> Dict[str, Any]:
         """Insert or update an explicitly owned team transcript row by id."""
 
@@ -5000,6 +5043,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 metadata=metadata,
                 status=status,
                 reasoning=reasoning,
+                tool_calls=tool_calls,
             )
 
         return self._execute_write(_do)
