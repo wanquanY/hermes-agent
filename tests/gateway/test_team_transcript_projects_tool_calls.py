@@ -1,15 +1,16 @@
-"""Team leader ``message.complete`` projection MUST write
-``messages.tool_calls`` reconstructed from the ``tool_events`` read
-model.
+"""Team leader ``message.complete`` projection MUST NOT set
+``messages.tool_calls`` alone — the team-transcript path has no matching
+``role='tool'`` response projection, so a populated
+``assistant.tool_calls`` produces a dangling turn that LLM providers
+reject with HTTP 400 ("assistant message with tool_calls must be
+followed by tool messages responding to each tool_call_id").
 
-The team-mission ``message.complete`` payload only carries
-``text_length`` / ``text_sha256`` / ``reasoning_*`` metadata — never
-``tool_calls``. Without this reconstruction the projected assistant row
-has a NULL ``tool_calls`` column, and the frontend's rehydration path
-(which reads that column to render tool cards on reload / conversation
-switch) silently drops the assistant's tool cards. Most visibly, the
-``team_mission_start_task`` card disappears the moment streaming state
-is discarded.
+A prior version of the projection rebuilt ``tool_calls`` from the
+``tool_events`` read model to fix UI rehydration; those tests are gone.
+Until a proper tool-response projection or a frontend switch to reading
+``tool_events`` directly lands, ``messages.tool_calls`` stays NULL for
+the team transcript path, and the backfill helper is a NO-OP that also
+clears any dangling ``tool_calls`` a prior heal left behind.
 """
 
 from __future__ import annotations
@@ -82,7 +83,7 @@ def _seed_tool_event(
             ),
         )
 
-    db._execute_write(_insert)  # noqa: SLF001 - test seeds read model directly.
+    db._execute_write(_insert)  # noqa: SLF001
 
 
 def _message_complete_frame(
@@ -135,10 +136,10 @@ def _message_complete_frame(
 
 
 def _stored_row(db: SessionDB, session_id: str) -> dict[str, Any]:
-    with db._lock:  # noqa: SLF001 - test verifies persisted row shape.
+    with db._lock:  # noqa: SLF001
         row = db._conn.execute(  # noqa: SLF001
             """
-            SELECT content, tool_calls, participant_id, metadata_json
+            SELECT id, content, tool_calls, participant_id, metadata_json, timestamp
             FROM messages
             WHERE session_id = ?
               AND role = 'assistant'
@@ -151,27 +152,30 @@ def _stored_row(db: SessionDB, session_id: str) -> dict[str, Any]:
     return dict(row) if row else {}
 
 
-def test_project_message_complete_writes_tool_calls_from_tool_events(tmp_path: Path) -> None:
-    db, session_id, participant_id = _create_team_session(tmp_path, "conv-tool-calls")
-    run_id = "team-leader-run-tool-calls"
-    turn_id = "team-leader-turn-tool-calls"
+def test_project_message_complete_leaves_tool_calls_null_even_with_tool_events(
+    tmp_path: Path,
+) -> None:
+    """LLM protocol invariant: the team projection MUST NOT populate
+    ``tool_calls`` on its own, because the team-transcript path has no
+    matching ``role='tool'`` response projection — a populated
+    assistant.tool_calls with no follow-up is a dangling turn."""
+    db, session_id, participant_id = _create_team_session(tmp_path, "conv-invariant")
+    run_id = "team-leader-run-invariant"
+    turn_id = "team-leader-turn-invariant"
     activity_id = f"chat:{session_id}"
 
-    arguments = {
-        "objective": "在 workspace 创建测试文件",
-        "title": "测试团队任务 - 创建文件",
-    }
+    # Seed tool_events as if the leader had called team_mission_start_task.
     _seed_tool_event(
         db,
         session_id=session_id,
         run_id=run_id,
         turn_id=turn_id,
         participant_id=participant_id,
-        tool_call_id="call_00_team_mission_start",
+        tool_call_id="call_dangling_check",
         tool_name="team_mission_start_task",
-        arguments=arguments,
-        seq_start=609,
-        seq_last=610,
+        arguments={"title": "invariant test"},
+        seq_start=1,
+        seq_last=2,
     )
 
     frame = _message_complete_frame(
@@ -180,8 +184,8 @@ def test_project_message_complete_writes_tool_calls_from_tool_events(tmp_path: P
         turn_id=turn_id,
         participant_id=participant_id,
         activity_id=activity_id,
-        seq=666,
-        text="好的，重新发起「测试团队任务 - 创建文件」。",
+        seq=10,
+        text="已启动。",
     )
 
     def _project(conn):
@@ -189,117 +193,19 @@ def test_project_message_complete_writes_tool_calls_from_tool_events(tmp_path: P
             db, conn, session_id=session_id, event=frame,
         )
 
-    saved = db._execute_write(_project)  # noqa: SLF001
-    assert saved, "projection must produce a row for a leader message.complete"
-
+    db._execute_write(_project)  # noqa: SLF001
     row = _stored_row(db, session_id)
-    assert row, "assistant row must be persisted to messages"
-    assert row["content"], "text content must survive projection"
-
-    tool_calls_raw = row["tool_calls"]
-    assert tool_calls_raw, (
-        "R2 invariant: messages.tool_calls must NOT be NULL when the "
-        "run has associated tool_events — the frontend rehydrates tool "
-        "cards from this column"
-    )
-    tool_calls = json.loads(tool_calls_raw)
-    assert isinstance(tool_calls, list) and len(tool_calls) == 1
-    call = tool_calls[0]
-    assert call["id"] == "call_00_team_mission_start"
-    assert call["type"] == "function"
-    assert call["function"]["name"] == "team_mission_start_task"
-    persisted_args = json.loads(call["function"]["arguments"])
-    assert persisted_args == arguments, (
-        "arguments must round-trip through tool_events → messages.tool_calls"
-    )
-
-
-def test_backfill_heals_historical_null_tool_calls_when_tool_events_exist(
-    tmp_path: Path,
-) -> None:
-    """Historical assistant rows written before the projection fix have
-    NULL tool_calls even when tool_events records exist for their run.
-    ``backfill_projected_message_tool_calls_locked`` must repair them."""
-    from hermes_team_mission.runtime.team_transcript_writer import (
-        backfill_projected_message_tool_calls_locked,
-    )
-
-    db, session_id, participant_id = _create_team_session(tmp_path, "conv-backfill")
-    run_id = "team-leader-run-backfill-historical"
-    turn_id = "team-leader-turn-backfill-historical"
-
-    # Simulate the old (broken) projection: assistant row inserted with
-    # NO tool_calls column value, but metadata_json carries run_id/turn_id
-    # so backfill can locate it.
-    conversation_message_id = _conversation_message_id(session_id, run_id, "1")
-
-    def _seed_broken_assistant(conn):
-        conn.execute(
-            """
-            INSERT INTO messages (
-                session_id, role, content, participant_id, timestamp,
-                conversation_message_id, metadata_json, reasoning
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                session_id,
-                "assistant",
-                "已重新启动，任务正在异步执行中。",
-                participant_id,
-                1.0,
-                conversation_message_id,
-                json.dumps(
-                    {"run_id": run_id, "turn_id": turn_id, "session_id": session_id},
-                    ensure_ascii=False,
-                ),
-                "",
-            ),
-        )
-
-    db._execute_write(_seed_broken_assistant)  # noqa: SLF001
-
-    _seed_tool_event(
-        db,
-        session_id=session_id,
-        run_id=run_id,
-        turn_id=turn_id,
-        participant_id=participant_id,
-        tool_call_id="call_backfill_target",
-        tool_name="team_mission_start_task",
-        arguments={"title": "历史任务"},
-        seq_start=100,
-        seq_last=101,
-    )
-
-    def _do_backfill(conn):
-        return backfill_projected_message_tool_calls_locked(
-            db, conn, session_ids=[session_id],
-        )
-
-    repaired = db._execute_write(_do_backfill)  # noqa: SLF001
-    assert repaired == 1
-
-    row = _stored_row(db, session_id)
-    tool_calls = json.loads(row["tool_calls"])
-    assert tool_calls[0]["id"] == "call_backfill_target"
-
-
-def _conversation_message_id(session_id: str, run_id: str, message_seq_in_run: str) -> str:
-    return assistant_conversation_message_id_for(
-        AssistantMessageIdentity(
-            session_id=session_id,
-            run_id=run_id,
-            message_seq_in_run=message_seq_in_run,
-        )
+    assert row["content"], "text still projects"
+    assert row["tool_calls"] in (None, ""), (
+        "LLM protocol invariant: team assistant row must NOT carry "
+        "tool_calls without a matching role='tool' response projection"
     )
 
 
 def test_project_message_complete_leaves_tool_calls_null_when_no_tool_events(
     tmp_path: Path,
 ) -> None:
-    """Plain text turn (no tool call): tool_calls column must be NULL,
-    not the empty string / empty list — the frontend distinguishes."""
+    """Plain text turn (no tool call): tool_calls column must stay NULL."""
     db, session_id, participant_id = _create_team_session(tmp_path, "conv-text-only")
     run_id = "team-leader-run-text-only"
     turn_id = "team-leader-turn-text-only"
@@ -323,6 +229,141 @@ def test_project_message_complete_leaves_tool_calls_null_when_no_tool_events(
     db._execute_write(_project)  # noqa: SLF001
     row = _stored_row(db, session_id)
     assert row["content"], "text-only turn still projects"
-    assert row["tool_calls"] in (None, ""), (
-        "no tool_events for this run → tool_calls must stay NULL/empty"
+    assert row["tool_calls"] in (None, ""), "no tool_events, no tool_calls"
+
+
+def test_backfill_clears_dangling_tool_calls_left_by_prior_heal(tmp_path: Path) -> None:
+    """A prior version of ``backfill_projected_message_tool_calls_locked``
+    populated ``messages.tool_calls`` for historical NULL rows. That
+    produced dangling assistant turns and 400s. The current no-op
+    backfill also defensively clears any tool_calls value that has no
+    matching role='tool' follow-up row for the same session."""
+    from hermes_team_mission.runtime.team_transcript_writer import (
+        backfill_projected_message_tool_calls_locked,
     )
+
+    db, session_id, participant_id = _create_team_session(tmp_path, "conv-dangling")
+    run_id = "team-leader-run-dangling"
+    turn_id = "team-leader-turn-dangling"
+    conversation_message_id = assistant_conversation_message_id_for(
+        AssistantMessageIdentity(
+            session_id=session_id,
+            run_id=run_id,
+            message_seq_in_run="1",
+        )
+    )
+
+    dangling_json = json.dumps(
+        [{
+            "id": "call_prior_heal",
+            "type": "function",
+            "function": {"name": "team_mission_start_task", "arguments": "{}"},
+        }],
+        ensure_ascii=False,
+    )
+
+    def _seed_dangling(conn):
+        conn.execute(
+            """
+            INSERT INTO messages (
+                session_id, role, content, participant_id, timestamp,
+                conversation_message_id, metadata_json, reasoning, tool_calls
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                "assistant",
+                "已启动。",
+                participant_id,
+                1.0,
+                conversation_message_id,
+                json.dumps({"run_id": run_id, "turn_id": turn_id, "session_id": session_id}),
+                "",
+                dangling_json,
+            ),
+        )
+
+    db._execute_write(_seed_dangling)  # noqa: SLF001
+
+    row_before = _stored_row(db, session_id)
+    assert row_before["tool_calls"] == dangling_json, "seed must place dangling tool_calls"
+
+    def _do_backfill(conn):
+        return backfill_projected_message_tool_calls_locked(
+            db, conn, session_ids=[session_id],
+        )
+
+    db._execute_write(_do_backfill)  # noqa: SLF001
+
+    row_after = _stored_row(db, session_id)
+    assert row_after["tool_calls"] in (None, ""), (
+        "defensive clear: dangling tool_calls (no matching role='tool' "
+        "follow-up) must be cleared so LLM requests stop 400ing"
+    )
+
+
+def test_backfill_preserves_tool_calls_when_role_tool_response_exists(tmp_path: Path) -> None:
+    """If a matching role='tool' response row exists for the same
+    session at or after the assistant timestamp, the tool_calls value
+    is a valid pair and must be preserved."""
+    from hermes_team_mission.runtime.team_transcript_writer import (
+        backfill_projected_message_tool_calls_locked,
+    )
+
+    db, session_id, participant_id = _create_team_session(tmp_path, "conv-valid-pair")
+    run_id = "team-leader-run-valid-pair"
+    conversation_message_id = assistant_conversation_message_id_for(
+        AssistantMessageIdentity(
+            session_id=session_id,
+            run_id=run_id,
+            message_seq_in_run="1",
+        )
+    )
+    valid_tool_calls = json.dumps(
+        [{
+            "id": "call_valid_pair",
+            "type": "function",
+            "function": {"name": "search_files", "arguments": "{}"},
+        }],
+        ensure_ascii=False,
+    )
+
+    def _seed_pair(conn):
+        conn.execute(
+            """
+            INSERT INTO messages (
+                session_id, role, content, participant_id, timestamp,
+                conversation_message_id, metadata_json, reasoning, tool_calls
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, "assistant", "调用工具", participant_id, 1.0,
+             conversation_message_id, "{}", "", valid_tool_calls),
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (
+                session_id, role, content, participant_id, timestamp,
+                tool_call_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, "tool", "{\"result\": \"ok\"}", "", 2.0, "call_valid_pair"),
+        )
+
+    db._execute_write(_seed_pair)  # noqa: SLF001
+
+    def _do_backfill(conn):
+        return backfill_projected_message_tool_calls_locked(
+            db, conn, session_ids=[session_id],
+        )
+
+    db._execute_write(_do_backfill)  # noqa: SLF001
+
+    with db._lock:  # noqa: SLF001
+        row = db._conn.execute(  # noqa: SLF001
+            "SELECT tool_calls FROM messages WHERE session_id=? AND role='assistant'",
+            (session_id,),
+        ).fetchone()
+    assert row["tool_calls"] == valid_tool_calls, "paired tool_calls must survive"

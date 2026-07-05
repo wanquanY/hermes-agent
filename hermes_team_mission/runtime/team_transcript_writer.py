@@ -1372,17 +1372,15 @@ class RuntimeTranscriptWriter:
         upsert_locked = getattr(db, "_upsert_team_message_by_id_locked", None)
         if not callable(upsert_locked):
             return {}
-        # Rebuild tool_calls from the tool_events read model so the
-        # projected assistant row carries the full turn — otherwise the
-        # frontend's rehydration path (which reads messages.tool_calls
-        # to render tool cards) silently drops the assistant's tool
-        # calls after streaming state is discarded.
-        tool_calls = _run_tool_calls_locked(
-            conn,
-            session_id=conversation_session_id,
-            run_id=run_id,
-            turn_id=turn_id,
-        )
+        # NOTE (2026-07-05): a prior attempt to populate messages.tool_calls
+        # from tool_events here caused LLM provider 400s ("assistant message
+        # with tool_calls must be followed by tool messages responding to
+        # each tool_call_id"), because the team-transcript path has no
+        # matching role='tool' response projection — the LLM history
+        # therefore had a dangling assistant.tool_calls with no tool
+        # response follow-up. Reverted to pass tool_calls=None until the
+        # tool-response projection is in place (see workflow output for
+        # the full architectural fix).
         saved = upsert_locked(
             conn,
             session_id=conversation_session_id,
@@ -1394,7 +1392,7 @@ class RuntimeTranscriptWriter:
             status=status,
             reasoning=payload.get("reasoning") or payload.get("reasoning_content") or "",
             timestamp=float(event.get("timestamp") or 0) or None,
-            tool_calls=tool_calls or None,
+            tool_calls=None,
         )
         if report_context:
             report_mission_id = _text(report_context.get("mission_id"))
@@ -1645,17 +1643,24 @@ def backfill_projected_message_tool_calls_locked(
     session_ids: list[str],
     limit: int = 500,
 ) -> int:
-    """Heal historical team leader assistant rows whose ``tool_calls``
-    column is NULL/empty but whose owning run has entries in
-    ``tool_events``.
+    """NO-OP after 2026-07-05.
 
-    Prior to the fix, the team projection path (which is the ONLY writer
-    for team leader messages) never populated ``tool_calls`` at all —
-    the frontend's rehydration reads that column to render tool cards,
-    so the ``team_mission_start_task`` card silently vanished on
-    reload. This one-shot repair rebuilds the missing JSON from the
-    ``tool_events`` read model. Runs without associated tool events are
-    left untouched (their ``tool_calls`` should stay NULL).
+    A prior version of this function rebuilt ``messages.tool_calls`` from
+    the ``tool_events`` read model to heal historical NULL rows. That
+    turned out to violate the LLM protocol: the team-transcript path
+    never projects a matching ``role='tool'`` response for each tool call,
+    so an assistant row with ``tool_calls`` set but no follow-up response
+    is a dangling turn — providers reject it with HTTP 400
+    ("assistant message with tool_calls must be followed by tool messages
+    responding to each tool_call_id").
+
+    The heal is kept as a NO-OP for call-site compatibility while the
+    correct architectural fix (either projecting tool responses so the
+    pair is complete, or rendering tool cards from ``tool_events``
+    directly in the frontend so ``messages.tool_calls`` is not needed as
+    a UI source) is being planned. Also, if a previous run of this
+    heal already populated tool_calls, we defensively clear those
+    dangling values on the same pass so LLM requests stop 400ing.
     """
     target_session_ids = [
         _text(session_id)
@@ -1664,56 +1669,28 @@ def backfill_projected_message_tool_calls_locked(
     ]
     if not target_session_ids:
         return 0
-    bounded_limit = max(1, min(int(limit or 500), 2000))
     placeholders = ",".join("?" for _ in target_session_ids)
     try:
-        rows = conn.execute(
+        conn.execute(
             f"""
-            SELECT m.id AS message_id,
-                   m.session_id AS session_id,
-                   json_extract(m.metadata_json, '$.run_id') AS run_id,
-                   json_extract(m.metadata_json, '$.turn_id') AS turn_id
-            FROM messages m
-            WHERE m.session_id IN ({placeholders})
-              AND m.role = 'assistant'
-              AND m.active = 1
-              AND COALESCE(m.tool_calls, '') = ''
-              AND json_extract(m.metadata_json, '$.run_id') IS NOT NULL
-              AND EXISTS (
-                  SELECT 1 FROM tool_events te
-                  WHERE te.session_id = m.session_id
-                    AND te.run_id = json_extract(m.metadata_json, '$.run_id')
-              )
-            ORDER BY m.id DESC
-            LIMIT ?
+            UPDATE messages
+               SET tool_calls = NULL
+             WHERE session_id IN ({placeholders})
+               AND role = 'assistant'
+               AND COALESCE(tool_calls, '') != ''
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM messages AS resp
+                    WHERE resp.session_id = messages.session_id
+                      AND resp.role = 'tool'
+                      AND resp.timestamp >= messages.timestamp
+               )
             """,
-            (*target_session_ids, bounded_limit),
-        ).fetchall()
-    except Exception:
-        return 0
-    repaired = 0
-    for row in rows:
-        session_id = _text(_row_value(row, "session_id"))
-        run_id = _text(_row_value(row, "run_id"))
-        turn_id = _text(_row_value(row, "turn_id"))
-        message_id = _row_value(row, "message_id")
-        tool_calls = _run_tool_calls_locked(
-            conn,
-            session_id=session_id,
-            run_id=run_id,
-            turn_id=turn_id,
+            tuple(target_session_ids),
         )
-        if not tool_calls:
-            continue
-        try:
-            conn.execute(
-                "UPDATE messages SET tool_calls = ? WHERE id = ?",
-                (json.dumps(tool_calls, ensure_ascii=False), message_id),
-            )
-            repaired += 1
-        except Exception:
-            continue
-    return repaired
+    except Exception:
+        pass
+    return 0
 
 
 def _conversation_session_id_from_mission(mission: dict[str, Any] | None) -> str:
