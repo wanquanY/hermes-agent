@@ -5774,10 +5774,22 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             with self._lock:
                 placeholders = ",".join("?" for _ in session_ids)
                 active_clause = "" if include_inactive else " AND active = 1"
+                # Order by timestamp first (matches the non-team branch at
+                # line ~6427 and the test invariant in
+                # test_team_transcript_writer_raw_segments._stored_messages_by_timestamp).
+                # ``project_message_complete_event_locked`` upserts the
+                # assistant row for the FINAL segment first (higher
+                # message_seq_in_run), then
+                # ``_project_reconstructed_assistant_segments_locked``
+                # back-fills earlier raw segments (pre-tool text). Those
+                # back-filled rows have SMALLER timestamps but LARGER
+                # ids — ordering by id alone yields post-tool text
+                # before pre-tool text and the tool card between them,
+                # which is the "顺序又乱" symptom.
                 rows = self._conn.execute(
                     f"SELECT {self._conversation_message_columns()} "
                     f"FROM messages WHERE session_id IN ({placeholders})"
-                    f"{active_clause} ORDER BY id",
+                    f"{active_clause} ORDER BY timestamp ASC, id ASC",
                     tuple(session_ids),
                 ).fetchall()
             messages = [
