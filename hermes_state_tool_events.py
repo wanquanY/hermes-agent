@@ -622,3 +622,94 @@ def tool_event_row_to_dict(row: Any) -> dict[str, Any]:
         payload["result_text"] = item["result_text"]
     item["payload"] = payload
     return item
+
+
+# Canonical tool-event reader (PR-3 §4.3) -----------------------------------
+#
+# The ``run_events`` table is the authoritative event source: every
+# ``tool.start`` / ``tool.complete`` (and ``tool.generating`` /
+# ``tool.progress``) frame is persisted there with a real ``seq`` assigned by
+# ``append_run_event``.  The ``tool_events`` table is a *projection* (read
+# model) whose ``seq_start`` / ``seq_last`` columns are derived from — but
+# not identical to — the canonical run_events ``seq`` values.
+#
+# Problem (triage S5/S7): when snapshot/pagination responses served the
+# ``tool_events`` row model, FE code synthesized ``tool.start`` /
+# ``tool.complete`` events and stamped them with ``seq_start``.  Those
+# synthetic seqs did **not** match the canonical run_events seqs, so shared-seq
+# deduplication in the FE ledger broke ("dual seq identity").
+#
+# Solution: serve canonical event shapes directly.  This function reads the
+# ``run_events`` rows for the tool-event types and decodes each via
+# ``decode_run_event_row``, producing the same dict shape that
+# ``list_run_events`` returns — including the *real* ``run_events.seq``.
+# FE no longer needs to reverse-derive events from the row model.
+#
+# ``tool_events`` table is intentionally untouched: it remains the read model
+# and backfill source for legacy callers.
+
+
+def _run_event_row_to_canonical(row: Any) -> dict[str, Any] | None:
+    """Decode a ``run_events`` row into a canonical event dict.
+
+    Mirrors the decode path used by ``SessionDB.list_run_events`` minus the
+    reference-rehydration step (which only affects cross-event references and
+    is not needed for the tool-event snapshot/pagination use case).  Returns
+    ``None`` when the row cannot be decoded to a dict.
+    """
+    event = decode_run_event_row(row)
+    if not isinstance(event, dict) or not event:
+        return None
+    # ``decode_run_event_row`` already populates: type, stored_session_id,
+    # session_id, runtime_session_id, runtime_scope_key, run_id, turn_id,
+    # participant_id, seq, timestamp, payload.  These are exactly the fields
+    # the canonical event shape requires.
+    event["seq"] = int(event.get("seq") or _row_value(row, "seq", 0) or 0)
+    return event
+
+
+def list_tool_events_as_canonical(
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    after_seq: int = 0,
+    limit: int = 2000,
+) -> list[dict[str, Any]]:
+    """Return canonical tool events (``tool.start``/``tool.complete``/…) for a session.
+
+    Reads directly from the ``run_events`` table so each returned event carries
+    its *real* ``run_events.seq`` — not the ``tool_events.seq_start`` projection
+    value.  The returned dicts have the same shape as ``list_run_events``
+    output: ``{type, seq, run_id, turn_id, payload, stored_session_id, ...}``.
+
+    Parameters mirror ``list_run_events`` for cursor compatibility:
+    ``after_seq`` is an exclusive forward cursor (only events with ``seq >
+    after_seq`` are returned).
+
+    The ``tool_events`` projection table is **not** queried here; it remains a
+    read model / backfill source for legacy callers.
+    """
+    stable = str(session_id or "").strip()
+    if not stable:
+        return []
+    bounded_limit = max(1, min(int(limit or 2000), 5000))
+    cursor_seq = int(after_seq or 0)
+    type_placeholders = ", ".join("?" for _ in TOOL_EVENT_TYPES)
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM run_events
+        WHERE session_id = ?
+          AND seq > ?
+          AND event_type IN ({type_placeholders})
+        ORDER BY seq ASC
+        LIMIT ?
+        """,
+        (stable, cursor_seq, *TOOL_EVENT_TYPES, bounded_limit),
+    ).fetchall()
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        event = _run_event_row_to_canonical(row)
+        if event is not None:
+            events.append(event)
+    return events
