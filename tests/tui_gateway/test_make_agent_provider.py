@@ -668,6 +668,93 @@ def test_make_agent_codex_runtime_profile_defaults_provider():
     assert mock_agent.call_args.kwargs["provider"] == "openai-codex"
 
 
+def test_member_chat_profile_context_builds_byo_codex_agent_without_turn_model():
+    from types import SimpleNamespace
+
+    from agent.codex_runtime import codex_app_server_turn_model
+    from tui_gateway import server
+
+    fake_runtime = {
+        "provider": "openai-codex",
+        "base_url": "",
+        "api_key": "",
+        "api_mode": "codex_app_server",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+        "codex_home": "/tmp/dovie/member-codex-home",
+    }
+    fake_cfg = {
+        "agent": {"system_prompt": ""},
+        "model": {"default": "gpt-5.5", "provider": "dovie-cloud"},
+    }
+    params = {
+        "stored_session_id": "team-session-1",
+        "session_id": "team-session-1",
+        "agent_context_mode": "member_chat",
+        "runtime_scope_key": "member-chat:conv-1:codex-member",
+        "run_context_json": (
+            '{"conversation_session_id":"team-session-1",'
+            '"participant_id":"member:codex-member",'
+            '"activity_id":"act-member_chat:team-session-1:codex-member",'
+            '"activity_kind":"member_chat",'
+            '"execution_scope_key":"member-chat:conv-1:codex-member",'
+            '"control_home":"/tmp/dovie/control",'
+            '"execution_home":"/tmp/dovie/member"}'
+        ),
+        "dovie_profile": {
+            "id": "agent-codex-member",
+            "runtimeExecutor": "codex",
+            "runtime_executor": "codex",
+            "codexHome": "/tmp/dovie/member-codex-home",
+            "codex_home": "/tmp/dovie/member-codex-home",
+            "codexAccountMode": "byo",
+            "codex_account_mode": "byo",
+            "codexExtraEnv": {
+                "CODEX_TRACE": "1",
+                "DROP_ME": None,
+            },
+            "codex_extra_env": {
+                "CODEX_TRACE": "1",
+                "DROP_ME": None,
+            },
+        },
+    }
+    profile_context = server._profile_context_for_params(params)
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._persisted_session_runtime", return_value=("", None)),
+        patch("tui_gateway.server._resolve_startup_runtime", return_value=("gpt-5.5", "dovie-cloud")),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime) as mock_resolve,
+        patch("run_agent.AIAgent", side_effect=lambda **kwargs: SimpleNamespace(**kwargs)),
+    ):
+        agent = server._make_agent(
+            "sid-member-codex",
+            "team-session-1",
+            session_id="team-session-1",
+            agent_context_mode="member_chat",
+            profile_context=profile_context,
+        )
+
+    mock_resolve.assert_called_once_with(
+        requested="openai-codex",
+        target_model="gpt-5.5",
+        runtime_executor="codex",
+        codex_home="/tmp/dovie/member-codex-home",
+    )
+    assert agent.api_mode == "codex_app_server"
+    assert agent.codex_home == "/tmp/dovie/member-codex-home"
+    assert agent.codex_account_mode == "byo"
+    assert agent.codex_extra_env == {"CODEX_TRACE": "1"}
+    assert codex_app_server_turn_model(agent) == ""
+
+
 def test_make_agent_rejects_forced_codex_runtime_without_codex_home():
     """Guard: refusing to fall back to ~/.codex is a load-bearing invariant.
 

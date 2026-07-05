@@ -376,7 +376,8 @@ async def test_e2e_team_mission_member_chat(
         viewing_participant_id="member:member-alice",
         participants=participants,
     )
-    assert [(message["role"], message["content"]) for message in projection] == [
+    assert projection[0]["metadata"]["team_member_identity_contract"] is True
+    assert [(message["role"], message["content"]) for message in projection[1:]] == [
         ("user", "@Alice please review the release plan."),
         ("assistant", "I will review the release plan as Alice."),
         ("user", "[Bob] Bob sees one risk in the test plan."),

@@ -17,6 +17,7 @@ runtime is not selected.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import subprocess
@@ -28,6 +29,7 @@ from typing import Any, Callable, Optional
 # Default minimum codex version we test against. The PR sets this from the
 # `codex --version` parsed at install time; bumping is a one-line change here.
 MIN_CODEX_VERSION = (0, 125, 0)
+logger = logging.getLogger(__name__)
 
 
 _DETECTED_USER_HTTPS_PROXY: Optional[str] = None
@@ -199,9 +201,7 @@ class CodexAppServerClient:
         _env_https = spawn_env.get("HTTPS_PROXY") or spawn_env.get("https_proxy")
         _detected = None if _env_https else _detect_user_https_proxy()
         _https_proxy = _env_https or _detected
-        import logging as _proxy_log
-        _proxy_log.getLogger().warning(
-            "[codex-perf][proxy] env_https=%r detected=%r effective=%r",
+        logger.debug("[codex-perf][proxy] env_https=%r detected=%r effective=%r",
             _env_https, _detected, _https_proxy,
         )
         if _https_proxy:

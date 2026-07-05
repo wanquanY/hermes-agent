@@ -72,6 +72,27 @@ def profile_context_for_params(params: dict | None = None) -> dict | None:
         or profile.get("codex_home")
         or ""
     ).strip()
+    codex_account_mode = str(
+        params.get("codex_account_mode")
+        or params.get("codexAccountMode")
+        or profile.get("codexAccountMode")
+        or profile.get("codex_account_mode")
+        or ""
+    ).strip()
+    codex_extra_env = {}
+    for candidate in (
+        params.get("codex_extra_env"),
+        params.get("codexExtraEnv"),
+        profile.get("codexExtraEnv"),
+        profile.get("codex_extra_env"),
+    ):
+        if isinstance(candidate, dict) and candidate:
+            codex_extra_env = {
+                str(k): str(v)
+                for k, v in candidate.items()
+                if v is not None
+            }
+            break
     provider = str(
         params.get("provider")
         or params.get("model_provider")
@@ -96,6 +117,8 @@ def profile_context_for_params(params: dict | None = None) -> dict | None:
         "runtime_scope_key": runtime_scope_key,
         "runtime_executor": runtime_executor,
         "codex_home": codex_home,
+        "codex_account_mode": codex_account_mode,
+        "codex_extra_env": codex_extra_env,
         "provider": provider,
     }
 

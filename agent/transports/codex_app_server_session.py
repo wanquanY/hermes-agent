@@ -227,6 +227,7 @@ class CodexAppServerSession:
         self._prior_thread_id: Optional[str] = (
             str(prior_thread_id).strip() or None if prior_thread_id else None
         )
+        self._thread_rebuilt_from_prior = False
         self._interrupt_event = threading.Event()
         # Pending file-change items, keyed by item id. Populated on
         # item/started for fileChange items; consumed by the approval
@@ -244,9 +245,8 @@ class CodexAppServerSession:
         return the same thread id."""
         if self._thread_id is not None:
             return self._thread_id
-        import logging as _dbg_lg, time as _dbg_time
-        _t0 = _dbg_time.monotonic()
-        _dbg_lg.getLogger().warning("[codex-perf][ensure_started] BEGIN prior=%s", (self._prior_thread_id or "")[:8])
+        _t0 = time.monotonic()
+        logger.debug("[codex-perf][ensure_started] BEGIN prior=%s", (self._prior_thread_id or "")[:8])
         if self._client is None:
             client_kwargs = {
                 "codex_bin": self._codex_bin,
@@ -254,16 +254,16 @@ class CodexAppServerSession:
             }
             if self._extra_env is not None:
                 client_kwargs["env"] = self._extra_env
-            _t_before_spawn = _dbg_time.monotonic()
+            _t_before_spawn = time.monotonic()
             self._client = self._client_factory(**client_kwargs)
-            _dbg_lg.getLogger().warning("[codex-perf][ensure_started] client spawned dt=%.3fs", _dbg_time.monotonic() - _t_before_spawn)
-        _t_before_init = _dbg_time.monotonic()
+            logger.debug("[codex-perf][ensure_started] client spawned dt=%.3fs", time.monotonic() - _t_before_spawn)
+        _t_before_init = time.monotonic()
         self._client.initialize(
             client_name="hermes",
             client_title="Hermes Agent",
             client_version=_get_hermes_version(),
         )
-        _dbg_lg.getLogger().warning("[codex-perf][ensure_started] initialize dt=%.3fs", _dbg_time.monotonic() - _t_before_init)
+        logger.debug("[codex-perf][ensure_started] initialize dt=%.3fs", time.monotonic() - _t_before_init)
         # Permission selection is intentionally NOT sent on thread/start.
         # Two reasons (live-tested against codex 0.130.0):
         #   1. `thread/start.permissions` is gated behind the experimentalApi
@@ -281,15 +281,17 @@ class CodexAppServerSession:
         # ~/.codex/config.toml the same way they would for any codex usage.
         thread_id: Optional[str] = None
         resumed = False
+        resume_failed = False
+        had_prior_thread = bool(self._prior_thread_id)
         if self._prior_thread_id:
             try:
-                _t_resume = _dbg_time.monotonic()
+                _t_resume = time.monotonic()
                 resume_result = self._client.request(
                     "thread/resume",
                     {"threadId": self._prior_thread_id},
                     timeout=15,
                 )
-                _dbg_lg.getLogger().warning("[codex-perf][ensure_started] thread/resume dt=%.3fs", _dbg_time.monotonic() - _t_resume)
+                logger.debug("[codex-perf][ensure_started] thread/resume dt=%.3fs", time.monotonic() - _t_resume)
                 thread_obj = resume_result.get("thread") or {}
                 thread_id = (
                     thread_obj.get("id")
@@ -312,12 +314,13 @@ class CodexAppServerSession:
                     self._prior_thread_id[:8],
                     exc,
                 )
+                resume_failed = True
                 thread_id = None
         if not thread_id:
             params: dict[str, Any] = {"cwd": self._cwd}
-            _t_start = _dbg_time.monotonic()
+            _t_start = time.monotonic()
             result = self._client.request("thread/start", params, timeout=15)
-            _dbg_lg.getLogger().warning("[codex-perf][ensure_started] thread/start dt=%.3fs", _dbg_time.monotonic() - _t_start)
+            logger.debug("[codex-perf][ensure_started] thread/start dt=%.3fs", time.monotonic() - _t_start)
             model = _extract_protocol_model(result)
             if model:
                 self._protocol_model = model
@@ -342,7 +345,8 @@ class CodexAppServerSession:
                 )
         self._thread_id = thread_id
         self._prior_thread_id = None
-        _dbg_lg.getLogger().warning("[codex-perf][ensure_started] END total_dt=%.3fs resumed=%s tid=%s", _dbg_time.monotonic() - _t0, resumed, self._thread_id[:8])
+        self._thread_rebuilt_from_prior = bool(had_prior_thread and resume_failed)
+        logger.debug("[codex-perf][ensure_started] END total_dt=%.3fs resumed=%s tid=%s", time.monotonic() - _t0, resumed, self._thread_id[:8])
         logger.info(
             "codex app-server thread %s: id=%s profile=%s cwd=%s",
             "resumed" if resumed else "started",
@@ -351,6 +355,11 @@ class CodexAppServerSession:
             self._cwd,
         )
         return self._thread_id
+
+    def consume_thread_rebuilt_from_prior(self) -> bool:
+        rebuilt = bool(self._thread_rebuilt_from_prior)
+        self._thread_rebuilt_from_prior = False
+        return rebuilt
 
     def close(self) -> None:
         if self._closed:
@@ -470,12 +479,11 @@ class CodexAppServerSession:
         # supports rich content but Hermes' text path is the common case).
         try:
             input_text = _coerce_turn_input_text(user_input)
-            import logging as _dbg_lg, time as _dbg_time
-            _t_turn_begin = _dbg_time.monotonic()
+            _t_turn_begin = time.monotonic()
             _first_delta_at: list[float] = []
             self._first_delta_at = _first_delta_at  # picked up in event loop
-            _dbg_lg.warning("[codex-flow][run_turn] SENDING turn/start thread=%s input_len=%s", self._thread_id, len(input_text))
-            _t_ts = _dbg_time.monotonic()
+            logger.debug("[codex-flow][run_turn] SENDING turn/start thread=%s input_len=%s", self._thread_id, len(input_text))
+            _t_ts = time.monotonic()
             turn_params: dict[str, Any] = {
                 "threadId": self._thread_id,
                 "input": [{"type": "text", "text": input_text}],
@@ -492,8 +500,8 @@ class CodexAppServerSession:
             model = _extract_protocol_model(ts)
             if model:
                 result.actual_model = model
-            _dbg_lg.warning("[codex-perf][run_turn] turn/start dt=%.3fs", _dbg_time.monotonic() - _t_ts)
-            _dbg_lg.warning("[codex-flow][run_turn] turn/start REPLIED turn_id=%s ts_keys=%s", (ts.get("turn") or {}).get("id"), sorted(ts.keys()) if isinstance(ts, dict) else "?")
+            logger.debug("[codex-perf][run_turn] turn/start dt=%.3fs", time.monotonic() - _t_ts)
+            logger.debug("[codex-flow][run_turn] turn/start REPLIED turn_id=%s ts_keys=%s", (ts.get("turn") or {}).get("id"), sorted(ts.keys()) if isinstance(ts, dict) else "?")
         except CodexAppServerError as exc:
             # Classify auth/refresh failures so the user gets a clear
             # `codex login` pointer instead of a raw RPC error string.
@@ -606,8 +614,7 @@ class CodexAppServerSession:
             # reading notifications, so the codex side isn't blocked.
             sreq = self._client.take_server_request(timeout=0)
             if sreq is not None:
-                import logging as _dbg_lg
-                _dbg_lg.warning("[codex-flow][run_turn] SERVER_REQUEST method=%r keys=%s", sreq.get("method"), sorted(sreq.keys()))
+                logger.debug("[codex-flow][run_turn] SERVER_REQUEST method=%r keys=%s", sreq.get("method"), sorted(sreq.keys()))
                 # Drain any pending notifications first so per-turn state
                 # (e.g. _pending_file_changes for fileChange approvals) is
                 # up to date when we make the approval decision. Bounded
@@ -648,22 +655,9 @@ class CodexAppServerSession:
                 continue
 
             method = note.get("method", "")
-            import logging as _dbg_lg, time as _dbg_time, json as _dbg_json
-            _dbg_lg.warning("[codex-flow][run_turn] EVENT method=%r params_keys=%s", method, sorted((note.get("params") or {}).keys())[:8])
-            if method in ("error", "warning", "mcpServer/startupStatus/updated"):
-                try:
-                    _dbg_lg.warning("[codex-flow][run_turn] FULL_EVENT %s: %s", method, _dbg_json.dumps(note.get("params") or {}, ensure_ascii=False)[:600])
-                except Exception:
-                    pass
-            if method in ("item/started", "item/completed"):
-                try:
-                    _item = (note.get("params") or {}).get("item") or {}
-                    _dbg_lg.warning("[codex-flow][run_turn] ITEM %s type=%r keys=%s", method, _item.get("type"), sorted(_item.keys())[:8])
-                except Exception:
-                    pass
             if method == "item/agentMessage/delta" and not _first_delta_at:
-                _first_delta_at.append(_dbg_time.monotonic())
-                _dbg_lg.warning("[codex-perf][run_turn] FIRST agentMessage/delta after turn_start dt=%.3fs", _first_delta_at[0] - _t_turn_begin)
+                _first_delta_at.append(time.monotonic())
+                logger.debug("[codex-perf][run_turn] FIRST agentMessage/delta after turn_start dt=%.3fs", _first_delta_at[0] - _t_turn_begin)
             mark_notification(note)
             if self._on_event is not None:
                 try:
@@ -671,8 +665,8 @@ class CodexAppServerSession:
                 except Exception:  # pragma: no cover - display callback
                     logger.debug("on_event callback raised", exc_info=True)
                 if method == "item/agentMessage/delta" and len(_first_delta_at) == 1:
-                    _first_delta_at.append(_dbg_time.monotonic())  # sentinel
-                    _dbg_lg.warning("[codex-flow][on_event] FIRST delta forwarded to hermes")
+                    _first_delta_at.append(time.monotonic())  # sentinel
+                    logger.debug("[codex-flow][on_event] FIRST delta forwarded to hermes")
 
             _apply_protocol_model_notification(result, note)
             _apply_token_usage_notification(result, note)

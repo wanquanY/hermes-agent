@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import PurePath
 from typing import Any
@@ -13,6 +14,8 @@ from hermes_team_mission.context.artifact_refs import artifact_refs_from_event
 from hermes_team_mission.context.artifact_refs import dedupe_artifact_refs
 from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_kind
 
+
+logger = logging.getLogger(__name__)
 
 MAIN_TRANSCRIPT_ACTIVITY_KINDS = frozenset({
     "leader_chat",
@@ -380,16 +383,386 @@ def _event_turn_id(event: dict[str, Any], payload: dict[str, Any]) -> str:
     return _text(event.get("turn_id") or event.get("turnId") or payload.get("turn_id") or payload.get("turnId"))
 
 
+def _message_seq_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return _text(value)
+    return str(value).strip()
+
+
+def _explicit_event_message_seq(event: dict[str, Any], payload: dict[str, Any]) -> str:
+    for value in (
+        event.get("message_seq_in_run"),
+        event.get("messageSeqInRun"),
+        payload.get("message_seq_in_run"),
+        payload.get("messageSeqInRun"),
+    ):
+        text = _message_seq_text(value)
+        if text:
+            return text
+    return ""
+
+
 def _event_message_seq(event: dict[str, Any], payload: dict[str, Any]) -> str:
+    for value in (
+        event.get("message_seq_in_run"),
+        event.get("messageSeqInRun"),
+        payload.get("message_seq_in_run"),
+        payload.get("messageSeqInRun"),
+        payload.get("client_message_id"),
+        payload.get("clientMessageId"),
+        event.get("seq"),
+    ):
+        text = _message_seq_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _event_client_message_id(event: dict[str, Any], payload: dict[str, Any]) -> str:
     return _text(
-        event.get("message_seq_in_run")
-        or event.get("messageSeqInRun")
-        or payload.get("message_seq_in_run")
-        or payload.get("messageSeqInRun")
+        event.get("client_message_id")
+        or event.get("clientMessageId")
         or payload.get("client_message_id")
         or payload.get("clientMessageId")
-        or event.get("seq")
     )
+
+
+def _assistant_segment_index(client_message_id: str) -> str:
+    marker = ":assistant-segment:"
+    if marker not in client_message_id:
+        return ""
+    suffix = client_message_id.rsplit(marker, 1)[-1]
+    return suffix.split(":", 1)[0].strip()
+
+
+def _assistant_raw_segment_identity(event: dict[str, Any], payload: dict[str, Any]) -> dict[str, str]:
+    message_seq = _explicit_event_message_seq(event, payload)
+    client_message_id = _event_client_message_id(event, payload)
+    segment_index = _assistant_segment_index(client_message_id)
+    event_seq = _message_seq_text(event.get("seq"))
+    if message_seq:
+        key = f"message_seq:{message_seq}"
+        stable_message_seq = message_seq
+        source = "message_seq_in_run"
+    elif segment_index:
+        key = f"client_segment:{segment_index}"
+        stable_message_seq = client_message_id or f"assistant-segment:{segment_index}"
+        source = "client_message_id"
+    elif client_message_id:
+        key = f"client_message_id:{client_message_id}"
+        stable_message_seq = client_message_id
+        source = "client_message_id"
+    elif event_seq:
+        key = f"event_seq:{event_seq}"
+        stable_message_seq = event_seq
+        source = "event_seq"
+    else:
+        key = ""
+        stable_message_seq = ""
+        source = ""
+    return {
+        "key": key,
+        "source": source,
+        "message_seq_in_run": message_seq,
+        "client_message_id": client_message_id,
+        "assistant_segment_index": segment_index,
+        "stable_message_seq": stable_message_seq,
+    }
+
+
+def _assistant_raw_segment_identities_match(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> bool:
+    for key in ("message_seq_in_run", "client_message_id", "assistant_segment_index", "stable_message_seq"):
+        left_value = _text(left.get(key))
+        right_value = _text(right.get(key))
+        if left_value and right_value and left_value == right_value:
+            return True
+    return False
+
+
+def _raw_segment_delta_text(payload: dict[str, Any]) -> str:
+    for key in ("delta", "text", "snapshot"):
+        value = payload.get(key)
+        if value is not None:
+            return str(value)
+    return ""
+
+
+def _raw_segment_delta_offset(payload: dict[str, Any]) -> int | None:
+    value = payload.get("offset")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, float) and not value.is_integer():
+            return None
+        offset = int(value)
+    except (TypeError, ValueError):
+        return None
+    return offset if offset >= 0 else None
+
+
+def _raw_segment_delta_fingerprint(payload: dict[str, Any], chunk: str) -> str:
+    return json.dumps(
+        {
+            "chunk": chunk,
+            "mode": _text(payload.get("mode")).lower(),
+            "snapshot": payload.get("snapshot") is not None,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _raw_segment_dedupe_client_id(segment: dict[str, Any]) -> str:
+    identity = _mapping(segment.get("identity"))
+    return _text(
+        identity.get("client_message_id")
+        or identity.get("stable_message_seq")
+        or identity.get("key")
+    )
+
+
+def _raw_segment_composed_text(segment: dict[str, Any]) -> str:
+    base_text = str(segment.get("base_text") or "")
+    offset_chunks = segment.get("offset_chunks")
+    if not isinstance(offset_chunks, dict):
+        offset_chunks = {}
+    fallback_chunks = segment.get("fallback_chunks")
+    if not isinstance(fallback_chunks, list):
+        fallback_chunks = []
+    return (
+        base_text
+        + "".join(str(offset_chunks[offset]) for offset in sorted(offset_chunks))
+        + "".join(str(chunk) for chunk in fallback_chunks)
+    )
+
+
+def _append_raw_segment_delta(segment: dict[str, Any], payload: dict[str, Any]) -> None:
+    chunk = _raw_segment_delta_text(payload)
+    if not chunk:
+        return
+    if _text(payload.get("mode")).lower() == "snapshot" or payload.get("snapshot") is not None:
+        segment["base_text"] = chunk
+        segment["offset_chunks"] = {}
+        segment["fallback_chunks"] = []
+        segment["fallback_fingerprints"] = set()
+    else:
+        offset = _raw_segment_delta_offset(payload)
+        if offset is not None:
+            offset_chunks = segment.setdefault("offset_chunks", {})
+            if isinstance(offset_chunks, dict):
+                offset_chunks[offset] = chunk
+        else:
+            fallback_chunks = segment.setdefault("fallback_chunks", [])
+            if not isinstance(fallback_chunks, list):
+                fallback_chunks = []
+                segment["fallback_chunks"] = fallback_chunks
+            fallback_fingerprints = segment.setdefault("fallback_fingerprints", set())
+            if not isinstance(fallback_fingerprints, set):
+                fallback_fingerprints = set(fallback_fingerprints)
+                segment["fallback_fingerprints"] = fallback_fingerprints
+            fingerprint = (
+                _raw_segment_dedupe_client_id(segment),
+                _raw_segment_delta_fingerprint(payload, chunk),
+            )
+            if fingerprint not in fallback_fingerprints:
+                fallback_fingerprints.add(fingerprint)
+                fallback_chunks.append(chunk)
+    segment["text"] = _raw_segment_composed_text(segment)
+
+
+def _raw_segment_identity_metadata(segment: dict[str, Any]) -> dict[str, Any]:
+    identity = _mapping(segment.get("identity"))
+    metadata: dict[str, Any] = {
+        "source": _text(identity.get("source")),
+        "stable_message_seq": _text(identity.get("stable_message_seq")),
+    }
+    for source_key, target_key in (
+        ("message_seq_in_run", "message_seq_in_run"),
+        ("client_message_id", "client_message_id"),
+        ("assistant_segment_index", "assistant_segment_index"),
+        ("start_seq", "start_seq"),
+        ("end_seq", "end_seq"),
+    ):
+        value = _text(segment.get(source_key) or identity.get(source_key))
+        if value:
+            metadata[target_key] = value
+    return {key: value for key, value in metadata.items() if value}
+
+
+def _raw_assistant_segments_for_run_locked(
+    conn: Any,
+    *,
+    session_id: str,
+    run_id: str,
+    turn_id: str,
+    final_event: dict[str, Any],
+    final_identity: dict[str, str],
+) -> list[dict[str, Any]]:
+    final_seq = _message_seq_text(final_event.get("seq"))
+    params: list[Any] = [session_id, run_id]
+    turn_filter = ""
+    if turn_id:
+        turn_filter = "AND (turn_id = ? OR COALESCE(turn_id, '') = '')"
+        params.append(turn_id)
+    else:
+        turn_filter = "AND COALESCE(turn_id, '') = ''"
+    final_seq_filter = ""
+    if final_seq:
+        final_seq_filter = "AND seq <= ?"
+        params.append(int(final_seq))
+    rows = conn.execute(
+        f"""
+        SELECT id, seq, timestamp, event_type, event_json
+        FROM run_events
+        WHERE session_id = ?
+          AND run_id = ?
+          {turn_filter}
+          {final_seq_filter}
+          AND event_type IN ('message.start', 'message.delta', 'message.complete')
+        ORDER BY seq, id
+        """,
+        tuple(params),
+    ).fetchall()
+
+    segments: list[dict[str, Any]] = []
+    segments_by_key: dict[str, dict[str, Any]] = {}
+    current: dict[str, Any] | None = None
+
+    def ensure_segment(identity: dict[str, str], row: Any) -> dict[str, Any]:
+        nonlocal current
+        key = _text(identity.get("key")) or f"row:{_row_value(row, 'id', '')}"
+        existing = segments_by_key.get(key)
+        if existing is not None:
+            current = existing
+            return existing
+        segment = {
+            "identity": dict(identity),
+            "text": "",
+            "start_seq": _message_seq_text(_row_value(row, "seq")),
+            "end_seq": _message_seq_text(_row_value(row, "seq")),
+            "timestamp": float(_row_value(row, "timestamp") or 0) or None,
+        }
+        segments.append(segment)
+        segments_by_key[key] = segment
+        current = segment
+        return segment
+
+    for row in rows:
+        event = _json_loads(_row_value(row, "event_json"), {})
+        if not isinstance(event, dict):
+            continue
+        event_type = _text(event.get("type") or _row_value(row, "event_type"))
+        payload = _event_payload(event)
+        identity = _assistant_raw_segment_identity(event, payload)
+        if event_type == "message.complete" and _assistant_raw_segment_identities_match(identity, final_identity):
+            break
+        if event_type == "message.start":
+            current = ensure_segment(identity, row)
+            continue
+        if event_type != "message.delta":
+            continue
+        if current is None or not _assistant_raw_segment_identities_match(
+            _mapping(current.get("identity")),
+            identity,
+        ):
+            current = ensure_segment(identity, row)
+        current["end_seq"] = _message_seq_text(_row_value(row, "seq")) or current.get("end_seq") or ""
+        if not current.get("timestamp"):
+            current["timestamp"] = float(_row_value(row, "timestamp") or 0) or None
+        _append_raw_segment_delta(current, payload)
+
+    return [
+        segment
+        for segment in segments
+        if not _assistant_raw_segment_identities_match(_mapping(segment.get("identity")), final_identity)
+    ]
+
+
+def _project_reconstructed_assistant_segments_locked(
+    db: Any,
+    conn: Any,
+    *,
+    session_id: str,
+    run_id: str,
+    turn_id: str,
+    final_event: dict[str, Any],
+    final_identity: dict[str, str],
+    transcript_activity_kind: str,
+    team_metadata: dict[str, Any],
+    activity_id: str,
+    participant_id: str,
+    run_context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    upsert_locked = getattr(db, "_upsert_team_message_by_id_locked", None)
+    if not callable(upsert_locked):
+        return []
+    reconstructed: list[dict[str, Any]] = []
+    for segment in _raw_assistant_segments_for_run_locked(
+        conn,
+        session_id=session_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        final_event=final_event,
+        final_identity=final_identity,
+    ):
+        text = _text(segment.get("text"))
+        if not text:
+            continue
+        identity = _mapping(segment.get("identity"))
+        stable_message_seq = _text(identity.get("stable_message_seq"))
+        if not stable_message_seq:
+            continue
+        raw_identity = _raw_segment_identity_metadata(segment)
+        conversation_message_id = assistant_conversation_message_id_for(
+            AssistantMessageIdentity(
+                session_id=session_id,
+                run_id=run_id,
+                message_seq_in_run=stable_message_seq,
+            )
+        )
+        segment_team_metadata = {
+            key: value
+            for key, value in team_metadata.items()
+            if key not in {"artifact_refs", "artifactRefs"}
+        }
+        segment_team_metadata["reconstructed_from_raw"] = True
+        segment_team_metadata["raw_segment_identity"] = raw_identity
+        metadata = {
+            "source": "team_mission.runtime_event",
+            "message_kind": "assistant_reply",
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "activity_kind": transcript_activity_kind,
+            "transcript_activity_kind": transcript_activity_kind,
+            "reconstructed_from_raw": True,
+            "raw_segment_identity": raw_identity,
+            "team_mission": segment_team_metadata,
+        }
+        if activity_id:
+            metadata["activity_id"] = activity_id
+        client_message_id = _text(identity.get("client_message_id"))
+        if client_message_id:
+            metadata["client_message_id"] = client_message_id
+        if run_context:
+            metadata["run_context"] = run_context
+        saved = upsert_locked(
+            conn,
+            session_id=session_id,
+            conversation_message_id=conversation_message_id,
+            role="assistant",
+            content=text,
+            participant_id=participant_id,
+            metadata=metadata,
+            status="completed",
+            timestamp=segment.get("timestamp"),
+        )
+        reconstructed.append(saved)
+    return reconstructed
 
 
 def main_transcript_activity_kind(message: dict[str, Any]) -> str:
@@ -896,6 +1269,39 @@ class RuntimeTranscriptWriter:
             metadata["client_message_id"] = client_message_id
         if run_context:
             metadata["run_context"] = run_context
+        final_identity = _assistant_raw_segment_identity(event, payload)
+        try:
+            reconstructed = _project_reconstructed_assistant_segments_locked(
+                db,
+                conn,
+                session_id=conversation_session_id,
+                run_id=run_id,
+                turn_id=turn_id,
+                final_event=event,
+                final_identity=final_identity,
+                transcript_activity_kind=transcript_activity_kind,
+                team_metadata=team_metadata,
+                activity_id=activity_id,
+                participant_id=participant_id,
+                run_context=run_context,
+            )
+            if reconstructed:
+                _emit_transcript_writer_diagnostic(
+                    "runtime-raw-assistant-segments-reconstructed",
+                    conversation_session_id=conversation_session_id,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    reconstructed_count=len(reconstructed),
+                )
+        except Exception as exc:
+            logger.warning(
+                "team transcript raw assistant segment reconstruction failed "
+                "for session=%s run=%s turn=%s: %r",
+                conversation_session_id,
+                run_id,
+                turn_id,
+                exc,
+            )
         status = _text(payload.get("status")) or "completed"
         upsert_locked = getattr(db, "_upsert_team_message_by_id_locked", None)
         if not callable(upsert_locked):

@@ -328,6 +328,109 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
     )
 
 
+def test_member_reply_leading_known_speaker_prefix_is_stripped_before_canonical_write(
+    tmp_path: Path,
+):
+    db = _new_db(tmp_path)
+    db.create_session(CONV_SESSION, source="team_mission", transient=False)
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-1",
+        team_id="team-1",
+        stable_session_id=CONV_SESSION,
+        title="Team Conversation",
+        objective="member chat prefix stripping",
+        workspace_id="ws-1",
+        workspace_path="/tmp/ws",
+        active_mission_id="",
+        created_at=100,
+        updated_at=200,
+    )
+    db.upsert_conversation_participant(
+        conversation_session_id=CONV_SESSION,
+        participant_id="leader:conv-1",
+        role="leader",
+        display_name="小多",
+    )
+    db.upsert_conversation_participant(
+        conversation_session_id=CONV_SESSION,
+        participant_id=member_participant_id("member-alice"),
+        role="member",
+        display_name="Alice",
+    )
+    db.upsert_run(run_id="run-member-prefix", session_id=CONV_SESSION, status="running")
+
+    record_event(
+        {
+            "type": "message.complete",
+            "session_id": CONV_SESSION,
+            "stored_session_id": CONV_SESSION,
+            "run_id": "run-member-prefix",
+            "turn_id": "t1",
+            "seq": 1,
+            "payload": {"text": "[小多] 你好", "status": "complete"},
+        },
+        db=db,
+        run_context=_member_run_context(),
+    )
+
+    messages = db.get_messages(CONV_SESSION)
+    assert len(messages) == 1
+    assert messages[0]["content"] == "你好"
+    assert messages[0]["metadata"]["stripped_speaker_prefix"] == "小多"
+    events = _events_for_session(db, CONV_SESSION)
+    assert events[-1]["payload"]["text"] == "你好"
+    assert events[-1]["payload"]["stripped_speaker_prefix"] == "小多"
+
+
+def test_member_reply_non_leading_known_speaker_prefix_is_not_stripped(tmp_path: Path):
+    db = _new_db(tmp_path)
+    db.create_session(CONV_SESSION, source="team_mission", transient=False)
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-1",
+        team_id="team-1",
+        stable_session_id=CONV_SESSION,
+        title="Team Conversation",
+        objective="member chat prefix non-leading",
+        workspace_id="ws-1",
+        workspace_path="/tmp/ws",
+        active_mission_id="",
+        created_at=100,
+        updated_at=200,
+    )
+    db.upsert_conversation_participant(
+        conversation_session_id=CONV_SESSION,
+        participant_id="leader:conv-1",
+        role="leader",
+        display_name="小多",
+    )
+    db.upsert_conversation_participant(
+        conversation_session_id=CONV_SESSION,
+        participant_id=member_participant_id("member-alice"),
+        role="member",
+        display_name="Alice",
+    )
+    db.upsert_run(run_id="run-member-prefix-mid", session_id=CONV_SESSION, status="running")
+
+    record_event(
+        {
+            "type": "message.complete",
+            "session_id": CONV_SESSION,
+            "stored_session_id": CONV_SESSION,
+            "run_id": "run-member-prefix-mid",
+            "turn_id": "t1",
+            "seq": 1,
+            "payload": {"text": "他说 [小多] 你好", "status": "complete"},
+        },
+        db=db,
+        run_context=_member_run_context(),
+    )
+
+    messages = db.get_messages(CONV_SESSION)
+    assert len(messages) == 1
+    assert messages[0]["content"] == "他说 [小多] 你好"
+    assert "stripped_speaker_prefix" not in messages[0]["metadata"]
+
+
 # ── case 5: invariant — no visible events ever land in memberchat-only ─
 
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from typing import Any
 
 import pytest
 
+from agent.dovie_attribution import build_dovie_attribution_headers, dovie_child_run_overlay
 from gateway.session_context import clear_session_vars, get_session_env, set_session_vars
 from tools import async_delegation as ad
 from tools.process_registry import process_registry
@@ -117,3 +119,63 @@ def test_async_delegation_batch_worker_reads_process_dovie_context_while_turn_ac
         assert seen == {"context": "sentinel-async-batch"}
     finally:
         clear_session_vars(tokens)
+
+
+def test_async_delegation_worker_receives_dovie_overlay_context() -> None:
+    seen: dict[str, str] = {}
+    read = threading.Event()
+    tokens = set_session_vars(
+        dovie_product_context=json.dumps(
+            {
+                "cloud_query": {
+                    "query_id": "query-async",
+                    "root_query_id": "root-query-async",
+                    "agent_run_id": "root-run-async",
+                    "query_context_token": "token-async",
+                },
+                "sourceAgentProfileId": "profile-root",
+            }
+        )
+    )
+
+    def runner() -> dict[str, Any]:
+        headers = build_dovie_attribution_headers()
+        seen["agent_run_id"] = headers["X-Dovie-Agent-Run-Id"]
+        seen["executing_agent_profile_id"] = headers[
+            "X-Dovie-Executing-Agent-Profile-Id"
+        ]
+        seen["agent_role"] = headers["X-Dovie-Agent-Role"]
+        read.set()
+        return {
+            "status": "completed",
+            "summary": "ok",
+            "api_calls": 1,
+            "duration_seconds": 0.1,
+            "model": "m",
+        }
+
+    try:
+        with dovie_child_run_overlay("profile-child", "subagent"):
+            result = ad.dispatch_async_delegation(
+                goal="g",
+                context=None,
+                toolsets=None,
+                role="leaf",
+                model="m",
+                session_key="",
+                runner=runner,
+                max_async_children=1,
+            )
+        assert result["status"] == "dispatched"
+        assert read.wait(timeout=2.0)
+        event = _drain_one()
+        assert event is not None
+        assert event["summary"] == "ok"
+    finally:
+        clear_session_vars(tokens)
+
+    assert seen == {
+        "agent_run_id": "root-run-async",
+        "executing_agent_profile_id": "profile-child",
+        "agent_role": "subagent",
+    }

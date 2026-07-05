@@ -120,11 +120,13 @@ def test_speaker_resolution_uses_participant_id_not_node_id() -> None:
         participants=participants,
     )
 
-    assert alpha_view[0]["role"] == "assistant"
-    assert alpha_view[0]["content"] == "Alpha has the build."
-    assert beta_view[0]["role"] == "user"
-    assert beta_view[0]["content"] == "[Alpha] Alpha has the build."
-    assert beta_view[0]["metadata"]["transformed_speaker_pid"] == "member:member-alpha"
+    assert alpha_view[0]["metadata"]["team_member_identity_contract"] is True
+    assert beta_view[0]["metadata"]["team_member_identity_contract"] is True
+    assert alpha_view[1]["role"] == "assistant"
+    assert alpha_view[1]["content"] == "Alpha has the build."
+    assert beta_view[1]["role"] == "user"
+    assert beta_view[1]["content"] == "[Alpha] Alpha has the build."
+    assert beta_view[1]["metadata"]["transformed_speaker_pid"] == "member:member-alpha"
 
 
 def test_render_snapshot_messages_speaker_field_uses_participant_id(tmp_path: Path, monkeypatch) -> None:

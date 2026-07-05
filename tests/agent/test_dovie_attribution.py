@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import contextvars
 import json
+import threading
 
 import httpx
 import pytest
 
 from agent.dovie_attribution import (
+    DOVIE_ATTRIBUTION_OVERLAY,
     attach_dovie_attribution_request_hook,
+    build_dovie_attribution_overlay_headers,
     build_dovie_attribution_headers,
+    dovie_child_run_overlay,
     dovie_attribution_request_hook,
 )
 from gateway.session_context import clear_session_vars, set_session_vars
@@ -79,6 +84,121 @@ def test_build_headers_uses_explicit_root_executing_and_agent_role():
     assert headers["X-Dovie-Root-Agent-Profile-Id"] == "profile-root-team"
     assert headers["X-Dovie-Executing-Agent-Profile-Id"] == "profile-member-1"
     assert headers["X-Dovie-Agent-Role"] == "team_member"
+
+
+def test_child_overlay_isolates_concurrent_child_headers_from_root():
+    tokens = _set_dovie_context(_context())
+    barrier = threading.Barrier(3)
+    child_headers: dict[str, dict[str, str]] = {}
+    errors: list[BaseException] = []
+
+    def child_worker(profile_id: str) -> None:
+        try:
+            with dovie_child_run_overlay(profile_id, "subagent"):
+                barrier.wait(timeout=2.0)
+                child_headers[profile_id] = build_dovie_attribution_headers()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(
+            target=child_worker,
+            args=("profile-child-a",),
+        ),
+        threading.Thread(
+            target=child_worker,
+            args=("profile-child-b",),
+        ),
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        barrier.wait(timeout=2.0)
+        root_headers = build_dovie_attribution_headers()
+    finally:
+        for thread in threads:
+            thread.join(timeout=2.0)
+        clear_session_vars(tokens)
+
+    assert errors == []
+    assert root_headers["X-Dovie-Agent-Run-Id"] == "agent-run-1"
+    assert "X-Dovie-Agent-Role" not in root_headers
+    assert child_headers["profile-child-a"]["X-Dovie-Agent-Run-Id"] == "agent-run-1"
+    assert child_headers["profile-child-a"]["X-Dovie-Executing-Agent-Profile-Id"] == "profile-child-a"
+    assert child_headers["profile-child-a"]["X-Dovie-Agent-Role"] == "subagent"
+    assert child_headers["profile-child-b"]["X-Dovie-Agent-Run-Id"] == "agent-run-1"
+    assert child_headers["profile-child-b"]["X-Dovie-Executing-Agent-Profile-Id"] == "profile-child-b"
+    assert child_headers["profile-child-b"]["X-Dovie-Agent-Role"] == "subagent"
+
+
+def test_child_overlay_restores_parent_context_after_exit():
+    tokens = _set_dovie_context(_context())
+    try:
+        with dovie_child_run_overlay("profile-child", "subagent"):
+            child_headers = build_dovie_attribution_headers()
+        restored_headers = build_dovie_attribution_headers()
+    finally:
+        clear_session_vars(tokens)
+
+    assert child_headers["X-Dovie-Agent-Run-Id"] == "agent-run-1"
+    assert child_headers["X-Dovie-Executing-Agent-Profile-Id"] == "profile-child"
+    assert child_headers["X-Dovie-Agent-Role"] == "subagent"
+    assert restored_headers["X-Dovie-Agent-Run-Id"] == "agent-run-1"
+    assert restored_headers["X-Dovie-Executing-Agent-Profile-Id"] == "profile-root-1"
+    assert "X-Dovie-Agent-Role" not in restored_headers
+
+
+def test_child_overlay_thread_propagates_with_copy_context():
+    tokens = _set_dovie_context(_context())
+    seen: dict[str, str] = {}
+    try:
+        with dovie_child_run_overlay("profile-thread", "subagent"):
+            ctx = contextvars.copy_context()
+
+            def worker() -> None:
+                headers = build_dovie_attribution_headers()
+                seen["run_id"] = headers["X-Dovie-Agent-Run-Id"]
+                seen["profile_id"] = headers["X-Dovie-Executing-Agent-Profile-Id"]
+                seen["role"] = headers["X-Dovie-Agent-Role"]
+
+            thread = threading.Thread(target=ctx.run, args=(worker,))
+            thread.start()
+            thread.join(timeout=2.0)
+            assert not thread.is_alive()
+    finally:
+        clear_session_vars(tokens)
+
+    assert seen == {
+        "run_id": "agent-run-1",
+        "profile_id": "profile-thread",
+        "role": "subagent",
+    }
+
+
+def test_child_overlay_without_base_context_sends_no_headers():
+    with dovie_child_run_overlay("profile-child", "subagent"):
+        assert build_dovie_attribution_headers() == {}
+        assert build_dovie_attribution_overlay_headers() == {}
+
+
+def test_child_overlay_ignores_agent_run_id_overlay_input():
+    tokens = _set_dovie_context(_context())
+    overlay_token = DOVIE_ATTRIBUTION_OVERLAY.set(
+        {
+            "agent_run_id": "malicious-child-run",
+            "executing_agent_profile_id": "profile-child",
+            "agent_role": "subagent",
+        }
+    )
+    try:
+        headers = build_dovie_attribution_headers()
+    finally:
+        DOVIE_ATTRIBUTION_OVERLAY.reset(overlay_token)
+        clear_session_vars(tokens)
+
+    assert headers["X-Dovie-Agent-Run-Id"] == "agent-run-1"
+    assert headers["X-Dovie-Executing-Agent-Profile-Id"] == "profile-child"
+    assert headers["X-Dovie-Agent-Role"] == "subagent"
 
 
 def test_build_headers_executing_profile_falls_back_to_source_profile():

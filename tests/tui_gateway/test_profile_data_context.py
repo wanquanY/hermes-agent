@@ -57,6 +57,56 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
     assert os.environ.get("DOVIE_TEST_PROFILE_ENV") is None
 
 
+def test_profile_context_extracts_codex_mode_and_extra_env_from_contract_fields(tmp_path):
+    profile_home = tmp_path / "profile-home"
+    codex_home = tmp_path / "codex-home"
+
+    ctx = server._profile_context_for_params({
+        "agentProfileId": "agent-codex",
+        "runtimeExecutor": "codex",
+        "codexHome": str(codex_home),
+        "codexAccountMode": "byo",
+        "codex_extra_env": {
+            "CODEX_TRACE": 1,
+            "DROP_ME": None,
+            42: True,
+        },
+        "dovie_profile": {
+            "hermesHomePath": str(profile_home),
+        },
+    })
+
+    assert ctx is not None
+    assert ctx["runtime_executor"] == "codex"
+    assert ctx["codex_home"] == str(codex_home)
+    assert ctx["codex_account_mode"] == "byo"
+    assert ctx["codex_extra_env"] == {
+        "CODEX_TRACE": "1",
+        "42": "True",
+    }
+
+
+def test_profile_context_extracts_nested_codex_camel_and_snake_fields(tmp_path):
+    codex_home = tmp_path / "nested-codex-home"
+
+    ctx = server._profile_context_for_params({
+        "dovieProfile": {
+            "id": "agent-nested-codex",
+            "runtime_executor": "codex",
+            "codex_home": str(codex_home),
+            "codexAccountMode": "platform",
+            "codexExtraEnv": {"DOXIE_PLATFORM_API_KEY": "rt-token"},
+        },
+    })
+
+    assert ctx is not None
+    assert ctx["id"] == "agent-nested-codex"
+    assert ctx["runtime_executor"] == "codex"
+    assert ctx["codex_home"] == str(codex_home)
+    assert ctx["codex_account_mode"] == "platform"
+    assert ctx["codex_extra_env"] == {"DOXIE_PLATFORM_API_KEY": "rt-token"}
+
+
 def test_control_plane_db_selection_uses_process_home_for_active_and_default(monkeypatch, tmp_path):
     """Profile context must not move control-plane DB reads out of process home."""
 

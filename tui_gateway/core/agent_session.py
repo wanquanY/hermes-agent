@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -14,6 +15,7 @@ from typing import Any
 from tui_gateway.methods._shared import bind_server_globals
 
 _server = bind_server_globals(globals())
+logger = logging.getLogger(__name__)
 _TUI_VERBOSE_TEXT_MAX_CHARS = 16_000
 _TUI_VERBOSE_TEXT_MAX_LINES = 240
 
@@ -503,12 +505,9 @@ def _make_agent(
         _persisted_codex = _persisted_codex_runtime(session_id or key)
     except Exception as _pc_exc:
         _persisted_codex = {}
-        import logging as _dbg_lg
-        _dbg_lg.warning("[codex-flow][_make_agent] persisted_codex EXC sid=%s: %s", session_id or key, _pc_exc)
+        logger.warning("persisted codex runtime lookup failed sid=%s: %s", session_id or key, _pc_exc)
     _persisted_codex_meta = _persisted_session_codex_metadata(session_id or key)
-    import logging as _dbg_lg
-    _dbg_lg.warning(
-        "[codex-flow][_make_agent] ENTER sid=%s override_keys=%s profile_ctx_keys=%s persisted_codex=%s persisted_codex_meta=%s",
+    logger.debug("[codex-flow][_make_agent] ENTER sid=%s override_keys=%s profile_ctx_keys=%s persisted_codex=%s persisted_codex_meta=%s",
         session_id or key,
         sorted((_override or {}).keys()),
         sorted(_profile_context.keys()),
@@ -607,15 +606,13 @@ def _make_agent(
         runtime_kwargs["runtime_executor"] = _runtime_executor
     if _codex_home:
         runtime_kwargs["codex_home"] = _codex_home
-    _dbg_lg.warning(
-        "[codex-flow][_make_agent] pre-resolve runtime_kwargs=%s _runtime_executor=%r _codex_home=%r",
+    logger.debug("[codex-flow][_make_agent] pre-resolve runtime_kwargs=%s _runtime_executor=%r _codex_home=%r",
         {k: v for k, v in runtime_kwargs.items() if k != "explicit_api_key"},
         _runtime_executor,
         _codex_home,
     )
     runtime = resolve_runtime_provider(**runtime_kwargs)
-    _dbg_lg.warning(
-        "[codex-flow][_make_agent] post-resolve runtime.api_mode=%r runtime.provider=%r runtime.codex_home=%r",
+    logger.debug("[codex-flow][_make_agent] post-resolve runtime.api_mode=%r runtime.provider=%r runtime.codex_home=%r",
         runtime.get("api_mode"),
         runtime.get("provider"),
         runtime.get("codex_home"),

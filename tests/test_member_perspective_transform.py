@@ -3,6 +3,12 @@ from __future__ import annotations
 from hermes_team_mission.state.session_views import transform_to_member_perspective
 
 
+def _body_after_identity_contract(messages):
+    assert messages[0]["role"] == "system"
+    assert messages[0]["metadata"]["team_member_identity_contract"] is True
+    return messages[1:]
+
+
 def test_user_messages_pass_through_unchanged() -> None:
     message = {"role": "user", "content": "please review"}
 
@@ -12,8 +18,34 @@ def test_user_messages_pass_through_unchanged() -> None:
         participants=[],
     )
 
-    assert result == [message]
-    assert result[0] is message
+    body = _body_after_identity_contract(result)
+    assert body == [message]
+    assert body[0] is message
+
+
+def test_identity_contract_precedes_projected_history_and_names_viewer() -> None:
+    result = transform_to_member_perspective(
+        [
+            {
+                "role": "assistant",
+                "content": "我是小多(Dovie)。",
+                "metadata": {"participant_id": "leader:conv-1"},
+            }
+        ],
+        viewing_participant_id="member:ui-ux",
+        participants=[
+            {"participant_id": "leader:conv-1", "role": "leader", "display_name": "小多"},
+            {"participant_id": "member:ui-ux", "role": "member", "display_name": "UI/UX设计师"},
+        ],
+    )
+
+    contract = result[0]
+    assert contract["role"] == "system"
+    assert "你是 UI/UX设计师(角色:member),团队会话中的一名成员。" in contract["content"]
+    assert "历史中带 `[某某]` 前缀、以 user 角色出现的消息" in contract["content"]
+    assert "你绝不能冒充任何其他参与者" in contract["content"]
+    assert "你的回复不要以 `[任何名字]` 前缀开头" in contract["content"]
+    assert result[1]["content"] == "[小多] 我是小多(Dovie)。"
 
 
 def test_self_assistant_message_keeps_assistant_role() -> None:
@@ -29,8 +61,9 @@ def test_self_assistant_message_keeps_assistant_role() -> None:
         participants=[{"participant_id": "member:alice", "display_name": "Alice"}],
     )
 
-    assert result == [message]
-    assert result[0]["role"] == "assistant"
+    body = _body_after_identity_contract(result)
+    assert body == [message]
+    assert body[0]["role"] == "assistant"
 
 
 def test_other_assistant_message_becomes_user_with_prefix() -> None:
@@ -49,11 +82,12 @@ def test_other_assistant_message_becomes_user_with_prefix() -> None:
         ],
     )
 
-    assert result[0]["role"] == "user"
-    assert result[0]["content"] == "[Leader Name] I will coordinate the plan."
-    assert result[0]["metadata"]["transformed_from_role"] == "assistant"
-    assert result[0]["metadata"]["transformed_speaker_pid"] == "leader:conv-1"
-    assert result[0]["metadata"]["transformed_speaker_name"] == "Leader Name"
+    body = _body_after_identity_contract(result)
+    assert body[0]["role"] == "user"
+    assert body[0]["content"] == "[Leader Name] I will coordinate the plan."
+    assert body[0]["metadata"]["transformed_from_role"] == "assistant"
+    assert body[0]["metadata"]["transformed_speaker_pid"] == "leader:conv-1"
+    assert body[0]["metadata"]["transformed_speaker_name"] == "Leader Name"
 
 
 def test_unknown_participant_uses_role_fallback() -> None:
@@ -69,8 +103,9 @@ def test_unknown_participant_uses_role_fallback() -> None:
         participants=[],
     )
 
-    assert result[0]["role"] == "user"
-    assert result[0]["content"] == "[reviewer] Use the stricter review path."
+    body = _body_after_identity_contract(result)
+    assert body[0]["role"] == "user"
+    assert body[0]["content"] == "[reviewer] Use the stricter review path."
 
 
 def test_assistant_without_participant_id_treated_as_other() -> None:
@@ -82,10 +117,11 @@ def test_assistant_without_participant_id_treated_as_other() -> None:
         participants=[],
     )
 
-    assert result[0]["role"] == "user"
-    assert result[0]["content"] == "[未知发言者] Unstamped assistant text"
-    assert result[0]["metadata"]["transformed_speaker_pid"] == ""
-    assert result[0]["metadata"]["transformed_speaker_name"] == "未知发言者"
+    body = _body_after_identity_contract(result)
+    assert body[0]["role"] == "user"
+    assert body[0]["content"] == "[未知发言者] Unstamped assistant text"
+    assert body[0]["metadata"]["transformed_speaker_pid"] == ""
+    assert body[0]["metadata"]["transformed_speaker_name"] == "未知发言者"
 
 
 def test_idempotent_transform_twice_same_result() -> None:
@@ -108,8 +144,9 @@ def test_idempotent_transform_twice_same_result() -> None:
     )
 
     assert twice == once
-    assert twice[0]["content"] == "[Leader] Leader instruction"
-    assert twice[0]["content"].count("[Leader]") == 1
+    body = _body_after_identity_contract(twice)
+    assert body[0]["content"] == "[Leader] Leader instruction"
+    assert body[0]["content"].count("[Leader]") == 1
 
 
 def test_other_participant_tool_turns_do_not_leak_into_viewer_history() -> None:
@@ -142,11 +179,12 @@ def test_other_participant_tool_turns_do_not_leak_into_viewer_history() -> None:
         ],
     )
 
-    assert [(message["role"], message["content"]) for message in result] == [
+    body = _body_after_identity_contract(result)
+    assert [(message["role"], message["content"]) for message in body] == [
         ("user", "[后端工程师] 查完了。"),
     ]
-    assert "tool_calls" not in result[0]
-    assert "tool_call_id" not in result[0]
+    assert "tool_calls" not in body[0]
+    assert "tool_call_id" not in body[0]
 
 
 def test_viewer_own_tool_turns_remain_valid_tool_sequences() -> None:
@@ -176,6 +214,7 @@ def test_viewer_own_tool_turns_remain_valid_tool_sequences() -> None:
         participants=[{"participant_id": "leader:conv-1", "display_name": "小多"}],
     )
 
-    assert [message["role"] for message in result] == ["assistant", "tool", "assistant"]
-    assert result[0]["tool_calls"][0]["id"] == "call-leader"
-    assert result[1]["tool_call_id"] == "call-leader"
+    body = _body_after_identity_contract(result)
+    assert [message["role"] for message in body] == ["assistant", "tool", "assistant"]
+    assert body[0]["tool_calls"][0]["id"] == "call-leader"
+    assert body[1]["tool_call_id"] == "call-leader"

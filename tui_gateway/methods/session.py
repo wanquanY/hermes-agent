@@ -162,6 +162,23 @@ def _requested_codex_account_mode(params: dict | None = None) -> str:
     ).strip().lower()
 
 
+def _is_byo_codex_agent(agent) -> bool:
+    if agent is None:
+        return False
+    if str(getattr(agent, "api_mode", "") or "").strip() != "codex_app_server":
+        return False
+    try:
+        from agent.codex_runtime import normalize_codex_account_mode
+
+        account_mode = normalize_codex_account_mode(
+            getattr(agent, "codex_account_mode", ""),
+            extra_env=getattr(agent, "codex_extra_env", None),
+        )
+    except Exception:
+        return False
+    return account_mode == "byo"
+
+
 def _requested_agent_profile_id(params: dict | None = None) -> str:
     return str(
         (params or {}).get("agent_profile_id")
@@ -2051,29 +2068,31 @@ def _(rid, params: dict) -> dict:
         provider = getattr(agent, "provider", None) or "unknown"
         model = str(usage.get("model") or getattr(agent, "model", None) or "unknown")
 
+    model_usage_entry = {
+        "provider": provider,
+        "model": model,
+        "count": int(usage.get("calls") or 0),
+        "totals": {
+            "input": int(usage.get("input") or usage.get("prompt") or 0),
+            "output": int(usage.get("output") or usage.get("completion") or 0),
+            "cacheRead": int(usage.get("cache_read") or 0),
+            "cacheWrite": int(usage.get("cache_write") or 0),
+            "reasoning": int(usage.get("reasoning") or 0),
+            "image": int(usage.get("image") or 0),
+            "totalTokens": int(usage.get("total") or 0),
+            "totalCost": float(usage.get("cost_usd") or 0),
+        },
+    }
+    if _is_byo_codex_agent(agent):
+        model_usage_entry["byo"] = True
+
     structured = {
         "updatedAt": updated_at,
         "sessions": [
             {
                 "key": key,
                 "usage": {
-                    "modelUsage": [
-                        {
-                            "provider": provider,
-                            "model": model,
-                            "count": int(usage.get("calls") or 0),
-                            "totals": {
-                                "input": int(usage.get("input") or usage.get("prompt") or 0),
-                                "output": int(usage.get("output") or usage.get("completion") or 0),
-                                "cacheRead": int(usage.get("cache_read") or 0),
-                                "cacheWrite": int(usage.get("cache_write") or 0),
-                                "reasoning": int(usage.get("reasoning") or 0),
-                                "image": int(usage.get("image") or 0),
-                                "totalTokens": int(usage.get("total") or 0),
-                                "totalCost": float(usage.get("cost_usd") or 0),
-                            },
-                        }
-                    ]
+                    "modelUsage": [model_usage_entry]
                 },
             }
         ],

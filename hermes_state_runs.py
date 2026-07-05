@@ -393,6 +393,124 @@ def _row_value(row: sqlite3.Row | None, key: str, default: Any = None) -> Any:
         return default
 
 
+_MESSAGE_COMPLETE_TEXT_KEYS = (
+    "text",
+    "final_response",
+    "finalResponse",
+    "summary",
+    "message",
+)
+_STRIPPED_SPEAKER_PREFIX_METADATA_KEY = "stripped_speaker_prefix"
+
+
+def _message_complete_text(payload: Dict[str, Any]) -> str:
+    for key in _MESSAGE_COMPLETE_TEXT_KEYS:
+        if key in payload:
+            return str(payload.get(key) or "")
+    return ""
+
+
+def _known_participant_display_names(db: Any, session_id: str) -> list[str]:
+    lister = getattr(db, "list_conversation_participants", None)
+    if not callable(lister):
+        return []
+    try:
+        participants = lister(session_id) or []
+    except Exception:
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for participant in participants:
+        if not isinstance(participant, dict):
+            continue
+        name = str(
+            participant.get("display_name")
+            or participant.get("displayName")
+            or ""
+        ).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    names.sort(key=len, reverse=True)
+    return names
+
+
+def _strip_known_speaker_prefix(text: str, known_names: list[str]) -> tuple[str, str]:
+    if not text:
+        return text, ""
+    for name in known_names:
+        prefix = f"[{name}]"
+        if text.startswith(prefix):
+            return text[len(prefix):].lstrip(), name
+    return text, ""
+
+
+def _strip_member_speaker_prefix_from_payload(
+    db: Any,
+    *,
+    session_id: str,
+    event_type: str,
+    participant_id: str,
+    payload: Dict[str, Any],
+) -> tuple[Dict[str, Any], str]:
+    if event_type != "message.complete" or not participant_id.startswith("member:"):
+        return payload, ""
+    original_text = _message_complete_text(payload)
+    if not original_text:
+        return payload, ""
+    stripped_text, speaker_name = _strip_known_speaker_prefix(
+        original_text,
+        _known_participant_display_names(db, session_id),
+    )
+    if not speaker_name:
+        return payload, ""
+    next_payload = dict(payload)
+    for key in _MESSAGE_COMPLETE_TEXT_KEYS:
+        if key in next_payload and str(next_payload.get(key) or "") == original_text:
+            next_payload[key] = stripped_text
+    next_payload[_STRIPPED_SPEAKER_PREFIX_METADATA_KEY] = speaker_name
+    next_payload["strippedSpeakerPrefix"] = speaker_name
+    return next_payload, speaker_name
+
+
+def _annotate_projected_message_stripped_prefix_locked(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    conversation_message_id: str,
+    stripped_speaker_prefix: str,
+) -> Dict[str, Any]:
+    session_id = str(session_id or "").strip()
+    conversation_message_id = str(conversation_message_id or "").strip()
+    stripped_speaker_prefix = str(stripped_speaker_prefix or "").strip()
+    if not session_id or not conversation_message_id or not stripped_speaker_prefix:
+        return {}
+    row = conn.execute(
+        """
+        SELECT id, metadata_json
+        FROM messages
+        WHERE session_id = ?
+          AND conversation_message_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (session_id, conversation_message_id),
+    ).fetchone()
+    if row is None:
+        return {}
+    metadata = _json_loads(_row_value(row, "metadata_json"), {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata[_STRIPPED_SPEAKER_PREFIX_METADATA_KEY] = stripped_speaker_prefix
+    metadata["strippedSpeakerPrefix"] = stripped_speaker_prefix
+    conn.execute(
+        "UPDATE messages SET metadata_json = ? WHERE id = ?",
+        (_json_dumps(metadata), int(_row_value(row, "id") or 0)),
+    )
+    return metadata
+
+
 def _event_subagent_id(event: Dict[str, Any]) -> str:
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     return str(
@@ -1295,6 +1413,17 @@ class SessionDBRunMixin:
             if isinstance(frame.get("payload"), dict):
                 frame["payload"]["activity_id"] = event_activity_id
                 payload = frame["payload"]
+        stripped_speaker_prefix = ""
+        if isinstance(payload, dict):
+            payload, stripped_speaker_prefix = _strip_member_speaker_prefix_from_payload(
+                self,
+                session_id=stable,
+                event_type=event_type,
+                participant_id=event_participant_id,
+                payload=payload,
+            )
+            if stripped_speaker_prefix:
+                frame["payload"] = payload
         event_json = _json_dumps(frame)
         frame_blob, frame_format = encode_run_event_frame(frame)
         retention_class = _run_event_retention_class(event_type)
@@ -1612,6 +1741,22 @@ class SessionDBRunMixin:
                         inserted_event["_projected_message_id"] = conversation_message_id
                         if isinstance(projected_message, dict) and isinstance(projected_message.get("_team_mission_report_ready"), dict):
                             inserted_event["_team_mission_report_ready"] = dict(projected_message["_team_mission_report_ready"])
+                        if stripped_speaker_prefix:
+                            projected_session_id = stable
+                            if isinstance(projected_message, dict):
+                                projected_session_id = str(
+                                    projected_message.get("session_id")
+                                    or projected_message.get("sessionId")
+                                    or stable
+                                ).strip()
+                            stripped_metadata = _annotate_projected_message_stripped_prefix_locked(
+                                conn,
+                                session_id=projected_session_id,
+                                conversation_message_id=conversation_message_id,
+                                stripped_speaker_prefix=stripped_speaker_prefix,
+                            )
+                            if isinstance(projected_message, dict) and stripped_metadata:
+                                projected_message["metadata"] = stripped_metadata
                         conn.execute(
                             """
                             UPDATE run_events

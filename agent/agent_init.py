@@ -296,9 +296,7 @@ def init_agent(
     agent.provider = provider_name or ""
     agent.acp_command = acp_command or command
     agent.acp_args = list(acp_args or args or [])
-    import logging as _dbg_lg
-    _dbg_lg.warning(
-        "[codex-flow][agent_init] AIAgent.__init__ received api_mode=%r provider=%r base_url=%r api_key_empty=%s model=%r",
+    logger.debug("[codex-flow][agent_init] AIAgent.__init__ received api_mode=%r provider=%r base_url=%r api_key_empty=%s model=%r",
         api_mode, provider, base_url, not api_key, model,
     )
     if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse", "codex_app_server"}:
@@ -697,15 +695,13 @@ def init_agent(
             print(f"🤖 AI Agent initialized with model: {agent.model} (AWS Bedrock, {agent._bedrock_region}{_gr_label})")
     elif agent.api_mode == "codex_app_server":
         # codex_app_server hands the entire turn to a codex CLI subprocess.
-        import logging as _dbg_lg
-        _dbg_lg.warning("[codex-flow][agent_init] taking codex_app_server BRANCH — api_mode=%r provider=%r", agent.api_mode, agent.provider)
+        logger.debug("[codex-flow][agent_init] taking codex_app_server BRANCH — api_mode=%r provider=%r", agent.api_mode, agent.provider)
         agent.client = None
         agent._client_kwargs = {}
         if not agent.quiet_mode:
             print(f"🤖 AI Agent initialized with model: {agent.model} (Codex app-server)")
     else:
-        import logging as _dbg_lg
-        _dbg_lg.warning("[codex-flow][agent_init] FALLING THROUGH to ELSE branch — api_mode=%r provider=%r api_key_empty=%s base_url=%r", agent.api_mode, agent.provider, not api_key, base_url)
+        logger.debug("[codex-flow][agent_init] FALLING THROUGH to ELSE branch — api_mode=%r provider=%r api_key_empty=%s base_url=%r", agent.api_mode, agent.provider, not api_key, base_url)
         if api_key and base_url:
             # Explicit credentials from CLI/gateway — construct directly.
             # The runtime provider resolver already handled auth for us.

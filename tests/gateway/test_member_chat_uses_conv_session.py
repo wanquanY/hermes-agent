@@ -78,6 +78,17 @@ def _submit_member(
     return db, captured, response
 
 
+def _expected_clean_member_dovie_profile(tmp_path: Path) -> dict:
+    member_scope = f"member-chat:{CONVERSATION_ID}:{TARGET_MEMBER_ID}"
+    return {
+        "id": "profile-alice",
+        "hermesHomePath": str(tmp_path / "alice-home"),
+        "agentProfileVersionId": "version-alice",
+        "runtimeScopeKey": member_scope,
+        "runtime_scope_key": member_scope,
+    }
+
+
 def _memberchat_session_ids(db: SessionDB) -> list[str]:
     rows = db._conn.execute(  # noqa: SLF001 - test introspection
         "SELECT id FROM sessions WHERE id LIKE 'memberchat:%' ORDER BY id"
@@ -114,6 +125,92 @@ def test_worker_spawn_uses_conversation_session_id(monkeypatch, tmp_path: Path):
     member_turn = response["result"]["member_turn"]
     assert member_turn["stored_session_id"] == CONVERSATION_SESSION_ID
     assert member_turn["worker_stored_session_id"] == CONVERSATION_SESSION_ID
+
+
+def test_member_submit_without_codex_contract_keeps_clean_dovie_profile(
+    monkeypatch,
+    tmp_path: Path,
+):
+    _db, captured, _response = _submit_member(monkeypatch, tmp_path)
+
+    assert captured["dovie_profile"] == _expected_clean_member_dovie_profile(tmp_path)
+
+
+def test_member_submit_merges_codex_contract_fields_into_dovie_profile(
+    monkeypatch,
+    tmp_path: Path,
+):
+    codex_home = tmp_path / "codex-home"
+    _db, captured, _response = _submit_member(
+        monkeypatch,
+        tmp_path,
+        extra_params={
+            "runtimeExecutor": "codex",
+            "runtime_executor": "codex",
+            "codexHome": str(codex_home),
+            "codex_home": str(codex_home),
+            "codexAccountMode": "platform",
+            "codex_account_mode": "platform",
+            "codexExtraEnv": {"UNUSED_CAMEL": "1"},
+            "codex_extra_env": {
+                "DOXIE_PLATFORM_API_KEY": "rt-token",
+                "DROP_ME": None,
+                42: True,
+            },
+            "runtimeScopeKey": "leader-scope-must-not-leak",
+            "runtime_scope_key": "leader-scope-must-not-leak",
+        },
+    )
+
+    member_scope = f"member-chat:{CONVERSATION_ID}:{TARGET_MEMBER_ID}"
+    profile = captured["dovie_profile"]
+    assert profile["runtimeExecutor"] == "codex"
+    assert profile["runtime_executor"] == "codex"
+    assert profile["codexHome"] == str(codex_home)
+    assert profile["codex_home"] == str(codex_home)
+    assert profile["codexAccountMode"] == "platform"
+    assert profile["codex_account_mode"] == "platform"
+    assert profile["codexExtraEnv"] == {
+        "DOXIE_PLATFORM_API_KEY": "rt-token",
+        "42": "True",
+    }
+    assert profile["codex_extra_env"] == {
+        "DOXIE_PLATFORM_API_KEY": "rt-token",
+        "42": "True",
+    }
+    assert profile["runtimeScopeKey"] == member_scope
+    assert profile["runtime_scope_key"] == member_scope
+
+
+def test_codex_member_submit_drops_model_from_worker_params(
+    monkeypatch,
+    tmp_path: Path,
+):
+    _db, captured, _response = _submit_member(
+        monkeypatch,
+        tmp_path,
+        extra_params={
+            "runtime_executor": "codex",
+            "codex_home": str(tmp_path / "codex-home"),
+            "model": "glm-5.2",
+        },
+    )
+
+    assert captured["dovie_profile"]["runtime_executor"] == "codex"
+    assert "model" not in captured
+
+
+def test_regular_member_submit_keeps_model_in_worker_params(
+    monkeypatch,
+    tmp_path: Path,
+):
+    _db, captured, _response = _submit_member(
+        monkeypatch,
+        tmp_path,
+        extra_params={"model": "glm-5.2"},
+    )
+
+    assert captured["model"] == "glm-5.2"
 
 
 def test_user_message_persists_to_conv_messages(monkeypatch, tmp_path: Path):

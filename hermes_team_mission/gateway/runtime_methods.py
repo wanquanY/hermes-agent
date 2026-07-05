@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from .common import *
+from .dovie_context import persist_mission_dovie_product_context_from_submit
 from .participant_autocreate import ensure_member_chat_participant
 from hermes_profile_dir import resolve_default_agent_dir
 from hermes_state_participants import leader_participant_id, member_participant_id
@@ -76,6 +77,50 @@ def _activity_kind_from_activity_id(activity_id: str, *, fallback: str = "chat")
     if normalized.startswith("chat:"):
         return "chat"
     return fallback
+
+
+def _params_request_codex_runtime(params: dict) -> bool:
+    if not isinstance(params, dict):
+        return False
+    runtime_executor = str(
+        params.get("runtime_executor")
+        or params.get("runtimeExecutor")
+        or ""
+    ).strip()
+    return runtime_executor.lower() == "codex"
+
+
+def _codex_contract_dovie_profile_fields(params: dict) -> dict:
+    if not _params_request_codex_runtime(params):
+        return {}
+    codex_fields = {
+        "runtimeExecutor": "codex",
+        "runtime_executor": "codex",
+    }
+    codex_home = str(params.get("codex_home") or params.get("codexHome") or "").strip()
+    if codex_home:
+        codex_fields["codexHome"] = codex_home
+        codex_fields["codex_home"] = codex_home
+    codex_account_mode = str(
+        params.get("codex_account_mode")
+        or params.get("codexAccountMode")
+        or ""
+    ).strip()
+    if codex_account_mode:
+        codex_fields["codexAccountMode"] = codex_account_mode
+        codex_fields["codex_account_mode"] = codex_account_mode
+    for raw_extra_env in (params.get("codex_extra_env"), params.get("codexExtraEnv")):
+        if not isinstance(raw_extra_env, dict):
+            continue
+        codex_extra_env = {
+            str(key): str(value)
+            for key, value in raw_extra_env.items()
+            if value is not None
+        }
+        codex_fields["codexExtraEnv"] = codex_extra_env
+        codex_fields["codex_extra_env"] = dict(codex_extra_env)
+        break
+    return codex_fields
 
 
 def _ensure_team_dispatch_activity(
@@ -379,7 +424,9 @@ def _submit_message_to_member(
         **dovie_profile,
         "runtimeScopeKey": member_scope,
         "runtime_scope_key": member_scope,
+        **_codex_contract_dovie_profile_fields(params),
     }
+    member_requests_codex_runtime = _params_request_codex_runtime(params)
     display_name = str(
         member.get("display_name")
         or member.get("displayName")
@@ -575,6 +622,8 @@ def _submit_message_to_member(
             agent_role="team_member",
         ),
     }
+    if not member_requests_codex_runtime and "model" in params:
+        submit_params["model"] = params["model"]
     # Dispatch run.submit through the runtime-proxy path so the worker spawns
     # on the member-chat execution scope and runs inside the member's profile home
     # (HERMES_HOME=profiles/<member>). The in-process `_methods["run.submit"]`
@@ -676,6 +725,12 @@ def _(rid, params: dict) -> dict:
                     graph = resolved_graph
                     mission_id = str(mission.get("mission_id") or "").strip()
     identity_mission = mission if isinstance(mission, dict) and mission else context_mission
+    if isinstance(identity_mission, dict) and identity_mission:
+        identity_mission = persist_mission_dovie_product_context_from_submit(db, identity_mission, params)
+        if mission and str(mission.get("mission_id") or "") == str(identity_mission.get("mission_id") or ""):
+            mission = identity_mission
+        if context_mission and str(context_mission.get("mission_id") or "") == str(identity_mission.get("mission_id") or ""):
+            context_mission = identity_mission
     metadata = identity_mission.get("metadata") if isinstance(identity_mission, dict) and isinstance(identity_mission.get("metadata"), dict) else {}
     conversation_id = (
         conversation_id

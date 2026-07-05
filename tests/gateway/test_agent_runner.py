@@ -160,7 +160,7 @@ def test_team_leader_worker_hydrates_member_replies_as_observed_group_speech(
                 "run_context_json": RunContext(
                     conversation_session_id="team-session-team-conversation-1",
                     participant_id="leader:team-conversation-1",
-                    activity_id="chat",
+                    activity_id="chat:team-conversation-1",
                     activity_kind="chat",
                     execution_scope_key="team:team-conversation-1:leader-conversation",
                     control_home=control_home,
@@ -170,12 +170,15 @@ def test_team_leader_worker_hydrates_member_replies_as_observed_group_speech(
         )
     )
 
-    assert [(msg["role"], msg["content"]) for msg in session["history"]] == [
+    assert session["history"][0]["role"] == "system"
+    assert session["history"][0]["metadata"]["team_member_identity_contract"] is True
+    assert "你是 小多(角色:未指定),团队会话中的一名成员。" in session["history"][0]["content"]
+    assert [(msg["role"], msg["content"]) for msg in session["history"][1:]] == [
         ("user", "你是谁？"),
         ("assistant", "我是小多，负责团队协调。"),
         ("user", "[前端工程师] 我是前端工程师，负责 UI。"),
     ]
-    assert session["history"][2]["metadata"]["transformed_speaker_pid"] == "member:frontend"
+    assert session["history"][3]["metadata"]["transformed_speaker_pid"] == "member:frontend"
 
 
 def test_worker_session_restores_workspace_context(

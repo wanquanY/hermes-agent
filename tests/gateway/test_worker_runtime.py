@@ -179,7 +179,7 @@ async def test_primary_dispatch_intercepts_run_submit(monkeypatch) -> None:
     sent = []
 
     class _FakeSup:
-        async def ensure(self, scope):
+        async def ensure(self, scope, env_overrides=None):
             return _fake_worker(scope)
 
         async def send(self, scope_key, conversation_id, frame):
@@ -240,7 +240,7 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
     ensure_calls: list = []
 
     class _FakeSupervisor:
-        async def ensure(self, scope):
+        async def ensure(self, scope, env_overrides=None):
             ensure_calls.append(scope)
             return _fake_worker(scope)
 
@@ -316,7 +316,7 @@ async def test_primary_dispatch_injects_session_workspace_context(monkeypatch, t
     workspace_root.mkdir()
 
     class _FakeSupervisor:
-        async def ensure(self, scope):
+        async def ensure(self, scope, env_overrides=None):
             return _fake_worker(scope)
 
         async def send(self, scope_key, conversation_id, frame):
@@ -363,7 +363,7 @@ async def test_primary_dispatch_rejects_invalid_session_workspace(monkeypatch) -
     transport = _RecordingTransport()
 
     class _Supervisor:
-        async def ensure(self, scope):
+        async def ensure(self, scope, env_overrides=None):
             raise AssertionError("supervisor must not start for invalid workspace")
 
     monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: _Supervisor())
@@ -388,7 +388,7 @@ async def test_primary_dispatch_acks_error_when_send_fails(monkeypatch) -> None:
     forgot: list[str] = []
 
     class _FailingSupervisor:
-        async def ensure(self, scope):
+        async def ensure(self, scope, env_overrides=None):
             return _fake_worker(scope)
 
         async def send(self, scope_key, conversation_id, frame):
@@ -417,7 +417,7 @@ async def test_primary_dispatch_acks_error_when_ensure_raises(monkeypatch) -> No
     transport = _RecordingTransport()
 
     class _BrokenSupervisor:
-        async def ensure(self, scope):
+        async def ensure(self, scope, env_overrides=None):
             raise RuntimeError("spawn failed")
 
         async def send(self, scope_key, conversation_id, frame):

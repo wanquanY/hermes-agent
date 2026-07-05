@@ -3,6 +3,8 @@ from __future__ import annotations
 # ruff: noqa: F401,F403,F405
 from .session_common import *
 
+_IDENTITY_CONTRACT_METADATA_KEY = "team_member_identity_contract"
+
 
 def _message_metadata(message: Dict[str, Any]) -> Dict[str, Any]:
     metadata = message.get("metadata")
@@ -22,6 +24,50 @@ def _participant_display_name(
             if value:
                 return value
     return ""
+
+
+def _participant_role(participant: Dict[str, Any]) -> str:
+    return (
+        _text(participant.get("role"))
+        or _text(participant.get("participant_role"))
+        or _text(participant.get("participantRole"))
+        or "未指定"
+    )
+
+
+def _identity_contract_message(
+    viewing_participant_id: str,
+    participant_by_id: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    participant = participant_by_id.get(viewing_participant_id) or {}
+    display_name = _participant_display_name(
+        viewing_participant_id,
+        participant_by_id,
+        participant,
+        participant,
+    ) or viewing_participant_id
+    role = _participant_role(participant)
+    return {
+        "role": "system",
+        "content": (
+            f"你是 {display_name}(角色:{role}),团队会话中的一名成员。\n"
+            "历史中带 `[某某]` 前缀、以 user 角色出现的消息,是团队里其他参与者的发言,仅供了解上下文。\n"
+            "你绝不能冒充任何其他参与者;你的回复不要以 `[任何名字]` 前缀开头。"
+        ),
+        "metadata": {
+            _IDENTITY_CONTRACT_METADATA_KEY: True,
+            "participant_id": viewing_participant_id,
+            "display_name": display_name,
+            "role": role,
+        },
+    }
+
+
+def is_team_member_identity_contract_message(message: Dict[str, Any]) -> bool:
+    if not isinstance(message, dict):
+        return False
+    metadata = _message_metadata(message)
+    return bool(metadata.get(_IDENTITY_CONTRACT_METADATA_KEY))
 
 
 def transform_to_member_perspective(
@@ -45,10 +91,13 @@ def transform_to_member_perspective(
         if isinstance(participant, dict) and _text(participant.get("participant_id"))
     }
     projected: List[Dict[str, Any]] = []
+    has_identity_contract = False
     drop_following_tools = False
     for message in messages or []:
         if not isinstance(message, dict):
             continue
+        if is_team_member_identity_contract_message(message):
+            has_identity_contract = True
 
         role = _text(message.get("role"))
         if role == "tool":
@@ -107,6 +156,8 @@ def transform_to_member_perspective(
         transformed.pop("reasoning_details", None)
         projected.append(transformed)
         drop_following_tools = True
+    if not has_identity_contract:
+        projected.insert(0, _identity_contract_message(viewing, participant_by_id))
     return projected
 
 

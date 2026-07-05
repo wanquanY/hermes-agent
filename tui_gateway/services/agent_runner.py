@@ -344,6 +344,18 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
 _HYDRATE_TAIL_LIMIT = 40
 
 
+def _is_team_member_identity_contract_message(message: Any) -> bool:
+    if not isinstance(message, dict):
+        return False
+    try:
+        from hermes_team_mission.state.session_views import (
+            is_team_member_identity_contract_message,
+        )
+    except Exception:
+        return False
+    return is_team_member_identity_contract_message(message)
+
+
 def _trim_history_to_window(history: list) -> list:
     """Return the last ``_HYDRATE_TAIL_LIMIT`` messages, advanced
     forward to the next non-``tool`` message so the slice never
@@ -351,6 +363,25 @@ def _trim_history_to_window(history: list) -> list:
     unchanged when it's at or under the limit."""
     if len(history) <= _HYDRATE_TAIL_LIMIT:
         return history
+    pinned: list = []
+    body: list = []
+    for message in history:
+        if _is_team_member_identity_contract_message(message):
+            if not pinned:
+                pinned.append(message)
+            continue
+        body.append(message)
+    if pinned:
+        body_limit = max(_HYDRATE_TAIL_LIMIT - len(pinned), 0)
+        if len(body) <= body_limit:
+            return pinned + body
+        start = len(body) - body_limit
+        while start < len(body) and (
+            isinstance(body[start], dict)
+            and body[start].get("role") == "tool"
+        ):
+            start += 1
+        return pinned + body[start:]
     start = len(history) - _HYDRATE_TAIL_LIMIT
     while start < len(history) and (
         isinstance(history[start], dict)

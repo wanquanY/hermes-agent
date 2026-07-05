@@ -4,13 +4,19 @@ The Dovie cloud query context is turn-local state carried in
 ``HERMES_DOVIE_PRODUCT_CONTEXT``.  Do not snapshot it into SDK
 ``default_headers``: provider clients are cached across turns.
 
-This side channel intentionally uses ``os.environ`` instead of
-``ContextVar``.  Worker subprocesses receive the context on the
-``run.start`` frame, set the process environment before handling the
+The base side channel intentionally uses ``os.environ`` instead of a
+turn-scoped ``ContextVar``.  Worker subprocesses receive the context on
+the ``run.start`` frame, set the process environment before handling the
 turn, and restore it when the turn exits.  All threads in that worker
 process therefore see the same value, including nested raw
 ``threading.Thread`` calls inside agent/runtime code, without requiring
 per-boundary propagation.
+
+Subagent attribution is a narrower exception layered on top of the base
+context.  A subagent may override only the executing profile and role while
+continuing to inherit the root query token, query ids, and ``agent_run_id``
+claim from the process context.  That overlay is held in a ``ContextVar`` so
+concurrent delegations cannot race through ``os.environ``.
 
 The correctness assumption is that a single worker subprocess handles
 only one turn at a time.  Hermes enforces that in ``AgentRunBackend`` by
@@ -27,15 +33,34 @@ remains intact.
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Iterable, Iterator, Mapping
 
 _HEADER_VALUE_LIMIT = 2048  # HTTP header 允许约 8KB;JWT token 加上强 SECRET_KEY 后可达 500+ 字符,原 512 会截掉 signature 尾部导致 backend 校验失败
+
+_DOVIE_ATTRIBUTION_OVERLAY_KEYS = frozenset(
+    {
+        "executing_agent_profile_id",
+        "agent_role",
+    }
+)
+
+DOVIE_ATTRIBUTION_OVERLAY: ContextVar[dict | None] = ContextVar(
+    "DOVIE_ATTRIBUTION_OVERLAY",
+    default=None,
+)
 
 _CLOUD_QUERY_HEADER_KEYS = {
     "query_id": "X-Dovie-Query-Id",
     "root_query_id": "X-Dovie-Root-Query-Id",
     "agent_run_id": "X-Dovie-Agent-Run-Id",
     "query_context_token": "X-Dovie-Query-Context-Token",
+}
+
+_DOVIE_ATTRIBUTION_OVERLAY_HEADER_KEYS = {
+    "executing_agent_profile_id": "X-Dovie-Executing-Agent-Profile-Id",
+    "agent_role": "X-Dovie-Agent-Role",
 }
 
 
@@ -62,6 +87,70 @@ def _put_header(headers: dict[str, str], name: str, value: Any) -> None:
         headers[name] = cleaned
 
 
+def _current_dovie_product_context() -> dict[str, Any] | None:
+    from gateway.session_context import get_session_env
+
+    raw_context = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
+    if not raw_context:
+        return None
+    parsed = json.loads(raw_context)
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _filtered_overlay() -> dict[str, Any]:
+    overlay = DOVIE_ATTRIBUTION_OVERLAY.get()
+    if not isinstance(overlay, Mapping):
+        return {}
+    return {
+        key: overlay.get(key)
+        for key in _DOVIE_ATTRIBUTION_OVERLAY_KEYS
+        if key in overlay
+    }
+
+
+def _overlay_or_base(overlay: Mapping[str, Any], key: str, base: Any) -> Any:
+    if key in overlay:
+        return overlay.get(key)
+    return base
+
+
+@contextmanager
+def dovie_child_run_overlay(
+    executing_agent_profile_id: str,
+    agent_role: str,
+) -> Iterator[None]:
+    """Temporarily override Dovie executing identity for a subagent."""
+
+    executing_profile_id = _clean_header_value(executing_agent_profile_id)
+    if not executing_profile_id:
+        yield
+        return
+
+    overlay = {
+        "executing_agent_profile_id": executing_profile_id,
+        "agent_role": agent_role,
+    }
+    token = DOVIE_ATTRIBUTION_OVERLAY.set(overlay)
+    try:
+        yield
+    finally:
+        DOVIE_ATTRIBUTION_OVERLAY.reset(token)
+
+
+def build_dovie_attribution_overlay_headers() -> dict[str, str]:
+    """Build only the child overlay headers for per-request overrides."""
+    try:
+        if _current_dovie_product_context() is None:
+            return {}
+    except Exception:
+        return {}
+    overlay = _filtered_overlay()
+    headers: dict[str, str] = {}
+    for source_key, header_name in _DOVIE_ATTRIBUTION_OVERLAY_HEADER_KEYS.items():
+        _put_header(headers, header_name, overlay.get(source_key))
+    return headers
+
+
 def build_dovie_attribution_headers() -> dict[str, str]:
     """Build Dovie attribution headers from the current task context.
 
@@ -69,15 +158,11 @@ def build_dovie_attribution_headers() -> dict[str, str]:
     sanitized for HTTP header safety and capped to a bounded size.
     """
     try:
-        from gateway.session_context import get_session_env
-
-        raw_context = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
-        if not raw_context:
-            return {}
-        parsed = json.loads(raw_context)
-        if not isinstance(parsed, dict):
+        parsed = _current_dovie_product_context()
+        if parsed is None:
             return {}
 
+        overlay = _filtered_overlay()
         headers: dict[str, str] = {}
         cloud_query = parsed.get("cloud_query") or parsed.get("cloudQuery") or {}
         if isinstance(cloud_query, dict):
@@ -102,26 +187,36 @@ def build_dovie_attribution_headers() -> dict[str, str]:
             or source_profile_id
         )
         executing_profile_id = (
-            _first_present(
-                parsed,
+            _overlay_or_base(
+                overlay,
+                "executing_agent_profile_id",
                 (
-                    "executing_agent_profile_id",
-                    "executingAgentProfileId",
+                    _first_present(
+                        parsed,
+                        (
+                            "executing_agent_profile_id",
+                            "executingAgentProfileId",
+                        ),
+                    )
+                    or source_profile_id
+                    or root_profile_id
                 ),
             )
-            or source_profile_id
-            or root_profile_id
         )
         _put_header(headers, "X-Dovie-Root-Agent-Profile-Id", root_profile_id)
         _put_header(headers, "X-Dovie-Executing-Agent-Profile-Id", executing_profile_id)
         _put_header(
             headers,
             "X-Dovie-Agent-Role",
-            _first_present(
-                parsed,
-                (
-                    "agent_role",
-                    "agentRole",
+            _overlay_or_base(
+                overlay,
+                "agent_role",
+                _first_present(
+                    parsed,
+                    (
+                        "agent_role",
+                        "agentRole",
+                    ),
                 ),
             ),
         )
@@ -249,8 +344,11 @@ def attach_dovie_attribution_request_hook(client_or_http_client: Any) -> Any:
 
 
 __all__ = [
+    "DOVIE_ATTRIBUTION_OVERLAY",
     "attach_dovie_attribution_request_hook",
+    "build_dovie_attribution_overlay_headers",
     "build_dovie_attribution_headers",
+    "dovie_child_run_overlay",
     "dovie_attribution_async_request_hook",
     "dovie_attribution_request_hook",
 ]

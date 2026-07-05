@@ -74,6 +74,13 @@ async def apply_runtime_cloud_proxy_update(params: dict[str, Any]) -> dict[str, 
     if token_present:
         _apply_env_update("DOVIE_LLM_RUNTIME_TOKEN", runtime_token)
         env_updates["DOVIE_LLM_RUNTIME_TOKEN"] = runtime_token
+        # Codex platform-mode subprocesses read the same runtime token from
+        # DOXIE_PLATFORM_API_KEY (their config.toml pins it as env_key for the
+        # doxie provider). Keep the two names in sync so a token refresh
+        # propagates to codex too — otherwise the first codex platform turn
+        # after login/refresh fails with "Missing environment variable".
+        _apply_env_update("DOXIE_PLATFORM_API_KEY", runtime_token)
+        env_updates["DOXIE_PLATFORM_API_KEY"] = runtime_token
 
     if origin_present:
         _apply_env_update("DOVIE_API_ORIGIN", api_origin)

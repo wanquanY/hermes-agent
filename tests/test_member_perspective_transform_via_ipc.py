@@ -162,15 +162,17 @@ def test_transform_to_member_perspective_produces_same_output_under_ipc(
 
     assert ipc_projection == direct_projection
     assert [message["role"] for message in ipc_projection] == [
+        "system",
         "user",
         "user",
         "assistant",
         "user",
     ]
-    assert ipc_projection[1]["content"] == "[Leader Name] I will coordinate this review."
-    assert ipc_projection[2]["content"] == "Alice prior response should stay assistant."
+    assert ipc_projection[0]["metadata"]["team_member_identity_contract"] is True
+    assert ipc_projection[2]["content"] == "[Leader Name] I will coordinate this review."
+    assert ipc_projection[3]["content"] == "Alice prior response should stay assistant."
     assert (
-        ipc_projection[3]["content"]
+        ipc_projection[4]["content"]
         == "[Bob] Bob prior response should become observed speech."
     )
 

@@ -67,6 +67,22 @@ def _worker_run_log(stage: str, **fields: Any) -> None:
     emit_dovie_runtime_diagnostic("dovie-worker-run", stage, fields)
 
 
+def _runtime_session_kind_summary(params: dict[str, Any], scope: RuntimeScope) -> str:
+    source = str(params.get("source") or "").strip()
+    if source:
+        return source
+    scope_key = str(scope.runtime_scope_key or "").strip()
+    if scope_key.startswith("member-chat:"):
+        return "member_chat"
+    if scope_key.startswith("team:") and ":node:" in scope_key:
+        return "mission_node"
+    if scope_key.startswith("team:"):
+        return "team_leader"
+    if scope_key.startswith("profile:"):
+        return "profile_chat"
+    return "unknown"
+
+
 class ControlPlaneTransport:
     """In-process transport for internal control-plane dispatch.
 
@@ -648,6 +664,17 @@ async def _dispatch_prompt_submit(
         }
     }
     dovie_product_context = dovie_product_context_from_params(params)
+    if not dovie_product_context:
+        _log.warning(
+            "dovie_attribution_context_missing request_id=%s method=%s stored_session_id=%s "
+            "runtime_scope_key=%s agent_profile_id=%s session_kind=%s",
+            rid,
+            str(req.get("method") or ""),
+            stored_session_id,
+            lease.scope_key,
+            scope.agent_profile_id,
+            _runtime_session_kind_summary(params, scope),
+        )
     if dovie_product_context:
         frame_params["dovie_product_context"] = dovie_product_context
     if workspace_context:
