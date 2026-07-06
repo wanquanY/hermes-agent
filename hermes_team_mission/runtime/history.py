@@ -20,6 +20,18 @@ def _bounded_int(value: Any, *, default: int, minimum: int = 0, maximum: int = 5
     return max(minimum, min(parsed, maximum))
 
 
+def _cursor_value(value: Any) -> int:
+    """Parse a cursor (after_seq/before_seq/after_id/before_id) value.
+
+    Returns 0 for missing/invalid input, which means "no cursor" (current
+    behaviour) — keeping the call site backward compatible.
+    """
+    try:
+        return int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def _text_set(value: Any) -> set[str]:
     if value is None:
         return set()
@@ -176,7 +188,9 @@ def _message_from_row(db: Any, row: Any) -> dict[str, Any]:
     if role not in {"assistant", "system", "tool", "user"}:
         role = "assistant"
     metadata = _json_loads(_row_value(row, "metadata_json", ""), {})
+    row_id = int(_row_value(row, "id", 0) or 0)
     message = {
+        "id": row_id,
         "role": role,
         "message_id": _text(_row_value(row, "platform_message_id", "")) or str(_row_value(row, "id", "")),
         "timestamp": float(_row_value(row, "timestamp", 0) or 0),
@@ -233,48 +247,98 @@ def _fetch_recent_messages(
     limit: int,
     activity_id: str = "",
     node_id: str = "",
+    after_id: int = 0,
+    before_id: int = 0,
 ) -> tuple[list[dict[str, Any]], int]:
     if not session_id or not hasattr(db, "_conn"):
         return [], 0
     bounded_limit = _bounded_int(limit, default=50, minimum=1, maximum=500)
+    after_id = _cursor_value(after_id)
+    before_id = _cursor_value(before_id)
     with db._lock:
         active_column = db._conn.execute("PRAGMA table_info(messages)").fetchall()
         has_active = any(_text(_row_value(row, "name")) == "active" for row in active_column)
         active_clause = "AND active = 1" if has_active else ""
         if activity_id:
+            # activity_id branch: full scan + Python-side node filter, then slice.
+            cursor_clause = ""
+            cursor_params: list[Any] = []
+            if after_id > 0:
+                cursor_clause = "AND id > ?"
+                cursor_params.append(after_id)
+            elif before_id > 0:
+                cursor_clause = "AND id < ?"
+                cursor_params.append(before_id)
             rows = db._conn.execute(
                 f"""
                 SELECT *
                 FROM messages
                 WHERE session_id = ?
                   {active_clause}
+                  {cursor_clause}
                   AND metadata_json LIKE ?
                 ORDER BY id ASC
                 """,
-                (session_id, f"%{activity_id}%"),
+                (session_id, *cursor_params, f"%{activity_id}%"),
             ).fetchall()
             filtered = [
                 message
                 for message in (_message_from_row(db, row) for row in rows)
                 if _message_matches_node_filter(message, activity_id=activity_id, node_id=node_id)
             ]
+            if after_id > 0:
+                # forward cursor: oldest-first, take the first N (earliest new)
+                return filtered[:bounded_limit], len(filtered)
+            if before_id > 0:
+                # backward cursor: ASC order, take the newest N under the cursor
+                return filtered[-bounded_limit:], len(filtered)
             return filtered[-bounded_limit:], len(filtered)
         total = db._conn.execute(
             f"SELECT count(*) AS count FROM messages WHERE session_id = ? {active_clause}",
             (session_id,),
         ).fetchone()
-        rows = db._conn.execute(
-            f"""
-            SELECT * FROM (
+        if after_id > 0:
+            # forward cursor: only messages with id > after_id, oldest first
+            rows = db._conn.execute(
+                f"""
                 SELECT *
                 FROM messages
                 WHERE session_id = ? {active_clause}
-                ORDER BY id DESC
+                  AND id > ?
+                ORDER BY id ASC
                 LIMIT ?
-            ) ORDER BY id ASC
-            """,
-            (session_id, bounded_limit),
-        ).fetchall()
+                """,
+                (session_id, after_id, bounded_limit),
+            ).fetchall()
+        elif before_id > 0:
+            # backward cursor: messages with id < before_id, newest first, then reverse to ASC
+            rows = db._conn.execute(
+                f"""
+                SELECT * FROM (
+                    SELECT *
+                    FROM messages
+                    WHERE session_id = ? {active_clause}
+                      AND id < ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                ) ORDER BY id ASC
+                """,
+                (session_id, before_id, bounded_limit),
+            ).fetchall()
+        else:
+            # default: recent N by id DESC, then reverse to ASC
+            rows = db._conn.execute(
+                f"""
+                SELECT * FROM (
+                    SELECT *
+                    FROM messages
+                    WHERE session_id = ? {active_clause}
+                    ORDER BY id DESC
+                    LIMIT ?
+                ) ORDER BY id ASC
+                """,
+                (session_id, bounded_limit),
+            ).fetchall()
     return [_message_from_row(db, row) for row in rows], int(_row_value(total, "count", len(rows)) or len(rows))
 
 
@@ -310,12 +374,16 @@ def _fetch_recent_run_events(
     event_types: set[str] | None = None,
     exclude_event_types: set[str] | None = None,
     activity_id: str = "",
+    after_seq: int = 0,
+    before_seq: int = 0,
 ) -> list[dict[str, Any]]:
     if not session_id or not hasattr(db, "_conn"):
         return []
     bounded_limit = _bounded_int(limit, default=0, minimum=0, maximum=5000)
     if bounded_limit <= 0:
         return []
+    after_seq = _cursor_value(after_seq)
+    before_seq = _cursor_value(before_seq)
     normalized_run_id = _text(run_id)
     include_types = sorted(event_types or set())
     exclude_types = sorted(exclude_event_types or set())
@@ -335,21 +403,55 @@ def _fetch_recent_run_events(
     if normalized_activity_id:
         clauses.append("activity_id = ?")
         params.append(normalized_activity_id)
-    params.append(bounded_limit)
     where_clause = "\n                  AND ".join(clauses)
     with db._lock:
-        rows = db._conn.execute(
-            f"""
-            SELECT * FROM (
+        if after_seq > 0:
+            # forward cursor: seq > after_seq, oldest first (no DESC subquery)
+            params.append(after_seq)
+            params.append(bounded_limit)
+            rows = db._conn.execute(
+                f"""
                 SELECT *
                 FROM run_events
                 WHERE {where_clause}
-                ORDER BY seq DESC
+                  AND seq > ?
+                ORDER BY seq ASC
                 LIMIT ?
-            ) ORDER BY seq ASC
-            """,
-            tuple(params),
-        ).fetchall()
+                """,
+                tuple(params),
+            ).fetchall()
+        elif before_seq > 0:
+            # backward cursor: seq < before_seq, newest first, then reverse to ASC
+            params.append(before_seq)
+            params.append(bounded_limit)
+            rows = db._conn.execute(
+                f"""
+                SELECT * FROM (
+                    SELECT *
+                    FROM run_events
+                    WHERE {where_clause}
+                      AND seq < ?
+                    ORDER BY seq DESC
+                    LIMIT ?
+                ) ORDER BY seq ASC
+                """,
+                tuple(params),
+            ).fetchall()
+        else:
+            # default: recent N by seq DESC, then reverse to ASC
+            params.append(bounded_limit)
+            rows = db._conn.execute(
+                f"""
+                SELECT * FROM (
+                    SELECT *
+                    FROM run_events
+                    WHERE {where_clause}
+                    ORDER BY seq DESC
+                    LIMIT ?
+                ) ORDER BY seq ASC
+                """,
+                tuple(params),
+            ).fetchall()
     return [_event_from_row(row, session_id) for row in rows]
 
 
@@ -390,6 +492,21 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
         default=0 if not include_run_events else 200,
         minimum=0,
         maximum=5000,
+    )
+    # Cursor params: after_seq/before_seq (run_events.seq domain) and
+    # after_id/before_id (messages.id domain). Default 0 = current behaviour
+    # (recent N). camelCase aliases for frontend convenience.
+    requested_after_seq = _cursor_value(
+        params.get("after_seq") or params.get("afterSeq")
+    )
+    requested_before_seq = _cursor_value(
+        params.get("before_seq") or params.get("beforeSeq")
+    )
+    requested_after_id = _cursor_value(
+        params.get("after_id") or params.get("afterId")
+    )
+    requested_before_id = _cursor_value(
+        params.get("before_id") or params.get("beforeId")
     )
     _trace_history(
         "request",
@@ -453,6 +570,8 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
             limit=requested_limit,
             activity_id=node_activity_id,
             node_id=resolved_node_id,
+            after_id=requested_after_id,
+            before_id=requested_before_id,
         )
         if candidate_messages:
             session_id = candidate_session_id
@@ -471,6 +590,8 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
                 event_types=run_event_types,
                 exclude_event_types=exclude_run_event_types,
                 activity_id=node_activity_id,
+                after_seq=requested_after_seq,
+                before_seq=requested_before_seq,
             )
             if candidate_run_events:
                 session_id = candidate_session_id
@@ -502,7 +623,13 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
             "node_id": node_id,
             "messages": [],
             "run_events": [],
-            "page_info": {"total_count": 0, "has_more_before": False, "has_more_after": False},
+            "page_info": {
+                "total_count": 0,
+                "has_more_before": False,
+                "has_more_after": False,
+                "last_run_event_seq": 0,
+                "last_message_id": 0,
+            },
             "source": {"session_id": "", "runtime_session_id": "", "runtime_scope_key": "", "run_id": ""},
         }
 
@@ -513,6 +640,8 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
             limit=requested_limit,
             activity_id=node_activity_id,
             node_id=resolved_node_id,
+            after_id=requested_after_id,
+            before_id=requested_before_id,
         )
     if include_run_events and not run_events:
         run_events = _fetch_recent_run_events(
@@ -524,11 +653,17 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
             event_types=run_event_types,
             exclude_event_types=exclude_run_event_types,
             activity_id=node_activity_id,
+            after_seq=requested_after_seq,
+            before_seq=requested_before_seq,
         )
+    last_run_event_seq = max((int(event.get("seq") or 0) for event in run_events), default=0)
+    last_message_id = max((int(message.get("id") or 0) for message in messages), default=0)
     page_info = {
         "total_count": total_count,
         "has_more_before": total_count > len(messages),
         "has_more_after": False,
+        "last_run_event_seq": last_run_event_seq,
+        "last_message_id": last_message_id,
     }
     source = {
         "session_id": session_id,
