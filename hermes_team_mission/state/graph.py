@@ -236,34 +236,57 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
         and _execution_mode_requires_finalizers(mode)
         and not required_execution_completed
     )
-    approval_pending = (
-        mode == "supervised_mission"
-        and any(
-            normalize_team_mission_node_kind(node.get("kind")) == "approval_gate"
-            and str(node.get("status") or "") not in _DEPENDENCY_SATISFIED_STATUSES
-            for node in updated_nodes
-        )
-    )
-    active = bool(statuses & _ACTIVE_NODE_STATUSES)
-    if approval_pending:
-        mission_status = "waiting_approval"
-    elif completion_satisfied and required_execution_completed:
-        mission_status = "completed"
-    elif "failed" in statuses:
-        mission_status = "failed"
-    elif active:
-        mission_status = "running"
-    elif ready_node_ids:
-        mission_status = "ready"
-    elif completion_blocked_by_required_execution:
-        mission_status = "running"
-    elif "blocked" in statuses:
-        mission_status = "blocked"
-    elif "blocked_waiting_dependency" in statuses:
-        mission_status = "waiting_dependency"
-    else:
-        mission_status = str(mission.get("status") or "draft")
     prior_mission_status = str(mission.get("status") or "")
+    # BUG FIX(2026-07-06): 一旦 mission 已进入终态(cancelled/failed/completed/blocked/
+    # interrupted),必须冻结 mission_status,不再让节点级 reduce 反过来覆盖它。
+    #
+    # 症状:用户在 plan 审批阶段点"取消" → reject_team_mission_plan 把 mission 和
+    # approval_gate 节点都写成 cancelled;紧接着 leader 起 report run 汇报"任务已
+    # 取消",report run 完成时 session_events 会再次触发 reduce_team_mission_graph
+    # (session_events.py:180)。旧逻辑走到下面 approval_pending 判定时:approval_gate
+    # 节点状态是 "cancelled",而 _DEPENDENCY_SATISFIED_STATUSES = {"completed",
+    # "verified"} 不含 cancelled → approval_pending=True → mission_status 被推导
+    # 回 "waiting_approval" → upsert_team_mission 把已 cancelled 的 mission 静默
+    # 覆盖回 waiting_approval → 前端下一次 render 立即看到审批卡再显,用户被迫再
+    # 点一次取消。用户描述"leader 报告响应结束瞬间弹审批"完全对应这条时序。
+    #
+    # 修法(核心层 A):任何终态 mission 都不再推导 status。剩下的下游动作
+    # (session_index projection / terminal 事件 append)仍照常执行 —— 这些是
+    # idempotent 的,重跑不会造成额外副作用。
+    if is_terminal_mission_status(prior_mission_status):
+        mission_status = prior_mission_status
+    else:
+        approval_pending = (
+            mode == "supervised_mission"
+            and any(
+                normalize_team_mission_node_kind(node.get("kind")) == "approval_gate"
+                # BUG FIX(2026-07-06)防御层 B:approval_gate 节点自身进入终态
+                # (cancelled/failed 等)也算 "不 pending",避免 non-terminal
+                # mission 因残留的终态 approval_gate 节点被永久锁在 waiting_approval。
+                and str(node.get("status") or "") not in _DEPENDENCY_SATISFIED_STATUSES
+                and str(node.get("status") or "") not in {"cancelled", "canceled", "failed"}
+                for node in updated_nodes
+            )
+        )
+        active = bool(statuses & _ACTIVE_NODE_STATUSES)
+        if approval_pending:
+            mission_status = "waiting_approval"
+        elif completion_satisfied and required_execution_completed:
+            mission_status = "completed"
+        elif "failed" in statuses:
+            mission_status = "failed"
+        elif active:
+            mission_status = "running"
+        elif ready_node_ids:
+            mission_status = "ready"
+        elif completion_blocked_by_required_execution:
+            mission_status = "running"
+        elif "blocked" in statuses:
+            mission_status = "blocked"
+        elif "blocked_waiting_dependency" in statuses:
+            mission_status = "waiting_dependency"
+        else:
+            mission_status = str(mission.get("status") or "draft")
     if mission_status != prior_mission_status:
         db.upsert_team_mission(
             mission_id=mission_id,
