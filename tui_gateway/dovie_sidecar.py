@@ -180,6 +180,20 @@ async def main_async(args: argparse.Namespace) -> None:
     except Exception as exc:
         raise SystemExit(f"Hermes Dovie gateway requires websockets + starlette: {exc}") from exc
 
+    # BUG FIX(2026-07-06): dovie_sidecar 从未调用 setup_logging,导致 gateway
+    # 进程里 logger.info(...) 全都往默认 stderr 写、永远不进 agent.log。
+    # 排查审批弹二次时,加的所有 [team_mission.plan.reject] / [dispatch-trace]
+    # INFO 日志都消失了,盲飞好几轮才发现是这个 root handler 缺失。
+    #
+    # 只跑 setup_logging(mode="gateway"),让 gateway 进程的日志与 workers
+    # (它们自己在 run_agent 里 setup_logging) 都汇聚到同一 agent.log。
+    try:
+        from hermes_logging import setup_logging as _setup_logging
+        _setup_logging(mode="gateway")
+    except Exception as exc:
+        # 日志配置失败不阻塞 gateway 启动 —— 仍然可以正常处理 RPC。
+        print(f"[dovie-sidecar] setup_logging failed: {exc}", flush=True)
+
     from tui_gateway import server as tui_gateway_server  # noqa: F401 - registers gateway methods
     from tui_gateway import ws as tui_gateway_ws
     from tui_gateway.services.dovie_cron_runtime import start_cron_ticker, stop_cron_ticker
