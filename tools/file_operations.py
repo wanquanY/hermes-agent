@@ -1818,9 +1818,16 @@ class ShellFileOperations(FileOperations):
         """Fallback search using grep."""
         cmd_parts = ["grep", "-rnH"]  # -H forces filename even for single-file searches
         
-        # Exclude hidden directories (matching ripgrep's default behavior).
-        # This prevents searching inside .hub/index-cache/, .git/, etc.
-        cmd_parts.append("--exclude-dir='.*'")
+        # Exclude hidden/dependency directories (matching ripgrep's
+        # default behavior).  NOTE: grep's --exclude-dir uses glob
+        # matching, NOT regex — a bare '.*' matches every directory
+        # name and silently swallows all results (verified: returns 0
+        # lines on BSD grep/macOS when the search root is '.').
+        # List common hidden dirs explicitly.
+        for _hidden in (".git", ".svn", ".hg", ".venv", "venv",
+                        "node_modules", "__pycache__", ".mypy_cache",
+                        ".pytest_cache", ".ruff_cache", ".hub", ".hermes"):
+            cmd_parts.append(f"--exclude-dir={_hidden}")
         
         # Add context if requested
         if context > 0:
