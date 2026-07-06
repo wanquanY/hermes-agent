@@ -1990,120 +1990,16 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         except sqlite3.OperationalError as exc:
             logger.debug("deferred message indexes create skipped: %s", exc)
 
-        # ── Schema version bookkeeping ─────────────────────────────────
-        # Bump to current so future data migrations (if any) can gate on
-        # version.  No version-gated column additions remain.
         cursor.execute("SELECT version FROM schema_version LIMIT 1")
         row = cursor.fetchone()
         if row is None:
             self._backfill_session_list_summaries(cursor)
             self._backfill_session_runtime_state(cursor)
             self._backfill_tool_events(cursor)
-            cursor.execute(
-                "INSERT INTO schema_version (version) VALUES (?)",
-                (SCHEMA_VERSION,),
-            )
-        else:
-            current_version = row["version"] if isinstance(row, sqlite3.Row) else row[0]
-            # Data migrations that can't be expressed declaratively (row
-            # backfills, index changes tied to a specific version step) stay
-            # in a version-gated chain. Column additions are handled by
-            # _reconcile_columns() above and no longer need entries here.
-            if current_version < 10:
-                # v10: trigram FTS5 table for CJK/substring search. The
-                # virtual table + triggers are created unconditionally via
-                # FTS_TRIGRAM_SQL below, but existing rows need a one-time
-                # backfill into the FTS index.
-                try:
-                    cursor.execute("SELECT * FROM messages_fts_trigram LIMIT 0")
-                    _fts_trigram_exists = True
-                except sqlite3.OperationalError:
-                    _fts_trigram_exists = False
-                if not _fts_trigram_exists:
-                    cursor.executescript(FTS_TRIGRAM_SQL)
-                    cursor.execute(
-                        "INSERT INTO messages_fts_trigram(rowid, content) "
-                        "SELECT id, content FROM messages WHERE content IS NOT NULL"
-                    )
-            if current_version < 11:
-                # v11: re-index FTS5 tables to cover tool_name + tool_calls and
-                # switch from external-content to inline mode. Existing DBs have
-                # old-schema FTS tables and triggers that IF NOT EXISTS won't
-                # overwrite, so we drop them explicitly and let the post-migration
-                # existence checks (below) recreate them from FTS_SQL /
-                # FTS_TRIGRAM_SQL, then backfill every message row. Fixes #16751.
-                for _trig in (
-                    "messages_fts_insert",
-                    "messages_fts_delete",
-                    "messages_fts_update",
-                    "messages_fts_trigram_insert",
-                    "messages_fts_trigram_delete",
-                    "messages_fts_trigram_update",
-                ):
-                    try:
-                        cursor.execute(f"DROP TRIGGER IF EXISTS {_trig}")
-                    except sqlite3.OperationalError:
-                        pass
-                for _tbl in ("messages_fts", "messages_fts_trigram"):
-                    try:
-                        cursor.execute(f"DROP TABLE IF EXISTS {_tbl}")
-                    except sqlite3.OperationalError:
-                        pass
-                # Recreate virtual tables + triggers with the new inline-mode
-                # schema that indexes content || tool_name || tool_calls.
-                cursor.executescript(FTS_SQL)
-                cursor.executescript(FTS_TRIGRAM_SQL)
-                # Backfill both indexes from every existing messages row.
-                cursor.execute(
-                    "INSERT INTO messages_fts(rowid, content) "
-                    "SELECT id, "
-                    "COALESCE(content, '') || ' ' || "
-                    "COALESCE(tool_name, '') || ' ' || "
-                    "COALESCE(tool_calls, '') "
-                    "FROM messages"
-                )
-                cursor.execute(
-                    "INSERT INTO messages_fts_trigram(rowid, content) "
-                    "SELECT id, "
-                    "COALESCE(content, '') || ' ' || "
-                    "COALESCE(tool_name, '') || ' ' || "
-                    "COALESCE(tool_calls, '') "
-                    "FROM messages"
-                )
-            if current_version < 14:
-                try:
-                    cursor.execute("UPDATE messages SET active = 1 WHERE active IS NULL")
-                except sqlite3.OperationalError:
-                    pass
-            if current_version < 18:
-                self._backfill_session_list_summaries(cursor)
-            if current_version < 20:
-                self._migrate_agent_profile_versions_to_latest_profiles(cursor)
-            if current_version < 39:
-                compact_team_mission_event_json_storage(cursor, logger)
-            if current_version < 28:
-                self._migrate_run_events_participant_id(cursor)
-            if current_version < 29:
-                self._migrate_activities_kind_mission_check(cursor)
-            if current_version < 30:
-                self._migrate_messages_participant_id(cursor)
-            if current_version < 31:
-                self._migrate_session_system_prompts(cursor)
-            if current_version < 33:
-                self._backfill_session_runtime_state(cursor)
-            if current_version < 34:
-                self._backfill_tool_events(cursor)
-            if current_version < 36:
-                self._backfill_run_event_frame_indexes(cursor)
-            if current_version < 37:
-                self._migrate_run_events_activity_id(cursor)
-            if current_version < 38:
-                self._migrate_activity_commands(cursor)
-            if current_version < SCHEMA_VERSION:
-                cursor.execute(
-                    "UPDATE schema_version SET version = ?",
-                    (SCHEMA_VERSION,),
-                )
+
+        from hermes_agent.storage.migrations import MigrationRunner
+
+        MigrationRunner(cursor, self).run_all()
 
         # Unique title index — always ensure it exists
         try:
