@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
 from .common import *
+
+_log = logging.getLogger(__name__)
 from .dovie_context import persist_mission_dovie_product_context_from_submit
 from .participant_autocreate import ensure_member_chat_participant
 from hermes_profile_dir import resolve_default_agent_dir
@@ -1387,13 +1390,37 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
+        _log.info(
+            "[team_mission.plan.approve] rejected: db unavailable rid=%s",
+            rid,
+        )
         return _db_unavailable_error(rid, code=5008)
     mission_id = _mission_id_from_params(params)
     if not mission_id:
+        _log.info(
+            "[team_mission.plan.approve] rejected: mission_id missing rid=%s",
+            rid,
+        )
         return _err(rid, 4006, "mission_id required")
+    task_id_log = str(params.get("task_id") or params.get("taskId") or "")
+    approved_by_log = str(params.get("approved_by") or params.get("approvedBy") or "user")
+    run_id_log = _run_id_from_params(params)
+    _log.info(
+        "[team_mission.plan.approve] enter mission_id=%s task_id=%s approved_by=%s run_id=%s rid=%s",
+        mission_id,
+        task_id_log,
+        approved_by_log,
+        run_id_log,
+        rid,
+    )
     graph = db.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else None
     if not isinstance(mission, dict):
+        _log.warning(
+            "[team_mission.plan.approve] mission not found mission_id=%s rid=%s",
+            mission_id,
+            rid,
+        )
         return _err(rid, 4040, "team mission not found")
     task_id = str(params.get("task_id") or params.get("taskId") or "").strip()
     approval_nodes: list[dict] = []
@@ -1426,6 +1453,12 @@ def _(rid, params: dict) -> dict:
             if str(node.get("status") or "").strip() in {"completed", "verified"}
         ]
         if completed_nodes and mission_status != "waiting_approval":
+            _log.info(
+                "[team_mission.plan.approve] already approved (idempotent) mission_id=%s task_id=%s rid=%s",
+                mission_id,
+                task_id,
+                rid,
+            )
             return _ok(
                 rid,
                 {
@@ -1439,6 +1472,14 @@ def _(rid, params: dict) -> dict:
                     "graph": graph,
                 },
             )
+        _log.warning(
+            "[team_mission.plan.approve] approval gate not found mission_id=%s task_id=%s mission_status=%s approval_node_count=%d rid=%s",
+            mission_id,
+            task_id,
+            mission_status,
+            len(approval_nodes),
+            rid,
+        )
         return _err(rid, 4040, "team mission approval gate not found")
     approval_node = sorted(
         waiting_nodes,
@@ -1446,6 +1487,12 @@ def _(rid, params: dict) -> dict:
     )[-1]
     node_id = str(approval_node.get("node_id") or approval_node.get("id") or "").strip()
     if not node_id:
+        _log.warning(
+            "[team_mission.plan.approve] approval node missing id mission_id=%s task_id=%s rid=%s",
+            mission_id,
+            task_id,
+            rid,
+        )
         return _err(rid, 4040, "team mission approval gate not found")
     metadata = dict(approval_node.get("metadata") or {})
     metadata.update({
@@ -1479,6 +1526,20 @@ def _(rid, params: dict) -> dict:
         params={"mission_id": mission_id, "task_id": task_id, "limit": params.get("limit")},
         trigger="team_mission.plan.approve",
     )
+    scheduled_ready_nodes = 0
+    if isinstance(schedule_result, dict):
+        try:
+            scheduled_ready_nodes = int(schedule_result.get("ready_nodes_count") or 0)
+        except (TypeError, ValueError):
+            scheduled_ready_nodes = 0
+    _log.info(
+        "[team_mission.plan.approve] ok mission_id=%s task_id=%s node_id=%s scheduled_ready=%d rid=%s",
+        mission_id,
+        task_id,
+        node_id,
+        scheduled_ready_nodes,
+        rid,
+    )
     return _ok(
         rid,
         {
@@ -1495,25 +1556,58 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
+        _log.info(
+            "[team_mission.plan.reject] rejected: db unavailable rid=%s",
+            rid,
+        )
         return _db_unavailable_error(rid, code=5008)
     mission_id = _mission_id_from_params(params)
     if not mission_id:
+        _log.info(
+            "[team_mission.plan.reject] rejected: mission_id missing rid=%s",
+            rid,
+        )
         return _err(rid, 4006, "mission_id required")
+    task_id = str(params.get("task_id") or params.get("taskId") or "")
+    rejected_by = str(params.get("rejected_by") or params.get("rejectedBy") or "user")
+    run_id = _run_id_from_params(params)
+    _log.info(
+        "[team_mission.plan.reject] enter mission_id=%s task_id=%s rejected_by=%s run_id=%s rid=%s",
+        mission_id,
+        task_id,
+        rejected_by,
+        run_id,
+        rid,
+    )
     result = db.reject_team_mission_plan(
         mission_id=mission_id,
-        task_id=str(params.get("task_id") or params.get("taskId") or ""),
-        rejected_by=str(params.get("rejected_by") or params.get("rejectedBy") or "user"),
+        task_id=task_id,
+        rejected_by=rejected_by,
         reason=str(params.get("reason") or ""),
-        run_id=_run_id_from_params(params),
+        run_id=run_id,
     )
     if not result:
+        _log.warning(
+            "[team_mission.plan.reject] mission not found mission_id=%s task_id=%s rid=%s",
+            mission_id,
+            task_id,
+            rid,
+        )
         return _err(rid, 4040, "team mission not found")
+    canceled_nodes = list(result.get("canceled_nodes") or [])
+    _log.info(
+        "[team_mission.plan.reject] ok mission_id=%s task_id=%s canceled_nodes=%d rid=%s",
+        mission_id,
+        result.get("task_id") or task_id,
+        len(canceled_nodes),
+        rid,
+    )
     return _ok(
         rid,
         {
             "mission_id": mission_id,
             "task_id": result.get("task_id") or "",
-            "canceled_nodes": list(result.get("canceled_nodes") or []),
+            "canceled_nodes": canceled_nodes,
             "graph": result.get("graph") or {},
         },
     )
