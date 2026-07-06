@@ -1595,11 +1595,61 @@ def _(rid, params: dict) -> dict:
         )
         return _err(rid, 4040, "team mission not found")
     canceled_nodes = list(result.get("canceled_nodes") or [])
+    # Live worker termination — mirror team_mission.cancel handler line 1998+.
+    # session_graph.reject_team_mission_plan reap 了 run 表状态,这里还要显式
+    # 调 run.cancel 让 worker 进程真的停下来。不 cancel worker,后续 plan_complete
+    # 等事件会继续 emit,前端重算 mission 状态 → 审批卡二次弹窗。
+    reason = str(params.get("reason") or "")
+    canceled_runs: list[dict] = []
+    cancel_errors: list[dict] = []
+    seen_run_ids: set[str] = set()
+    for binding in result.get("cancel_run_bindings") or []:
+        if not isinstance(binding, dict):
+            continue
+        bound_run_id = str(binding.get("run_id") or "").strip()
+        if not bound_run_id or bound_run_id in seen_run_ids:
+            continue
+        seen_run_ids.add(bound_run_id)
+        stored_session_id = str(
+            binding.get("session_id") or binding.get("stored_session_id") or ""
+        ).strip()
+        cancel_params = {
+            "run_id": bound_run_id,
+            "stored_session_id": stored_session_id,
+            "runtime_session_id": str(binding.get("runtime_session_id") or ""),
+            "runtime_scope_key": str(binding.get("runtime_scope_key") or stored_session_id),
+            "reason": reason or "用户拒绝了团队任务图计划。",
+        }
+        try:
+            response = _methods["run.cancel"](rid, cancel_params)
+        except Exception as exc:
+            cancel_errors.append({"run_id": bound_run_id, "message": str(exc)})
+            continue
+        if isinstance(response, dict) and response.get("error"):
+            error = response.get("error") if isinstance(response.get("error"), dict) else {}
+            cancel_errors.append({
+                "run_id": bound_run_id,
+                "message": str(error.get("message") or response.get("error") or "run cancel failed"),
+            })
+            continue
+        response_result = (
+            response.get("result")
+            if isinstance(response, dict) and isinstance(response.get("result"), dict)
+            else {}
+        )
+        canceled_runs.append({
+            "run_id": bound_run_id,
+            "stored_session_id": stored_session_id,
+            "status": str(response_result.get("status") or "cancelled"),
+            "turn_id": str(response_result.get("turn_id") or ""),
+        })
     _log.info(
-        "[team_mission.plan.reject] ok mission_id=%s task_id=%s canceled_nodes=%d rid=%s",
+        "[team_mission.plan.reject] ok mission_id=%s task_id=%s canceled_nodes=%d canceled_runs=%d cancel_errors=%d rid=%s",
         mission_id,
         result.get("task_id") or task_id,
         len(canceled_nodes),
+        len(canceled_runs),
+        len(cancel_errors),
         rid,
     )
     return _ok(
@@ -1608,6 +1658,8 @@ def _(rid, params: dict) -> dict:
             "mission_id": mission_id,
             "task_id": result.get("task_id") or "",
             "canceled_nodes": canceled_nodes,
+            "canceled_runs": canceled_runs,
+            "cancel_errors": cancel_errors,
             "graph": result.get("graph") or {},
         },
     )

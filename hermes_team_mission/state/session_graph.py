@@ -919,6 +919,42 @@ class SessionDBTeamMissionGraphMixin:
                 position_x=float(node.get("position_x") or 0),
                 position_y=float(node.get("position_y") or 0),
             ))
+        # BUG FIX(2026-07-06): Safety reaper — 与 cancel_team_mission 对齐。
+        # 之前 reject 只 cancel 主表 status + node status,没 reap bound worker runs,
+        # 导致 mission node worker 在 reject 后继续跑并 emit `plan_complete` /
+        # `node_create` / `edge_create` 等事件,FE 收到这些事件后重算 mission
+        # 状态,审批卡片"取消一次又弹一次"(user report:新建 team 会话第一次
+        # 团队任务也弹两次,activeGraphRunIds 里 stale worker run 是直接证据)。
+        # cancel_team_mission line 1021+ 的 reaper 是同一 pattern,原样复用。
+        rejected_at = time.time()
+        cancel_run_bindings: list[Dict[str, Any]] = []
+        active_run_ids: set[str] = set()
+        run_bindings = [b for b in graph.get("run_bindings", []) if isinstance(b, dict)]
+        for binding in run_bindings:
+            bound_run_id = _text(binding.get("run_id"))
+            if not bound_run_id or bound_run_id in active_run_ids:
+                continue
+            run = self.get_run(bound_run_id) if hasattr(self, "get_run") else None
+            run_status = _text((run or {}).get("status")).lower()
+            if run and run_status not in _TERMINAL_RUN_STATUSES:
+                active_run_ids.add(bound_run_id)
+                cancel_run_bindings.append(binding)
+                if hasattr(self, "upsert_run"):
+                    self.upsert_run(
+                        run_id=bound_run_id,
+                        session_id=_text(run.get("session_id")) or _text(binding.get("session_id")),
+                        runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key")),
+                        turn_id=_text(run.get("turn_id")),
+                        runtime_session_id=_text(run.get("runtime_session_id")) or _text(binding.get("runtime_session_id")),
+                        status="cancelled",
+                        completed_at=rejected_at,
+                        metadata={
+                            "cancelled_by": _text(rejected_by) or "team_mission.plan.reject",
+                            "cancel_reason": _text(reason),
+                            "cancelled_mission_id": mission_id,
+                            "cancelled_via": "plan.reject",
+                        },
+                    )
         # BUG FIX(2026-07-06): 之前这里写 status="draft" 与 link 表的 "cancelled"
         # 不一致。desktop `selectActiveConversationMission` 用主表 status 判 terminal;
         # "draft" ∉ TERMINAL_MISSION_STATUSES → 前端一直认为这个 mission 还是
@@ -977,6 +1013,7 @@ class SessionDBTeamMissionGraphMixin:
             "mission_id": mission_id,
             "task_id": normalized_task_id,
             "canceled_nodes": canceled_nodes,
+            "cancel_run_bindings": cancel_run_bindings,
             "graph": self.get_team_mission_graph(mission_id),
         }
 
