@@ -2818,7 +2818,10 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
     )
     assert rejected["result"]["task_id"] == "task-2"
     rejected_graph = rejected["result"]["graph"]
-    assert rejected_graph["mission"]["status"] == "draft"
+    # 2026-07-06: reject plan == cancel mission,mission 主表进入 terminal 状态。
+    # 之前写 "draft" 与 link 表 "cancelled" 不一致,导致 desktop 判 mission 非
+    # terminal → 审批卡反复出现(user report 三症状 C3)。
+    assert rejected_graph["mission"]["status"] == "cancelled"
     rejected_task_nodes = [
         node for node in rejected_graph["nodes"]
         if (node.get("metadata") or {}).get("task_id") == "task-2"

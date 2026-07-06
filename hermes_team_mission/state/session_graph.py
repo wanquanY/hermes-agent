@@ -919,6 +919,12 @@ class SessionDBTeamMissionGraphMixin:
                 position_x=float(node.get("position_x") or 0),
                 position_y=float(node.get("position_y") or 0),
             ))
+        # BUG FIX(2026-07-06): 之前这里写 status="draft" 与 link 表的 "cancelled"
+        # 不一致。desktop `selectActiveConversationMission` 用主表 status 判 terminal;
+        # "draft" ∉ TERMINAL_MISSION_STATUSES → 前端一直认为这个 mission 还是
+        # active,`waiting_approval` 审批卡在 UI 上反复出现(user report 三症状 C3)。
+        # 语义上 reject plan == cancel mission(前端 handler 提示"已取消团队任务",
+        # 构造 terminal session marker),两处都对齐 "cancelled"。
         self.upsert_team_mission(
             mission_id=mission_id,
             team_id=str(mission.get("team_id") or ""),
@@ -927,7 +933,7 @@ class SessionDBTeamMissionGraphMixin:
             workspace_id=str(mission.get("workspace_id") or ""),
             workspace_path=str(mission.get("workspace_path") or ""),
             mode=str(mission.get("mode") or ""),
-            status="draft",
+            status="cancelled",
             leader_session_id=str(mission.get("leader_session_id") or ""),
             metadata=dict(mission.get("metadata") or {}),
         )
@@ -947,7 +953,7 @@ class SessionDBTeamMissionGraphMixin:
                 "node_ids": [str(node.get("node_id") or "") for node in canceled_nodes],
                 "rejected_by": _text(rejected_by),
                 "reason": _text(reason),
-                "mission_status": "draft",
+                "mission_status": "cancelled",
             },
         }
         if run_id:

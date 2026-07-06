@@ -810,7 +810,9 @@ def test_reject_team_mission_plan_clears_conversation_approval_projection(tmp_pa
         reason="用户取消规划审批",
     )
 
-    assert result["graph"]["mission"]["status"] == "draft"
+    # 2026-07-06: reject plan == cancel mission,主表和 link 表都对齐 cancelled。
+    # 之前写 "draft" 导致 desktop 判 mission 为非 terminal,审批卡反复出现。
+    assert result["graph"]["mission"]["status"] == "cancelled"
     item = db.list_session_index()["sessions"][0]
     assert item["running"] is False
     assert item["status"] == "idle"
@@ -825,8 +827,8 @@ def test_reject_team_mission_plan_clears_conversation_approval_projection(tmp_pa
     status_events = [event for event in events if event.get("type") == "team_mission.conversation.status"]
     assert status_events
     conversation = status_events[-1]["payload"]["projection"]
-    assert conversation["mission_status"] == "draft"
-    assert conversation["run_state"] == "idle"
+    assert conversation["mission_status"] == "cancelled"
+    assert conversation["run_state"] == "cancelled"
     assert conversation["waiting_approval"] is False
     assert conversation["pending_approval_count"] == 0
 
