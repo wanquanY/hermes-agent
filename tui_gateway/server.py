@@ -1105,6 +1105,20 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
 
         rid, method, params = normalized
 
+        # DIAGNOSTIC(2026-07-06): 用户报告 reject 后审批弹两次,但 hermes 端
+        # `[team_mission.plan.reject]` INFO 日志始终不出现。加这个 dispatch
+        # 顶端 trace 记录每一个入站方法名,证明 reject RPC 是不是真的到 gateway。
+        # 只对 team_mission 系列关键路径生效,避免刷屏。
+        if method.startswith("team_mission.") or method in {
+            "approval.respond", "clarify.respond", "run.cancel",
+        }:
+            logger.info(
+                "[dispatch-trace] method=%s rid=%s param_keys=%s",
+                method,
+                rid,
+                sorted(list(params.keys()))[:20] if isinstance(params, dict) else [],
+            )
+
         def run_handler() -> dict | None:
             try:
                 return handle_request(req)
