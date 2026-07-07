@@ -26,6 +26,9 @@ def _make_conn() -> sqlite3.Connection:
         CREATE TABLE sessions (
             id TEXT PRIMARY KEY,
             source TEXT NOT NULL,
+            user_id TEXT,
+            model TEXT,
+            model_config TEXT,
             title TEXT,
             display_title TEXT,
             display_title_source TEXT,
@@ -35,7 +38,8 @@ def _make_conn() -> sqlite3.Connection:
             started_at REAL NOT NULL,
             updated_at REAL NOT NULL,
             ended_at REAL,
-            end_reason TEXT
+            end_reason TEXT,
+            transient INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE session_index (
             session_id TEXT PRIMARY KEY,
@@ -45,6 +49,7 @@ def _make_conn() -> sqlite3.Connection:
             title TEXT NOT NULL DEFAULT '',
             preview TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT 'unknown',
+            transient INTEGER NOT NULL DEFAULT 0,
             session_kind TEXT NOT NULL DEFAULT 'hermes_session',
             conversation_kind TEXT NOT NULL DEFAULT 'direct',
             status TEXT NOT NULL DEFAULT 'idle',
@@ -100,6 +105,34 @@ def test_create_provisions_session_index_row():
     assert row is not None
     assert row["session_id"] == "s1"
     assert row["title"] == "T1"
+
+
+def test_create_persists_tui_session_metadata():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(
+        SessionSpec(
+            session_id="s1",
+            source="tui",
+            user_id="user-1",
+            model="gpt-test",
+            model_config={"runtime_executor": "codex_app_server"},
+            transient=True,
+        )
+    )
+
+    session_row = conn.execute(
+        "SELECT user_id, model, model_config, transient FROM sessions WHERE id='s1'"
+    ).fetchone()
+    assert session_row["user_id"] == "user-1"
+    assert session_row["model"] == "gpt-test"
+    assert session_row["model_config"] == '{"runtime_executor":"codex_app_server"}'
+    assert session_row["transient"] == 1
+
+    index_row = conn.execute(
+        "SELECT transient FROM session_index WHERE session_id='s1'"
+    ).fetchone()
+    assert index_row["transient"] == 1
 
 
 def test_create_empty_session_id_rejected():
@@ -230,4 +263,41 @@ def test_close_marks_session_ended_and_updates_index():
     ).fetchone()
     assert idx_row["status"] == "closed"
     assert idx_row["running"] == 0
+    assert idx_row["active_run_id"] == ""
+
+
+def test_close_preserves_first_terminal_reason():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="s1", source="test"))
+
+    repo.close("s1", reason="first")
+    repo.close("s1", reason="second")
+
+    session_row = conn.execute(
+        "SELECT end_reason FROM sessions WHERE id='s1'"
+    ).fetchone()
+    assert session_row["end_reason"] == "first"
+
+
+def test_reopen_clears_terminal_state():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="s1", source="test"))
+    repo.close("s1", reason="done")
+
+    repo.reopen("s1")
+
+    session_row = conn.execute(
+        "SELECT ended_at, end_reason FROM sessions WHERE id='s1'"
+    ).fetchone()
+    assert session_row["ended_at"] is None
+    assert session_row["end_reason"] is None
+
+    idx_row = conn.execute(
+        "SELECT status, running, waiting_approval, active_run_id FROM session_index WHERE session_id='s1'"
+    ).fetchone()
+    assert idx_row["status"] == "idle"
+    assert idx_row["running"] == 0
+    assert idx_row["waiting_approval"] == 0
     assert idx_row["active_run_id"] == ""

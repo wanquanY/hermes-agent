@@ -9,6 +9,7 @@ from dovie_extension.display_transcript import (
     sanitize_session_list_item,
     sanitize_transcript_messages,
 )
+from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
 from tui_gateway.services.profile_context import profile_context_for_params as _profile_context_for_params
@@ -134,6 +135,13 @@ def _db_for_session_request(params: dict | None, stable_session_id: str = ""):
     if stable and _is_control_plane_stable_session_id(stable):
         return _db_for_stable_session(stable)
     return _profile_db_from_params(params) or _get_db()
+
+
+def _session_repo_for_db(db):
+    conn = getattr(db, "_conn", None)
+    if conn is None:
+        return None
+    return SessionRepoImpl(conn)
 
 
 def _requested_runtime_executor(params: dict | None = None) -> str:
@@ -1022,10 +1030,21 @@ def _(rid, params: dict) -> dict:
             codex_row_config["provider"] = _prov
     if db is not None:
         try:
-            create_kwargs: dict = {"source": "tui", "model": model, "transient": transient}
-            if codex_row_config:
-                create_kwargs["model_config"] = codex_row_config
-            db.create_session(key, **create_kwargs)
+            repo = _session_repo_for_db(db)
+            if repo is None:
+                return _err(rid, 5000, "session repository unavailable")
+            repo.create(
+                SessionSpec(
+                    session_id=key,
+                    source="tui",
+                    model=model,
+                    model_config=codex_row_config or None,
+                    transient=transient,
+                    runtime_scope_key=runtime_scope_key,
+                    session_kind="hermes_session",
+                    conversation_kind="direct",
+                )
+            )
         except Exception as exc:
             return _err(rid, 5000, f"session create failed: {exc}")
         try:

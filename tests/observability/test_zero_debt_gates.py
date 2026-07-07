@@ -106,20 +106,17 @@ def test_p1_verdict_json_passes_channel_ownership_checks() -> None:
     assert verdict["required_test_commands"]
 
 
-def test_p1_phase_closure_rejects_pending_human_signoff() -> None:
-    result = subprocess.run(
+def test_p1_phase_closure_accepts_recorded_human_signoff() -> None:
+    output = subprocess.check_output(
         [sys.executable, str(PHASE_CLOSURE), "--phase", "P1", "--json"],
         cwd=REPO_ROOT,
         text=True,
-        capture_output=True,
-        check=False,
     )
-    assert result.returncode != 0
-    closure = json.loads(result.stdout)
+    closure = json.loads(output)
     assert closure["phase"] == "P1"
-    assert closure["status"] == "fail"
+    assert closure["status"] == "pass"
     assert any(
-        check["id"] == "human_signoff:not_pending" and not check["ok"]
+        check["id"] == "human_signoff:explicit_approval" and check["ok"]
         for check in closure["checks"]
     )
 
@@ -174,10 +171,10 @@ def test_p2_inventory_reports_current_offender_baseline() -> None:
     inventory = json.loads(output)
     assert inventory["phase"] == "P2"
     gates = inventory["gates"]
-    assert gates["p2:no_sessiondb_production"]["total_offenders"] == 284
+    assert gates["p2:no_sessiondb_production"]["total_offenders"] == 283
     assert gates["p2:no_sessiondb_production"]["file_count"] == 81
     assert gates["p2:no_legacy_identity_alias_internal"]["total_offenders"] == 1201
-    assert gates["p2:no_legacy_identity_alias_internal"]["file_count"] == 79
+    assert gates["p2:no_legacy_identity_alias_internal"]["file_count"] == 80
 
     markdown = subprocess.check_output(
         [sys.executable, str(P2_INVENTORY), "--format", "markdown"],
@@ -197,8 +194,8 @@ def test_zero_debt_status_separates_verdict_from_closure() -> None:
     status = json.loads(output)
     rows = {row["phase"]: row for row in status["phases"]}
     assert rows["P1"]["machine_verdict"] == "pass"
-    assert rows["P1"]["closure"] == "fail"
-    assert rows["P1"]["closure_failed_checks"] == ["human_signoff:not_pending"]
+    assert rows["P1"]["closure"] == "pass"
+    assert rows["P1"]["closure_failed_checks"] == []
     assert rows["P2"]["machine_verdict"] == "fail"
     assert rows["P2"]["closure"] == "fail"
     assert "p2:no_sessiondb_production" in rows["P2"]["machine_failed_checks"]

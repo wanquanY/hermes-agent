@@ -506,14 +506,17 @@ class TestSessionStoreRewriteTranscript:
     @pytest.fixture()
     def store(self, tmp_path, monkeypatch):
         import hermes_state
+        from hermes_state import SessionDB
+
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
         config = GatewayConfig()
-        s = SessionStore(sessions_dir=tmp_path, config=config)
+        s = SessionStore(sessions_dir=tmp_path, config=config, session_repo=MagicMock())
+        s._transcript_db = SessionDB(db_path=tmp_path / "state.db")
         return s
 
     def test_rewrite_replaces_transcript(self, store, tmp_path):
         session_id = "test_session_1"
-        store._db.create_session(session_id=session_id, source="test")
+        store._transcript_db.create_session(session_id=session_id, source="test")
         # Write initial transcript
         for msg in [
             {"role": "user", "content": "hello"},
@@ -536,7 +539,7 @@ class TestSessionStoreRewriteTranscript:
 
     def test_rewrite_with_empty_list(self, store):
         session_id = "test_session_2"
-        store._db.create_session(session_id=session_id, source="test")
+        store._transcript_db.create_session(session_id=session_id, source="test")
         store.append_to_transcript(session_id, {"role": "user", "content": "hi"})
 
         store.rewrite_transcript(session_id, [])
@@ -550,21 +553,27 @@ class TestLoadTranscriptDBOnly:
 
     def test_db_only_returns_empty_for_nonexistent(self, tmp_path, monkeypatch):
         import hermes_state
+        from hermes_state import SessionDB
+
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
         config = GatewayConfig()
-        store = SessionStore(sessions_dir=tmp_path, config=config)
+        store = SessionStore(sessions_dir=tmp_path, config=config, session_repo=MagicMock())
+        store._transcript_db = SessionDB(db_path=tmp_path / "state.db")
         result = store.load_transcript("nonexistent")
         assert result == []
 
     def test_db_only_returns_messages(self, tmp_path, monkeypatch):
         import hermes_state
+        from hermes_state import SessionDB
+
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
         config = GatewayConfig()
-        store = SessionStore(sessions_dir=tmp_path, config=config)
+        store = SessionStore(sessions_dir=tmp_path, config=config, session_repo=MagicMock())
+        store._transcript_db = SessionDB(db_path=tmp_path / "state.db")
         sid = "db_only_session"
-        store._db.create_session(session_id=sid, source="gateway", model="m")
-        store._db.append_message(session_id=sid, role="user", content="db-q")
-        store._db.append_message(session_id=sid, role="assistant", content="db-a")
+        store._transcript_db.create_session(session_id=sid, source="gateway", model="m")
+        store._transcript_db.append_message(session_id=sid, role="user", content="db-q")
+        store._transcript_db.append_message(session_id=sid, role="assistant", content="db-a")
 
         result = store.load_transcript(sid)
         assert len(result) == 2
@@ -576,13 +585,18 @@ class TestSessionStoreSwitchSession:
     """Regression coverage for gateway /resume session switching semantics."""
 
     def test_switch_session_reopens_target_session_in_db(self, tmp_path):
-        from hermes_state import SessionDB
+        from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+        from hermes_agent.storage.session_repository_db import connect_session_repository_db
 
         config = GatewayConfig()
+        conn = connect_session_repository_db(tmp_path / "state.db")
+        repo = SessionRepoImpl(conn)
         with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
-        db = SessionDB(db_path=tmp_path / "state.db")
-        store._db = db
+            store = SessionStore(
+                sessions_dir=tmp_path / "sessions",
+                config=config,
+                session_repo=repo,
+            )
         store._loaded = True
 
         source = SessionSource(
@@ -596,19 +610,27 @@ class TestSessionStoreSwitchSession:
         current_session_id = current_entry.session_id
 
         target_session_id = "old_session_abc"
-        db.create_session(target_session_id, source="feishu", user_id="user-1")
-        db.end_session(target_session_id, end_reason="user_exit")
-        assert db.get_session(target_session_id)["ended_at"] is not None
+        repo.create(SessionSpec(session_id=target_session_id, source="feishu"))
+        repo.close(target_session_id, reason="user_exit")
+        assert repo.get(target_session_id).ended_at is not None
 
         switched = store.switch_session(current_entry.session_key, target_session_id)
 
         assert switched is not None
         assert switched.session_id == target_session_id
-        assert db.get_session(current_session_id)["end_reason"] == "session_switch"
-        resumed = db.get_session(target_session_id)
-        assert resumed["ended_at"] is None
-        assert resumed["end_reason"] is None
-        db.close()
+        current = conn.execute(
+            "SELECT end_reason FROM sessions WHERE id = ?",
+            (current_session_id,),
+        ).fetchone()
+        assert current["end_reason"] == "session_switch"
+        resumed = repo.get(target_session_id)
+        assert resumed.ended_at is None
+        resumed_row = conn.execute(
+            "SELECT end_reason FROM sessions WHERE id = ?",
+            (target_session_id,),
+        ).fetchone()
+        assert resumed_row["end_reason"] is None
+        conn.close()
 
 
 class TestWhatsAppSessionKeyConsistency:
@@ -991,43 +1013,44 @@ class TestHasAnySessions:
     """Tests for has_any_sessions() fix (issue #351)."""
 
     @pytest.fixture
-    def store_with_mock_db(self, tmp_path):
-        """SessionStore with a mocked database."""
+    def store_with_mock_repo(self, tmp_path):
+        """SessionStore with a mocked session repository."""
         config = GatewayConfig()
+        repo = MagicMock()
         with patch("gateway.session.SessionStore._ensure_loaded"):
-            s = SessionStore(sessions_dir=tmp_path, config=config)
+            s = SessionStore(sessions_dir=tmp_path, config=config, session_repo=repo)
         s._loaded = True
         s._entries = {}
-        s._db = MagicMock()
+        s._session_repo = repo
         return s
 
-    def test_uses_database_count_when_available(self, store_with_mock_db):
-        """has_any_sessions should use database session_count, not len(_entries)."""
-        store = store_with_mock_db
+    def test_uses_repository_count_when_available(self, store_with_mock_repo):
+        """has_any_sessions should use repository rows, not len(_entries)."""
+        store = store_with_mock_repo
         # Simulate single-platform user with only 1 entry in memory
         store._entries = {"telegram:12345": MagicMock()}
-        # But database has 3 sessions (current + 2 previous resets)
-        store._db.session_count.return_value = 3
+        # But repository has historical rows (current + previous resets)
+        store._session_repo.list.return_value = [MagicMock(), MagicMock()]
 
         assert store.has_any_sessions() is True
-        store._db.session_count.assert_called_once()
+        store._session_repo.list.assert_called_once()
 
-    def test_first_session_ever_returns_false(self, store_with_mock_db):
-        """First session ever should return False (only current session in DB)."""
-        store = store_with_mock_db
+    def test_first_session_ever_returns_false(self, store_with_mock_repo):
+        """First session ever should return False (only current session in repo)."""
+        store = store_with_mock_repo
         store._entries = {"telegram:12345": MagicMock()}
-        # Database has exactly 1 session (the current one just created)
-        store._db.session_count.return_value = 1
+        store._session_repo.list.return_value = [MagicMock()]
 
         assert store.has_any_sessions() is False
 
-    def test_fallback_without_database(self, tmp_path):
-        """Should fall back to len(_entries) when DB is not available."""
+    def test_fallback_without_repository(self, tmp_path):
+        """Should fall back to len(_entries) when repository is not available."""
         config = GatewayConfig()
+        repo = MagicMock()
+        repo.list.side_effect = RuntimeError("unavailable")
         with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path, config=config)
+            store = SessionStore(sessions_dir=tmp_path, config=config, session_repo=repo)
         store._loaded = True
-        store._db = None
         store._entries = {"key1": MagicMock(), "key2": MagicMock()}
 
         # > 1 entries means has sessions

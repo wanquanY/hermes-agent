@@ -828,26 +828,48 @@ def test_session_status_returns_machine_readable_run_state(server):
     assert resp["result"]["run_updated_at"] == 22
 
 
-def test_session_create_control_plane_only_accepts_tool_progress_mode(server, monkeypatch):
+def test_session_create_control_plane_only_persists_through_session_repo(
+    server,
+    monkeypatch,
+    tmp_path,
+):
     import importlib
+
+    from hermes_agent.storage.session_repository_db import connect_session_repository_db
 
     importlib.reload(importlib.import_module("tui_gateway.methods.session"))
 
     class _DB:
-        def __init__(self):
-            self.created = []
+        def __init__(self, conn):
+            self._conn = conn
 
-        def create_session(self, session_id, source, model, transient=False):
-            self.created.append(
-                {
-                    "session_id": session_id,
-                    "source": source,
-                    "model": model,
-                    "transient": transient,
-                }
+        def upsert_session_index(self, **kwargs):
+            self._conn.execute(
+                """
+                UPDATE session_index
+                   SET owner_agent_profile_id = ?,
+                       owner_profile_version_id = ?,
+                       runtime_scope_key = ?,
+                       source = ?,
+                       transient = ?,
+                       session_kind = ?,
+                       conversation_kind = ?
+                 WHERE session_id = ?
+                """,
+                (
+                    kwargs.get("owner_agent_profile_id") or "",
+                    kwargs.get("owner_profile_version_id") or "",
+                    kwargs.get("runtime_scope_key") or "",
+                    kwargs.get("source") or "unknown",
+                    1 if kwargs.get("transient") else 0,
+                    kwargs.get("session_kind") or "hermes_session",
+                    kwargs.get("conversation_kind") or "direct",
+                    kwargs.get("session_id") or "",
+                ),
             )
 
-    db = _DB()
+    conn = connect_session_repository_db(tmp_path / "state.db")
+    db = _DB(conn)
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_resolve_model", lambda: "gpt-test")
 
@@ -868,14 +890,27 @@ def test_session_create_control_plane_only_accepts_tool_progress_mode(server, mo
     assert resp["result"]["info"]["control_plane_only"] is True
     assert resp["result"]["info"]["lazy"] is True
     assert resp["result"]["info"]["transient"] is True
-    assert db.created == [
-        {
-            "session_id": resp["result"]["stored_session_id"],
-            "source": "tui",
-            "model": "gpt-test",
-            "transient": True,
-        }
-    ]
+    session_id = resp["result"]["stored_session_id"]
+    session_row = conn.execute(
+        "SELECT id, source, model, transient FROM sessions WHERE id = ?",
+        (session_id,),
+    ).fetchone()
+    assert dict(session_row) == {
+        "id": session_id,
+        "source": "tui",
+        "model": "gpt-test",
+        "transient": 1,
+    }
+    index_row = conn.execute(
+        "SELECT session_id, source, transient FROM session_index WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    assert dict(index_row) == {
+        "session_id": session_id,
+        "source": "tui",
+        "transient": 1,
+    }
+    conn.close()
 
 
 def test_approval_control_plane_methods_accept_stored_session_id(server, monkeypatch):

@@ -12,6 +12,7 @@ import hashlib
 import logging
 import os
 import json
+import sqlite3
 import threading
 import uuid
 from pathlib import Path
@@ -70,6 +71,8 @@ from channels.whatsapp_identity import (
     canonical_whatsapp_identifier,
     normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
 )
+from hermes_agent.repositories.session_repo import SessionFilter, SessionRepo, SessionSpec
+from hermes_agent.storage.session_repository_db import connect_session_repository_db
 from utils import atomic_replace
 
 
@@ -461,26 +464,29 @@ class SessionStore:
     """
     Manages session storage and retrieval.
     
-    Uses SQLite (via SessionDB) for session metadata and message transcripts.
-    Falls back to legacy JSONL files if SQLite is unavailable.
+    Session metadata is owned by SessionRepo. The JSON file remains only the
+    gateway's session-key index, and transcript persistence is isolated to the
+    transcript methods until the P2 message slice moves that owner as well.
     """
     
     def __init__(self, sessions_dir: Path, config: GatewayConfig,
-                 has_active_processes_fn=None):
+                 has_active_processes_fn=None,
+                 session_repo: Optional[SessionRepo] = None):
         self.sessions_dir = sessions_dir
         self.config = config
         self._entries: Dict[str, SessionEntry] = {}
         self._loaded = False
         self._lock = threading.Lock()
         self._has_active_processes_fn = has_active_processes_fn
-        
-        # Initialize SQLite session database
-        self._db = None
-        try:
-            from hermes_state import SessionDB
-            self._db = SessionDB()
-        except Exception as e:
-            print(f"[gateway] Warning: SQLite session store unavailable, falling back to JSONL: {e}")
+        self._transcript_db = None
+        self._session_repo_conn: sqlite3.Connection | None = None
+        if session_repo is not None:
+            self._session_repo = session_repo
+        else:
+            self._session_repo_conn = connect_session_repository_db()
+            from hermes_agent.repositories.session_repo import SessionRepoImpl
+
+            self._session_repo = SessionRepoImpl(self._session_repo_conn)
     
     def _ensure_loaded(self) -> None:
         """Load sessions index from disk if not already loaded."""
@@ -626,7 +632,7 @@ class SessionStore:
     def has_any_sessions(self) -> bool:
         """Check if any sessions have ever been created (across all platforms).
 
-        Uses the SQLite database as the source of truth because it preserves
+        Uses the SessionRepo as the source of truth because it preserves
         historical session records (ended sessions still count).  The in-memory
         ``_entries`` dict replaces entries on reset, so ``len(_entries)`` would
         stay at 1 for single-platform users — which is the bug this fixes.
@@ -634,11 +640,10 @@ class SessionStore:
         The current session is already in the DB by the time this is called
         (get_or_create_session runs first), so we check ``> 1``.
         """
-        if self._db:
-            try:
-                return self._db.session_count() > 1
-            except Exception:
-                pass  # fall through to heuristic
+        try:
+            return len(list(self._session_repo.list(SessionFilter(include_ended=True, limit=2)))) > 1
+        except Exception:
+            logger.debug("Session repository count check failed", exc_info=True)
         # Fallback: check if sessions.json was loaded with existing data.
         # This covers the rare case where the DB is unavailable.
         with self._lock:
@@ -659,10 +664,10 @@ class SessionStore:
         session_key = self._generate_session_key(source)
         now = _now()
 
-        # SQLite calls are made outside the lock to avoid holding it during I/O.
+        # Repository calls are made outside the lock to avoid holding it during I/O.
         # All _entries / _loaded mutations are protected by self._lock.
-        db_end_session_id = None
-        db_create_kwargs = None
+        repo_end_session_id = None
+        repo_create_spec = None
 
         with self._lock:
             self._ensure_loaded_locked()
@@ -700,7 +705,7 @@ class SessionStore:
                     auto_reset_reason = reset_reason
                     # Track whether the expired session had any real conversation
                     reset_had_activity = entry.total_tokens > 0
-                    db_end_session_id = entry.session_id
+                    repo_end_session_id = entry.session_id
             else:
                 was_auto_reset = False
                 auto_reset_reason = None
@@ -725,24 +730,18 @@ class SessionStore:
 
             self._entries[session_key] = entry
             self._save()
-            db_create_kwargs = {
-                "session_id": session_id,
-                "source": source.platform.value,
-                "user_id": source.user_id,
-            }
+            repo_create_spec = SessionSpec(
+                session_id=session_id,
+                source=source.platform.value,
+                title=source.chat_name or "",
+                display_title=source.chat_name or "",
+            )
 
-        # SQLite operations outside the lock
-        if self._db and db_end_session_id:
-            try:
-                self._db.end_session(db_end_session_id, "session_reset")
-            except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
+        if repo_end_session_id:
+            self._session_repo.close(repo_end_session_id, "session_reset")
 
-        if self._db and db_create_kwargs:
-            try:
-                self._db.create_session(**db_create_kwargs)
-            except Exception as e:
-                print(f"[gateway] Warning: Failed to create SQLite session: {e}")
+        if repo_create_spec:
+            self._session_repo.create(repo_create_spec)
 
         return entry
 
@@ -921,8 +920,8 @@ class SessionStore:
 
     def reset_session(self, session_key: str, display_name: Optional[str] = None) -> Optional[SessionEntry]:
         """Force reset a session, creating a new session ID."""
-        db_end_session_id = None
-        db_create_kwargs = None
+        repo_end_session_id = None
+        repo_create_spec = None
         new_entry = None
 
         with self._lock:
@@ -932,7 +931,7 @@ class SessionStore:
                 return None
 
             old_entry = self._entries[session_key]
-            db_end_session_id = old_entry.session_id
+            repo_end_session_id = old_entry.session_id
 
             now = _now()
             session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -951,23 +950,18 @@ class SessionStore:
 
             self._entries[session_key] = new_entry
             self._save()
-            db_create_kwargs = {
-                "session_id": session_id,
-                "source": old_entry.platform.value if old_entry.platform else "unknown",
-                "user_id": old_entry.origin.user_id if old_entry.origin else None,
-            }
+            repo_create_spec = SessionSpec(
+                session_id=session_id,
+                source=old_entry.platform.value if old_entry.platform else "unknown",
+                title=new_entry.display_name or "",
+                display_title=new_entry.display_name or "",
+            )
 
-        if self._db and db_end_session_id:
-            try:
-                self._db.end_session(db_end_session_id, "session_reset")
-            except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
+        if repo_end_session_id:
+            self._session_repo.close(repo_end_session_id, "session_reset")
 
-        if self._db and db_create_kwargs:
-            try:
-                self._db.create_session(**db_create_kwargs)
-            except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
+        if repo_create_spec:
+            self._session_repo.create(repo_create_spec)
 
         return new_entry
 
@@ -980,7 +974,7 @@ class SessionStore:
         old transcript is loaded on the next message. If the target session was
         previously ended, re-open it so gateway resume semantics match the CLI.
         """
-        db_end_session_id = None
+        repo_end_session_id = None
         new_entry = None
 
         with self._lock:
@@ -995,7 +989,7 @@ class SessionStore:
             if old_entry.session_id == target_session_id:
                 return old_entry
 
-            db_end_session_id = old_entry.session_id
+            repo_end_session_id = old_entry.session_id
 
             now = _now()
             new_entry = SessionEntry(
@@ -1012,17 +1006,9 @@ class SessionStore:
             self._entries[session_key] = new_entry
             self._save()
 
-        if self._db and db_end_session_id:
-            try:
-                self._db.end_session(db_end_session_id, "session_switch")
-            except Exception as e:
-                logger.debug("Session DB end_session failed: %s", e)
-
-        if self._db:
-            try:
-                self._db.reopen_session(target_session_id)
-            except Exception as e:
-                logger.debug("Session DB reopen_session failed: %s", e)
+        if repo_end_session_id:
+            self._session_repo.close(repo_end_session_id, "session_switch")
+        self._session_repo.reopen(target_session_id)
 
         return new_entry
 
@@ -1049,9 +1035,10 @@ class SessionStore:
                      _flush_messages_to_session_db(), preventing the
                      duplicate-write bug (#860).
         """
-        if self._db and not skip_db:
+        transcript_db = None if skip_db else self._legacy_transcript_db()
+        if transcript_db:
             try:
-                self._db.append_message(
+                transcript_db.append_message(
                     session_id=session_id,
                     role=message.get("role", "unknown"),
                     content=message.get("content"),
@@ -1071,7 +1058,7 @@ class SessionStore:
                     ),
                 )
             except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
+                logger.debug("Transcript DB operation failed: %s", e)
     
     def rewrite_transcript(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         """Replace the entire transcript for a session with new messages.
@@ -1079,9 +1066,10 @@ class SessionStore:
         Used by /retry, /undo, and /compress to persist modified conversation
         history. state.db is the canonical store.
         """
-        if self._db:
+        transcript_db = self._legacy_transcript_db()
+        if transcript_db:
             try:
-                self._db.replace_messages(session_id, messages)
+                transcript_db.replace_messages(session_id, messages)
             except Exception as e:
                 logger.debug("Failed to rewrite transcript in DB: %s", e)
 
@@ -1092,13 +1080,27 @@ class SessionStore:
         in spec 002 — pre-DB sessions on existing disks have already been
         migrated (their DB row holds the full message history).
         """
-        if not self._db:
+        transcript_db = self._legacy_transcript_db()
+        if not transcript_db:
             return []
         try:
-            return self._db.get_messages_as_conversation(session_id)
+            return transcript_db.get_messages_as_conversation(session_id)
         except Exception as e:
             logger.debug("Could not load messages from DB: %s", e)
             return []
+
+    def _legacy_transcript_db(self):
+        """Return the existing transcript handle until P2 message ownership moves."""
+        if self._transcript_db is not None:
+            return self._transcript_db
+        try:
+            from hermes_state import SessionDB
+
+            self._transcript_db = SessionDB()
+        except Exception:
+            logger.debug("Transcript DB unavailable", exc_info=True)
+            self._transcript_db = None
+        return self._transcript_db
 
 
 def build_session_context(

@@ -8,15 +8,15 @@ Two exports:
   ``RepositoryConnection``; owns only the ``sessions`` + ``session_index``
   tables (spec §4.1). Cross-table joins live in L2 domain services.
 
-``session_id: str`` is the ONLY session identifier at v3.0.2 —
-``stable_session_id / stored_session_id / runtime_session_id`` are legacy
-aliases that Phase G dispatch pre-hook normalization retires.
+``session_id: str`` is the only domain identifier accepted by this repository.
+Wire-only legacy aliases are folded before requests enter the domain layer.
 """
 
 from __future__ import annotations
 
 import sqlite3
 import time
+import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol, runtime_checkable
 
@@ -32,6 +32,10 @@ class SessionSpec:
     title: str = ""
     display_title: str = ""
     display_title_source: str = ""
+    user_id: str = ""
+    model: str = ""
+    model_config: dict[str, Any] | str | None = None
+    transient: bool = False
     session_kind: str = "hermes_session"
     conversation_kind: str = "direct"
     owner_agent_profile_id: str = ""
@@ -118,6 +122,8 @@ class SessionRepo(Protocol):
 
     def close(self, session_id: str, reason: str) -> None: ...
 
+    def reopen(self, session_id: str) -> None: ...
+
 
 class SessionRepoImpl:
     """SQLite-backed SessionRepo (spec §4.1)."""
@@ -137,22 +143,27 @@ class SessionRepoImpl:
         self._conn.execute(
             """
             INSERT OR REPLACE INTO sessions (
-                id, source, title, display_title, display_title_source,
+                id, source, user_id, model, model_config,
+                title, display_title, display_title_source,
                 session_kind, conversation_kind, parent_session_id,
-                started_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                started_at, updated_at, transient
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 stable,
                 str(spec.source or "unknown"),
+                str(spec.user_id or ""),
+                str(spec.model or ""),
+                _encode_model_config(spec.model_config),
                 str(spec.title or ""),
                 str(spec.display_title or ""),
                 str(spec.display_title_source or ""),
                 str(spec.session_kind or "hermes_session"),
                 str(spec.conversation_kind or "direct"),
-                str(spec.parent_session_id or ""),
+                str(spec.parent_session_id or "") or None,
                 now,
                 now,
+                1 if spec.transient else 0,
             ),
         )
         # spec §4.1 — session_index row auto-provisioned so downstream
@@ -161,9 +172,9 @@ class SessionRepoImpl:
             """
             INSERT OR IGNORE INTO session_index (
                 session_id, owner_agent_profile_id, owner_profile_version_id,
-                runtime_scope_key, title, source, session_kind,
+                runtime_scope_key, title, source, transient, session_kind,
                 conversation_kind, started_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 stable,
@@ -172,6 +183,7 @@ class SessionRepoImpl:
                 str(spec.runtime_scope_key or ""),
                 str(spec.title or ""),
                 str(spec.source or "unknown"),
+                1 if spec.transient else 0,
                 str(spec.session_kind or "hermes_session"),
                 str(spec.conversation_kind or "direct"),
                 now,
@@ -314,6 +326,7 @@ class SessionRepoImpl:
                    end_reason = ?,
                    updated_at = ?
              WHERE id = ?
+               AND ended_at IS NULL
             """,
             (now, str(reason or ""), now, stable),
         )
@@ -322,6 +335,34 @@ class SessionRepoImpl:
             """
             UPDATE session_index
                SET status = 'closed',
+                   running = 0,
+                   waiting_approval = 0,
+                   active_run_id = '',
+                   updated_at = ?
+             WHERE session_id = ?
+            """,
+            (now, stable),
+        )
+
+    def reopen(self, session_id: str) -> None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required for reopen")
+        now = time.time()
+        self._conn.execute(
+            """
+            UPDATE sessions
+               SET ended_at = NULL,
+                   end_reason = NULL,
+                   updated_at = ?
+             WHERE id = ?
+            """,
+            (now, stable),
+        )
+        self._conn.execute(
+            """
+            UPDATE session_index
+               SET status = 'idle',
                    running = 0,
                    waiting_approval = 0,
                    active_run_id = '',
@@ -371,6 +412,14 @@ def _row_to_session(row: Any) -> Session:
         ended_at=float(row[8]) if row[8] is not None else None,
         parent_session_id=str(row[9] or ""),
     )
+
+
+def _encode_model_config(value: dict[str, Any] | str | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 __all__ = [
