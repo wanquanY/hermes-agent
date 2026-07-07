@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+from hermes_agent.domain.canonical_event import CanonicalEvent as DomainCanonicalEvent
 from hermes_agent.domain.event_ledger import EventLedger, LedgerEvent
 from hermes_agent.domain.run_terminator import (
     TerminateCause,
@@ -45,11 +46,40 @@ class Run:
 
 @dataclass(frozen=True)
 class CanonicalEventSpec:
+    """L1 persistence-layer append parameter for ``RunRepo.append_event``.
+
+    Distinct from ``hermes_agent.domain.CanonicalEvent`` (spec §6.2 line
+    412-420) — that one is the **typed wire event** with
+    ``payload: TypedPayload``. This dataclass is the **serialized form**
+    heading into the SQLite ``run_events.payload_json`` column, so
+    ``payload`` is intentionally a plain dict (whatever the caller
+    produced by ``dataclasses.asdict()`` on the typed payload).
+
+    Use ``from_canonical(event)`` to convert from the typed form when
+    the caller is holding a domain ``CanonicalEvent``.
+
+    Audit note (docs/v3_audit_report.md §五 #1) confirmed this is not a
+    spec §6.2 violation once distinguished from ``CanonicalEvent``.
+    """
+
     event_type: str
     payload: dict[str, Any]
     run_id: str
     turn_id: str = ""
     preassigned_seq: int | None = None
+
+    @classmethod
+    def from_canonical(cls, event: "DomainCanonicalEvent") -> "CanonicalEventSpec":
+        """Build a persistence spec from a typed domain ``CanonicalEvent``."""
+        from dataclasses import asdict
+
+        return cls(
+            event_type=event.type.value,
+            payload=asdict(event.payload),
+            run_id=event.run_id,
+            turn_id=event.turn_id or "",
+            preassigned_seq=event.seq,
+        )
 
 
 @runtime_checkable
