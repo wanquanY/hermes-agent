@@ -26,6 +26,15 @@ from hermes_agent.domain.canonical_event import (
     ToolStartPayload,
     TypedPayload,
 )
+from hermes_agent.domain.interaction import (
+    InteractionFrame,
+    InteractionFrameType,
+    InteractionKind,
+    InteractionRegistry,
+    InteractionRequest,
+    InteractionResponse,
+    InternalRunEventType,
+)
 
 __all__ = [
     "CANONICAL_EVENT_ARM_COUNT",
@@ -48,4 +57,11 @@ __all__ = [
     "SessionRecalledPayload",
     "TypedPayload",
     "PAYLOAD_BY_TYPE",
+    "InternalRunEventType",
+    "InteractionFrameType",
+    "InteractionFrame",
+    "InteractionKind",
+    "InteractionRequest",
+    "InteractionResponse",
+    "InteractionRegistry",
 ]
