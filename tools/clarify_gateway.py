@@ -202,6 +202,15 @@ def has_pending_clarify(clarify_id: str) -> bool:
         return cid in _entries
 
 
+def get_pending_by_request_id(clarify_id: str) -> Optional[_ClarifyEntry]:
+    """Return a pending clarify entry by request id without resolving it."""
+    cid = str(clarify_id or "").strip()
+    if not cid:
+        return None
+    with _lock:
+        return _entries.get(cid)
+
+
 def get_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
     """Return the OLDEST pending clarify entry for a session, or None.
 

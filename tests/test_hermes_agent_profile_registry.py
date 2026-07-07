@@ -201,6 +201,41 @@ def test_profile_registry_gateway_crud_is_latest_only(monkeypatch, tmp_path: Pat
     assert discarded_response["result"]["draft"]["status"] == "discarded"
 
 
+def test_profile_upsert_uses_control_db_when_profile_context_has_home(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from tui_gateway import server
+
+    control_home = tmp_path / "control-home"
+    profile_home = tmp_path / "profiles" / "agent-a"
+    monkeypatch.setenv("DOVIE_HERMES_CONTROL_HOME", str(control_home))
+    monkeypatch.setattr(server, "_db_by_home", {})
+    monkeypatch.setattr(server, "_db_error_by_home", {})
+
+    response = server.handle_request({
+        "id": "profile-upsert",
+        "method": "profile.upsert",
+        "params": {
+            "profile": {
+                "id": "agent-a",
+                "slug": "agent-a",
+                "name": "Agent A",
+                "hermesHomePath": str(profile_home),
+            },
+            "dovie_profile": {
+                "id": "agent-a",
+                "runtimeScopeKey": "profile:agent-a",
+                "hermesHomePath": str(profile_home),
+            },
+        },
+    })
+
+    assert "error" not in response
+    assert (control_home / "state.db").exists()
+    assert not (profile_home / "state.db").exists()
+
+
 def test_team_mission_control_home_falls_back_to_hermes_home(monkeypatch, tmp_path: Path):
     from hermes_team_mission.runtime.profile_scope import team_mission_control_home
 

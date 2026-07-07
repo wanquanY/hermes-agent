@@ -56,6 +56,7 @@ class _FakeDB:
         self.entered: list[str] = []
         self.active = 0
         self.max_active = 0
+        self.active_lock = threading.Lock()
 
     def get_messages_as_conversation(self, session_id: str):
         return list(self.messages)
@@ -75,12 +76,15 @@ class _FakeDB:
         raise RuntimeError("boom")
 
     def slow_append_message(self, session_id: str, role: str, content: str | None = None):
-        self.active += 1
-        self.max_active = max(self.max_active, self.active)
-        self.entered.append(content or "")
+        with self.active_lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.entered.append(content or "")
+            result = len(self.entered)
         time.sleep(0.01)
-        self.active -= 1
-        return len(self.entered)
+        with self.active_lock:
+            self.active -= 1
+        return result
 
 
 def _proxy_roundtrip(proxy: WorkerDBProxy, writer: _Writer, result=None, error=None):
@@ -318,6 +322,42 @@ async def test_concurrent_worker_calls_serialize(monkeypatch: pytest.MonkeyPatch
     )
     assert [reply.result for reply in replies] == [1, 2, 3, 4, 5]
     assert db.max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_db_rpc_locks_are_sharded_by_stable_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FakeDB()
+    monkeypatch.setattr("tui_gateway.services.worker_supervisor.DB_RPC_ALLOWED_METHODS", {"slow_append_message"})
+    monkeypatch.setattr(
+        "tui_gateway.server._db_for_stable_session",
+        lambda _stable: db,
+        raising=False,
+    )
+    supervisor = WorkerSupervisor(
+        on_event=_noop,
+        on_interactive_request=_noop,
+        on_run_terminal=_noop,
+    )
+
+    replies = await asyncio.gather(
+        *[
+            supervisor._execute_db_rpc(
+                DBRpcRequestFrame(
+                    id=str(index),
+                    method="db.slow_append_message",
+                    params=[[f"session-{index}", "user", str(index)], {}],
+                    db_scope={"stable_session_id": f"session-{index}"},
+                )
+            )
+            for index in range(5)
+        ]
+    )
+
+    assert all(reply.error is None for reply in replies)
+    assert sorted(reply.result for reply in replies) == [1, 2, 3, 4, 5]
+    assert db.max_active > 1
 
 
 def test_proxy_timeout_handled() -> None:

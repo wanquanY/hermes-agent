@@ -1,15 +1,11 @@
 import asyncio
 import json
-import os
-import sys
-import types
-import time
 
 import pytest
 
 from tui_gateway import ws
 from tui_gateway.methods.prompt import _prompt_terminal_status_from_result
-from tui_gateway.services import runtime_proxy
+from tui_gateway.services import runtime_scope
 
 
 def test_prompt_terminal_status_keeps_usable_response_complete_with_nonfatal_error():
@@ -115,7 +111,7 @@ def test_profile_scoped_runtime_read_methods_are_proxied_to_runtime_worker(metho
     """``run.list`` / ``run.status`` read per-profile run state; they're
     re-proxied to the worker until Phase 4-5 ports them over the
     stdin/stdout protocol."""
-    assert runtime_proxy.should_proxy_to_runtime(
+    assert runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": method,
@@ -166,7 +162,7 @@ def test_event_read_methods_stay_on_control_plane(method):
     worker now has events the main db doesn't, or (b) gate the proxy on
     "worker already exists" so reconnect doesn't cold-spawn.
     """
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": method,
@@ -198,7 +194,7 @@ def test_team_mission_scoped_methods_are_proxied_to_runtime_worker(method):
     """Team-mission writes touch in-worker scheduler state — they're
     proxied until the Phase 4-5 stdin/stdout worker protocol forwards
     these operations over its own command channel."""
-    assert runtime_proxy.should_proxy_to_runtime(
+    assert runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": method,
@@ -230,7 +226,7 @@ def test_clarify_respond_with_local_pending_stays_on_control_plane():
     clarify_id = "test-clarify-local-1"
     clarify_gateway.register(clarify_id, session_key="team-session-x", question="q?", choices=["a", "b"])
     try:
-        assert not runtime_proxy.should_proxy_to_runtime(
+        assert not runtime_scope.should_route_to_worker(
             {
                 "id": "1",
                 "method": "clarify.respond",
@@ -245,7 +241,7 @@ def test_clarify_respond_with_local_pending_stays_on_control_plane():
         # lives in a worker process) still proxies to the worker that
         # owns it — until Phase 4-5 replaces this with the stdin/stdout
         # forwarding protocol.
-        assert runtime_proxy.should_proxy_to_runtime(
+        assert runtime_scope.should_route_to_worker(
             {
                 "id": "2",
                 "method": "clarify.respond",
@@ -272,7 +268,7 @@ def test_clarify_respond_with_local_pending_stays_on_control_plane():
     ],
 )
 def test_team_mission_persisted_state_methods_stay_on_control_plane(method):
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": method,
@@ -297,7 +293,7 @@ def test_team_mission_persisted_state_methods_stay_on_control_plane(method):
     ],
 )
 def test_unscoped_runtime_read_methods_stay_on_control_plane(method):
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": method,
@@ -309,7 +305,7 @@ def test_unscoped_runtime_read_methods_stay_on_control_plane(method):
 
 
 def test_prompt_submit_with_profile_scope_is_proxied_to_runtime_worker():
-    assert runtime_proxy.should_proxy_to_runtime(
+    assert runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": "prompt.submit",
@@ -326,7 +322,7 @@ def test_prompt_submit_with_profile_scope_is_proxied_to_runtime_worker():
 
 @pytest.mark.parametrize("method", ["team_mission.message.submit", "team_mission.conversation.ensure"])
 def test_team_leader_runtime_methods_do_not_proxy_from_profile_or_member_payload(method):
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": method,
@@ -359,7 +355,7 @@ def test_team_leader_runtime_methods_do_not_proxy_from_profile_or_member_payload
 
 @pytest.mark.parametrize("method", ["team_mission.message.submit", "team_mission.conversation.ensure"])
 def test_team_conversation_canonical_write_methods_stay_on_control_plane_after_runtime_context_resolution(method):
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": method,
@@ -380,7 +376,7 @@ def test_team_conversation_canonical_write_methods_stay_on_control_plane_after_r
 
 
 def test_team_mission_create_does_not_proxy_from_nested_members():
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": "team_mission.create",
@@ -397,226 +393,6 @@ def test_team_mission_create_does_not_proxy_from_nested_members():
             },
         }
     )
-
-
-def test_runtime_worker_exit_terminalizes_scope_active_runs(monkeypatch):
-    from tui_gateway import server
-    from tui_gateway.services import run_control
-
-    class ExitedProcess:
-        pid = 12345
-
-        def poll(self):
-            return 1
-
-    worker = runtime_proxy.RuntimeWorker(
-        scope=runtime_proxy.RuntimeScope(
-            runtime_scope_key="team:conversation-1:leader-conversation",
-            hermes_home="/tmp/hermes",
-        ),
-        process=ExitedProcess(),
-        port=1234,
-        token="token",
-        created_at=time.time(),
-        last_started_at=time.time(),
-        last_used_at=time.time(),
-    )
-    published = []
-
-    monkeypatch.setattr(server, "_get_db", lambda: "db")
-    monkeypatch.setattr(
-        run_control,
-        "list_runs",
-        lambda *args, **kwargs: [
-            {
-                "run_id": "run-1",
-                "session_id": "team-session-1",
-                "turn_id": "turn-1",
-                "runtime_scope_key": "team:conversation-1:leader-conversation",
-                "runtime_session_id": "runtime-1",
-                "status": "running",
-            }
-        ],
-    )
-
-    def publish_terminal(**kwargs):
-        published.append(kwargs)
-        return {"type": "message.complete"}
-
-    monkeypatch.setattr(run_control, "publish_run_terminal_event", publish_terminal)
-
-    failed = runtime_proxy._terminalize_worker_active_runs(  # noqa: SLF001
-        worker,
-        reason="runtime websocket closed",
-    )
-
-    assert failed == 1
-    assert published[0]["stored_session_id"] == "team-session-1"
-    assert published[0]["run_id"] == "run-1"
-    assert published[0]["status"] == "failed"
-    assert "scope=team:conversation-1:leader-conversation" in published[0]["message"]
-
-    assert runtime_proxy._terminalize_worker_active_runs(worker, reason="again") == 0  # noqa: SLF001
-
-
-def test_runtime_worker_exit_terminalizes_runs_owned_by_dead_pid_even_when_scope_mismatched(monkeypatch):
-    from tui_gateway import server
-    from tui_gateway.services import run_control
-
-    class ExitedProcess:
-        pid = 12345
-
-        def poll(self):
-            return 1
-
-    worker = runtime_proxy.RuntimeWorker(
-        scope=runtime_proxy.RuntimeScope(
-            runtime_scope_key="profile:agent-default",
-            hermes_home="/tmp/hermes",
-        ),
-        process=ExitedProcess(),
-        port=1234,
-        token="token",
-        created_at=time.time(),
-        last_started_at=time.time(),
-        last_used_at=time.time(),
-    )
-    published = []
-
-    monkeypatch.setattr(server, "_get_db", lambda: "db")
-
-    def list_runs(*args, **kwargs):
-        if kwargs.get("runtime_scope_key"):
-            return []
-        return [
-            {
-                "run_id": "run-1",
-                "session_id": "team-session-1",
-                "turn_id": "turn-1",
-                "runtime_scope_key": "team:conversation-1:leader-conversation",
-                "runtime_session_id": "runtime-1",
-                "status": "running",
-                "metadata": {"gateway_pid": 12345},
-            }
-        ]
-
-    monkeypatch.setattr(run_control, "list_runs", list_runs)
-    monkeypatch.setattr(run_control, "publish_run_terminal_event", lambda **kwargs: published.append(kwargs))
-
-    failed = runtime_proxy._terminalize_worker_active_runs(  # noqa: SLF001
-        worker,
-        reason="runtime websocket closed",
-    )
-
-    assert failed == 1
-    assert published[0]["runtime_scope_key"] == "team:conversation-1:leader-conversation"
-
-
-def test_relayed_runtime_terminal_event_updates_owner_team_mission_db(tmp_path, monkeypatch):
-    from hermes_state import SessionDB
-    from tui_gateway import server
-    from tui_gateway.services import run_control
-
-    db = SessionDB(tmp_path / "state.db")
-    db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="supervised_mission")
-    db.upsert_team_mission_node(
-        mission_id="mission-1",
-        node_id="node-verifier",
-        kind="verifier",
-        title="Verifier",
-        status="running",
-        runtime_scope_key="profile:agent-7:version:v1",
-    )
-    db.upsert_run(
-        run_id="run-verifier",
-        session_id="team:mission-1:node:node-verifier",
-        runtime_scope_key="profile:agent-7:version:v1",
-        turn_id="turn-verifier",
-        runtime_session_id="runtime-verifier",
-        status="running",
-    )
-    db.bind_team_mission_run(
-        mission_id="mission-1",
-        node_id="node-verifier",
-        run_id="run-verifier",
-        session_id="team:mission-1:node:node-verifier",
-        runtime_session_id="runtime-verifier",
-        runtime_scope_key="profile:agent-7:version:v1",
-        role="verifier",
-    )
-    db.append_run_event(
-        "team:mission-1:node:node-verifier",
-        {
-            "type": "mission.node.started",
-            "session_id": "runtime-verifier",
-            "stored_session_id": "team:mission-1:node:node-verifier",
-            "run_id": "run-verifier",
-            "turn_id": "turn-verifier",
-            "runtime_scope_key": "profile:agent-7:version:v1",
-            "seq": 331,
-            "payload": {"node_id": "node-verifier"},
-        },
-    )
-    monkeypatch.setattr(server, "_get_db", lambda: db)
-    monkeypatch.setattr(server, "_db_for_stable_session", lambda _stable: db)
-
-    relayed_complete = {
-        "jsonrpc": "2.0",
-        "method": "event",
-        "params": {
-            "type": "message.complete",
-            "session_id": "runtime-verifier",
-            "stored_session_id": "team:mission-1:node:node-verifier",
-            "run_id": "run-verifier",
-            "turn_id": "turn-verifier",
-            "runtime_scope_key": "profile:agent-7:version:v1",
-            "seq": 331,
-            "payload": {
-                "status": "complete",
-                "text": "verification passed",
-            },
-        },
-    }
-
-    runtime_proxy._persist_relayed_runtime_event(relayed_complete)  # noqa: SLF001
-
-    node = db.get_team_mission_node("mission-1", "node-verifier")
-    run = db.get_run("run-verifier")
-    assert node["status"] == "completed"
-    assert node["metadata"]["last_run_terminal_status"] == "completed"
-    assert node["metadata"]["last_run_terminal_seq"] > 331
-    assert run["status"] == "completed"
-
-    runtime_proxy._persist_relayed_runtime_event(relayed_complete)  # noqa: SLF001
-    completed_events = [
-        event for event in db.list_team_mission_run_events("mission-1")
-        if event["type"] == "team_mission.runtime.event"
-        and (event.get("payload") or {}).get("event_type") == "message.complete"
-        and (((event.get("payload") or {}).get("source_event") or {}).get("payload") or {}).get("status")
-        == "complete"
-        and (((event.get("payload") or {}).get("source_event") or {}).get("payload") or {}).get(
-            "runtime_source_seq"
-        )
-        == 331
-    ]
-    assert len(completed_events) == 1
-
-    run_control.publish_run_terminal_event(
-        stored_session_id="team:mission-1:node:node-verifier",
-        run_id="run-verifier",
-        turn_id="turn-verifier",
-        runtime_scope_key="profile:agent-7:version:v1",
-        runtime_session_id="runtime-verifier",
-        status="failed",
-        message="prompt worker terminal event did not close active run",
-        db=db,
-    )
-
-    node = db.get_team_mission_node("mission-1", "node-verifier")
-    run = db.get_run("run-verifier")
-    assert node["status"] == "completed"
-    assert node["metadata"]["last_run_terminal_status"] == "completed"
-    assert run["status"] == "completed"
 
 
 def test_team_mission_emit_uses_control_db_while_profile_context_is_active(tmp_path, monkeypatch):
@@ -1191,7 +967,7 @@ def test_run_control_replaces_duplicate_activity_subscriptions_per_transport(tmp
 
 
 def test_control_plane_session_list_is_not_proxied_to_runtime_worker():
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": "session.list",
@@ -1207,7 +983,7 @@ def test_control_plane_session_list_is_not_proxied_to_runtime_worker():
 
 
 def test_control_plane_session_title_is_not_proxied_to_runtime_worker():
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": "session.title",
@@ -1226,7 +1002,7 @@ def test_control_plane_session_title_is_not_proxied_to_runtime_worker():
 
 
 def test_control_plane_session_messages_are_not_proxied_to_runtime_worker():
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": "session.messages",
@@ -1246,7 +1022,7 @@ def test_control_plane_session_messages_are_not_proxied_to_runtime_worker():
 
 
 def test_control_plane_team_mission_node_history_is_not_proxied_to_runtime_worker():
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": "team_mission.node.history",
@@ -1270,7 +1046,7 @@ def test_profile_scoped_cron_manage_is_proxied_to_runtime_worker():
     """cron.manage default (no controlPlaneOnly) writes cron jobs into
     the worker's in-memory cron runtime — proxy until Phase 4-5
     forwards cron ops over the new worker protocol."""
-    assert runtime_proxy.should_proxy_to_runtime(
+    assert runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": "cron.manage",
@@ -1288,7 +1064,7 @@ def test_profile_scoped_cron_manage_is_proxied_to_runtime_worker():
 
 @pytest.mark.parametrize("action", ["list", "status", "runs", ""])
 def test_profile_scoped_cron_control_plane_reads_are_not_proxied_to_runtime_worker(action):
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": "cron.manage",
@@ -1307,7 +1083,7 @@ def test_profile_scoped_cron_control_plane_reads_are_not_proxied_to_runtime_work
 
 
 def test_profile_growth_summary_stays_on_control_plane_with_profile_scope():
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": "profile.growth.summary",
@@ -1332,7 +1108,7 @@ def test_profile_scoped_cron_control_plane_flag_does_not_bypass_runtime_mutation
     """Cron mutations target the worker's cron runtime regardless of
     the ``controlPlaneOnly`` hint — that hint is only honored for the
     read-only list/status actions. Mutations proxy until Phase 4-5."""
-    assert runtime_proxy.should_proxy_to_runtime(
+    assert runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": "cron.manage",
@@ -1366,7 +1142,7 @@ def test_interactive_respond_methods_stay_on_control_plane(method):
     ``_gateway_queues``, never written to from the main side), causing
     the "clarify response triggered but no message.delta appeared"
     bug. Pin the new contract: control plane handles them in-process."""
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": method,
@@ -1395,7 +1171,7 @@ def test_profile_scoped_runtime_tool_methods_are_proxied_to_runtime_worker(metho
     registries (skill module map, toolset enable/disable state). They
     proxy until Phase 4-5 forwards these registry ops over the new
     worker protocol."""
-    assert runtime_proxy.should_proxy_to_runtime(
+    assert runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": method,
@@ -1412,7 +1188,7 @@ def test_profile_scoped_runtime_tool_methods_are_proxied_to_runtime_worker(metho
 
 
 def test_runtime_ensure_stays_on_control_plane():
-    assert not runtime_proxy.should_proxy_to_runtime(
+    assert not runtime_scope.should_route_to_worker(
         {
             "id": "1",
             "method": "runtime.ensure",
@@ -1467,670 +1243,8 @@ def test_dovie_sidecar_parent_watchdog_detects_missing_parent(monkeypatch):
     assert not dovie_sidecar.parent_process_still_owns_sidecar(12345)
 
 
-@pytest.mark.asyncio
-async def test_runtime_proxy_keeps_bridge_open_for_streaming_events(monkeypatch):
-    class FakeRuntimeSocket:
-        def __init__(self):
-            self.sent = []
-            self.closed = False
-            self.frames = asyncio.Queue()
-            self.frames.put_nowait(
-                json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "event",
-                        "params": {"type": "gateway.ready"},
-                    }
-                )
-            )
-
-        async def send(self, raw):
-            self.sent.append(json.loads(raw))
-
-        async def recv(self):
-            return await self.frames.get()
-
-        async def close(self):
-            self.closed = True
-
-    class FakeClientSocket:
-        def __init__(self):
-            self.sent = []
-
-        async def send_text(self, raw):
-            self.sent.append(json.loads(raw))
-
-    runtime_socket = FakeRuntimeSocket()
-
-    async def fake_connect(_uri):
-        return runtime_socket
-
-    class FakeProcess:
-        pid = 12345
-
-        def poll(self):
-            return None
-
-    worker = runtime_proxy.RuntimeWorker(
-        scope=runtime_proxy.RuntimeScope(
-            agent_profile_id="agent-a",
-            runtime_scope_key="profile:agent-a",
-            hermes_home="/tmp/hermes-agent-a",
-        ),
-        process=FakeProcess(),
-        port=19450,
-        token="token",
-        created_at=1,
-        last_started_at=1,
-        last_used_at=1,
-    )
-
-    class FakePool:
-        async def ensure_worker(self, _scope, _params):
-            return worker
-
-        async def retain_bridge(self, scope_key):
-            worker.bridge_count += 1
-
-        async def release_bridge(self, scope_key):
-            worker.bridge_count -= 1
-
-    monkeypatch.setitem(sys.modules, "websockets", types.SimpleNamespace(connect=fake_connect))
-    monkeypatch.setattr(runtime_proxy, "runtime_proxy_pool", lambda: FakePool())
-
-    transport = ws.WSTransport(FakeClientSocket(), asyncio.get_running_loop())
-    req = {
-        "jsonrpc": "2.0",
-        "id": "1",
-        "method": "prompt.submit",
-        "params": {
-            "runtime_scope_key": "profile:agent-a",
-            "dovie_profile": {
-                "id": "agent-a",
-                "hermesHomePath": "/tmp/hermes-agent-a",
-            },
-        },
-    }
-
-    assert await runtime_proxy.proxy_to_runtime(req, transport)
-    assert runtime_socket.sent == [req]
-
-    runtime_socket.frames.put_nowait(
-        json.dumps({"jsonrpc": "2.0", "id": "1", "result": {"status": "streaming"}})
-    )
-    runtime_socket.frames.put_nowait(
-        json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "method": "event",
-                "params": {
-                    "type": "message.delta",
-                    "session_id": "s",
-                    "payload": {"text": "hello"},
-                },
-            }
-        )
-    )
-    for _ in range(20):
-        if len(transport._ws.sent) >= 2:  # noqa: SLF001
-            break
-        await asyncio.sleep(0.01)
-
-    assert transport._ws.sent == [  # noqa: SLF001
-        {"jsonrpc": "2.0", "id": "1", "result": {"status": "streaming"}},
-        {
-            "jsonrpc": "2.0",
-            "method": "event",
-            "params": {
-                "type": "message.delta",
-                "session_id": "s",
-                "payload": {"text": "hello"},
-            },
-        },
-    ]
-    assert not runtime_socket.closed
-
-    await transport.aclose()
-    assert runtime_socket.closed
-    assert worker.bridge_count == 0
-
-
-@pytest.mark.asyncio
-async def test_runtime_proxy_retains_worker_before_bridge_creation(monkeypatch):
-    class FakeProcess:
-        pid = 12347
-
-        def poll(self):
-            return None
-
-    worker = runtime_proxy.RuntimeWorker(
-        scope=runtime_proxy.RuntimeScope(
-            agent_profile_id="agent-a",
-            runtime_scope_key="profile:agent-a",
-            hermes_home="/tmp/hermes-agent-a",
-        ),
-        process=FakeProcess(),
-        port=19451,
-        token="token",
-        created_at=1,
-        last_started_at=1,
-        last_used_at=1,
-    )
-    events: list[tuple[str, int]] = []
-
-    class FakePool:
-        async def ensure_worker(self, _scope, _params):
-            return worker
-
-        async def retain_bridge(self, _scope_key):
-            worker.bridge_count += 1
-            events.append(("retain", worker.bridge_count))
-
-        async def release_bridge(self, _scope_key):
-            worker.bridge_count -= 1
-            events.append(("release", worker.bridge_count))
-
-    class FakeBridge:
-        async def send(self, _req):
-            events.append(("send", worker.bridge_count))
-
-    class FakeTransport:
-        async def runtime_bridge(self, bridge_worker):
-            assert bridge_worker is worker
-            events.append(("runtime_bridge", worker.bridge_count))
-            return FakeBridge()
-
-    monkeypatch.setattr(runtime_proxy, "runtime_proxy_pool", lambda: FakePool())
-
-    req = {
-        "jsonrpc": "2.0",
-        "id": "1",
-        "method": "prompt.submit",
-        "params": {
-            "runtime_scope_key": "profile:agent-a",
-            "dovie_profile": {
-                "id": "agent-a",
-                "hermesHomePath": "/tmp/hermes-agent-a",
-            },
-        },
-    }
-
-    assert await runtime_proxy.proxy_to_runtime(req, FakeTransport())
-    assert events == [
-        ("retain", 1),
-        ("runtime_bridge", 1),
-        ("send", 1),
-        ("release", 0),
-    ]
-    assert worker.bridge_count == 0
-
-
-@pytest.mark.asyncio
-async def test_runtime_proxy_rejects_non_object_ready_frame_without_attribute_error(monkeypatch):
-    class FakeRuntimeSocket:
-        def __init__(self):
-            self.closed = False
-
-        async def recv(self):
-            return "null"
-
-        async def close(self):
-            self.closed = True
-
-    class FakeProcess:
-        pid = 12346
-
-        def poll(self):
-            return None
-
-    class FakePool:
-        async def retain_bridge(self, _scope_key):
-            raise AssertionError("bridge must not be retained before a valid ready frame")
-
-        async def release_bridge(self, _scope_key):
-            raise AssertionError("bridge was never retained")
-
-    runtime_socket = FakeRuntimeSocket()
-
-    async def fake_connect(_uri):
-        return runtime_socket
-
-    monkeypatch.setitem(sys.modules, "websockets", types.SimpleNamespace(connect=fake_connect))
-    monkeypatch.setattr(runtime_proxy, "_RUNTIME_CONNECT_ATTEMPTS", 1)
-    monkeypatch.setattr(runtime_proxy, "_RUNTIME_CONNECT_DELAY_S", 0)
-
-    worker = runtime_proxy.RuntimeWorker(
-        scope=runtime_proxy.RuntimeScope(
-            agent_profile_id="agent-a",
-            runtime_scope_key="profile:agent-a",
-            hermes_home="/tmp/hermes-agent-a",
-        ),
-        process=FakeProcess(),
-        port=19451,
-        token="token",
-        created_at=1,
-        last_started_at=1,
-        last_used_at=1,
-    )
-    bridge = runtime_proxy.RuntimeProxyBridge(
-        worker=worker,
-        transport=object(),
-        pool=FakePool(),
-    )
-
-    with pytest.raises(RuntimeError, match="ready frame must be a JSON object, got NoneType"):
-        await bridge.send({"id": "1", "method": "run.status", "params": {}})
-    assert runtime_socket.closed
-    assert bridge.closed
-
-
-@pytest.mark.asyncio
-async def test_ws_transport_replaces_cached_runtime_bridge_when_worker_changes():
-    class FakeClientSocket:
-        async def send_text(self, _raw):
-            return None
-
-    class FakeProcess:
-        def __init__(self, pid):
-            self.pid = pid
-
-        def poll(self):
-            return None
-
-    scope = runtime_proxy.RuntimeScope(
-        agent_profile_id="agent-a",
-        runtime_scope_key="team:conversation-1:leader-conversation",
-        hermes_home="/tmp/hermes-agent-a",
-    )
-    first_worker = runtime_proxy.RuntimeWorker(
-        scope=scope,
-        process=FakeProcess(21001),
-        port=21001,
-        token="first",
-        created_at=1,
-        last_started_at=1,
-        last_used_at=1,
-    )
-    second_worker = runtime_proxy.RuntimeWorker(
-        scope=scope,
-        process=FakeProcess(21002),
-        port=21002,
-        token="second",
-        created_at=2,
-        last_started_at=2,
-        last_used_at=2,
-    )
-
-    transport = ws.WSTransport(FakeClientSocket(), asyncio.get_running_loop())
-    first_bridge = await transport.runtime_bridge(first_worker)
-    second_bridge = await transport.runtime_bridge(second_worker)
-
-    assert second_bridge is not first_bridge
-    assert first_bridge.closed
-    assert second_bridge.worker is second_worker
-    assert transport._runtime_bridges[scope.runtime_scope_key] is second_bridge  # noqa: SLF001
-
-
-def test_runtime_proxy_ignores_non_object_requests():
-    assert not runtime_proxy.should_proxy_to_runtime(None)
-    assert not runtime_proxy.should_proxy_to_runtime([])
-    assert not runtime_proxy.should_proxy_to_runtime(["not", "a", "request"])
-    assert runtime_proxy.runtime_scope_from_request(["not", "a", "request"]) == runtime_proxy.RuntimeScope()
-
-
-@pytest.mark.asyncio
-async def test_runtime_worker_pool_reuses_and_reclaims_idle_workers(monkeypatch):
-    class FakeProcess:
-        next_pid = 20000
-
-        def __init__(self, *args, **kwargs):
-            self.args = args
-            self.kwargs = kwargs
-            self.pid = FakeProcess.next_pid
-            FakeProcess.next_pid += 1
-            self.terminated = False
-            self.killed = False
-
-        def poll(self):
-            return 0 if self.terminated or self.killed else None
-
-        def terminate(self):
-            self.terminated = True
-
-        def kill(self):
-            self.killed = True
-
-        def wait(self, _timeout=None):
-            self.terminated = True
-            return 0
-
-    now = 1000.0
-
-    monkeypatch.setattr(runtime_proxy.time, "time", lambda: now)
-    monkeypatch.setattr(runtime_proxy.subprocess, "Popen", FakeProcess)
-    monkeypatch.setattr(runtime_proxy, "_reserve_loopback_port", lambda: 21000)
-    monkeypatch.setenv("DOVIE_HERMES_RUNTIME_WORKER_IDLE_SECONDS", "10")
-
-    pool = runtime_proxy.RuntimeWorkerPool()
-    scope = runtime_proxy.RuntimeScope(
-        agent_profile_id="agent-a",
-        runtime_scope_key="profile:agent-a",
-        hermes_home="/tmp/hermes-agent-a",
-    )
-    params = {
-        "dovie_profile": {
-            "id": "agent-a",
-            "hermesHomePath": "/tmp/hermes-agent-a",
-            "env": {"FEISHU_APP_SECRET": "secret"},
-        }
-    }
-
-    first = await pool.ensure_worker(scope, params)
-    second = await pool.ensure_worker(scope, params)
-    assert second is first
-    assert first.process.kwargs["env"]["HERMES_HOME"] == "/tmp/hermes-agent-a"
-    assert first.process.kwargs["env"]["FEISHU_APP_SECRET"] == "secret"
-    assert "--token" not in first.process.args[0]
-    assert first.process.kwargs["env"]["DOVIE_SIDECAR_TOKEN"]
-    assert first.process.kwargs["env"]["DOVIE_SIDECAR_PARENT_PID"] == str(os.getpid())
-
-    now = 1012.0
-    reclaimed = await pool.reclaim_idle()
-    assert reclaimed["scopeKeys"] == ["profile:agent-a"]
-    assert first.process.terminated
-    assert pool.snapshot()["runningWorkerCount"] == 0
-
-
-@pytest.mark.asyncio
-async def test_runtime_worker_pool_restarts_when_profile_launch_env_changes(monkeypatch):
-    class FakeProcess:
-        next_pid = 21100
-
-        def __init__(self, *args, **kwargs):
-            self.args = args
-            self.kwargs = kwargs
-            self.pid = FakeProcess.next_pid
-            FakeProcess.next_pid += 1
-            self.terminated = False
-            self.killed = False
-
-        def poll(self):
-            return 0 if self.terminated or self.killed else None
-
-        def terminate(self):
-            self.terminated = True
-
-        def kill(self):
-            self.killed = True
-
-        def wait(self, _timeout=None):
-            self.terminated = True
-            return 0
-
-    monkeypatch.setattr(runtime_proxy.subprocess, "Popen", FakeProcess)
-    monkeypatch.setattr(runtime_proxy, "_reserve_loopback_port", lambda: 21100)
-
-    pool = runtime_proxy.RuntimeWorkerPool()
-    scope = runtime_proxy.RuntimeScope(
-        agent_profile_id="agent-a",
-        runtime_scope_key="profile:agent-a",
-        hermes_home="/tmp/hermes-agent-a",
-    )
-    first = await pool.ensure_worker(
-        scope,
-        {
-            "dovie_profile": {
-                "id": "agent-a",
-                "hermesHomePath": "/tmp/hermes-agent-a",
-                "env": {},
-            }
-        },
-    )
-    second = await pool.ensure_worker(
-        scope,
-        {
-            "dovie_profile": {
-                "id": "agent-a",
-                "hermesHomePath": "/tmp/hermes-agent-a",
-                "env": {
-                    "DOVIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/dovie/invoke",
-                    "DOVIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
-                },
-            }
-        },
-    )
-
-    assert second is not first
-    assert first.process.terminated
-    assert second.process.kwargs["env"]["DOVIE_BACKEND_BRIDGE_URL"] == "http://127.0.0.1:4567/api/dovie/invoke"
-    assert second.process.kwargs["env"]["DOVIE_BACKEND_BRIDGE_TOKEN"] == "bridge-token"
-    assert pool.snapshot()["runningWorkerCount"] == 1
-
-
-@pytest.mark.asyncio
-async def test_runtime_worker_pool_keeps_active_bridge_when_launch_env_changes(monkeypatch):
-    class FakeProcess:
-        next_pid = 21150
-
-        def __init__(self, *args, **kwargs):
-            self.args = args
-            self.kwargs = kwargs
-            self.pid = FakeProcess.next_pid
-            FakeProcess.next_pid += 1
-            self.terminated = False
-
-        def poll(self):
-            return 0 if self.terminated else None
-
-        def terminate(self):
-            self.terminated = True
-
-        def wait(self, _timeout=None):
-            self.terminated = True
-            return 0
-
-    monkeypatch.setattr(runtime_proxy.subprocess, "Popen", FakeProcess)
-    monkeypatch.setattr(runtime_proxy, "_reserve_loopback_port", lambda: 21150)
-
-    pool = runtime_proxy.RuntimeWorkerPool()
-    scope = runtime_proxy.RuntimeScope(
-        agent_profile_id="agent-a",
-        runtime_scope_key="team:conversation-a:leader-conversation",
-        hermes_home="/tmp/hermes-agent-a",
-    )
-    first = await pool.ensure_worker(
-        scope,
-        {
-            "runtime_scope_key": "team:conversation-a:leader-conversation",
-            "dovie_profile": {
-                "id": "agent-a",
-                "hermesHomePath": "/tmp/hermes-agent-a",
-                "env": {},
-            },
-        },
-    )
-    await pool.retain_bridge(first.scope_key)
-
-    second = await pool.ensure_worker(
-        scope,
-        {
-            "runtime_scope_key": "team:conversation-a:leader-conversation",
-            "dovie_profile": {
-                "id": "agent-a",
-                "hermesHomePath": "/tmp/hermes-agent-a",
-                "env": {
-                    "DOVIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/dovie/invoke",
-                },
-            },
-        },
-    )
-
-    assert second is first
-    assert first.running()
-    assert not first.process.terminated
-    assert "DOVIE_BACKEND_BRIDGE_URL" not in first.process.kwargs["env"]
-    assert pool.snapshot()["runningWorkerCount"] == 1
-
-
-@pytest.mark.asyncio
-async def test_runtime_worker_pool_keeps_active_run_when_launch_env_changes(monkeypatch):
-    class FakeProcess:
-        next_pid = 21170
-
-        def __init__(self, *args, **kwargs):
-            self.args = args
-            self.kwargs = kwargs
-            self.pid = FakeProcess.next_pid
-            FakeProcess.next_pid += 1
-            self.terminated = False
-
-        def poll(self):
-            return 0 if self.terminated else None
-
-        def terminate(self):
-            self.terminated = True
-
-        def wait(self, _timeout=None):
-            self.terminated = True
-            return 0
-
-    monkeypatch.setattr(runtime_proxy.subprocess, "Popen", FakeProcess)
-    monkeypatch.setattr(runtime_proxy, "_reserve_loopback_port", lambda: 21170)
-    monkeypatch.setattr(runtime_proxy, "_worker_has_active_runs", lambda _worker: True)
-
-    pool = runtime_proxy.RuntimeWorkerPool()
-    scope = runtime_proxy.RuntimeScope(
-        agent_profile_id="agent-a",
-        runtime_scope_key="team:conversation-a:leader-conversation",
-        hermes_home="/tmp/hermes-agent-a",
-    )
-    first = await pool.ensure_worker(
-        scope,
-        {
-            "runtime_scope_key": "team:conversation-a:leader-conversation",
-            "dovie_profile": {
-                "id": "agent-a",
-                "hermesHomePath": "/tmp/hermes-agent-a",
-                "env": {},
-            },
-        },
-    )
-
-    second = await pool.ensure_worker(
-        scope,
-        {
-            "runtime_scope_key": "team:conversation-a:leader-conversation",
-            "dovie_profile": {
-                "id": "agent-a",
-                "hermesHomePath": "/tmp/hermes-agent-a",
-                "env": {
-                    "DOVIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
-                },
-            },
-        },
-    )
-
-    assert second is first
-    assert first.running()
-    assert not first.process.terminated
-    assert "DOVIE_BACKEND_BRIDGE_TOKEN" not in first.process.kwargs["env"]
-    assert pool.snapshot()["runningWorkerCount"] == 1
-
-
-@pytest.mark.asyncio
-async def test_runtime_worker_pool_reuses_existing_worker_when_scoped_read_lacks_launch_home(monkeypatch):
-    class FakeProcess:
-        next_pid = 21200
-
-        def __init__(self, *args, **kwargs):
-            self.args = args
-            self.kwargs = kwargs
-            self.pid = FakeProcess.next_pid
-            FakeProcess.next_pid += 1
-            self.terminated = False
-            self.killed = False
-
-        def poll(self):
-            return 0 if self.terminated or self.killed else None
-
-        def terminate(self):
-            self.terminated = True
-
-        def kill(self):
-            self.killed = True
-
-        def wait(self, _timeout=None):
-            self.terminated = True
-            return 0
-
-    monkeypatch.setattr(runtime_proxy.subprocess, "Popen", FakeProcess)
-    monkeypatch.setattr(runtime_proxy, "_reserve_loopback_port", lambda: 21200)
-
-    pool = runtime_proxy.RuntimeWorkerPool()
-    launch_scope = runtime_proxy.RuntimeScope(
-        agent_profile_id="agent-a",
-        runtime_scope_key="profile:agent-a",
-        hermes_home="/tmp/hermes-agent-a",
-    )
-    first = await pool.ensure_worker(
-        launch_scope,
-        {"dovie_profile": {"id": "agent-a", "hermesHomePath": "/tmp/hermes-agent-a"}},
-    )
-    read_scope = runtime_proxy.RuntimeScope(
-        agent_profile_id="agent-a",
-        runtime_scope_key="profile:agent-a",
-        hermes_home="",
-    )
-
-    second = await pool.ensure_worker(read_scope, {"runtime_scope_key": "profile:agent-a"})
-
-    assert second is first
-    assert first.running()
-    assert not first.process.terminated
-    assert pool.snapshot()["runningWorkerCount"] == 1
-
-
-@pytest.mark.asyncio
-async def test_runtime_worker_pool_does_not_reclaim_active_bridge(monkeypatch):
-    class FakeProcess:
-        pid = 22000
-
-        def __init__(self, *args, **kwargs):
-            self.terminated = False
-
-        def poll(self):
-            return 0 if self.terminated else None
-
-        def terminate(self):
-            self.terminated = True
-
-        def wait(self, _timeout=None):
-            self.terminated = True
-            return 0
-
-    now = 2000.0
-
-    monkeypatch.setattr(runtime_proxy.time, "time", lambda: now)
-    monkeypatch.setattr(runtime_proxy.subprocess, "Popen", FakeProcess)
-    monkeypatch.setattr(runtime_proxy, "_reserve_loopback_port", lambda: 22000)
-    monkeypatch.setenv("DOVIE_HERMES_RUNTIME_WORKER_IDLE_SECONDS", "10")
-
-    pool = runtime_proxy.RuntimeWorkerPool()
-    scope = runtime_proxy.RuntimeScope(
-        agent_profile_id="agent-a",
-        runtime_scope_key="profile:agent-a",
-        hermes_home="/tmp/hermes-agent-a",
-    )
-    worker = await pool.ensure_worker(scope, {"dovie_profile": {"hermesHomePath": "/tmp/hermes-agent-a"}})
-    await pool.retain_bridge(worker.scope_key)
-
-    now = 2012.0
-    reclaimed = await pool.reclaim_idle()
-    assert reclaimed["reclaimed"] == 0
-    assert worker.running()
-    assert pool.snapshot()["runningWorkerCount"] == 1
-
-    await pool.release_bridge(worker.scope_key)
-    now = 2024.0
-    reclaimed = await pool.reclaim_idle()
-    assert reclaimed["reclaimed"] == 1
+def test_runtime_scope_router_ignores_non_object_requests():
+    assert not runtime_scope.should_route_to_worker(None)
+    assert not runtime_scope.should_route_to_worker([])
+    assert not runtime_scope.should_route_to_worker(["not", "a", "request"])
+    assert runtime_scope.runtime_scope_from_request(["not", "a", "request"]) == runtime_scope.RuntimeScope()

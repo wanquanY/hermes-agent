@@ -149,6 +149,19 @@ _team_mission_ready_scheduler: Any = None
 _team_mission_event_listener_registered = False
 
 
+def _reset_for_tests() -> None:
+    with _lock:
+        _events_by_session.clear()
+        _subscribers_by_session.clear()
+        _subscriptions_by_id.clear()
+        _subscription_ids_by_session.clear()
+        _subscription_ids_by_activity.clear()
+        _subscription_ids_by_transport.clear()
+        _run_state_by_id.clear()
+        _run_ids_by_session.clear()
+        _last_seq_by_session.clear()
+
+
 def _db_method(db: Any, name: str):
     if db is None or db.__class__.__module__.startswith("unittest.mock"):
         return None
@@ -761,7 +774,15 @@ def _ensure_outbound_run_identity(params: dict[str, Any]) -> None:
     )
 
 
-def _sync_canonical_frame_seq(
+def _positive_frame_int(value: Any) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def _sync_canonical_frame_identity(
     saved: Any,
     *,
     frame: dict[str, Any],
@@ -770,7 +791,7 @@ def _sync_canonical_frame_seq(
     run_id: str,
     event_type: str = "",
 ) -> None:
-    """Write the authoritative post-persist seq back into the outbound frame.
+    """Write authoritative post-persist ids back into the outbound frame.
 
     ``append_run_event`` may bump the requested seq (seq = max(requested,
     MAX+1) per conversation) and duplicate dispositions return the canonical
@@ -779,38 +800,59 @@ def _sync_canonical_frame_seq(
     must carry the persisted value — both ``frame`` (the copy retained in
     ``_events_by_session``) and the caller's ``params`` (the dict
     ``publish_recorded_event`` hands to transports after this returns).
+
+    ``runtime_source_seq`` is the temporary bridge for raw-worker/canonical
+    dedupe during the SeqAllocator migration. It must also be present on live
+    delivery, not just replay rows, until the frontend capability deprecation
+    removes that fallback.
     """
     if not isinstance(saved, dict):
         return
-    canonical_seq = int(saved.get("seq") or 0)
-    outbound_seq = int(frame.get("seq") or 0)
-    if canonical_seq <= 0 or canonical_seq == outbound_seq:
-        return
-    frame["seq"] = canonical_seq
-    if isinstance(params, dict):
-        params["seq"] = canonical_seq
-        params_payload = params.get("payload")
-        if isinstance(params_payload, dict) and "seq" in params_payload:
-            params_payload["seq"] = canonical_seq
-    frame_payload = frame.get("payload")
-    if isinstance(frame_payload, dict) and "seq" in frame_payload:
-        frame_payload["seq"] = canonical_seq
-    with _lock:
-        if stable:
-            _last_seq_by_session[stable] = max(
-                int(_last_seq_by_session.get(stable) or 0), canonical_seq
-            )
-        state = _run_state_by_id.get(run_id) if run_id else None
-        if isinstance(state, dict):
-            state["last_seq"] = max(int(state.get("last_seq") or 0), canonical_seq)
-    _diagnostic_warning(
-        "run-event-seq-rewritten-to-canonical",
-        event_type=event_type,
-        session_id=stable,
-        run_id=run_id,
-        requested_seq=outbound_seq,
-        canonical_seq=canonical_seq,
+    canonical_seq = _positive_frame_int(saved.get("seq"))
+    outbound_seq = _positive_frame_int(frame.get("seq"))
+    if canonical_seq > 0 and canonical_seq != outbound_seq:
+        frame["seq"] = canonical_seq
+        if isinstance(params, dict):
+            params["seq"] = canonical_seq
+            params_payload = params.get("payload")
+            if isinstance(params_payload, dict) and "seq" in params_payload:
+                params_payload["seq"] = canonical_seq
+        frame_payload = frame.get("payload")
+        if isinstance(frame_payload, dict) and "seq" in frame_payload:
+            frame_payload["seq"] = canonical_seq
+        with _lock:
+            if stable:
+                _last_seq_by_session[stable] = max(
+                    int(_last_seq_by_session.get(stable) or 0), canonical_seq
+                )
+            state = _run_state_by_id.get(run_id) if run_id else None
+            if isinstance(state, dict):
+                state["last_seq"] = max(int(state.get("last_seq") or 0), canonical_seq)
+        _diagnostic_warning(
+            "run-event-seq-rewritten-to-canonical",
+            event_type=event_type,
+            session_id=stable,
+            run_id=run_id,
+            requested_seq=outbound_seq,
+            canonical_seq=canonical_seq,
+        )
+    raw_frame_payload = frame.get("payload")
+    frame_payload = raw_frame_payload if isinstance(raw_frame_payload, dict) else {}
+    runtime_source_seq = _positive_frame_int(
+        saved.get("runtime_source_seq")
+        or frame.get("runtime_source_seq")
+        or frame_payload.get("runtime_source_seq")
     )
+    if runtime_source_seq <= 0:
+        return
+    frame["runtime_source_seq"] = runtime_source_seq
+    if isinstance(params, dict):
+        params["runtime_source_seq"] = runtime_source_seq
+        params_payload = params.get("payload")
+        if isinstance(params_payload, dict):
+            params_payload["runtime_source_seq"] = runtime_source_seq
+    if isinstance(raw_frame_payload, dict):
+        frame_payload["runtime_source_seq"] = runtime_source_seq
 
 
 def _active_run_ids_for_session(stable: str, db: Any = None) -> set[str]:
@@ -1734,7 +1776,7 @@ def record_event(
             # publish_recorded_event after this function returns, and the
             # poller reads from the DB). Sync it into the outbound dicts
             # so what FE receives is byte-identical to what replay serves.
-            _sync_canonical_frame_seq(
+            _sync_canonical_frame_identity(
                 saved,
                 frame=frame,
                 params=params,
@@ -2132,7 +2174,7 @@ def publish_recorded_event(
     return delivered
 
 
-def publish_run_terminal_event(
+def terminate_run(
     *,
     stored_session_id: str,
     run_id: str,
@@ -2142,6 +2184,7 @@ def publish_run_terminal_event(
     activity_id: str = "",
     status: str = "failed",
     message: str = "",
+    cause: str = "worker_emitted",
     db: Any = None,
     owner_transport: Transport | None = None,
 ) -> dict[str, Any]:
@@ -2151,6 +2194,54 @@ def publish_run_terminal_event(
         return {}
     terminal_status = str(status or "failed").strip().lower() or "failed"
     payload_status = _payload_status(terminal_status)
+
+    # spec §7.2 — RunStateMachine.terminate_run single entrypoint. Perform the
+    # atomic terminal transition (idempotent, degrades on SeqAllocatorBusy)
+    # BEFORE publishing the notification frame so that subscribers observe the
+    # committed state. If db is unavailable (test paths, legacy callers) the
+    # atomic transition is skipped — the caller still gets a frame published.
+    atomic_result = None
+    if db is not None:
+        conn = getattr(db, "_conn", None)
+        if conn is not None:
+            try:
+                from hermes_agent.domain.run_terminator import (
+                    TerminateCause,
+                    terminate_run as _domain_terminate_run,
+                )
+
+                try:
+                    resolved_cause = TerminateCause(str(cause or "worker_emitted"))
+                except ValueError:
+                    resolved_cause = TerminateCause.WORKER_EMITTED
+                atomic_result = _domain_terminate_run(
+                    conn,
+                    run_id=normalized_run_id,
+                    session_id=stable,
+                    target_status=terminal_status,
+                    cause=resolved_cause,
+                    turn_id=str(turn_id or "").strip(),
+                    message=message,
+                )
+            except ValueError:
+                logger.exception(
+                    "run_state_machine.terminate_run rejected run=%s session=%s status=%s",
+                    normalized_run_id,
+                    stable,
+                    terminal_status,
+                )
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "run_state_machine.terminate_run failed run=%s session=%s status=%s",
+                    normalized_run_id,
+                    stable,
+                    terminal_status,
+                )
+                raise RuntimeError(
+                    "run_state_machine.terminate_run failed; refusing legacy terminal fallback"
+                ) from exc
+
     payload: dict[str, Any] = {
         "run_id": normalized_run_id,
         "turn_id": str(turn_id or "").strip(),
@@ -2165,6 +2256,11 @@ def publish_run_terminal_event(
         payload["text"] = str(message) if payload_status == "error" else ""
     else:
         payload["text"] = ""
+    if atomic_result is not None:
+        payload["terminal_seq"] = atomic_result.terminal_seq
+        payload["terminal_cause"] = atomic_result.cause.value
+        if atomic_result.degraded:
+            payload["terminal_degraded"] = True
     frame = {
         "type": "message.complete",
         "session_id": str(runtime_session_id or stable).strip(),
@@ -2173,12 +2269,13 @@ def publish_run_terminal_event(
         "turn_id": str(turn_id or "").strip(),
         "runtime_scope_key": str(runtime_scope_key or stable).strip(),
         **({"activity_id": normalized_activity_id, "activityId": normalized_activity_id} if normalized_activity_id else {}),
-        "seq": next_event_seq(stable, db=db),
         "owner_metadata": {
             "gateway_pid": os.getpid(),
         },
         "payload": payload,
     }
+    if atomic_result is not None and atomic_result.terminal_seq:
+        frame["seq"] = atomic_result.terminal_seq
     _diagnostic_warning(
         "publish-terminal-event",
         db=_db_label(db),
@@ -2189,11 +2286,50 @@ def publish_run_terminal_event(
         turn_id=str(turn_id or "").strip(),
         runtime_scope_key=str(runtime_scope_key or stable).strip(),
         runtime_session_id=str(runtime_session_id or stable).strip(),
-        seq=int(frame.get("seq") or 0),
+        seq=0,
         message=str(message or ""),
     )
-    publish_recorded_event(frame, owner_transport=owner_transport, db=db)
+    # spec §7.2 — when the domain-level atomic transition succeeded (APPLIED
+    # or IDEMPOTENT_SKIP or DEGRADED), the canonical event is already persisted
+    # (or intentionally skipped for DEGRADED). Pass persist=False to avoid a
+    # second run_events INSERT that would silently duplicate or clash on the
+    # UNIQUE(session_id, seq) constraint.
+    persist_flag = atomic_result is None
+    publish_recorded_event(
+        frame,
+        owner_transport=owner_transport,
+        db=db,
+        persist=persist_flag,
+    )
     return frame
+
+
+def publish_run_terminal_event(
+    *,
+    stored_session_id: str,
+    run_id: str,
+    turn_id: str = "",
+    runtime_scope_key: str = "",
+    runtime_session_id: str = "",
+    activity_id: str = "",
+    status: str = "failed",
+    message: str = "",
+    db: Any = None,
+    owner_transport: Transport | None = None,
+) -> dict[str, Any]:
+    """Compatibility wrapper for the Phase C terminal entrypoint."""
+    return terminate_run(
+        stored_session_id=stored_session_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        runtime_scope_key=runtime_scope_key,
+        runtime_session_id=runtime_session_id,
+        activity_id=activity_id,
+        status=status,
+        message=message,
+        db=db,
+        owner_transport=owner_transport,
+    )
 
 
 def subscribe_session(

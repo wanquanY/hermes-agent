@@ -17,7 +17,7 @@ from tui_gateway.run_worker import (
     decode_incoming,
     encode_incoming,
 )
-from tui_gateway.services.runtime_proxy import RuntimeScope
+from tui_gateway.services.runtime_scope import RuntimeScope
 from tui_gateway.services.worker_supervisor import RunWorker, WorkerSupervisor
 
 

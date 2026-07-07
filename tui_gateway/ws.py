@@ -33,7 +33,8 @@ from collections import deque
 from typing import Any
 
 from tui_gateway import server
-from tui_gateway.services.runtime_proxy import runtime_scope_from_request
+from tui_gateway.services.contract_capabilities import timeline_contract_ready_payload
+from tui_gateway.services.runtime_scope import runtime_scope_from_request
 from tui_gateway.services.worker_runtime import primary_dispatch
 
 _log = logging.getLogger(__name__)
@@ -401,7 +402,10 @@ async def handle_ws(ws: Any) -> None:
             "method": "event",
             "params": {
                 "type": "gateway.ready",
-                "payload": {"skin": server.resolve_skin()},
+                "payload": {
+                    "skin": server.resolve_skin(),
+                    **timeline_contract_ready_payload(),
+                },
             },
         }
     )

@@ -822,6 +822,7 @@ def test_append_session_info_same_payload_new_run_is_not_deduplicated(db):
 
 
 def test_prune_duplicate_session_info_events_keeps_latest_duplicate(db):
+    db.create_session("stored-1", source="test")
     payload_a = '{"status":"starting","model":"test-model"}'
     payload_b = '{"status":"running","model":"test-model"}'
     for seq, payload in ((1, payload_a), (2, payload_a), (3, payload_b), (4, payload_b)):
@@ -1373,6 +1374,7 @@ def test_compact_run_events_preserves_active_message_delta_rows(db):
 
 
 def test_compact_run_events_prunes_terminal_stream_rows_without_run_row(db):
+    db.create_session("stored-1", source="test")
     for seq, event_type, payload, status in (
         (1, "message.delta", '{"mode":"append","text":"A","delta":"A","offset":0}', ""),
         (2, "message.complete", '{"status":"complete","text":"A"}', "completed"),

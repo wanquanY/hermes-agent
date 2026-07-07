@@ -8,6 +8,19 @@ import time
 from typing import Any, Dict, List, Optional
 
 from hermes_runtime_event_payloads import primary_deliverable_text
+from hermes_agent.domain.event_ledger import EventLedger
+from hermes_agent.domain.run_state_machine import ACTIVE_RUN_STATUSES
+from hermes_agent.domain.run_state_machine import RUN_OPENING_EVENT_TYPES
+from hermes_agent.domain.run_state_machine import TERMINAL_RUN_STATUSES
+from hermes_agent.domain.run_state_machine import error_for_status
+from hermes_agent.domain.run_state_machine import event_opens_active_run
+from hermes_agent.domain.run_state_machine import prefer_terminal_run_status
+from hermes_agent.domain.run_state_machine import resolve_explicit_run_status
+from hermes_agent.domain.run_state_machine import resolve_run_status_transition
+from hermes_agent.domain.run_state_machine import terminal_status_from_event
+from hermes_agent.domain.seq_allocator import allocate_run_event_seq
+from hermes_agent.domain.seq_allocator import ensure_session_counter
+from hermes_agent.repositories.run_repo import RunRepoImpl
 from hermes_state_run_event_codec import (
     decode_run_event_row,
     encode_run_event_frame,
@@ -32,6 +45,7 @@ from hermes_state_runtime import (
 )
 from hermes_state_tool_events import (
     TOOL_EVENT_TYPES,
+    list_tool_events_as_canonical,
     project_tool_event,
     tool_event_row_to_dict,
 )
@@ -45,21 +59,6 @@ from hermes_team_mission.runtime.run_event_retention import (
 
 logger = logging.getLogger(__name__)
 
-ACTIVE_RUN_STATUSES = {
-    "queued",
-    "starting",
-    "running",
-    "waiting_approval",
-    "cancelling",
-    "finalizing",
-}
-TERMINAL_RUN_STATUSES = {"completed", "failed", "interrupted", "cancelled"}
-TERMINAL_RUN_STATUS_RANK = {
-    "cancelled": 1,
-    "interrupted": 1,
-    "failed": 1,
-    "completed": 2,
-}
 RUN_EVENT_PRUNE_INTERVAL_EVENTS = 500
 CONTROL_ONLY_ACTIVE_RUN_REPAIR_STALE_SECONDS = 60.0
 CONTROL_ONLY_ACTIVE_RUN_REPAIR_OWNER_DEAD_GRACE_SECONDS = 10.0
@@ -98,20 +97,6 @@ RUNTIME_LIFECYCLE_EVENT_TYPES = {
     "reasoning.delta",
     "thinking.delta",
 }
-RUN_OPENING_EVENT_TYPES = {
-    "message.start",
-    "message.delta",
-    "reasoning.delta",
-    "thinking.delta",
-    "tool.start",
-    "tool.generating",
-    "tool.progress",
-    "approval.request",
-    "secret.request",
-    "sudo.request",
-    "input_approval.request",
-    *COALESCIBLE_STREAM_EVENT_TYPES,
-}
 STREAM_IDENTITY_PAYLOAD_KEYS = (
     "subagent_id",
     "subagentId",
@@ -135,6 +120,14 @@ def _json_loads(value: str | None, fallback: Any) -> Any:
         return json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return fallback
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
 
 
 def _run_event_retention_class(event_type: str) -> str:
@@ -332,36 +325,15 @@ def _event_with_participant_id(event: Dict[str, Any], participant_id: str = "") 
 
 
 def _event_status(event_type: str, payload: Dict[str, Any]) -> str | None:
-    if event_type == "error":
-        return "failed"
-    if event_type == "session.recalled":
-        return "interrupted"
-    if event_type != "message.complete":
-        return None
-    status = str(payload.get("status") or "").strip().lower()
-    if status == "interrupted":
-        return "interrupted"
-    if status in {"cancelled", "canceled"}:
-        return "cancelled"
-    if status in {"error", "failed"}:
-        return "failed"
-    return "completed"
+    return terminal_status_from_event(event_type, payload)
 
 
 def _prefer_terminal_run_status(existing_status: str, next_status: str) -> str:
-    existing = str(existing_status or "").strip().lower()
-    incoming = str(next_status or "").strip().lower()
-    if existing not in TERMINAL_RUN_STATUSES or incoming not in TERMINAL_RUN_STATUSES:
-        return incoming or existing
-    existing_rank = TERMINAL_RUN_STATUS_RANK.get(existing, 0)
-    incoming_rank = TERMINAL_RUN_STATUS_RANK.get(incoming, 0)
-    if incoming_rank > existing_rank:
-        return incoming
-    return existing
+    return prefer_terminal_run_status(existing_status, next_status)
 
 
 def _event_opens_active_run(event_type: str) -> bool:
-    return str(event_type or "").strip() in RUN_OPENING_EVENT_TYPES
+    return event_opens_active_run(event_type)
 
 
 def _event_reopens_terminal_run(event_type: str) -> bool:
@@ -816,22 +788,19 @@ class SessionDBRunMixin:
                 continue
             metadata["recovery_reason"] = "control-only run events are not active runtime runs"
             metadata["recovered_at"] = repaired_at
-            conn.execute(
-                """
-                UPDATE runs
-                SET status = 'completed',
-                    updated_at = ?,
-                    completed_at = COALESCE(completed_at, updated_at, ?),
-                    error = COALESCE(error, ''),
-                    metadata_json = ?
-                WHERE run_id = ?
-                """,
-                (
-                    repaired_at,
-                    repaired_at,
-                    _json_dumps(metadata),
-                    row["run_id"],
-                ),
+            RunRepoImpl(conn).upsert_materialized_state(
+                run_id=str(row["run_id"] or ""),
+                session_id=str(row["session_id"] or ""),
+                runtime_scope_key=str(row["runtime_scope_key"] or row["session_id"] or ""),
+                turn_id=str(row["turn_id"] or ""),
+                runtime_session_id=str(row["runtime_session_id"] or ""),
+                status="completed",
+                started_at=float(row["started_at"] or repaired_at),
+                updated_at=repaired_at,
+                completed_at=float(row["completed_at"] or repaired_at),
+                last_seq=int(row["last_seq"] or 0),
+                error=str(row["error"] or ""),
+                metadata=metadata,
             )
         return len(rows)
 
@@ -855,10 +824,10 @@ class SessionDBRunMixin:
             return int(fallback_seq or 0)
         with self._lock:
             row = self._conn.execute(
-                "SELECT COALESCE(MAX(seq), 0) AS last_seq FROM run_events WHERE session_id = ?",
+                "SELECT next_seq FROM seq_counter WHERE session_id = ?",
                 (stable,),
             ).fetchone()
-        persisted_next = int(_row_value(row, "last_seq", 0) or 0) + 1
+        persisted_next = int(_row_value(row, "next_seq", 0) or 0)
         return max(persisted_next, int(fallback_seq or 0))
 
     def upsert_run(
@@ -888,85 +857,27 @@ class SessionDBRunMixin:
         normalized_scope = str(runtime_scope_key or session_id).strip()
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
-            existing = conn.execute(
-                "SELECT * FROM runs WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
-            if existing is None:
-                conn.execute(
-                    """
-                    INSERT INTO runs (
-                        run_id, session_id, runtime_scope_key, turn_id, runtime_session_id, status,
-                        started_at, updated_at, completed_at, last_seq, error,
-                        metadata_json
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        run_id,
-                        session_id,
-                        normalized_scope,
-                        turn_id,
-                        runtime_session_id,
-                        normalized_status,
-                        started,
-                        updated,
-                        completed_at,
-                        int(last_seq or 0),
-                        error,
-                        _json_dumps(metadata or {}),
-                    ),
-                )
-            else:
-                existing_status = str(existing["status"] or "")
-                next_status = normalized_status
-                if existing_status in TERMINAL_RUN_STATUSES and normalized_status not in TERMINAL_RUN_STATUSES:
-                    next_status = existing_status
-                elif existing_status in TERMINAL_RUN_STATUSES and normalized_status in TERMINAL_RUN_STATUSES:
-                    next_status = _prefer_terminal_run_status(existing_status, normalized_status)
-                next_completed_at = completed_at
-                if next_completed_at is None:
-                    next_completed_at = existing["completed_at"]
-                if next_status in TERMINAL_RUN_STATUSES and next_completed_at is None:
-                    next_completed_at = updated
-                merged_metadata = _json_loads(existing["metadata_json"], {})
-                if isinstance(metadata, dict):
-                    merged_metadata.update(metadata)
-                if next_status == "failed":
-                    next_error = error or str(existing["error"] or "")
-                elif next_status in TERMINAL_RUN_STATUSES:
-                    next_error = ""
-                else:
-                    next_error = error or str(existing["error"] or "")
-                conn.execute(
-                    """
-                    UPDATE runs
-                    SET session_id = ?,
-                        runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
-                        turn_id = COALESCE(NULLIF(?, ''), turn_id),
-                        runtime_session_id = COALESCE(NULLIF(?, ''), runtime_session_id),
-                        status = ?,
-                        updated_at = ?,
-                        completed_at = ?,
-                        last_seq = MAX(COALESCE(last_seq, 0), ?),
-                        error = ?,
-                        metadata_json = ?
-                    WHERE run_id = ?
-                    """,
-                    (
-                        session_id,
-                        normalized_scope,
-                        turn_id,
-                        runtime_session_id,
-                        next_status,
-                        updated,
-                        next_completed_at,
-                        int(last_seq or 0),
-                        next_error,
-                        _json_dumps(merged_metadata if isinstance(merged_metadata, dict) else {}),
-                        run_id,
-                    ),
-                )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO sessions (id, source, started_at)
+                VALUES (?, 'runtime', ?)
+                """,
+                (session_id, started),
+            )
+            RunRepoImpl(conn).upsert_materialized_state(
+                run_id=run_id,
+                session_id=session_id,
+                runtime_scope_key=normalized_scope,
+                turn_id=turn_id,
+                runtime_session_id=runtime_session_id,
+                status=normalized_status,
+                started_at=started,
+                updated_at=updated,
+                completed_at=completed_at,
+                last_seq=int(last_seq or 0),
+                error=error,
+                metadata=metadata or {},
+            )
             row = conn.execute(
                 "SELECT * FROM runs WHERE run_id = ?",
                 (run_id,),
@@ -1216,26 +1127,18 @@ class SessionDBRunMixin:
                 }
 
             try:
-                conn.execute(
-                    """
-                    INSERT INTO runs (
-                        run_id, session_id, runtime_scope_key, turn_id, runtime_session_id, status,
-                        started_at, updated_at, completed_at, last_seq, error,
-                        metadata_json
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, '', ?)
-                    """,
-                    (
-                        normalized_run_id,
-                        stable,
-                        normalized_scope,
-                        turn_id,
-                        runtime_session_id,
-                        normalized_status,
-                        started,
-                        updated,
-                        _json_dumps(metadata or {}),
-                    ),
+                RunRepoImpl(conn).upsert_materialized_state(
+                    run_id=normalized_run_id,
+                    session_id=stable,
+                    runtime_scope_key=normalized_scope,
+                    turn_id=turn_id,
+                    runtime_session_id=runtime_session_id,
+                    status=normalized_status,
+                    started_at=started,
+                    updated_at=updated,
+                    last_seq=0,
+                    error="",
+                    metadata=metadata or {},
                 )
             except sqlite3.IntegrityError:
                 active = conn.execute(
@@ -1383,15 +1286,10 @@ class SessionDBRunMixin:
         runtime_scope_key = _event_runtime_scope_key(frame, stable)
         frame["runtime_scope_key"] = runtime_scope_key
         timestamp = float(frame.get("timestamp") or time.time())
-        requested_seq = int(frame.get("seq") or 0)
-        authoritative_next_seq = self.next_run_event_seq(stable)
-        # run_events.seq is the authoritative timeline sequence for a stored
-        # conversation. Runtime frames may carry source-side seq values, but
-        # they must never collide with or move behind the persisted run_events
-        # domain for this stored_session_id.
-        seq = requested_seq if requested_seq >= authoritative_next_seq else authoritative_next_seq
-        assert seq >= authoritative_next_seq
-        frame["seq"] = seq
+        inbound_runtime_seq = _positive_int(frame.get("seq"))
+        if inbound_runtime_seq and runtime_source_seq_from_event(frame) <= 0:
+            frame["runtime_source_seq"] = inbound_runtime_seq
+        seq = 0
         terminal_status = _event_status(event_type, payload)
         owner_metadata = frame.get("owner_metadata")
         owner_metadata = owner_metadata if isinstance(owner_metadata, dict) else {}
@@ -1428,8 +1326,53 @@ class SessionDBRunMixin:
         frame_blob, frame_format = encode_run_event_frame(frame)
         retention_class = _run_event_retention_class(event_type)
         runtime_source_seq = runtime_source_seq_from_event(frame)
+        interaction_request_id = ""
+        interaction_kind = ""
+        interaction_status = ""
+        anchor_seq = 0
+        if event_type.startswith("_internal.interaction.") and isinstance(payload, dict):
+            interaction_request_id = str(
+                payload.get("interaction_request_id")
+                or payload.get("request_id")
+                or ""
+            ).strip()
+            interaction_kind = str(
+                payload.get("interaction_kind")
+                or payload.get("kind")
+                or ""
+            ).strip()
+            interaction_status = str(
+                payload.get("interaction_status")
+                or payload.get("status")
+                or payload.get("state")
+                or ""
+            ).strip()
+            try:
+                anchor_seq = int(payload.get("anchor_seq") or frame.get("anchor_seq") or 0)
+            except (TypeError, ValueError):
+                anchor_seq = 0
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            nonlocal seq
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO sessions (id, source, started_at)
+                VALUES (?, 'runtime', ?)
+                """,
+                (stable, timestamp),
+            )
+            ensure_session_counter(conn, session_id=stable, updated_at=timestamp)
+
+            def _assign_seq() -> int:
+                nonlocal seq, event_json, frame_blob, frame_format
+                if seq > 0:
+                    return seq
+                seq = allocate_run_event_seq(conn, session_id=stable, updated_at=timestamp)
+                frame["seq"] = seq
+                event_json = _json_dumps(frame)
+                frame_blob, frame_format = encode_run_event_frame(frame)
+                return seq
+
             inserted_event = frame
             event_json_for_insert = event_json
             frame_blob_for_insert = frame_blob
@@ -1438,24 +1381,6 @@ class SessionDBRunMixin:
             existing = None
             existing_status = ""
             ignored_after_terminal = False
-            if event_type == "session.info":
-                runtime_state, duplicate_session_info = self._upsert_session_runtime_state_locked(
-                    conn,
-                    session_id=stable,
-                    payload=payload,
-                    runtime_scope_key=runtime_scope_key,
-                    runtime_session_id=runtime_session_id,
-                    run_id=run_id,
-                    turn_id=turn_id,
-                    updated_at=timestamp,
-                    source_seq=seq,
-                )
-                if duplicate_session_info:
-                    duplicate_event = dict(frame)
-                    duplicate_event["seq"] = int(runtime_state.get("source_seq") or seq)
-                    duplicate_event["_persistence_disposition"] = "duplicate_session_info"
-                    duplicate_event["_session_runtime_state"] = runtime_state
-                    return duplicate_event
             if run_id:
                 existing = conn.execute(
                     "SELECT * FROM runs WHERE run_id = ?",
@@ -1497,10 +1422,37 @@ class SessionDBRunMixin:
                     and _event_reopens_terminal_run(event_type)
                 )
                 if ignored_after_terminal:
+                    _assign_seq()
                     frame["_persistence_disposition"] = "ignored_after_terminal"
                     event_json_for_insert = _json_dumps(frame)
                     frame_blob_for_insert, frame_format_for_insert = encode_run_event_frame(frame)
+            if event_type == "session.info":
+                _assign_seq()
+                event_json_for_insert = event_json
+                frame_blob_for_insert = frame_blob
+                frame_format_for_insert = frame_format
+                runtime_state, duplicate_session_info = self._upsert_session_runtime_state_locked(
+                    conn,
+                    session_id=stable,
+                    payload=payload,
+                    runtime_scope_key=runtime_scope_key,
+                    runtime_session_id=runtime_session_id,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    updated_at=timestamp,
+                    source_seq=seq,
+                )
+                if duplicate_session_info:
+                    duplicate_event = dict(frame)
+                    duplicate_event["seq"] = int(runtime_state.get("source_seq") or seq)
+                    duplicate_event["_persistence_disposition"] = "duplicate_session_info"
+                    duplicate_event["_session_runtime_state"] = runtime_state
+                    return duplicate_event
             if _event_is_coalescible_stream_delta(frame):
+                _assign_seq()
+                event_json_for_insert = event_json
+                frame_blob_for_insert = frame_blob
+                frame_format_for_insert = frame_format
                 boundary_event_types = _stream_compaction_boundary_event_types(event_type)
                 boundary_placeholders = ",".join("?" for _ in boundary_event_types)
                 boundary = conn.execute(
@@ -1595,80 +1547,54 @@ class SessionDBRunMixin:
                             merged_event["payload"]["activity_id"] = merged_activity_id
                         merged_runtime_source_seq = runtime_source_seq_from_event(merged_event)
                         merged_frame_blob, merged_frame_format = encode_run_event_frame(merged_event)
-                        conn.execute(
-                            """
-                            UPDATE run_events
-                            SET run_id = ?,
-                                turn_id = ?,
-                                runtime_session_id = ?,
-                                runtime_scope_key = ?,
-                                participant_id = ?,
-                                activity_id = ?,
-                                seq = ?,
-                                timestamp = ?,
-                                payload_json = ?,
-                                event_json = ?,
-                                status = ?,
-                                frame_blob = ?,
-                                frame_format = ?,
-                                retention_class = ?,
-                                projection_state = COALESCE(NULLIF(projection_state, ''), 'raw'),
-                                runtime_source_seq = ?
-                            WHERE id = ?
-                            """,
-                            (
-                                run_id,
-                                turn_id,
-                                runtime_session_id,
-                                runtime_scope_key,
-                                merged_participant_id,
-                                merged_activity_id or None,
-                                seq,
-                                timestamp,
-                                _json_dumps(merged_payload),
-                                _json_dumps(merged_event),
-                                terminal_status or "",
-                                merged_frame_blob,
-                                merged_frame_format,
-                                retention_class,
-                                merged_runtime_source_seq,
-                                previous["id"],
-                            ),
+                        EventLedger(conn).rewrite_runtime_frame_row(
+                            row_id=int(previous["id"]),
+                            run_id=run_id,
+                            turn_id=turn_id,
+                            runtime_session_id=runtime_session_id,
+                            runtime_scope_key=runtime_scope_key,
+                            participant_id=merged_participant_id,
+                            activity_id=merged_activity_id or None,
+                            seq=seq,
+                            timestamp=timestamp,
+                            payload_json=_json_dumps(merged_payload),
+                            event_json=_json_dumps(merged_event),
+                            status=terminal_status or "",
+                            frame_blob=merged_frame_blob,
+                            frame_format=merged_frame_format,
+                            retention_class=retention_class,
+                            runtime_source_seq=merged_runtime_source_seq,
                         )
                         inserted_event = merged_event
                         coalesced = True
             if not coalesced:
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO run_events (
-                        session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
-                        participant_id, activity_id, event_type,
-                        seq, timestamp, payload_json, event_json, status,
-                        frame_blob, frame_format, retention_class, projection_state,
-                        runtime_source_seq
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        stable,
-                        run_id,
-                        turn_id,
-                        runtime_session_id,
-                        runtime_scope_key,
-                        event_participant_id,
-                        event_activity_id or None,
-                        event_type,
-                        seq,
-                        timestamp,
-                        _json_dumps(payload),
-                        event_json_for_insert,
-                        "ignored_after_terminal" if ignored_after_terminal else terminal_status or "",
-                        frame_blob_for_insert,
-                        frame_format_for_insert,
-                        retention_class,
-                        "raw",
-                        runtime_source_seq,
-                    ),
+                _assign_seq()
+                event_json_for_insert = event_json
+                frame_blob_for_insert = frame_blob
+                frame_format_for_insert = frame_format
+                EventLedger(conn).append_runtime_frame(
+                    session_id=stable,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    runtime_session_id=runtime_session_id,
+                    runtime_scope_key=runtime_scope_key,
+                    participant_id=event_participant_id,
+                    activity_id=event_activity_id or None,
+                    event_type=event_type,
+                    seq=seq,
+                    timestamp=timestamp,
+                    payload_json=_json_dumps(payload),
+                    event_json=event_json_for_insert,
+                    status="ignored_after_terminal" if ignored_after_terminal else terminal_status or "",
+                    frame_blob=frame_blob_for_insert,
+                    frame_format=frame_format_for_insert,
+                    retention_class=retention_class,
+                    interaction_request_id=interaction_request_id or None,
+                    interaction_kind=interaction_kind or None,
+                    interaction_status=interaction_status or None,
+                    anchor_seq=anchor_seq,
+                    projection_state="raw",
+                    runtime_source_seq=runtime_source_seq,
                 )
             inserted_row = conn.execute(
                 """
@@ -1699,17 +1625,9 @@ class SessionDBRunMixin:
                         inserted_event = dict(inserted_event)
                         inserted_event["_projected_tool_event_id"] = projected_tool_event.get("id")
                         if inserted_row is not None:
-                            conn.execute(
-                                """
-                                UPDATE run_events
-                                SET projected_tool_event_id = ?,
-                                    projection_state = COALESCE(NULLIF(projection_state, ''), 'raw')
-                                WHERE id = ?
-                                """,
-                                (
-                                    str(projected_tool_event.get("id") or ""),
-                                    int(inserted_row["id"]),
-                                ),
+                            EventLedger(conn).mark_projected_tool_event(
+                                row_id=int(inserted_row["id"]),
+                                tool_event_id=str(projected_tool_event.get("id") or ""),
                             )
                 except Exception as exc:
                     logger.debug(
@@ -1757,17 +1675,9 @@ class SessionDBRunMixin:
                             )
                             if isinstance(projected_message, dict) and stripped_metadata:
                                 projected_message["metadata"] = stripped_metadata
-                        conn.execute(
-                            """
-                            UPDATE run_events
-                            SET projected_message_id = ?,
-                                projection_state = 'projected'
-                            WHERE id = ?
-                            """,
-                            (
-                                conversation_message_id,
-                                int(inserted_row["id"]),
-                            ),
+                        EventLedger(conn).mark_projected_message(
+                            row_id=int(inserted_row["id"]),
+                            conversation_message_id=conversation_message_id,
                         )
                 except Exception as exc:
                     logger.debug(
@@ -1811,23 +1721,15 @@ class SessionDBRunMixin:
             if run_id:
                 if ignored_after_terminal:
                     return inserted_event
-                should_track_run = bool(
-                    existing is not None
-                    or terminal_status
-                    or _event_opens_active_run(event_type)
+                transition = resolve_run_status_transition(
+                    event_type=event_type,
+                    existing_status=existing_status,
+                    terminal_status=terminal_status,
+                    has_existing_run=existing is not None,
                 )
-                if not should_track_run:
+                if not transition.should_track:
                     return inserted_event
-                next_status = terminal_status or existing_status or "running"
-                if existing_status in TERMINAL_RUN_STATUSES and terminal_status is None:
-                    next_status = existing_status
-                elif existing_status in TERMINAL_RUN_STATUSES and terminal_status in TERMINAL_RUN_STATUSES:
-                    next_status = _prefer_terminal_run_status(existing_status, terminal_status)
-                if (
-                    _event_opens_active_run(event_type)
-                    and existing_status not in TERMINAL_RUN_STATUSES
-                ):
-                    next_status = "running"
+                next_status = transition.status
                 rejected_duplicate_active = ""
                 if existing is None and next_status in ACTIVE_RUN_STATUSES:
                     self._repair_control_only_active_runs_locked(conn, session_id=stable, now=timestamp)
@@ -1866,70 +1768,26 @@ class SessionDBRunMixin:
                 if not isinstance(metadata, dict):
                     metadata = {}
                 metadata.update(owner_metadata)
-                if existing is None:
-                    conn.execute(
-                        """
-                        INSERT INTO runs (
-                            run_id, session_id, runtime_scope_key, turn_id, runtime_session_id, status,
-                            started_at, updated_at, completed_at, last_seq, error,
-                            metadata_json
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            run_id,
-                            stable,
-                            runtime_scope_key,
-                            turn_id,
-                            runtime_session_id,
-                            next_status,
-                            timestamp,
-                            timestamp,
-                            completed_at,
-                            seq,
-                            rejected_duplicate_active
-                            or (str(payload.get("message") or "") if next_status == "failed" else ""),
-                            _json_dumps(metadata),
-                        ),
-                    )
-                else:
-                    if completed_at is None:
-                        completed_at = existing["completed_at"]
-                    if next_status == "failed":
-                        next_error = str(payload.get("message") or "") or str(existing["error"] or "")
-                    elif next_status in TERMINAL_RUN_STATUSES:
-                        next_error = ""
-                    else:
-                        next_error = str(payload.get("message") or "") or str(existing["error"] or "")
-                    conn.execute(
-                        """
-                        UPDATE runs
-                        SET session_id = ?,
-                            runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
-                            turn_id = COALESCE(NULLIF(?, ''), turn_id),
-                            runtime_session_id = COALESCE(NULLIF(?, ''), runtime_session_id),
-                            status = ?,
-                            updated_at = ?,
-                            completed_at = ?,
-                            last_seq = MAX(COALESCE(last_seq, 0), ?),
-                            error = ?,
-                            metadata_json = ?
-                        WHERE run_id = ?
-                        """,
-                        (
-                            stable,
-                            runtime_scope_key,
-                            turn_id,
-                            runtime_session_id,
-                            next_status,
-                            timestamp,
-                            completed_at,
-                            seq,
-                            next_error,
-                            _json_dumps(metadata),
-                            run_id,
-                        ),
-                    )
+                run_error = error_for_status(
+                    status=next_status,
+                    payload=payload,
+                    duplicate_active_error=rejected_duplicate_active,
+                    existing_error=str(existing["error"] or "") if existing is not None else "",
+                )
+                RunRepoImpl(conn).upsert_materialized_state(
+                    run_id=run_id,
+                    session_id=stable,
+                    runtime_scope_key=runtime_scope_key,
+                    turn_id=turn_id,
+                    runtime_session_id=runtime_session_id,
+                    status=next_status,
+                    started_at=timestamp,
+                    updated_at=timestamp,
+                    completed_at=completed_at,
+                    last_seq=seq,
+                    error=run_error,
+                    metadata=metadata,
+                )
                 # Mirror the run's terminal status into session_index so the
                 # sidebar stops showing this session as `running` after the
                 # streaming finish lands. The non-streaming write path
@@ -2063,57 +1921,23 @@ class SessionDBRunMixin:
         run_id: str = "",
         activity_id: str = "",
         limit: int = 2000,
+        include_internal: bool = False,
     ) -> List[Dict[str, Any]]:
         stable = str(session_id or "").strip()
         if not stable:
             return []
-        bounded_limit = max(1, min(int(limit or 2000), 5000))
-        params: list[Any] = [stable, int(after_seq or 0)]
-        scope = str(runtime_scope_key or "").strip()
-        scope_clause = ""
-        if scope:
-            scope_clause = "AND COALESCE(runtime_scope_key, session_id) = ?"
-            params.append(scope)
-        run_clause = ""
-        normalized_run_id = str(run_id or "").strip()
-        if normalized_run_id:
-            run_clause = "AND run_id = ?"
-            params.append(normalized_run_id)
-        # ADR-0001: optional activity_id filter — when supplied, narrow
-        # the result to a single Activity. Backwards compatible because
-        # the clause is empty when activity_id is "".
-        activity_clause = ""
-        normalized_activity_id = str(activity_id or "").strip()
-        if normalized_activity_id:
-            activity_clause = "AND activity_id = ?"
-            params.append(normalized_activity_id)
-        active_clause = ""
-        if active_only:
-            active_statuses = _sql_status_literals(ACTIVE_RUN_STATUSES)
-            active_clause = (
-                "AND run_id IN ("
-                "SELECT run_id FROM runs WHERE session_id = ? "
-                f"AND status IN ({active_statuses})"
-                ")"
-            )
-            params.append(stable)
-        params.append(bounded_limit)
         with self._lock:
-            rows = self._conn.execute(
-                f"""
-                SELECT *
-                FROM run_events
-                WHERE session_id = ?
-                  AND seq > ?
-                  {scope_clause}
-                  {run_clause}
-                  {activity_clause}
-                  {active_clause}
-                ORDER BY seq ASC
-                LIMIT ?
-                """,
-                tuple(params),
-            ).fetchall()
+            rows = EventLedger(self._conn).list_runtime_rows(
+                stable,
+                after_seq=int(after_seq or 0),
+                active_only=active_only,
+                active_statuses=ACTIVE_RUN_STATUSES,
+                runtime_scope_key=runtime_scope_key,
+                run_id=run_id,
+                activity_id=activity_id,
+                limit=limit,
+                include_internal=include_internal,
+            )
         events = []
         with self._lock:
             for row in rows:
@@ -2133,24 +1957,19 @@ class SessionDBRunMixin:
         *,
         after_seq: int = 0,
         limit: int = 2000,
+        include_internal: bool = False,
     ) -> List[Dict[str, Any]]:
         """Return all run_events for an activity_id across sessions, ordered by seq."""
         normalized_activity_id = str(activity_id or "").strip()
         if not normalized_activity_id:
             return []
-        bounded_limit = max(1, min(int(limit or 2000), 5000))
         with self._lock:
-            rows = self._conn.execute(
-                """
-                SELECT *
-                FROM run_events
-                WHERE activity_id = ?
-                  AND seq > ?
-                ORDER BY seq ASC
-                LIMIT ?
-                """,
-                (normalized_activity_id, int(after_seq or 0), bounded_limit),
-            ).fetchall()
+            rows = EventLedger(self._conn).list_activity_rows(
+                normalized_activity_id,
+                after_seq=int(after_seq or 0),
+                limit=limit,
+                include_internal=include_internal,
+            )
         events = []
         with self._lock:
             for row in rows:
@@ -2171,6 +1990,54 @@ class SessionDBRunMixin:
                     events.append(event)
         return events
 
+    def list_run_events_by_mission_activity(
+        self,
+        mission_id: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 2000,
+        include_internal: bool = False,
+        reverse: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return run_events for mission-level activity replay.
+
+        Includes both the mission aggregate activity id (``mission:<id>``) and
+        node-scoped activity ids (``act-node:<id>:...``). ``team_mission_events``
+        is audit-only and is intentionally not read here.
+        """
+        normalized_mission_id = str(mission_id or "").strip()
+        if not normalized_mission_id:
+            return []
+        with self._lock:
+            rows = EventLedger(self._conn).list_mission_activity_rows(
+                normalized_mission_id,
+                after_seq=int(after_seq or 0),
+                limit=limit,
+                include_internal=include_internal,
+                reverse=reverse,
+            )
+        events = []
+        with self._lock:
+            for row in rows:
+                event = decode_run_event_row(row)
+                if isinstance(event, dict):
+                    event = rehydrate_referenced_run_event(self._conn, row, event)
+                    event = _event_with_participant_id(
+                        event,
+                        str(_row_value(row, "participant_id", "") or ""),
+                    )
+                    activity_id = str(_row_value(row, "activity_id", "") or "")
+                    if activity_id:
+                        event["activity_id"] = activity_id
+                        event["activityId"] = activity_id
+                        payload = event.get("payload")
+                        if isinstance(payload, dict):
+                            payload = dict(payload)
+                            payload.setdefault("activity_id", activity_id)
+                            event["payload"] = payload
+                    events.append(event)
+        return events
+
     def list_tool_events(
         self,
         session_id: str,
@@ -2183,47 +2050,37 @@ class SessionDBRunMixin:
         stable = str(session_id or "").strip()
         if not stable:
             return []
-        bounded_limit = max(1, min(int(limit or 2000), 5000))
-        normalized_direction = str(direction or "after").strip().lower()
-        params: list[Any] = [stable, int(after_seq or 0)]
-        run_clause = ""
-        normalized_run_id = str(run_id or "").strip()
-        if normalized_run_id:
-            run_clause = "AND COALESCE(run_id, '') = ?"
-            params.append(normalized_run_id)
-        params.append(bounded_limit)
-        order_expr = "COALESCE(seq_start, seq_last, id)"
-        if normalized_direction == "tail":
-            query = f"""
-                SELECT *
-                FROM (
-                    SELECT *
-                    FROM tool_events
-                    WHERE session_id = ?
-                      AND COALESCE(seq_last, seq_start, 0) > ?
-                      {run_clause}
-                    ORDER BY {order_expr} DESC, id DESC
-                    LIMIT ?
-                )
-                ORDER BY {order_expr} ASC, id ASC
-                """
-        else:
-            query = f"""
-                SELECT *
-                FROM tool_events
-                WHERE session_id = ?
-                  AND COALESCE(seq_last, seq_start, 0) > ?
-                  {run_clause}
-                ORDER BY {order_expr} ASC, id ASC
-                LIMIT ?
-                """
         with self._lock:
-            rows = self._conn.execute(query, tuple(params)).fetchall()
+            rows = EventLedger(self._conn).list_tool_event_projection_rows(
+                stable,
+                after_seq=int(after_seq or 0),
+                run_id=run_id,
+                direction=direction,
+                limit=limit,
+            )
         return [
             item
             for row in rows
             if (item := tool_event_row_to_dict(row))
         ]
+
+    def list_tool_events_as_canonical(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 2000,
+    ) -> List[Dict[str, Any]]:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return []
+        with self._lock:
+            return list_tool_events_as_canonical(
+                self._conn,
+                stable,
+                after_seq=int(after_seq or 0),
+                limit=limit,
+            )
 
     def backfill_run_event_frame_blobs(
         self,
@@ -2270,9 +2127,9 @@ class SessionDBRunMixin:
                     retention_class=_run_event_retention_class(str(row["event_type"] or event.get("type") or "")),
                     projection_state="raw",
                 )
-                conn.execute(
-                    "UPDATE run_events SET runtime_source_seq = ? WHERE id = ?",
-                    (runtime_source_seq, int(row["id"])),
+                EventLedger(conn).update_runtime_source_seq(
+                    row_id=int(row["id"]),
+                    runtime_source_seq=runtime_source_seq,
                 )
                 project_run_event_search_index(
                     conn,
@@ -2437,52 +2294,16 @@ class SessionDBRunMixin:
         stable = str(session_id or "").strip()
         if not stable:
             return []
-        bounded_limit = max(1, min(int(limit or 2000), 20000))
-        params: list[Any] = [stable, int(after_seq or 0)]
-        clauses: list[str] = [
-            "e.session_id = ?",
-            "e.seq > ?",
-        ]
-        scope = str(runtime_scope_key or "").strip()
-        if scope:
-            clauses.append("COALESCE(e.runtime_scope_key, e.session_id) = ?")
-            params.append(scope)
-        normalized_types = [
-            str(item or "").strip()
-            for item in (event_types or ())
-            if str(item or "").strip()
-        ]
-        if normalized_types:
-            placeholders = ", ".join("?" for _ in normalized_types)
-            clauses.append(f"e.event_type IN ({placeholders})")
-            params.extend(normalized_types)
-        else:
-            prefix = str(event_type_prefix or "").strip()
-            if prefix:
-                clauses.append("e.event_type LIKE ?")
-                params.append(f"{prefix}%")
-        contains = str(payload_contains or "").strip()
-        from_sql = "run_events e"
-        if contains:
-            from_sql = (
-                "run_events e "
-                "JOIN run_event_search_index idx ON idx.run_event_id = e.id"
-            )
-            clauses.append("instr(idx.search_text, ?) > 0")
-            params.append(contains)
-        params.append(bounded_limit)
-        where_sql = " AND ".join(clauses)
         with self._lock:
-            rows = self._conn.execute(
-                f"""
-                SELECT e.*
-                FROM {from_sql}
-                WHERE {where_sql}
-                ORDER BY e.seq ASC
-                LIMIT ?
-                """,
-                tuple(params),
-            ).fetchall()
+            rows = EventLedger(self._conn).list_filtered_rows(
+                stable,
+                after_seq=int(after_seq or 0),
+                runtime_scope_key=runtime_scope_key,
+                event_types=event_types or (),
+                event_type_prefix=event_type_prefix,
+                payload_contains=payload_contains,
+                limit=limit,
+            )
         events = []
         with self._lock:
             for row in rows:
@@ -2627,95 +2448,58 @@ class SessionDBRunMixin:
                 if not isinstance(metadata, dict):
                     metadata = {}
                 metadata["recovery_reason"] = reason
-                terminal_seq_row = conn.execute(
-                    "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM run_events WHERE session_id = ?",
-                    (row["session_id"],),
-                ).fetchone()
-                terminal_seq = int(_row_value(terminal_seq_row, "next_seq", 1) or 1)
-                terminal_payload = {
-                    "run_id": row["run_id"],
-                    "turn_id": row["turn_id"],
-                    "status": "failed",
-                    "message": reason,
-                    "recovery": True,
-                }
                 terminal_activity_id = _recovery_activity_id_for_run(conn, row)
+                from hermes_agent.domain.run_terminator import TerminateCause
+                from hermes_agent.domain.run_terminator import terminate_run
+
+                terminal_payload_extra = {"recovery": True}
                 if terminal_activity_id:
-                    terminal_payload["activity_id"] = terminal_activity_id
-                    terminal_payload["activityId"] = terminal_activity_id
-                terminal_frame = {
-                    "type": "message.complete",
-                    "session_id": row["runtime_session_id"] or row["session_id"],
-                    "stored_session_id": row["session_id"],
-                    "run_id": row["run_id"],
-                    "turn_id": row["turn_id"],
-                    "runtime_scope_key": row["runtime_scope_key"] or row["session_id"],
-                    **({"activity_id": terminal_activity_id, "activityId": terminal_activity_id} if terminal_activity_id else {}),
-                    "seq": terminal_seq,
-                    "timestamp": now,
-                    "payload": terminal_payload,
-                }
-                terminal_frame_blob, terminal_frame_format = encode_run_event_frame(terminal_frame)
-                inserted_terminal = conn.execute(
-                    """
-                    INSERT INTO run_events (
-                        session_id, run_id, turn_id, runtime_session_id, runtime_scope_key, activity_id, event_type,
-                        seq, timestamp, payload_json, event_json, status,
-                        frame_blob, frame_format, retention_class, projection_state, runtime_source_seq
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        row["session_id"],
-                        row["run_id"],
-                        row["turn_id"],
-                        row["runtime_session_id"],
-                        row["runtime_scope_key"] or row["session_id"],
-                        terminal_activity_id or None,
-                        "message.complete",
-                        terminal_seq,
-                        now,
-                        _json_dumps(terminal_payload),
-                        _json_dumps(terminal_frame),
-                        "failed",
-                        terminal_frame_blob,
-                        terminal_frame_format,
-                        _run_event_retention_class("message.complete"),
-                        "raw",
-                        runtime_source_seq_from_event(terminal_frame),
-                    ),
-                )
-                project_run_event_search_index(
+                    terminal_payload_extra["activity_id"] = terminal_activity_id
+                    terminal_payload_extra["activityId"] = terminal_activity_id
+                terminal_result = terminate_run(
                     conn,
-                    row_id=int(inserted_terminal.lastrowid or 0),
+                    run_id=str(row["run_id"] or ""),
                     session_id=str(row["session_id"] or ""),
-                    seq=terminal_seq,
-                    event_type="message.complete",
-                    runtime_scope_key=str(row["runtime_scope_key"] or row["session_id"] or ""),
-                    runtime_source_seq=runtime_source_seq_from_event(terminal_frame),
-                    event=terminal_frame,
-                    updated_at=now,
+                    target_status="failed",
+                    cause=TerminateCause.WORKER_CRASHED,
+                    turn_id=str(row["turn_id"] or ""),
+                    message=reason,
+                    payload_extra=terminal_payload_extra,
+                    now=now,
                 )
-                conn.execute(
-                    """
-                    UPDATE runs
-                    SET status = 'failed',
-                        updated_at = ?,
-                        completed_at = COALESCE(completed_at, ?),
-                        last_seq = MAX(COALESCE(last_seq, 0), ?),
-                        error = COALESCE(NULLIF(error, ''), ?),
-                        metadata_json = ?
-                    WHERE run_id = ?
-                    """,
-                    (
-                        now,
-                        now,
-                        terminal_seq,
-                        reason,
-                        _json_dumps(metadata),
-                        row["run_id"],
-                    ),
-                )
+                terminal_seq = int(terminal_result.terminal_seq or 0)
+                if terminal_seq > 0:
+                    inserted_terminal = conn.execute(
+                        """
+                        SELECT *
+                        FROM run_events
+                        WHERE session_id = ?
+                          AND seq = ?
+                        LIMIT 1
+                        """,
+                        (str(row["session_id"] or ""), terminal_seq),
+                    ).fetchone()
+                    terminal_frame = decode_run_event_row(inserted_terminal)
+                    if inserted_terminal is not None and isinstance(terminal_frame, dict):
+                        if terminal_activity_id:
+                            EventLedger(conn).mark_activity_id(
+                                row_id=int(inserted_terminal["id"]),
+                                activity_id=terminal_activity_id,
+                            )
+                            terminal_frame["activity_id"] = terminal_activity_id
+                            terminal_frame["activityId"] = terminal_activity_id
+                        project_run_event_search_index(
+                            conn,
+                            row_id=int(inserted_terminal["id"]),
+                            session_id=str(row["session_id"] or ""),
+                            seq=terminal_seq,
+                            event_type=str(inserted_terminal["event_type"] or "error"),
+                            runtime_scope_key=str(row["runtime_scope_key"] or row["session_id"] or ""),
+                            runtime_source_seq=runtime_source_seq_from_event(terminal_frame),
+                            event=terminal_frame,
+                            updated_at=now,
+                        )
+                RunRepoImpl(conn).update_metadata(str(row["run_id"] or ""), metadata)
                 failed += 1
             if diagnostics and (failed or logger.isEnabledFor(logging.DEBUG)):
                 log_active_scan = logger.warning if failed else logger.debug
@@ -2832,10 +2616,7 @@ class SessionDBRunMixin:
                 return {"deleted_events": 0}
             self._archive_run_event_rows(conn, rows_to_delete, reason="duplicate_session_info")
             ids = [int(row["id"]) for row in rows_to_delete]
-            for start in range(0, len(ids), 500):
-                chunk = ids[start:start + 500]
-                placeholders = ",".join("?" for _ in chunk)
-                conn.execute(f"DELETE FROM run_events WHERE id IN ({placeholders})", tuple(chunk))
+            EventLedger(conn).delete_rows_by_id(ids)
             return {"deleted_events": len(rows_to_delete)}
 
         return self._execute_write(_do)
@@ -2872,10 +2653,7 @@ class SessionDBRunMixin:
                     return 0
             self._archive_run_event_rows(conn, rows, reason=reason)
             ids = [int(row["id"]) for row in rows]
-            for start in range(0, len(ids), 500):
-                chunk = ids[start:start + 500]
-                placeholders = ",".join("?" for _ in chunk)
-                conn.execute(f"DELETE FROM run_events WHERE id IN ({placeholders})", tuple(chunk))
+            EventLedger(conn).delete_rows_by_id(ids)
             return len(ids)
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -2984,22 +2762,8 @@ class SessionDBRunMixin:
                 return {"deleted_events": 0, "event_types": list(normalized_types)}
             self._archive_run_event_rows(conn, rows, reason="terminal_run_stream_events")
             ids = [int(row["id"]) for row in rows]
-            for start in range(0, len(ids), 500):
-                chunk = ids[start:start + 500]
-                id_placeholders = ",".join("?" for _ in chunk)
-                conn.execute(f"DELETE FROM run_events WHERE id IN ({id_placeholders})", tuple(chunk))
-            conn.execute(
-                """
-                UPDATE runs
-                SET last_seq = MAX(COALESCE(last_seq, 0), (
-                    SELECT COALESCE(MAX(seq), 0)
-                    FROM run_events
-                    WHERE run_id = ?
-                ))
-                WHERE run_id = ?
-                """,
-                (normalized_run_id, normalized_run_id),
-            )
+            EventLedger(conn).delete_rows_by_id(ids)
+            RunRepoImpl(conn).refresh_last_seq(normalized_run_id)
             return {"deleted_events": len(rows), "event_types": list(normalized_types)}
 
         return self._execute_write(_do)
@@ -3079,10 +2843,7 @@ class SessionDBRunMixin:
                     return
                 self._archive_run_event_rows(conn, rows_to_delete, reason="terminal_run_stream_events")
                 ids = [int(row["id"]) for row in rows_to_delete]
-                for start in range(0, len(ids), 500):
-                    chunk = ids[start:start + 500]
-                    id_placeholders = ",".join("?" for _ in chunk)
-                    conn.execute(f"DELETE FROM run_events WHERE id IN ({id_placeholders})", tuple(chunk))
+                EventLedger(conn).delete_rows_by_id(ids)
                 for row in rows_to_delete:
                     normalized_run_id = str(row["run_id"] or "").strip()
                     if normalized_run_id:
@@ -3160,35 +2921,19 @@ class SessionDBRunMixin:
                     keep_frame_blob, keep_frame_format = encode_run_event_frame(keep_event)
                     keep_runtime_source_seq = runtime_source_seq_from_event(keep_event)
                     delete_ids = [int(row["id"]) for row in rows_for_group if int(row["id"]) != int(keep_row["id"])]
-                    for start in range(0, len(delete_ids), 500):
-                        chunk = delete_ids[start:start + 500]
-                        placeholders = ",".join("?" for _ in chunk)
-                        conn.execute(f"DELETE FROM run_events WHERE id IN ({placeholders})", tuple(chunk))
-                    conn.execute(
-                        """
-                        UPDATE run_events
-                        SET seq = ?,
-                            participant_id = ?,
-                            payload_json = ?,
-                            event_json = ?,
-                            frame_blob = ?,
-                            frame_format = ?,
-                            retention_class = COALESCE(NULLIF(retention_class, ''), ?),
-                            projection_state = COALESCE(NULLIF(projection_state, ''), 'raw'),
-                            runtime_source_seq = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            canonical_seq,
-                            keep_participant_id,
-                            _json_dumps(keep_payload),
-                            _json_dumps(keep_event),
-                            keep_frame_blob,
-                            keep_frame_format,
-                            _run_event_retention_class(str(group["event_type"] or keep_event.get("type") or "")),
-                            keep_runtime_source_seq,
-                            int(keep_row["id"]),
+                    EventLedger(conn).delete_rows_by_id(delete_ids)
+                    EventLedger(conn).rewrite_compacted_frame_row(
+                        row_id=int(keep_row["id"]),
+                        seq=canonical_seq,
+                        participant_id=keep_participant_id,
+                        payload_json=_json_dumps(keep_payload),
+                        event_json=_json_dumps(keep_event),
+                        frame_blob=keep_frame_blob,
+                        frame_format=keep_frame_format,
+                        retention_class=_run_event_retention_class(
+                            str(group["event_type"] or keep_event.get("type") or "")
                         ),
+                        runtime_source_seq=keep_runtime_source_seq,
                     )
                     project_run_event_search_index(
                         conn,
@@ -3255,10 +3000,7 @@ class SessionDBRunMixin:
                     }
                 keep_row = pending[-1][0]
                 delete_ids = [int(row["id"]) for row, _ in pending[:-1]]
-                for start in range(0, len(delete_ids), 500):
-                    chunk = delete_ids[start:start + 500]
-                    placeholders = ",".join("?" for _ in chunk)
-                    conn.execute(f"DELETE FROM run_events WHERE id IN ({placeholders})", tuple(chunk))
+                EventLedger(conn).delete_rows_by_id(delete_ids)
                 payload = merged_event.get("payload") if isinstance(merged_event.get("payload"), dict) else {}
                 merged_participant_id = _event_participant_id(merged_event)
                 if merged_participant_id and isinstance(payload, dict):
@@ -3267,41 +3009,21 @@ class SessionDBRunMixin:
                     merged_event["payload"] = payload
                 compact_frame_blob, compact_frame_format = encode_run_event_frame(merged_event)
                 compact_runtime_source_seq = runtime_source_seq_from_event(merged_event)
-                conn.execute(
-                    """
-                    UPDATE run_events
-                    SET run_id = ?,
-                        turn_id = ?,
-                        runtime_session_id = ?,
-                        runtime_scope_key = ?,
-                        participant_id = ?,
-                        seq = ?,
-                        timestamp = ?,
-                        payload_json = ?,
-                        event_json = ?,
-                        frame_blob = ?,
-                        frame_format = ?,
-                        retention_class = COALESCE(NULLIF(retention_class, ''), ?),
-                        projection_state = COALESCE(NULLIF(projection_state, ''), 'raw'),
-                        runtime_source_seq = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        _event_run_id(merged_event),
-                        _event_turn_id(merged_event),
-                        str(merged_event.get("runtime_session_id") or ""),
-                        _event_runtime_scope_key(merged_event),
-                        merged_participant_id,
-                        int(merged_event.get("seq") or 0),
-                        float(merged_event.get("timestamp") or 0),
-                        _json_dumps(payload),
-                        _json_dumps(merged_event),
-                        compact_frame_blob,
-                        compact_frame_format,
-                        _run_event_retention_class(str(merged_event.get("type") or "")),
-                        compact_runtime_source_seq,
-                        int(keep_row["id"]),
-                    ),
+                EventLedger(conn).rewrite_compacted_frame_row(
+                    row_id=int(keep_row["id"]),
+                    run_id=_event_run_id(merged_event),
+                    turn_id=_event_turn_id(merged_event),
+                    runtime_session_id=str(merged_event.get("runtime_session_id") or ""),
+                    runtime_scope_key=_event_runtime_scope_key(merged_event),
+                    participant_id=merged_participant_id,
+                    seq=int(merged_event.get("seq") or 0),
+                    timestamp=float(merged_event.get("timestamp") or 0),
+                    payload_json=_json_dumps(payload),
+                    event_json=_json_dumps(merged_event),
+                    frame_blob=compact_frame_blob,
+                    frame_format=compact_frame_format,
+                    retention_class=_run_event_retention_class(str(merged_event.get("type") or "")),
+                    runtime_source_seq=compact_runtime_source_seq,
                 )
                 project_run_event_search_index(
                     conn,
@@ -3351,18 +3073,7 @@ class SessionDBRunMixin:
                 pending_by_key[key] = [(row, event)]
             flush_pending()
             for run_id in affected_run_ids:
-                conn.execute(
-                    """
-                    UPDATE runs
-                    SET last_seq = MAX(COALESCE(last_seq, 0), (
-                        SELECT COALESCE(MAX(seq), 0)
-                        FROM run_events
-                        WHERE run_id = ?
-                    ))
-                    WHERE run_id = ?
-                    """,
-                    (run_id, run_id),
-                )
+                RunRepoImpl(conn).refresh_last_seq(run_id)
             return {
                 "compacted_segments": compacted_segments,
                 "pruned_terminal_stream_events": pruned_terminal_stream_events,

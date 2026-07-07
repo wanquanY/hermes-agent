@@ -6,6 +6,7 @@ import sqlite3
 
 import pytest
 
+from hermes_state import SessionDB
 from hermes_agent.repositories import (
     Activity,
     ActivitySpec,
@@ -103,6 +104,42 @@ def test_impl_is_structural_team_mission_repo():
     assert isinstance(repo, TeamMissionRepo)
 
 
+def test_production_schema_supports_v3_activity_repository(tmp_path):
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("s1", "test")
+        repo = TeamMissionRepoImpl(db._conn)
+
+        activity = repo.append_activity(
+            "s1",
+            ActivitySpec(
+                activity_id="a-production-schema",
+                session_id="s1",
+                kind="async_agent_dispatch",
+                target_id="agent-1",
+                prompt_summary="dispatch agent",
+            ),
+        )
+
+        row = db._conn.execute(
+            """
+            SELECT activity_id, session_id, kind, activity_seq, status, target_id
+              FROM v3_activities
+             WHERE activity_id = ?
+            """,
+            ("a-production-schema",),
+        ).fetchone()
+        assert row is not None
+        assert row["activity_id"] == activity.activity_id
+        assert row["session_id"] == "s1"
+        assert row["kind"] == "async_agent_dispatch"
+        assert row["activity_seq"] == activity.activity_seq
+        assert row["status"] == "pending"
+        assert row["target_id"] == "agent-1"
+    finally:
+        db.close()
+
+
 def test_create_mission_and_get_graph_empty():
     conn = _make_conn()
     repo = TeamMissionRepoImpl(conn)
@@ -167,9 +204,13 @@ def test_append_activity_shares_seq_counter_domain():
     """spec §6.5 — activity_seq is drawn from the same SeqAllocator as run_events."""
     conn = _make_conn()
     repo = TeamMissionRepoImpl(conn)
-    # Simulate a canonical event first — seq_counter primes to 2 (INSERT after MAX(1)+1).
+    # Simulate a canonical event first. The counter is authoritative; runtime
+    # MAX(run_events.seq) backfill has been retired.
     conn.execute(
         "INSERT INTO run_events (session_id, seq, event_type, timestamp) VALUES ('s1', 1, 'message.start', 0)"
+    )
+    conn.execute(
+        "INSERT INTO seq_counter (session_id, next_seq, updated_at) VALUES ('s1', 2, 0)"
     )
     a1 = repo.append_activity(
         "s1",

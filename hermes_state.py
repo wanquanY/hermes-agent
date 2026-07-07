@@ -25,6 +25,8 @@ import warnings
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
+from hermes_agent.domain.event_ledger import EventLedger
+from hermes_agent.domain.seq_allocator import ensure_session_counter
 from hermes_constants import get_hermes_home
 from hermes_state_activities import ActivitiesMixin
 from hermes_state_agent_profiles import SessionDBAgentProfileMixin
@@ -68,7 +70,7 @@ DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 # allowing narrowly scoped submodules such as ``hermes_state.migrations``.
 __path__ = [str(Path(__file__).with_name("hermes_state"))]
 
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 46
 CONVERSATION_PARTICIPANTS_BACKFILL_META_KEY = "conversation_participants_backfill_cr_p1_2"
 MISSION_ACTIVITIES_BACKFILL_META_KEY = "mission_activities_backfill_cr_p3_1"
 RUN_EVENT_RETENTION_POLICY = RunEventRetentionPolicy()
@@ -345,6 +347,30 @@ CREATE TABLE IF NOT EXISTS activities (
     updated_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS v3_activities (
+    activity_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'async_agent_dispatch',
+            'async_team_dispatch',
+            'team_mission_activity',
+            'dispatch_completion'
+        )
+    ),
+    activity_seq INTEGER NOT NULL CHECK (activity_seq >= 1),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        status IN ('pending', 'running', 'completed', 'failed', 'cancelled')
+    ),
+    target_id TEXT NOT NULL DEFAULT '',
+    prompt_summary TEXT,
+    result_summary TEXT NOT NULL DEFAULT '',
+    started_at REAL NOT NULL DEFAULT 0,
+    completed_at REAL,
+    metadata_json TEXT,
+    UNIQUE(session_id, activity_seq)
+);
+
 CREATE TABLE IF NOT EXISTS activity_commands (
     command_id TEXT PRIMARY KEY,
     activity_id TEXT NOT NULL,
@@ -429,7 +455,7 @@ CREATE TABLE IF NOT EXISTS state_meta (
 
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     runtime_scope_key TEXT,
     turn_id TEXT,
     runtime_session_id TEXT,
@@ -438,8 +464,18 @@ CREATE TABLE IF NOT EXISTS runs (
     updated_at REAL NOT NULL,
     completed_at REAL,
     last_seq INTEGER DEFAULT 0,
+    terminal_seq INTEGER NOT NULL DEFAULT 0,
+    terminal_degraded INTEGER NOT NULL DEFAULT 0,
+    terminal_cause TEXT NOT NULL DEFAULT '',
     error TEXT,
     metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS seq_counter (
+    session_id TEXT PRIMARY KEY,
+    next_seq INTEGER NOT NULL CHECK (next_seq >= 1),
+    updated_at REAL NOT NULL DEFAULT 0,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS run_events (
@@ -462,6 +498,10 @@ CREATE TABLE IF NOT EXISTS run_events (
     retention_class TEXT,
     projected_message_id TEXT,
     projected_tool_event_id TEXT,
+    interaction_request_id TEXT,
+    interaction_kind TEXT,
+    interaction_status TEXT,
+    anchor_seq INTEGER NOT NULL DEFAULT 0,
     projection_state TEXT,
     runtime_source_seq INTEGER NOT NULL DEFAULT 0,
     UNIQUE(session_id, seq)
@@ -723,6 +763,12 @@ CREATE INDEX IF NOT EXISTS idx_run_events_projection_state
     ON run_events(projection_state, session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_run_events_runtime_source_seq
     ON run_events(session_id, runtime_source_seq, event_type);
+CREATE INDEX IF NOT EXISTS idx_run_events_interaction_request
+    ON run_events(interaction_request_id, seq)
+    WHERE interaction_request_id IS NOT NULL AND interaction_request_id != '';
+CREATE INDEX IF NOT EXISTS idx_run_events_interaction_pending
+    ON run_events(session_id, interaction_status, seq)
+    WHERE interaction_request_id IS NOT NULL AND interaction_request_id != '';
 CREATE INDEX IF NOT EXISTS idx_run_event_search_index_session_seq
     ON run_event_search_index(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_run_event_search_index_source_seq
@@ -737,6 +783,10 @@ CREATE INDEX IF NOT EXISTS idx_tool_events_run
     ON tool_events(run_id, seq_start);
 CREATE INDEX IF NOT EXISTS idx_tool_events_participant
     ON tool_events(participant_id);
+CREATE INDEX IF NOT EXISTS idx_v3_activities_session_seq
+    ON v3_activities(session_id, activity_seq);
+CREATE INDEX IF NOT EXISTS idx_v3_activities_kind_status_seq
+    ON v3_activities(kind, status, activity_seq);
 CREATE INDEX IF NOT EXISTS idx_run_event_archives_session
     ON run_event_archives(session_id, archived_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_teams_status_updated
@@ -859,6 +909,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
             )
             self._conn.row_factory = sqlite3.Row
             apply_wal_with_fallback(self._conn, db_label="state.db")
+            self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.execute("PRAGMA foreign_keys=ON")
             # 增量自动回收:删除产生的空闲页进入 freelist 并被后续写入复用,文件不再
             # 无限膨胀(团队任务的流式 delta「删了不回收」曾把 state.db 撑到 2.5GB、
@@ -1674,9 +1725,9 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                 retention_class=RUN_EVENT_RETENTION_POLICY.classify_event_type(event_type),
                 projection_state="raw",
             )
-            cursor.execute(
-                "UPDATE run_events SET runtime_source_seq = ? WHERE id = ?",
-                (runtime_source_seq, int(row["id"])),
+            EventLedger(cursor.connection).update_runtime_source_seq(
+                row_id=int(row["id"]),
+                runtime_source_seq=runtime_source_seq,
             )
             project_run_event_search_index(
                 cursor.connection,
@@ -2000,6 +2051,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         from hermes_agent.storage.migrations import MigrationRunner
 
         MigrationRunner(cursor, self).run_all()
+        self._ensure_message_fts_locked(cursor)
 
         # Unique title index — always ensure it exists
         try:
@@ -2010,19 +2062,44 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
         except sqlite3.OperationalError:
             pass  # Index already exists
 
-        # FTS5 setup (separate because CREATE VIRTUAL TABLE can't be in executescript with IF NOT EXISTS reliably)
-        try:
-            cursor.execute("SELECT * FROM messages_fts LIMIT 0")
-        except sqlite3.OperationalError:
-            cursor.executescript(FTS_SQL)
-
-        # Trigram FTS5 for CJK/substring search
-        try:
-            cursor.execute("SELECT * FROM messages_fts_trigram LIMIT 0")
-        except sqlite3.OperationalError:
-            cursor.executescript(FTS_TRIGRAM_SQL)
-
         self._conn.commit()
+
+    def _ensure_message_fts_locked(self, cursor: sqlite3.Cursor) -> None:
+        """Ensure message FTS tables, triggers, and backfill are present.
+
+        Some schema migrations rebuild ``messages``. SQLite drops triggers
+        attached to a table when that table is dropped, so table-existence
+        checks alone are insufficient.
+        """
+        cursor.executescript(FTS_SQL)
+        cursor.executescript(FTS_TRIGRAM_SQL)
+        message_count = int(cursor.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
+        fts_count = int(cursor.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0])
+        trigram_count = int(cursor.execute("SELECT COUNT(*) FROM messages_fts_trigram").fetchone()[0])
+        if fts_count != message_count:
+            cursor.execute("DELETE FROM messages_fts")
+            cursor.execute(
+                """
+                INSERT INTO messages_fts(rowid, content)
+                SELECT id,
+                       COALESCE(content, '') || ' ' ||
+                       COALESCE(tool_name, '') || ' ' ||
+                       COALESCE(tool_calls, '')
+                FROM messages
+                """
+            )
+        if trigram_count != message_count:
+            cursor.execute("DELETE FROM messages_fts_trigram")
+            cursor.execute(
+                """
+                INSERT INTO messages_fts_trigram(rowid, content)
+                SELECT id,
+                       COALESCE(content, '') || ' ' ||
+                       COALESCE(tool_name, '') || ' ' ||
+                       COALESCE(tool_calls, '')
+                FROM messages
+                """
+            )
 
     def reconcile_conversation_participants_one_shot(self) -> Dict[str, Any]:
         """Backfill conversation_participants from existing conversations.
@@ -2339,6 +2416,7 @@ class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionD
                     1 if transient else 0,
                 ),
             )
+            ensure_session_counter(conn, session_id=session_id, updated_at=time.time())
         self._execute_write(_do)
 
     def create_session(self, session_id: str, source: str, **kwargs) -> str:

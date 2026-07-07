@@ -55,10 +55,12 @@ async def test_clarify_request_event_triggers_project_state(
     await router.on_event(
         "scope-1",
         "conv-1",
-        EventFrame(params={"type": "clarify.request", "stored_session_id": "sess-1"}),
+        EventFrame(params={"type": "clarify.request", "stored_session_id": "sess-1", "payload": {"request_id": "req-1"}}),
     )
 
-    assert events[0]["payload"]["type"] == "clarify.request"
+    assert events[0]["payload"]["type"] == "interaction.requested"
+    assert events[0]["payload"]["request_id"] == "req-1"
+    assert events[0]["kwargs"] == {"persist": False}
     assert calls == [
         {
             "session_key": "sess-1",
@@ -146,10 +148,11 @@ async def test_project_state_failure_does_not_break_publish_event(
     await router.on_event(
         "scope-1",
         "conv-1",
-        EventFrame(params={"type": "approval.resolved", "stored_session_id": "sess-3"}),
+        EventFrame(params={"type": "approval.resolved", "stored_session_id": "sess-3", "payload": {"request_id": "req-3"}}),
     )
 
-    assert events[0]["payload"]["type"] == "approval.resolved"
+    assert events[0]["payload"]["type"] == "interaction.resolved"
+    assert events[0]["payload"]["request_id"] == "req-3"
     assert (
         "clarify/approval projection failed event_type=approval.resolved" in caplog.text
     )

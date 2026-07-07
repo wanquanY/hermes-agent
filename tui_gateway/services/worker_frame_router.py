@@ -11,7 +11,7 @@ the worker. This module owns that mapping:
     InteractiveRequestFrame → record in routing table + publish a
                               frontend-visible event so the user sees
                               the clarify/approval card
-    RunTerminalFrame        → publish_run_terminal_event(...)
+    RunTerminalFrame        → terminate_run(...)
 
   main → worker
     *.respond handler       → router.respond(request_id, answer)
@@ -32,11 +32,12 @@ legacy in-worker registry.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
-import json
 import time
 from dataclasses import dataclass
+from dataclasses import replace
 from typing import Any, Optional, Protocol
 
 from tui_gateway.run_worker import (
@@ -58,9 +59,39 @@ _CLARIFY_APPROVAL_EVENT_STATES: dict[str, tuple[str, bool]] = {
     "approval.request": ("approval", True),
     "approval.resolved": ("approval", False),
 }
+_INTERACTION_EVENT_TYPES: dict[str, tuple[str, str]] = {
+    "clarify.request": ("clarify", "requested"),
+    "approval.request": ("approval", "requested"),
+    "sudo.request": ("sudo", "requested"),
+    "secret.request": ("secret", "requested"),
+    "clarify.resolved": ("clarify", "resolved"),
+    "approval.resolved": ("approval", "resolved"),
+    "sudo.resolved": ("sudo", "resolved"),
+    "secret.resolved": ("secret", "resolved"),
+    "clarify.expired": ("clarify", "expired"),
+    "approval.expired": ("approval", "expired"),
+    "sudo.expired": ("sudo", "expired"),
+    "secret.expired": ("secret", "expired"),
+}
 def _payload_dict(params: dict[str, Any]) -> dict[str, Any]:
     payload = params.get("payload")
     return payload if isinstance(payload, dict) else {}
+
+
+def _interaction_anchor_seq(params: dict[str, Any], payload: dict[str, Any]) -> int:
+    for value in (
+        payload.get("anchor_seq"),
+        payload.get("anchorSeq"),
+        params.get("anchor_seq"),
+        params.get("anchorSeq"),
+    ):
+        try:
+            seq = int(value or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        if seq > 0:
+            return seq
+    return 0
 
 
 @dataclass
@@ -126,6 +157,7 @@ class PendingEntry:
     session_key: str = ""
     scope_key: str = ""
     state: str = "pending"  # "pending" | "resolved" | "expired"
+    anchor_seq: int = 0
     created_at: float = 0.0
     resolved_at: float = 0.0
     choice: Any = None
@@ -147,9 +179,11 @@ class PendingRegistry:
 
     Event publishing (interaction.requested / interaction.resolved /
     interaction.expired) is optional: pass a ``publish_event`` callable
-    and the registry will emit canonical events on state transitions.
+    and the registry will emit lifecycle frames on state transitions.
     The callable receives ``(event_type: str, entry: PendingEntry)`` and
-    is responsible for building the ``record_event`` params dict.
+    is responsible for durable persistence and delivery. Publish failures
+    propagate; callers must not observe a local state transition that failed
+    to persist.
     """
 
     def __init__(
@@ -173,6 +207,7 @@ class PendingRegistry:
         conversation_id: str = "",
         session_key: str = "",
         scope_key: str = "",
+        anchor_seq: int = 0,
     ) -> PendingEntry:
         """Register a new pending interactive request.
 
@@ -192,12 +227,13 @@ class PendingRegistry:
             conversation_id=str(conversation_id or ""),
             session_key=str(session_key or ""),
             scope_key=str(scope_key or ""),
+            anchor_seq=max(0, int(anchor_seq or 0)),
             state="pending",
             created_at=now,
         )
+        self._emit("interaction.requested", entry)
         with self._lock:
             self._entries[rid] = entry
-        self._emit("interaction.requested", entry)
         return entry
 
     def lookup(self, request_id: str) -> PendingEntry | None:
@@ -236,10 +272,16 @@ class PendingRegistry:
                 self._maybe_expire_locked(entry)
             if entry.state != "pending":
                 return False
-            entry.state = "resolved"
-            entry.resolved_at = self._clock()
-            entry.choice = choice
-        self._emit("interaction.resolved", entry)
+            resolved = replace(
+                entry,
+                state="resolved",
+                resolved_at=self._clock(),
+                choice=choice,
+            )
+            self._emit("interaction.resolved", resolved)
+            entry.state = resolved.state
+            entry.resolved_at = resolved.resolved_at
+            entry.choice = resolved.choice
         return True
 
     def is_pending(self, request_id: str) -> bool:
@@ -278,34 +320,15 @@ class PendingRegistry:
             return
         if (self._clock() - entry.created_at) <= self._ttl:
             return
-        entry.state = "expired"
-        entry.resolved_at = self._clock()
-        # Publish outside the lock to avoid re-entrancy if the callback
-        # calls back into the registry. We stash the entry and emit after
-        # releasing — but since we're inside a locked block, defer via a
-        # sentinel and emit in the caller. Simpler: emit here; the
-        # publish callback is expected to be non-reentrant (it builds a
-        # dict and calls record_event, which has its own locking).
-        try:
-            self._emit("interaction.expired", entry)
-        except Exception:
-            _log.debug(
-                "[pending-registry] interaction.expired publish failed rid=%s",
-                entry.request_id,
-                exc_info=True,
-            )
+        expired = replace(entry, state="expired", resolved_at=self._clock())
+        self._emit("interaction.expired", expired)
+        entry.state = expired.state
+        entry.resolved_at = expired.resolved_at
 
     def _emit(self, event_type: str, entry: PendingEntry) -> None:
         if self._publish_event is None:
             return
-        try:
-            self._publish_event(event_type, entry)
-        except Exception:
-            _log.debug(
-                "[pending-registry] %s publish failed rid=%s",
-                event_type, entry.request_id,
-                exc_info=True,
-            )
+        self._publish_event(event_type, entry)
 
 
 # Sentinel for "no resolved choice" — distinguishes a resolved choice of
@@ -338,6 +361,7 @@ class WorkerFrameRouter:
         sender: _SupervisorSender,
         publish_event: Any,
         publish_run_terminal: Any,
+        persist_interaction_event: Any = None,
     ) -> None:
         self._sender = sender
         # Injected so unit tests don't touch the global event-publish
@@ -346,6 +370,7 @@ class WorkerFrameRouter:
         # ``run_control.publish_run_terminal_event``.
         self._publish_event = publish_event
         self._publish_run_terminal = publish_run_terminal
+        self._persist_interaction_event = persist_interaction_event
         self._lock = threading.RLock()
         self._runs: dict[str, RunInfo] = {}
         self._pending: dict[str, _Pending] = {}
@@ -466,6 +491,9 @@ class WorkerFrameRouter:
         params.setdefault("conversation_id", conversation)
         self._capture_last_message_event(params)
         run_context = self._run_context_for_event(params)
+        if self._publish_interaction_frame(params, scope_key, conversation, run_context):
+            self._project_clarify_approval_state(params)
+            return
         try:
             if run_context is None:
                 self._publish_event(params)
@@ -477,6 +505,103 @@ class WorkerFrameRouter:
                 scope_key, params.get("type"),
             )
         self._project_clarify_approval_state(params)
+
+    def _publish_interaction_frame(
+        self,
+        params: dict[str, Any],
+        scope_key: str,
+        conversation_id: str,
+        run_context: Any = None,
+    ) -> bool:
+        event_type = str(params.get("type") or "").strip()
+        mapped = _INTERACTION_EVENT_TYPES.get(event_type)
+        if mapped is None:
+            return False
+        kind, status = mapped
+        payload = _payload_dict(params)
+        request_id = str(
+            payload.get("request_id")
+            or payload.get("requestId")
+            or params.get("request_id")
+            or params.get("requestId")
+            or payload.get("id")
+            or ""
+        ).strip()
+        if not request_id:
+            _log.warning(
+                "[worker-router] dropping interaction frame without request_id type=%s scope_key=%s",
+                event_type,
+                scope_key,
+            )
+            return True
+        stored_session_id = str(
+            params.get("stored_session_id")
+            or params.get("storedSessionId")
+            or payload.get("stored_session_id")
+            or payload.get("storedSessionId")
+            or payload.get("session_key")
+            or conversation_id
+            or params.get("session_id")
+            or ""
+        ).strip()
+        runtime_session_id = str(params.get("session_id") or payload.get("session_id") or payload.get("sessionId") or "").strip()
+        runtime_scope_key = str(
+            params.get("runtime_scope_key")
+            or params.get("runtimeScopeKey")
+            or payload.get("runtime_scope_key")
+            or payload.get("runtimeScopeKey")
+            or scope_key
+            or ""
+        ).strip()
+        interaction_payload = {
+            **payload,
+            "request_id": request_id,
+            "kind": kind,
+            "status": "pending" if status == "requested" else status,
+            "source_event_type": event_type,
+            "source_event": dict(params),
+        }
+        anchor_seq = _interaction_anchor_seq(params, payload)
+        interaction_payload["anchor_seq"] = anchor_seq
+        entry = PendingEntry(
+            request_id=request_id,
+            kind=kind,
+            conversation_id=runtime_session_id or conversation_id or stored_session_id,
+            session_key=stored_session_id,
+            scope_key=runtime_scope_key,
+            state="pending" if status == "requested" else status,
+            anchor_seq=anchor_seq,
+            choice=payload.get("choice"),
+        )
+        if self._persist_interaction_event is not None:
+            self._persist_interaction_event(f"interaction.{status}", entry)
+        frame = {
+            "type": f"interaction.{status}",
+            "kind": kind,
+            "request_id": request_id,
+            "stored_session_id": stored_session_id,
+            "session_id": runtime_session_id,
+            "runtime_scope_key": runtime_scope_key,
+            "conversation_id": conversation_id or stored_session_id,
+            "run_id": str(params.get("run_id") or payload.get("run_id") or payload.get("runId") or ""),
+            "turn_id": str(params.get("turn_id") or payload.get("turn_id") or payload.get("turnId") or ""),
+            "seq": int(params.get("seq") or 0),
+            "payload": interaction_payload,
+        }
+        try:
+            if run_context is None:
+                self._publish_event(frame, persist=False)
+            else:
+                self._publish_event(frame, persist=False, run_context=run_context)
+        except TypeError:
+            self._publish_event(frame)
+        except Exception:
+            _log.exception(
+                "[worker-router] interaction publish failed type=%s request_id=%s",
+                event_type,
+                request_id,
+            )
+        return True
 
     async def on_interactive_request(
         self,

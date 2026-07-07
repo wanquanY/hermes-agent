@@ -459,7 +459,7 @@ def _terminalize_active_run_for_shutdown(
         turn_id,
         end_reason,
     )
-    run_control.publish_run_terminal_event(
+    run_control.terminate_run(
         stored_session_id=stable_session_id,
         run_id=run_id,
         turn_id=turn_id,
@@ -534,13 +534,15 @@ def _get_control_plane_db(*, use_active_profile: bool = True):
         control_home = _resolve_home_path(control_home_env, fallback=control_home_env)
     else:
         control_home = process_home
+    create_if_missing = _current_method.get("") not in _READ_ONLY_DB_METHODS
+    if not create_if_missing and not (control_home / "state.db").exists():
+        return None
 
     if control_home == process_home:
         # Main gateway path: continue using the process-level `_db` slot via
         # the shared session_store helper (its `active_home == default_home`
         # fast path is correct here — the implicit SessionDB() also routes to
         # process_home, matching active_home).
-        create_if_missing = _current_method.get("") not in _READ_ONLY_DB_METHODS
         result = _get_session_db_for_home(
             active_home=control_home,
             default_home=control_home,
@@ -561,10 +563,7 @@ def _get_control_plane_db(*, use_active_profile: bool = True):
     cached = _db_by_home.get(home_key)
     if cached is not None:
         return cached
-    create_if_missing = _current_method.get("") not in _READ_ONLY_DB_METHODS
     db_path = control_home / "state.db"
-    if not create_if_missing and not db_path.exists():
-        return None
     try:
         from hermes_state import SessionDB
 
@@ -1039,7 +1038,7 @@ def _push_profile_context_for_request(req: dict) -> Any:
     profile metadata aren't broken by the new resolver.
     """
     try:
-        from tui_gateway.services.runtime_proxy import runtime_scope_from_request
+        from tui_gateway.services.runtime_scope import runtime_scope_from_request
         from tui_gateway.services.profile_context import (
             current_profile,
             profile_registry,

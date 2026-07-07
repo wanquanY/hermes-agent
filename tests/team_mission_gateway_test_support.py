@@ -23,7 +23,10 @@ class GatewayModuleSet:
         object.__setattr__(
             self,
             "_modules",
-            tuple(importlib.import_module(module_name) for module_name in module_names),
+            tuple(
+                importlib.reload(importlib.import_module(module_name))
+                for module_name in module_names
+            ),
         )
 
     def __getattr__(self, name: str) -> Any:

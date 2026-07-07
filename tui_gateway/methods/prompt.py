@@ -131,7 +131,7 @@ def _mark_prompt_run_failed(
     db = _db_for_stable_session(stored_session_id)
     if db is None or not run_id or not stored_session_id:
         return
-    run_control.publish_run_terminal_event(
+    run_control.terminate_run(
         stored_session_id=stored_session_id,
         run_id=run_id,
         turn_id=turn_id,
@@ -154,7 +154,7 @@ def _mark_prompt_run_cancelled(
     db = _db_for_stable_session(stored_session_id)
     event = None
     if db is not None and run_id and stored_session_id:
-        event = run_control.publish_run_terminal_event(
+        event = run_control.terminate_run(
             stored_session_id=stored_session_id,
             run_id=run_id,
             turn_id=turn_id,
@@ -842,7 +842,7 @@ def _run_prompt_submit(
             fallback_status,
             reason,
         )
-        run_control.publish_run_terminal_event(
+        run_control.terminate_run(
             stored_session_id=stored_session_id,
             run_id=turn_run_id,
             turn_id=turn_id,

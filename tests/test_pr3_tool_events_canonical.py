@@ -13,12 +13,13 @@ authoritative ``seq`` values), and assert that
 ``run_events.seq`` — **not** the ``tool_events.seq_start`` projection value.
 
 They also exercise the ``session.messages`` JSON-RPC handler to verify the
-canonical path is wired through the gateway (with legacy fallback).
+canonical path is wired through the gateway without row-model fallback.
 """
 
 from __future__ import annotations
 
 import importlib
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -414,6 +415,43 @@ def test_session_messages_canonical_tool_events_empty_when_none(monkeypatch, tmp
     finally:
         db.close()
     assert result["toolEvents"] == []
+
+
+def test_session_messages_refuses_legacy_tool_event_row_model(monkeypatch):
+    """``include_tool_events`` must not fall back to ``db.list_tool_events`` rows."""
+
+    class LegacyOnlyDB:
+        def get_session(self, session_id):
+            return {"id": session_id}
+
+        def get_session_by_title(self, title):
+            return None
+
+        def get_messages_page_as_conversation(self, *args, **kwargs):
+            return {"messages": [], "pageInfo": {}}
+
+        def get_session_branch_info(self, session_id):
+            return None
+
+        def list_tool_events(self, *args, **kwargs):
+            return [{"type": "tool.complete", "seq_start": 99}]
+
+    session_history = importlib.import_module("tui_gateway.methods.session_history")
+    monkeypatch.setattr(session_history, "_get_db", lambda: LegacyOnlyDB())
+
+    response = server._methods["session.messages"](
+        "legacy-row-model",
+        {"session_id": "session-1", "include_tool_events": True},
+    )
+
+    assert response["error"]["message"] == "canonical tool event reader unavailable"
+
+
+def test_session_messages_has_no_legacy_tool_events_fallback():
+    session_history = importlib.import_module("tui_gateway.methods.session_history")
+    source = inspect.getsource(session_history)
+    assert "list_tool_events_as_canonical" in source
+    assert "list_tool_events(" not in source
 
 
 def test_session_messages_canonical_tool_events_off_by_default(monkeypatch, tmp_path):

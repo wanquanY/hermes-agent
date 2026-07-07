@@ -2,11 +2,27 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hermes_state import SessionDB
 
 
 def _db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("conv-1", source="tui", transient=False)
+    db.create_session("conv-2", source="tui", transient=False)
+    return db
+
+
+def test_participant_write_requires_existing_session(tmp_path: Path) -> None:
+    db = SessionDB(tmp_path / "state.db")
+
+    with pytest.raises(ValueError, match="existing conversation session"):
+        db.ensure_participant(
+            "conv-1",
+            participant_id="member:m1",
+            role="member",
+        )
 
 
 def test_ensure_participant_inserts_row(tmp_path: Path) -> None:

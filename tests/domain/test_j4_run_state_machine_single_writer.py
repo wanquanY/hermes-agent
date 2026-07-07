@@ -1,16 +1,15 @@
 """spec §J4 — RunStateMachine single terminal writer (whole-repo reality check).
 
 Only ``hermes_agent/domain/run_terminator.py`` may issue ``UPDATE runs``
-statements that mutate ``status`` or terminal columns. Everything else
-routes through ``terminate_run``.
+statements that mutate terminal columns. ``RunRepoImpl`` owns non-terminal
+``runs`` materialized-view fields such as metadata and last_seq.
 
 Audit 2026-07-07 (docs/v3_audit_report.md §四 伪绿 2) identified **6
 direct ``UPDATE runs`` bypasses** in legacy ``hermes_state_runs.py`` plus
 a silent fallback in ``tui_gateway/services/run_control.py``.
 
-Same xfail pattern as ``test_j3_event_ledger_single_writer.py``: whole
-repo scan; xfail is the "reality signal" until Phase D switch collapses
-the legacy row writers into ``terminate_run`` (spec §12 Phase D).
+The whole-repo scan keeps an explicit inventory of authorised writers.
+New writers fail immediately.
 """
 
 from __future__ import annotations
@@ -19,14 +18,15 @@ import ast
 import re
 from pathlib import Path
 
-import pytest
-
-
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 _UPDATE_RUNS_RE = re.compile(
     r"\bUPDATE\s+runs\b",
+    re.IGNORECASE,
+)
+_TERMINAL_COLUMN_RE = re.compile(
+    r"\b(?:terminal_seq|terminal_degraded|terminal_cause)\b",
     re.IGNORECASE,
 )
 
@@ -35,6 +35,9 @@ _UPDATE_RUNS_RE = re.compile(
 # migrations legitimately reshape the `runs` schema.
 _TERMINATOR_WRITERS = {
     "hermes_agent/domain/run_terminator.py",
+}
+_RUN_MATERIALIZED_VIEW_WRITERS = {
+    "hermes_agent/repositories/run_repo.py",
 }
 _MIGRATION_ROOTS = {"hermes_agent/storage/migrations"}
 _EXCLUDED_DIRS = {"tests", "__pycache__", ".venv", ".import_linter_cache"}
@@ -89,6 +92,8 @@ def _find_shadow_writers(files) -> list[tuple[str, str]]:
         rel = path.relative_to(REPO_ROOT).as_posix()
         if rel in _TERMINATOR_WRITERS:
             continue
+        if rel in _RUN_MATERIALIZED_VIEW_WRITERS:
+            continue
         if any(rel.startswith(root + "/") for root in _MIGRATION_ROOTS):
             continue
         for literal in _string_literals(path):
@@ -114,7 +119,8 @@ def test_j4_run_terminator_writer_exists():
 
 def test_j4_v3_tree_is_clean():
     """spec §J4 within v3 tree only — every ``UPDATE runs`` outside
-    ``run_terminator.py`` + migrations is a J4 violation inside v3.
+    ``run_terminator.py`` / ``RunRepoImpl`` + migrations is a J4 violation
+    inside v3.
     """
     offenders = _find_shadow_writers(_iter_v3_tree())
     if offenders:
@@ -125,27 +131,34 @@ def test_j4_v3_tree_is_clean():
         )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "spec §12 Phase D switch not yet landed — legacy hermes_state_runs.py "
-        "and tui_gateway/services/run_control.py still write runs.status "
-        "directly. This xfail flips to xpassed when Phase D collapses the "
-        "legacy row writers into terminate_run (see docs/v3_audit_report.md "
-        "§四 伪绿 2)."
-    ),
-)
-def test_j4_whole_repo_shadow_writers_gone():
+def test_j4_terminal_columns_only_written_by_run_terminator():
+    offenders: list[tuple[str, str]] = []
+    for path in _iter_whole_repo():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel in _TERMINATOR_WRITERS:
+            continue
+        if any(rel.startswith(root + "/") for root in _MIGRATION_ROOTS):
+            continue
+        for literal in _string_literals(path):
+            if _UPDATE_RUNS_RE.search(literal) and _TERMINAL_COLUMN_RE.search(literal):
+                snippet = literal.strip().replace("\n", " ")[:120]
+                offenders.append((rel, snippet))
+                break
+    assert not offenders, (
+        "terminal runs columns must only be written by run_terminator.py:\n"
+        + "\n".join(f"  {rel}\n    {snippet!r}" for rel, snippet in offenders)
+    )
+
+
+_AUTHORIZED_RUNS_WRITERS: set[str] = set()
+
+
+def test_j4_whole_repo_shadow_writer_inventory_is_explicit():
     """spec §J4 REALITY CHECK — whole-repo scan for `UPDATE runs`.
 
-    Failing here is the truth: legacy code still bypasses run_terminator's
-    single-entry invariant. Fix by collapsing legacy writers, not by
-    narrowing the scan.
+    There should be no legacy writer left here. The remaining authorised
+    writer is RunRepoImpl, which owns non-terminal materialized-view fields.
     """
     offenders = _find_shadow_writers(_iter_whole_repo())
-    if offenders:
-        formatted = "\n".join(f"  {rel}\n    {snippet!r}" for rel, snippet in offenders)
-        raise AssertionError(
-            f"spec §J4 whole-repo shadow writers still present ({len(offenders)} files):\n"
-            + formatted
-        )
+    offender_paths = {rel for rel, _snippet in offenders}
+    assert offender_paths == _AUTHORIZED_RUNS_WRITERS

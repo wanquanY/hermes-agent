@@ -3,11 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import sqlite3
 import threading
 import time
 from typing import Any, Dict, List
 
+from hermes_agent.domain.team_mission_audit_log import TeamMissionAuditLog
 from hermes_team_mission.domain.identities import canonical_node_id as _canonical_graph_node_id
 from hermes_team_mission.runtime.failure import classify_team_mission_failure
 
@@ -686,13 +686,6 @@ def structural_dedupe_key(mission_id: str, source_event: Dict[str, Any]) -> str:
     return ":".join(["structural", text(mission_id), event_type, entity_id])
 
 
-def _row_to_event(row: sqlite3.Row | None) -> Dict[str, Any]:
-    if row is None:
-        return {}
-    event = json_loads(row["event_json"], {})
-    return event if isinstance(event, dict) else {}
-
-
 def append_team_mission_event(
     db: Any,
     *,
@@ -723,57 +716,21 @@ def append_team_mission_event(
         or source_event.get("session_id")
     )
     source_seq = int(payload.get("source_seq") or payload.get("sourceSeq") or event_seq(source_event) or 0)
-    inserted = False
     with db._lock:
-        existing = db._conn.execute(
-            "SELECT event_json FROM team_mission_events WHERE mission_id = ? AND dedupe_key = ?",
-            (mission_id, dedupe_key),
-        ).fetchone()
-        if existing is not None:
-            duplicate = _row_to_event(existing)
-            duplicate["_persistence_disposition"] = "duplicate_mission_event"
-            return duplicate
-        row = db._conn.execute(
-            "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM team_mission_events WHERE mission_id = ?",
-            (mission_id,),
-        ).fetchone()
-        seq = int((row["next_seq"] if row is not None else 1) or 1)
-        stored = _with_mission_seq(event, seq)
-        try:
-            db._conn.execute(
-                """
-                INSERT INTO team_mission_events (
-                    mission_id, seq, event_type, source_event_type,
-                    source_run_id, source_session_id, source_seq, dedupe_key,
-                    timestamp, payload_json, source_event_json, event_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    mission_id,
-                    seq,
-                    event_type,
-                    source_type,
-                    source_run_id,
-                    source_session_id,
-                    source_seq,
-                    dedupe_key,
-                    float(stored.get("timestamp") or now),
-                    "",
-                    "",
-                    json_dumps(stored),
-                    now,
-                ),
-            )
-            inserted = True
-        except sqlite3.IntegrityError:
-            existing = db._conn.execute(
-                "SELECT event_json FROM team_mission_events WHERE mission_id = ? AND dedupe_key = ?",
-                (mission_id, dedupe_key),
-            ).fetchone()
-            duplicate = _row_to_event(existing)
-            duplicate["_persistence_disposition"] = "duplicate_mission_event"
-            return duplicate
-    if inserted:
+        result = TeamMissionAuditLog(db._conn).append(
+            mission_id=mission_id,
+            dedupe_key=dedupe_key,
+            event=event,
+            event_type=event_type,
+            source_event_type=source_type,
+            source_run_id=source_run_id,
+            source_session_id=source_session_id,
+            source_seq=source_seq,
+            timestamp=float(event.get("timestamp") or now),
+            now=now,
+        )
+    stored = result.event
+    if result.inserted:
         notify_team_mission_event_listeners(mission_id, stored)
     return stored
 
@@ -826,6 +783,95 @@ def append_team_mission_runtime_event(
     return stored
 
 
+def _mission_activity_session_id(
+    db: Any,
+    mission_id: str,
+    event: Dict[str, Any],
+    identity: Dict[str, str] | None = None,
+) -> str:
+    payload = event_payload(event)
+    identity = identity or {}
+    candidates = [
+        identity.get("session_id"),
+        identity.get("sessionId"),
+        identity.get("stored_session_id"),
+        identity.get("storedSessionId"),
+        identity.get("conversation_session_id"),
+        identity.get("conversationSessionId"),
+        event.get("stored_session_id"),
+        event.get("storedSessionId"),
+        event.get("session_id"),
+        event.get("sessionId"),
+        payload.get("stored_session_id"),
+        payload.get("storedSessionId"),
+        payload.get("session_id"),
+        payload.get("sessionId"),
+    ]
+    # Do not fall back to the visible team transcript session here. These
+    # canonical activity events are replay-index rows, not chat transcript
+    # messages. Writing them into the visible session would pollute
+    # `list_run_events(<team-session>)` and reintroduce the mirror bug that the
+    # team-mission transcript split was designed to prevent.
+    candidates.append(f"team:mission:{mission_id}:events")
+    for candidate in candidates:
+        normalized = text(candidate)
+        if normalized:
+            return normalized
+    return ""
+
+
+def _ensure_activity_session(db: Any, session_id: str) -> None:
+    stable = text(session_id)
+    if not stable:
+        return
+    creator = getattr(db, "create_session", None)
+    if not callable(creator):
+        return
+    getter = getattr(db, "get_session", None)
+    try:
+        if callable(getter) and getter(stable):
+            return
+    except Exception:
+        pass
+    try:
+        creator(stable, "team_mission", transient=True)
+    except TypeError:
+        creator(stable, "team_mission")
+
+
+def _append_mission_activity_run_event(
+    db: Any,
+    *,
+    mission_id: str,
+    event: Dict[str, Any],
+    identity: Dict[str, str] | None = None,
+) -> None:
+    appender = getattr(db, "append_run_event", None)
+    if not callable(appender):
+        return
+    stable_mission = text(mission_id)
+    session_id = _mission_activity_session_id(db, stable_mission, event, identity)
+    if not stable_mission or not session_id:
+        return
+    activity_id = f"mission:{stable_mission}"
+    frame = dict(event or {})
+    payload = dict(event_payload(frame))
+    frame["activity_id"] = activity_id
+    frame["activityId"] = activity_id
+    frame["stored_session_id"] = session_id
+    frame.setdefault("session_id", frame.get("runtime_session_id") or session_id)
+    payload["activity_id"] = activity_id
+    payload["activityId"] = activity_id
+    frame["payload"] = payload
+    _ensure_activity_session(db, session_id)
+    previous = getattr(db, "_team_mission_projecting", False)
+    db._team_mission_projecting = True
+    try:
+        appender(session_id, frame)
+    finally:
+        db._team_mission_projecting = previous
+
+
 def append_team_mission_structural_event(
     db: Any,
     *,
@@ -867,13 +913,22 @@ def append_team_mission_structural_event(
         if edge_id:
             event_identity.setdefault("edge_id", edge_id)
             event_identity.setdefault("edgeId", edge_id)
-    return append_team_mission_event(
+    projected = projection_event(source_event, event_identity)
+    stored = append_team_mission_event(
         db,
         mission_id=mission_id,
-        event=projection_event(source_event, event_identity),
+        event=projected,
         dedupe_key=text(dedupe_key) or structural_dedupe_key(mission_id, source_event),
         source_event=source_event,
     )
+    if stored:
+        _append_mission_activity_run_event(
+            db,
+            mission_id=mission_id,
+            event=stored,
+            identity=event_identity,
+        )
+    return stored
 
 
 def append_team_mission_conversation_status_event(
@@ -901,13 +956,20 @@ def append_team_mission_conversation_status_event(
     payload["source_event_seq"] = int(source_mission_seq or 0)
     payload["sourceEventSeq"] = int(source_mission_seq or 0)
     event["payload"] = payload
-    return append_team_mission_event(
+    stored = append_team_mission_event(
         db,
         mission_id=mission_id,
         event=event,
         dedupe_key=status_dedupe_key(mission_id, source_mission_seq, source_event),
         source_event=source_event,
     )
+    if stored:
+        _append_mission_activity_run_event(
+            db,
+            mission_id=mission_id,
+            event=stored,
+        )
+    return stored
 
 
 def append_team_mission_event_for_run(
@@ -993,23 +1055,9 @@ def list_team_mission_events(
     mission_id = text(mission_id)
     if not mission_id:
         return []
-    after_seq = int(after_seq or 0)
-    safe_limit = max(1, min(int(limit or 2000), 10000))
     with db._lock:
-        rows = db._conn.execute(
-            """
-            SELECT event_json
-            FROM team_mission_events
-            WHERE mission_id = ?
-              AND seq > ?
-            ORDER BY seq ASC
-            LIMIT ?
-            """,
-            (mission_id, after_seq, safe_limit),
-        ).fetchall()
-    events: List[Dict[str, Any]] = []
-    for row in rows:
-        event = _row_to_event(row)
-        if event:
-            events.append(event)
-    return events
+        return TeamMissionAuditLog(db._conn).list(
+            mission_id,
+            after_seq=int(after_seq or 0),
+            limit=limit,
+        )

@@ -417,12 +417,9 @@ def _submit_message_to_member(
     # Keep the member profile's runtime context in the dovie_profile payload so
     # the spawned worker still uses the member's hermes_home / model / toolsets
     # — only the routing key is fresh. CRITICAL: overwrite BOTH the camelCase
-    # AND snake_case keys, because runtime_proxy._scope_from_params prefers
-    # snake_case `runtime_scope_key` and otherwise inherits the member's
-    # default profile scope (e.g. `profile:<id>`) — spawning a generic worker
-    # against the wrong HERMES_HOME (the main dovie home, with its default
-    # "Hermes Agent" SOUL), so the member's identity / memories / skills
-    # never load.
+    # AND snake_case keys because worker scope hydration accepts both client
+    # dialects; otherwise the member can inherit the default profile scope
+    # (e.g. `profile:<id>`) and spawn against the wrong HERMES_HOME.
     dovie_profile = {
         **dovie_profile,
         "runtimeScopeKey": member_scope,

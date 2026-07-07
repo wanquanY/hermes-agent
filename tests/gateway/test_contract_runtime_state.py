@@ -101,7 +101,7 @@ def _write_profile_state_db(db_path: Path, sessions: list[dict]) -> None:
 def test_runtime_state_inspect_reports_hermes_owned_database_state(tmp_path: Path) -> None:
     from tui_gateway.services.runtime_state import inspect_runtime_state
 
-    _write_session_db(tmp_path / "state.db")
+    _write_session_db(tmp_path / "profiles" / "default" / "state.db")
     profile_home = tmp_path / "profiles" / "agent-a"
     _write_session_db(profile_home / "state.db", session_id="profile-session")
 

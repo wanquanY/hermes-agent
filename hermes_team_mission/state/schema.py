@@ -122,6 +122,12 @@ CREATE TABLE IF NOT EXISTS team_mission_events (
     UNIQUE(mission_id, dedupe_key)
 );
 
+CREATE TABLE IF NOT EXISTS team_mission_event_seq_counter (
+    mission_id TEXT PRIMARY KEY REFERENCES team_missions(mission_id) ON DELETE CASCADE,
+    next_seq INTEGER NOT NULL CHECK (next_seq >= 1),
+    updated_at REAL NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS team_mission_artifacts (
     artifact_id TEXT PRIMARY KEY,
     mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
@@ -230,6 +236,8 @@ CREATE INDEX IF NOT EXISTS idx_team_mission_events_mission_seq
     ON team_mission_events(mission_id, seq ASC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_events_source_run
     ON team_mission_events(source_run_id, source_seq);
+CREATE INDEX IF NOT EXISTS idx_team_mission_event_seq_counter_updated
+    ON team_mission_event_seq_counter(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_artifacts_mission
     ON team_mission_artifacts(mission_id, node_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_deliverables_mission

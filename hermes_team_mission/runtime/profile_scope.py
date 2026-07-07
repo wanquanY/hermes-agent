@@ -307,7 +307,7 @@ def leave_team_mission_control_home(token: Any) -> None:
         return
 
 
-def team_mission_control_db(parent_agent: Any = None) -> Any:
+def team_mission_control_db(parent_agent: Any = None, *, create_if_missing: bool = True) -> Any:
     db = getattr(parent_agent, "_session_db", None) if parent_agent is not None else None
     if _is_worker_db_proxy(db):
         return db
@@ -316,7 +316,10 @@ def team_mission_control_db(parent_agent: Any = None) -> Any:
         try:
             from hermes_state import SessionDB
 
-            return SessionDB(db_path=Path(explicit_control_home).expanduser().resolve() / "state.db")
+            db_path = Path(explicit_control_home).expanduser().resolve() / "state.db"
+            if not create_if_missing and not db_path.exists():
+                return None
+            return SessionDB(db_path=db_path)
         except Exception:
             pass
     if db is not None:
@@ -332,9 +335,14 @@ def team_mission_control_db(parent_agent: Any = None) -> Any:
         try:
             from hermes_state import SessionDB
 
-            return SessionDB(db_path=Path(control_home).expanduser().resolve() / "state.db")
+            db_path = Path(control_home).expanduser().resolve() / "state.db"
+            if not create_if_missing and not db_path.exists():
+                return None
+            return SessionDB(db_path=db_path)
         except Exception:
             pass
+    if not create_if_missing:
+        return None
     from hermes_state import SessionDB
 
     return SessionDB()

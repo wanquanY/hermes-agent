@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import uuid
 
-from hermes_team_mission.runtime.profile_scope import team_mission_control_db as _team_registry_control_db
 from tui_gateway.methods._shared import bind_server_globals
 
 _server = bind_server_globals(globals())
 
 
 def _get_db():
-    return _team_registry_control_db()
+    return _server._get_db()
 
 
 def _text(value) -> str:

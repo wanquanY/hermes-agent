@@ -5,6 +5,8 @@ import sqlite3
 import zlib
 from typing import Any
 
+from hermes_agent.domain.event_ledger import EventLedger
+
 
 RUN_EVENT_FRAME_FORMAT = "zlib+json:v1"
 
@@ -81,6 +83,23 @@ def decode_run_event_row(row: Any) -> dict[str, Any]:
     event.setdefault("participant_id", _row_value(row, "participant_id", ""))
     event.setdefault("seq", int(_row_value(row, "seq", 0) or 0))
     event.setdefault("timestamp", float(_row_value(row, "timestamp", 0) or 0))
+    interaction_request_id = _text(_row_value(row, "interaction_request_id", ""))
+    if interaction_request_id:
+        payload.setdefault("interaction_request_id", interaction_request_id)
+        payload.setdefault("request_id", interaction_request_id)
+        interaction_kind = _text(_row_value(row, "interaction_kind", ""))
+        interaction_status = _text(_row_value(row, "interaction_status", ""))
+        anchor_seq = int(_row_value(row, "anchor_seq", 0) or 0)
+        if interaction_kind:
+            payload.setdefault("interaction_kind", interaction_kind)
+            payload.setdefault("kind", interaction_kind)
+        if interaction_status:
+            payload.setdefault("interaction_status", interaction_status)
+            payload.setdefault("status", interaction_status)
+            payload.setdefault("state", interaction_status)
+        if anchor_seq > 0:
+            payload["anchor_seq"] = anchor_seq
+            event.setdefault("anchor_seq", anchor_seq)
     event["payload"] = payload
     return event
 
@@ -101,24 +120,12 @@ def update_run_event_frame_columns(
     projection_state: str = "",
 ) -> None:
     frame_blob, frame_format = encode_run_event_frame(event)
-    conn.execute(
-        """
-        UPDATE run_events
-        SET frame_blob = ?,
-            frame_format = ?,
-            retention_class = COALESCE(NULLIF(?, ''), retention_class),
-            projected_message_id = COALESCE(NULLIF(?, ''), projected_message_id),
-            projected_tool_event_id = COALESCE(NULLIF(?, ''), projected_tool_event_id),
-            projection_state = COALESCE(NULLIF(?, ''), projection_state)
-        WHERE id = ?
-        """,
-        (
-            frame_blob,
-            frame_format,
-            retention_class,
-            projected_message_id,
-            projected_tool_event_id,
-            projection_state,
-            int(row_id),
-        ),
+    EventLedger(conn).update_frame_columns(
+        row_id=int(row_id),
+        frame_blob=frame_blob,
+        frame_format=frame_format,
+        retention_class=retention_class,
+        projected_message_id=projected_message_id,
+        projected_tool_event_id=projected_tool_event_id,
+        projection_state=projection_state,
     )

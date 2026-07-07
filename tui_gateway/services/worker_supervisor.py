@@ -1,22 +1,9 @@
 """Process supervisor for the stdin/stdout ``run_worker`` subprocess.
 
-Replaces ``RuntimeWorkerPool`` + ``RuntimeProxyBridge``: instead of
-spawning a child sidecar that listens on its own websocket and lives
-through ``RuntimeProxyBridge``, the supervisor launches a plain
-subprocess that speaks the line-framed JSON protocol defined in
-``tui_gateway.run_worker``.
-
-Phase 4b (this file) implements:
-- ``RunWorker`` — one subprocess per ``runtime_scope_key``
-- ``WorkerSupervisor`` — process registry, spawn/send/shutdown
-- bounded inbound queue + a separate dispatch task per worker so the
-  stdout read loop never blocks on DB writes done by the callbacks
-  (handoff invariant #8)
-
-Phase 4c wired the dispatch callbacks into ``run_control``,
-``tools/approval``, ``tools/clarify_gateway``. Phase 5+ made this the
-sole worker-spawning path; the legacy ``RuntimeWorkerPool`` proxy was
-deleted in Phase 6.
+``RunWorker`` owns subprocess IO for one ``runtime_scope_key`` /
+conversation identity. ``WorkerSupervisor`` owns process registry,
+spawn/send/shutdown, and callback dispatch. The bounded inbound queue keeps
+stdout reading independent from DB writes performed by callbacks.
 """
 
 from __future__ import annotations
@@ -48,7 +35,7 @@ from tui_gateway.run_worker import (
     decode_outgoing,
     encode_incoming,
 )
-from tui_gateway.services.runtime_proxy import RuntimeScope
+from tui_gateway.services.runtime_scope import RuntimeScope
 from tui_gateway.services.worker_db_proxy import serialize_db_value
 
 _log = logging.getLogger(__name__)
@@ -228,7 +215,6 @@ class RunWorker:
     inbound_queue: asyncio.Queue
     created_at: float
     last_used_at: float
-    active_runs: set[str] = field(default_factory=set)
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     read_task: Optional[asyncio.Task] = None
     dispatch_task: Optional[asyncio.Task] = None
@@ -270,7 +256,6 @@ class RunWorker:
             "hermesHome": self.scope.hermes_home or None,
             "pid": self.process.pid if running else None,
             "running": running,
-            "activeRuns": sorted(self.active_runs),
             "createdAt": self.created_at,
             "lastUsedAt": self.last_used_at,
             "returncode": self.process.returncode,
@@ -306,7 +291,7 @@ class WorkerSupervisor:
         self._queue_maxsize = max(1, int(queue_maxsize))
         self._python = python_executable or sys.executable
         self._stdio_limit_bytes = _normalize_worker_stdio_limit_bytes(stdio_limit_bytes)
-        self._db_rpc_lock = asyncio.Lock()
+        self._db_rpc_locks: dict[str, asyncio.Lock] = {}
 
     # ── public API ───────────────────────────────────────────────────
 
@@ -364,7 +349,6 @@ class WorkerSupervisor:
                 run_id=str(getattr(frame, "run_id", "") or ""),
                 turn_id=str(getattr(frame, "turn_id", "") or ""),
                 worker_pid=worker.process.pid if worker.process else None,
-                worker_active_runs=sorted(worker.active_runs),
             )
         if not await self._send_frame_to_worker(worker, frame):
             _worker_supervisor_log(
@@ -628,8 +612,6 @@ class WorkerSupervisor:
             elif isinstance(frame, InteractiveRequestFrame):
                 await self._on_interactive_request(scope_key, worker.conversation_id, frame)
             elif isinstance(frame, RunTerminalFrame):
-                before_active_runs = sorted(worker.active_runs)
-                worker.active_runs.discard(frame.run_id)
                 _worker_supervisor_log(
                     "supervisor-terminal-received",
                     scope_key=scope_key,
@@ -639,8 +621,6 @@ class WorkerSupervisor:
                     turn_id=frame.turn_id,
                     stored_session_id=frame.stored_session_id,
                     message=frame.message,
-                    before_active_runs=before_active_runs,
-                    after_active_runs=sorted(worker.active_runs),
                 )
                 await self._on_run_terminal(scope_key, worker.conversation_id, frame)
             elif isinstance(frame, LogFrame):
@@ -697,8 +677,9 @@ class WorkerSupervisor:
             target = getattr(db, db_method_name, None)
             if not callable(target):
                 raise AttributeError(f"SessionDB has no method {db_method_name!r}")
-            async with self._db_rpc_lock:
-                result = target(*args, **kwargs)
+            lock_key = _db_rpc_lock_key(frame, args, kwargs)
+            async with self._db_rpc_lock_for(lock_key):
+                result = await asyncio.to_thread(target, *args, **kwargs)
             return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
         except Exception as exc:
             return _db_rpc_error(
@@ -707,6 +688,14 @@ class WorkerSupervisor:
                 str(exc) or repr(exc),
                 code=-32000,
             )
+
+    def _db_rpc_lock_for(self, key: str) -> asyncio.Lock:
+        normalized = str(key or "").strip() or "__control__"
+        lock = self._db_rpc_locks.get(normalized)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._db_rpc_locks[normalized] = lock
+        return lock
 
     async def _execute_worker_jsonrpc(
         self,
@@ -959,6 +948,17 @@ def _stable_session_id_from_rpc(
     } and args:
         return str(args[0] or "").strip()
     return ""
+
+
+def _db_rpc_lock_key(
+    frame: DBRpcRequestFrame,
+    args: list[Any],
+    kwargs: dict[str, Any],
+) -> str:
+    stable = _stable_session_id_from_rpc(frame, args, kwargs)
+    if stable:
+        return f"session:{stable}"
+    return "__control__"
 
 
 def _db_rpc_error(

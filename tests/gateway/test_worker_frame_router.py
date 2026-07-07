@@ -50,7 +50,7 @@ class _FakeSupervisor:
         return self.deliver
 
 
-def _make_router(supervisor: _FakeSupervisor = None):
+def _make_router(supervisor: _FakeSupervisor = None, persist_interaction_event=None):
     sup = supervisor or _FakeSupervisor()
     events: list[dict] = []
     terminals: list[dict] = []
@@ -67,6 +67,7 @@ def _make_router(supervisor: _FakeSupervisor = None):
         sender=sup,
         publish_event=publish_event,
         publish_run_terminal=publish_run_terminal,
+        persist_interaction_event=persist_interaction_event,
     )
     return router, sup, events, terminals
 
@@ -87,6 +88,88 @@ async def test_on_event_forwards_payload() -> None:
             "conversation_id": "sess-1",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_interaction_request_publishes_independent_frame_and_persists_internal() -> None:
+    persisted: list[tuple[str, str, str, str, int]] = []
+
+    def persist(event_type: str, entry: Any) -> None:
+        persisted.append((event_type, entry.request_id, entry.kind, entry.session_key, entry.anchor_seq))
+
+    router, _sup, events, _ = _make_router(persist_interaction_event=persist)
+    await router.on_event(
+        "profile:x",
+        "sess-1",
+        EventFrame(params={
+            "type": "approval.request",
+            "stored_session_id": "sess-1",
+            "payload": {
+                "request_id": "req-approval",
+                "command": "rm -rf /tmp/demo",
+                "anchor_seq": 12,
+            },
+        }),
+    )
+
+    assert persisted == [("interaction.requested", "req-approval", "approval", "sess-1", 12)]
+    assert events == [
+        {
+            "type": "interaction.requested",
+            "kind": "approval",
+            "request_id": "req-approval",
+            "stored_session_id": "sess-1",
+            "session_id": "",
+            "runtime_scope_key": "profile:x",
+            "conversation_id": "sess-1",
+            "run_id": "",
+            "turn_id": "",
+            "seq": 0,
+            "payload": {
+                "request_id": "req-approval",
+                "command": "rm -rf /tmp/demo",
+                "anchor_seq": 12,
+                "kind": "approval",
+                "status": "pending",
+                "source_event_type": "approval.request",
+                "source_event": {
+                    "type": "approval.request",
+                    "stored_session_id": "sess-1",
+                    "payload": {
+                        "request_id": "req-approval",
+                        "command": "rm -rf /tmp/demo",
+                        "anchor_seq": 12,
+                    },
+                    "runtime_scope_key": "profile:x",
+                    "conversation_id": "sess-1",
+                },
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_interaction_request_persistence_failure_blocks_delivery() -> None:
+    def persist(_event_type: str, _entry: Any) -> None:
+        raise RuntimeError("persist failed")
+
+    router, _sup, events, _ = _make_router(persist_interaction_event=persist)
+
+    with pytest.raises(RuntimeError, match="persist failed"):
+        await router.on_event(
+            "profile:x",
+            "sess-1",
+            EventFrame(params={
+                "type": "approval.request",
+                "stored_session_id": "sess-1",
+                "payload": {
+                    "request_id": "req-approval",
+                    "anchor_seq": 12,
+                },
+            }),
+        )
+
+    assert events == []
 
 
 @pytest.mark.asyncio
@@ -206,6 +289,7 @@ async def test_on_run_terminal_publishes_on_failed() -> None:
             "turn_id": "turn-1",
             "runtime_scope_key": "profile:x",
             "runtime_session_id": "sess-1",
+            "activity_id": "",
             "status": "failed",
             "message": "kaboom",
         }

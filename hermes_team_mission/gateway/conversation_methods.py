@@ -7,6 +7,13 @@ from hermes_team_mission.domain.activity import ACTIVITY_ID_FORMAT_PATTERN
 from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command
 
 
+def _get_existing_db():
+    try:
+        return _get_db(create_if_missing=False)
+    except TypeError:
+        return _get_db()
+
+
 def _activity_id_from_params(params: dict) -> str:
     activity_id = str(params.get("activity_id") or params.get("activityId") or "").strip()
     if activity_id and not ACTIVITY_ID_FORMAT_PATTERN.match(activity_id):
@@ -129,7 +136,7 @@ def _mission_metadata_fallback_from_params(params: dict, *, mission_id: str, tea
 
 @method("team_capability.snapshot.get")
 def _(rid, params: dict) -> dict:
-    db = _get_db()
+    db = _get_existing_db()
     if db is None:
         return _db_unavailable_error(rid, code=5008)
     snapshot_id = _team_capability_snapshot_id(params) or str(params.get("snapshot_id") or params.get("snapshotId") or "").strip()
@@ -152,7 +159,7 @@ def _(rid, params: dict) -> dict:
 
 @method("team_capability.snapshot.refresh")
 def _(rid, params: dict) -> dict:
-    db = _get_db()
+    db = _get_existing_db()
     if db is None:
         return _db_unavailable_error(rid, code=5008)
     team_id = str(params.get("team_id") or params.get("teamId") or "").strip()
@@ -722,7 +729,7 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Superseded by enriched session.list per P4; kept for ABI compatibility."""
 
-    db = _get_db()
+    db = _get_existing_db()
     if db is None:
         return _ok(rid, {"conversations": []})
     conversations = db.list_team_mission_conversations(

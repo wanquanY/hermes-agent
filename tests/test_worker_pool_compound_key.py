@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from tui_gateway.services.runtime_proxy import RuntimeScope
+from tui_gateway.services.runtime_scope import RuntimeScope
 from tui_gateway.services.worker_pool import WorkerPool
 from tui_gateway.services.worker_supervisor import RunWorker
 

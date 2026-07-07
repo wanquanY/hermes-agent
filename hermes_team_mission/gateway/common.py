@@ -56,8 +56,8 @@ _server = bind_server_globals(globals())
 _log = logging.getLogger(__name__)
 
 
-def _get_db():
-    return _team_mission_control_db()
+def _get_db(*, create_if_missing: bool = True):
+    return _team_mission_control_db(create_if_missing=create_if_missing)
 
 
 def _get_runtime_db():

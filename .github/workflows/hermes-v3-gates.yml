@@ -4,19 +4,23 @@ name: Hermes v3 gates
 # (see docs/hermes_agent_architecture_v3.md § J1-J11 invariants).
 #
 # Three gates:
-#   1. v3 pytest — the six v3 directories must stay green.
-#      xfail markers on legacy shadow-writer probes are OK; they
-#      encode the "not yet switched" reality (docs/v3_audit_report.md).
+#   1. v3 pytest — the v3/domain observability tests must stay green.
+#      J2/J3/J4 guards are blocking and scan production legacy entrypoints
+#      where those invariants are already switched.
 #   2. import-linter — the layered skeleton contract must remain KEPT.
 #      Runs against the .importlinter config at repo root.
-#   3. silent-swallow lint — hermes_agent/ must remain 0 findings.
-#      The whole-repo whole scan is *not* blocking here (encoded as xfail).
+#   3. silent-swallow lint — hermes_agent/ must remain 0 findings, and the
+#      whole-repo terminal fallback guard must stay green.
 
 on:
   push:
     branches: [main]
     paths:
       - "hermes_agent/**"
+      - "hermes_state.py"
+      - "hermes_state_*.py"
+      - "hermes_team_mission/**"
+      - "tui_gateway/**"
       - "tests/domain/**"
       - "tests/gateway_v3/**"
       - "tests/observability/**"
@@ -29,6 +33,10 @@ on:
     branches: [main]
     paths:
       - "hermes_agent/**"
+      - "hermes_state.py"
+      - "hermes_state_*.py"
+      - "hermes_team_mission/**"
+      - "tui_gateway/**"
       - "tests/domain/**"
       - "tests/gateway_v3/**"
       - "tests/observability/**"
@@ -100,7 +108,7 @@ jobs:
         run: lint-imports
 
   silent-swallow-v3:
-    name: silent-swallow lint (v3 tree only, blocking)
+    name: silent-swallow lint + terminal fallback guard
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -126,3 +134,6 @@ jobs:
               sys.exit(1)
           print("hermes_agent/ clean —— 0 silent-swallow findings")
           EOF
+
+      - name: Run whole-repo terminal fallback guard
+        run: python -m pytest tests/observability/test_silent_fallback_scan.py -q

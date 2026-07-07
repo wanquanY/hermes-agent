@@ -6,7 +6,7 @@ import time
 import pytest
 
 from tui_gateway.run_worker import RunTerminalFrame
-from tui_gateway.services.runtime_proxy import RuntimeScope
+from tui_gateway.services.runtime_scope import RuntimeScope
 from tui_gateway.services.worker_pool import WorkerPool
 from tui_gateway.services.worker_supervisor import RunWorker
 
@@ -178,6 +178,36 @@ async def test_get_or_spawn_respawns_idle_worker_when_profile_env_changes() -> N
 
 
 @pytest.mark.asyncio
+async def test_get_or_spawn_reuses_inflight_worker_when_profile_env_changes() -> None:
+    supervisor = _FakeSupervisor()
+    pool = WorkerPool(supervisor, reap_tick_s=60)
+    try:
+        first = await pool.get_or_spawn("conv-1", _profile())
+        await pool.record_run_start(
+            conversation_id="conv-1",
+            run_id="run-1",
+            stored_session_id="conv-1",
+            turn_id="turn-1",
+        )
+
+        second = await pool.get_or_spawn(
+            "conv-1",
+            _profile({
+                "DOVIE_BACKEND_BRIDGE_URL": "http://127.0.0.1:4567/api/dovie/invoke",
+                "DOVIE_BACKEND_BRIDGE_TOKEN": "bridge-token",
+            }),
+        )
+
+        assert second.worker is first.worker
+        assert first.running()
+        assert supervisor.shutdown_calls == []
+        assert supervisor.ensure_envs == [{}]
+        assert pool.stats()["activeWorkerCount"] == 1
+    finally:
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_concurrent_get_or_spawn_same_conv_single_spawn() -> None:
     supervisor = _FakeSupervisor(ensure_delay_s=0.01)
     pool = WorkerPool(supervisor, reap_tick_s=60)
@@ -228,6 +258,27 @@ async def test_active_worker_not_reaped_while_run_inflight() -> None:
 
         assert supervisor.shutdown_calls == []
         assert pool.stats()["activeWorkerCount"] == 1
+    finally:
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_pool_is_single_source_for_active_runs() -> None:
+    supervisor = _FakeSupervisor()
+    pool = WorkerPool(supervisor, reap_tick_s=60)
+    try:
+        lease = await pool.get_or_spawn("conv-1", _profile())
+        await pool.record_run_start(
+            conversation_id="conv-1",
+            run_id="run-1",
+            stored_session_id="conv-1",
+            turn_id="turn-1",
+        )
+
+        worker_status = lease.worker.status()
+        assert "activeRuns" not in worker_status
+        assert not hasattr(lease.worker, "active_runs")
+        assert pool.stats()["workers"][0]["activeRuns"] == ["run-1"]
     finally:
         await pool.shutdown()
 

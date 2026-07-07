@@ -20,6 +20,15 @@ class _MemoryTransport:
         pass
 
 
+@pytest.fixture(autouse=True)
+def _reset_run_control_state():
+    from tui_gateway.services import run_control
+
+    run_control._reset_for_tests()
+    yield
+    run_control._reset_for_tests()
+
+
 def _workspace_payload(tmp_path: Path, workspace_id: str = "workspace-1") -> dict:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
@@ -2585,6 +2594,7 @@ def test_team_mission_conversation_delete_gateway_removes_canonical_conversation
         {"conversation_id": "conversation-1"},
     )
 
+    assert "result" in response, response
     assert response["result"]["deleted"] is True
     assert response["result"]["conversation_id"] == "conversation-1"
     assert response["result"]["stable_session_id"] == "team-session-1"
@@ -3962,18 +3972,30 @@ def test_team_mission_cancel_reaps_zombie_run_on_already_terminal_mission(monkey
     assert db.get_run("run-verify")["status"] == "cancelled"
 
 
-def test_gateway_emit_publishes_terminal_event_to_session_subscribers(monkeypatch):
+def test_gateway_emit_publishes_terminal_event_to_session_subscribers(monkeypatch, tmp_path: Path):
+    from hermes_state import SessionDB
     from tui_gateway import server
     from tui_gateway.services import run_control
 
     stable_session_id = "team-session-live"
     runtime_session_id = "runtime-live"
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session(stable_session_id, source="test")
+    db.upsert_run(
+        run_id="run-live",
+        session_id=stable_session_id,
+        runtime_scope_key="team:mission-live:leader-conversation",
+        runtime_session_id=runtime_session_id,
+        status="running",
+    )
+    monkeypatch.setattr(server, "_db_for_stable_session", lambda _stable: db)
     subscriber_transport = _MemoryTransport()
     owner_transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
         stored_session_id=stable_session_id,
         transport=subscriber_transport,
         active_only=True,
+        db=db,
     )
     previous_session = None
     with server._sessions_lock:
@@ -4006,6 +4028,7 @@ def test_gateway_emit_publishes_terminal_event_to_session_subscribers(monkeypatc
                 server._sessions.pop(runtime_session_id, None)
             else:
                 server._sessions[runtime_session_id] = previous_session
+        db.close()
 
     assert any(
         frame.get("method") == "event"
@@ -4013,7 +4036,7 @@ def test_gateway_emit_publishes_terminal_event_to_session_subscribers(monkeypatc
         and (frame.get("params") or {}).get("stored_session_id") == stable_session_id
         and ((frame.get("params") or {}).get("payload") or {}).get("text") == "done"
         for frame in subscriber_transport.frames
-    )
+    ), subscriber_transport.frames
 
 
 def test_event_bus_delivers_explicit_subscription_on_owner_transport(tmp_path: Path):
@@ -4045,7 +4068,6 @@ def test_event_bus_delivers_explicit_subscription_on_owner_transport(tmp_path: P
         )
     finally:
         run_control.unsubscribe_session(subscription_id=subscription_id)
-        db.close()
 
     assert any(item is transport for item in delivered)
     streamed = [
@@ -4058,14 +4080,11 @@ def test_event_bus_delivers_explicit_subscription_on_owner_transport(tmp_path: P
     assert streamed[0]["payload"]["delta"] == "实时"
 
 
-@pytest.mark.skip(reason="Phase 6: legacy bridge relay (_record_relayed_runtime_event) deleted; events flow through WorkerSupervisor → WorkerFrameRouter.on_event now")
-def test_runtime_proxy_relay_uses_persisted_event_bus_for_owner_subscription(monkeypatch, tmp_path: Path):
+def test_worker_event_path_uses_persisted_event_bus_for_owner_subscription(tmp_path: Path):
     from hermes_state import SessionDB
-    from tui_gateway import server
-    from tui_gateway.services import run_control, runtime_proxy
+    from tui_gateway.services import run_control
 
     db = SessionDB(tmp_path / "state.db")
-    monkeypatch.setattr(server, "_get_db", lambda: db)
     transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
         stored_session_id="team-session-relay-live",
@@ -4074,26 +4093,22 @@ def test_runtime_proxy_relay_uses_persisted_event_bus_for_owner_subscription(mon
         db=db,
     )
     try:
-        delivered = runtime_proxy._persist_relayed_runtime_event(
+        delivered = run_control.publish_recorded_event(
             {
-                "jsonrpc": "2.0",
-                "method": "event",
-                "params": {
-                    "type": "message.delta",
-                    "session_id": "runtime-relay-live",
-                    "stored_session_id": "team-session-relay-live",
-                    "run_id": "run-relay-live",
-                    "turn_id": "turn-relay-live",
-                    "runtime_scope_key": "team:conversation-relay:leader-conversation",
-                    "seq": 77,
-                    "payload": {"mode": "append", "delta": "同步", "text": "同步"},
-                },
+                "type": "message.delta",
+                "session_id": "runtime-relay-live",
+                "stored_session_id": "team-session-relay-live",
+                "run_id": "run-relay-live",
+                "turn_id": "turn-relay-live",
+                "runtime_scope_key": "team:conversation-relay:leader-conversation",
+                "seq": 77,
+                "payload": {"mode": "append", "delta": "同步", "text": "同步"},
             },
             owner_transport=transport,
+            db=db,
         )
     finally:
         run_control.unsubscribe_session(subscription_id=subscription_id)
-        db.close()
 
     assert any(item is transport for item in delivered)
     streamed = [
@@ -4104,126 +4119,102 @@ def test_runtime_proxy_relay_uses_persisted_event_bus_for_owner_subscription(mon
     assert [event["type"] for event in streamed] == ["message.delta"]
     assert streamed[0]["stored_session_id"] == "team-session-relay-live"
     assert streamed[0]["seq"] == 1
+    assert streamed[0]["runtime_source_seq"] == 77
     assert streamed[0]["payload"]["runtime_source_seq"] == 77
     assert streamed[0]["payload"]["delta"] == "同步"
-
-
-@pytest.mark.skip(reason="Phase 6: legacy bridge relay deleted")
-def test_runtime_proxy_drops_already_relayed_runtime_event(monkeypatch, tmp_path: Path):
-    from hermes_state import SessionDB
-    from tui_gateway import server
-    from tui_gateway.services import runtime_proxy
-
-    db = SessionDB(tmp_path / "state.db")
-    monkeypatch.setattr(server, "_get_db", lambda: db)
-    frame = {
-        "jsonrpc": "2.0",
-        "method": "event",
-        "params": {
-            "type": "message.delta",
-            "session_id": "runtime-relay-loop",
-            "stored_session_id": "team-session-relay-loop",
-            "run_id": "run-relay-loop",
-            "turn_id": "turn-relay-loop",
-            "runtime_scope_key": "team:conversation-relay:leader-conversation",
-            "seq": 110,
-            "runtime_source_seq": 103,
-            "payload": {
-                "mode": "append",
-                "delta": "重复",
-                "text": "重复",
-                "runtime_source_seq": 103,
-            },
-        },
-    }
-
-    result = runtime_proxy._record_relayed_runtime_event(frame)
-
-    assert result.delivered_transports == []
-    assert result.allow_direct_relay is False
-    assert db.list_run_events("team-session-relay-loop") == []
+    persisted = db.list_run_events("team-session-relay-live")
+    assert len(persisted) == 1
+    assert persisted[0]["seq"] == 1
+    assert persisted[0]["runtime_source_seq"] == 77
     db.close()
 
 
-@pytest.mark.skip(reason="Phase 6: legacy bridge relay deleted")
-def test_runtime_proxy_disables_direct_relay_for_duplicate_source_seq(monkeypatch, tmp_path: Path):
+def test_worker_terminal_event_updates_owner_team_mission_db(tmp_path: Path):
     from hermes_state import SessionDB
-    from tui_gateway import server
-    from tui_gateway.services import runtime_proxy
+    from tui_gateway.services import run_control
 
     db = SessionDB(tmp_path / "state.db")
-    monkeypatch.setattr(server, "_get_db", lambda: db)
-    frame = {
-        "jsonrpc": "2.0",
-        "method": "event",
-        "params": {
-            "type": "message.delta",
-            "session_id": "runtime-source-once",
-            "stored_session_id": "team-session-source-once",
-            "run_id": "run-source-once",
-            "turn_id": "turn-source-once",
-            "runtime_scope_key": "team:conversation-source:leader-conversation",
-            "seq": 77,
-            "payload": {"mode": "append", "delta": "一次", "text": "一次"},
-        },
-    }
-
-    first = runtime_proxy._record_relayed_runtime_event(frame)
-    second = runtime_proxy._record_relayed_runtime_event(frame)
-
-    assert first.allow_direct_relay is True
-    assert second.delivered_transports == []
-    assert second.allow_direct_relay is False
-    events = db.list_run_events("team-session-source-once")
-    assert len(events) == 1
-    assert events[0]["payload"]["runtime_source_seq"] == 77
-    db.close()
-
-
-@pytest.mark.skip(reason="Phase 6: legacy bridge relay deleted")
-def test_runtime_proxy_does_not_duplicate_runtime_frame_already_in_state(monkeypatch, tmp_path: Path):
-    from hermes_state import SessionDB
-    from tui_gateway import server
-    from tui_gateway.services import runtime_proxy
-
-    db = SessionDB(tmp_path / "state.db")
-    monkeypatch.setattr(server, "_get_db", lambda: db)
     db.append_run_event(
-        "team-session-source-state",
+        "team:mission-1:node:node-verifier",
         {
-            "type": "message.delta",
-            "session_id": "runtime-source-state",
-            "stored_session_id": "team-session-source-state",
-            "run_id": "run-source-state",
-            "turn_id": "turn-source-state",
-            "runtime_scope_key": "team:conversation-source:leader-conversation",
-            "seq": 77,
-            "payload": {"mode": "append", "delta": "原始", "text": "原始", "offset": 0},
+            "type": "mission.node.started",
+            "session_id": "runtime-verifier",
+            "stored_session_id": "team:mission-1:node:node-verifier",
+            "run_id": "run-verifier",
+            "turn_id": "turn-verifier",
+            "runtime_scope_key": "profile:agent-7:version:v1",
+            "seq": 331,
+            "payload": {"node_id": "node-verifier"},
         },
     )
-    frame = {
-        "jsonrpc": "2.0",
-        "method": "event",
-        "params": {
-            "type": "message.delta",
-            "session_id": "runtime-source-state",
-            "stored_session_id": "team-session-source-state",
-            "run_id": "run-source-state",
-            "turn_id": "turn-source-state",
-            "runtime_scope_key": "team:conversation-source:leader-conversation",
-            "seq": 77,
-            "payload": {"mode": "append", "delta": "原始", "text": "原始", "offset": 0},
+
+    db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="supervised_mission")
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="node-verifier",
+        kind="verifier",
+        title="Verifier",
+        status="running",
+        runtime_scope_key="profile:agent-7:version:v1",
+    )
+    db.upsert_run(
+        run_id="run-verifier",
+        session_id="team:mission-1:node:node-verifier",
+        runtime_scope_key="profile:agent-7:version:v1",
+        turn_id="turn-verifier",
+        runtime_session_id="runtime-verifier",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-1",
+        node_id="node-verifier",
+        run_id="run-verifier",
+        session_id="team:mission-1:node:node-verifier",
+        runtime_session_id="runtime-verifier",
+        runtime_scope_key="profile:agent-7:version:v1",
+        role="verifier",
+    )
+
+    run_control.publish_recorded_event(
+        {
+            "type": "message.complete",
+            "session_id": "runtime-verifier",
+            "stored_session_id": "team:mission-1:node:node-verifier",
+            "run_id": "run-verifier",
+            "turn_id": "turn-verifier",
+            "runtime_scope_key": "profile:agent-7:version:v1",
+            "seq": 331,
+            "payload": {
+                "status": "complete",
+                "text": "verification passed",
+            },
         },
-    }
+        db=db,
+    )
 
-    result = runtime_proxy._record_relayed_runtime_event(frame)
+    node = db.get_team_mission_node("mission-1", "node-verifier")
+    run = db.get_run("run-verifier")
+    assert node["status"] == "completed"
+    assert node["metadata"]["last_run_terminal_status"] == "completed"
+    assert node["metadata"]["last_run_terminal_seq"] == 2
+    assert run["status"] == "completed"
 
-    assert result.delivered_transports == []
-    assert result.allow_direct_relay is True
-    events = db.list_run_events("team-session-source-state")
-    assert len(events) == 1
-    assert events[0]["seq"] == 77
-    assert "runtime_source_seq" not in events[0]["payload"]
+    run_control.terminate_run(
+        stored_session_id="team:mission-1:node:node-verifier",
+        run_id="run-verifier",
+        turn_id="turn-verifier",
+        runtime_scope_key="profile:agent-7:version:v1",
+        runtime_session_id="runtime-verifier",
+        status="failed",
+        message="prompt worker terminal event did not close active run",
+        db=db,
+    )
+
+    node = db.get_team_mission_node("mission-1", "node-verifier")
+    run = db.get_run("run-verifier")
+    assert node["status"] == "completed"
+    assert node["metadata"]["last_run_terminal_status"] == "completed"
+    assert run["status"] == "completed"
     db.close()
 
 
@@ -4333,7 +4324,8 @@ def test_run_control_subscription_poll_delivers_new_append_after_direct_delivery
         "payload": {"mode": "append", "text": "你", "delta": "你", "offset": 0},
     }
     try:
-        run_control.remember_transport_delivery(transport, direct_event)
+        saved_direct = db.append_run_event(stable_session_id, direct_event)
+        run_control.remember_transport_delivery(transport, saved_direct)
         db.append_run_event(
             stable_session_id,
             {
@@ -5150,7 +5142,8 @@ def test_team_mission_node_history_reads_runtime_from_hermes_store(monkeypatch, 
     assert result["messages"][0]["text"] == "final answer"
     assert result["messages"][0]["metadata"]["run_id"] == "run-worker"
     assert result["run_events"][0]["type"] == "message.complete"
-    assert result["run_events"][0]["seq"] == 7
+    assert result["run_events"][0]["seq"] == 1
+    assert result["run_events"][0]["runtime_source_seq"] == 7
     assert result["run_events"][0]["activity_id"] == "act-node:mission-1:node-worker"
     assert result["source"]["node_id"] == "node-worker"
 

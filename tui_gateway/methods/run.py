@@ -89,7 +89,7 @@ def _mark_registered_run_failed(
     db = _run_db_for_stable_session(stored_session_id)
     if db is None or not run_id or not stored_session_id:
         return
-    run_control.publish_run_terminal_event(
+    run_control.terminate_run(
         stored_session_id=stored_session_id,
         run_id=run_id,
         turn_id=turn_id,
@@ -347,7 +347,7 @@ def _(rid, params: dict) -> dict:
         or ""
     ).strip()
     message = str(params.get("message") or params.get("error") or "run failed").strip()
-    event = run_control.publish_run_terminal_event(
+    event = run_control.terminate_run(
         stored_session_id=stable_session_id,
         run_id=run_id,
         runtime_session_id=str(state.get("runtime_session_id") or ""),
@@ -487,7 +487,7 @@ def _(rid, params: dict) -> dict:
             try:
                 state = run_control.get_run(run_id, db=db) or {}
                 session_id = str(state.get("stored_session_id") or state.get("session_id") or stable_session_id)
-                event = run_control.publish_run_terminal_event(
+                event = run_control.terminate_run(
                     stored_session_id=session_id,
                     run_id=run_id,
                     runtime_session_id=str(state.get("runtime_session_id") or state.get("session_id") or ""),

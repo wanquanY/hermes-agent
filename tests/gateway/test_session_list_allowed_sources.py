@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from hermes_state import SessionDB
 from tui_gateway import server
-from tui_gateway.services import run_control, runtime_proxy
+from tui_gateway.services import run_control, runtime_scope
 
 
 class _StubDB:
@@ -41,6 +41,24 @@ def _call(limit: int | None = None):
         "method": "session.list",
         "params": params,
     })
+
+
+def _route_control_plane_to_home(monkeypatch, home) -> None:
+    monkeypatch.setenv("DOVIE_HERMES_CONTROL_HOME", str(home))
+    monkeypatch.setattr(server, "_db_by_home", {})
+    monkeypatch.setattr(server, "_db_error_by_home", {})
+
+
+def _dovie_profile_without_home(
+    *,
+    profile_id: str = "agent-a",
+    version_id: str = "version-1",
+) -> dict:
+    return {
+        "id": profile_id,
+        "agentProfileVersionId": version_id,
+        "runtimeScopeKey": f"profile:{profile_id}:version:{version_id}",
+    }
 
 
 def test_session_list_surfaces_all_user_facing_sources(monkeypatch):
@@ -110,21 +128,15 @@ def test_session_list_surfaces_team_conversation_route_metadata(tmp_path, monkey
     finally:
         seed_db.close()
 
-    monkeypatch.setattr(server, "_db_by_home", {})
-    monkeypatch.setattr(server, "_db_error_by_home", {})
+    _route_control_plane_to_home(monkeypatch, profile_home)
     try:
         resp = server.handle_request({
             "id": "1",
             "method": "session.list",
-            "params": {
-                "dovie_profile": {
-                    "id": "agent-a",
-                    "agentProfileVersionId": "version-1",
-                    "runtimeScopeKey": "profile:agent-a:version:version-1",
-                    "hermesHomePath": str(profile_home),
+                "params": {
+                    "dovie_profile": _dovie_profile_without_home(),
                 },
-            },
-        })
+            })
         assert "error" not in resp
         [item] = resp["result"]["sessions"]
         assert item["id"] == "team-session-1"
@@ -189,21 +201,15 @@ def test_session_list_hides_team_mission_node_run_sessions(tmp_path, monkeypatch
     finally:
         seed_db.close()
 
-    monkeypatch.setattr(server, "_db_by_home", {})
-    monkeypatch.setattr(server, "_db_error_by_home", {})
+    _route_control_plane_to_home(monkeypatch, profile_home)
     try:
         resp = server.handle_request({
             "id": "1",
             "method": "session.list",
-            "params": {
-                "dovie_profile": {
-                    "id": "agent-a",
-                    "agentProfileVersionId": "version-1",
-                    "runtimeScopeKey": "profile:agent-a:version:version-1",
-                    "hermesHomePath": str(profile_home),
+                "params": {
+                    "dovie_profile": _dovie_profile_without_home(),
                 },
-            },
-        })
+            })
         assert "error" not in resp
         ids = [item["id"] for item in resp["result"]["sessions"]]
         assert ids == ["team-session-1"]
@@ -339,24 +345,18 @@ def test_session_list_reads_requested_dovie_profile_home(tmp_path, monkeypatch):
     finally:
         seed_db.close()
 
-    monkeypatch.setattr(server, "_db_by_home", {})
-    monkeypatch.setattr(server, "_db_error_by_home", {})
+    _route_control_plane_to_home(monkeypatch, profile_home)
     try:
         resp = server.handle_request({
             "id": "1",
             "method": "session.list",
-            "params": {
-                "agentProfileId": "agent-a",
-                "agentProfileVersionId": "version-1",
-                "runtimeScopeKey": "profile:agent-a:version:version-1",
-                "dovie_profile": {
-                    "id": "agent-a",
+                "params": {
+                    "agentProfileId": "agent-a",
                     "agentProfileVersionId": "version-1",
                     "runtimeScopeKey": "profile:agent-a:version:version-1",
-                    "hermesHomePath": str(profile_home),
+                    "dovie_profile": _dovie_profile_without_home(),
                 },
-            },
-        })
+            })
         assert resp["result"]["sessions"][0]["id"] == "stored-1"
         assert resp["result"]["sessions"][0]["preview"] == "hello from profile db"
     finally:
@@ -383,24 +383,18 @@ def test_team_conversation_list_reads_requested_dovie_profile_home(tmp_path, mon
     finally:
         seed_db.close()
 
-    monkeypatch.setattr(server, "_db_by_home", {})
-    monkeypatch.setattr(server, "_db_error_by_home", {})
+    _route_control_plane_to_home(monkeypatch, profile_home)
     try:
         resp = server.handle_request({
             "id": "1",
             "method": "team_mission.conversation.list",
-            "params": {
-                "agentProfileId": "agent-a",
-                "agentProfileVersionId": "version-1",
-                "runtimeScopeKey": "profile:agent-a:version:version-1",
-                "dovie_profile": {
-                    "id": "agent-a",
+                "params": {
+                    "agentProfileId": "agent-a",
                     "agentProfileVersionId": "version-1",
                     "runtimeScopeKey": "profile:agent-a:version:version-1",
-                    "hermesHomePath": str(profile_home),
+                    "dovie_profile": _dovie_profile_without_home(),
                 },
-            },
-        })
+            })
         assert resp["result"]["conversations"][0]["conversation_id"] == "conversation-1"
         assert resp["result"]["conversations"][0]["title"] == "Profile scoped team conversation"
     finally:
@@ -412,24 +406,18 @@ def test_team_conversation_list_returns_empty_for_profile_home_without_state_db(
     """Enumerating every profile/version scope should not turn unused homes into UI errors."""
     profile_home = tmp_path / "empty-profile-home"
 
-    monkeypatch.setattr(server, "_db_by_home", {})
-    monkeypatch.setattr(server, "_db_error_by_home", {})
+    _route_control_plane_to_home(monkeypatch, profile_home)
     try:
         resp = server.handle_request({
             "id": "1",
             "method": "team_mission.conversation.list",
-            "params": {
-                "agentProfileId": "agent-a",
-                "agentProfileVersionId": "version-empty",
-                "runtimeScopeKey": "profile:agent-a:version:version-empty",
-                "dovie_profile": {
-                    "id": "agent-a",
+                "params": {
+                    "agentProfileId": "agent-a",
                     "agentProfileVersionId": "version-empty",
                     "runtimeScopeKey": "profile:agent-a:version:version-empty",
-                    "hermesHomePath": str(profile_home),
+                    "dovie_profile": _dovie_profile_without_home(version_id="version-empty"),
                 },
-            },
-        })
+            })
         assert "error" not in resp
         assert resp["result"]["conversations"] == []
         assert not (profile_home / "state.db").exists()
@@ -439,7 +427,7 @@ def test_team_conversation_list_returns_empty_for_profile_home_without_state_db(
 
 
 def test_team_conversation_list_is_control_plane_read_for_profile_scope():
-    assert runtime_proxy.should_proxy_to_runtime({
+    assert runtime_scope.should_route_to_worker({
         "id": "1",
         "method": "team_mission.conversation.list",
         "params": {
@@ -496,8 +484,7 @@ def test_team_conversation_list_projects_active_mission_runtime_state(tmp_path, 
     finally:
         seed_db.close()
 
-    monkeypatch.setattr(server, "_db_by_home", {})
-    monkeypatch.setattr(server, "_db_error_by_home", {})
+    _route_control_plane_to_home(monkeypatch, profile_home)
     try:
         resp = server.handle_request({
             "id": "1",
@@ -582,8 +569,7 @@ def test_team_conversation_list_uses_active_member_run_bindings_when_mission_sta
     finally:
         seed_db.close()
 
-    monkeypatch.setattr(server, "_db_by_home", {})
-    monkeypatch.setattr(server, "_db_error_by_home", {})
+    _route_control_plane_to_home(monkeypatch, profile_home)
     try:
         resp = server.handle_request({
             "id": "1",
@@ -670,21 +656,15 @@ def test_team_conversation_list_projects_final_deliverable_and_artifacts(tmp_pat
     finally:
         seed_db.close()
 
-    monkeypatch.setattr(server, "_db_by_home", {})
-    monkeypatch.setattr(server, "_db_error_by_home", {})
+    _route_control_plane_to_home(monkeypatch, profile_home)
     try:
         resp = server.handle_request({
             "id": "1",
             "method": "team_mission.conversation.list",
-            "params": {
-                "dovie_profile": {
-                    "id": "agent-a",
-                    "agentProfileVersionId": "version-1",
-                    "runtimeScopeKey": "profile:agent-a:version:version-1",
-                    "hermesHomePath": str(profile_home),
+                "params": {
+                    "dovie_profile": _dovie_profile_without_home(),
                 },
-            },
-        })
+            })
         assert "error" not in resp
         [conversation] = resp["result"]["conversations"]
         assert conversation["conversation_id"] == "conversation-completed"
@@ -731,21 +711,15 @@ def test_team_conversation_list_prioritizes_approval_gate_state(tmp_path, monkey
     finally:
         seed_db.close()
 
-    monkeypatch.setattr(server, "_db_by_home", {})
-    monkeypatch.setattr(server, "_db_error_by_home", {})
+    _route_control_plane_to_home(monkeypatch, profile_home)
     try:
         resp = server.handle_request({
             "id": "1",
             "method": "team_mission.conversation.list",
-            "params": {
-                "dovie_profile": {
-                    "id": "agent-a",
-                    "agentProfileVersionId": "version-1",
-                    "runtimeScopeKey": "profile:agent-a:version:version-1",
-                    "hermesHomePath": str(profile_home),
+                "params": {
+                    "dovie_profile": _dovie_profile_without_home(),
                 },
-            },
-        })
+            })
         assert "error" not in resp
         [conversation] = resp["result"]["conversations"]
         assert conversation["conversation_id"] == "conversation-approval"
@@ -851,7 +825,7 @@ def test_conversation_activity_list_projects_run_and_approval_state(monkeypatch)
 
 
 def test_conversation_activity_list_is_control_plane_read_for_profile_scope():
-    assert runtime_proxy.should_proxy_to_runtime({
+    assert runtime_scope.should_route_to_worker({
         "id": "1",
         "method": "conversation.activity.list",
         "params": {
@@ -934,7 +908,6 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
     assert resp["result"]["messages"] == [
         {"role": "user", "text": "older", "message_id": "10", "timestamp": 10.0},
     ]
-    assert resp["result"]["toolEvents"][0]["tool_call_id"] == "tool-1"
     assert resp["result"]["runEvents"][0]["type"] == "tool.complete"
     assert resp["result"]["runEvents"][0]["payload"]["result"]["draft"]["id"] == "draft-1"
     assert resp["result"]["pageInfo"]["hasMoreBefore"] is False

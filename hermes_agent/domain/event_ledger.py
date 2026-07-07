@@ -26,6 +26,7 @@ from enum import Enum
 from typing import Any, Iterable
 
 from hermes_agent.domain.exceptions import SeqAllocatorBusy
+from hermes_agent.domain.seq_allocator import allocate_only
 
 
 _logger = logging.getLogger(__name__)
@@ -177,6 +178,633 @@ class EventLedger:
                     _logger.warning("EventLedger.append rollback failed: %s", rb_exc)
             raise
 
+    def append_runtime_frame(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        turn_id: str,
+        runtime_session_id: str,
+        runtime_scope_key: str,
+        participant_id: str,
+        activity_id: str | None,
+        event_type: str,
+        seq: int,
+        timestamp: float,
+        payload_json: str,
+        event_json: str,
+        status: str,
+        frame_blob: bytes | None,
+        frame_format: str,
+        retention_class: str,
+        interaction_request_id: str | None = None,
+        interaction_kind: str | None = None,
+        interaction_status: str | None = None,
+        anchor_seq: int = 0,
+        projection_state: str = "raw",
+        runtime_source_seq: int = 0,
+    ) -> None:
+        """Append a fully materialized runtime frame row.
+
+        This is the transitional production bridge for ``SessionDB.append_run_event``:
+        the gateway still owns frame normalization and projections, while this
+        domain service owns the physical ``run_events`` INSERT.
+        """
+
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO run_events (
+                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                participant_id, activity_id, event_type,
+                seq, timestamp, payload_json, event_json, status,
+                frame_blob, frame_format, retention_class,
+                interaction_request_id, interaction_kind, interaction_status, anchor_seq,
+                projection_state,
+                runtime_source_seq
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(session_id or ""),
+                str(run_id or ""),
+                str(turn_id or ""),
+                str(runtime_session_id or ""),
+                str(runtime_scope_key or ""),
+                str(participant_id or ""),
+                activity_id,
+                str(event_type or ""),
+                int(seq),
+                float(timestamp),
+                payload_json,
+                event_json,
+                str(status or ""),
+                frame_blob,
+                str(frame_format or ""),
+                str(retention_class or ""),
+                interaction_request_id,
+                interaction_kind,
+                interaction_status,
+                int(anchor_seq or 0),
+                str(projection_state or "raw"),
+                int(runtime_source_seq or 0),
+            ),
+        )
+
+    def mark_projected_tool_event(self, *, row_id: int, tool_event_id: str) -> None:
+        if int(row_id or 0) <= 0 or not str(tool_event_id or "").strip():
+            return
+        self._conn.execute(
+            """
+            UPDATE run_events
+            SET projected_tool_event_id = ?,
+                projection_state = COALESCE(NULLIF(projection_state, ''), 'raw')
+            WHERE id = ?
+            """,
+            (str(tool_event_id or "").strip(), int(row_id)),
+        )
+
+    def mark_projected_message(self, *, row_id: int, conversation_message_id: str) -> None:
+        if int(row_id or 0) <= 0 or not str(conversation_message_id or "").strip():
+            return
+        self._conn.execute(
+            """
+            UPDATE run_events
+            SET projected_message_id = ?,
+                projection_state = 'projected'
+            WHERE id = ?
+            """,
+            (str(conversation_message_id or "").strip(), int(row_id)),
+        )
+
+    def mark_activity_id(self, *, row_id: int, activity_id: str) -> None:
+        if int(row_id or 0) <= 0 or not str(activity_id or "").strip():
+            return
+        self._conn.execute(
+            """
+            UPDATE run_events
+            SET activity_id = ?
+            WHERE id = ?
+            """,
+            (str(activity_id or "").strip(), int(row_id)),
+        )
+
+    def update_runtime_source_seq(self, *, row_id: int, runtime_source_seq: int) -> None:
+        if int(row_id or 0) <= 0:
+            return
+        self._conn.execute(
+            """
+            UPDATE run_events
+            SET runtime_source_seq = ?
+            WHERE id = ?
+            """,
+            (int(runtime_source_seq or 0), int(row_id)),
+        )
+
+    def update_frame_columns(
+        self,
+        *,
+        row_id: int,
+        frame_blob: bytes | None,
+        frame_format: str,
+        retention_class: str = "",
+        projected_message_id: str = "",
+        projected_tool_event_id: str = "",
+        projection_state: str = "",
+    ) -> None:
+        if int(row_id or 0) <= 0:
+            return
+        self._conn.execute(
+            """
+            UPDATE run_events
+            SET frame_blob = ?,
+                frame_format = ?,
+                retention_class = COALESCE(NULLIF(?, ''), retention_class),
+                projected_message_id = COALESCE(NULLIF(?, ''), projected_message_id),
+                projected_tool_event_id = COALESCE(NULLIF(?, ''), projected_tool_event_id),
+                projection_state = COALESCE(NULLIF(?, ''), projection_state)
+            WHERE id = ?
+            """,
+            (
+                frame_blob,
+                str(frame_format or ""),
+                str(retention_class or ""),
+                str(projected_message_id or ""),
+                str(projected_tool_event_id or ""),
+                str(projection_state or ""),
+                int(row_id),
+            ),
+        )
+
+    def rewrite_referenced_frame(
+        self,
+        *,
+        row_id: int,
+        payload_json: str,
+        event_json: str,
+        frame_blob: bytes | None,
+        frame_format: str,
+        projected_message_id: str = "",
+        projected_tool_event_id: str = "",
+        runtime_source_seq: int = 0,
+    ) -> None:
+        if int(row_id or 0) <= 0:
+            return
+        self._conn.execute(
+            """
+            UPDATE run_events
+            SET payload_json = ?,
+                event_json = ?,
+                frame_blob = ?,
+                frame_format = ?,
+                projected_message_id = COALESCE(NULLIF(?, ''), projected_message_id),
+                projected_tool_event_id = COALESCE(NULLIF(?, ''), projected_tool_event_id),
+                projection_state = 'referenced',
+                runtime_source_seq = ?
+            WHERE id = ?
+            """,
+            (
+                str(payload_json or ""),
+                str(event_json or ""),
+                frame_blob,
+                str(frame_format or ""),
+                str(projected_message_id or ""),
+                str(projected_tool_event_id or ""),
+                int(runtime_source_seq or 0),
+                int(row_id),
+            ),
+        )
+
+    def rewrite_runtime_frame_row(
+        self,
+        *,
+        row_id: int,
+        run_id: str,
+        turn_id: str,
+        runtime_session_id: str,
+        runtime_scope_key: str,
+        participant_id: str,
+        activity_id: str | None,
+        seq: int,
+        timestamp: float,
+        payload_json: str,
+        event_json: str,
+        status: str,
+        frame_blob: bytes | None,
+        frame_format: str,
+        retention_class: str,
+        runtime_source_seq: int = 0,
+    ) -> None:
+        """Rewrite one existing row during ledger-owned compaction/coalescing.
+
+        This is not a public append path: it preserves the current row id and is
+        reserved for maintenance flows that merge multiple runtime fragments
+        into a single canonical frame.
+        """
+
+        if int(row_id or 0) <= 0:
+            return
+        self._conn.execute(
+            """
+            UPDATE run_events
+            SET run_id = ?,
+                turn_id = ?,
+                runtime_session_id = ?,
+                runtime_scope_key = ?,
+                participant_id = ?,
+                activity_id = ?,
+                seq = ?,
+                timestamp = ?,
+                payload_json = ?,
+                event_json = ?,
+                status = ?,
+                frame_blob = ?,
+                frame_format = ?,
+                retention_class = ?,
+                projection_state = COALESCE(NULLIF(projection_state, ''), 'raw'),
+                runtime_source_seq = ?
+            WHERE id = ?
+            """,
+            (
+                str(run_id or ""),
+                str(turn_id or ""),
+                str(runtime_session_id or ""),
+                str(runtime_scope_key or ""),
+                str(participant_id or ""),
+                activity_id,
+                int(seq),
+                float(timestamp),
+                str(payload_json or ""),
+                str(event_json or ""),
+                str(status or ""),
+                frame_blob,
+                str(frame_format or ""),
+                str(retention_class or ""),
+                int(runtime_source_seq or 0),
+                int(row_id),
+            ),
+        )
+
+    def rewrite_compacted_frame_row(
+        self,
+        *,
+        row_id: int,
+        seq: int,
+        participant_id: str,
+        payload_json: str,
+        event_json: str,
+        frame_blob: bytes | None,
+        frame_format: str,
+        retention_class: str,
+        runtime_source_seq: int = 0,
+        run_id: str | None = None,
+        turn_id: str | None = None,
+        runtime_session_id: str | None = None,
+        runtime_scope_key: str | None = None,
+        activity_id: str | None = None,
+        timestamp: float | None = None,
+    ) -> None:
+        """Rewrite a retained row after pruning or stream compaction.
+
+        Optional identity fields are only touched when provided; this keeps
+        older compaction callers from accidentally blanking transcript anchors.
+        """
+
+        if int(row_id or 0) <= 0:
+            return
+        assignments = [
+            "seq = ?",
+            "participant_id = ?",
+            "payload_json = ?",
+            "event_json = ?",
+            "frame_blob = ?",
+            "frame_format = ?",
+            "retention_class = COALESCE(NULLIF(retention_class, ''), ?)",
+            "projection_state = COALESCE(NULLIF(projection_state, ''), 'raw')",
+            "runtime_source_seq = ?",
+        ]
+        params: list[Any] = [
+            int(seq),
+            str(participant_id or ""),
+            str(payload_json or ""),
+            str(event_json or ""),
+            frame_blob,
+            str(frame_format or ""),
+            str(retention_class or ""),
+            int(runtime_source_seq or 0),
+        ]
+        if run_id is not None:
+            assignments.append("run_id = ?")
+            params.append(str(run_id or ""))
+        if turn_id is not None:
+            assignments.append("turn_id = ?")
+            params.append(str(turn_id or ""))
+        if runtime_session_id is not None:
+            assignments.append("runtime_session_id = ?")
+            params.append(str(runtime_session_id or ""))
+        if runtime_scope_key is not None:
+            assignments.append("runtime_scope_key = ?")
+            params.append(str(runtime_scope_key or ""))
+        if activity_id is not None:
+            assignments.append("activity_id = ?")
+            params.append(str(activity_id or ""))
+        if timestamp is not None:
+            assignments.append("timestamp = ?")
+            params.append(float(timestamp or 0))
+        params.append(int(row_id))
+        self._conn.execute(
+            f"""
+            UPDATE run_events
+            SET {", ".join(assignments)}
+            WHERE id = ?
+            """,
+            tuple(params),
+        )
+
+    def delete_rows_by_id(self, row_ids: Iterable[int]) -> int:
+        ids = [int(row_id) for row_id in row_ids if int(row_id or 0) > 0]
+        if not ids:
+            return 0
+        deleted = 0
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = self._conn.execute(
+                f"DELETE FROM run_events WHERE id IN ({placeholders})",
+                tuple(chunk),
+            )
+            deleted += int(cursor.rowcount or 0)
+        return deleted
+
+    def delete_sessions(self, session_ids: Iterable[str]) -> int:
+        ids = [str(session_id or "").strip() for session_id in session_ids if str(session_id or "").strip()]
+        if not ids:
+            return 0
+        deleted = 0
+        for start in range(0, len(ids), 250):
+            chunk = ids[start:start + 250]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = self._conn.execute(
+                f"""
+                DELETE FROM run_events
+                WHERE session_id IN ({placeholders})
+                   OR runtime_session_id IN ({placeholders})
+                """,
+                tuple(chunk + chunk),
+            )
+            deleted += int(cursor.rowcount or 0)
+        return deleted
+
+    def list_runtime_rows(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        active_only: bool = False,
+        active_statuses: Iterable[str] = (),
+        runtime_scope_key: str = "",
+        run_id: str = "",
+        activity_id: str = "",
+        include_internal: bool = False,
+        limit: int = 2000,
+    ) -> list[Any]:
+        """Return physical ``run_events`` rows for canonical replay.
+
+        This keeps the query contract in the ledger while letting transitional
+        SessionDB callers continue using their legacy row decoder.
+        """
+
+        stable_sid = str(session_id or "").strip()
+        if not stable_sid:
+            return []
+        bounded_limit = max(1, min(int(limit or 2000), 5000))
+        clauses = ["session_id = ?", "seq > ?"]
+        params: list[Any] = [stable_sid, int(after_seq or 0)]
+        scope = str(runtime_scope_key or "").strip()
+        if scope:
+            clauses.append("COALESCE(runtime_scope_key, session_id) = ?")
+            params.append(scope)
+        normalized_run_id = str(run_id or "").strip()
+        if normalized_run_id:
+            clauses.append("run_id = ?")
+            params.append(normalized_run_id)
+        normalized_activity_id = str(activity_id or "").strip()
+        if normalized_activity_id:
+            clauses.append("activity_id = ?")
+            params.append(normalized_activity_id)
+        if active_only:
+            statuses = [str(status or "").strip() for status in active_statuses if str(status or "").strip()]
+            if not statuses:
+                return []
+            placeholders = ",".join("?" for _ in statuses)
+            clauses.append(
+                "run_id IN ("
+                "SELECT run_id FROM runs WHERE session_id = ? "
+                f"AND status IN ({placeholders})"
+                ")"
+            )
+            params.append(stable_sid)
+            params.extend(statuses)
+        if not include_internal:
+            clauses.append("event_type NOT LIKE '_internal.%'")
+        params.append(bounded_limit)
+        rows = self._conn.execute(
+            f"""
+            SELECT *
+            FROM run_events
+            WHERE {' AND '.join(clauses)}
+            ORDER BY seq ASC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return list(rows)
+
+    def list_activity_rows(
+        self,
+        activity_id: str,
+        *,
+        after_seq: int = 0,
+        include_internal: bool = False,
+        limit: int = 2000,
+    ) -> list[Any]:
+        normalized_activity_id = str(activity_id or "").strip()
+        if not normalized_activity_id:
+            return []
+        bounded_limit = max(1, min(int(limit or 2000), 5000))
+        clauses = ["activity_id = ?", "seq > ?"]
+        params: list[Any] = [normalized_activity_id, int(after_seq or 0)]
+        if not include_internal:
+            clauses.append("event_type NOT LIKE '_internal.%'")
+        params.append(bounded_limit)
+        rows = self._conn.execute(
+            f"""
+            SELECT *
+            FROM run_events
+            WHERE {' AND '.join(clauses)}
+            ORDER BY seq ASC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return list(rows)
+
+    def list_mission_activity_rows(
+        self,
+        mission_id: str,
+        *,
+        after_seq: int = 0,
+        include_internal: bool = False,
+        limit: int = 2000,
+        reverse: bool = False,
+    ) -> list[Any]:
+        stable_mission = str(mission_id or "").strip()
+        if not stable_mission:
+            return []
+        bounded_limit = max(1, min(int(limit or 2000), 5000))
+        clauses = [
+            "(activity_id = ? OR activity_id LIKE ?)",
+            "seq > ?",
+        ]
+        params: list[Any] = [
+            f"mission:{stable_mission}",
+            f"act-node:{stable_mission}:%",
+            int(after_seq or 0),
+        ]
+        if not include_internal:
+            clauses.append("event_type NOT LIKE '_internal.%'")
+        params.append(bounded_limit)
+        order_direction = "DESC" if reverse else "ASC"
+        outer_direction = "ASC"
+        rows = self._conn.execute(
+            f"""
+            SELECT *
+            FROM (
+                SELECT *
+                FROM run_events
+                WHERE {' AND '.join(clauses)}
+                ORDER BY seq {order_direction}, id {order_direction}
+                LIMIT ?
+            )
+            ORDER BY seq {outer_direction}, id {outer_direction}
+            """,
+            tuple(params),
+        ).fetchall()
+        return list(rows)
+
+    def list_tool_event_projection_rows(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        run_id: str = "",
+        direction: str = "after",
+        limit: int = 2000,
+    ) -> list[Any]:
+        """Read legacy ``tool_events`` projection rows.
+
+        ``tool_events`` is a read model derived from ``run_events``. Keeping
+        this accessor on the ledger prevents SessionDB callers from treating
+        the projection as an independent storage owner.
+        """
+
+        stable_sid = str(session_id or "").strip()
+        if not stable_sid:
+            return []
+        bounded_limit = max(1, min(int(limit or 2000), 5000))
+        normalized_direction = str(direction or "after").strip().lower()
+        clauses = ["session_id = ?", "COALESCE(seq_last, seq_start, 0) > ?"]
+        params: list[Any] = [stable_sid, int(after_seq or 0)]
+        normalized_run_id = str(run_id or "").strip()
+        if normalized_run_id:
+            clauses.append("COALESCE(run_id, '') = ?")
+            params.append(normalized_run_id)
+        params.append(bounded_limit)
+        order_expr = "COALESCE(seq_start, seq_last, id)"
+        if normalized_direction == "tail":
+            rows = self._conn.execute(
+                f"""
+                SELECT *
+                FROM (
+                    SELECT *
+                    FROM tool_events
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY {order_expr} DESC, id DESC
+                    LIMIT ?
+                )
+                ORDER BY {order_expr} ASC, id ASC
+                """,
+                tuple(params),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                f"""
+                SELECT *
+                FROM tool_events
+                WHERE {' AND '.join(clauses)}
+                ORDER BY {order_expr} ASC, id ASC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return list(rows)
+
+    def list_filtered_rows(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        runtime_scope_key: str = "",
+        event_types: Iterable[str] = (),
+        event_type_prefix: str = "",
+        payload_contains: str = "",
+        limit: int = 2000,
+    ) -> list[Any]:
+        stable_sid = str(session_id or "").strip()
+        if not stable_sid:
+            return []
+        bounded_limit = max(1, min(int(limit or 2000), 20000))
+        clauses = ["e.session_id = ?", "e.seq > ?"]
+        params: list[Any] = [stable_sid, int(after_seq or 0)]
+        scope = str(runtime_scope_key or "").strip()
+        if scope:
+            clauses.append("COALESCE(e.runtime_scope_key, e.session_id) = ?")
+            params.append(scope)
+        normalized_types = [
+            str(item or "").strip()
+            for item in event_types
+            if str(item or "").strip()
+        ]
+        if normalized_types:
+            placeholders = ", ".join("?" for _ in normalized_types)
+            clauses.append(f"e.event_type IN ({placeholders})")
+            params.extend(normalized_types)
+        else:
+            prefix = str(event_type_prefix or "").strip()
+            if prefix:
+                clauses.append("e.event_type LIKE ?")
+                params.append(f"{prefix}%")
+        contains = str(payload_contains or "").strip()
+        from_sql = "run_events e"
+        if contains:
+            from_sql = (
+                "run_events e "
+                "JOIN run_event_search_index idx ON idx.run_event_id = e.id"
+            )
+            clauses.append("instr(idx.search_text, ?) > 0")
+            params.append(contains)
+        params.append(bounded_limit)
+        rows = self._conn.execute(
+            f"""
+            SELECT e.*
+            FROM {from_sql}
+            WHERE {' AND '.join(clauses)}
+            ORDER BY e.seq ASC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return list(rows)
+
     def list(
         self,
         session_id: str,
@@ -226,38 +854,7 @@ class EventLedger:
 
     def _allocate_seq(self, session_id: str, now: float) -> int:
         try:
-            # Ensure seq_counter row exists (bootstrap from run_events MAX).
-            self._conn.execute(
-                """
-                INSERT OR IGNORE INTO seq_counter (session_id, next_seq, updated_at)
-                SELECT ?, COALESCE(MAX(seq), 0) + 1, ?
-                  FROM run_events
-                 WHERE session_id = ?
-                """,
-                (session_id, now, session_id),
-            )
-            self._conn.execute(
-                """
-                INSERT OR IGNORE INTO seq_counter (session_id, next_seq, updated_at)
-                VALUES (?, 1, ?)
-                """,
-                (session_id, now),
-            )
-            row = self._conn.execute(
-                """
-                UPDATE seq_counter
-                   SET next_seq = next_seq + 1,
-                       updated_at = ?
-                 WHERE session_id = ?
-                RETURNING next_seq - 1
-                """,
-                (now, session_id),
-            ).fetchone()
-            if row is None:
-                raise SeqAllocatorBusy(
-                    f"seq_counter unavailable for session {session_id}"
-                )
-            return int(row[0])
+            return allocate_only(self._conn, session_id=session_id, updated_at=now)
         except sqlite3.OperationalError as exc:
             raise SeqAllocatorBusy(str(exc)) from exc
 

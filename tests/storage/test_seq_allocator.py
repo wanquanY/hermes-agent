@@ -122,6 +122,19 @@ def test_append_run_event_uses_allocator_not_inbound_runtime_seq(tmp_path: Path)
     assert int(counter["next_seq"]) == 3
 
 
+def test_next_run_event_seq_does_not_fallback_to_run_events_max(tmp_path: Path) -> None:
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("s-missing-counter", source="test")
+        db.append_run_event("s-missing-counter", _event(seq=100, run_id="run-1", index=1))
+        db._conn.execute("DELETE FROM seq_counter WHERE session_id = ?", ("s-missing-counter",))
+
+        assert db.next_run_event_seq("s-missing-counter") == 0
+        assert db.next_run_event_seq("s-missing-counter", fallback_seq=99) == 99
+    finally:
+        db.close()
+
+
 def test_append_run_event_allocates_unique_seq_under_parallel_writes(tmp_path: Path) -> None:
     db = SessionDB(tmp_path / "state.db")
     total_workers = 12

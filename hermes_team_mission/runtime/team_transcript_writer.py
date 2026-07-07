@@ -6,6 +6,7 @@ import time
 from pathlib import PurePath
 from typing import Any
 
+from hermes_agent.domain.event_ledger import EventLedger
 from hermes_conversation_message_identity import AssistantMessageIdentity
 from hermes_conversation_message_identity import assistant_conversation_message_id_for
 from hermes_conversation_message_identity import user_conversation_message_id_for
@@ -1552,14 +1553,9 @@ def backfill_unprojected_message_complete_events_locked(
         )
         if not conversation_message_id:
             continue
-        conn.execute(
-            """
-            UPDATE run_events
-               SET projected_message_id = ?,
-                   projection_state = 'projected'
-             WHERE id = ?
-            """,
-            (conversation_message_id, int(_row_value(row, "id") or 0)),
+        EventLedger(conn).mark_projected_message(
+            row_id=int(_row_value(row, "id") or 0),
+            conversation_message_id=conversation_message_id,
         )
         repaired += 1
     return repaired

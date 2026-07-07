@@ -7,6 +7,7 @@ from hermes_state_runs import orphaned_active_run_decision
 from hermes_state_run_event_codec import payload_from_run_event_row
 
 from .session_common import *
+from hermes_agent.domain.team_mission_audit_log import TeamMissionAuditLog
 
 
 class SessionDBTeamMissionGraphMixin:
@@ -1388,18 +1389,11 @@ class SessionDBTeamMissionGraphMixin:
                 return 0
             if not _is_terminal_mission_status(_row_value(mission_row, "status", "")):
                 return 0
-        placeholders = ",".join("?" for _ in _TEAM_MISSION_PRUNABLE_SOURCE_TYPES)
-
         def _do(conn: sqlite3.Connection) -> int:
-            cursor = conn.execute(
-                f"""
-                DELETE FROM team_mission_events
-                WHERE mission_id = ?
-                  AND source_event_type IN ({placeholders})
-                """,
-                (mission_id, *_TEAM_MISSION_PRUNABLE_SOURCE_TYPES),
+            return TeamMissionAuditLog(conn).prune_source_event_types(
+                mission_id=mission_id,
+                source_event_types=_TEAM_MISSION_PRUNABLE_SOURCE_TYPES,
             )
-            return int(cursor.rowcount or 0)
 
         return self._execute_write(_do)
 

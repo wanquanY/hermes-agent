@@ -44,6 +44,7 @@ def test_empty_database_init_applies_all_migrations(tmp_path: Path):
         "session_runtime_state",
         "tool_events",
         "team_mission_events",
+        "v3_activities",
         "activity_commands",
     }.issubset(tables)
     assert _schema_version(db_path) == SCHEMA_VERSION

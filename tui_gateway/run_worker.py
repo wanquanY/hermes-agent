@@ -1,9 +1,9 @@
 """Run-worker entry: stdin/stdout JSON-line subprocess that hosts the
 LLM runtime for one ``runtime_scope_key`` profile.
 
-Replaces the sub-sidecar process spawned by ``RuntimeWorkerPool``. The
-new worker does NOT open a websocket server — the main sidecar drives
-it over the worker's stdin and reads events back from its stdout.
+The worker is owned by ``WorkerSupervisor``. It does not open a websocket
+server; the main sidecar drives it over stdin and reads events back from
+stdout.
 
 Protocol (one JSON object per line, UTF-8, ``\\n``-terminated):
 
@@ -16,17 +16,13 @@ Protocol (one JSON object per line, UTF-8, ``\\n``-terminated):
       {"op":"shutdown"}
 
     outbound (worker → main)
-      {"op":"event", "params": {...}}            # 1:1 with the legacy
-                                                 # worker→main ws event
-                                                 # payload
+      {"op":"event", "params": {...}}
       {"op":"interactive.request", "kind", "request_id", "payload"}
       {"op":"run.terminal", "run_id", "status"}
       {"op":"log", "level", "text"}
 
-Phase 4a (this file) implemented the codec + a stub run loop suitable
-for unit tests. Phase 4c wired the run handler into the real agent
-library. Phase 5+ made this the sole worker-spawning path; the legacy
-``RuntimeWorkerPool`` proxy was deleted in Phase 6.
+This module owns the frame codec and the subprocess run loop used by the
+worker/supervisor protocol.
 """
 
 from __future__ import annotations

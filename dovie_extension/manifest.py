@@ -481,6 +481,8 @@ def _runtime_features_present() -> set[str]:
 
 
 def gateway_capabilities() -> dict[str, Any]:
+    from tui_gateway.services.contract_capabilities import timeline_contract_capabilities
+
     methods = sorted(_method_modules_present())
     state_features = sorted(_state_features_present())
     runtime_features = sorted(_runtime_features_present())
@@ -508,5 +510,6 @@ def gateway_capabilities() -> dict[str, Any]:
         "missingStateFeatures": missing_state_features,
         "missingRuntimeFeatures": missing_runtime_features,
         "missingCapabilities": missing_capabilities,
+        "timelineContract": timeline_contract_capabilities(),
         "ok": not missing_capabilities,
     }

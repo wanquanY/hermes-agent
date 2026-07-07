@@ -2,18 +2,15 @@
 
 Only ``hermes_agent/domain/event_ledger.py`` may issue ``INSERT / UPDATE /
 DELETE`` statements against ``run_events``. Everything else routes through
-``EventLedger.append``.
+``EventLedger``.
 
 **Prior version scanned only ``hermes_agent/`` — that scope was too narrow
 and produced a false green (audit 2026-07-07, docs/v3_audit_report.md
 §四 伪绿 1).** The production writers live at repo root
 (``hermes_state_runs.py:1676`` and ``:2704``), outside the ``hermes_agent/``
-tree. This file now scans the WHOLE repo and lists every writer.
-
-Until Phase E switch lands (spec §12 Phase E: `append_run_event` collapses
-into EventLedger, `team_mission_events` drops), the assertion is
-``xfail(strict=False)`` — the failure IS the reality signal; when it
-starts to *pass*, Phase E has landed and the xfail flips to a real green.
+tree. This file now scans the WHOLE repo and requires zero non-ledger
+writers. New physical mutations must be added as EventLedger methods and
+covered by domain tests.
 """
 
 from __future__ import annotations
@@ -21,9 +18,6 @@ from __future__ import annotations
 import ast
 import re
 from pathlib import Path
-
-import pytest
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -138,27 +132,14 @@ def test_j3_v3_tree_is_clean():
         )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "spec §12 Phase E switch not yet landed — legacy hermes_state_runs.py "
-        "and hermes_team_mission/state/event_log.py still write run_events / "
-        "team_mission_events directly. This xfail flips to xpassed when Phase E "
-        "collapses the legacy writers into EventLedger (see "
-        "docs/v3_audit_report.md §四 伪绿 1)."
-    ),
-)
-def test_j3_whole_repo_shadow_writers_gone():
-    """spec §J3 REALITY CHECK — whole-repo scan.
+def test_j3_whole_repo_has_no_shadow_run_event_writers():
+    """spec §J3 — whole-repo scan.
 
-    Failing here is the truthful signal that shadow (non-EventLedger)
-    writers still exist. Do not silence — instead retire the legacy
-    writers.
+    ``run_events`` is the canonical ledger. Outside EventLedger and
+    migrations, code may decide what to append/update/delete, but the
+    physical mutation must route through EventLedger.
     """
     offenders = _find_shadow_writers(_iter_python_files_whole_repo())
     if offenders:
         formatted = "\n".join(f"  {rel}\n    {snippet!r}" for rel, snippet in offenders)
-        raise AssertionError(
-            f"spec §J3 whole-repo shadow writers still present ({len(offenders)} files):\n"
-            + formatted
-        )
+        raise AssertionError("spec §J3 violated — non-ledger writers:\n" + formatted)

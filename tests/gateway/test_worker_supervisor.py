@@ -31,7 +31,7 @@ from tui_gateway.run_worker import (
     RunTerminalFrame,
     encode_outgoing,
 )
-from tui_gateway.services.runtime_proxy import RuntimeScope
+from tui_gateway.services.runtime_scope import RuntimeScope
 from tui_gateway.services.worker_supervisor import (
     RunWorker,
     WorkerSupervisor,

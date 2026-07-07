@@ -4,6 +4,7 @@ import json
 import sqlite3
 from typing import Any
 
+from hermes_agent.domain.event_ledger import EventLedger
 from hermes_state_run_event_codec import decode_run_event_row
 
 
@@ -158,9 +159,9 @@ def project_run_event_search_index_from_row(conn: sqlite3.Connection, row: Any) 
     runtime_source_seq = runtime_source_seq_from_event(event)
     row_id = int(_row_value(row, "id", 0) or 0)
     if runtime_source_seq != int(_row_value(row, "runtime_source_seq", 0) or 0):
-        conn.execute(
-            "UPDATE run_events SET runtime_source_seq = ? WHERE id = ?",
-            (runtime_source_seq, row_id),
+        EventLedger(conn).update_runtime_source_seq(
+            row_id=row_id,
+            runtime_source_seq=runtime_source_seq,
         )
     project_run_event_search_index(
         conn,

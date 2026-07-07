@@ -50,6 +50,14 @@ def agent_participant_id(agent_profile_id: str = "") -> str:
     return f"agent:{normalized_profile_id}"
 
 
+def _conversation_session_exists(conn: sqlite3.Connection, session_id: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sessions WHERE id = ? LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    return row is not None
+
+
 class ParticipantsMixin:
     def ensure_participant(
         self,
@@ -78,6 +86,10 @@ class ParticipantsMixin:
         now = time.time()
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            if not _conversation_session_exists(conn, normalized_conversation_session_id):
+                raise ValueError(
+                    "conversation participant requires an existing conversation session"
+                )
             existing = conn.execute(
                 """
                 SELECT created_at
@@ -343,6 +355,10 @@ class ParticipantsMixin:
         now = time.time()
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            if not _conversation_session_exists(conn, normalized_conversation_session_id):
+                raise ValueError(
+                    "conversation participant requires an existing conversation session"
+                )
             conn.execute(
                 """
                 INSERT INTO conversation_participants (

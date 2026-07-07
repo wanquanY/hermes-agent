@@ -118,15 +118,15 @@ def _(rid, params: dict) -> dict:
     try:
         from tui_gateway.services.worker_runtime import worker_supervisor
 
-        runtime_proxy = worker_supervisor().snapshot()
+        worker_supervisor_snapshot = worker_supervisor().snapshot()
     except Exception as exc:
-        runtime_proxy = {"error": str(exc)}
+        worker_supervisor_snapshot = {"error": str(exc)}
     return _ok(
         rid,
         {
             "status": str(state.get("gateway_state") or state.get("status") or "unknown"),
             "runtime": state,
-            "runtime_proxy": runtime_proxy,
+            "workerSupervisor": worker_supervisor_snapshot,
             "available": bool(state),
             **({"error": error} if error else {}),
         },

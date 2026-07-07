@@ -41,6 +41,8 @@ import re
 import time
 from typing import Any, Dict, Optional, Tuple
 
+from hermes_agent.domain.event_ledger import EventLedger
+
 logger = logging.getLogger(__name__)
 
 # Marker keys in ``state_meta`` (Hermes' generic kv table).
@@ -192,10 +194,9 @@ def backfill_run_events_activity_id(
     if updates and not dry_run:
         with lock:
             try:
-                conn.executemany(
-                    "UPDATE run_events SET activity_id = ? WHERE id = ?",
-                    updates,
-                )
+                ledger = EventLedger(conn)
+                for activity_id, row_id in updates:
+                    ledger.mark_activity_id(row_id=row_id, activity_id=activity_id)
                 conn.commit()
                 updated = len(updates)
             except Exception as exc:

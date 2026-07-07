@@ -16,7 +16,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from agent.dovie_diagnostics import emit_dovie_runtime_diagnostic
 from tui_gateway.run_worker import RunTerminalFrame
-from tui_gateway.services.runtime_proxy import RuntimeScope
+from tui_gateway.services.runtime_scope import RuntimeScope
 from tui_gateway.services.worker_supervisor import RunWorker, WorkerSupervisor
 
 _log = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ class _LeaseState:
     inflight: dict[str, _RunRecord] = field(default_factory=dict)
 
     def has_inflight(self) -> bool:
-        return bool(self.inflight or self.worker.active_runs)
+        return bool(self.inflight)
 
 
 class WorkerPool:
@@ -155,7 +155,6 @@ class WorkerPool:
                         worker_conversation_id=state.worker.conversation_id,
                         pid=state.worker.process.pid if state.worker.process else None,
                         inflight_runs=sorted(state.inflight),
-                        worker_active_runs=sorted(state.worker.active_runs),
                         profile_env_keys=sorted(profile_env),
                     )
                     return WorkerLease(conversation_id=conv, worker=state.worker, acquired_at=now)
@@ -269,7 +268,7 @@ class WorkerPool:
                     "scopeKey": s.worker.scope_key,
                     "pid": s.worker.process.pid if s.worker.running() else None,
                     "running": s.worker.running(),
-                    "activeRuns": sorted(set(s.inflight) | set(s.worker.active_runs)),
+                    "activeRuns": sorted(s.inflight),
                     "createdAt": s.created_at,
                     "lastAcquiredAt": s.last_acquired_at,
                     "idleSince": s.idle_since,
@@ -316,13 +315,12 @@ class WorkerPool:
                     reason="state_not_found",
                 )
                 return
-            before_active_runs = sorted(set(state.inflight) | set(state.worker.active_runs))
+            before_active_runs = sorted(state.inflight)
             state.inflight[normalized_run_id] = _RunRecord(
                 run_id=normalized_run_id,
                 stored_session_id=str(stored_session_id or conv).strip(),
                 turn_id=str(turn_id or "").strip(),
             )
-            state.worker.active_runs.add(normalized_run_id)
             self._run_to_state_key[normalized_run_id] = key
             _worker_pool_log(
                 "pool-record-start",
@@ -332,7 +330,7 @@ class WorkerPool:
                 run_id=normalized_run_id,
                 turn_id=str(turn_id or "").strip(),
                 before_active_runs=before_active_runs,
-                after_active_runs=sorted(set(state.inflight) | set(state.worker.active_runs)),
+                after_active_runs=sorted(state.inflight),
             )
 
     async def forget_run(self, run_id: str) -> None:
@@ -361,16 +359,15 @@ class WorkerPool:
                     reason="state_not_found",
                 )
                 return
-            before_active_runs = sorted(set(state.inflight) | set(state.worker.active_runs))
+            before_active_runs = sorted(state.inflight)
             state.inflight.pop(normalized_run_id, None)
-            state.worker.active_runs.discard(normalized_run_id)
             _worker_pool_log(
                 "pool-forget",
                 run_id=normalized_run_id,
                 scope_key=state.worker.scope_key,
                 conversation_id=state.conversation_id,
                 before_active_runs=before_active_runs,
-                after_active_runs=sorted(set(state.inflight) | set(state.worker.active_runs)),
+                after_active_runs=sorted(state.inflight),
             )
 
     async def _reap_loop(self) -> None:
@@ -426,7 +423,7 @@ class WorkerPool:
         reason: str,
     ) -> None:
         uptime = max(0.0, time.time() - state.created_at)
-        inflight_count = len(set(state.inflight) | set(state.worker.active_runs))
+        inflight_count = len(state.inflight)
         if inflight_count:
             _log.warning(
                 "[worker-pool] worker conv_id=%s scope_key=%s crashed after %.3fs inflight=%d",
@@ -443,7 +440,7 @@ class WorkerPool:
         )
 
     async def _fail_inflight_runs(self, state: _LeaseState, *, reason: str) -> None:
-        run_ids = sorted(set(state.inflight) | set(state.worker.active_runs))
+        run_ids = sorted(state.inflight)
         for run_id in run_ids:
             record = state.inflight.get(run_id) or _RunRecord(
                 run_id=run_id,
@@ -471,7 +468,6 @@ class WorkerPool:
                     )
             else:
                 self._publish_failed_run_direct(state, record, message=message)
-            state.worker.active_runs.discard(run_id)
             state.inflight.pop(run_id, None)
             self._run_to_state_key.pop(run_id, None)
 
@@ -485,13 +481,14 @@ class WorkerPool:
         try:
             from tui_gateway.services import run_control
 
-            run_control.publish_run_terminal_event(
+            run_control.terminate_run(
                 stored_session_id=record.stored_session_id or state.conversation_id,
                 run_id=record.run_id,
                 turn_id=record.turn_id,
                 runtime_scope_key=state.worker.scope_key,
                 runtime_session_id=record.stored_session_id or state.conversation_id,
                 status="failed",
+                cause="worker_crashed",  # spec §7.3 — pool reap = WORKER_CRASHED
                 message=message,
             )
         except Exception:
@@ -540,9 +537,8 @@ class WorkerPool:
                     reason="state_not_found",
                 )
                 return
-            before_active_runs = sorted(set(state.inflight) | set(state.worker.active_runs))
+            before_active_runs = sorted(state.inflight)
             state.inflight.pop(normalized_run_id, None)
-            state.worker.active_runs.discard(normalized_run_id)
             if not state.has_inflight() and state.idle_since is None:
                 state.idle_since = time.time()
             _worker_pool_log(
@@ -551,7 +547,7 @@ class WorkerPool:
                 scope_key=state.worker.scope_key,
                 conversation_id=state.conversation_id,
                 before_active_runs=before_active_runs,
-                after_active_runs=sorted(set(state.inflight) | set(state.worker.active_runs)),
+                after_active_runs=sorted(state.inflight),
                 idle_since=state.idle_since,
             )
 

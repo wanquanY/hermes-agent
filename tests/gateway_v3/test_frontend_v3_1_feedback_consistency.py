@@ -81,15 +81,15 @@ def test_p0_2_internal_prefix_convention_in_event_ledger():
 # ---------------------------------------------------------------------------
 
 
-def test_p0_3_persist_interaction_event_returns_anchor_seq():
-    """spec §7.4 —— InteractionRegistry 的持久化接口必须返回 anchor_seq。
+def test_p0_3_interaction_registry_persist_handles_anchor_seq():
+    """spec §7.4 —— InteractionRegistry 持久化接口必须处理 anchor_seq。
     """
-    from tui_gateway.services.interaction_registry import persist_interaction_event
+    from tui_gateway.services.interaction_registry import InteractionRegistry
 
-    src = inspect.getsource(persist_interaction_event)
+    src = inspect.getsource(InteractionRegistry.persist)
     # 必须显式处理 anchor_seq —— 无论是设置还是返回。
     assert "anchor_seq" in src, (
-        "persist_interaction_event 里没有 anchor_seq —— spec §7.4 "
+        "InteractionRegistry.persist 里没有 anchor_seq —— spec §7.4 "
         "Interaction 双通道要求这个字段"
     )
 

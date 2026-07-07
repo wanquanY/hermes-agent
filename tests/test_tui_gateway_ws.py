@@ -70,6 +70,33 @@ class DispatchFakeWebSocket:
         return None
 
 
+def test_ws_gateway_ready_advertises_timeline_contract():
+    release_after = threading.Event()
+    fake_ws = DispatchFakeWebSocket([], release_after)
+
+    async def run() -> None:
+        await asyncio.wait_for(handle_ws(fake_ws), timeout=2)
+
+    asyncio.run(run())
+
+    ready = fake_ws.sent[0]["params"]
+    payload = ready["payload"]
+    assert ready["type"] == "gateway.ready"
+    assert payload["contractVersion"] == "3.1"
+    assert payload["capabilities"] == {
+        "cursor": {
+            "afterSeq": True,
+            "afterId": True,
+            "beforeSeq": True,
+            "beforeId": True,
+        },
+        "history": {"canonical": False},
+        "toolEvents": {"canonical": True},
+    }
+    assert payload["deprecations"] == []
+    assert "runtimeSourceSeq" not in payload["deprecations"]
+
+
 def test_ws_receive_loop_does_not_wait_for_previous_response_flush(monkeypatch):
     first_release = threading.Event()
     second_seen = threading.Event()

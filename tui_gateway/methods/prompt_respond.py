@@ -50,41 +50,17 @@ def _pending_registry():
 
 
 def _publish_interaction_event(event_type: str, entry: Any) -> None:
-    """Publish ``interaction.*`` events through the canonical stream.
+    """Persist interaction lifecycle transitions outside the canonical stream."""
+    from tui_gateway.services.interaction_registry import persist_interaction_event
 
-    Builds a ``record_event``-compatible params dict and calls
-    ``run_control.publish_recorded_event`` so the event participates in
-    the normal seq / persistence flow (FE single-stream ingest, I9).
-
-    Failures are logged but never propagated — a publish hiccup must not
-    break the respond contract.
-    """
-    try:
-        from tui_gateway.services import run_control
-
-        params: dict[str, Any] = {
-            "type": event_type,
-            "request_id": entry.request_id,
-            "kind": entry.kind,
-            "session_id": entry.conversation_id or entry.session_key,
-            "stored_session_id": entry.session_key or entry.conversation_id,
-            "runtime_scope_key": entry.scope_key,
-            "payload": {
-                "request_id": entry.request_id,
-                "kind": entry.kind,
-                "state": entry.state,
-            },
-        }
-        if entry.state == "resolved":
-            params["payload"]["choice"] = entry.choice
-        run_control.publish_recorded_event(params)
-    except Exception:
-        import logging
-
-        logging.getLogger(__name__).debug(
-            "[prompt-respond] interaction event publish failed type=%s rid=%s",
-            event_type, getattr(entry, "request_id", "?"),
-            exc_info=True,
+    stable = str(getattr(entry, "session_key", "") or getattr(entry, "conversation_id", "") or "").strip()
+    if not stable:
+        raise ValueError("interaction persistence requires a stable session id")
+    db = _db_for_stable_session(stable)
+    saved = persist_interaction_event(db, event_type, entry)
+    if not saved:
+        raise RuntimeError(
+            f"interaction persistence failed type={event_type} request_id={getattr(entry, 'request_id', '')}"
         )
 
 
@@ -179,11 +155,11 @@ def _respond(rid, params, key):
         return _err(rid, 4404, "unknown_request")
 
     answer = params.get(key, "")
+    if not reg.mark_resolved(r, choice=answer):
+        return _err(rid, 4404, "unknown_request")
     with _prompt_lock:
         _answers[r] = answer
         ev.set()
-
-    reg.mark_resolved(r, choice=answer)
     return _ok(rid, {"status": "resolved", "resolved": 1})
 
 
@@ -221,6 +197,13 @@ def _respond_gateway_clarify(rid, params: dict):
         from tools import clarify_gateway as _clarify_mod
     except Exception:
         return _err(rid, 4404, "unknown_request")
+    pending_entry = None
+    if hasattr(_clarify_mod, "get_pending_by_request_id"):
+        try:
+            pending_entry = _clarify_mod.get_pending_by_request_id(r)
+        except Exception as exc:
+            return _err(rid, 5004, str(exc))
+    session_key = str(getattr(pending_entry, "session_key", "") or "").strip()
     try:
         resolved = _clarify_mod.resolve_gateway_clarify(r, params.get("answer", ""))
     except Exception as exc:
@@ -232,8 +215,9 @@ def _respond_gateway_clarify(rid, params: dict):
         return _err(rid, 4404, "unknown_request")
     # Register + mark resolved so a subsequent respond gets 4409.
     if known is None:
-        reg.register(request_id=r, kind="clarify")
-    reg.mark_resolved(r, choice=params.get("answer", ""))
+        reg.register(request_id=r, kind="clarify", session_key=session_key)
+    if not reg.mark_resolved(r, choice=params.get("answer", "")):
+        return _err(rid, 4404, "unknown_request")
     return _ok(rid, {"status": "resolved", "resolved": 1, "source": "clarify_gateway"})
 
 

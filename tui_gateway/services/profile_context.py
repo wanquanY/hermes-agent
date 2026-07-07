@@ -174,12 +174,12 @@ def active_hermes_home(*, fallback: str, default_home: str | None = None) -> str
 # Sub-sidecar deprecation: ProfileContext class + ProfileRegistry.
 #
 # Below is scaffolding for the refactor that removes the per-profile
-# sub-sidecar process (the duplicate ``dovie_sidecar`` child spawned
-# by ``RuntimeWorkerPool``). The sub-sidecar relied on PROCESS-LEVEL
-# isolation to keep one profile's module-level state (approval queue,
-# clarify pending, etc.) from leaking into another's. After removal
-# the main sidecar hosts every profile at once, so each of those
-# module-level dicts must be keyed by ``scope_key``.
+# sub-sidecar process (the duplicate per-profile ``dovie_sidecar``
+# child). That design relied on PROCESS-LEVEL isolation to keep one
+# profile's module-level state (approval queue, clarify pending, etc.)
+# from leaking into another's. After removal the main sidecar hosts
+# every profile at once, so each of those module-level dicts must be
+# keyed by ``scope_key``.
 #
 # This block defines that bucket type (``ProfileContext``), a
 # process-wide ``scope_key → ProfileContext`` registry, a

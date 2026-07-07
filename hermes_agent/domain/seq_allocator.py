@@ -21,6 +21,14 @@ def _is_busy_error(exc: sqlite3.OperationalError) -> bool:
     return "database is locked" in message or "database is busy" in message or "locked" in message
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
 def ensure_seq_counter_table(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -65,16 +73,39 @@ def ensure_session_counter(
     if not stable:
         return
     ensure_seq_counter_table(conn)
-    conn.execute(
-        """
-        INSERT INTO seq_counter (session_id, next_seq, updated_at)
-        SELECT ?, COALESCE(MAX(seq), 0) + 1, ?
-          FROM run_events
-         WHERE session_id = ?
-        ON CONFLICT(session_id) DO NOTHING
-        """,
-        (stable, float(updated_at or 0), stable),
-    )
+    existing = conn.execute(
+        "SELECT next_seq FROM seq_counter WHERE session_id = ?",
+        (stable,),
+    ).fetchone()
+    if existing is not None:
+        return
+    has_events = conn.execute(
+        "SELECT 1 FROM run_events WHERE session_id = ? LIMIT 1",
+        (stable,),
+    ).fetchone()
+    if has_events is not None:
+        raise RuntimeError(
+            f"seq_counter missing for non-empty session {stable}; run migrations before writing events"
+        )
+    if _table_exists(conn, "sessions"):
+        conn.execute(
+            """
+            INSERT INTO seq_counter (session_id, next_seq, updated_at)
+            SELECT ?, 1, ?
+            WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ?)
+            ON CONFLICT(session_id) DO NOTHING
+            """,
+            (stable, float(updated_at or 0), stable),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO seq_counter (session_id, next_seq, updated_at)
+            VALUES (?, 1, ?)
+            ON CONFLICT(session_id) DO NOTHING
+            """,
+            (stable, float(updated_at or 0)),
+        )
 
 
 def allocate_run_event_seq(

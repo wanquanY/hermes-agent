@@ -33,6 +33,7 @@ from enum import Enum
 from hermes_agent.domain.event_ledger import EventLedger
 from hermes_agent.domain.exceptions import SeqAllocatorBusy
 from hermes_agent.domain.run_state_machine import TERMINAL_RUN_STATUSES
+from hermes_agent.domain.seq_allocator import allocate_only
 
 
 _logger = logging.getLogger(__name__)
@@ -223,7 +224,10 @@ def terminate_run(
                    terminal_cause = ?,
                    completed_at = ?,
                    updated_at = ?,
-                   last_seq = MAX(COALESCE(last_seq, 0), ?),
+                   last_seq = CASE
+                       WHEN COALESCE(last_seq, 0) >= ? THEN COALESCE(last_seq, 0)
+                       ELSE ?
+                   END,
                    error = COALESCE(NULLIF(?, ''), error)
              WHERE run_id = ?
             """,
@@ -233,6 +237,7 @@ def terminate_run(
                 resolved_cause.value,
                 ts,
                 ts,
+                terminal_seq,
                 terminal_seq,
                 str(message or ""),
                 normalized_run,
@@ -272,42 +277,6 @@ def _allocate_terminal_seq(
     session_id: str,
     now: float,
 ) -> int:
-    """Allocate a monotonic seq via ``seq_counter`` inside the caller's tx.
+    """Allocate terminal seq through the shared SeqAllocator service."""
 
-    Raises ``SeqAllocatorBusy`` on repeated ``sqlite3.OperationalError`` — the
-    outer transaction stays open so the caller can decide (DEGRADED path).
-    """
-
-    # Ensure a counter row exists for this session; INSERT OR IGNORE avoids
-    # overwriting an existing counter that may already be ahead of MAX(seq).
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO seq_counter (session_id, next_seq, updated_at)
-        SELECT ?, COALESCE(MAX(seq), 0) + 1, ?
-          FROM run_events
-         WHERE session_id = ?
-        """,
-        (session_id, float(now or 0), session_id),
-    )
-    # No row means the session_id row is fully missing (empty run_events too);
-    # fall back to a bare counter row.
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO seq_counter (session_id, next_seq, updated_at)
-        VALUES (?, 1, ?)
-        """,
-        (session_id, float(now or 0)),
-    )
-    row = conn.execute(
-        """
-        UPDATE seq_counter
-           SET next_seq = next_seq + 1,
-               updated_at = ?
-         WHERE session_id = ?
-        RETURNING next_seq - 1
-        """,
-        (float(now or 0), session_id),
-    ).fetchone()
-    if row is None:
-        raise SeqAllocatorBusy(f"seq_counter unavailable for session {session_id}")
-    return int(row[0])
+    return allocate_only(conn, session_id=session_id, updated_at=float(now or 0))

@@ -35,6 +35,23 @@ def test_dovie_gateway_capabilities_reports_complete_gateway_abi():
     assert "state:team_capability_snapshot" in manifest["stateFeatures"]
     assert "state:runtime_scope_key" in manifest["stateFeatures"]
     assert "state:transient_session" in manifest["stateFeatures"]
+    assert manifest["timelineContract"] == {
+        "contractVersion": "3.1",
+        "capabilities": {
+            "cursor": {
+                "afterSeq": True,
+                "afterId": True,
+                "beforeSeq": True,
+                "beforeId": True,
+            },
+            "history": {"canonical": False},
+            "toolEvents": {"canonical": True},
+        },
+        "deprecations": [],
+    }
+    assert "interaction.persistent" not in json.dumps(manifest["timelineContract"])
+    assert "runStateMachine.singleEntrypoint" not in json.dumps(manifest["timelineContract"])
+    assert "runtimeSourceSeq" not in manifest["timelineContract"]["deprecations"]
     assert manifest["missingCapabilities"] == []
 
 
@@ -56,6 +73,11 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     response = server._methods["gateway.capabilities"](1, {})
 
     assert response["result"]["protocolVersion"] == "2026-06-15"
+    assert response["result"]["timelineContract"]["contractVersion"] == "3.1"
+    assert response["result"]["timelineContract"]["capabilities"]["cursor"]["afterSeq"] is True
+    assert response["result"]["timelineContract"]["capabilities"]["history"]["canonical"] is False
+    assert response["result"]["timelineContract"]["capabilities"]["toolEvents"]["canonical"] is True
+    assert response["result"]["timelineContract"]["deprecations"] == []
     assert "run.submit" in response["result"]["methods"]
     assert "run.events" in response["result"]["methods"]
     assert "events.unsubscribe" in response["result"]["methods"]
@@ -336,7 +358,7 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
         db.close()
 
 
-def test_conversation_render_snapshot_returns_completed_team_projection_without_historical_runtime_events(tmp_path, monkeypatch):
+def test_conversation_render_snapshot_returns_completed_team_projection_without_runtime_replay_events(tmp_path, monkeypatch):
     import importlib
 
     from hermes_state import SessionDB
@@ -1099,6 +1121,7 @@ def test_session_db_keeps_terminal_run_closed_after_late_delta(tmp_path):
             },
         )
         assert db.get_run("run-1")["status"] == "completed"
+        terminal_seq = db.list_run_events("session-1")[-1]["seq"]
 
         db.append_run_event(
             "session-1",
@@ -1115,8 +1138,11 @@ def test_session_db_keeps_terminal_run_closed_after_late_delta(tmp_path):
 
         terminal = db.get_run("run-1")
         assert terminal["status"] == "completed"
-        assert terminal["last_seq"] == 2
+        assert terminal["last_seq"] == terminal_seq
         assert terminal["completed_at"] is not None
+        events = db.list_run_events("session-1", include_internal=True)
+        assert [event["seq"] for event in events] == [terminal_seq]
+        assert [event["type"] for event in events] == ["message.complete"]
         assert db.list_run_events(
             "session-1",
             active_only=True,
@@ -1171,7 +1197,9 @@ def test_run_control_session_status_recovers_dead_gateway_active_run(tmp_path, c
         stale = db.get_run("stale-run")
         assert stale["status"] == "failed"
         assert stale["error"] == "gateway process restarted before run reached terminal state"
-        assert db.list_run_events("team-session-recovered")[-1]["type"] == "message.complete"
+        assert stale["terminal_seq"] > 0
+        assert stale["terminal_cause"] == "worker_crashed"
+        assert db.list_run_events("team-session-recovered")[-1]["type"] == "error"
     finally:
         db.close()
 
@@ -1466,7 +1494,7 @@ def test_gateway_shutdown_terminalizes_active_run(tmp_path, monkeypatch):
 
         run = db.get_run("active-run")
         assert run["status"] == "interrupted"
-        assert run["error"] == ""
+        assert run["error"] == "gateway test_shutdown before run reached terminal state"
         assert db.list_run_events("team-session-shutdown")[-1]["type"] == "message.complete"
         assert db.list_run_events("team-session-shutdown")[-1]["payload"]["status"] == "interrupted"
     finally:

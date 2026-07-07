@@ -1,11 +1,10 @@
 """Singleton holder + lifecycle for the new ``WorkerSupervisor`` +
 ``WorkerFrameRouter``, plus the primary-mode dispatch entrypoint.
 
-The legacy ``RuntimeWorkerPool`` exposes a module-level singleton via
-``runtime_proxy_pool()``. This module mirrors that pattern for the
-new stack so callers (``prompt.submit`` handler, ``*.respond``
-handlers, ``runtime.status`` reporter) can grab a process-wide instance
-without threading construction through every call site.
+This module owns the process-wide worker runtime services so callers
+(``prompt.submit`` handler, ``*.respond`` handlers, ``runtime.status``
+reporter) can grab one canonical instance without threading
+construction through every call site.
 
 Initialization is **lazy** — neither the supervisor nor the router is
 built until the first accessor call. That keeps two properties:
@@ -44,7 +43,7 @@ from tui_gateway.run_worker import (
     RunStartFrame,
     dovie_product_context_from_params,
 )
-from tui_gateway.services.runtime_proxy import (
+from tui_gateway.services.runtime_scope import (
     RuntimeScope,
     runtime_scope_from_request,
 )
@@ -159,7 +158,7 @@ def worker_frame_router() -> WorkerFrameRouter:
     """Process-wide ``WorkerFrameRouter`` singleton.
 
     Binds the production ``publish_recorded_event`` /
-    ``publish_run_terminal_event`` from ``run_control`` and a sender
+    ``terminate_run`` from ``run_control`` and a sender
     stub that forwards to the supervisor singleton. The sender uses
     ``worker_supervisor()`` lazily — both directions are lazy so
     construction order between supervisor and router doesn't deadlock.
@@ -185,7 +184,7 @@ def worker_frame_router() -> WorkerFrameRouter:
                 async def send(self, scope_key: str, conversation_id: str, frame):
                     return await worker_supervisor().send(scope_key, conversation_id, frame)
 
-            def _publish_event_with_db(params: dict, *, run_context=None):
+            def _publish_event_with_db(params: dict, *, run_context=None, persist: bool = True):
                 # The MAIN side is the canonical persistence point for
                 # worker-relayed events. The worker's wrapped
                 # ``publish_recorded_event`` (see
@@ -236,8 +235,26 @@ def worker_frame_router() -> WorkerFrameRouter:
                     except Exception:
                         db = None
                 return run_control.publish_recorded_event(
-                    params, db=db, persist=True, run_context=run_context,
+                    params, db=db, persist=bool(persist), run_context=run_context,
                 )
+
+            def _persist_interaction_event_with_db(event_type: str, entry) -> dict:
+                from tui_gateway.services.interaction_registry import persist_interaction_event
+
+                stable = str(
+                    getattr(entry, "session_key", "")
+                    or getattr(entry, "conversation_id", "")
+                    or ""
+                ).strip()
+                if not stable:
+                    raise ValueError("interaction persistence requires a stable session id")
+                db = _server._db_for_stable_session(stable)
+                saved = persist_interaction_event(db, event_type, entry)
+                if not saved:
+                    raise RuntimeError(
+                        f"interaction persistence failed type={event_type} request_id={getattr(entry, 'request_id', '')}"
+                    )
+                return saved
 
             def _publish_run_terminal_with_db(**kwargs):
                 stable = str(
@@ -253,7 +270,7 @@ def worker_frame_router() -> WorkerFrameRouter:
                         db = None
                 if db is not None:
                     kwargs["db"] = db
-                # publish_run_terminal_event internally calls
+                # terminate_run internally calls
                 # publish_recorded_event without exposing a persist
                 # flag; that call DOES persist on the main side, but
                 # this method is only invoked from on_run_terminal
@@ -262,12 +279,13 @@ def worker_frame_router() -> WorkerFrameRouter:
                 # persisted by the worker (worker may have died before
                 # its own publish), so the main-side persist is the
                 # canonical source there.
-                return run_control.publish_run_terminal_event(**kwargs)
+                return run_control.terminate_run(**kwargs)
 
             _router_singleton = WorkerFrameRouter(
                 sender=_SupervisorSenderProxy(),
                 publish_event=_publish_event_with_db,
                 publish_run_terminal=_publish_run_terminal_with_db,
+                persist_interaction_event=_persist_interaction_event_with_db,
             )
         return _router_singleton
 
@@ -313,12 +331,11 @@ async def shutdown_run_worker_runtime() -> None:
 
 
 async def primary_dispatch(req: Any, transport: Any) -> bool:
-    """Phase 5c entry point: handle requests via the new run_worker
-    stack instead of the legacy ``RuntimeWorkerPool`` proxy.
+    """Primary entry point for requests owned by the run-worker stack.
 
     Returns True if the request was handled (the caller must NOT also
-    call ``proxy_to_runtime`` / dispatch locally). False = caller falls
-    back to legacy handling.
+    dispatch it locally). False = caller falls back to in-process
+    control-plane handling.
 
     Scope:
     - ``prompt.submit`` on a scoped (non-default) profile → route to
@@ -465,7 +482,7 @@ async def _dispatch_run_cancel(req: dict, transport: Any, params: dict) -> bool:
       1. Tries ``session.interrupt`` against the MAIN sidecar's
          in-process session map. The worker is in a separate process,
          so the session row never appears there — interrupt fails.
-      2. Falls back to ``publish_run_terminal_event`` with
+      2. Falls back to ``terminate_run`` with
          ``message="cancelled without live runtime"``. This publishes
          a synthetic ``message.complete(cancelled)`` to the FRONTEND
          (UI shows cancelled state) but never touches the worker.
@@ -605,7 +622,6 @@ async def _dispatch_prompt_submit(
         turn_id=turn_id,
         worker_pid=lease.worker.process.pid if lease.worker.process else None,
         worker_running=lease.worker.running(),
-        worker_active_runs=sorted(lease.worker.active_runs),
     )
     run_start_kwargs = {
         "scope_key": lease.scope_key,

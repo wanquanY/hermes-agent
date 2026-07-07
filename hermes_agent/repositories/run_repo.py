@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import sqlite3
 import time
+import json
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from hermes_agent.domain.canonical_event import CanonicalEvent as DomainCanonicalEvent
 from hermes_agent.domain.event_ledger import EventLedger, LedgerEvent
+from hermes_agent.domain.run_state_machine import TERMINAL_RUN_STATUSES
+from hermes_agent.domain.run_state_machine import error_for_status
+from hermes_agent.domain.run_state_machine import resolve_explicit_run_status
 from hermes_agent.domain.run_terminator import (
     TerminateCause,
     TerminateResult,
@@ -86,7 +90,28 @@ class CanonicalEventSpec:
 class RunRepo(Protocol):
     def create_run(self, session_id: str, spec: RunSpec) -> Run: ...
 
+    def upsert_materialized_state(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        runtime_scope_key: str = "",
+        turn_id: str = "",
+        runtime_session_id: str = "",
+        status: str = "running",
+        started_at: float | None = None,
+        updated_at: float | None = None,
+        completed_at: float | None = None,
+        last_seq: int = 0,
+        error: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> Run: ...
+
     def get_run(self, run_id: str) -> Run | None: ...
+
+    def update_metadata(self, run_id: str, metadata: dict[str, Any]) -> None: ...
+
+    def refresh_last_seq(self, run_id: str) -> None: ...
 
     def append_event(
         self,
@@ -175,6 +200,118 @@ class RunRepoImpl:
         assert got is not None
         return got
 
+    def upsert_materialized_state(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        runtime_scope_key: str = "",
+        turn_id: str = "",
+        runtime_session_id: str = "",
+        status: str = "running",
+        started_at: float | None = None,
+        updated_at: float | None = None,
+        completed_at: float | None = None,
+        last_seq: int = 0,
+        error: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> Run:
+        stable_run = str(run_id or "").strip()
+        stable_sid = str(session_id or "").strip()
+        if not stable_run or not stable_sid:
+            raise ValueError("run_id and session_id are required")
+        now = time.time()
+        started = float(started_at or now)
+        updated = float(updated_at or now)
+        incoming_status = str(status or "running").strip() or "running"
+        normalized_scope = str(runtime_scope_key or stable_sid).strip()
+        incoming_metadata = metadata if isinstance(metadata, dict) else {}
+        existing = self._conn.execute(
+            "SELECT * FROM runs WHERE run_id = ?",
+            (stable_run,),
+        ).fetchone()
+        if existing is None:
+            self._conn.execute(
+                """
+                INSERT INTO runs (
+                    run_id, session_id, runtime_scope_key, turn_id, runtime_session_id, status,
+                    started_at, updated_at, completed_at, last_seq, error,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stable_run,
+                    stable_sid,
+                    normalized_scope,
+                    str(turn_id or ""),
+                    str(runtime_session_id or ""),
+                    incoming_status,
+                    started,
+                    updated,
+                    completed_at,
+                    int(last_seq or 0),
+                    str(error or ""),
+                    _json_dumps(incoming_metadata),
+                ),
+            )
+        else:
+            existing_status = str(existing["status"] or "")
+            next_status = resolve_explicit_run_status(
+                existing_status=existing_status,
+                incoming_status=incoming_status,
+            )
+            next_completed_at = completed_at
+            if next_completed_at is None:
+                next_completed_at = existing["completed_at"]
+            if next_status in TERMINAL_RUN_STATUSES and next_completed_at is None:
+                next_completed_at = updated
+            merged_metadata = _json_loads(existing["metadata_json"], {})
+            if not isinstance(merged_metadata, dict):
+                merged_metadata = {}
+            merged_metadata.update(incoming_metadata)
+            next_error = error_for_status(
+                status=next_status,
+                payload={"message": str(error or "")},
+                existing_error=str(existing["error"] or ""),
+            )
+            self._conn.execute(
+                """
+                UPDATE runs
+                SET session_id = ?,
+                    runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
+                    turn_id = COALESCE(NULLIF(?, ''), turn_id),
+                    runtime_session_id = COALESCE(NULLIF(?, ''), runtime_session_id),
+                    status = ?,
+                    updated_at = ?,
+                    completed_at = ?,
+                    last_seq = CASE
+                        WHEN COALESCE(last_seq, 0) >= ? THEN COALESCE(last_seq, 0)
+                        ELSE ?
+                    END,
+                    error = ?,
+                    metadata_json = ?
+                WHERE run_id = ?
+                """,
+                (
+                    stable_sid,
+                    normalized_scope,
+                    str(turn_id or ""),
+                    str(runtime_session_id or ""),
+                    next_status,
+                    updated,
+                    next_completed_at,
+                    int(last_seq or 0),
+                    int(last_seq or 0),
+                    next_error,
+                    _json_dumps(merged_metadata),
+                    stable_run,
+                ),
+            )
+        got = self.get_run(stable_run)
+        assert got is not None
+        return got
+
     def get_run(self, run_id: str) -> Run | None:
         stable = str(run_id or "").strip()
         if not stable:
@@ -192,6 +329,29 @@ class RunRepoImpl:
         if row is None:
             return None
         return _row_to_run(row)
+
+    def update_metadata(self, run_id: str, metadata: dict[str, Any]) -> None:
+        stable = str(run_id or "").strip()
+        if not stable:
+            return
+        self._conn.execute(
+            """
+            UPDATE runs
+            SET metadata_json = ?
+            WHERE run_id = ?
+            """,
+            (_json_dumps(metadata if isinstance(metadata, dict) else {}), stable),
+        )
+
+    def refresh_last_seq(self, run_id: str) -> None:
+        stable = str(run_id or "").strip()
+        if not stable:
+            return
+        # ``runs.last_seq`` is a monotonic high-water mark maintained when
+        # events are appended or terminal state is written. Maintenance jobs may
+        # compact/delete old run_events rows, so recomputing from the ledger is
+        # both expensive and semantically wrong.
+        return
 
     def append_event(
         self,
@@ -282,6 +442,19 @@ def _row_to_run(row: Any) -> Run:
         terminal_degraded=bool(int(_g("terminal_degraded", 11) or 0)),
         terminal_cause=str(_g("terminal_cause", 12) or ""),
     )
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _json_loads(value: str | None, fallback: Any) -> Any:
+    if value is None or value == "":
+        return fallback
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return fallback
 
 
 __all__ = [

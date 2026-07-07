@@ -11,6 +11,7 @@ from dovie_extension.display_transcript import (
 )
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
+from tui_gateway.services.profile_context import profile_context_for_params as _profile_context_for_params
 from tui_gateway.services.workspace import (
     bind_session_workspace as _bind_session_workspace,
     normalize_session_cwd as _normalize_session_cwd,
@@ -100,6 +101,39 @@ def _requested_runtime_scope_key(params: dict | None = None) -> str:
         or (params or {}).get("runtimeScopeKey")
         or ""
     ).strip()
+
+
+def _profile_db_from_params(params: dict | None = None):
+    profile_context = _profile_context_for_params(params or {}) or {}
+    hermes_home = str(profile_context.get("hermes_home") or "").strip()
+    if not hermes_home:
+        return None
+    try:
+        active_home = _resolve_home_path(hermes_home, fallback=hermes_home)
+        default_home = _resolve_home_path(_hermes_home, fallback=_hermes_home)
+        result = _get_session_db_for_home(
+            active_home=active_home,
+            default_home=default_home,
+            default_db=_server._db,
+            default_error=_server._db_error,
+            db_by_home=_server._db_by_home,
+            db_error_by_home=_server._db_error_by_home,
+            logger=logger,
+            create_if_missing=_current_method.get("") not in _READ_ONLY_DB_METHODS,
+        )
+        if active_home == default_home:
+            _server._db = result.default_db
+            _server._db_error = result.default_error
+        return result.db
+    except Exception:
+        return None
+
+
+def _db_for_session_request(params: dict | None, stable_session_id: str = ""):
+    stable = str(stable_session_id or "").strip()
+    if stable and _is_control_plane_stable_session_id(stable):
+        return _db_for_stable_session(stable)
+    return _profile_db_from_params(params) or _get_db()
 
 
 def _requested_runtime_executor(params: dict | None = None) -> str:
@@ -948,7 +982,7 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as exc:
         return _err(rid, 5012, f"workspace bind failed: {exc}")
-    db = _get_db()
+    db = _db_for_session_request(params, key)
     if db is None and control_plane_only:
         return _db_unavailable_error(rid, code=5000)
     # Honor the desktop composer's per-session model pick for the projected row
@@ -2115,7 +2149,7 @@ def _(rid, params: dict) -> dict:
     key = str((session or {}).get("session_key") or requested)
     agent = (session or {}).get("agent")
     meta = {}
-    db = _get_db()
+    db = _db_for_session_request(params, key)
     if db and key:
         try:
             meta = db.get_session(key) or {}

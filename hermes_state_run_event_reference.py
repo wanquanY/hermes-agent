@@ -5,6 +5,7 @@ import json
 import sqlite3
 from typing import Any
 
+from hermes_agent.domain.event_ledger import EventLedger
 from hermes_conversation_message_identity import AssistantMessageIdentity
 from hermes_conversation_message_identity import assistant_conversation_message_id_for
 from hermes_state_run_event_codec import decode_run_event_row
@@ -372,29 +373,15 @@ def reference_projected_run_event_payloads(
         payload = _record(referenced_event.get("payload"))
         frame_blob, frame_format = encode_run_event_frame(referenced_event)
         runtime_source_seq = runtime_source_seq_from_event(referenced_event)
-        conn.execute(
-            """
-            UPDATE run_events
-            SET payload_json = ?,
-                event_json = ?,
-                frame_blob = ?,
-                frame_format = ?,
-                projected_message_id = COALESCE(NULLIF(?, ''), projected_message_id),
-                projected_tool_event_id = COALESCE(NULLIF(?, ''), projected_tool_event_id),
-                projection_state = 'referenced',
-                runtime_source_seq = ?
-            WHERE id = ?
-            """,
-            (
-                _json_dumps(payload),
-                _json_dumps(referenced_event),
-                frame_blob,
-                frame_format,
-                projected_message_id,
-                projected_tool_event_id,
-                runtime_source_seq,
-                int(row["id"]),
-            ),
+        EventLedger(conn).rewrite_referenced_frame(
+            row_id=int(row["id"]),
+            payload_json=_json_dumps(payload),
+            event_json=_json_dumps(referenced_event),
+            frame_blob=frame_blob,
+            frame_format=frame_format,
+            projected_message_id=projected_message_id,
+            projected_tool_event_id=projected_tool_event_id,
+            runtime_source_seq=runtime_source_seq,
         )
         project_run_event_search_index(
             conn,

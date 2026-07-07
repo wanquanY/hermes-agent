@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dovie_extension.display_transcript import sanitize_transcript_messages
-from hermes_state_tool_events import list_tool_events_as_canonical as _list_tool_events_as_canonical_fn
 from tui_gateway.methods import session as _session_methods
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.methods.session import (
@@ -148,49 +147,19 @@ def _(rid, params: dict) -> dict:
         try:
             # PR-3 §4.3: serve canonical tool-event shapes (tool.start /
             # tool.complete with the real run_events.seq) so FE no longer
-            # reverse-derives events from the tool_events row model.  Resolve
-            # order:
-            #   1. db.list_tool_events_as_canonical — forward-compatible if a
-            #      future PR attaches the method to SessionDB.
-            #   2. module-level list_tool_events_as_canonical(db._conn, …) —
-            #      the implementation shipped in hermes_state_tool_events.
-            #   3. db.list_tool_events — legacy fallback (row model) for old
-            #      DBs / degraded environments without run_events access.
+            # reverse-derives events from the tool_events row model.
             canonical_method = getattr(db, "list_tool_events_as_canonical", None)
-            if callable(canonical_method):
-                tool_events = canonical_method(
-                    target,
-                    after_seq=after_seq,
-                    limit=_bounded_page_limit(
-                        params.get("tool_events_limit", params.get("toolEventsLimit")),
-                        default=2000,
-                        maximum=5000,
-                    ),
-                )
-            elif callable(_list_tool_events_as_canonical_fn) and hasattr(db, "_conn"):
-                tool_events = _list_tool_events_as_canonical_fn(
-                    db._conn,  # noqa: SLF001 — canonical reader needs the raw connection.
-                    target,
-                    after_seq=after_seq,
-                    limit=_bounded_page_limit(
-                        params.get("tool_events_limit", params.get("toolEventsLimit")),
-                        default=2000,
-                        maximum=5000,
-                    ),
-                )
-            else:
-                list_tool_events = getattr(db, "list_tool_events", None)
-                if callable(list_tool_events):
-                    tool_events = list_tool_events(
-                        target,
-                        run_id=str(params.get("run_id") or params.get("runId") or ""),
-                        direction=str(params.get("direction") or "tail"),
-                        limit=_bounded_page_limit(
-                            params.get("tool_events_limit", params.get("toolEventsLimit")),
-                            default=2000,
-                            maximum=5000,
-                        ),
-                    )
+            if not callable(canonical_method):
+                return _err(rid, 5000, "canonical tool event reader unavailable")
+            tool_events = canonical_method(
+                target,
+                after_seq=after_seq,
+                limit=_bounded_page_limit(
+                    params.get("tool_events_limit", params.get("toolEventsLimit")),
+                    default=2000,
+                    maximum=5000,
+                ),
+            )
         except Exception as exc:
             return _err(rid, 5000, f"tool event page failed: {exc}")
     raw_messages = _history_to_messages(page.get("messages") or [])

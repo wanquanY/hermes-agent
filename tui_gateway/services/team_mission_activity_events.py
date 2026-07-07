@@ -1,13 +1,15 @@
 """Team Mission activity subscription bridge.
 
-Mission activity subscriptions consume the Team Mission event log, not raw
-runtime run_events.  This keeps the canvas protocol aligned with the canonical
-``team_mission.runtime.event`` projection used by the frontend reducer.
+Mission activity subscriptions consume canonical ``run_events`` activity
+indexes. ``team_mission_events`` is audit-only and must not be used as the
+runtime replay source.
 """
 
 from __future__ import annotations
 
 from typing import Any, Callable
+
+from hermes_team_mission.state.event_log import projection_event
 
 _TERMINAL_DELIVERY_LOG_COUNTS: dict[tuple[str, str, str, str, str, str], int] = {}
 
@@ -244,6 +246,17 @@ def mission_id_for_activity(activity_id: str, db: Any = None) -> str:
     return mission_id(activity_id) or _activity_target_mission_id(activity_id, db=db)
 
 
+def session_id_for_activity(activity_id: str) -> str:
+    normalized = text(activity_id)
+    if normalized.startswith("chat:"):
+        return normalized.removeprefix("chat:")
+    if normalized.startswith("act-member_chat:"):
+        parts = normalized.split(":")
+        if len(parts) >= 2:
+            return text(parts[1])
+    return ""
+
+
 def node_selector(activity_id: str) -> str:
     normalized = str(activity_id or "").strip()
     if not normalized.startswith("act-node:"):
@@ -262,12 +275,12 @@ def is_activity_id(activity_id: str) -> bool:
 
 
 def uses_event_log(activity_id: str, db: Any = None) -> bool:
-    """Return true when an activity id is backed by Team Mission event log.
+    """Return true when an activity id is backed by Team Mission activity replay.
 
     ``mission:<id>`` is also used by the generic Activity command bridge in a
     few legacy paths. Those activities have no Team Mission graph and must keep
-    reading ``run_events``. A real Team Mission graph is the boundary that
-    switches the subscription source to ``team_mission_events``.
+    reading ordinary activity-indexed ``run_events``. A real Team Mission graph
+    is the boundary that switches to mission-scoped run_events replay.
     """
     normalized_mission_id = mission_id_for_activity(activity_id, db=db)
     if not normalized_mission_id:
@@ -316,16 +329,21 @@ def activity_last_seq(activity_id: str, db: Any = None) -> int:
     if not normalized_activity_id:
         return 0
     if uses_event_log(normalized_activity_id, db=db):
-        normalized_mission_id = mission_id_for_activity(normalized_activity_id, db=db)
-        return _int_value(_sqlite_scalar(
+        events = _list_mission_activity_run_events(
             db,
-            "SELECT COALESCE(MAX(seq), 0) FROM team_mission_events WHERE mission_id = ?",
-            (normalized_mission_id,),
-        ))
+            normalized_activity_id,
+            after_seq=0,
+            limit=1,
+            reverse=True,
+        )
+        return max((int(event.get("seq") or 0) for event in events if isinstance(event, dict)), default=0)
+    session_id = session_id_for_activity(normalized_activity_id)
+    if not session_id:
+        return 0
     return _int_value(_sqlite_scalar(
         db,
-        "SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE activity_id = ?",
-        (normalized_activity_id,),
+        "SELECT next_seq - 1 FROM seq_counter WHERE session_id = ?",
+        (session_id,),
     ))
 
 
@@ -638,6 +656,81 @@ def event_for_subscription(event: dict[str, Any], activity_id: str) -> dict[str,
     return projected
 
 
+def _identity_for_activity_event(
+    event: dict[str, Any],
+    activity_id: str,
+    mission_id_value: str,
+) -> dict[str, str]:
+    identity: dict[str, str] = {
+        "mission_id": mission_id_value,
+        "missionId": mission_id_value,
+    }
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    source_activity_id = text(
+        event.get("activity_id")
+        or event.get("activityId")
+        or payload.get("activity_id")
+        or payload.get("activityId")
+    )
+    selector = node_selector(source_activity_id) or node_selector(activity_id)
+    if selector:
+        identity["node_id"] = selector
+        identity["nodeId"] = selector
+        identity["canonical_node_id"] = selector
+        identity["canonicalNodeId"] = selector
+    return identity
+
+
+def _project_run_event_for_subscription(
+    event: dict[str, Any],
+    activity_id: str,
+    *,
+    mission_id_value: str,
+) -> dict[str, Any]:
+    event_type = text(event.get("type"))
+    if event_type.startswith("team_mission."):
+        return event_for_subscription(event, activity_id)
+    try:
+        source_seq = int(event.get("seq") or 0)
+    except (TypeError, ValueError):
+        source_seq = 0
+    projected = projection_event(
+        event,
+        _identity_for_activity_event(event, activity_id, mission_id_value),
+        source_seq=source_seq,
+        mission_seq=source_seq,
+    )
+    return event_for_subscription(projected, activity_id)
+
+
+def _list_mission_activity_run_events(
+    db: Any,
+    activity_id: str,
+    *,
+    after_seq: int,
+    limit: int,
+    reverse: bool = False,
+) -> list[dict[str, Any]]:
+    normalized_mission_id = mission_id_for_activity(activity_id, db=db)
+    if not normalized_mission_id:
+        return []
+    if str(activity_id or "").strip().startswith("act-node:"):
+        method = _db_method(db, "list_run_events_by_activity")
+        if method is None:
+            return []
+        events = method(activity_id, after_seq=after_seq, limit=limit)
+    else:
+        method = _db_method(db, "list_run_events_by_mission_activity")
+        if method is not None:
+            events = method(normalized_mission_id, after_seq=after_seq, limit=limit, reverse=reverse)
+        else:
+            fallback = _db_method(db, "list_run_events_by_activity")
+            if fallback is None:
+                return []
+            events = fallback(f"mission:{normalized_mission_id}", after_seq=after_seq, limit=limit)
+    return [event for event in events if isinstance(event, dict)]
+
+
 def list_activity_events(
     db: Any,
     activity_id: str,
@@ -658,23 +751,25 @@ def list_activity_events(
             )
         except (TypeError, ValueError):
             bounded_limit = TEAM_MISSION_ACTIVITY_REPLAY_DEFAULT_LIMIT
-        method = _db_method(db, "list_team_mission_events")
-        if method is None or not normalized_mission_id:
+        if not normalized_mission_id:
             _emit_activity_diagnostic(
-                "list-activity-events-drop-no-event-log",
+                "list-activity-events-drop-no-mission-id",
                 activity_id=activity_id,
                 mission_id=normalized_mission_id,
-                has_method=method is not None,
             )
             _terminal_activity_log(
-                "list-drop-no-event-log",
+                "list-drop-no-mission-id",
                 activity_id=activity_id,
                 mission_id=normalized_mission_id,
-                has_method=method is not None,
             )
             return []
         try:
-            events = method(normalized_mission_id, after_seq=after_seq, limit=bounded_limit)
+            events = _list_mission_activity_run_events(
+                db,
+                activity_id,
+                after_seq=after_seq,
+                limit=bounded_limit,
+            )
         except Exception as exc:
             _emit_activity_diagnostic(
                 "list-activity-events-error",
@@ -694,20 +789,19 @@ def list_activity_events(
             )
             return []
         result = [
-            event_for_subscription(event, activity_id)
-            for event in events
-            if isinstance(event, dict)
-            and event_matches_activity(
+            _project_run_event_for_subscription(
                 event,
                 activity_id,
-                resolved_mission_id=normalized_mission_id,
+                mission_id_value=normalized_mission_id,
             )
+            for event in events
+            if isinstance(event, dict)
         ]
         _emit_activity_diagnostic(
             "list-activity-events",
             activity_id=activity_id,
             mission_id=normalized_mission_id,
-            source="team_mission_events",
+            source="run_events",
             after_seq=after_seq,
             requested_limit=limit,
             limit=bounded_limit,

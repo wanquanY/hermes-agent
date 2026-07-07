@@ -5,6 +5,7 @@ import sqlite3
 import time
 from typing import Any, Dict
 
+from hermes_agent.domain.event_ledger import EventLedger
 from hermes_team_mission.domain.utils import text as _text
 
 _PLACEHOLDER_TEAM_CONVERSATION_TITLES = {"", "Team Mission", "团队会话"}
@@ -131,14 +132,7 @@ def _delete_session_rows(conn: sqlite3.Connection, session_ids: list[str]) -> li
         f"DELETE FROM session_lineage WHERE session_id IN ({placeholders})",
         tuple(ordered_ids),
     )
-    conn.execute(
-        f"""
-        DELETE FROM run_events
-        WHERE session_id IN ({placeholders})
-           OR runtime_session_id IN ({placeholders})
-        """,
-        tuple(ordered_ids + ordered_ids),
-    )
+    EventLedger(conn).delete_sessions(ordered_ids)
     conn.execute(
         f"DELETE FROM run_event_archives WHERE session_id IN ({placeholders})",
         tuple(ordered_ids),

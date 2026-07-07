@@ -98,7 +98,7 @@ def test_run_events_seq_monotonic_across_leader_and_member_runs_same_conv(
         db.close()
 
 
-def test_team_render_does_not_synthesize_messages_from_run_events(
+def test_team_render_reads_write_time_projected_messages_from_transcript(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -112,7 +112,7 @@ def test_team_render_does_not_synthesize_messages_from_run_events(
 
         result = _render_team()
 
-        assert result["messages"] == []
+        assert [message["text"] for message in result["messages"]] == ["rendered from run_events"]
     finally:
         db.close()
 

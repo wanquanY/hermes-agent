@@ -415,11 +415,13 @@ def _run_event_activity_last_seq(db: Any, activity_id: str) -> int:
     activity_id = _text(activity_id)
     if not activity_id:
         return 0
-    return _int_value(_sqlite_scalar(
-        db,
-        "SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE activity_id = ?",
-        (activity_id,),
-    ))
+    if activity_id.startswith("chat:"):
+        return _run_event_session_last_seq(db, activity_id.removeprefix("chat:"))
+    if activity_id.startswith("act-member_chat:"):
+        parts = activity_id.split(":")
+        if len(parts) >= 2:
+            return _run_event_session_last_seq(db, parts[1])
+    return 0
 
 
 def _run_event_session_last_seq(db: Any, session_id: str) -> int:
@@ -428,20 +430,38 @@ def _run_event_session_last_seq(db: Any, session_id: str) -> int:
         return 0
     return _int_value(_sqlite_scalar(
         db,
-        "SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE session_id = ?",
+        "SELECT next_seq - 1 FROM seq_counter WHERE session_id = ?",
         (session_id,),
     ))
 
 
-def _team_mission_event_last_seq(db: Any, mission_id: str) -> int:
+def _mission_activity_last_seq(db: Any, mission_id: str) -> int:
     mission_id = _text(mission_id)
     if not mission_id:
         return 0
-    return _int_value(_sqlite_scalar(
-        db,
-        "SELECT COALESCE(MAX(seq), 0) FROM team_mission_events WHERE mission_id = ?",
-        (mission_id,),
-    ))
+    method = getattr(db, "list_run_events_by_mission_activity", None)
+    if callable(method):
+        try:
+            events = method(mission_id, limit=1, reverse=True)
+            return max((int(event.get("seq") or 0) for event in events if isinstance(event, dict)), default=0)
+        except Exception:
+            return 0
+    if db is None or not hasattr(db, "_lock") or not hasattr(db, "_conn"):
+        return 0
+    try:
+        with db._lock:
+            row = db._conn.execute(
+                """
+                SELECT COALESCE(MAX(seq), 0) AS last_seq
+                  FROM run_events
+                 WHERE activity_id = ?
+                    OR activity_id LIKE ?
+                """,
+                (f"mission:{mission_id}", f"act-node:{mission_id}:%"),
+            ).fetchone()
+            return int((row["last_seq"] if row is not None else 0) or 0)
+    except Exception:
+        return 0
 
 
 def _activity_watermark(
@@ -578,11 +598,11 @@ def _team_activity_watermarks(
     for item in dict.fromkeys(mission_ids):
         watermarks.append(_activity_watermark(
             activity_id=f"mission:{item}",
-            last_seq=_team_mission_event_last_seq(db, item),
+            last_seq=_mission_activity_last_seq(db, item),
             status=status if item == mission_id else "completed",
             terminal=terminal if item == mission_id else True,
             replay_policy="cursor_only" if (terminal or item != mission_id) else "replay_live",
-            source="team_mission_events",
+            source="run_events",
         ))
 
     for member_id in _team_member_ids(team, participants):
@@ -992,6 +1012,15 @@ def _team_conversation_snapshot(
         if not _record(summary.get("decision")).get("include")
     ]
     raw_run_events = list(page.get("runEvents") or []) if isinstance(page, dict) else []
+    event_participants = _run_event_participant_index(raw_run_events)
+    if event_participants:
+        messages = [
+            _with_message_participant_id(
+                message,
+                _participant_id_for_message_from_events(message, event_participants),
+            )
+            for message in messages
+        ]
     tool_events = list(page.get("toolEvents") or []) if isinstance(page, dict) else []
     page_info = (
         page.get("pageInfo")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from hermes_agent.domain.team_mission_audit_log import TeamMissionAuditLog
 from .common import *
 from hermes_team_mission.read_model import build_team_mission_read_model
 
@@ -35,12 +36,7 @@ def _latest_team_mission_event_seq(db: Any, mission_id: str) -> int:
     if hasattr(db, "_lock") and hasattr(db, "_conn"):
         try:
             with db._lock:
-                row = db._conn.execute(
-                    "SELECT COALESCE(MAX(seq), 0) AS latest_seq FROM team_mission_events WHERE mission_id = ?",
-                    (mission_id,),
-                ).fetchone()
-            if row is not None:
-                return int(row["latest_seq"] or 0)
+                return TeamMissionAuditLog(db._conn).latest_seq(mission_id)
         except Exception:
             pass
     lister = getattr(db, "list_team_mission_events", None)

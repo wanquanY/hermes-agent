@@ -269,14 +269,46 @@ class TestPendingRegistryEvents:
         reg.lookup("rid-1")  # triggers expiry
         assert events[-1][0] == "interaction.expired"
 
-    def test_publish_failure_does_not_raise(self):
+    def test_publish_failure_raises_and_does_not_register(self):
         def bad_publish(et, e):
             raise RuntimeError("boom")
 
         reg = PendingRegistry(publish_event=bad_publish)
-        # Should not raise
+        with pytest.raises(RuntimeError, match="boom"):
+            reg.register(request_id="rid-1", kind="clarify")
+        assert reg.lookup("rid-1") is None
+
+    def test_resolve_publish_failure_raises_and_keeps_pending(self):
+        events = []
+
+        def publish(et, e):
+            if et == "interaction.resolved":
+                raise RuntimeError("boom")
+            events.append((et, e.request_id, e.state))
+
+        reg = PendingRegistry(publish_event=publish)
         reg.register(request_id="rid-1", kind="clarify")
-        reg.mark_resolved("rid-1", choice="yes")
+        with pytest.raises(RuntimeError, match="boom"):
+            reg.mark_resolved("rid-1", choice="yes")
+        entry = reg.lookup("rid-1")
+        assert entry is not None
+        assert entry.state == "pending"
+
+    def test_expire_publish_failure_raises_and_keeps_pending(self):
+        def publish(et, e):
+            if et == "interaction.expired":
+                raise RuntimeError("boom")
+
+        clock = [1000.0]
+        reg = PendingRegistry(ttl_seconds=10, clock=lambda: clock[0], publish_event=publish)
+        reg.register(request_id="rid-1", kind="clarify")
+        clock[0] = 1020
+        with pytest.raises(RuntimeError, match="boom"):
+            reg.lookup("rid-1")
+        clock[0] = 1000
+        entry = reg.lookup("rid-1")
+        assert entry is not None
+        assert entry.state == "pending"
 
 
 # =========================================================================
@@ -423,6 +455,9 @@ class TestClarifyRespondNoSilentSwallow:
         assert result["error"]["code"] == 4404
 
     def test_clarify_respond_success_returns_resolved(self):
+        from tui_gateway import server
+
+        server._interactive_registry = PendingRegistry()
         # Register a clarify entry in the clarify gateway
         clarify_module.register("cid-1", "session-key-1", "Pick one", ["A", "B"])
         handler = _get_method("clarify.respond")
@@ -431,6 +466,9 @@ class TestClarifyRespondNoSilentSwallow:
         assert result["result"]["resolved"] == 1
 
     def test_clarify_respond_already_resolved_returns_4409(self):
+        from tui_gateway import server
+
+        server._interactive_registry = PendingRegistry()
         clarify_module.register("cid-1", "session-key-1", "Pick one", ["A", "B"])
         handler = _get_method("clarify.respond")
         # First respond succeeds
