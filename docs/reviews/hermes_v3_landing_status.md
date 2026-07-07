@@ -939,3 +939,99 @@ behavior; zero regression.
 - ✅ pytest (six v3 directories) — 357 pass + 13 skip
 - ✅ mutation harness (RUN_MUTATION_TESTS=1) — 13/13 pass
 
+---
+
+## Loop 26-35 — invariant static guards and consistency locks
+
+After the static checks passed, loops 26-35 built a complete perimeter of
+static guards so future drift on any spec invariant is caught by pytest
+without waiting for a runtime scenario. Also added a real subprocess
+proof for the stdio_daemon executable entry point.
+
+### Invariant guards landed
+
+| # | Guard | Spec | Test file | commit |
+|---|---|---|---|---|
+| J1 | Identity fold (property, request+response, 8 groups × 32 rounds) | §5.1 | `tests/gateway_v3/test_identity_fold_property.py` | `70a2e7449` |
+| J3 | Only `event_ledger.py` writes `run_events` | §6.1 | `tests/domain/test_j3_event_ledger_single_writer.py` | `24c16f301` |
+| J6 | Full daemon `registry.validate()` + wire naming + namespace lock + duplicate rejection | §J6 | `tests/gateway_v3/test_j6_j7_registry_hygiene.py` | `5cd911974` |
+| J7 | Wire method names are snake_case dot form; no camelCase / kebab / Pascal / reserved | §J7 | `tests/gateway_v3/test_j6_j7_registry_hygiene.py` | `5cd911974` |
+| J8 | DenyAllResolver on every registered method returns 4003 | §J8 | `tests/gateway_v3/test_j8_permission_sweep.py` | `971462b7b` |
+| J9 | `raise MethodError(...)` always uses `ErrorCode.X` enum member; wire codes are 4-digit strings | §J9 | `tests/gateway_v3/test_j9_error_code_central_registry.py` | `715a07d9e` |
+| J10 | Contract version drift — 3 sources agree on `"3.1"`; capabilities schema locked; no internal milestone leakage | §J10 §11 | `tests/gateway_v3/test_j10_contract_version_drift.py` | `9c62d7b36` |
+| §4.6 | Every RepoImpl only touches its own aggregate tables | §4.6 | `tests/repositories/test_j4_6_cross_aggregate_isolation.py` | `4320a94d6` |
+| Phase J boundary | v3 ↔ legacy `gateway/` two-way import isolation | §12 J | `tests/observability/test_v3_legacy_gateway_boundary.py` | `18a05ceb7` |
+| L5 subprocess proof | `python -m hermes_agent.transport.stdio_daemon <db>` really spawns and speaks JSONL | §3 | `tests/transport/test_stdio_daemon_subprocess.py` | `d5732f7b5` |
+| Frontend v3.1 P0/P1 #1-4 | 14-arm freeze + interaction.* not in canonical + anchor_seq presence + activity表归属 | v3.0.2 §"relative to v3.0.1" | `tests/gateway_v3/test_frontend_v3_1_feedback_consistency.py` | `9654b2684` |
+| Frontend v3.1 P0/P1 #5-6 | deprecations: string[] + no internal milestone leakage | v3.0.2 §"relative to v3.0.1" | `test_j10_contract_version_drift.py` | `9c62d7b36` |
+
+### J1-J11 coverage matrix
+
+| Invariant | Property test | Mutation test | Static guard | Confirmed |
+|---|---|---|---|---|
+| J1 identity/FK | ✅ | ✅ (×3 mutations) | ✅ | ✅ |
+| J2 seq atomic + monotonic | ✅ | ✅ | ⚪ N/A | ✅ |
+| J3 EventLedger single append | ✅ | ✅ | ✅ | ✅ |
+| J4 RunStateMachine single entry | ✅ | ✅ | ⚪ N/A | ✅ |
+| J5 WorkerPool single copy | ⚪ | ✅ | ⚪ N/A | ✅ |
+| J6 Gateway single registry | ⚪ | ✅ | ✅ | ✅ |
+| J7 snake_case wire | ✅ | ✅ | ✅ | ✅ |
+| J8 permission required | ⚪ | ✅ | ✅ (sweep) | ✅ |
+| J9 error code central | ⚪ | ✅ | ✅ | ✅ |
+| J10 contract version | ⚪ | ✅ | ✅ (3-source drift) | ✅ |
+| J11 silent swallow lint | ⚪ | ✅ | ✅ (AST scan, 0 findings) | ✅ |
+
+### Final v3 stack test count
+**408 passed + 13 skipped in ~5.7 s**
+
+### Wire surface (31 methods locked)
+- session (6): create / get / list / close / branch / update_index
+- run (6): launch / terminate / reap_orphans / get / list / list_events
+- message (5): append / get / get_page / search_fts / merge_metadata
+- team_mission (8): create / get_graph / get_node / add_node / add_edge / bind_run / ready_nodes / advance_node
+- agent_profile (5): create / add_version / get / list / growth_summary
+- system (1): system.handshake
+
+### L5 Transport
+
+| Adapter | Status |
+|---|---|
+| `Transport` protocol | ✅ |
+| `InMemoryTransport` | ✅ (test wiring) |
+| `StdioTransport` | ✅ (production-ready) |
+| `stdio_daemon` executable | ✅ `python -m hermes_agent.transport.stdio_daemon <db>` |
+| Subprocess spawn proof | ✅ real OS pipe roundtrip |
+| WebSocket / HTTP | ⚪ pending — protocol abstracted, no adapter yet |
+
+### Landing commits (all on `feat/team-timeline-rearchitecture`)
+
+```
+9654b2684 test: frontend v3.1 feedback consistency (loop 35)
+5cd911974 test: J6/J7 registry hygiene (loop 34)
+9c62d7b36 test: J10 contract version drift (loop 33)
+715a07d9e test: J9 error code central registry (loop 32)
+24c16f301 test: J3 event ledger single writer (loop 31)
+d5732f7b5 test: stdio_daemon subprocess spawn (loop 30)
+18a05ceb7 test: Phase J boundary guard (loop 29)
+4320a94d6 test: §4.6 cross-aggregate isolation (loop 28)
+971462b7b test: J8 permission sweep (loop 27)
+70a2e7449 test: J1 identity fold property (loop 26)
+9237d26f9 docs: drop file-based audit brief (superseded)
+3013511c7 docs: audit brief for codex (per-commit, superseded)
+564dd18d8 feat: backend v3.0.2 landing body — A2-M + L5 stdio + 31 methods
+0c4c05094 docs: Phase A1 projected_* consumer audit
+d6357891c refactor: Phase 0.2 15 migrations + MigrationRunner + import-linter
+4ca9ebaed refactor: Phase 0.1 migrations directory skeleton
+```
+
+15 commits since Phase 0 start.
+
+### Remaining explicit gaps (unchanged from earlier honest status)
+1. Phase J legacy `gateway/` retirement — **WAIVED** by user ("channel 相关的不要动")
+2. Phase D5 wire protocol 18 consumer sites — **WAIVED-PENDING** (audit says not loop-mechanizable)
+3. Cross-repo front↔back e2e three-symptom regression — outside code scope, needs real device
+4. WebSocket / HTTP L5 adapters — L5 protocol abstracted, no impl
+5. stdio_daemon per-session conn shard (currently one shared conn)
+6. Full pytest root-level run — v3 six directories all green; `tests/` root has independent hangs (telegram/e2e) unrelated to v3
+
+
