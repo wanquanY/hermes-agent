@@ -1,12 +1,19 @@
-"""spec §J3 — single EventLedger append entry.
+"""spec §J3 — single EventLedger append entry (whole-repo reality check).
 
 Only ``hermes_agent/domain/event_ledger.py`` may issue ``INSERT / UPDATE /
-DELETE`` statements against ``run_events``. Migrations are allowed to
-touch structural DDL (``ALTER TABLE``, ``CREATE INDEX``). Everything
-else routes through ``EventLedger.append``.
+DELETE`` statements against ``run_events``. Everything else routes through
+``EventLedger.append``.
 
-If someone later adds a raw ``INSERT INTO run_events (...)`` outside the
-ledger, this test flags it — spec §6.1 says run_events is the one ledger.
+**Prior version scanned only ``hermes_agent/`` — that scope was too narrow
+and produced a false green (audit 2026-07-07, docs/v3_audit_report.md
+§四 伪绿 1).** The production writers live at repo root
+(``hermes_state_runs.py:1676`` and ``:2704``), outside the ``hermes_agent/``
+tree. This file now scans the WHOLE repo and lists every writer.
+
+Until Phase E switch lands (spec §12 Phase E: `append_run_event` collapses
+into EventLedger, `team_mission_events` drops), the assertion is
+``xfail(strict=False)`` — the failure IS the reality signal; when it
+starts to *pass*, Phase E has landed and the xfail flips to a real green.
 """
 
 from __future__ import annotations
@@ -15,9 +22,10 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-V3_PKG = REPO_ROOT / "hermes_agent"
 
 
 _MUTATION_RE = re.compile(
@@ -29,29 +37,40 @@ _MUTATION_RE = re.compile(
 )
 
 
-# Allowed writers (relative to REPO_ROOT).
-_ALLOWED = {
+# Legitimate writers — the canonical ledger + structural / one-off backfill
+# migrations. Paths relative to REPO_ROOT.
+_LEDGER_WRITERS = {
     "hermes_agent/domain/event_ledger.py",
-    # Migrations legitimately shape the schema; they use ALTER TABLE / CREATE
-    # INDEX / DROP COLUMN which are structural, not row-mutation. But some
-    # backfill migrations do issue INSERT/UPDATE — those are one-off schema
-    # movements, not runtime writes, so we scope them here.
-    "hermes_agent/storage/migrations/0042_interaction_events_persist.py",
-    "hermes_agent/storage/migrations/0028_run_events_participant_id.py",
-    "hermes_agent/storage/migrations/0034_tool_events_backfill.py",
 }
 
+# Migrations legitimately shape the schema and may need to backfill rows;
+# every migration file is one-off, not runtime.
+_MIGRATION_ROOTS = {"hermes_agent/storage/migrations"}
 
-def _iter_python_files(root: Path):
-    for path in root.rglob("*.py"):
+# Test files never count.
+_EXCLUDED_DIRS = {"tests", "__pycache__", ".venv", ".import_linter_cache"}
+
+
+def _iter_python_files_whole_repo():
+    for path in REPO_ROOT.rglob("*.py"):
+        parts = set(path.relative_to(REPO_ROOT).parts)
+        if parts & _EXCLUDED_DIRS:
+            continue
+        yield path
+
+
+def _iter_python_files_v3():
+    for path in (REPO_ROOT / "hermes_agent").rglob("*.py"):
         if "__pycache__" in path.parts:
             continue
         yield path
 
 
 def _string_literals(path: Path) -> list[str]:
-    """Extract every non-docstring string literal from ``path``."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except SyntaxError:
+        return []
     docstring_ids: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(
@@ -75,42 +94,71 @@ def _string_literals(path: Path) -> list[str]:
     return literals
 
 
-def test_j3_only_event_ledger_writes_run_events():
+def _is_migration(rel: str) -> bool:
+    return any(rel.startswith(root + "/") for root in _MIGRATION_ROOTS)
+
+
+def _find_shadow_writers(files) -> list[tuple[str, str]]:
     offenders: list[tuple[str, str]] = []
-    for path in _iter_python_files(V3_PKG):
+    for path in files:
         rel = path.relative_to(REPO_ROOT).as_posix()
-        if rel in _ALLOWED:
+        if rel in _LEDGER_WRITERS:
+            continue
+        if _is_migration(rel):
             continue
         for literal in _string_literals(path):
             if _MUTATION_RE.search(literal):
                 snippet = literal.strip().replace("\n", " ")[:120]
                 offenders.append((rel, snippet))
-    if offenders:
-        formatted = "\n".join(
-            f"  {rel}\n    {snippet!r}" for rel, snippet in offenders
-        )
-        raise AssertionError(
-            "spec §J3 violated — non-ledger code writes run_events:\n"
-            + formatted
-        )
+                break  # one hit per file is enough for the report
+    return offenders
 
 
-def test_j3_allowed_list_stays_narrow():
-    """Sentinel — any future addition to ``_ALLOWED`` requires a spec §J3
-    review. This assertion prints the current list so the reviewer can
-    see growth over time.
-    """
-    # Current v3 ledger + 3 migrations. Fail if the list ever grows past 5.
-    assert len(_ALLOWED) <= 5, (
-        f"_ALLOWED grew past 5 entries — was a raw run_events writer added "
-        f"outside the ledger? Current: {sorted(_ALLOWED)}"
-    )
+# ---------------------------------------------------------------------------
 
 
 def test_j3_event_ledger_writer_exists():
     """Sanity — event_ledger.py must contain the canonical INSERT."""
-    src = (V3_PKG / "domain" / "event_ledger.py").read_text(encoding="utf-8")
+    src = (REPO_ROOT / "hermes_agent" / "domain" / "event_ledger.py").read_text(encoding="utf-8")
     assert _MUTATION_RE.search(src), (
-        "event_ledger.py has no INSERT INTO run_events — did the ledger "
-        "lose its canonical writer?"
+        "event_ledger.py has no INSERT INTO run_events — canonical writer lost"
     )
+
+
+def test_j3_v3_tree_is_clean():
+    """spec §J3 within the v3 tree (``hermes_agent/`` only) — every
+    ``INSERT/UPDATE/DELETE run_events`` outside the ledger + migrations is
+    a J3 violation inside v3.
+    """
+    offenders = _find_shadow_writers(_iter_python_files_v3())
+    if offenders:
+        formatted = "\n".join(f"  {rel}\n    {snippet!r}" for rel, snippet in offenders)
+        raise AssertionError(
+            "spec §J3 violated inside v3 tree — non-ledger writers:\n" + formatted
+        )
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "spec §12 Phase E switch not yet landed — legacy hermes_state_runs.py "
+        "and hermes_team_mission/state/event_log.py still write run_events / "
+        "team_mission_events directly. This xfail flips to xpassed when Phase E "
+        "collapses the legacy writers into EventLedger (see "
+        "docs/v3_audit_report.md §四 伪绿 1)."
+    ),
+)
+def test_j3_whole_repo_shadow_writers_gone():
+    """spec §J3 REALITY CHECK — whole-repo scan.
+
+    Failing here is the truthful signal that shadow (non-EventLedger)
+    writers still exist. Do not silence — instead retire the legacy
+    writers.
+    """
+    offenders = _find_shadow_writers(_iter_python_files_whole_repo())
+    if offenders:
+        formatted = "\n".join(f"  {rel}\n    {snippet!r}" for rel, snippet in offenders)
+        raise AssertionError(
+            f"spec §J3 whole-repo shadow writers still present ({len(offenders)} files):\n"
+            + formatted
+        )
