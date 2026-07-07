@@ -4,13 +4,13 @@ root_packages =
 
 [importlinter:contract:layered-skeleton]
 name = Hermes v3 layered skeleton
-type = layered
+type = layers
 layers =
     hermes_agent.transport
     hermes_agent.gateway
     hermes_agent.orchestration
-    hermes_agent.domain
     hermes_agent.repositories
+    hermes_agent.domain
     hermes_agent.storage
 ignore_imports =
-    hermes_agent.** -> hermes_agent.**
+    hermes_agent.storage.migrations.* -> hermes_agent.domain.seq_allocator

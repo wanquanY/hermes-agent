@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 version = 11
 description = "fts reindex"
+
+
+_logger = logging.getLogger(__name__)
 
 
 def apply(cursor: sqlite3.Cursor) -> None:
@@ -28,13 +32,21 @@ def apply(cursor: sqlite3.Cursor) -> None:
     ):
         try:
             cursor.execute(f"DROP TRIGGER IF EXISTS {_trig}")
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as exc:
+            _logger.debug(
+                "migration 0011 DROP TRIGGER %s skipped (legacy schema tolerance): %s",
+                _trig,
+                exc,
+            )
     for _tbl in ("messages_fts", "messages_fts_trigram"):
         try:
             cursor.execute(f"DROP TABLE IF EXISTS {_tbl}")
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as exc:
+            _logger.debug(
+                "migration 0011 DROP TABLE %s skipped (legacy schema tolerance): %s",
+                _tbl,
+                exc,
+            )
     # Recreate virtual tables + triggers with the new inline-mode
     # schema that indexes content || tool_name || tool_calls.
     cursor.executescript(FTS_SQL)

@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Protocol
+
+
+_logger = logging.getLogger(__name__)
+
+
+def _log_frozen_skip(version: int, exc: BaseException) -> None:
+    _logger.warning(
+        "migration %d frozen (%s); skipping until unpark", version, exc
+    )
 
 _MIGRATION_PREFIX_WIDTH = 4
 
@@ -214,26 +224,45 @@ class MigrationRunner:
         )
 
     def run_all(self) -> None:
-        """Apply pending migrations in ascending order and bump schema_version."""
+        """Apply pending migrations in ascending order and bump schema_version.
+
+        Migrations that raise an exception whose class name is
+        ``FrozenMigrationError`` are treated as intentionally parked (spec
+        §12 Phase M pattern) — skipped, logged, and excluded from the
+        target ``schema_version`` bump. Real errors continue to abort.
+        """
 
         context = MigrationContext(owner=self._owner)
         migrations = load_migrations(self._migrations_dir, context=context)
         current_version = self._read_schema_version()
-        target_version = max(record.version for record in migrations)
-        applied = False
+        applied_versions: list[int] = []
 
         for record in migrations:
             if record.version == 1:
                 if current_version is None:
-                    record.migration.apply(self._cursor)
-                    applied = True
+                    try:
+                        record.migration.apply(self._cursor)
+                        applied_versions.append(record.version)
+                    except Exception as exc:
+                        if type(exc).__name__ == "FrozenMigrationError":
+                            _log_frozen_skip(record.version, exc)
+                            continue
+                        raise
                 continue
             if current_version is None or record.version > current_version:
-                record.migration.apply(self._cursor)
-                applied = True
+                try:
+                    record.migration.apply(self._cursor)
+                    applied_versions.append(record.version)
+                except Exception as exc:
+                    if type(exc).__name__ == "FrozenMigrationError":
+                        _log_frozen_skip(record.version, exc)
+                        continue
+                    raise
 
-        if current_version is None or (applied and target_version > current_version):
-            self._write_schema_version(target_version)
+        if applied_versions:
+            bump_to = max(applied_versions)
+            if current_version is None or bump_to > current_version:
+                self._write_schema_version(bump_to)
 
     def _read_schema_version(self) -> int | None:
         try:
