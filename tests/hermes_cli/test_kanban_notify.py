@@ -547,7 +547,7 @@ async def test_notifier_uploads_artifacts_on_completion(kanban_home, tmp_path):
     fake_adapter.send_document = AsyncMock(side_effect=_send_document)
     # extract_local_files is used internally for legacy path fallback;
     # the real BasePlatformAdapter implementation lives there, so wire it.
-    from gateway.platforms.base import BasePlatformAdapter
+    from channels.platforms.base import BasePlatformAdapter
     fake_adapter.extract_local_files = BasePlatformAdapter.extract_local_files
 
     runner.adapters = {Platform.TELEGRAM: fake_adapter}
@@ -619,7 +619,7 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
     fake_adapter.send = AsyncMock(side_effect=_send)
     fake_adapter.send_document = AsyncMock(side_effect=_send_document)
     fake_adapter.send_multiple_images = AsyncMock()
-    from gateway.platforms.base import BasePlatformAdapter
+    from channels.platforms.base import BasePlatformAdapter
     fake_adapter.extract_local_files = BasePlatformAdapter.extract_local_files
 
     runner.adapters = {Platform.TELEGRAM: fake_adapter}

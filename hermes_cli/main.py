@@ -6793,7 +6793,7 @@ def _kill_stale_dashboard_processes(
             still_pending = []
             # On Windows, os.kill(pid, 0) is NOT a no-op. Route through
             # the cross-platform existence check.
-            from gateway.status import _pid_exists
+            from channels.runtime_status import _pid_exists
             for pid in pending:
                 if _pid_exists(pid):
                     still_pending.append(pid)
@@ -9633,7 +9633,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     print(
                         f"  ⚠ {len(_stuck)} gateway process(es) ignored SIGTERM — force-killing"
                     )
-                    from gateway.status import terminate_pid as _terminate_pid
+                    from channels.runtime_status import terminate_pid as _terminate_pid
                     for pid in _stuck:
                         try:
                             # Routes through taskkill /T /F on Windows,

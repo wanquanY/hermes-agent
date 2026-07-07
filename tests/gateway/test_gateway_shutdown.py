@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.platforms.base import MessageEvent
+from channels.platforms.base import MessageEvent
 from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
 from gateway.session import build_session_key
 from tests.gateway.restart_test_helpers import make_restart_runner, make_restart_source
@@ -73,8 +73,8 @@ async def test_gateway_stop_interrupts_running_agents_and_cancels_adapter_tasks(
     runner._running_agents = {session_key: running_agent}
 
     with (
-        patch("gateway.status.remove_pid_file"),
-        patch("gateway.status.write_runtime_status"),
+        patch("channels.runtime_status.remove_pid_file"),
+        patch("channels.runtime_status.write_runtime_status"),
         patch("agent.auxiliary_client.shutdown_cached_clients") as shutdown_cached_clients,
     ):
         await runner.stop()
@@ -104,7 +104,7 @@ async def test_gateway_stop_drains_running_agents_before_disconnect():
 
     asyncio.create_task(finish_agent())
 
-    with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
+    with patch("channels.runtime_status.remove_pid_file"), patch("channels.runtime_status.write_runtime_status"):
         await runner.stop()
 
     running_agent.interrupt.assert_not_called()
@@ -123,7 +123,7 @@ async def test_gateway_stop_interrupts_after_drain_timeout():
     running_agent = MagicMock()
     runner._running_agents = {"session": running_agent}
 
-    with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
+    with patch("channels.runtime_status.remove_pid_file"), patch("channels.runtime_status.write_runtime_status"):
         await runner.stop()
 
     running_agent.interrupt.assert_called_once_with("Gateway shutting down")
@@ -136,7 +136,7 @@ async def test_gateway_stop_service_restart_sets_named_exit_code():
     runner, adapter = make_restart_runner()
     adapter.disconnect = AsyncMock()
 
-    with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
+    with patch("channels.runtime_status.remove_pid_file"), patch("channels.runtime_status.write_runtime_status"):
         await runner.stop(restart=True, service_restart=True)
 
     assert runner._exit_code == GATEWAY_SERVICE_RESTART_EXIT_CODE
@@ -199,7 +199,7 @@ async def test_gateway_stop_kills_tool_subprocesses_before_adapter_disconnect_on
 
     runner._running_agents = {"session": MagicMock()}
 
-    with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
+    with patch("channels.runtime_status.remove_pid_file"), patch("channels.runtime_status.write_runtime_status"):
         await runner.stop()
 
     # First kill_all must precede the first disconnect.  (Both the eager
@@ -240,7 +240,7 @@ async def test_gateway_stop_kills_tool_subprocesses_on_graceful_path(monkeypatch
     monkeypatch.setattr(_bt, "cleanup_all_browsers", lambda: None)
 
     # No running agents → drain returns immediately, no timeout, no eager cleanup.
-    with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
+    with patch("channels.runtime_status.remove_pid_file"), patch("channels.runtime_status.write_runtime_status"):
         await runner.stop()
 
     # Only the final catch-all fires on the graceful path.

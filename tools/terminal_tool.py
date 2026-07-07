@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 def _session_env(name: str, default: str = "") -> str:
     try:
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
 
         return get_session_env(name, default)
     except Exception:
@@ -276,7 +276,7 @@ def set_approval_callback(cb):
 def _get_sudo_password_cache_scope() -> str:
     """Return the cache scope for interactive sudo passwords."""
     try:
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
 
         session_key = get_session_env("HERMES_SESSION_KEY", "")
     except Exception:
@@ -2027,7 +2027,7 @@ def terminal_tool(
                 # watch-pattern and completion notifications can be
                 # routed back to the correct chat/thread.
                 if background and (notify_on_complete or watch_patterns):
-                    from gateway.session_context import get_session_context_env as _gcse
+                    from channels.session_context import get_session_context_env as _gcse
 
                     _gw_platform = _gcse("HERMES_SESSION_PLATFORM", "")
                     notification_session_key = _gcse("HERMES_SESSION_KEY", "")
@@ -2060,6 +2060,22 @@ def terminal_tool(
                 if conflict_note:
                     logger.warning("background proc %s: %s", proc_session.id, conflict_note)
                     result_data["watch_patterns_ignored"] = conflict_note
+
+                if background and (notify_on_complete or watch_patterns):
+                    from channels.session_context import async_delivery_supported
+
+                    if not async_delivery_supported():
+                        notify_on_complete = False
+                        watch_patterns = []
+                        unsupported_note = (
+                            "This session cannot receive asynchronous tool "
+                            "completion notifications. Poll the process session "
+                            "status instead."
+                        )
+                        result_data["notify_on_complete"] = False
+                        result_data["notify_unsupported"] = unsupported_note
+                        proc_session.notify_on_complete = False
+                        proc_session.watch_patterns = []
 
                 # Mark for agent notification on completion
                 if notify_on_complete and background:

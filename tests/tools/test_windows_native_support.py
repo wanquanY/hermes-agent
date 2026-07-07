@@ -179,7 +179,7 @@ class TestConfigureWindowsStdio:
 
 
 class TestTerminatePidRoutingOnWindows:
-    """``gateway.status.terminate_pid`` must use taskkill /T /F on Windows.
+    """``channels.runtime_status.terminate_pid`` must use taskkill /T /F on Windows.
 
     On Linux we can't reload gateway/status with sys.platform=win32 because
     the module unconditionally imports ``msvcrt`` in that branch.  Instead
@@ -311,7 +311,7 @@ class TestSigkillFallback:
 # OSError widening on liveness probes
 #
 # Post-#21561, ``ProcessRegistry._is_host_pid_alive`` delegates to
-# ``gateway.status._pid_exists``, which is the cross-platform liveness
+# ``channels.runtime_status._pid_exists``, which is the cross-platform liveness
 # primitive (psutil-first, ctypes/os.kill fallback). The tests below assert
 # (a) the delegation is correct and (b) ``_pid_exists`` correctly widens
 # Windows' ``OSError(WinError 87)`` / ``PermissionError`` behavior on the
@@ -320,13 +320,13 @@ class TestSigkillFallback:
 
 
 class TestProcessRegistryOSErrorWidening:
-    """_is_host_pid_alive delegates to gateway.status._pid_exists."""
+    """_is_host_pid_alive delegates to channels.runtime_status._pid_exists."""
 
     def test_oserror_treated_as_not_alive(self, monkeypatch):
         """_pid_exists → False propagates as _is_host_pid_alive → False."""
         from tools.process_registry import ProcessRegistry
 
-        monkeypatch.setattr("gateway.status._pid_exists", lambda pid: False)
+        monkeypatch.setattr("channels.runtime_status._pid_exists", lambda pid: False)
         assert ProcessRegistry._is_host_pid_alive(12345) is False
 
     def test_permission_error_treated_as_alive(self, monkeypatch):
@@ -342,7 +342,7 @@ class TestProcessRegistryOSErrorWidening:
         """
         from tools.process_registry import ProcessRegistry
 
-        monkeypatch.setattr("gateway.status._pid_exists", lambda pid: True)
+        monkeypatch.setattr("channels.runtime_status._pid_exists", lambda pid: True)
         assert ProcessRegistry._is_host_pid_alive(12345) is True
 
     def test_zero_or_none_pid_returns_false_without_probing(self, monkeypatch):
@@ -351,7 +351,7 @@ class TestProcessRegistryOSErrorWidening:
 
         probes = []
         monkeypatch.setattr(
-            "gateway.status._pid_exists",
+            "channels.runtime_status._pid_exists",
             lambda pid: probes.append(pid) or True,
         )
         assert ProcessRegistry._is_host_pid_alive(None) is False
@@ -361,12 +361,12 @@ class TestProcessRegistryOSErrorWidening:
     def test_alive_pid_returns_true(self, monkeypatch):
         from tools.process_registry import ProcessRegistry
 
-        monkeypatch.setattr("gateway.status._pid_exists", lambda pid: True)
+        monkeypatch.setattr("channels.runtime_status._pid_exists", lambda pid: True)
         assert ProcessRegistry._is_host_pid_alive(os.getpid()) is True
 
 
 class TestPidExistsOSErrorWidening:
-    """gateway.status._pid_exists itself must widen Windows errors correctly.
+    """channels.runtime_status._pid_exists itself must widen Windows errors correctly.
 
     The POSIX fallback branch (reached when psutil isn't importable) is the
     only path where Python raises ``OSError(WinError 87)`` on Windows for a

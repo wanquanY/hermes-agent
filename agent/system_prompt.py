@@ -1190,7 +1190,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     elif platform_key:
         # Check plugin registry for platform-specific LLM guidance
         try:
-            from gateway.platform_registry import platform_registry
+            from channels.platform_registry import platform_registry
             _entry = platform_registry.get(platform_key)
             if _entry and _entry.platform_hint:
                 _default_hint = _entry.platform_hint
@@ -1215,7 +1215,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         # dir, so os.getcwd() would pick up the repo's AGENTS.md and
         # other dev files — inflating token usage by ~10k for no benefit.
         try:
-            from gateway.session_context import get_session_env
+            from channels.session_context import get_session_env
 
             _context_cwd = get_session_env("TERMINAL_CWD", "").strip() or None
         except Exception:

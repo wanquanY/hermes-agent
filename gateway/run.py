@@ -194,9 +194,9 @@ def _redact_gateway_user_facing_secrets(text: str) -> str:
 
 def _redact_approval_command(cmd: "str | None") -> str:
     """Redact credentials from a command before it enters an approval prompt."""
-    from agent.redact import redact_sensitive_text
+    from hermes_agent.gateway.runtime_config import redact_approval_command
 
-    return redact_sensitive_text(str(cmd or ""), force=True)
+    return redact_approval_command(cmd)
 
 
 def _gateway_provider_error_reply(text: str) -> str:
@@ -1024,7 +1024,7 @@ from gateway.session import (
     is_shared_multi_user_session,
 )
 from gateway.delivery import DeliveryRouter
-from gateway.platforms.base import (
+from channels.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
     MessageEvent,
@@ -1039,7 +1039,7 @@ from gateway.restart import (
 )
 
 
-from gateway.whatsapp_identity import (
+from channels.whatsapp_identity import (
     canonical_whatsapp_identifier as _canonical_whatsapp_identifier,  # noqa: F401
     expand_whatsapp_aliases as _expand_whatsapp_auth_aliases,
     normalize_whatsapp_identifier as _normalize_whatsapp_identifier,
@@ -1063,83 +1063,16 @@ def _resolve_runtime_agent_kwargs() -> dict:
     resolve credentials using the fallback provider chain from config.yaml
     before giving up.
     """
-    from hermes_cli.runtime_provider import (
-        resolve_runtime_provider,
-        format_runtime_provider_error,
-    )
-    from hermes_cli.auth import AuthError
+    from hermes_agent.gateway.runtime_config import resolve_runtime_agent_kwargs
 
-    try:
-        runtime = resolve_runtime_provider(
-            requested=os.getenv("HERMES_INFERENCE_PROVIDER"),
-        )
-    except AuthError as auth_exc:
-        # Primary provider auth failed (expired token, revoked key, etc.).
-        # Try the fallback provider chain before raising.
-        logger.warning("Primary provider auth failed: %s — trying fallback", auth_exc)
-        fb_config = _try_resolve_fallback_provider()
-        if fb_config is not None:
-            return fb_config
-        raise RuntimeError(format_runtime_provider_error(auth_exc)) from auth_exc
-    except Exception as exc:
-        raise RuntimeError(format_runtime_provider_error(exc)) from exc
-
-    return {
-        "api_key": runtime.get("api_key"),
-        "base_url": runtime.get("base_url"),
-        "provider": runtime.get("provider"),
-        "api_mode": runtime.get("api_mode"),
-        "command": runtime.get("command"),
-        "args": list(runtime.get("args") or []),
-        "credential_pool": runtime.get("credential_pool"),
-    }
+    return resolve_runtime_agent_kwargs(_hermes_home)
 
 
 def _try_resolve_fallback_provider() -> dict | None:
     """Attempt to resolve credentials from the fallback_model/fallback_providers config."""
-    from hermes_cli.runtime_provider import resolve_runtime_provider
-    try:
-        import yaml as _y
-        cfg_path = _hermes_home / "config.yaml"
-        if not cfg_path.exists():
-            return None
-        with open(cfg_path, encoding="utf-8") as _f:
-            cfg = _y.safe_load(_f) or {}
-        fb = cfg.get("fallback_providers") or cfg.get("fallback_model")
-        if not fb:
-            return None
-        # Normalize to list
-        fb_list = fb if isinstance(fb, list) else [fb]
-        for entry in fb_list:
-            if not isinstance(entry, dict):
-                continue
-            try:
-                runtime = resolve_runtime_provider(
-                    requested=entry.get("provider"),
-                    explicit_base_url=entry.get("base_url"),
-                    explicit_api_key=entry.get("api_key"),
-                )
-                logger.info(
-                    "Fallback provider resolved: %s model=%s",
-                    runtime.get("provider"),
-                    entry.get("model"),
-                )
-                return {
-                    "api_key": runtime.get("api_key"),
-                    "base_url": runtime.get("base_url"),
-                    "provider": runtime.get("provider"),
-                    "api_mode": runtime.get("api_mode"),
-                    "command": runtime.get("command"),
-                    "args": list(runtime.get("args") or []),
-                    "credential_pool": runtime.get("credential_pool"),
-                    "model": entry.get("model"),
-                }
-            except Exception as fb_exc:
-                logger.debug("Fallback entry %s failed: %s", entry.get("provider"), fb_exc)
-                continue
-    except Exception:
-        pass
-    return None
+    from hermes_agent.gateway.runtime_config import _try_resolve_fallback_provider
+
+    return _try_resolve_fallback_provider(_hermes_home)
 
 
 def _build_media_placeholder(event) -> str:
@@ -1416,26 +1349,9 @@ def _load_gateway_config() -> dict:
     still see their fixture) and shares the mtime-keyed raw-yaml cache
     from ``hermes_cli.config.read_raw_config`` when the paths match.
     """
-    config_path = _hermes_home / 'config.yaml'
-    try:
-        from hermes_cli.config import get_config_path, read_raw_config
-        # Fast path: if _hermes_home agrees with the canonical config
-        # location, reuse the shared cache. Otherwise fall through to a
-        # direct read (keeps test fixtures with a monkeypatched
-        # _hermes_home working).
-        if config_path == get_config_path():
-            return read_raw_config()
-    except Exception:
-        pass
+    from hermes_agent.gateway.runtime_config import load_gateway_runtime_config
 
-    try:
-        if config_path.exists():
-            import yaml
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return yaml.safe_load(f) or {}
-    except Exception:
-        logger.debug("Could not load gateway config from %s", config_path)
-    return {}
+    return load_gateway_runtime_config(_hermes_home)
 
 
 def _resolve_gateway_model(config: dict | None = None) -> str:
@@ -1445,13 +1361,9 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     back to the hardcoded default which fails when the active provider is
     openai-codex.
     """
-    cfg = config if config is not None else _load_gateway_config()
-    model_cfg = cfg.get("model", {})
-    if isinstance(model_cfg, str):
-        return model_cfg
-    elif isinstance(model_cfg, dict):
-        return model_cfg.get("default") or model_cfg.get("model") or ""
-    return ""
+    from hermes_agent.gateway.runtime_config import resolve_gateway_model
+
+    return resolve_gateway_model(config)
 
 
 def _resolve_hermes_bin() -> Optional[list[str]]:
@@ -2718,7 +2630,7 @@ class GatewayRunner:
 
     def _update_runtime_status(self, gateway_state: Optional[str] = None, exit_reason: Optional[str] = None) -> None:
         try:
-            from gateway.status import write_runtime_status
+            from channels.runtime_status import write_runtime_status
             write_runtime_status(
                 gateway_state=gateway_state,
                 exit_reason=exit_reason,
@@ -2745,7 +2657,7 @@ class GatewayRunner:
         Best-effort: a failed status write must never disrupt a turn.
         """
         try:
-            from gateway.status import write_runtime_status
+            from channels.runtime_status import write_runtime_status
             write_runtime_status(active_agents=self._running_agent_count())
         except Exception:
             pass
@@ -2759,7 +2671,7 @@ class GatewayRunner:
         error_message: Optional[str] = None,
     ) -> None:
         try:
-            from gateway.status import write_runtime_status
+            from channels.runtime_status import write_runtime_status
             write_runtime_status(
                 platform=platform,
                 platform_state=platform_state,
@@ -2903,21 +2815,12 @@ class GatewayRunner:
         "minimal", "low", "medium", "high", "xhigh". Returns None to use
         default (medium).
         """
-        from hermes_constants import parse_reasoning_effort
-        effort = ""
-        try:
-            import yaml as _y
-            cfg_path = _hermes_home / "config.yaml"
-            if cfg_path.exists():
-                with open(cfg_path, encoding="utf-8") as _f:
-                    cfg = _y.safe_load(_f) or {}
-                effort = str(cfg_get(cfg, "agent", "reasoning_effort", default="") or "").strip()
-        except Exception:
-            pass
-        result = parse_reasoning_effort(effort)
-        if effort and effort.strip() and result is None:
-            logger.warning("Unknown reasoning_effort '%s', using default (medium)", effort)
-        return result
+        from hermes_agent.gateway.runtime_config import (
+            load_gateway_runtime_config,
+            load_reasoning_config,
+        )
+
+        return load_reasoning_config(load_gateway_runtime_config(_hermes_home))
 
     @staticmethod
     def _parse_reasoning_command_args(raw_args: str) -> tuple[str, bool]:
@@ -3126,18 +3029,12 @@ class GatewayRunner:
         dict (legacy ``fallback_model``), or None if not configured.
         AIAgent.__init__ normalizes both formats into a chain.
         """
-        try:
-            import yaml as _y
-            cfg_path = _hermes_home / "config.yaml"
-            if cfg_path.exists():
-                with open(cfg_path, encoding="utf-8") as _f:
-                    cfg = _y.safe_load(_f) or {}
-                fb = cfg.get("fallback_providers") or cfg.get("fallback_model") or None
-                if fb:
-                    return fb
-        except Exception:
-            pass
-        return None
+        from hermes_agent.gateway.runtime_config import (
+            load_fallback_model,
+            load_gateway_runtime_config,
+        )
+
+        return load_fallback_model(load_gateway_runtime_config(_hermes_home))
 
     def _snapshot_running_agents(self) -> Dict[str, Any]:
         return {
@@ -4024,7 +3921,7 @@ class GatewayRunner:
         except Exception:
             pass
         try:
-            from gateway.status import write_runtime_status
+            from channels.runtime_status import write_runtime_status
             write_runtime_status(gateway_state="starting", exit_reason=None)
         except Exception:
             pass
@@ -4092,7 +3989,7 @@ class GatewayRunner:
         _plugin_allowed_vars: tuple = ()
         _plugin_allow_all_vars: tuple = ()
         try:
-            from gateway.platform_registry import platform_registry
+            from channels.platform_registry import platform_registry
             _plugin_allowed_vars = tuple(
                 e.allowed_users_env for e in platform_registry.plugin_entries()
                 if e.allowed_users_env
@@ -4325,7 +4222,7 @@ class GatewayRunner:
                 reason = "; ".join(startup_nonretryable_errors)
                 logger.error("Gateway hit a non-retryable startup conflict: %s", reason)
                 try:
-                    from gateway.status import write_runtime_status
+                    from channels.runtime_status import write_runtime_status
                     write_runtime_status(gateway_state="startup_failed", exit_reason=reason)
                 except Exception:
                     pass
@@ -4350,7 +4247,7 @@ class GatewayRunner:
                         len(self._failed_platforms), reason,
                     )
                     try:
-                        from gateway.status import write_runtime_status
+                        from channels.runtime_status import write_runtime_status
                         write_runtime_status(
                             gateway_state="degraded",
                             exit_reason=None,
@@ -4544,7 +4441,7 @@ class GatewayRunner:
         """Execute one handoff row. Raises on failure (caller marks failed)."""
         from gateway.config import Platform
         from gateway.session import SessionSource, build_session_key
-        from gateway.platforms.base import MessageEvent
+        from channels.platforms.base import MessageEvent
 
         cli_session_id = row["id"]
         platform_name = (row.get("handoff_platform") or "").strip().lower()
@@ -5354,7 +5251,7 @@ class GatewayRunner:
         if not candidates:
             return
 
-        from gateway.platforms.base import BasePlatformAdapter
+        from channels.platforms.base import BasePlatformAdapter
         candidates = BasePlatformAdapter.filter_local_delivery_paths(candidates)
         if not candidates:
             return
@@ -6238,7 +6135,7 @@ class GatewayRunner:
                 _phase_elapsed(),
             )
 
-            from gateway.status import remove_pid_file, release_gateway_runtime_lock
+            from channels.runtime_status import remove_pid_file, release_gateway_runtime_lock
             remove_pid_file()
             release_gateway_runtime_lock()
 
@@ -6307,7 +6204,7 @@ class GatewayRunner:
 
         # ── Plugin-registered platforms (checked first) ───────────────────
         try:
-            from gateway.platform_registry import platform_registry
+            from channels.platform_registry import platform_registry
             if platform_registry.is_registered(platform.value):
                 adapter = platform_registry.create_adapter(platform.value, config)
                 if adapter is not None:
@@ -6325,7 +6222,7 @@ class GatewayRunner:
         # Fall through to built-in adapters below
 
         if platform == Platform.TELEGRAM:
-            from gateway.platforms.telegram import TelegramAdapter, check_telegram_requirements
+            from channels.platforms.telegram import TelegramAdapter, check_telegram_requirements
             if not check_telegram_requirements():
                 logger.warning("Telegram: python-telegram-bot not installed")
                 return None
@@ -6354,7 +6251,7 @@ class GatewayRunner:
             return adapter
         
         elif platform == Platform.DISCORD:
-            from gateway.platforms.discord import DiscordAdapter, check_discord_requirements
+            from channels.platforms.discord import DiscordAdapter, check_discord_requirements
             if not check_discord_requirements():
                 logger.warning("Discord: discord.py not installed")
                 return None
@@ -6363,63 +6260,63 @@ class GatewayRunner:
             return adapter
         
         elif platform == Platform.WHATSAPP:
-            from gateway.platforms.whatsapp import WhatsAppAdapter, check_whatsapp_requirements
+            from channels.platforms.whatsapp import WhatsAppAdapter, check_whatsapp_requirements
             if not check_whatsapp_requirements():
                 logger.warning("WhatsApp: Node.js not installed or bridge not configured")
                 return None
             return WhatsAppAdapter(config)
         
         elif platform == Platform.SLACK:
-            from gateway.platforms.slack import SlackAdapter, check_slack_requirements
+            from channels.platforms.slack import SlackAdapter, check_slack_requirements
             if not check_slack_requirements():
                 logger.warning("Slack: slack-bolt not installed. Run: pip install 'hermes-agent[slack]'")
                 return None
             return SlackAdapter(config)
 
         elif platform == Platform.SIGNAL:
-            from gateway.platforms.signal import SignalAdapter, check_signal_requirements
+            from channels.platforms.signal import SignalAdapter, check_signal_requirements
             if not check_signal_requirements():
                 logger.warning("Signal: SIGNAL_HTTP_URL or SIGNAL_ACCOUNT not configured")
                 return None
             return SignalAdapter(config)
 
         elif platform == Platform.HOMEASSISTANT:
-            from gateway.platforms.homeassistant import HomeAssistantAdapter, check_ha_requirements
+            from channels.platforms.homeassistant import HomeAssistantAdapter, check_ha_requirements
             if not check_ha_requirements():
                 logger.warning("HomeAssistant: aiohttp not installed or HASS_TOKEN not set")
                 return None
             return HomeAssistantAdapter(config)
 
         elif platform == Platform.EMAIL:
-            from gateway.platforms.email import EmailAdapter, check_email_requirements
+            from channels.platforms.email import EmailAdapter, check_email_requirements
             if not check_email_requirements():
                 logger.warning("Email: EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_IMAP_HOST, or EMAIL_SMTP_HOST not set")
                 return None
             return EmailAdapter(config)
 
         elif platform == Platform.SMS:
-            from gateway.platforms.sms import SmsAdapter, check_sms_requirements
+            from channels.platforms.sms import SmsAdapter, check_sms_requirements
             if not check_sms_requirements():
                 logger.warning("SMS: aiohttp not installed or TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN not set")
                 return None
             return SmsAdapter(config)
 
         elif platform == Platform.DINGTALK:
-            from gateway.platforms.dingtalk import DingTalkAdapter, check_dingtalk_requirements
+            from channels.platforms.dingtalk import DingTalkAdapter, check_dingtalk_requirements
             if not check_dingtalk_requirements():
                 logger.warning("DingTalk: dingtalk-stream not installed or DINGTALK_CLIENT_ID/SECRET not set")
                 return None
             return DingTalkAdapter(config)
 
         elif platform == Platform.FEISHU:
-            from gateway.platforms.feishu import FeishuAdapter, check_feishu_requirements
+            from channels.platforms.feishu import FeishuAdapter, check_feishu_requirements
             if not check_feishu_requirements():
                 logger.warning("Feishu: lark-oapi not installed or FEISHU_APP_ID/SECRET not set")
                 return None
             return FeishuAdapter(config)
 
         elif platform == Platform.WECOM_CALLBACK:
-            from gateway.platforms.wecom_callback import (
+            from channels.platforms.wecom_callback import (
                 WecomCallbackAdapter,
                 check_wecom_callback_requirements,
             )
@@ -6429,42 +6326,42 @@ class GatewayRunner:
             return WecomCallbackAdapter(config)
 
         elif platform == Platform.WECOM:
-            from gateway.platforms.wecom import WeComAdapter, check_wecom_requirements
+            from channels.platforms.wecom import WeComAdapter, check_wecom_requirements
             if not check_wecom_requirements():
                 logger.warning("WeCom: aiohttp not installed or WECOM_BOT_ID/SECRET not set")
                 return None
             return WeComAdapter(config)
 
         elif platform == Platform.WEIXIN:
-            from gateway.platforms.weixin import WeixinAdapter, check_weixin_requirements
+            from channels.platforms.weixin import WeixinAdapter, check_weixin_requirements
             if not check_weixin_requirements():
                 logger.warning("Weixin: aiohttp/cryptography not installed")
                 return None
             return WeixinAdapter(config)
 
         elif platform == Platform.MATTERMOST:
-            from gateway.platforms.mattermost import MattermostAdapter, check_mattermost_requirements
+            from channels.platforms.mattermost import MattermostAdapter, check_mattermost_requirements
             if not check_mattermost_requirements():
                 logger.warning("Mattermost: MATTERMOST_TOKEN or MATTERMOST_URL not set, or aiohttp missing")
                 return None
             return MattermostAdapter(config)
 
         elif platform == Platform.MATRIX:
-            from gateway.platforms.matrix import MatrixAdapter, check_matrix_requirements
+            from channels.platforms.matrix import MatrixAdapter, check_matrix_requirements
             if not check_matrix_requirements():
                 logger.warning("Matrix: mautrix not installed or credentials not set. Run: pip install 'mautrix[encryption]'")
                 return None
             return MatrixAdapter(config)
 
         elif platform == Platform.API_SERVER:
-            from gateway.platforms.api_server import APIServerAdapter, check_api_server_requirements
+            from channels.platforms.api_server import APIServerAdapter, check_api_server_requirements
             if not check_api_server_requirements():
                 logger.warning("API Server: aiohttp not installed")
                 return None
             return APIServerAdapter(config)
 
         elif platform == Platform.WEBHOOK:
-            from gateway.platforms.webhook import WebhookAdapter, check_webhook_requirements
+            from channels.platforms.webhook import WebhookAdapter, check_webhook_requirements
             if not check_webhook_requirements():
                 logger.warning("Webhook: aiohttp not installed")
                 return None
@@ -6473,7 +6370,7 @@ class GatewayRunner:
             return adapter
 
         elif platform == Platform.MSGRAPH_WEBHOOK:
-            from gateway.platforms.msgraph_webhook import (
+            from channels.platforms.msgraph_webhook import (
                 MSGraphWebhookAdapter,
                 check_msgraph_webhook_requirements,
             )
@@ -6483,21 +6380,21 @@ class GatewayRunner:
             return MSGraphWebhookAdapter(config)
 
         elif platform == Platform.BLUEBUBBLES:
-            from gateway.platforms.bluebubbles import BlueBubblesAdapter, check_bluebubbles_requirements
+            from channels.platforms.bluebubbles import BlueBubblesAdapter, check_bluebubbles_requirements
             if not check_bluebubbles_requirements():
                 logger.warning("BlueBubbles: aiohttp/httpx missing or BLUEBUBBLES_SERVER_URL/BLUEBUBBLES_PASSWORD not configured")
                 return None
             return BlueBubblesAdapter(config)
 
         elif platform == Platform.QQBOT:
-            from gateway.platforms.qqbot import QQAdapter, check_qq_requirements
+            from channels.platforms.qqbot import QQAdapter, check_qq_requirements
             if not check_qq_requirements():
                 logger.warning("QQBot: aiohttp/httpx missing or QQ_APP_ID/QQ_CLIENT_SECRET not configured")
                 return None
             return QQAdapter(config)
 
         elif platform == Platform.YUANBAO:
-            from gateway.platforms.yuanbao import YuanbaoAdapter, WEBSOCKETS_AVAILABLE
+            from channels.platforms.yuanbao import YuanbaoAdapter, WEBSOCKETS_AVAILABLE
             if not WEBSOCKETS_AVAILABLE:
                 logger.warning("Yuanbao: websockets not installed. Run: pip install websockets")
                 return None
@@ -6608,7 +6505,7 @@ class GatewayRunner:
         # Plugin platforms: check the registry for auth env var names
         if source.platform not in platform_env_map:
             try:
-                from gateway.platform_registry import platform_registry
+                from channels.platform_registry import platform_registry
                 entry = platform_registry.get(source.platform.value)
                 if entry:
                     if entry.allowed_users_env:
@@ -10283,6 +10180,7 @@ class GatewayRunner:
         import yaml
         from hermes_cli.model_switch import (
             switch_model as _switch_model, parse_model_flags,
+            resolve_persist_behavior,
             list_authenticated_providers,
             list_picker_providers,
         )
@@ -10291,7 +10189,8 @@ class GatewayRunner:
         raw_args = event.get_command_args().strip()
 
         # Parse --provider, --global, and --refresh flags
-        model_input, explicit_provider, persist_global, force_refresh = parse_model_flags(raw_args)
+        model_input, explicit_provider, is_global, force_refresh, is_session = parse_model_flags(raw_args)
+        persist_global = resolve_persist_behavior(is_global, is_session)
 
         # --refresh: bust the disk cache so the picker shows live data.
         if force_refresh:
@@ -10573,7 +10472,14 @@ class GatewayRunner:
                         cfg = yaml.safe_load(f) or {}
                 else:
                     cfg = {}
-                model_cfg = cfg.setdefault("model", {})
+                existing_model_cfg = cfg.get("model")
+                if isinstance(existing_model_cfg, dict):
+                    model_cfg = existing_model_cfg
+                else:
+                    model_cfg = {}
+                    if isinstance(existing_model_cfg, str) and existing_model_cfg.strip():
+                        model_cfg["default"] = existing_model_cfg.strip()
+                    cfg["model"] = model_cfg
                 model_cfg["default"] = result.new_model
                 model_cfg["provider"] = result.target_provider
                 if result.base_url:
@@ -11613,7 +11519,7 @@ class GatewayRunner:
             # send_multiple_images (Telegram sendPhoto recompresses to ~1280px).
             force_document_attachments = "[[as_document]]" in response
 
-            from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
+            from channels.platforms.base import BasePlatformAdapter, should_send_media_as_audio
 
             media_files, _ = adapter.extract_media(response)
             media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
@@ -11914,7 +11820,7 @@ class GatewayRunner:
             # Extract media files from the response
             if response:
                 media_files, response = adapter.extract_media(response)
-                from gateway.platforms.base import BasePlatformAdapter
+                from channels.platforms.base import BasePlatformAdapter
                 media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
                 images, text_content = adapter.extract_images(response)
 
@@ -13888,7 +13794,7 @@ class GatewayRunner:
         # Plugin platforms with allow_update_command=True are also allowed
         if platform not in _allowed:
             try:
-                from gateway.platform_registry import platform_registry
+                from channels.platform_registry import platform_registry
                 entry = platform_registry.get(platform.value)
                 if not entry or not entry.allow_update_command:
                     return t("gateway.update.platform_not_messaging")
@@ -14463,7 +14369,7 @@ class GatewayRunner:
         Returns a list of reset tokens; pass them to ``_clear_session_env``
         in a ``finally`` block.
         """
-        from gateway.session_context import set_session_vars
+        from channels.session_context import set_session_vars
         # Propagate the adapter's async-delivery capability so async tools
         # (terminal notify_on_complete / watch_patterns, delegate_task
         # background=True) know whether this channel can wake a later turn.
@@ -14488,7 +14394,7 @@ class GatewayRunner:
 
     def _clear_session_env(self, tokens: list) -> None:
         """Restore session context variables to their pre-handler values."""
-        from gateway.session_context import clear_session_vars
+        from channels.session_context import clear_session_vars
         clear_session_vars(tokens)
 
     async def _run_in_executor_with_context(self, func, *args):
@@ -14733,7 +14639,7 @@ class GatewayRunner:
             # registered in the platform registry.
             if platform.value not in _BUILTIN_PLATFORM_VALUES:
                 try:
-                    from gateway.platform_registry import platform_registry
+                    from channels.platform_registry import platform_registry
                     if not platform_registry.is_registered(platform.value):
                         raise ValueError(platform_name)
                 except Exception:
@@ -18096,7 +18002,7 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     once per hour.
     """
     from cron.scheduler import tick as cron_tick
-    from gateway.platforms.base import cleanup_image_cache, cleanup_document_cache
+    from channels.platforms.base import cleanup_image_cache, cleanup_document_cache
     from hermes_cli.debug import _sweep_expired_pastes
 
     IMAGE_CACHE_EVERY = 60   # ticks — once per hour at default 60s interval
@@ -18195,7 +18101,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # The PID file is scoped to HERMES_HOME, so future multi-profile
     # setups (each profile using a distinct HERMES_HOME) will naturally
     # allow concurrent instances without tripping this guard.
-    from gateway.status import (
+    from channels.runtime_status import (
         acquire_gateway_runtime_lock,
         get_running_pid,
         get_process_start_time,
@@ -18217,7 +18123,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             # Restart=on-failure and start a flap loop against us).
             # Best-effort — proceed even if the write fails.
             try:
-                from gateway.status import write_takeover_marker
+                from channels.runtime_status import write_takeover_marker
                 write_takeover_marker(existing_pid)
             except Exception as e:
                 logger.debug("Could not write takeover marker: %s", e)
@@ -18233,7 +18139,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 # Marker is scoped to a specific target; clean it up on
                 # give-up so it doesn't grief an unrelated future shutdown.
                 try:
-                    from gateway.status import clear_takeover_marker
+                    from channels.runtime_status import clear_takeover_marker
                     clear_takeover_marker()
                 except Exception:
                     pass
@@ -18241,7 +18147,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             # Wait up to 10 seconds for the old process to exit.
             # ``os.kill(pid, 0)`` on Windows is NOT a no-op — use the
             # handle-based existence check instead.
-            from gateway.status import _pid_exists
+            from channels.runtime_status import _pid_exists
             for _ in range(20):
                 if not _pid_exists(existing_pid):
                     break  # Process is gone
@@ -18267,7 +18173,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             # Clean up any takeover marker the old process didn't consume
             # (e.g. SIGKILL'd before its shutdown handler could read it).
             try:
-                from gateway.status import clear_takeover_marker
+                from channels.runtime_status import clear_takeover_marker
                 clear_takeover_marker()
             except Exception:
                 pass
@@ -18275,7 +18181,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             # Stopped (Ctrl+Z) processes don't release locks on exit,
             # leaving stale lock files that block the new gateway from starting.
             try:
-                from gateway.status import release_all_scoped_locks
+                from channels.runtime_status import release_all_scoped_locks
                 _released = release_all_scoped_locks(
                     owner_pid=existing_pid,
                     owner_start_time=existing_start_time,
@@ -18393,7 +18299,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         # gateway.service from pre-rename installs).
         planned_takeover = False
         try:
-            from gateway.status import consume_takeover_marker_for_self
+            from channels.runtime_status import consume_takeover_marker_for_self
             planned_takeover = consume_takeover_marker_for_self()
         except Exception as e:
             logger.debug("Takeover marker check failed: %s", e)
@@ -18407,7 +18313,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             planned_stop = True
         elif not planned_takeover:
             try:
-                from gateway.status import consume_planned_stop_marker_for_self
+                from channels.runtime_status import consume_planned_stop_marker_for_self
                 planned_stop = consume_planned_stop_marker_for_self()
             except Exception as e:
                 logger.debug("Planned stop marker check failed: %s", e)
@@ -18495,7 +18401,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Telegram polling, Discord gateway sockets, etc. The loser exits
     # cleanly before touching any external service.
     import atexit
-    from gateway.status import write_pid_file, remove_pid_file, get_running_pid
+    from channels.runtime_status import write_pid_file, remove_pid_file, get_running_pid
     _current_pid = get_running_pid()
     if _current_pid is not None and _current_pid != os.getpid():
         logger.error(

@@ -33,7 +33,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent, MessageType, SendResult
+from channels.platforms.base import MessageEvent, MessageType, SendResult
 from gateway.run import (
     _auto_continue_freshness_window,
     _coerce_gateway_timestamp,
@@ -782,8 +782,8 @@ async def test_drain_timeout_marks_resume_pending():
     session_store.mark_resume_pending = MagicMock(return_value=True)
     runner.session_store = session_store
 
-    with patch("gateway.status.remove_pid_file"), patch(
-        "gateway.status.write_runtime_status"
+    with patch("channels.runtime_status.remove_pid_file"), patch(
+        "channels.runtime_status.write_runtime_status"
     ):
         await runner.stop()
 
@@ -809,8 +809,8 @@ async def test_drain_timeout_uses_restart_reason_when_restarting():
     session_store.mark_resume_pending = MagicMock(return_value=True)
     runner.session_store = session_store
 
-    with patch("gateway.status.remove_pid_file"), patch(
-        "gateway.status.write_runtime_status"
+    with patch("channels.runtime_status.remove_pid_file"), patch(
+        "channels.runtime_status.write_runtime_status"
     ):
         await runner.stop(restart=True, detached_restart=False, service_restart=True)
 
@@ -844,8 +844,8 @@ async def test_drain_timeout_skips_pending_sentinel_sessions():
     session_store.mark_resume_pending = MagicMock(return_value=True)
     runner.session_store = session_store
 
-    with patch("gateway.status.remove_pid_file"), patch(
-        "gateway.status.write_runtime_status"
+    with patch("channels.runtime_status.remove_pid_file"), patch(
+        "channels.runtime_status.write_runtime_status"
     ):
         await runner.stop()
 

@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from agent.dovie_attribution import build_dovie_attribution_headers, dovie_child_run_overlay
-from gateway.session_context import clear_session_vars, get_session_env, set_session_vars
+from channels.session_context import clear_session_vars, get_session_env, set_session_vars
 from tools import async_delegation as ad
 from tools.process_registry import process_registry
 

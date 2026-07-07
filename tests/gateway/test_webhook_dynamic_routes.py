@@ -6,7 +6,7 @@ import pytest
 from pathlib import Path
 
 from gateway.config import PlatformConfig
-from gateway.platforms.webhook import WebhookAdapter, _DYNAMIC_ROUTES_FILENAME
+from channels.platforms.webhook import WebhookAdapter, _DYNAMIC_ROUTES_FILENAME
 
 
 def _make_adapter(routes=None, extra=None):

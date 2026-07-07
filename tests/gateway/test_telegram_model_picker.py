@@ -32,7 +32,7 @@ def _ensure_telegram_mock():
 _ensure_telegram_mock()
 
 from gateway.config import PlatformConfig
-from gateway.platforms.telegram import TelegramAdapter
+from channels.platforms.telegram import TelegramAdapter
 
 
 def _make_adapter():
@@ -147,7 +147,7 @@ class TestTelegramModelPicker:
         which is robust to whether `telegram` is the real SDK or the module
         mock (the SDK markup objects don't expose a plain iterable under the
         mock)."""
-        import gateway.platforms.telegram as tg
+        import channels.platforms.telegram as tg
 
         built: list = []
 

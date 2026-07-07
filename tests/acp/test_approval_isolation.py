@@ -151,7 +151,7 @@ class TestThreadLocalApprovalCallback:
         import contextvars
         from concurrent.futures import ThreadPoolExecutor
 
-        from gateway.session_context import (
+        from channels.session_context import (
             clear_session_vars,
             set_session_vars,
         )

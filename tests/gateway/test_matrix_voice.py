@@ -19,7 +19,7 @@ try:
 except ImportError:
     pytest.skip("mautrix not installed", allow_module_level=True)
 
-from gateway.platforms.base import MessageType
+from channels.platforms.base import MessageType
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +28,7 @@ from gateway.platforms.base import MessageType
 
 def _make_adapter():
     """Create a MatrixAdapter with mocked config."""
-    from gateway.platforms.matrix import MatrixAdapter
+    from channels.platforms.matrix import MatrixAdapter
     from gateway.config import PlatformConfig
 
     config = PlatformConfig(

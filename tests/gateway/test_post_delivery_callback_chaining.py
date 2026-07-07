@@ -9,7 +9,7 @@ Stale-generation registrations are rejected.
 import pytest
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, SendResult
+from channels.platforms.base import BasePlatformAdapter, SendResult
 
 
 class _MinAdapter(BasePlatformAdapter):

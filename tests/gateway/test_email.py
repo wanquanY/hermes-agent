@@ -22,7 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from gateway.platforms.base import SendResult
+from channels.platforms.base import SendResult
 
 
 class TestConfigEnvOverrides(unittest.TestCase):
@@ -74,19 +74,19 @@ class TestCheckRequirements(unittest.TestCase):
         "EMAIL_SMTP_HOST": "smtp.b.com",
     }, clear=False)
     def test_requirements_met(self):
-        from gateway.platforms.email import check_email_requirements
+        from channels.platforms.email import check_email_requirements
         self.assertTrue(check_email_requirements())
 
     @patch.dict(os.environ, {
         "EMAIL_ADDRESS": "a@b.com",
     }, clear=True)
     def test_requirements_not_met(self):
-        from gateway.platforms.email import check_email_requirements
+        from channels.platforms.email import check_email_requirements
         self.assertFalse(check_email_requirements())
 
     @patch.dict(os.environ, {}, clear=True)
     def test_requirements_empty_env(self):
-        from gateway.platforms.email import check_email_requirements
+        from channels.platforms.email import check_email_requirements
         self.assertFalse(check_email_requirements())
 
 
@@ -94,39 +94,39 @@ class TestHelperFunctions(unittest.TestCase):
     """Test email parsing helper functions."""
 
     def test_decode_header_plain(self):
-        from gateway.platforms.email import _decode_header_value
+        from channels.platforms.email import _decode_header_value
         self.assertEqual(_decode_header_value("Hello World"), "Hello World")
 
     def test_decode_header_encoded(self):
-        from gateway.platforms.email import _decode_header_value
+        from channels.platforms.email import _decode_header_value
         # RFC 2047 encoded subject
         encoded = "=?utf-8?B?TWVyaGFiYQ==?="  # "Merhaba" in base64
         result = _decode_header_value(encoded)
         self.assertEqual(result, "Merhaba")
 
     def test_extract_email_address_with_name(self):
-        from gateway.platforms.email import _extract_email_address
+        from channels.platforms.email import _extract_email_address
         self.assertEqual(
             _extract_email_address("John Doe <john@example.com>"),
             "john@example.com"
         )
 
     def test_extract_email_address_bare(self):
-        from gateway.platforms.email import _extract_email_address
+        from channels.platforms.email import _extract_email_address
         self.assertEqual(
             _extract_email_address("john@example.com"),
             "john@example.com"
         )
 
     def test_extract_email_address_uppercase(self):
-        from gateway.platforms.email import _extract_email_address
+        from channels.platforms.email import _extract_email_address
         self.assertEqual(
             _extract_email_address("John@Example.COM"),
             "john@example.com"
         )
 
     def test_strip_html_basic(self):
-        from gateway.platforms.email import _strip_html
+        from channels.platforms.email import _strip_html
         html = "<p>Hello <b>world</b></p>"
         result = _strip_html(html)
         self.assertIn("Hello", result)
@@ -135,14 +135,14 @@ class TestHelperFunctions(unittest.TestCase):
         self.assertNotIn("<b>", result)
 
     def test_strip_html_br_tags(self):
-        from gateway.platforms.email import _strip_html
+        from channels.platforms.email import _strip_html
         html = "Line 1<br>Line 2<br/>Line 3"
         result = _strip_html(html)
         self.assertIn("Line 1", result)
         self.assertIn("Line 2", result)
 
     def test_strip_html_entities(self):
-        from gateway.platforms.email import _strip_html
+        from channels.platforms.email import _strip_html
         html = "a &amp; b &lt; c &gt; d"
         result = _strip_html(html)
         self.assertIn("a & b", result)
@@ -152,20 +152,20 @@ class TestExtractTextBody(unittest.TestCase):
     """Test email body extraction from different message formats."""
 
     def test_plain_text_body(self):
-        from gateway.platforms.email import _extract_text_body
+        from channels.platforms.email import _extract_text_body
         msg = MIMEText("Hello, this is a test.", "plain", "utf-8")
         result = _extract_text_body(msg)
         self.assertEqual(result, "Hello, this is a test.")
 
     def test_html_body_fallback(self):
-        from gateway.platforms.email import _extract_text_body
+        from channels.platforms.email import _extract_text_body
         msg = MIMEText("<p>Hello from HTML</p>", "html", "utf-8")
         result = _extract_text_body(msg)
         self.assertIn("Hello from HTML", result)
         self.assertNotIn("<p>", result)
 
     def test_multipart_prefers_plain(self):
-        from gateway.platforms.email import _extract_text_body
+        from channels.platforms.email import _extract_text_body
         msg = MIMEMultipart("alternative")
         msg.attach(MIMEText("<p>HTML version</p>", "html", "utf-8"))
         msg.attach(MIMEText("Plain version", "plain", "utf-8"))
@@ -173,14 +173,14 @@ class TestExtractTextBody(unittest.TestCase):
         self.assertEqual(result, "Plain version")
 
     def test_multipart_html_only(self):
-        from gateway.platforms.email import _extract_text_body
+        from channels.platforms.email import _extract_text_body
         msg = MIMEMultipart("alternative")
         msg.attach(MIMEText("<p>Only HTML</p>", "html", "utf-8"))
         result = _extract_text_body(msg)
         self.assertIn("Only HTML", result)
 
     def test_empty_body(self):
-        from gateway.platforms.email import _extract_text_body
+        from channels.platforms.email import _extract_text_body
         msg = MIMEText("", "plain", "utf-8")
         result = _extract_text_body(msg)
         self.assertEqual(result, "")
@@ -190,14 +190,14 @@ class TestExtractAttachments(unittest.TestCase):
     """Test attachment extraction and caching."""
 
     def test_no_attachments(self):
-        from gateway.platforms.email import _extract_attachments
+        from channels.platforms.email import _extract_attachments
         msg = MIMEText("No attachments here.", "plain", "utf-8")
         result = _extract_attachments(msg)
         self.assertEqual(result, [])
 
-    @patch("gateway.platforms.email.cache_document_from_bytes")
+    @patch("channels.platforms.email.cache_document_from_bytes")
     def test_document_attachment(self, mock_cache):
-        from gateway.platforms.email import _extract_attachments
+        from channels.platforms.email import _extract_attachments
         mock_cache.return_value = "/tmp/cached_doc.pdf"
 
         msg = MIMEMultipart()
@@ -215,9 +215,9 @@ class TestExtractAttachments(unittest.TestCase):
         self.assertEqual(result[0]["filename"], "report.pdf")
         mock_cache.assert_called_once()
 
-    @patch("gateway.platforms.email.cache_image_from_bytes")
+    @patch("channels.platforms.email.cache_image_from_bytes")
     def test_image_attachment(self, mock_cache):
-        from gateway.platforms.email import _extract_attachments
+        from channels.platforms.email import _extract_attachments
         mock_cache.return_value = "/tmp/cached_img.jpg"
 
         msg = MIMEMultipart()
@@ -250,7 +250,7 @@ class TestDispatchMessage(unittest.TestCase):
             "EMAIL_SMTP_PORT": "587",
             "EMAIL_POLL_INTERVAL": "15",
         }):
-            from gateway.platforms.email import EmailAdapter
+            from channels.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
         return adapter
 
@@ -369,7 +369,7 @@ class TestDispatchMessage(unittest.TestCase):
     def test_image_attachment_sets_photo_type(self):
         """Email with image attachment should set message type to PHOTO."""
         import asyncio
-        from gateway.platforms.base import MessageType
+        from channels.platforms.base import MessageType
         adapter = self._make_adapter()
         captured_events = []
 
@@ -522,7 +522,7 @@ class TestThreadContext(unittest.TestCase):
             "EMAIL_IMAP_HOST": "imap.test.com",
             "EMAIL_SMTP_HOST": "smtp.test.com",
         }):
-            from gateway.platforms.email import EmailAdapter
+            from channels.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
         return adapter
 
@@ -619,7 +619,7 @@ class TestSendMethods(unittest.TestCase):
             "EMAIL_IMAP_HOST": "imap.test.com",
             "EMAIL_SMTP_HOST": "smtp.test.com",
         }):
-            from gateway.platforms.email import EmailAdapter
+            from channels.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
         return adapter
 
@@ -739,7 +739,7 @@ class TestConnectDisconnect(unittest.TestCase):
             "EMAIL_IMAP_HOST": "imap.test.com",
             "EMAIL_SMTP_HOST": "smtp.test.com",
         }):
-            from gateway.platforms.email import EmailAdapter
+            from channels.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
         return adapter
 
@@ -817,7 +817,7 @@ class TestFetchNewMessages(unittest.TestCase):
             "EMAIL_IMAP_HOST": "imap.test.com",
             "EMAIL_SMTP_HOST": "smtp.test.com",
         }):
-            from gateway.platforms.email import EmailAdapter
+            from channels.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
         return adapter
 
@@ -911,7 +911,7 @@ class TestPollLoop(unittest.TestCase):
             "EMAIL_SMTP_HOST": "smtp.test.com",
             "EMAIL_POLL_INTERVAL": "1",
         }):
-            from gateway.platforms.email import EmailAdapter
+            from channels.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
         return adapter
 
@@ -1026,7 +1026,7 @@ class TestSmtpConnectionCleanup(unittest.TestCase):
     }, clear=False)
     def _make_adapter(self):
         from gateway.config import PlatformConfig
-        from gateway.platforms.email import EmailAdapter
+        from channels.platforms.email import EmailAdapter
         return EmailAdapter(PlatformConfig(enabled=True))
 
     @patch.dict(os.environ, {
@@ -1081,7 +1081,7 @@ class TestImapConnectionCleanup(unittest.TestCase):
     }, clear=False)
     def _make_adapter(self):
         from gateway.config import PlatformConfig
-        from gateway.platforms.email import EmailAdapter
+        from channels.platforms.email import EmailAdapter
         return EmailAdapter(PlatformConfig(enabled=True))
 
     @patch.dict(os.environ, {
@@ -1146,7 +1146,7 @@ class TestImapIdExtensionForNetEase(unittest.TestCase):
             "EMAIL_IMAP_HOST": "imap.163.com",
             "EMAIL_SMTP_HOST": "smtp.163.com",
         }):
-            from gateway.platforms.email import EmailAdapter
+            from channels.platforms.email import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
         return adapter
 
@@ -1197,7 +1197,7 @@ class TestImapIdExtensionForNetEase(unittest.TestCase):
 
     def test_send_imap_id_swallows_errors_for_non_supporting_servers(self):
         """Servers that reject ID must not break the connection."""
-        from gateway.platforms.email import _send_imap_id
+        from channels.platforms.email import _send_imap_id
 
         mock_imap = MagicMock()
         mock_imap.xatom.side_effect = Exception("BAD command unknown: ID")

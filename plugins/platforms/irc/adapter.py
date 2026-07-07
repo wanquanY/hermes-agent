@@ -43,13 +43,13 @@ logger = logging.getLogger(__name__)
 # is discovered but the gateway hasn't been fully initialised yet.
 # ---------------------------------------------------------------------------
 
-from gateway.platforms.base import (
+from channels.platforms.base import (
     BasePlatformAdapter,
     SendResult,
     MessageEvent,
     MessageType,
 )
-from gateway.session import SessionSource
+from channels.session_identity import SessionSource
 from gateway.config import PlatformConfig, Platform
 
 
@@ -128,7 +128,7 @@ class IRCAdapter(BasePlatformAdapter):
         max_msg = extra.get("max_message_length")
         if max_msg is None:
             try:
-                from gateway.platform_registry import platform_registry
+                from channels.platform_registry import platform_registry
                 entry = platform_registry.get("irc")
                 if entry and entry.max_message_length:
                     max_msg = entry.max_message_length
@@ -163,7 +163,7 @@ class IRCAdapter(BasePlatformAdapter):
 
         # Prevent two profiles from using the same IRC identity
         try:
-            from gateway.status import acquire_scoped_lock, release_scoped_lock
+            from channels.runtime_status import acquire_scoped_lock, release_scoped_lock
             lock_key = f"{self.server}:{self.nickname}"
             if not acquire_scoped_lock("irc", lock_key):
                 logger.error("IRC: %s@%s already in use by another profile", self.nickname, self.server)
@@ -222,7 +222,7 @@ class IRCAdapter(BasePlatformAdapter):
         # Release the scoped lock so another profile can use this identity
         if getattr(self, "_lock_key", None):
             try:
-                from gateway.status import release_scoped_lock
+                from channels.runtime_status import release_scoped_lock
                 release_scoped_lock("irc", self._lock_key)
             except Exception:
                 pass

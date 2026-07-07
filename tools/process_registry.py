@@ -426,7 +426,7 @@ class ProcessRegistry:
             return False
         # ``os.kill(pid, 0)`` is NOT a no-op on Windows (bpo-14484) — use
         # the cross-platform existence check.
-        from gateway.status import _pid_exists
+        from channels.runtime_status import _pid_exists
         return _pid_exists(pid)
 
     @staticmethod
@@ -435,7 +435,7 @@ class ProcessRegistry:
         if not pid:
             return None
         try:
-            from gateway.status import get_process_start_time
+            from channels.runtime_status import get_process_start_time
             return get_process_start_time(pid)
         except Exception:
             return None
@@ -522,7 +522,7 @@ class ProcessRegistry:
 
         Windows: shells out to ``taskkill /PID <pid> /T /F``. This is
         the documented Microsoft primitive for tree-kill and matches the
-        existing convention in ``gateway.status.terminate_pid``.  ``/F`` is
+        existing convention in ``channels.runtime_status.terminate_pid``.  ``/F`` is
         already a hard kill, so no separate escalation step is needed.  We
         can't reuse the POSIX psutil path on Windows because:
 

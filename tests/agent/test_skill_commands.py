@@ -218,7 +218,7 @@ class TestScanSkillCommands:
         """
         import agent.skill_commands as sc_mod
         from agent.skill_commands import get_skill_commands
-        from gateway.session_context import (
+        from channels.session_context import (
             clear_session_vars,
             get_session_env,
             set_session_vars,
@@ -557,7 +557,7 @@ Generate some audio.
         )
 
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
-            from gateway.session_context import clear_session_vars, set_session_vars
+            from channels.session_context import clear_session_vars, set_session_vars
 
             tokens = set_session_vars(platform="telegram")
             try:

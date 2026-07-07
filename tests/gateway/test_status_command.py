@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
+from channels.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
@@ -493,7 +493,7 @@ async def test_status_command_bypasses_active_session_guard():
     """When an agent is running, /status must be dispatched immediately via
     base.handle_message — not queued or treated as an interrupt (#5046)."""
     import asyncio
-    from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
+    from channels.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
     from gateway.session import build_session_key
     from gateway.config import Platform, PlatformConfig, GatewayConfig
 
@@ -582,7 +582,7 @@ async def test_post_delivery_callback_generation_snapshot_happens_after_bind():
     fire a fresher run's callbacks.
     """
     import asyncio
-    from gateway.platforms.base import BasePlatformAdapter
+    from channels.platforms.base import BasePlatformAdapter
 
     source = _make_source()
     session_key = build_session_key(source)

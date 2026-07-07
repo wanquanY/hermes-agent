@@ -92,7 +92,7 @@ class TestSystemdServiceRefresh:
         monkeypatch.setattr(gateway_cli, "generate_systemd_unit", lambda system=False, run_as_user=None: "new unit\n")
 
         calls = []
-        monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+        monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: None)
         monkeypatch.setattr(gateway_cli, "_recover_pending_systemd_restart", lambda system=False, previous_pid=None: False)
         monkeypatch.setattr(
             gateway_cli,
@@ -563,7 +563,7 @@ class TestLaunchdServiceRecovery:
         monkeypatch.setattr(gateway_cli, "_wait_for_gateway_exit", lambda timeout, force_after=None: True)
         monkeypatch.setattr(gateway_cli, "terminate_pid", lambda pid, force=False: calls.append(("term", pid, force)))
         monkeypatch.setattr(
-            "gateway.status.get_running_pid",
+            "channels.runtime_status.get_running_pid",
             lambda: 321,
         )
 
@@ -584,7 +584,7 @@ class TestLaunchdServiceRecovery:
         calls = []
 
         monkeypatch.setattr(
-            "gateway.status.get_running_pid",
+            "channels.runtime_status.get_running_pid",
             lambda: 321,
         )
         monkeypatch.setattr(
@@ -745,7 +745,7 @@ class TestGatewaySystemServiceRouting:
         monkeypatch.setattr(gateway_cli, "refresh_systemd_unit_if_needed", lambda system=False: calls.append(("refresh", system)))
         monkeypatch.setattr(gateway_cli, "_get_restart_drain_timeout", lambda: 12.0)
         monkeypatch.setattr(
-            "gateway.status.get_running_pid",
+            "channels.runtime_status.get_running_pid",
             lambda: 654,
         )
         monkeypatch.setattr(
@@ -789,7 +789,7 @@ class TestGatewaySystemServiceRouting:
         monkeypatch.setattr(gateway_cli, "_require_service_installed", lambda action, system=False: None)
         monkeypatch.setattr(gateway_cli, "refresh_systemd_unit_if_needed", lambda system=False: None)
         monkeypatch.setattr(gateway_cli, "_get_restart_drain_timeout", lambda: 10.0)
-        monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+        monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: None)
         monkeypatch.setattr(
             gateway_cli,
             "_read_systemd_unit_properties",
@@ -831,7 +831,7 @@ class TestGatewaySystemServiceRouting:
                 "MainPID": "999",
             },
         )
-        monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+        monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: None)
         monkeypatch.setattr(
             gateway_cli,
             "_gateway_runtime_status_for_pid",
@@ -847,7 +847,7 @@ class TestGatewaySystemServiceRouting:
         monkeypatch.setattr(gateway_cli, "_select_systemd_scope", lambda system=False: False)
         monkeypatch.setattr(gateway_cli, "_require_service_installed", lambda action, system=False: None)
         monkeypatch.setattr(gateway_cli, "refresh_systemd_unit_if_needed", lambda system=False: None)
-        monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+        monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: None)
         monkeypatch.setattr(gateway_cli, "_recover_pending_systemd_restart", lambda system=False, previous_pid=None: False)
 
         def fake_run_systemctl(args, **kwargs):
@@ -878,7 +878,7 @@ class TestGatewaySystemServiceRouting:
         monkeypatch.setattr(gateway_cli, "_require_service_installed", lambda action, system=False: None)
         monkeypatch.setattr(gateway_cli, "refresh_systemd_unit_if_needed", lambda system=False: None)
         monkeypatch.setattr(
-            "gateway.status.read_runtime_status",
+            "channels.runtime_status.read_runtime_status",
             lambda: {"restart_requested": True, "gateway_state": "stopped"},
         )
         monkeypatch.setattr(gateway_cli, "_request_gateway_self_restart", lambda pid: False)
@@ -913,7 +913,7 @@ class TestGatewaySystemServiceRouting:
 
         monkeypatch.setattr(gateway_cli.subprocess, "run", fake_subprocess_run)
         monkeypatch.setattr(
-            "gateway.status.get_running_pid",
+            "channels.runtime_status.get_running_pid",
             lambda: 999 if started["value"] else None,
         )
         monkeypatch.setattr(

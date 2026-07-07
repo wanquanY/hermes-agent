@@ -25,7 +25,7 @@ from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.api_server import (
+from channels.platforms.api_server import (
     APIServerAdapter,
     ResponseStore,
     _IdempotencyCache,
@@ -46,7 +46,7 @@ class TestCheckRequirements:
     def test_returns_true_when_aiohttp_available(self):
         assert check_api_server_requirements() is True
 
-    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", False)
+    @patch("channels.platforms.api_server.AIOHTTP_AVAILABLE", False)
     def test_returns_false_without_aiohttp(self):
         assert check_api_server_requirements() is False
 
@@ -311,23 +311,23 @@ class TestAdapterInit:
 
         monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
         monkeypatch.setattr(
-            "gateway.run._resolve_runtime_agent_kwargs",
+            "hermes_agent.gateway.runtime_config.resolve_runtime_agent_kwargs",
             lambda: {
                 "provider": "openai-codex",
                 "base_url": "https://example.test/v1",
                 "api_mode": "codex_responses",
             },
         )
-        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "gpt-5.5")
+        monkeypatch.setattr("hermes_agent.gateway.runtime_config.resolve_gateway_model", lambda *_: "gpt-5.5")
         monkeypatch.setattr(
-            "gateway.run._load_gateway_config",
+            "hermes_agent.gateway.runtime_config.load_gateway_runtime_config",
             lambda: {"agent": {"reasoning_effort": "xhigh"}},
         )
         monkeypatch.setattr(
-            "gateway.run.GatewayRunner._load_reasoning_config",
-            staticmethod(lambda: {"enabled": True, "effort": "xhigh"}),
+            "hermes_agent.gateway.runtime_config.load_reasoning_config",
+            lambda *_: {"enabled": True, "effort": "xhigh"},
         )
-        monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
+        monkeypatch.setattr("hermes_agent.gateway.runtime_config.load_fallback_model", lambda *_: None)
         monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
 
         adapter = APIServerAdapter(PlatformConfig(enabled=True))
@@ -577,7 +577,7 @@ class TestHealthDetailedEndpoint:
     async def test_health_detailed_returns_ok(self, adapter):
         """GET /health/detailed returns status, platform, and runtime fields."""
         app = _create_app(adapter)
-        with patch("gateway.status.read_runtime_status", return_value={
+        with patch("channels.runtime_status.read_runtime_status", return_value={
             "gateway_state": "running",
             "platforms": {"telegram": {"state": "connected"}},
             "active_agents": 2,
@@ -600,7 +600,7 @@ class TestHealthDetailedEndpoint:
     async def test_health_detailed_no_runtime_status(self, adapter):
         """When gateway_state.json is missing, fields are None."""
         app = _create_app(adapter)
-        with patch("gateway.status.read_runtime_status", return_value=None):
+        with patch("channels.runtime_status.read_runtime_status", return_value=None):
             async with TestClient(TestServer(app)) as cli:
                 resp = await cli.get("/health/detailed")
                 assert resp.status == 200
@@ -613,7 +613,7 @@ class TestHealthDetailedEndpoint:
     async def test_health_detailed_does_not_require_auth(self, auth_adapter):
         """Health detailed endpoint should be accessible without auth, like /health."""
         app = _create_app(auth_adapter)
-        with patch("gateway.status.read_runtime_status", return_value=None):
+        with patch("channels.runtime_status.read_runtime_status", return_value=None):
             async with TestClient(TestServer(app)) as cli:
                 resp = await cli.get("/health/detailed")
                 assert resp.status == 200
@@ -640,7 +640,7 @@ class TestModelsEndpoint:
     @pytest.mark.asyncio
     async def test_models_returns_profile_name(self):
         """When running under a named profile, /v1/models advertises the profile name."""
-        with patch("gateway.platforms.api_server.APIServerAdapter._resolve_model_name", return_value="lucas"):
+        with patch("channels.platforms.api_server.APIServerAdapter._resolve_model_name", return_value="lucas"):
             adapter = _make_adapter()
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
@@ -1012,7 +1012,7 @@ class TestChatCompletionsEndpoint:
                         )
                     ),
                 ),
-                patch("gateway.platforms.api_server.asyncio.ensure_future", side_effect=_fake_ensure_future),
+                patch("channels.platforms.api_server.asyncio.ensure_future", side_effect=_fake_ensure_future),
                 patch.object(adapter, "_write_sse_chat_completion", new_callable=AsyncMock) as mock_write_sse,
             ):
                 mock_write_sse.return_value = web.Response(status=200, text="ok")
@@ -1036,7 +1036,7 @@ class TestChatCompletionsEndpoint:
     async def test_stream_sends_keepalive_during_quiet_tool_gap(self, adapter):
         """Idle SSE streams should send keepalive comments while tools run silently."""
         import asyncio
-        import gateway.platforms.api_server as api_server_mod
+        import channels.platforms.api_server as api_server_mod
 
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
@@ -2113,7 +2113,7 @@ class TestResponsesStreaming:
                         )
                     ),
                 ),
-                patch("gateway.platforms.api_server.asyncio.ensure_future", side_effect=_fake_ensure_future),
+                patch("channels.platforms.api_server.asyncio.ensure_future", side_effect=_fake_ensure_future),
                 patch.object(adapter, "_write_sse_responses", new_callable=AsyncMock) as mock_write_sse,
             ):
                 mock_write_sse.return_value = web.Response(status=200, text="ok")
@@ -2315,7 +2315,7 @@ class TestResponsesStreaming:
                 written_payloads.append(payload)
 
         # Patch web.StreamResponse for the duration of the writer call.
-        import gateway.platforms.api_server as api_mod
+        import channels.platforms.api_server as api_mod
         import queue as _q
 
         stream_q: _q.Queue = _q.Queue()
@@ -2386,7 +2386,7 @@ class TestResponsesStreaming:
                 if write_call_count["n"] >= 3:
                     raise ConnectionResetError("simulated client disconnect")
 
-        import gateway.platforms.api_server as api_mod
+        import channels.platforms.api_server as api_mod
         import queue as _q
 
         stream_q: _q.Queue = _q.Queue()

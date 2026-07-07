@@ -164,7 +164,7 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
     # with --replace?  We can't see the new process directly here, but if
     # there's a takeover marker on disk that DOESN'T name us, that's a
     # smoking gun for "another --replace instance is killing us".
-    # Filenames mirror gateway.status (._TAKEOVER_MARKER_FILENAME /
+    # Filenames mirror channels.runtime_status (._TAKEOVER_MARKER_FILENAME /
     # _PLANNED_STOP_MARKER_FILENAME); we use string literals here so the
     # signal-handler path stays import-light.
     try:

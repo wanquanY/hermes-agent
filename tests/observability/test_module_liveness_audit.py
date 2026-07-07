@@ -49,20 +49,24 @@ def test_audit_marks_imported_target_module_as_live():
 def test_audit_handles_nested_gateway_subpackages():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        _write(root / "gateway" / "platforms" / "__init__.py", "")
-        _write(root / "gateway" / "platforms" / "telegram.py", "def send(): pass\n")
-        _write(root / "gateway" / "dead.py", "# no importer\n")
+        _write(root / "channels" / "platforms" / "__init__.py", "")
+        _write(root / "channels" / "platforms" / "telegram.py", "def send(): pass\n")
+        _write(root / "channels" / "dead.py", "# no importer\n")
         _write(
             root / "hermes_agent" / "consumer.py",
-            "from gateway.platforms.telegram import send\n",
+            "from channels.platforms.telegram import send\n",
         )
 
-        audit = audit_liveness(root, live_roots=("hermes_agent",))
+        audit = audit_liveness(
+            root,
+            target_package="channels",
+            live_roots=("hermes_agent",),
+        )
         by_module = {r.module: r for r in audit.reports}
         # __init__ collapses to the package name.
-        assert by_module["gateway.platforms.telegram"].is_live is True
-        assert by_module["gateway.platforms"].is_live is True  # via prefix match
-        assert by_module["gateway.dead"].is_live is False
+        assert by_module["channels.platforms.telegram"].is_live is True
+        assert by_module["channels.platforms"].is_live is True  # via prefix match
+        assert by_module["channels.dead"].is_live is False
 
 
 def test_audit_target_missing_root_returns_empty_report():
@@ -102,7 +106,7 @@ def test_audit_detects_function_body_lazy_import():
     """Regression — scanner used to miss imports inside function bodies.
 
     The Phase J audit was invalidated in loop iteration 13 because the old
-    regex-based scanner ignored ``from gateway.platforms.telegram import ...``
+    regex-based scanner ignored ``from channels.platforms.telegram import ...``
     when it lived inside an ``if platform.enabled:`` branch. This test
     locks in the AST walker's coverage of function-body imports.
     """

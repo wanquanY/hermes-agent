@@ -35,7 +35,7 @@ def _get_db(parent_agent=None):
 
 def _session_context() -> dict[str, Any]:
     try:
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
 
         raw = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
     except Exception:

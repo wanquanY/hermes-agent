@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
+from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 from gateway.run import GatewayRunner
 
 
@@ -114,7 +114,7 @@ class TestStartupPlatformIsolation:
             coro.close()
             return MagicMock()
 
-        with patch("gateway.status.write_runtime_status"):
+        with patch("channels.runtime_status.write_runtime_status"):
             with patch("hermes_cli.plugins.discover_plugins"):
                 with patch("hermes_cli.config.load_config", return_value={}):
                     with patch("agent.shell_hooks.register_from_config"):

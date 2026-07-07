@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent.subagent_invoke import invoke_subagent
-from gateway.session_context import clear_session_vars, set_session_vars
+from channels.session_context import clear_session_vars, set_session_vars
 
 
 class _FakeCompletions:

@@ -60,136 +60,17 @@ from .config import (
     SessionResetPolicy,  # noqa: F401 — re-exported via gateway/__init__.py
     HomeChannel,
 )
-from .whatsapp_identity import (
+from channels.session_identity import (
+    SessionContext,
+    SessionSource,
+    build_session_key,
+    is_shared_multi_user_session,
+)
+from channels.whatsapp_identity import (
     canonical_whatsapp_identifier,
     normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
 )
 from utils import atomic_replace
-
-
-@dataclass
-class SessionSource:
-    """
-    Describes where a message originated from.
-    
-    This information is used to:
-    1. Route responses back to the right place
-    2. Inject context into the system prompt
-    3. Track origin for cron job delivery
-    """
-    platform: Platform
-    chat_id: str
-    chat_name: Optional[str] = None
-    chat_type: str = "dm"  # "dm", "group", "channel", "thread"
-    user_id: Optional[str] = None
-    user_name: Optional[str] = None
-    thread_id: Optional[str] = None  # For forum topics, Discord threads, etc.
-    chat_topic: Optional[str] = None  # Channel topic/description (Discord, Slack)
-    user_id_alt: Optional[str] = None  # Platform-specific stable alt ID (Signal UUID, Feishu union_id)
-    chat_id_alt: Optional[str] = None  # Signal group internal ID
-    is_bot: bool = False  # True when the message author is a bot/webhook (Discord)
-    guild_id: Optional[str] = None  # Discord guild / Slack workspace / Matrix server scope
-    parent_chat_id: Optional[str] = None  # Parent channel when chat_id refers to a thread
-    message_id: Optional[str] = None  # ID of the triggering message (for pin/reply/react)
-    
-    @property
-    def description(self) -> str:
-        """Human-readable description of the source."""
-        if self.platform == Platform.LOCAL:
-            return "CLI terminal"
-        
-        parts = []
-        if self.chat_type == "dm":
-            parts.append(f"DM with {self.user_name or self.user_id or 'user'}")
-        elif self.chat_type == "group":
-            parts.append(f"group: {self.chat_name or self.chat_id}")
-        elif self.chat_type == "channel":
-            parts.append(f"channel: {self.chat_name or self.chat_id}")
-        else:
-            parts.append(self.chat_name or self.chat_id)
-        
-        if self.thread_id:
-            parts.append(f"thread: {self.thread_id}")
-        
-        return ", ".join(parts)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        d = {
-            "platform": self.platform.value,
-            "chat_id": self.chat_id,
-            "chat_name": self.chat_name,
-            "chat_type": self.chat_type,
-            "user_id": self.user_id,
-            "user_name": self.user_name,
-            "thread_id": self.thread_id,
-            "chat_topic": self.chat_topic,
-        }
-        if self.user_id_alt:
-            d["user_id_alt"] = self.user_id_alt
-        if self.chat_id_alt:
-            d["chat_id_alt"] = self.chat_id_alt
-        if self.guild_id:
-            d["guild_id"] = self.guild_id
-        if self.parent_chat_id:
-            d["parent_chat_id"] = self.parent_chat_id
-        if self.message_id:
-            d["message_id"] = self.message_id
-        return d
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "SessionSource":
-        return cls(
-            platform=Platform(data["platform"]),
-            chat_id=str(data["chat_id"]),
-            chat_name=data.get("chat_name"),
-            chat_type=data.get("chat_type", "dm"),
-            user_id=data.get("user_id"),
-            user_name=data.get("user_name"),
-            thread_id=data.get("thread_id"),
-            chat_topic=data.get("chat_topic"),
-            user_id_alt=data.get("user_id_alt"),
-            chat_id_alt=data.get("chat_id_alt"),
-            guild_id=data.get("guild_id"),
-            parent_chat_id=data.get("parent_chat_id"),
-            message_id=data.get("message_id"),
-        )
-    
-
-
-@dataclass
-class SessionContext:
-    """
-    Full context for a session, used for dynamic system prompt injection.
-    
-    The agent receives this information to understand:
-    - Where messages are coming from
-    - What platforms are available
-    - Where it can deliver scheduled task outputs
-    """
-    source: SessionSource
-    connected_platforms: List[Platform]
-    home_channels: Dict[Platform, HomeChannel]
-    shared_multi_user_session: bool = False
-    
-    # Session metadata
-    session_key: str = ""
-    session_id: str = ""
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "source": self.source.to_dict(),
-            "connected_platforms": [p.value for p in self.connected_platforms],
-            "home_channels": {
-                p.value: hc.to_dict() for p, hc in self.home_channels.items()
-            },
-            "shared_multi_user_session": self.shared_multi_user_session,
-            "session_key": self.session_key,
-            "session_id": self.session_id,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-        }
 
 
 _PII_SAFE_PLATFORMS = frozenset({
@@ -252,7 +133,7 @@ def build_session_context_prompt(
     _is_pii_safe = context.source.platform in _PII_SAFE_PLATFORMS
     if not _is_pii_safe:
         try:
-            from gateway.platform_registry import platform_registry
+            from channels.platform_registry import platform_registry
             entry = platform_registry.get(context.source.platform.value)
             if entry and entry.pii_safe:
                 _is_pii_safe = True
@@ -574,95 +455,6 @@ class SessionEntry:
             auto_reset_reason=data.get("auto_reset_reason"),
             reset_had_activity=data.get("reset_had_activity", False),
         )
-
-
-def is_shared_multi_user_session(
-    source: SessionSource,
-    *,
-    group_sessions_per_user: bool = True,
-    thread_sessions_per_user: bool = False,
-) -> bool:
-    """Return True when a non-DM session is shared across participants.
-
-    Mirrors the isolation rules in :func:`build_session_key`:
-      - DMs are never shared.
-      - Threads are shared unless ``thread_sessions_per_user`` is True.
-      - Non-thread group/channel sessions are shared unless
-        ``group_sessions_per_user`` is True (default: True = isolated).
-    """
-    if source.chat_type == "dm":
-        return False
-    if source.thread_id:
-        return not thread_sessions_per_user
-    return not group_sessions_per_user
-
-
-def build_session_key(
-    source: SessionSource,
-    group_sessions_per_user: bool = True,
-    thread_sessions_per_user: bool = False,
-) -> str:
-    """Build a deterministic session key from a message source.
-
-    This is the single source of truth for session key construction.
-
-    DM rules:
-      - DMs include chat_id when present, so each private conversation is isolated.
-      - thread_id further differentiates threaded DMs within the same DM chat.
-      - Without chat_id, thread_id is used as a best-effort fallback.
-      - Without thread_id or chat_id, DMs share a single session.
-
-    Group/channel rules:
-      - chat_id identifies the parent group/channel.
-      - user_id/user_id_alt isolates participants within that parent chat when available when
-        ``group_sessions_per_user`` is enabled.
-      - thread_id differentiates threads within that parent chat.  When
-        ``thread_sessions_per_user`` is False (default), threads are *shared* across all
-        participants — user_id is NOT appended, so every user in the thread
-        shares a single session.  This is the expected UX for threaded
-        conversations (Telegram forum topics, Discord threads, Slack threads).
-      - Without participant identifiers, or when isolation is disabled, messages fall back to one
-        shared session per chat.
-      - Without identifiers, messages fall back to one session per platform/chat_type.
-    """
-    platform = source.platform.value
-    if source.chat_type == "dm":
-        dm_chat_id = source.chat_id
-        if source.platform == Platform.WHATSAPP:
-            dm_chat_id = canonical_whatsapp_identifier(source.chat_id)
-
-        if dm_chat_id:
-            if source.thread_id:
-                return f"agent:main:{platform}:dm:{dm_chat_id}:{source.thread_id}"
-            return f"agent:main:{platform}:dm:{dm_chat_id}"
-        if source.thread_id:
-            return f"agent:main:{platform}:dm:{source.thread_id}"
-        return f"agent:main:{platform}:dm"
-
-    participant_id = source.user_id_alt or source.user_id
-    if participant_id and source.platform == Platform.WHATSAPP:
-        # Same JID/LID-flip bug as the DM case: without canonicalisation, a
-        # single group member gets two isolated per-user sessions when the
-        # bridge reshuffles alias forms.
-        participant_id = canonical_whatsapp_identifier(str(participant_id)) or participant_id
-    key_parts = ["agent:main", platform, source.chat_type]
-
-    if source.chat_id:
-        key_parts.append(source.chat_id)
-    if source.thread_id:
-        key_parts.append(source.thread_id)
-
-    # In threads, default to shared sessions (all participants see the same
-    # conversation).  Per-user isolation only applies when explicitly enabled
-    # via thread_sessions_per_user, or when there is no thread (regular group).
-    isolate_user = group_sessions_per_user
-    if source.thread_id and not thread_sessions_per_user:
-        isolate_user = False
-
-    if isolate_user and participant_id:
-        key_parts.append(str(participant_id))
-
-    return ":".join(key_parts)
 
 
 class SessionStore:

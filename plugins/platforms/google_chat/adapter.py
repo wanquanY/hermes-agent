@@ -127,8 +127,8 @@ from gateway.config import Platform, PlatformConfig
 # Built-ins avoid this because they have explicit enum members; plugin
 # platforms earn the attribute by asking for it once.
 Platform("google_chat")
-from gateway.platforms.helpers import MessageDeduplicator
-from gateway.platforms.base import (
+from channels.platforms.helpers import MessageDeduplicator
+from channels.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,

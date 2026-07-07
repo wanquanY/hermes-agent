@@ -48,7 +48,7 @@ def available() -> bool:
 
 def browser_session_id() -> str:
     try:
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
 
         scoped = get_session_env("DOVIE_BROWSER_SESSION_ID", "").strip()
         if scoped:

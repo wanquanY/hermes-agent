@@ -217,7 +217,7 @@ class TestTelegramAdapterDeleteMessage:
     """Contract: Telegram adapter implements ``delete_message``."""
 
     def test_delete_message_method_exists(self):
-        telegram = pytest.importorskip("gateway.platforms.telegram")
+        telegram = pytest.importorskip("channels.platforms.telegram")
         import inspect
         cls = telegram.TelegramAdapter
         assert hasattr(cls, "delete_message"), (
@@ -230,7 +230,7 @@ class TestTelegramAdapterDeleteMessage:
 
     def test_base_adapter_default_returns_false(self):
         """BasePlatformAdapter.delete_message default = no-op returning False."""
-        from gateway.platforms.base import BasePlatformAdapter
+        from channels.platforms.base import BasePlatformAdapter
         import inspect
         sig = inspect.signature(BasePlatformAdapter.delete_message)
         assert list(sig.parameters)[:3] == ["self", "chat_id", "message_id"]

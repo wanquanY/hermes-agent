@@ -123,7 +123,7 @@ class TestCleanShutdownMarker:
         with patch("gateway.run.GatewayRunner._drain_active_agents", new_callable=AsyncMock, return_value=([], False)), \
              patch("gateway.run.GatewayRunner._finalize_shutdown_agents"), \
              patch("gateway.run.GatewayRunner._update_runtime_status"), \
-             patch("gateway.status.remove_pid_file"), \
+             patch("channels.runtime_status.remove_pid_file"), \
              patch("tools.process_registry.process_registry") as mock_proc_reg, \
              patch("tools.terminal_tool.cleanup_all_environments"), \
              patch("tools.browser_tool.cleanup_all_browsers"):
@@ -216,7 +216,7 @@ class TestCleanShutdownMarker:
         with patch("gateway.run.GatewayRunner._drain_active_agents", new_callable=AsyncMock, return_value=([], False)), \
              patch("gateway.run.GatewayRunner._finalize_shutdown_agents"), \
              patch("gateway.run.GatewayRunner._update_runtime_status"), \
-             patch("gateway.status.remove_pid_file"), \
+             patch("channels.runtime_status.remove_pid_file"), \
              patch("tools.process_registry.process_registry") as mock_proc_reg, \
              patch("tools.terminal_tool.cleanup_all_environments"), \
              patch("tools.browser_tool.cleanup_all_browsers"):

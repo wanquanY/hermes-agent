@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 def _session_env(name: str, default: str = "") -> str:
     try:
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
 
         return get_session_env(name, default)
     except Exception:

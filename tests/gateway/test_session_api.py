@@ -7,7 +7,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from gateway.config import PlatformConfig
-from gateway.platforms.api_server import APIServerAdapter
+from channels.platforms.api_server import APIServerAdapter
 from hermes_state import SessionDB
 
 
@@ -90,7 +90,7 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
             self.session_id = session_id
 
         def run_conversation(self, user_message, conversation_history, task_id):
-            from gateway.session_context import get_session_env
+            from channels.session_context import get_session_env
             from tools.environments.local import _make_run_env
 
             observed["task_id"] = task_id

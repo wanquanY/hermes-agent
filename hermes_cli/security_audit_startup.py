@@ -193,7 +193,7 @@ def _network_listener_without_auth(config: Optional[dict]) -> list[str]:
     """
     findings: list[str] = []
     try:
-        from gateway.platforms.base import is_network_accessible
+        from channels.platforms.base import is_network_accessible
     except Exception:
         return findings
 

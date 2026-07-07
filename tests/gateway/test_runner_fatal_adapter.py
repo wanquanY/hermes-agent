@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter
+from channels.platforms.base import BasePlatformAdapter
 from gateway.run import GatewayRunner
 
 

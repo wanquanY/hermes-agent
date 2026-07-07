@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 
 from agent.dovie_attribution import build_dovie_attribution_headers
-from gateway.session_context import clear_session_vars, set_session_vars
+from channels.session_context import clear_session_vars, set_session_vars
 from tools import delegate_tool as dt
 
 

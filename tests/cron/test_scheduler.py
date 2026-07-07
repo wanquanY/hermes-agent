@@ -609,7 +609,7 @@ class TestDeliverResultWrapping:
         media_file.parent.mkdir(parents=True, exist_ok=True)
         media_file.write_bytes(data)
         monkeypatch.setattr(
-            "gateway.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
+            "channels.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
             (root,),
         )
         return media_file.resolve()
@@ -1404,7 +1404,7 @@ class TestRunJobSessionPersistence:
                 pass
 
             def run_conversation(self, *args, **kwargs):
-                from gateway.session_context import get_session_env
+                from channels.session_context import get_session_env
                 seen["platform"] = get_session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM") or None
                 seen["chat_id"] = get_session_env("HERMES_CRON_AUTO_DELIVER_CHAT_ID") or None
                 seen["thread_id"] = get_session_env("HERMES_CRON_AUTO_DELIVER_THREAD_ID") or None
@@ -1465,7 +1465,7 @@ class TestRunJobSessionPersistence:
                 pass
 
             def run_conversation(self, *args, **kwargs):
-                from gateway.session_context import get_session_env
+                from channels.session_context import get_session_env
 
                 seen.append(
                     {
@@ -2298,7 +2298,7 @@ class TestSendMediaViaAdapter:
         media_file.parent.mkdir(parents=True, exist_ok=True)
         media_file.write_bytes(data)
         monkeypatch.setattr(
-            "gateway.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
+            "channels.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
             (root,),
         )
         return media_file.resolve()
@@ -2398,13 +2398,13 @@ class TestParallelTick:
 
     def test_parallel_jobs_isolated_contextvars(self):
         """Each job's ContextVars must be isolated — no cross-contamination."""
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
         seen = {}
 
         def mock_run_job(job):
             origin = job.get("origin", {})
             # run_job sets ContextVars — verify each job sees its own
-            from gateway.session_context import set_session_vars, clear_session_vars
+            from channels.session_context import set_session_vars, clear_session_vars
             tokens = set_session_vars(
                 platform=origin.get("platform", ""),
                 chat_id=str(origin.get("chat_id", "")),
@@ -2542,7 +2542,7 @@ class TestDeliverResultTimeoutCancelsFuture:
         Telegram falls back to the base chat after "thread not found".
         """
         from gateway.config import Platform
-        from gateway.platforms.base import SendResult
+        from channels.platforms.base import SendResult
         from concurrent.futures import Future
 
         send_result = SendResult(
@@ -2641,7 +2641,7 @@ class TestSendMediaTimeoutCancelsFuture:
         slow.write_bytes(b"slow")
         fast.write_bytes(b"fast")
         monkeypatch.setattr(
-            "gateway.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
+            "channels.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
             (root,),
         )
         media_files = [

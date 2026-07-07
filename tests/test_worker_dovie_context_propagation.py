@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from agent.dovie_attribution import build_dovie_attribution_headers
-from gateway.session_context import clear_session_vars, get_session_env, set_session_vars
+from channels.session_context import clear_session_vars, get_session_env, set_session_vars
 from tui_gateway.run_worker import (
     RunStartFrame,
     RunTerminalFrame,

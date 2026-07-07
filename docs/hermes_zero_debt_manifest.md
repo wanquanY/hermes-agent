@@ -2,8 +2,8 @@
 
 ## Status
 
-- Manifest version: `2026-07-07-p0`
-- Active phase: `P0`
+- Manifest version: `2026-07-07-p1`
+- Active phase: `P1`
 - Branch policy: execute destructive work only on `feat/hermes-zero-debt`.
 - Ownership policy: one writable owner for the active branch; all other agent sessions are read-only.
 - Frontend contract freeze: DoXie timeline v3.1 is frozen for this effort. New feedback after P0 goes to v3.2 and does not mutate this execution contract.
@@ -38,8 +38,16 @@
 | `hermes_agent/storage/` | Storage layer | Migrations and low-level storage primitives. |
 | `hermes_team_mission/` | Transitional domain package | Must migrate or fold into target owners by vertical slice; not deleted by name first. |
 | `tui_gateway/server.py` | Transport entry | WebSocket/JSON-RPC process entry survives, internals are replaced. |
-| `gateway/platforms/*` | P1 channels source | Move to `channels/platforms/*` before legacy `gateway/` retirement. |
-| `gateway/slash_commands.py` | P1 slash command source | Move to a standalone slash command module before legacy `gateway/` retirement. |
+| `channels/config.py` | Channel configuration owner | Owns `Platform`, `HomeChannel`, and `PlatformConfig`; `gateway.config` only re-exports during gateway retirement. |
+| `channels/platform_registry.py` | Channel registry owner | Owns platform connected-check registry after P1. |
+| `channels/session_identity.py` | Channel session identity owner | Owns `SessionSource`, `SessionContext`, and session-key construction after P1. |
+| `channels/session_context.py` | Channel session context owner | Owns active session context extraction after P1. |
+| `channels/runtime_status.py` | Channel runtime status owner | Owns channel-facing status rendering after P1. |
+| `channels/sticker_cache.py` | Channel sticker cache owner | Owns sticker cache behavior after P1. |
+| `channels/rich_sent_store.py` | Channel rich-message sent-store owner | Owns bounded sent-message lookup used by rich channel adapters. |
+| `channels/whatsapp_identity.py` | Channel WhatsApp identity owner | Owns WhatsApp sender/session identity normalization after P1. |
+| `channels/platforms/*` | Channel platform owner | Owns platform adapters after P1 channel migration. |
+| `hermes_agent/gateway/runtime_config.py` | Gateway runtime config owner | Owns model/provider/reasoning/fallback config helpers while `gateway.run` is retired by later vertical slices. |
 | `tests/` | Verification | Tests are preserved or rewritten around target owners. Obsolete tests may be deleted with the deleted behavior. |
 
 ## Kill List
@@ -72,8 +80,8 @@ Delete only after the listed responsibility has a production-wired target owner 
 | `hermes_agent/gateway/methods/` | Full method set replacing `tui_gateway/methods/*`. |
 | `hermes_agent/gateway/pipeline.py` | Sole wire-boundary identity alias folding and dispatch error model. |
 | `hermes_agent/repositories/message_repo.py` | Message/timeline query ownership after `SessionDB` retirement. |
-| `channels/platforms/` | Independent platform adapters with no `gateway.*`, `tui_gateway.*`, or `hermes_state*` imports. |
-| `channels/slash_commands/` | Slash command runtime independent from legacy `gateway/run.py`. |
+| `channels/platforms/` | Independent platform adapters. P1 moved file ownership and cleared channel imports from legacy `gateway.*`; remaining structural debt is adapter-file size and deeper per-adapter responsibility splits, not gateway fallback. |
+| `channels/slash_commands/` | Not created in P1. Audit showed `gateway/slash_commands.py` was an unreferenced shadow mixin; live slash command dispatch remains in `gateway/run.py` until the gateway-run vertical slice migrates. |
 
 ## Production Grep Gates
 
@@ -128,3 +136,7 @@ python scripts/zero_debt/verdict.py --phase PX --json
 ```
 
 The user sign-off must record the real-device result for that phase. P3+ requires the three DoXie symptoms: normal session display, no duplicate approval popup, stable message/tool/reasoning order.
+
+Phase closure must be checked with `scripts/zero_debt/phase_closure.py`; a
+pending or template-only human sign-off file does not permit entering the next
+phase.

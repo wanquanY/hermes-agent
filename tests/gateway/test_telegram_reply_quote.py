@@ -33,7 +33,7 @@ def _ensure_telegram_mock():
 
 _ensure_telegram_mock()
 
-from gateway.platforms.telegram import TelegramAdapter  # noqa: E402
+from channels.platforms.telegram import TelegramAdapter  # noqa: E402
 
 
 def _make_adapter():
@@ -77,7 +77,7 @@ def _make_message(
 
 def test_native_partial_quote_used_as_reply_to_text():
     """When ``message.quote`` is present, prefer the selected substring."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter()
     msg = _make_message(
@@ -96,7 +96,7 @@ def test_native_partial_quote_used_as_reply_to_text():
 
 def test_full_reply_text_used_when_no_native_quote():
     """No ``message.quote`` → fall back to the whole replied-to message text."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter()
     msg = _make_message(
@@ -113,7 +113,7 @@ def test_full_reply_text_used_when_no_native_quote():
 
 def test_caption_fallback_when_no_quote_and_no_text():
     """Replied-to media message: caption is used when text is absent."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter()
     msg = _make_message(
@@ -130,7 +130,7 @@ def test_caption_fallback_when_no_quote_and_no_text():
 
 def test_empty_quote_text_falls_back_to_full_reply():
     """Defensive: a present-but-empty quote.text shouldn't blank the prefix."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter()
     msg = _make_message(

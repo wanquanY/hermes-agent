@@ -20,7 +20,152 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = REPO_ROOT / "docs" / "hermes_zero_debt_manifest.md"
 EXECUTION_PLAN = REPO_ROOT / "docs" / "hermes_zero_debt_execution_plan.md"
 VERDICT_SCRIPT = REPO_ROOT / "scripts" / "zero_debt" / "verdict.py"
+PHASE_CLOSURE_SCRIPT = REPO_ROOT / "scripts" / "zero_debt" / "phase_closure.py"
 GATE_TEST = REPO_ROOT / "tests" / "observability" / "test_zero_debt_gates.py"
+P1_BOUNDARY_TEST = REPO_ROOT / "tests" / "observability" / "test_channels_p1_boundary.py"
+
+_SCAN_EXCLUDED_DIRS = {
+    ".venv",
+    "__pycache__",
+    ".import_linter_cache",
+    "tests",
+    "docs",
+}
+
+_P1_LEGACY_PATHS = [
+    "gateway/platforms",
+    "gateway/slash_commands.py",
+    "gateway/platform_registry.py",
+    "gateway/session_context.py",
+    "gateway/status.py",
+    "gateway/sticker_cache.py",
+    "gateway/whatsapp_identity.py",
+]
+
+_P1_TARGET_PATHS = [
+    "channels/__init__.py",
+    "channels/config.py",
+    "channels/platform_registry.py",
+    "channels/rich_sent_store.py",
+    "channels/runtime_status.py",
+    "channels/session_context.py",
+    "channels/session_identity.py",
+    "channels/sticker_cache.py",
+    "channels/whatsapp_identity.py",
+    "channels/platforms/__init__.py",
+    "channels/platforms/base.py",
+    "channels/platforms/base_delivery.py",
+    "channels/platforms/base_media_cache.py",
+    "channels/platforms/base_models.py",
+    "channels/platforms/base_network.py",
+    "channels/platforms/base_text.py",
+    "channels/platforms/telegram.py",
+    "channels/platforms/telegram_callbacks.py",
+    "channels/platforms/telegram_connection.py",
+    "channels/platforms/telegram_delivery.py",
+    "channels/platforms/telegram_inbound.py",
+    "channels/platforms/discord.py",
+    "channels/platforms/discord_command_sync.py",
+    "channels/platforms/discord_context.py",
+    "channels/platforms/discord_delivery.py",
+    "channels/platforms/discord_inbound.py",
+    "channels/platforms/discord_slash.py",
+    "channels/platforms/discord_voice.py",
+    "channels/platforms/slack.py",
+    "channels/platforms/slack_blocks.py",
+    "channels/platforms/slack_inbound.py",
+    "channels/platforms/slack_support.py",
+    "channels/platforms/feishu.py",
+    "channels/platforms/feishu_content.py",
+    "channels/platforms/feishu_inbound_state.py",
+    "channels/platforms/feishu_message.py",
+    "channels/platforms/feishu_onboard.py",
+    "channels/platforms/feishu_outbound.py",
+    "channels/platforms/feishu_webhook.py",
+    "channels/platforms/qqbot/adapter.py",
+    "channels/platforms/qqbot/media.py",
+    "channels/platforms/weixin.py",
+    "channels/platforms/weixin_formatting.py",
+    "channels/platforms/wecom.py",
+    "channels/platforms/whatsapp.py",
+    "channels/platforms/signal.py",
+    "channels/platforms/sms.py",
+    "channels/platforms/email.py",
+    "channels/platforms/dingtalk.py",
+    "channels/platforms/homeassistant.py",
+    "channels/platforms/mattermost.py",
+    "channels/platforms/matrix.py",
+    "channels/platforms/matrix_crypto.py",
+    "channels/platforms/matrix_formatting.py",
+    "channels/platforms/matrix_reactions.py",
+    "channels/platforms/matrix_room_ops.py",
+    "channels/platforms/matrix_support.py",
+    "channels/platforms/bluebubbles.py",
+    "channels/platforms/webhook.py",
+    "channels/platforms/api_server.py",
+    "channels/platforms/api_server_jobs.py",
+    "channels/platforms/api_server_responses.py",
+    "channels/platforms/api_server_runs.py",
+    "channels/platforms/api_server_sessions.py",
+    "channels/platforms/api_server_support.py",
+    "channels/platforms/yuanbao.py",
+    "channels/platforms/yuanbao_auth.py",
+    "channels/platforms/yuanbao_constants.py",
+    "channels/platforms/yuanbao_inbound.py",
+    "channels/platforms/yuanbao_markdown.py",
+    "channels/platforms/yuanbao_outbound.py",
+    "hermes_agent/gateway/runtime_config.py",
+]
+
+_P1_LEGACY_IMPORT_TOKENS = [
+    "from gateway.platforms",
+    "import gateway.platforms",
+    "from gateway import rich_sent_store",
+    "from gateway.platform_registry",
+    "import gateway.platform_registry",
+    "from gateway.session_context",
+    "import gateway.session_context",
+    "from gateway.status",
+    "import gateway.status",
+    "from gateway.sticker_cache",
+    "import gateway.sticker_cache",
+    "from gateway.whatsapp_identity",
+    "import gateway.whatsapp_identity",
+    "from gateway.slash_commands",
+    "import gateway.slash_commands",
+]
+
+_P2_SESSIONDB_TOKENS = (
+    "from hermes_state",
+    "import hermes_state",
+    "SessionDB",
+)
+
+_P2_IDENTITY_ALIAS_TOKENS = (
+    "stored_session_id",
+    "stable_session_id",
+    "runtime_session_id",
+)
+
+_P2_IDENTITY_ALIAS_ALLOWLIST = {
+    "hermes_agent/gateway/pipeline.py",
+    "scripts/zero_debt/verdict.py",
+}
+
+_P2_RUN_EVENTS_INSERT_ALLOWLIST = {
+    "hermes_agent/domain/event_ledger.py",
+    "scripts/zero_debt/verdict.py",
+}
+
+_P2_RUNS_UPDATE_ALLOWLIST = {
+    "hermes_agent/domain/run_terminator.py",
+    "hermes_agent/repositories/run_repo.py",
+    "scripts/zero_debt/verdict.py",
+}
+
+_P2_SESSIONDB_ALLOWLIST = {
+    "scripts/zero_debt/verdict.py",
+}
 
 
 @dataclass(frozen=True)
@@ -52,6 +197,16 @@ def _git(args: list[str]) -> str:
         return ""
 
 
+def _production_python_files() -> list[Path]:
+    files: list[Path] = []
+    for path in REPO_ROOT.rglob("*.py"):
+        rel = path.relative_to(REPO_ROOT)
+        if set(rel.parts) & _SCAN_EXCLUDED_DIRS:
+            continue
+        files.append(path)
+    return files
+
+
 def _contains_all(text: str, tokens: list[str]) -> bool:
     return all(token in text for token in tokens)
 
@@ -61,7 +216,9 @@ def _required_file_checks() -> list[Check]:
         MANIFEST,
         EXECUTION_PLAN,
         VERDICT_SCRIPT,
+        PHASE_CLOSURE_SCRIPT,
         GATE_TEST,
+        P1_BOUNDARY_TEST,
     ]
     return [
         Check(
@@ -139,8 +296,9 @@ def _execution_plan_checks() -> list[Check]:
             ok=(
                 "zero_debt_phase_pX_verdict.json" in text
                 and "zero_debt_phase_pX_human_signoff.md" in text
+                and "scripts/zero_debt/phase_closure.py" in text
             ),
-            message="machine and user sign-off files are required",
+            message="machine verdict, human sign-off, and closure gate are required",
         ),
     ]
 
@@ -174,22 +332,219 @@ def build_p0_verdict() -> dict[str, Any]:
     }
 
 
+def _p1_path_checks() -> list[Check]:
+    checks: list[Check] = []
+    for path in _P1_LEGACY_PATHS:
+        full_path = REPO_ROOT / path
+        checks.append(
+            Check(
+                id=f"p1_legacy_removed:{path}",
+                ok=not full_path.exists(),
+                message="removed" if not full_path.exists() else "still exists",
+            )
+        )
+    for path in _P1_TARGET_PATHS:
+        full_path = REPO_ROOT / path
+        checks.append(
+            Check(
+                id=f"p1_target_exists:{path}",
+                ok=full_path.exists(),
+                message="exists" if full_path.exists() else "missing",
+            )
+        )
+    return checks
+
+
+def _p1_import_checks() -> list[Check]:
+    legacy_import_offenders: list[str] = []
+    channel_gateway_offenders: list[str] = []
+    for path in _production_python_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            continue
+        for lineno, line in enumerate(lines, start=1):
+            stripped = line.strip()
+            if any(stripped.startswith(token) for token in _P1_LEGACY_IMPORT_TOKENS):
+                legacy_import_offenders.append(f"{rel}:{lineno}: {stripped}")
+            if rel.startswith("channels/") and (
+                stripped.startswith("from gateway") or stripped.startswith("import gateway.")
+            ):
+                channel_gateway_offenders.append(f"{rel}:{lineno}: {stripped}")
+
+    return [
+        Check(
+            id="p1:no_legacy_channel_imports",
+            ok=not legacy_import_offenders,
+            message=(
+                "no production imports from moved gateway channel owners"
+                if not legacy_import_offenders
+                else "\n".join(legacy_import_offenders[:20])
+            ),
+        ),
+        Check(
+            id="p1:channels_do_not_import_gateway",
+            ok=not channel_gateway_offenders,
+            message=(
+                "channels package has no gateway imports"
+                if not channel_gateway_offenders
+                else "\n".join(channel_gateway_offenders[:20])
+            ),
+        ),
+    ]
+
+
+def _scan_lines_for_tokens(
+    *,
+    tokens: tuple[str, ...],
+    allowlist: set[str] | None = None,
+) -> list[str]:
+    offenders: list[str] = []
+    allowed = allowlist or set()
+    for path in _production_python_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel in allowed:
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            continue
+        for lineno, line in enumerate(lines, start=1):
+            if any(token in line for token in tokens):
+                offenders.append(f"{rel}:{lineno}: {line.strip()}")
+    return offenders
+
+
+def _p2_data_plane_checks() -> list[Check]:
+    sessiondb_offenders = _scan_lines_for_tokens(
+        tokens=_P2_SESSIONDB_TOKENS,
+        allowlist=_P2_SESSIONDB_ALLOWLIST,
+    )
+    identity_alias_offenders = _scan_lines_for_tokens(
+        tokens=_P2_IDENTITY_ALIAS_TOKENS,
+        allowlist=_P2_IDENTITY_ALIAS_ALLOWLIST,
+    )
+    run_events_insert_offenders = _scan_lines_for_tokens(
+        tokens=("INSERT INTO run_events",),
+        allowlist=_P2_RUN_EVENTS_INSERT_ALLOWLIST,
+    )
+    runs_update_offenders = _scan_lines_for_tokens(
+        tokens=("UPDATE runs",),
+        allowlist=_P2_RUNS_UPDATE_ALLOWLIST,
+    )
+    return [
+        Check(
+            id="p2:no_sessiondb_production",
+            ok=not sessiondb_offenders,
+            message=(
+                "production code has no hermes_state/SessionDB dependency"
+                if not sessiondb_offenders
+                else "\n".join(sessiondb_offenders[:30])
+            ),
+        ),
+        Check(
+            id="p2:no_legacy_identity_alias_internal",
+            ok=not identity_alias_offenders,
+            message=(
+                "legacy identity aliases appear only at the wire folding boundary"
+                if not identity_alias_offenders
+                else "\n".join(identity_alias_offenders[:30])
+            ),
+        ),
+        Check(
+            id="p2:event_ledger_single_writer",
+            ok=not run_events_insert_offenders,
+            message=(
+                "run_events INSERT is owned by EventLedger only"
+                if not run_events_insert_offenders
+                else "\n".join(run_events_insert_offenders[:30])
+            ),
+        ),
+        Check(
+            id="p2:run_state_single_writer",
+            ok=not runs_update_offenders,
+            message=(
+                "runs UPDATE is owned by RunTerminator/RunRepo only"
+                if not runs_update_offenders
+                else "\n".join(runs_update_offenders[:30])
+            ),
+        ),
+    ]
+
+
+def build_p1_verdict() -> dict[str, Any]:
+    checks = [
+        *_required_file_checks(),
+        *_p1_path_checks(),
+        *_p1_import_checks(),
+    ]
+    failed = [check for check in checks if not check.ok]
+    return {
+        "phase": "P1",
+        "status": "fail" if failed else "pass",
+        "checks": [check.as_dict() for check in checks],
+        "warnings": [
+            *_working_state_warnings(),
+            (
+                "P1 verdict checks static ownership gates only; attach the "
+                "documented pytest and real-device results before human sign-off"
+            ),
+        ],
+        "required_test_commands": [
+            ".venv/bin/pytest tests/channels tests/observability/test_channels_p1_boundary.py tests/observability/test_module_liveness_audit.py -q",
+            ".venv/bin/pytest tests/channels tests/observability/test_channels_p1_boundary.py tests/observability/test_module_liveness_audit.py tests/gateway/test_config.py tests/gateway/test_platform_registry.py tests/gateway/test_platform_connected_checkers.py tests/gateway/test_session.py tests/gateway/test_session_env.py tests/gateway/test_session_race_guard.py tests/gateway/test_platform_base.py tests/gateway/test_api_server.py tests/gateway/test_api_server_runs.py tests/gateway/test_api_server_jobs.py tests/gateway/test_api_server_toolset.py tests/gateway/test_async_delivery_capability.py tests/gateway/test_status_command.py tests/gateway/test_gateway_shutdown.py tests/gateway/test_runner_startup_failures.py tests/gateway/test_runner_fatal_adapter.py tests/gateway/test_model_command_flat_string_config.py tests/gateway/test_telegram_format.py tests/gateway/test_telegram_network.py tests/gateway/test_sticker_cache.py -q",
+        ],
+        "next_required_human_signoff": "docs/audits/zero_debt_phase_p1_human_signoff.md",
+    }
+
+
+def build_p2_verdict() -> dict[str, Any]:
+    checks = [
+        *_required_file_checks(),
+        *_p2_data_plane_checks(),
+    ]
+    failed = [check for check in checks if not check.ok]
+    return {
+        "phase": "P2",
+        "status": "fail" if failed else "pass",
+        "checks": [check.as_dict() for check in checks],
+        "warnings": [
+            *_working_state_warnings(),
+            (
+                "P2 verdict is the data-plane ownership gate. It is expected "
+                "to fail until P2 vertical slices migrate SessionDB/hermes_state "
+                "production ownership into repositories and domain services."
+            ),
+        ],
+        "required_test_commands": [
+            ".venv/bin/pytest tests/observability/test_zero_debt_gates.py -q",
+            ".venv/bin/pytest tests/gateway tests/storage tests/tui_gateway -q",
+        ],
+        "next_required_human_signoff": "docs/audits/zero_debt_phase_p2_human_signoff.md",
+    }
+
+
 def build_verdict(phase: str) -> dict[str, Any]:
     normalized = str(phase or "").upper()
-    if normalized != "P0":
-        return {
-            "phase": normalized,
-            "status": "fail",
-            "checks": [
-                {
-                    "id": "phase:supported",
-                    "ok": False,
-                    "message": "only P0 verdict is implemented; extend this script before later phase sign-off",
-                }
-            ],
-            "warnings": [],
-        }
-    return build_p0_verdict()
+    if normalized == "P0":
+        return build_p0_verdict()
+    if normalized == "P1":
+        return build_p1_verdict()
+    if normalized == "P2":
+        return build_p2_verdict()
+    return {
+        "phase": normalized,
+        "status": "fail",
+        "checks": [
+            {
+                "id": "phase:supported",
+                "ok": False,
+                "message": "only P0, P1, and P2 verdicts are implemented; extend this script before later phase sign-off",
+            }
+        ],
+        "warnings": [],
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

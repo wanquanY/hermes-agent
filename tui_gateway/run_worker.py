@@ -730,7 +730,7 @@ def _build_default_handler(
             clear_session_vars = None
             active_runs.add(frame.run_id)
             try:
-                from gateway.session_context import (
+                from channels.session_context import (
                     clear_session_vars as _clear_session_vars,
                     set_session_vars,
                 )

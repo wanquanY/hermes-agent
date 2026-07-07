@@ -14,8 +14,13 @@ import json
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable
-from enum import Enum
 
+from channels.config import (
+    _BUILTIN_PLATFORM_VALUES,
+    HomeChannel,
+    Platform,
+    PlatformConfig,
+)
 from hermes_cli.config import get_hermes_home
 from utils import is_truthy_value
 
@@ -92,148 +97,6 @@ def _ensure_platform_extra_dict(platforms_data: dict, name: str) -> tuple[dict, 
     return plat_data, extra
 
 
-# Module-level cache for bundled platform plugin names (lives outside the
-# enum so it doesn't become an accidental enum member).
-_Platform__bundled_plugin_names: Optional[set] = None
-
-
-class Platform(Enum):
-    """Supported messaging platforms.
-
-    Built-in platforms have explicit members.  Plugin platforms use dynamic
-    members created on-demand by ``_missing_()`` so that
-    ``Platform("irc")`` works without modifying this enum.  Dynamic members
-    are cached in ``_value2member_map_`` for identity-stable comparisons.
-    """
-    LOCAL = "local"
-    TELEGRAM = "telegram"
-    DISCORD = "discord"
-    WHATSAPP = "whatsapp"
-    SLACK = "slack"
-    SIGNAL = "signal"
-    MATTERMOST = "mattermost"
-    MATRIX = "matrix"
-    HOMEASSISTANT = "homeassistant"
-    EMAIL = "email"
-    SMS = "sms"
-    DINGTALK = "dingtalk"
-    API_SERVER = "api_server"
-    WEBHOOK = "webhook"
-    MSGRAPH_WEBHOOK = "msgraph_webhook"
-    FEISHU = "feishu"
-    WECOM = "wecom"
-    WECOM_CALLBACK = "wecom_callback"
-    WEIXIN = "weixin"
-    BLUEBUBBLES = "bluebubbles"
-    QQBOT = "qqbot"
-    YUANBAO = "yuanbao"
-    @classmethod
-    def _missing_(cls, value):
-        """Accept unknown platform names only for known plugin adapters.
-
-        Creates a pseudo-member cached in ``_value2member_map_`` so that
-        ``Platform("irc") is Platform("irc")`` holds True (identity-stable).
-        Arbitrary strings are rejected to prevent enum pollution.
-        """
-        if not isinstance(value, str) or not value.strip():
-            return None
-        # Normalise to lowercase to avoid case mismatches in config
-        value = value.strip().lower()
-        # Check cache first (another call may have created it already)
-        if value in cls._value2member_map_:
-            return cls._value2member_map_[value]
-
-        # Only create pseudo-members for bundled plugin platforms (discovered
-        # via filesystem scan) or runtime-registered plugin platforms.
-        global _Platform__bundled_plugin_names
-        if _Platform__bundled_plugin_names is None:
-            _Platform__bundled_plugin_names = cls._scan_bundled_plugin_platforms()
-        if value in _Platform__bundled_plugin_names:
-            pseudo = object.__new__(cls)
-            pseudo._value_ = value
-            pseudo._name_ = value.upper().replace("-", "_").replace(" ", "_")
-            cls._value2member_map_[value] = pseudo
-            cls._member_map_[pseudo._name_] = pseudo
-            return pseudo
-
-        # Runtime-registered plugins (e.g. user-installed, discovered after
-        # the enum was defined).
-        try:
-            from gateway.platform_registry import platform_registry
-            if platform_registry.is_registered(value):
-                pseudo = object.__new__(cls)
-                pseudo._value_ = value
-                pseudo._name_ = value.upper().replace("-", "_").replace(" ", "_")
-                cls._value2member_map_[value] = pseudo
-                cls._member_map_[pseudo._name_] = pseudo
-                return pseudo
-        except Exception:
-            pass
-
-        return None
-
-    @classmethod
-    def _scan_bundled_plugin_platforms(cls) -> set:
-        """Return names of bundled platform plugins under ``plugins/platforms/``."""
-        names: set = set()
-        try:
-            platforms_dir = Path(__file__).parent.parent / "plugins" / "platforms"
-            if platforms_dir.is_dir():
-                for child in platforms_dir.iterdir():
-                    if (
-                        child.is_dir()
-                        and (child / "__init__.py").exists()
-                        and (
-                            (child / "plugin.yaml").exists()
-                            or (child / "plugin.yml").exists()
-                        )
-                    ):
-                        names.add(child.name.lower())
-        except Exception:
-            pass
-        return names
-
-
-# Snapshot of built-in platform values before any dynamic _missing_ lookups.
-# Used to distinguish real platforms from arbitrary strings.
-_BUILTIN_PLATFORM_VALUES = frozenset(m.value for m in Platform.__members__.values())
-
-
-@dataclass
-class HomeChannel:
-    """
-    Default destination for a platform.
-    
-    When a cron job specifies deliver="telegram" without a specific chat ID,
-    messages are sent to this home channel. Thread-aware platforms may also
-    store a thread/topic ID so the bare platform target routes to the exact
-    conversation where /sethome was run.
-    """
-    platform: Platform
-    chat_id: str
-    name: str  # Human-readable name for display
-    thread_id: Optional[str] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "platform": self.platform.value,
-            "chat_id": self.chat_id,
-            "name": self.name,
-        }
-        if self.thread_id:
-            result["thread_id"] = self.thread_id
-        return result
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "HomeChannel":
-        return cls(
-            platform=Platform(data["platform"]),
-            chat_id=str(data["chat_id"]),
-            name=data.get("name", "Home"),
-            thread_id=str(data["thread_id"]) if data.get("thread_id") else None,
-        )
-
-
 @dataclass
 class SessionResetPolicy:
     """
@@ -274,70 +137,6 @@ class SessionResetPolicy:
             idle_minutes=idle_minutes if idle_minutes is not None else 1440,
             notify=_coerce_bool(notify, True),
             notify_exclude_platforms=tuple(exclude) if exclude is not None else ("api_server", "webhook"),
-        )
-
-
-@dataclass
-class PlatformConfig:
-    """Configuration for a single messaging platform."""
-    enabled: bool = False
-    token: Optional[str] = None  # Bot token (Telegram, Discord)
-    api_key: Optional[str] = None  # API key if different from token
-    home_channel: Optional[HomeChannel] = None
-    
-    # Reply threading mode (Telegram/Slack)
-    # - "off": Never thread replies to original message
-    # - "first": Only first chunk threads to user's message (default)
-    # - "all": All chunks in multi-part replies thread to user's message
-    reply_to_mode: str = "first"
-
-    # Whether the gateway is allowed to send "♻️ Gateway online" /
-    # "♻ Gateway restarted" lifecycle notifications on this platform.
-    # Default True preserves prior behavior. Set False on platforms used
-    # by end users (e.g. Slack) where operator-flavored restart pings are
-    # noise; keep True for back-channels where the operator wants them.
-    gateway_restart_notification: bool = True
-
-    # Platform-specific settings
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "enabled": self.enabled,
-            "extra": self.extra,
-            "reply_to_mode": self.reply_to_mode,
-            "gateway_restart_notification": self.gateway_restart_notification,
-        }
-        if self.token:
-            result["token"] = self.token
-        if self.api_key:
-            result["api_key"] = self.api_key
-        if self.home_channel:
-            result["home_channel"] = self.home_channel.to_dict()
-        return result
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "PlatformConfig":
-        home_channel = None
-        if "home_channel" in data:
-            home_channel = HomeChannel.from_dict(data["home_channel"])
-
-        # gateway_restart_notification may be bridged into extra via the
-        # shared-key loop in load_gateway_config(); check both top-level
-        # and extra so YAML ``discord: gateway_restart_notification: false``
-        # works without needing a separate platforms: block.
-        _grn = data.get("gateway_restart_notification")
-        if _grn is None:
-            _grn = data.get("extra", {}).get("gateway_restart_notification")
-
-        return cls(
-            enabled=_coerce_bool(data.get("enabled"), False),
-            token=data.get("token"),
-            api_key=data.get("api_key"),
-            home_channel=home_channel,
-            reply_to_mode=data.get("reply_to_mode", "first"),
-            gateway_restart_notification=_coerce_bool(_grn, True),
-            extra=data.get("extra", {}),
         )
 
 
@@ -524,7 +323,7 @@ class GatewayConfig:
 
         # Plugin-registered platforms
         try:
-            from gateway.platform_registry import platform_registry
+            from channels.platform_registry import platform_registry
             entry = platform_registry.get(platform.value)
             if entry:
                 if entry.is_connected is not None:
@@ -789,7 +588,7 @@ def load_gateway_config() -> GatewayConfig:
             try:
                 from hermes_cli.plugins import discover_plugins
                 discover_plugins()  # idempotent
-                from gateway.platform_registry import platform_registry as _pr
+                from channels.platform_registry import platform_registry as _pr
             except Exception as e:
                 logger.debug("plugin discovery skipped: %s", e)
                 _pr = None
@@ -1009,7 +808,7 @@ def load_gateway_config() -> GatewayConfig:
             telegram_cfg = yaml_cfg.get("telegram", {})
             if isinstance(telegram_cfg, dict):
                 # Bridge top-level legacy `telegram.disable_topic_auto_rename` into
-                # gateway.platforms.telegram.extra so the runtime config sees it.
+                # channels.platforms.telegram.extra so the runtime config sees it.
                 # Read as a runtime-config flag, not env-var (no need for env override).
                 if "disable_topic_auto_rename" in telegram_cfg:
                     _tg_plat = platforms_data.setdefault(Platform.TELEGRAM.value, {})
@@ -1881,7 +1680,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     try:
         from hermes_cli.plugins import discover_plugins
         discover_plugins()  # idempotent
-        from gateway.platform_registry import platform_registry
+        from channels.platform_registry import platform_registry
         for entry in platform_registry.plugin_entries():
             try:
                 if not entry.check_fn():

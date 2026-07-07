@@ -23,8 +23,14 @@ from gateway.config import Platform, PlatformConfig
 # Telegram
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _isolate_telegram_topic_env(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_ALLOWED_TOPICS", raising=False)
+    monkeypatch.delenv("TELEGRAM_IGNORED_THREADS", raising=False)
+
+
 def _make_telegram_adapter(*, allowed_chats=None, require_mention=None, guest_mode=False):
-    from gateway.platforms.telegram import TelegramAdapter
+    from channels.platforms.telegram import TelegramAdapter
 
     extra = {"guest_mode": guest_mode}
     if allowed_chats is not None:
@@ -74,7 +80,7 @@ def _tg_dm_message(text="hello"):
 class TestTelegramAllowedChats:
     def test_empty_is_no_restriction(self, monkeypatch):
         monkeypatch.delenv("TELEGRAM_ALLOWED_CHATS", raising=False)
-        adapter = _make_telegram_adapter()
+        adapter = _make_telegram_adapter(require_mention=False)
         assert adapter._telegram_allowed_chats() == set()
         assert adapter._should_process_message(_tg_group_message(-100)) is True
 
@@ -162,8 +168,8 @@ class TestTelegramAllowedChats:
 
 def _make_dingtalk_adapter(*, allowed_chats=None, require_mention=None):
     # Import lazily — DingTalk SDK may not be installed.
-    pytest.importorskip("gateway.platforms.dingtalk", reason="DingTalk adapter not importable")
-    from gateway.platforms.dingtalk import DingTalkAdapter
+    pytest.importorskip("channels.platforms.dingtalk", reason="DingTalk adapter not importable")
+    from channels.platforms.dingtalk import DingTalkAdapter
 
     extra = {}
     if allowed_chats is not None:
@@ -242,7 +248,7 @@ class TestMattermostAllowedChannels:
 
     @staticmethod
     def _would_process(channel_id, channel_type="O", allowed_cfg=None, allowed_env=""):
-        """Replicate the whitelist gate from gateway/platforms/mattermost.py."""
+        """Replicate the whitelist gate from channels/platforms/mattermost.py."""
         import os as _os
         if channel_type == "D":
             return True

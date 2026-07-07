@@ -24,9 +24,9 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from gateway.platforms.base import BasePlatformAdapter as _BasePlatformAdapter
-from gateway.platforms.base import _custom_unit_to_cp
-from gateway.platforms.base import MEDIA_TAG_CLEANUP_RE
+from channels.platforms.base import BasePlatformAdapter as _BasePlatformAdapter
+from channels.platforms.base import _custom_unit_to_cp
+from channels.platforms.base import MEDIA_TAG_CLEANUP_RE
 from gateway.config import (
     DEFAULT_STREAMING_EDIT_INTERVAL as _DEFAULT_STREAMING_EDIT_INTERVAL,
     DEFAULT_STREAMING_BUFFER_THRESHOLD as _DEFAULT_STREAMING_BUFFER_THRESHOLD,
@@ -877,7 +877,22 @@ class GatewayStreamConsumer:
         Retries each chunk once on flood-control failures with a short delay.
         """
         final_text = self._clean_for_display(text)
-        continuation = self._continuation_text(final_text)
+        visible_prefix = self._visible_prefix()
+        fallback_requested = self._fallback_final_send
+        if (
+            fallback_requested
+            or self._fallback_preserve_partial_messages
+            or not self._message_id
+            or not visible_prefix
+            or final_text == visible_prefix
+        ):
+            continuation = self._continuation_text(final_text)
+        else:
+            # A normal fallback preview is stale: re-send the complete final
+            # response, then delete the preview once the fresh message lands.
+            # Only partial-overflow fallback keeps the visible prefix and sends
+            # just the missing tail.
+            continuation = final_text
         self._fallback_final_send = False
         if not continuation.strip():
             # Nothing new to send — the visible partial already matches final text.
@@ -886,7 +901,7 @@ class GatewayStreamConsumer:
             # calculation may wrongly conclude "already shown" because the
             # streamed prefix was from a *previous* segment (before the tool
             # boundary).  In that case, send the full final_text as-is (#10807).
-            if final_text.strip() and final_text != self._visible_prefix():
+            if final_text.strip() and final_text != visible_prefix:
                 continuation = final_text
             else:
                 # Defence-in-depth for #7183: the last edit may still show the

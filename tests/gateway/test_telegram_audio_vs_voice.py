@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from gateway.config import GatewayConfig, Platform
-from gateway.platforms.base import MessageEvent, MessageType
+from channels.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionSource
 
 
@@ -173,7 +173,7 @@ async def test_audio_attachment_skips_stt_when_stt_disabled():
 
 def test_telegram_media_type_detection_audio_vs_voice():
     """The Telegram platform must set MessageType.AUDIO for msg.audio, VOICE for msg.voice."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     # The Telegram adapter's _build_media_type already returns correct values
     # via MessageType.AUDIO for .audio and MessageType.VOICE for .voice.

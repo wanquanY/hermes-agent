@@ -44,7 +44,7 @@ from typing import Any, Dict, List, Optional
 # Imported at module top because they're stdlib-only inside Hermes — no
 # external dependency that would block the plugin from loading.
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import (
+from channels.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,

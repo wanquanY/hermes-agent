@@ -49,7 +49,7 @@ def _run_setup_feishu(
          patch("hermes_cli.gateway.print_warning"), \
          patch("hermes_cli.gateway.print_error"), \
          patch("hermes_cli.gateway.color", side_effect=lambda t, c: t), \
-         patch("gateway.platforms.feishu.qr_register", return_value=qr_result):
+         patch("channels.platforms.feishu.qr_register", return_value=qr_result):
 
         from hermes_cli.gateway import _setup_feishu
         _setup_feishu()
@@ -120,7 +120,7 @@ class TestSetupFeishuConnectionMode:
         )
         assert env["FEISHU_CONNECTION_MODE"] == "websocket"
 
-    @patch("gateway.platforms.feishu.probe_bot", return_value=None)
+    @patch("channels.platforms.feishu.probe_bot", return_value=None)
     def test_manual_path_websocket(self, _mock_probe):
         env = _run_setup_feishu(
             qr_result=None,
@@ -129,7 +129,7 @@ class TestSetupFeishuConnectionMode:
         )
         assert env["FEISHU_CONNECTION_MODE"] == "websocket"
 
-    @patch("gateway.platforms.feishu.probe_bot", return_value=None)
+    @patch("channels.platforms.feishu.probe_bot", return_value=None)
     def test_manual_path_webhook(self, _mock_probe):
         env = _run_setup_feishu(
             qr_result=None,
@@ -248,7 +248,7 @@ class TestSetupFeishuAdapterIntegration:
 
         with patch.dict(os.environ, env, clear=True):
             from gateway.config import PlatformConfig
-            from gateway.platforms.feishu import FeishuAdapter
+            from channels.platforms.feishu import FeishuAdapter
             adapter = FeishuAdapter(PlatformConfig())
             assert adapter._app_id == "cli_test_app"
             assert adapter._app_secret == "test_secret_value"
@@ -261,7 +261,7 @@ class TestSetupFeishuAdapterIntegration:
         env = self._make_env_from_setup(dm_idx=1)
 
         with patch.dict(os.environ, env, clear=True):
-            from gateway.platforms.feishu import FeishuAdapter
+            from channels.platforms.feishu import FeishuAdapter
             from gateway.config import PlatformConfig
             # Verify adapter initializes without error and env var is correct.
             FeishuAdapter(PlatformConfig())
@@ -274,6 +274,6 @@ class TestSetupFeishuAdapterIntegration:
 
         with patch.dict(os.environ, env, clear=True):
             from gateway.config import PlatformConfig
-            from gateway.platforms.feishu import FeishuAdapter
+            from channels.platforms.feishu import FeishuAdapter
             adapter = FeishuAdapter(PlatformConfig())
             assert adapter._group_policy == "open"

@@ -23,7 +23,7 @@ import pytest
 
 import gateway.run as gateway_run
 from gateway.config import GatewayConfig, Platform
-from gateway.platforms.base import MessageEvent
+from channels.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource
 
 

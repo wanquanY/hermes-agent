@@ -429,7 +429,7 @@ class TestTerminalNotificationRouting:
         self, monkeypatch, tmp_path
     ):
         """Gateway watch routing must not trust process-global env fallback."""
-        from gateway.session_context import _UNSET, _VAR_MAP
+        from channels.session_context import _UNSET, _VAR_MAP
         from tools import terminal_tool as terminal_module
         from tools.process_registry import process_registry
 
@@ -509,7 +509,7 @@ class TestTerminalNotificationRouting:
 
     def test_watch_patterns_bind_current_context(self, monkeypatch, tmp_path):
         """When ContextVar routing exists, watch notifications keep that owner."""
-        from gateway.session_context import clear_session_vars, set_session_vars
+        from channels.session_context import clear_session_vars, set_session_vars
         from tools import terminal_tool as terminal_module
         from tools.process_registry import process_registry
 

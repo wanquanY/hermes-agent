@@ -285,8 +285,8 @@ class TestGatewayCleanupWiring:
 
         loop = asyncio.new_event_loop()
         try:
-            with patch("gateway.status.remove_pid_file"), \
-                 patch("gateway.status.write_runtime_status"), \
+            with patch("channels.runtime_status.remove_pid_file"), \
+                 patch("channels.runtime_status.write_runtime_status"), \
                  patch("tools.terminal_tool.cleanup_all_environments"), \
                  patch("tools.browser_tool.cleanup_all_browsers"):
                 loop.run_until_complete(GatewayRunner.stop(runner))

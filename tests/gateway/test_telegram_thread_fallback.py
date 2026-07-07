@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.config import PlatformConfig, Platform
-from gateway.platforms.base import (
+from channels.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
@@ -107,6 +107,10 @@ _fake_telegram_request.HTTPXRequest = object
 @pytest.fixture(autouse=True)
 def _inject_fake_telegram(monkeypatch):
     """Inject fake telegram modules so the adapter can import from them."""
+    sys.modules.pop("channels.platforms.telegram", None)
+    channels_platforms = sys.modules.get("channels.platforms")
+    if channels_platforms is not None and hasattr(channels_platforms, "telegram"):
+        monkeypatch.delattr(channels_platforms, "telegram", raising=False)
     monkeypatch.setitem(sys.modules, "telegram", _fake_telegram)
     monkeypatch.setitem(sys.modules, "telegram.error", _fake_telegram_error)
     monkeypatch.setitem(sys.modules, "telegram.constants", _fake_telegram_constants)
@@ -115,7 +119,7 @@ def _inject_fake_telegram(monkeypatch):
 
 
 def _make_adapter():
-    from gateway.platforms.telegram import TelegramAdapter
+    from channels.platforms.telegram import TelegramAdapter
 
     config = PlatformConfig(enabled=True, token="fake-token")
     adapter = object.__new__(TelegramAdapter)
@@ -136,7 +140,7 @@ def _make_adapter():
 
 def test_non_forum_group_reply_thread_id_does_not_fork_session_key():
     """Reply-derived thread ids in ordinary groups must not create topic lanes."""
-    from gateway.platforms import telegram as telegram_mod
+    from channels.platforms import telegram as telegram_mod
 
     adapter = _make_adapter()
     message = SimpleNamespace(
@@ -170,7 +174,7 @@ def test_non_forum_group_reply_thread_id_does_not_fork_session_key():
 
 def test_forum_group_topic_message_preserves_thread_session_key():
     """Real Telegram forum-topic messages should still route by topic id."""
-    from gateway.platforms import telegram as telegram_mod
+    from channels.platforms import telegram as telegram_mod
 
     adapter = _make_adapter()
     message = SimpleNamespace(
@@ -200,7 +204,7 @@ def test_forum_group_topic_message_preserves_thread_session_key():
 
 def test_forum_general_topic_without_message_thread_id_keeps_thread_context():
     """Forum General-topic messages should keep synthetic thread context."""
-    from gateway.platforms import telegram as telegram_mod
+    from channels.platforms import telegram as telegram_mod
 
     adapter = _make_adapter()
     message = SimpleNamespace(
@@ -387,7 +391,7 @@ async def test_send_retries_without_thread_on_thread_not_found():
     adapter._bot = SimpleNamespace(send_message=mock_send_message)
 
     result = await adapter.send(
-        chat_id="123",
+        chat_id="-100123",
         content="test message",
         metadata={"thread_id": "99999"},
     )
@@ -419,7 +423,7 @@ async def test_send_retries_transient_thread_not_found_before_fallback():
     adapter._bot = SimpleNamespace(send_message=mock_send_message)
 
     result = await adapter.send(
-        chat_id="123",
+        chat_id="-100123",
         content="test message",
         metadata={"thread_id": "99999"},
     )
@@ -715,8 +719,8 @@ async def test_send_dm_topic_fallback_without_anchor_does_not_crash():
 
 
 @pytest.mark.asyncio
-async def test_send_dm_topic_reply_not_found_retry_drops_thread_id():
-    """If Telegram deletes the reply anchor, private-topic retry must drop thread id too."""
+async def test_send_dm_topic_reply_not_found_fails_loud():
+    """If Telegram deletes the reply anchor, text sends must not leave the topic lane silently."""
     adapter = _make_adapter()
     call_log = []
 
@@ -738,12 +742,11 @@ async def test_send_dm_topic_reply_not_found_retry_drops_thread_id():
         },
     )
 
-    assert result.success is True
+    assert result.success is False
+    assert "Message to be replied not found" in result.error
     assert call_log[0]["reply_to_message_id"] == 462
     assert call_log[0]["message_thread_id"] == 20197
-    assert call_log[1]["reply_to_message_id"] is None
-    assert "message_thread_id" not in call_log[1]
-    assert "direct_messages_topic_id" not in call_log[1]
+    assert len(call_log) == 1
 
 
 @pytest.mark.asyncio
@@ -1043,7 +1046,7 @@ async def test_slash_confirm_forum_callback_followup_keeps_existing_thread_behav
 @pytest.mark.asyncio
 async def test_base_send_image_fallback_preserves_metadata():
     """Base image fallback should pass metadata through instead of referencing kwargs."""
-    from gateway.platforms.base import BasePlatformAdapter
+    from channels.platforms.base import BasePlatformAdapter
 
     class _ConcreteBaseAdapter(BasePlatformAdapter):
         async def connect(self):
@@ -1084,7 +1087,7 @@ async def test_send_raises_on_other_bad_request():
     adapter._bot = SimpleNamespace(send_message=mock_send_message)
 
     result = await adapter.send(
-        chat_id="123",
+        chat_id="-100123",
         content="test message",
         metadata={"thread_id": "99999"},
     )
@@ -1245,7 +1248,7 @@ async def test_thread_fallback_only_fires_once():
     # Send a long message that gets split into chunks
     long_msg = "A" * 5000  # Exceeds Telegram's 4096 limit
     result = await adapter.send(
-        chat_id="123",
+        chat_id="-100123",
         content=long_msg,
         metadata={"thread_id": "99999"},
     )

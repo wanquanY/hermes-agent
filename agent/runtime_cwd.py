@@ -21,7 +21,7 @@ def resolve_agent_cwd() -> Path:
     if _SESSION_CWD:
         return Path(_SESSION_CWD).expanduser()
     try:
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
 
         session_cwd = get_session_env("TERMINAL_CWD", "").strip()
         if session_cwd:

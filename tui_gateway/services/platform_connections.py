@@ -511,9 +511,9 @@ def _poll_dingtalk_qr(
 
 
 def _start_feishu_qr() -> dict[str, Any]:
-    feishu = sys.modules.get("gateway.platforms.feishu")
+    feishu = sys.modules.get("channels.platforms.feishu")
     if feishu is None:
-        from gateway.platforms import feishu
+        from channels.platforms import feishu
 
     domain = "feishu"
     feishu._init_registration(domain)
@@ -535,9 +535,9 @@ def _poll_feishu_qr(
     load_cfg: Callable[[], dict],
     save_cfg: Callable[[dict], None],
 ) -> dict[str, Any]:
-    feishu = sys.modules.get("gateway.platforms.feishu")
+    feishu = sys.modules.get("channels.platforms.feishu")
     if feishu is None:
-        from gateway.platforms import feishu
+        from channels.platforms import feishu
 
     current_domain = str(session.get("domain") or "feishu")
     base_url = feishu._accounts_base_url(current_domain)
@@ -590,7 +590,7 @@ def _poll_feishu_qr(
 
 
 def _start_qqbot_qr() -> dict[str, Any]:
-    from gateway.platforms.qqbot import onboard
+    from channels.platforms.qqbot import onboard
 
     task_id, aes_key = onboard._create_bind_task()
     url = onboard.build_connect_url(task_id)
@@ -609,7 +609,7 @@ def _poll_qqbot_qr(
     load_cfg: Callable[[], dict],
     save_cfg: Callable[[dict], None],
 ) -> dict[str, Any]:
-    from gateway.platforms.qqbot import onboard
+    from channels.platforms.qqbot import onboard
 
     status, app_id, encrypted_secret, user_openid = onboard._poll_bind_result(str(session.get("task_id") or ""))
     if status == onboard.BindStatus.PENDING or status == onboard.BindStatus.NONE:
@@ -637,9 +637,9 @@ def _start_weixin_qr() -> dict[str, Any]:
     import asyncio
 
     async def _fetch() -> dict[str, Any]:
-        weixin = sys.modules.get("gateway.platforms.weixin")
+        weixin = sys.modules.get("channels.platforms.weixin")
         if weixin is None:
-            from gateway.platforms import weixin
+            from channels.platforms import weixin
 
         if not weixin.AIOHTTP_AVAILABLE:
             raise RuntimeError("aiohttp is required for Weixin QR login")
@@ -677,9 +677,9 @@ def _poll_weixin_qr(
     import asyncio
 
     async def _fetch() -> dict[str, Any]:
-        weixin = sys.modules.get("gateway.platforms.weixin")
+        weixin = sys.modules.get("channels.platforms.weixin")
         if weixin is None:
-            from gateway.platforms import weixin
+            from channels.platforms import weixin
 
         async with weixin.aiohttp.ClientSession(
             trust_env=True,
@@ -692,9 +692,9 @@ def _poll_weixin_qr(
                 timeout_ms=weixin.QR_TIMEOUT_MS,
             )
 
-    weixin = sys.modules.get("gateway.platforms.weixin")
+    weixin = sys.modules.get("channels.platforms.weixin")
     if weixin is None:
-        from gateway.platforms import weixin
+        from channels.platforms import weixin
     from hermes_constants import get_hermes_home
 
     response = asyncio.run(_fetch())
@@ -784,7 +784,7 @@ def _plain_platform_status(platform: dict[str, Any]) -> str:
 
 def _read_runtime_status() -> dict[str, Any]:
     try:
-        from gateway.status import read_runtime_status
+        from channels.runtime_status import read_runtime_status
 
         state = read_runtime_status()
         return state if isinstance(state, dict) else {}
@@ -794,7 +794,7 @@ def _read_runtime_status() -> dict[str, Any]:
 
 def _running_gateway_pid() -> int | None:
     try:
-        from gateway.status import get_running_pid
+        from channels.runtime_status import get_running_pid
 
         return get_running_pid(cleanup_stale=True)
     except Exception:

@@ -105,7 +105,7 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Return lightweight gateway runtime diagnostics without building an agent."""
     try:
-        from gateway.status import read_runtime_status
+        from channels.runtime_status import read_runtime_status
 
         state = read_runtime_status()
         if not isinstance(state, dict):

@@ -7,7 +7,7 @@ from gateway.config import Platform, PlatformConfig
 def _make_adapter(monkeypatch, **extra):
     monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
     monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
-    from gateway.platforms.bluebubbles import BlueBubblesAdapter
+    from channels.platforms.bluebubbles import BlueBubblesAdapter
 
     cfg = PlatformConfig(
         enabled=True,
@@ -62,7 +62,7 @@ class TestBlueBubblesHelpers:
     def test_check_requirements(self, monkeypatch):
         monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
         monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
-        from gateway.platforms.bluebubbles import check_bluebubbles_requirements
+        from channels.platforms.bluebubbles import check_bluebubbles_requirements
 
         assert check_bluebubbles_requirements() is True
 
@@ -325,7 +325,7 @@ class TestBlueBubblesAttachmentDownload:
             return cached_path
 
         monkeypatch.setattr(
-            "gateway.platforms.bluebubbles.cache_image_from_bytes",
+            "channels.platforms.bluebubbles.cache_image_from_bytes",
             mock_cache_image,
         )
 
@@ -360,7 +360,7 @@ class TestBlueBubblesAttachmentDownload:
             return cached_path
 
         monkeypatch.setattr(
-            "gateway.platforms.bluebubbles.cache_audio_from_bytes",
+            "channels.platforms.bluebubbles.cache_audio_from_bytes",
             mock_cache_audio,
         )
 
@@ -395,7 +395,7 @@ class TestBlueBubblesAttachmentDownload:
             return cached_path
 
         monkeypatch.setattr(
-            "gateway.platforms.bluebubbles.cache_document_from_bytes",
+            "channels.platforms.bluebubbles.cache_document_from_bytes",
             mock_cache_doc,
         )
 
@@ -455,7 +455,7 @@ class TestBlueBubblesWebhookUrl:
     def test_register_url_omits_query_when_no_password(self, monkeypatch):
         """If no password is configured, the register URL should be the bare URL."""
         monkeypatch.delenv("BLUEBUBBLES_PASSWORD", raising=False)
-        from gateway.platforms.bluebubbles import BlueBubblesAdapter
+        from channels.platforms.bluebubbles import BlueBubblesAdapter
         cfg = PlatformConfig(
             enabled=True,
             extra={"server_url": "http://localhost:1234", "password": ""},

@@ -261,7 +261,7 @@ def _dovie_product_context_payload(agent: Any) -> Dict[str, Any]:
     if parsed:
         return parsed
     try:
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
 
         raw = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
     except Exception:

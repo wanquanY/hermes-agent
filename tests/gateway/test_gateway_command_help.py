@@ -3,7 +3,7 @@
 import pytest
 
 from gateway.config import Platform
-from gateway.platforms.base import MessageEvent
+from channels.platforms.base import MessageEvent
 from gateway.session import SessionSource
 
 

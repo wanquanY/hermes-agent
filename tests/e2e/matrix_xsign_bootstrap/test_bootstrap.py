@@ -164,7 +164,7 @@ class XsignBootstrapE2E(unittest.IsolatedAsyncioTestCase):
         from mautrix.types import TrustState
         from mautrix.util.async_db import Database
 
-        # The actual bootstrap snippet from gateway/platforms/matrix.py
+        # The actual bootstrap snippet from channels/platforms/matrix.py
         # (copied so we can run it without importing the full hermes
         # gateway and its many deps). If the source code drifts from this,
         # the test should be updated to match.

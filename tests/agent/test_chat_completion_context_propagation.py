@@ -10,7 +10,7 @@ from agent.chat_completion_helpers import (
     interruptible_api_call,
     interruptible_streaming_api_call,
 )
-from gateway.session_context import clear_session_vars, get_session_env, set_session_vars
+from channels.session_context import clear_session_vars, get_session_env, set_session_vars
 
 
 @pytest.fixture(autouse=True)

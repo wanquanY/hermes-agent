@@ -2035,7 +2035,7 @@ def test_platforms_manage_catalog_returns_structured_platforms(server):
 
     with patch.dict(sys.modules, {
         "hermes_cli.gateway": fake_gateway,
-        "gateway.status": fake_status,
+        "channels.runtime_status": fake_status,
     }):
         resp = server.handle_request({
             "id": "platforms-catalog",
@@ -2228,7 +2228,7 @@ def test_platforms_manage_feishu_qr_flow_does_not_persist_bot_display_name(serve
     with patch.dict(sys.modules, {
         "hermes_cli.gateway": fake_gateway,
         "hermes_cli.config": fake_config,
-        "gateway.platforms.feishu": fake_feishu,
+        "channels.platforms.feishu": fake_feishu,
     }):
         start = server.handle_request({
             "id": "platforms-feishu-qr-start",
@@ -2311,7 +2311,7 @@ def test_platforms_manage_weixin_qr_flow_allows_scan_owner(server, monkeypatch):
     with patch.dict(sys.modules, {
         "hermes_cli.gateway": fake_gateway,
         "hermes_cli.config": fake_config,
-        "gateway.platforms.weixin": fake_weixin,
+        "channels.platforms.weixin": fake_weixin,
     }):
         start = server.handle_request({
             "id": "platforms-weixin-qr-start",

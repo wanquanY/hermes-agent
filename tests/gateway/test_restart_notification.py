@@ -9,7 +9,7 @@ import pytest
 
 import gateway.run as gateway_run
 from gateway.config import HomeChannel, Platform
-from gateway.platforms.base import MessageEvent, MessageType, SendResult
+from channels.platforms.base import MessageEvent, MessageType, SendResult
 from gateway.session import build_session_key
 from tests.gateway.restart_test_helpers import (
     make_restart_runner,
@@ -455,7 +455,7 @@ async def test_send_restart_notification_logs_warning_on_sendresult_failure(
     logged "Sent restart notification to ..." at INFO — masking real
     delivery failures behind a fake success line.
     """
-    from gateway.platforms.base import SendResult
+    from channels.platforms.base import SendResult
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
 
@@ -577,7 +577,7 @@ async def test_send_restart_notification_logs_info_on_sendresult_success(
     tmp_path, monkeypatch, caplog
 ):
     """Adapter returning SendResult(success=True) keeps the INFO log line."""
-    from gateway.platforms.base import SendResult
+    from channels.platforms.base import SendResult
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
 

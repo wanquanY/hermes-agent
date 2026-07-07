@@ -49,7 +49,7 @@ def _ensure_telegram_mock():
 
 _ensure_telegram_mock()
 
-from gateway.platforms.telegram import TelegramAdapter
+from channels.platforms.telegram import TelegramAdapter
 from gateway.config import Platform, PlatformConfig
 
 
@@ -395,7 +395,7 @@ class TestBaseAdapterClarifyFallback:
 
     @pytest.mark.asyncio
     async def test_numbered_text_fallback(self):
-        from gateway.platforms.base import BasePlatformAdapter, SendResult
+        from channels.platforms.base import BasePlatformAdapter, SendResult
 
         # Subclass just enough to instantiate
         class _Stub(BasePlatformAdapter):
@@ -432,7 +432,7 @@ class TestBaseAdapterClarifyFallback:
 
     @pytest.mark.asyncio
     async def test_open_ended_fallback_renders_question_only(self):
-        from gateway.platforms.base import BasePlatformAdapter, SendResult
+        from channels.platforms.base import BasePlatformAdapter, SendResult
 
         class _Stub(BasePlatformAdapter):
             name = "stub"

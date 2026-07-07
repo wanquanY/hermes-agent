@@ -27,7 +27,7 @@ def _make_config(**extra):
 
 class TestQQRequirements:
     def test_returns_bool(self):
-        from gateway.platforms.qqbot import check_qq_requirements
+        from channels.platforms.qqbot import check_qq_requirements
         result = check_qq_requirements()
         assert isinstance(result, bool)
 
@@ -38,7 +38,7 @@ class TestQQRequirements:
 
 class TestQQAdapterInit:
     def _make(self, **extra):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
         return QQAdapter(_make_config(**extra))
 
     def test_basic_attributes(self):
@@ -104,7 +104,7 @@ class TestQQAdapterInit:
 
 class TestCoerceList:
     def _fn(self, value):
-        from gateway.platforms.qqbot import _coerce_list
+        from channels.platforms.qqbot import _coerce_list
         return _coerce_list(value)
 
     def test_none(self):
@@ -132,7 +132,7 @@ class TestCoerceList:
 
 class TestIsVoiceContentType:
     def _fn(self, content_type, filename):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
         return QQAdapter._is_voice_content_type(content_type, filename)
 
     def test_voice_content_type(self):
@@ -157,7 +157,7 @@ class TestIsVoiceContentType:
 
 class TestVoiceAttachmentSSRFProtection:
     def _make_adapter(self, **extra):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
         return QQAdapter(_make_config(**extra))
 
     def test_stt_blocks_unsafe_download_url(self):
@@ -177,10 +177,10 @@ class TestVoiceAttachmentSSRFProtection:
         adapter._http_client.get.assert_not_called()
 
     def test_connect_uses_redirect_guard_hook(self):
-        from gateway.platforms.qqbot import QQAdapter, _ssrf_redirect_guard
+        from channels.platforms.qqbot import QQAdapter, _ssrf_redirect_guard
 
         client = mock.AsyncMock()
-        with mock.patch("gateway.platforms.qqbot.adapter.httpx.AsyncClient", return_value=client) as async_client_cls:
+        with mock.patch("channels.platforms.qqbot.adapter.httpx.AsyncClient", return_value=client) as async_client_cls:
             adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
             adapter._ensure_token = mock.AsyncMock(side_effect=RuntimeError("stop after client creation"))
 
@@ -200,7 +200,7 @@ class TestVoiceAttachmentSSRFProtection:
 class TestQQWebSocketProxy:
     @pytest.mark.asyncio
     async def test_open_ws_honors_proxy_env(self, monkeypatch):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
 
         for key in (
             "WSS_PROXY",
@@ -230,7 +230,7 @@ class TestQQWebSocketProxy:
                 seen_ws_kwargs.update(kwargs)
                 return mock.AsyncMock(closed=False)
 
-        with mock.patch("gateway.platforms.qqbot.adapter.aiohttp.ClientSession", side_effect=FakeSession):
+        with mock.patch("channels.platforms.qqbot.adapter.aiohttp.ClientSession", side_effect=FakeSession):
             await adapter._open_ws("wss://api.sgroup.qq.com/websocket")
 
         assert seen_session_kwargs.get("trust_env") is True
@@ -242,7 +242,7 @@ class TestQQWebSocketProxy:
 
 class TestStripAtMention:
     def _fn(self, content):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
         return QQAdapter._strip_at_mention(content)
 
     def test_removes_mention(self):
@@ -266,7 +266,7 @@ class TestStripAtMention:
 
 class TestDmAllowed:
     def _make_adapter(self, **extra):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
         return QQAdapter(_make_config(**extra))
 
     def test_open_policy(self):
@@ -296,7 +296,7 @@ class TestDmAllowed:
 
 class TestGroupAllowed:
     def _make_adapter(self, **extra):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
         return QQAdapter(_make_config(**extra))
 
     def test_open_policy(self):
@@ -318,7 +318,7 @@ class TestGroupAllowed:
 
 class TestResolveSTTConfig:
     def _make_adapter(self, **extra):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
         return QQAdapter(_make_config(**extra))
 
     def test_no_config(self):
@@ -360,23 +360,23 @@ class TestResolveSTTConfig:
 
 class TestDetectMessageType:
     def _fn(self, media_urls, media_types):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
         return QQAdapter._detect_message_type(media_urls, media_types)
 
     def test_no_media(self):
-        from gateway.platforms.base import MessageType
+        from channels.platforms.base import MessageType
         assert self._fn([], []) == MessageType.TEXT
 
     def test_image(self):
-        from gateway.platforms.base import MessageType
+        from channels.platforms.base import MessageType
         assert self._fn(["file.jpg"], ["image/jpeg"]) == MessageType.PHOTO
 
     def test_voice(self):
-        from gateway.platforms.base import MessageType
+        from channels.platforms.base import MessageType
         assert self._fn(["voice.silk"], ["audio/silk"]) == MessageType.VOICE
 
     def test_video(self):
-        from gateway.platforms.base import MessageType
+        from channels.platforms.base import MessageType
         assert self._fn(["vid.mp4"], ["video/mp4"]) == MessageType.VIDEO
 
 
@@ -386,24 +386,24 @@ class TestDetectMessageType:
 
 class TestQQCloseError:
     def test_attributes(self):
-        from gateway.platforms.qqbot import QQCloseError
+        from channels.platforms.qqbot import QQCloseError
         err = QQCloseError(4004, "bad token")
         assert err.code == 4004
         assert err.reason == "bad token"
 
     def test_code_none(self):
-        from gateway.platforms.qqbot import QQCloseError
+        from channels.platforms.qqbot import QQCloseError
         err = QQCloseError(None, "")
         assert err.code is None
 
     def test_string_to_int(self):
-        from gateway.platforms.qqbot import QQCloseError
+        from channels.platforms.qqbot import QQCloseError
         err = QQCloseError("4914", "banned")
         assert err.code == 4914
         assert err.reason == "banned"
 
     def test_message_format(self):
-        from gateway.platforms.qqbot import QQCloseError
+        from channels.platforms.qqbot import QQCloseError
         err = QQCloseError(4008, "rate limit")
         assert "4008" in str(err)
         assert "rate limit" in str(err)
@@ -415,7 +415,7 @@ class TestQQCloseError:
 
 class TestDispatchPayload:
     def _make_adapter(self, **extra):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
         adapter = QQAdapter(_make_config(**extra))
         return adapter
 
@@ -455,7 +455,7 @@ class TestDispatchPayload:
 
 class TestReadyHandling:
     def _make_adapter(self, **extra):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
         return QQAdapter(_make_config(**extra))
 
     def test_ready_stores_session(self):
@@ -485,7 +485,7 @@ class TestReadyHandling:
 
 class TestParseJson:
     def _fn(self, raw):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
         return QQAdapter._parse_json(raw)
 
     def test_valid_json(self):
@@ -515,7 +515,7 @@ class TestParseJson:
 
 class TestBuildTextBody:
     def _make_adapter(self, **extra):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
         return QQAdapter(_make_config(**extra))
 
     def test_plain_text(self):
@@ -555,7 +555,7 @@ class TestWaitForReconnection:
     """Test that send() waits for reconnection instead of silently dropping."""
 
     def _make_adapter(self, **extra):
-        from gateway.platforms.qqbot import QQAdapter
+        from channels.platforms.qqbot import QQAdapter
         return QQAdapter(_make_config(**extra))
 
     @pytest.mark.asyncio
@@ -637,25 +637,25 @@ class TestWaitForReconnection:
 
 class TestChunkedUploadFormatSize:
     def test_bytes(self):
-        from gateway.platforms.qqbot.chunked_upload import format_size
+        from channels.platforms.qqbot.chunked_upload import format_size
         assert format_size(100) == "100.0 B"
 
     def test_kilobytes(self):
-        from gateway.platforms.qqbot.chunked_upload import format_size
+        from channels.platforms.qqbot.chunked_upload import format_size
         assert format_size(2048) == "2.0 KB"
 
     def test_megabytes(self):
-        from gateway.platforms.qqbot.chunked_upload import format_size
+        from channels.platforms.qqbot.chunked_upload import format_size
         assert format_size(5 * 1024 * 1024) == "5.0 MB"
 
     def test_gigabytes(self):
-        from gateway.platforms.qqbot.chunked_upload import format_size
+        from channels.platforms.qqbot.chunked_upload import format_size
         assert format_size(3 * 1024 ** 3) == "3.0 GB"
 
 
 class TestChunkedUploadErrors:
     def test_daily_limit_has_human_size(self):
-        from gateway.platforms.qqbot.chunked_upload import UploadDailyLimitExceededError
+        from channels.platforms.qqbot.chunked_upload import UploadDailyLimitExceededError
         exc = UploadDailyLimitExceededError("demo.mp4", 12_345_678)
         assert exc.file_name == "demo.mp4"
         assert exc.file_size == 12_345_678
@@ -663,7 +663,7 @@ class TestChunkedUploadErrors:
         assert "demo.mp4" in str(exc)
 
     def test_too_large_includes_limit(self):
-        from gateway.platforms.qqbot.chunked_upload import UploadFileTooLargeError
+        from channels.platforms.qqbot.chunked_upload import UploadFileTooLargeError
         exc = UploadFileTooLargeError("huge.bin", 200 * 1024 * 1024, 100 * 1024 * 1024)
         assert exc.file_name == "huge.bin"
         assert "MB" in exc.file_size_human
@@ -671,27 +671,27 @@ class TestChunkedUploadErrors:
         assert "huge.bin" in str(exc)
 
     def test_too_large_unknown_limit(self):
-        from gateway.platforms.qqbot.chunked_upload import UploadFileTooLargeError
+        from channels.platforms.qqbot.chunked_upload import UploadFileTooLargeError
         exc = UploadFileTooLargeError("f", 100, 0)
         assert exc.limit_human == "unknown"
 
 
 class TestChunkedUploadHelpers:
     def test_read_chunk_exact_bytes(self, tmp_path):
-        from gateway.platforms.qqbot.chunked_upload import _read_file_chunk
+        from channels.platforms.qqbot.chunked_upload import _read_file_chunk
         f = tmp_path / "x.bin"
         f.write_bytes(b"0123456789abcdef")
         assert _read_file_chunk(str(f), 2, 4) == b"2345"
 
     def test_read_chunk_short_read_raises(self, tmp_path):
-        from gateway.platforms.qqbot.chunked_upload import _read_file_chunk
+        from channels.platforms.qqbot.chunked_upload import _read_file_chunk
         f = tmp_path / "x.bin"
         f.write_bytes(b"hi")
         with pytest.raises(IOError):
             _read_file_chunk(str(f), 0, 100)
 
     def test_compute_hashes_small_file(self, tmp_path):
-        from gateway.platforms.qqbot.chunked_upload import _compute_file_hashes
+        from channels.platforms.qqbot.chunked_upload import _compute_file_hashes
         f = tmp_path / "x.bin"
         f.write_bytes(b"hello world")
         h = _compute_file_hashes(str(f), 11)
@@ -702,7 +702,7 @@ class TestChunkedUploadHelpers:
 
     def test_compute_hashes_large_file_has_distinct_md5_10m(self, tmp_path):
         # File > 10,002,432 bytes → md5_10m is truncated, so it differs from full md5.
-        from gateway.platforms.qqbot.chunked_upload import (
+        from channels.platforms.qqbot.chunked_upload import (
             _compute_file_hashes, _MD5_10M_SIZE,
         )
         f = tmp_path / "big.bin"
@@ -713,7 +713,7 @@ class TestChunkedUploadHelpers:
         assert h["md5"] != h["md5_10m"]
 
     def test_parse_prepare_response_wrapped_in_data(self):
-        from gateway.platforms.qqbot.chunked_upload import _parse_prepare_response
+        from channels.platforms.qqbot.chunked_upload import _parse_prepare_response
         raw = {
             "data": {
                 "upload_id": "uid-42",
@@ -736,12 +736,12 @@ class TestChunkedUploadHelpers:
         assert r.retry_timeout == 90.0
 
     def test_parse_prepare_response_missing_upload_id_raises(self):
-        from gateway.platforms.qqbot.chunked_upload import _parse_prepare_response
+        from channels.platforms.qqbot.chunked_upload import _parse_prepare_response
         with pytest.raises(ValueError, match="upload_id"):
             _parse_prepare_response({"block_size": 1024, "parts": [{"index": 1, "url": "x"}]})
 
     def test_parse_prepare_response_missing_parts_raises(self):
-        from gateway.platforms.qqbot.chunked_upload import _parse_prepare_response
+        from channels.platforms.qqbot.chunked_upload import _parse_prepare_response
         with pytest.raises(ValueError, match="parts"):
             _parse_prepare_response({"upload_id": "uid", "block_size": 1024, "parts": []})
 
@@ -754,7 +754,7 @@ class TestChunkedUploaderFlow:
 
     @pytest.mark.asyncio
     async def test_full_upload_two_parts_success(self, tmp_path):
-        from gateway.platforms.qqbot.chunked_upload import ChunkedUploader
+        from channels.platforms.qqbot.chunked_upload import ChunkedUploader
 
         # Two-part file.
         f = tmp_path / "vid.mp4"
@@ -821,7 +821,7 @@ class TestChunkedUploaderFlow:
     @pytest.mark.asyncio
     async def test_group_paths(self, tmp_path):
         """Group uploads hit /v2/groups/... instead of /v2/users/..."""
-        from gateway.platforms.qqbot.chunked_upload import ChunkedUploader
+        from channels.platforms.qqbot.chunked_upload import ChunkedUploader
 
         f = tmp_path / "a.bin"
         f.write_bytes(b"x" * 100)
@@ -861,7 +861,7 @@ class TestChunkedUploaderFlow:
 
     @pytest.mark.asyncio
     async def test_daily_limit_raises_structured_error(self, tmp_path):
-        from gateway.platforms.qqbot.chunked_upload import (
+        from channels.platforms.qqbot.chunked_upload import (
             ChunkedUploader, UploadDailyLimitExceededError,
         )
 
@@ -889,8 +889,8 @@ class TestChunkedUploaderFlow:
     @pytest.mark.asyncio
     async def test_part_finish_retries_on_40093001_then_succeeds(self, tmp_path):
         """biz_code 40093001 is retryable — finish-with-retry must keep trying."""
-        from gateway.platforms.qqbot.chunked_upload import ChunkedUploader
-        import gateway.platforms.qqbot.chunked_upload as cu
+        from channels.platforms.qqbot.chunked_upload import ChunkedUploader
+        import channels.platforms.qqbot.chunked_upload as cu
 
         # Make the retry loop fast so the test doesn't take real seconds.
         orig_interval = cu._PART_FINISH_RETRY_INTERVAL
@@ -939,7 +939,7 @@ class TestChunkedUploaderFlow:
     @pytest.mark.asyncio
     async def test_put_retries_transient_failure(self, tmp_path):
         """COS PUT failures retry up to _PART_UPLOAD_MAX_RETRIES times."""
-        from gateway.platforms.qqbot.chunked_upload import ChunkedUploader
+        from channels.platforms.qqbot.chunked_upload import ChunkedUploader
 
         f = tmp_path / "a.bin"
         f.write_bytes(b"x" * 20)
@@ -986,59 +986,59 @@ class TestChunkedUploaderFlow:
 
 class TestApprovalButtonData:
     def test_parse_allow_once(self):
-        from gateway.platforms.qqbot.keyboards import parse_approval_button_data
+        from channels.platforms.qqbot.keyboards import parse_approval_button_data
         result = parse_approval_button_data("approve:agent:main:qqbot:c2c:UID:allow-once")
         assert result == ("agent:main:qqbot:c2c:UID", "allow-once")
 
     def test_parse_allow_always(self):
-        from gateway.platforms.qqbot.keyboards import parse_approval_button_data
+        from channels.platforms.qqbot.keyboards import parse_approval_button_data
         assert parse_approval_button_data("approve:sess:allow-always") == ("sess", "allow-always")
 
     def test_parse_deny(self):
-        from gateway.platforms.qqbot.keyboards import parse_approval_button_data
+        from channels.platforms.qqbot.keyboards import parse_approval_button_data
         assert parse_approval_button_data("approve:sess:deny") == ("sess", "deny")
 
     def test_parse_invalid_prefix_returns_none(self):
-        from gateway.platforms.qqbot.keyboards import parse_approval_button_data
+        from channels.platforms.qqbot.keyboards import parse_approval_button_data
         assert parse_approval_button_data("update_prompt:y") is None
 
     def test_parse_unknown_decision_returns_none(self):
-        from gateway.platforms.qqbot.keyboards import parse_approval_button_data
+        from channels.platforms.qqbot.keyboards import parse_approval_button_data
         assert parse_approval_button_data("approve:sess:maybe") is None
 
     def test_parse_empty_returns_none(self):
-        from gateway.platforms.qqbot.keyboards import parse_approval_button_data
+        from channels.platforms.qqbot.keyboards import parse_approval_button_data
         assert parse_approval_button_data("") is None
         assert parse_approval_button_data(None) is None  # type: ignore[arg-type]
 
 
 class TestUpdatePromptButtonData:
     def test_parse_yes(self):
-        from gateway.platforms.qqbot.keyboards import parse_update_prompt_button_data
+        from channels.platforms.qqbot.keyboards import parse_update_prompt_button_data
         assert parse_update_prompt_button_data("update_prompt:y") == "y"
 
     def test_parse_no(self):
-        from gateway.platforms.qqbot.keyboards import parse_update_prompt_button_data
+        from channels.platforms.qqbot.keyboards import parse_update_prompt_button_data
         assert parse_update_prompt_button_data("update_prompt:n") == "n"
 
     def test_parse_unknown_returns_none(self):
-        from gateway.platforms.qqbot.keyboards import parse_update_prompt_button_data
+        from channels.platforms.qqbot.keyboards import parse_update_prompt_button_data
         assert parse_update_prompt_button_data("update_prompt:maybe") is None
 
     def test_parse_wrong_prefix(self):
-        from gateway.platforms.qqbot.keyboards import parse_update_prompt_button_data
+        from channels.platforms.qqbot.keyboards import parse_update_prompt_button_data
         assert parse_update_prompt_button_data("approve:sess:deny") is None
 
 
 class TestBuildApprovalKeyboard:
     def test_three_buttons_in_single_row(self):
-        from gateway.platforms.qqbot.keyboards import build_approval_keyboard
+        from channels.platforms.qqbot.keyboards import build_approval_keyboard
         kb = build_approval_keyboard("session-1")
         assert len(kb.content.rows) == 1
         assert len(kb.content.rows[0].buttons) == 3
 
     def test_button_data_embeds_session_key(self):
-        from gateway.platforms.qqbot.keyboards import build_approval_keyboard
+        from channels.platforms.qqbot.keyboards import build_approval_keyboard
         kb = build_approval_keyboard("agent:main:qqbot:c2c:UID")
         datas = [b.action.data for b in kb.content.rows[0].buttons]
         assert datas[0] == "approve:agent:main:qqbot:c2c:UID:allow-once"
@@ -1046,13 +1046,13 @@ class TestBuildApprovalKeyboard:
         assert datas[2] == "approve:agent:main:qqbot:c2c:UID:deny"
 
     def test_buttons_share_group_id_for_mutual_exclusion(self):
-        from gateway.platforms.qqbot.keyboards import build_approval_keyboard
+        from channels.platforms.qqbot.keyboards import build_approval_keyboard
         kb = build_approval_keyboard("s")
         group_ids = {b.group_id for b in kb.content.rows[0].buttons}
         assert group_ids == {"approval"}
 
     def test_to_dict_has_expected_shape(self):
-        from gateway.platforms.qqbot.keyboards import build_approval_keyboard
+        from channels.platforms.qqbot.keyboards import build_approval_keyboard
         kb = build_approval_keyboard("s")
         d = kb.to_dict()
         assert "content" in d
@@ -1067,7 +1067,7 @@ class TestBuildApprovalKeyboard:
 
     def test_round_trip_parse_matches_build(self):
         """Every button built by build_approval_keyboard is parseable."""
-        from gateway.platforms.qqbot.keyboards import (
+        from channels.platforms.qqbot.keyboards import (
             build_approval_keyboard, parse_approval_button_data,
         )
         session_key = "agent:main:qqbot:c2c:UID123"
@@ -1081,12 +1081,12 @@ class TestBuildApprovalKeyboard:
 
 class TestBuildUpdatePromptKeyboard:
     def test_two_buttons(self):
-        from gateway.platforms.qqbot.keyboards import build_update_prompt_keyboard
+        from channels.platforms.qqbot.keyboards import build_update_prompt_keyboard
         kb = build_update_prompt_keyboard()
         assert len(kb.content.rows[0].buttons) == 2
 
     def test_button_data_shape(self):
-        from gateway.platforms.qqbot.keyboards import build_update_prompt_keyboard
+        from channels.platforms.qqbot.keyboards import build_update_prompt_keyboard
         kb = build_update_prompt_keyboard()
         datas = [b.action.data for b in kb.content.rows[0].buttons]
         assert datas == ["update_prompt:y", "update_prompt:n"]
@@ -1094,7 +1094,7 @@ class TestBuildUpdatePromptKeyboard:
 
 class TestBuildApprovalText:
     def test_exec_approval_includes_command_preview(self):
-        from gateway.platforms.qqbot.keyboards import (
+        from channels.platforms.qqbot.keyboards import (
             ApprovalRequest, build_approval_text,
         )
         req = ApprovalRequest(
@@ -1111,7 +1111,7 @@ class TestBuildApprovalText:
         assert "60" in text
 
     def test_plugin_approval_uses_severity_icon(self):
-        from gateway.platforms.qqbot.keyboards import (
+        from channels.platforms.qqbot.keyboards import (
             ApprovalRequest, build_approval_text,
         )
         crit = ApprovalRequest(
@@ -1129,7 +1129,7 @@ class TestBuildApprovalText:
         assert "🟡" in build_approval_text(default)
 
     def test_truncates_long_commands(self):
-        from gateway.platforms.qqbot.keyboards import (
+        from channels.platforms.qqbot.keyboards import (
             ApprovalRequest, build_approval_text,
         )
         long = "x" * 1000
@@ -1149,7 +1149,7 @@ class TestBuildApprovalText:
 
 class TestInteractionEventParsing:
     def test_parse_c2c_interaction(self):
-        from gateway.platforms.qqbot.keyboards import parse_interaction_event
+        from channels.platforms.qqbot.keyboards import parse_interaction_event
         raw = {
             "id": "interaction-42",
             "chat_type": 2,
@@ -1172,7 +1172,7 @@ class TestInteractionEventParsing:
         assert ev.operator_openid == "user-1"
 
     def test_parse_group_interaction(self):
-        from gateway.platforms.qqbot.keyboards import parse_interaction_event
+        from channels.platforms.qqbot.keyboards import parse_interaction_event
         raw = {
             "id": "i-1",
             "chat_type": 1,
@@ -1193,7 +1193,7 @@ class TestInteractionEventParsing:
         assert ev.operator_openid == "mem-1"  # member openid preferred in group
 
     def test_parse_missing_data_gracefully(self):
-        from gateway.platforms.qqbot.keyboards import parse_interaction_event
+        from channels.platforms.qqbot.keyboards import parse_interaction_event
         ev = parse_interaction_event({"id": "i", "chat_type": 0})
         assert ev.id == "i"
         assert ev.scene == "guild"
@@ -1206,7 +1206,7 @@ class TestAdapterInteractionDispatch:
     """End-to-end verification of _on_interaction including ACK + callback."""
 
     def _make_adapter(self):
-        from gateway.platforms.qqbot.adapter import QQAdapter
+        from channels.platforms.qqbot.adapter import QQAdapter
         return QQAdapter(_make_config(app_id="a", client_secret="b"))
 
     @pytest.mark.asyncio
@@ -1316,7 +1316,7 @@ class TestProcessQuotedContext:
     """Verify the quoted-message pipeline: text + voice STT + images + files."""
 
     def _make_adapter(self):
-        from gateway.platforms.qqbot.adapter import QQAdapter
+        from channels.platforms.qqbot.adapter import QQAdapter
         return QQAdapter(_make_config(app_id="a", client_secret="b"))
 
     @pytest.mark.asyncio
@@ -1512,15 +1512,15 @@ class TestProcessQuotedContext:
 
 class TestMergeQuoteInto:
     def test_empty_quote_returns_original(self):
-        from gateway.platforms.qqbot.adapter import QQAdapter
+        from channels.platforms.qqbot.adapter import QQAdapter
         assert QQAdapter._merge_quote_into("hello", "") == "hello"
 
     def test_empty_text_returns_only_quote(self):
-        from gateway.platforms.qqbot.adapter import QQAdapter
+        from channels.platforms.qqbot.adapter import QQAdapter
         assert QQAdapter._merge_quote_into("", "[Quoted]") == "[Quoted]"
 
     def test_both_present_joined_with_blank_line(self):
-        from gateway.platforms.qqbot.adapter import QQAdapter
+        from channels.platforms.qqbot.adapter import QQAdapter
         merged = QQAdapter._merge_quote_into("hi there", "[Quoted]:\nctx")
         assert merged == "[Quoted]:\nctx\n\nhi there"
 
@@ -1533,7 +1533,7 @@ class TestDefaultInteractionDispatch:
     """Verify the adapter's default INTERACTION_CREATE router."""
 
     def _make_adapter(self):
-        from gateway.platforms.qqbot.adapter import QQAdapter
+        from channels.platforms.qqbot.adapter import QQAdapter
         return QQAdapter(_make_config(app_id="a", client_secret="b"))
 
     def test_default_callback_installed_on_init(self):
@@ -1544,7 +1544,7 @@ class TestDefaultInteractionDispatch:
 
     def test_send_exec_approval_is_a_class_method(self):
         """gateway/run.py uses ``type(adapter).send_exec_approval`` to detect support."""
-        from gateway.platforms.qqbot.adapter import QQAdapter
+        from channels.platforms.qqbot.adapter import QQAdapter
         assert getattr(QQAdapter, "send_exec_approval", None) is not None
         assert getattr(QQAdapter, "send_update_prompt", None) is not None
 
@@ -1565,7 +1565,7 @@ class TestDefaultInteractionDispatch:
         orig = tools.approval.resolve_gateway_approval
         tools.approval.resolve_gateway_approval = fake_resolve
         try:
-            from gateway.platforms.qqbot.keyboards import parse_interaction_event
+            from channels.platforms.qqbot.keyboards import parse_interaction_event
             event = parse_interaction_event({
                 "id": "i",
                 "chat_type": 2,
@@ -1591,7 +1591,7 @@ class TestDefaultInteractionDispatch:
         orig = tools.approval.resolve_gateway_approval
         tools.approval.resolve_gateway_approval = fake_resolve
         try:
-            from gateway.platforms.qqbot.keyboards import parse_interaction_event
+            from channels.platforms.qqbot.keyboards import parse_interaction_event
             event = parse_interaction_event({
                 "id": "i", "chat_type": 2, "user_openid": "u",
                 "data": {"resolved": {"button_data": "approve:s:allow-always"}},
@@ -1615,7 +1615,7 @@ class TestDefaultInteractionDispatch:
         orig = tools.approval.resolve_gateway_approval
         tools.approval.resolve_gateway_approval = fake_resolve
         try:
-            from gateway.platforms.qqbot.keyboards import parse_interaction_event
+            from channels.platforms.qqbot.keyboards import parse_interaction_event
             event = parse_interaction_event({
                 "id": "i", "chat_type": 2, "user_openid": "u",
                 "data": {"resolved": {"button_data": "approve:s:deny"}},
@@ -1637,7 +1637,7 @@ class TestDefaultInteractionDispatch:
             lambda: hermes_home,
         )
 
-        from gateway.platforms.qqbot.keyboards import parse_interaction_event
+        from channels.platforms.qqbot.keyboards import parse_interaction_event
         event = parse_interaction_event({
             "id": "i", "chat_type": 2, "user_openid": "u-1",
             "data": {"resolved": {"button_data": "update_prompt:y"}},
@@ -1657,7 +1657,7 @@ class TestDefaultInteractionDispatch:
             "hermes_constants.get_hermes_home",
             lambda: hermes_home,
         )
-        from gateway.platforms.qqbot.keyboards import parse_interaction_event
+        from channels.platforms.qqbot.keyboards import parse_interaction_event
         event = parse_interaction_event({
             "id": "i", "chat_type": 2, "user_openid": "u",
             "data": {"resolved": {"button_data": "update_prompt:n"}},
@@ -1671,7 +1671,7 @@ class TestDefaultInteractionDispatch:
         """Unrecognised button_data is logged and dropped — no exception."""
         adapter = self._make_adapter()
 
-        from gateway.platforms.qqbot.keyboards import parse_interaction_event
+        from channels.platforms.qqbot.keyboards import parse_interaction_event
         event = parse_interaction_event({
             "id": "i", "chat_type": 2, "user_openid": "u",
             "data": {"resolved": {"button_data": "some:unknown:format"}},
@@ -1682,7 +1682,7 @@ class TestDefaultInteractionDispatch:
     @pytest.mark.asyncio
     async def test_empty_button_data_is_harmless(self):
         adapter = self._make_adapter()
-        from gateway.platforms.qqbot.keyboards import InteractionEvent
+        from channels.platforms.qqbot.keyboards import InteractionEvent
         await adapter._default_interaction_dispatch(InteractionEvent(id="i"))
 
     @pytest.mark.asyncio
@@ -1697,7 +1697,7 @@ class TestDefaultInteractionDispatch:
         orig = tools.approval.resolve_gateway_approval
         tools.approval.resolve_gateway_approval = bad_resolve
         try:
-            from gateway.platforms.qqbot.keyboards import parse_interaction_event
+            from channels.platforms.qqbot.keyboards import parse_interaction_event
             event = parse_interaction_event({
                 "id": "i", "chat_type": 2, "user_openid": "u",
                 "data": {"resolved": {"button_data": "approve:s:deny"}},
@@ -1712,7 +1712,7 @@ class TestSendExecApproval:
     """Verify the gateway contract: QQAdapter.send_exec_approval(...)."""
 
     def _make_adapter(self):
-        from gateway.platforms.qqbot.adapter import QQAdapter
+        from channels.platforms.qqbot.adapter import QQAdapter
         return QQAdapter(_make_config(app_id="a", client_secret="b"))
 
     @pytest.mark.asyncio
@@ -1722,7 +1722,7 @@ class TestSendExecApproval:
         calls = []
 
         async def fake_send_approval(chat_id, req, reply_to=None):
-            from gateway.platforms.base import SendResult
+            from channels.platforms.base import SendResult
             calls.append({"chat_id": chat_id, "req": req, "reply_to": reply_to})
             return SendResult(success=True, message_id="m-1")
 
@@ -1750,7 +1750,7 @@ class TestSendExecApproval:
         adapter = self._make_adapter()
 
         async def fake_send_approval(chat_id, req, reply_to=None):
-            from gateway.platforms.base import SendResult
+            from channels.platforms.base import SendResult
             return SendResult(success=True)
 
         adapter.send_approval_request = fake_send_approval  # type: ignore[assignment]
@@ -1766,7 +1766,7 @@ class TestSendUpdatePrompt:
     """Verify the cross-adapter send_update_prompt signature + behaviour."""
 
     def _make_adapter(self):
-        from gateway.platforms.qqbot.adapter import QQAdapter
+        from channels.platforms.qqbot.adapter import QQAdapter
         return QQAdapter(_make_config(app_id="a", client_secret="b"))
 
     @pytest.mark.asyncio
@@ -1776,7 +1776,7 @@ class TestSendUpdatePrompt:
         captured = {}
 
         async def fake_swk(chat_id, content, keyboard, reply_to=None):
-            from gateway.platforms.base import SendResult
+            from channels.platforms.base import SendResult
             captured["chat_id"] = chat_id
             captured["content"] = content
             captured["keyboard"] = keyboard
@@ -1804,7 +1804,7 @@ class TestSendUpdatePrompt:
         adapter = self._make_adapter()
 
         async def fake_swk(chat_id, content, keyboard, reply_to=None):
-            from gateway.platforms.base import SendResult
+            from channels.platforms.base import SendResult
             assert "default:" not in content
             return SendResult(success=True)
 

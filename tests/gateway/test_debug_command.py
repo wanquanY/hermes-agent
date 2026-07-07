@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from gateway.config import GatewayConfig, Platform
-from gateway.platforms.base import MessageEvent
+from channels.platforms.base import MessageEvent
 from gateway.session import SessionSource
 
 

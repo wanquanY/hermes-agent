@@ -15,7 +15,7 @@ from agent.dovie_attribution import (
     dovie_child_run_overlay,
     dovie_attribution_request_hook,
 )
-from gateway.session_context import clear_session_vars, set_session_vars
+from channels.session_context import clear_session_vars, set_session_vars
 
 
 def _context(query_id: str = "query-1") -> dict:

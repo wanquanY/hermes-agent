@@ -90,8 +90,8 @@ class TestExtractLoggerName:
         assert _extract_logger_name(line) == "gateway.run"
 
     def test_nested_logger(self):
-        line = "2026-04-11 10:23:45 INFO gateway.platforms.telegram: connected"
-        assert _extract_logger_name(line) == "gateway.platforms.telegram"
+        line = "2026-04-11 10:23:45 INFO channels.platforms.telegram: connected"
+        assert _extract_logger_name(line) == "channels.platforms.telegram"
 
     def test_warning_level(self):
         line = "2026-04-11 10:23:45 WARNING tools.terminal_tool: timeout"
@@ -119,7 +119,7 @@ class TestLineMatchesComponent:
         assert _line_matches_component(line, ("gateway",))
 
     def test_gateway_nested(self):
-        line = "2026-04-11 10:23:45 INFO gateway.platforms.telegram: msg"
+        line = "2026-04-11 10:23:45 INFO channels.platforms.telegram: msg"
         assert _line_matches_component(line, ("gateway",))
 
     def test_tools_component(self):

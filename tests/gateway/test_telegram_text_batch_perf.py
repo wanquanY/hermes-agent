@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gateway.platforms.telegram import TelegramAdapter
+from channels.platforms.telegram import TelegramAdapter
 
 
 @pytest.fixture

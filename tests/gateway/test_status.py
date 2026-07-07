@@ -482,7 +482,7 @@ class TestScopedLocks:
         }))
 
         # Post-#21561 the liveness probe routes through
-        # ``gateway.status._pid_exists`` (psutil-first, safe on Windows).
+        # ``channels.runtime_status._pid_exists`` (psutil-first, safe on Windows).
         monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
 
@@ -510,7 +510,7 @@ class TestScopedLocks:
         }))
 
         # Post-#21561 the liveness probe routes through
-        # ``gateway.status._pid_exists`` (psutil-first, safe on Windows),
+        # ``channels.runtime_status._pid_exists`` (psutil-first, safe on Windows),
         # not ``os.kill``.
         monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: None)

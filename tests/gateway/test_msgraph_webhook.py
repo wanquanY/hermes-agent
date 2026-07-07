@@ -6,7 +6,7 @@ import json
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig, _apply_env_overrides
-from gateway.platforms.msgraph_webhook import MSGraphWebhookAdapter
+from channels.platforms.msgraph_webhook import MSGraphWebhookAdapter
 
 
 def _make_adapter(**extra_overrides) -> MSGraphWebhookAdapter:
@@ -178,7 +178,7 @@ class TestMSGraphNotifications:
             return real_compare(a, b)
 
         monkeypatch.setattr(
-            "gateway.platforms.msgraph_webhook.hmac.compare_digest", _spy
+            "channels.platforms.msgraph_webhook.hmac.compare_digest", _spy
         )
 
         adapter = _make_adapter()

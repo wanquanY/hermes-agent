@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
 
-from gateway.platform_registry import PlatformRegistry, PlatformEntry, platform_registry
+from channels.platform_registry import PlatformRegistry, PlatformEntry, platform_registry
 from gateway.config import Platform, PlatformConfig, GatewayConfig
 
 
@@ -39,7 +39,7 @@ class TestPlatformEnumDynamic:
 
     def test_dynamic_member_with_hyphens(self):
         """Registered plugin platforms with hyphens work once registered."""
-        from gateway.platform_registry import platform_registry as _reg
+        from channels.platform_registry import platform_registry as _reg
 
         entry = PlatformEntry(
             name="my-platform",
@@ -223,7 +223,7 @@ class TestGatewayConfigPluginPlatform:
     def test_get_connected_platforms_includes_registered_plugin(self):
         """Plugin platform with registry entry passes get_connected_platforms."""
         # Register a fake plugin platform
-        from gateway.platform_registry import platform_registry as _reg
+        from channels.platform_registry import platform_registry as _reg
 
         test_entry = PlatformEntry(
             name="testplat",
@@ -261,7 +261,7 @@ class TestGatewayConfigPluginPlatform:
 
     def test_get_connected_platforms_excludes_invalid_config(self):
         """Plugin platform with failing validate_config is excluded."""
-        from gateway.platform_registry import platform_registry as _reg
+        from channels.platform_registry import platform_registry as _reg
 
         test_entry = PlatformEntry(
             name="badconfig",
@@ -360,7 +360,7 @@ class TestPlatformsMerge:
 
     def test_get_all_platforms_includes_plugin(self):
         from hermes_cli.platforms import get_all_platforms
-        from gateway.platform_registry import platform_registry as _reg
+        from channels.platform_registry import platform_registry as _reg
 
         _reg.register(PlatformEntry(
             name="testmerge",
@@ -379,7 +379,7 @@ class TestPlatformsMerge:
 
     def test_platform_label_plugin_fallback(self):
         from hermes_cli.platforms import platform_label
-        from gateway.platform_registry import platform_registry as _reg
+        from channels.platform_registry import platform_registry as _reg
 
         _reg.register(PlatformEntry(
             name="labeltest",
@@ -442,7 +442,7 @@ class TestApplyYamlConfigFnDispatch:
         return hermes_home
 
     def _register_hook(self, name, hook_fn):
-        from gateway.platform_registry import platform_registry as _reg
+        from channels.platform_registry import platform_registry as _reg
 
         entry = PlatformEntry(
             name=name,
@@ -548,7 +548,7 @@ class TestApplyYamlConfigFnDispatch:
             good_called["count"] += 1
             return None
 
-        from gateway.platform_registry import platform_registry as _reg
+        from channels.platform_registry import platform_registry as _reg
         _reg.register(PlatformEntry(
             name="mybadplat",
             label="MyBad",
@@ -676,7 +676,7 @@ class TestPluginPlatformSharedKeyBridge:
     def test_shared_keys_bridged_for_plugin_platform(self, tmp_path, monkeypatch):
         """A plugin platform's ``require_mention``/``dm_policy``/etc. flow into
         ``PlatformConfig.extra`` without the plugin needing its own bridge."""
-        from gateway.platform_registry import platform_registry as _reg
+        from channels.platform_registry import platform_registry as _reg
 
         _reg.register(PlatformEntry(
             name="mysharedplat",

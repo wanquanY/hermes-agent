@@ -3888,7 +3888,7 @@ def _pid_alive(pid: Optional[int]) -> bool:
     """Return True if ``pid`` is still running on this host.
 
     Cross-platform: uses ``OpenProcess`` + ``WaitForSingleObject`` on
-    Windows (via ``gateway.status._pid_exists``) and ``os.kill(pid, 0)``
+    Windows (via ``channels.runtime_status._pid_exists``) and ``os.kill(pid, 0)``
     on POSIX. Returns False for falsy PIDs or on any OS error.
 
     **DO NOT** use ``os.kill(pid, 0)`` directly on Windows — Python's
@@ -3909,7 +3909,7 @@ def _pid_alive(pid: Optional[int]) -> bool:
     """
     if not pid or pid <= 0:
         return False
-    from gateway.status import _pid_exists
+    from channels.runtime_status import _pid_exists
     if not _pid_exists(int(pid)):
         return False
     # Still here → process exists. Check for zombie on platforms

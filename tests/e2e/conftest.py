@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent, SendResult
+from channels.platforms.base import MessageEvent, SendResult
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 E2E_MESSAGE_SETTLE_DELAY = 0.3
@@ -118,12 +118,12 @@ _ensure_discord_mock()
 _ensure_slack_mock()
 
 import discord  # noqa: E402 — mocked above
-from gateway.platforms.telegram import TelegramAdapter  # noqa: E402
-from gateway.platforms.discord import DiscordAdapter  # noqa: E402
+from channels.platforms.telegram import TelegramAdapter  # noqa: E402
+from channels.platforms.discord import DiscordAdapter  # noqa: E402
 
-import gateway.platforms.slack as _slack_mod  # noqa: E402
+import channels.platforms.slack as _slack_mod  # noqa: E402
 _slack_mod.SLACK_AVAILABLE = True
-from gateway.platforms.slack import SlackAdapter  # noqa: E402
+from channels.platforms.slack import SlackAdapter  # noqa: E402
 
 
 # Platform-generic factories
@@ -243,7 +243,7 @@ def make_adapter(platform: Platform, runner=None):
     config = PlatformConfig(enabled=True, token="e2e-test-token")
 
     if platform == Platform.DISCORD:
-        from gateway.platforms.helpers import ThreadParticipationTracker
+        from channels.platforms.helpers import ThreadParticipationTracker
         with patch.object(ThreadParticipationTracker, "_load", return_value=set()):
             adapter = DiscordAdapter(config)
         platform_key = Platform.DISCORD
@@ -397,7 +397,7 @@ def _make_discord_adapter_wired(runner=None):
         runner = make_runner(Platform.DISCORD)
 
     config = PlatformConfig(enabled=True, token="e2e-test-token")
-    from gateway.platforms.helpers import ThreadParticipationTracker
+    from channels.platforms.helpers import ThreadParticipationTracker
     with patch.object(ThreadParticipationTracker, "_load", return_value=set()):
         adapter = DiscordAdapter(config)
 

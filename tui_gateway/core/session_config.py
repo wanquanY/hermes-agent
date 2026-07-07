@@ -70,7 +70,7 @@ def _set_session_context(
     dovie_product_context: str | None = None,
 ) -> list:
     try:
-        from gateway.session_context import set_session_vars
+        from channels.session_context import set_session_vars
 
         with _sessions_lock:
             session = next(
@@ -101,7 +101,7 @@ def _clear_session_context(tokens: list) -> None:
     if not tokens:
         return
     try:
-        from gateway.session_context import clear_session_vars
+        from channels.session_context import clear_session_vars
 
         clear_session_vars(tokens)
     except Exception:

@@ -555,7 +555,7 @@ def test_gateway_install_can_decline_start_now_and_startup(monkeypatch):
 def test_find_gateway_pids_falls_back_to_pid_file_when_process_scan_fails(monkeypatch):
     monkeypatch.setattr(gateway, "_get_service_pids", lambda: set())
     monkeypatch.setattr(gateway, "is_windows", lambda: False)
-    monkeypatch.setattr("gateway.status.get_running_pid", lambda: 321)
+    monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: 321)
 
     # /proc walk is the first path tried (#22693). Force os.listdir on /proc
     # to raise so the function falls back to ps, where fake_run takes over.
@@ -590,7 +590,7 @@ class TestWaitForGatewayExit:
 
     def test_returns_immediately_when_no_pid(self, monkeypatch):
         """If get_running_pid returns None, exit instantly."""
-        monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+        monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: None)
         # Should return without sleeping at all.
         gateway._wait_for_gateway_exit(timeout=1.0, force_after=0.5)
 
@@ -603,7 +603,7 @@ class TestWaitForGatewayExit:
             poll_count += 1
             return 12345 if poll_count <= 2 else None
 
-        monkeypatch.setattr("gateway.status.get_running_pid", mock_get_running_pid)
+        monkeypatch.setattr("channels.runtime_status.get_running_pid", mock_get_running_pid)
         monkeypatch.setattr("time.sleep", lambda _: None)
 
         gateway._wait_for_gateway_exit(timeout=10.0, force_after=999.0)
@@ -632,7 +632,7 @@ class TestWaitForGatewayExit:
 
         monkeypatch.setattr("time.monotonic", fake_monotonic)
         monkeypatch.setattr("time.sleep", lambda _: None)
-        monkeypatch.setattr("gateway.status.get_running_pid", mock_get_running_pid)
+        monkeypatch.setattr("channels.runtime_status.get_running_pid", mock_get_running_pid)
         monkeypatch.setattr(gateway, "terminate_pid", mock_terminate)
 
         gateway._wait_for_gateway_exit(timeout=10.0, force_after=5.0)
@@ -652,7 +652,7 @@ class TestWaitForGatewayExit:
 
         monkeypatch.setattr("time.monotonic", fake_monotonic)
         monkeypatch.setattr("time.sleep", lambda _: None)
-        monkeypatch.setattr("gateway.status.get_running_pid", lambda: 99)
+        monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: 99)
         monkeypatch.setattr(gateway, "terminate_pid", mock_terminate)
 
         # Should not raise — ProcessLookupError means it's already gone.
@@ -674,9 +674,9 @@ class TestStopProfileGateway:
     def test_stop_profile_gateway_keeps_pid_file_when_process_still_running(self, monkeypatch):
         calls = {"kill": 0, "alive_probes": 0, "remove": 0}
 
-        monkeypatch.setattr("gateway.status.get_running_pid", lambda: 12345)
+        monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: 12345)
         # Post-#21561: the stop loop sends one SIGTERM via ``os.kill`` then
-        # polls liveness via ``gateway.status._pid_exists`` (safe on
+        # polls liveness via ``channels.runtime_status._pid_exists`` (safe on
         # Windows — bpo-14484). Instrument both seams separately.
         monkeypatch.setattr(
             gateway.os,
@@ -684,12 +684,12 @@ class TestStopProfileGateway:
             lambda pid, sig: calls.__setitem__("kill", calls["kill"] + 1),
         )
         monkeypatch.setattr(
-            "gateway.status._pid_exists",
+            "channels.runtime_status._pid_exists",
             lambda pid: calls.__setitem__("alive_probes", calls["alive_probes"] + 1) or True,
         )
         monkeypatch.setattr("time.sleep", lambda _: None)
         monkeypatch.setattr(
-            "gateway.status.remove_pid_file",
+            "channels.runtime_status.remove_pid_file",
             lambda: calls.__setitem__("remove", calls["remove"] + 1),
         )
 

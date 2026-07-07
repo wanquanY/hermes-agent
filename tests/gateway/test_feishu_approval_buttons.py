@@ -38,8 +38,8 @@ def _ensure_feishu_mocks():
 _ensure_feishu_mocks()
 
 from gateway.config import PlatformConfig
-import gateway.platforms.feishu as feishu_module
-from gateway.platforms.feishu import FeishuAdapter
+import channels.platforms.feishu as feishu_module
+from channels.platforms.feishu import FeishuAdapter
 
 
 # ---------------------------------------------------------------------------

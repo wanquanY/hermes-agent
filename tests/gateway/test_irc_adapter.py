@@ -491,7 +491,7 @@ class TestIRCPluginRegistration:
         monkeypatch.setenv("IRC_SERVER", "irc.test.net")
         monkeypatch.setenv("IRC_CHANNEL", "#test")
 
-        from gateway.platform_registry import platform_registry
+        from channels.platform_registry import platform_registry
 
         # Clean up if already registered
         platform_registry.unregister("irc")

@@ -1239,7 +1239,7 @@ DEFAULT_CONFIG = {
         # "♻ Restarting gateway…", "⚡ Stopped…") after N seconds on platforms
         # that support message deletion (currently Telegram; other platforms
         # ignore and leave the message in place).  Only affects slash-command
-        # replies wrapped with gateway.platforms.base.EphemeralReply — agent
+        # replies wrapped with channels.platforms.base.EphemeralReply — agent
         # responses and content messages are never touched.  Default 0
         # (disabled) preserves prior behavior.
         "ephemeral_system_ttl": 0,
@@ -1886,7 +1886,7 @@ DEFAULT_CONFIG = {
         "trust_recent_files_seconds": 600,
 
         # OpenAI-compatible API server platform
-        # (gateway/platforms/api_server.py).
+        # (channels/platforms/api_server.py).
         "api_server": {
             # Maximum number of agent runs the API server will service
             # concurrently. Requests to /v1/chat/completions, /v1/responses,

@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from agent.dovie_attribution import build_dovie_attribution_headers
-from gateway.session_context import clear_session_vars, set_session_vars
+from channels.session_context import clear_session_vars, set_session_vars
 from hermes_state import SessionDB
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway import server

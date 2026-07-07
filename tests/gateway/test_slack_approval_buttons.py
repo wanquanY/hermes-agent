@@ -43,7 +43,7 @@ def _ensure_slack_mock():
 
 _ensure_slack_mock()
 
-from gateway.platforms.slack import SlackAdapter
+from channels.platforms.slack import SlackAdapter
 from gateway.config import Platform, PlatformConfig
 
 

@@ -88,7 +88,7 @@ def _put_header(headers: dict[str, str], name: str, value: Any) -> None:
 
 
 def _current_dovie_product_context() -> dict[str, Any] | None:
-    from gateway.session_context import get_session_env
+    from channels.session_context import get_session_env
 
     raw_context = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
     if not raw_context:

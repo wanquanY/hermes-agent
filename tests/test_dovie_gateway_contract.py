@@ -1014,7 +1014,7 @@ def test_runtime_status_returns_lightweight_diagnostics(monkeypatch):
     from tui_gateway import server
 
     monkeypatch.setattr(
-        "gateway.status.read_runtime_status",
+        "channels.runtime_status.read_runtime_status",
         lambda: {"gateway_state": "running", "pid": 1234},
     )
     response = server._methods["runtime.status"](1, {})

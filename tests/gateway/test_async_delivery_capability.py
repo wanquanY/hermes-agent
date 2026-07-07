@@ -10,7 +10,7 @@ of silently registering a watcher that never fires.
 This is wired through:
   - ``BasePlatformAdapter.supports_async_delivery`` (default True)
   - ``APIServerAdapter.supports_async_delivery = False``
-  - ``gateway.session_context._SESSION_ASYNC_DELIVERY`` contextvar +
+  - ``channels.session_context._SESSION_ASYNC_DELIVERY`` contextvar +
     ``async_delivery_supported()`` helper, bound per-session.
 
 These are behavior/invariant tests (how the capability relates to the channel),
@@ -21,7 +21,7 @@ import json
 
 import pytest
 
-from gateway.session_context import (
+from channels.session_context import (
     async_delivery_supported,
     clear_session_vars,
     get_session_env,
@@ -92,12 +92,12 @@ class TestAsyncDeliverySupported:
 
 class TestAdapterCapabilityFlag:
     def test_base_default_true(self):
-        from gateway.platforms.base import BasePlatformAdapter
+        from channels.platforms.base import BasePlatformAdapter
 
         assert BasePlatformAdapter.supports_async_delivery is True
 
     def test_api_server_false(self):
-        from gateway.platforms.api_server import APIServerAdapter
+        from channels.platforms.api_server import APIServerAdapter
 
         assert APIServerAdapter.supports_async_delivery is False
 
@@ -105,8 +105,8 @@ class TestAdapterCapabilityFlag:
         """Every API-server agent-entry path binds through
         _bind_api_server_session, which hardwires async_delivery=False — a new
         route physically cannot reintroduce the silent no-op (#10760)."""
-        from gateway.platforms.api_server import APIServerAdapter
-        from gateway.session_context import clear_session_vars, get_session_env
+        from channels.platforms.api_server import APIServerAdapter
+        from channels.session_context import clear_session_vars, get_session_env
 
         tokens = APIServerAdapter._bind_api_server_session(
             chat_id="c1", session_key="sk1", session_id="sid1"
@@ -121,8 +121,8 @@ class TestAdapterCapabilityFlag:
         """The no-delivery decision is request-scoped, NOT stuck to the session.
         After clear, a session resumed on a delivering interface re-binds fresh
         and is NOT blocked."""
-        from gateway.platforms.api_server import APIServerAdapter
-        from gateway.session_context import clear_session_vars
+        from channels.platforms.api_server import APIServerAdapter
+        from channels.session_context import clear_session_vars
 
         # Turn 1: same session over the API server -> blocked.
         tokens = APIServerAdapter._bind_api_server_session(session_key="shared-key")

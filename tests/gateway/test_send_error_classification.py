@@ -8,7 +8,7 @@ of substring-matching the raw provider message.
 
 import pytest
 
-from gateway.platforms.base import (
+from channels.platforms.base import (
     SEND_ERROR_KINDS,
     SendResult,
     classify_send_error,

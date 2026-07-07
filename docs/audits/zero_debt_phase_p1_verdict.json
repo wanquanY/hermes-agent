@@ -1,0 +1,450 @@
+{
+  "checks": [
+    {
+      "id": "file_exists:docs/hermes_zero_debt_manifest.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:docs/hermes_zero_debt_execution_plan.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:scripts/zero_debt/verdict.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:scripts/zero_debt/phase_closure.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:tests/observability/test_zero_debt_gates.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:tests/observability/test_channels_p1_boundary.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_legacy_removed:gateway/platforms",
+      "message": "removed",
+      "ok": true
+    },
+    {
+      "id": "p1_legacy_removed:gateway/slash_commands.py",
+      "message": "removed",
+      "ok": true
+    },
+    {
+      "id": "p1_legacy_removed:gateway/platform_registry.py",
+      "message": "removed",
+      "ok": true
+    },
+    {
+      "id": "p1_legacy_removed:gateway/session_context.py",
+      "message": "removed",
+      "ok": true
+    },
+    {
+      "id": "p1_legacy_removed:gateway/status.py",
+      "message": "removed",
+      "ok": true
+    },
+    {
+      "id": "p1_legacy_removed:gateway/sticker_cache.py",
+      "message": "removed",
+      "ok": true
+    },
+    {
+      "id": "p1_legacy_removed:gateway/whatsapp_identity.py",
+      "message": "removed",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/__init__.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/config.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platform_registry.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/rich_sent_store.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/runtime_status.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/session_context.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/session_identity.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/sticker_cache.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/whatsapp_identity.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/__init__.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/base.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/base_delivery.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/base_media_cache.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/base_models.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/base_network.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/base_text.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/telegram.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/telegram_callbacks.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/telegram_connection.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/telegram_delivery.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/telegram_inbound.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/discord.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/discord_command_sync.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/discord_context.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/discord_delivery.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/discord_inbound.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/discord_slash.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/discord_voice.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/slack.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/slack_blocks.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/slack_inbound.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/slack_support.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/feishu.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/feishu_content.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/feishu_inbound_state.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/feishu_message.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/feishu_onboard.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/feishu_outbound.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/feishu_webhook.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/qqbot/adapter.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/qqbot/media.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/weixin.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/weixin_formatting.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/wecom.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/whatsapp.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/signal.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/sms.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/email.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/dingtalk.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/homeassistant.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/mattermost.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/matrix.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/matrix_crypto.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/matrix_formatting.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/matrix_reactions.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/matrix_room_ops.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/matrix_support.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/bluebubbles.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/webhook.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/api_server.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/api_server_jobs.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/api_server_responses.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/api_server_runs.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/api_server_sessions.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/api_server_support.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/yuanbao.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/yuanbao_auth.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/yuanbao_constants.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/yuanbao_inbound.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/yuanbao_markdown.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/platforms/yuanbao_outbound.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:hermes_agent/gateway/runtime_config.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1:no_legacy_channel_imports",
+      "message": "no production imports from moved gateway channel owners",
+      "ok": true
+    },
+    {
+      "id": "p1:channels_do_not_import_gateway",
+      "message": "channels package has no gateway imports",
+      "ok": true
+    }
+  ],
+  "next_required_human_signoff": "docs/audits/zero_debt_phase_p1_human_signoff.md",
+  "phase": "P1",
+  "required_test_commands": [
+    ".venv/bin/pytest tests/channels tests/observability/test_channels_p1_boundary.py tests/observability/test_module_liveness_audit.py -q",
+    ".venv/bin/pytest tests/channels tests/observability/test_channels_p1_boundary.py tests/observability/test_module_liveness_audit.py tests/gateway/test_config.py tests/gateway/test_platform_registry.py tests/gateway/test_platform_connected_checkers.py tests/gateway/test_session.py tests/gateway/test_session_env.py tests/gateway/test_session_race_guard.py tests/gateway/test_platform_base.py tests/gateway/test_api_server.py tests/gateway/test_api_server_runs.py tests/gateway/test_api_server_jobs.py tests/gateway/test_api_server_toolset.py tests/gateway/test_async_delivery_capability.py tests/gateway/test_status_command.py tests/gateway/test_gateway_shutdown.py tests/gateway/test_runner_startup_failures.py tests/gateway/test_runner_fatal_adapter.py tests/gateway/test_model_command_flat_string_config.py tests/gateway/test_telegram_format.py tests/gateway/test_telegram_network.py tests/gateway/test_sticker_cache.py -q"
+  ],
+  "status": "pass",
+  "warnings": [
+    "worktree is dirty; P1+ requires an explicit baseline or clean handoff",
+    "P1 verdict checks static ownership gates only; attach the documented pytest and real-device results before human sign-off"
+  ]
+}

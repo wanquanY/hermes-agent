@@ -1013,7 +1013,7 @@ def init_agent(
     # CLI mode where ContextVars aren't used.
     os.environ["HERMES_SESSION_ID"] = agent.session_id
     try:
-        from gateway.session_context import _SESSION_ID
+        from channels.session_context import _SESSION_ID
         _SESSION_ID.set(agent.session_id)
     except Exception:
         pass  # CLI/test mode — ContextVar not needed

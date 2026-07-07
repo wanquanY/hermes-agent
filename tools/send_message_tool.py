@@ -242,7 +242,7 @@ def _handle_send(args):
         else:
             return tool_error(f"Platform '{platform_name}' is not configured. Set up credentials in ~/.hermes/config.yaml or environment variables.")
 
-    from gateway.platforms.base import BasePlatformAdapter
+    from channels.platforms.base import BasePlatformAdapter
 
     # Capture [[as_document]] directive before extract_media strips it.
     # Image-extension files in this batch will route through send_document
@@ -318,7 +318,7 @@ def _handle_send(args):
         if isinstance(result, dict) and result.get("success") and mirror_text:
             try:
                 from gateway.mirror import mirror_to_session
-                from gateway.session_context import get_session_env
+                from channels.session_context import get_session_env
                 source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
                 user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
                 if mirror_to_session(
@@ -422,7 +422,7 @@ def _describe_media_for_mirror(media_files):
 
 def _get_cron_auto_delivery_target():
     """Return the cron scheduler's auto-delivery target for the current run, if any."""
-    from gateway.session_context import get_session_env
+    from channels.session_context import get_session_env
     platform = get_session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM", "").strip().lower()
     chat_id = get_session_env("HERMES_CRON_AUTO_DELIVER_CHAT_ID", "").strip()
     if not platform or not chat_id:
@@ -514,7 +514,7 @@ async def _send_via_adapter(
     platform_name = platform.value if hasattr(platform, "value") else str(platform)
     entry = None
     try:
-        from gateway.platform_registry import platform_registry
+        from channels.platform_registry import platform_registry
         entry = platform_registry.get(platform_name)
     except Exception:
         entry = None
@@ -563,20 +563,20 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     (preserves code-block boundaries, adds part indicators).
     """
     from gateway.config import Platform
-    from gateway.platforms.base import BasePlatformAdapter, utf16_len
-    from gateway.platforms.discord import DiscordAdapter
-    from gateway.platforms.slack import SlackAdapter
+    from channels.platforms.base import BasePlatformAdapter, utf16_len
+    from channels.platforms.discord import DiscordAdapter
+    from channels.platforms.slack import SlackAdapter
 
     # Telegram adapter import is optional (requires python-telegram-bot)
     try:
-        from gateway.platforms.telegram import TelegramAdapter
+        from channels.platforms.telegram import TelegramAdapter
         _telegram_available = True
     except ImportError:
         _telegram_available = False
 
     # Feishu adapter import is optional (requires lark-oapi)
     try:
-        from gateway.platforms.feishu import FeishuAdapter
+        from channels.platforms.feishu import FeishuAdapter
         _feishu_available = True
     except ImportError:
         _feishu_available = False
@@ -602,7 +602,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     # Check plugin registry for max_message_length
     if platform not in _MAX_LENGTHS:
         try:
-            from gateway.platform_registry import platform_registry
+            from channels.platform_registry import platform_registry
             entry = platform_registry.get(platform.value)
             if entry and entry.max_message_length > 0:
                 _MAX_LENGTHS[platform] = entry.max_message_length
@@ -825,7 +825,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         else:
             # Reuse the gateway adapter's format_message for markdown→MarkdownV2
             try:
-                from gateway.platforms.telegram import TelegramAdapter
+                from channels.platforms.telegram import TelegramAdapter
                 _adapter = TelegramAdapter.__new__(TelegramAdapter)
                 formatted = _adapter.format_message(message)
             except Exception:
@@ -839,7 +839,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         # where api.telegram.org is blocked. The in-gateway adapter does the
         # same thing in gateway/platforms/telegram.py.
         try:
-            from gateway.platforms.base import resolve_proxy_url
+            from channels.platforms.base import resolve_proxy_url
             _tg_proxy = resolve_proxy_url("TELEGRAM_PROXY", target_hosts=["api.telegram.org"])
         except Exception:
             _tg_proxy = None
@@ -870,7 +870,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             # send to a forum group's General topic always errors out
             # (see issue #22267).
             try:
-                from gateway.platforms.telegram import TelegramAdapter
+                from channels.platforms.telegram import TelegramAdapter
                 effective_thread_id = TelegramAdapter._message_thread_id_for_send(
                     str(thread_id)
                 )
@@ -922,7 +922,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                     )
                     if not _has_html:
                         try:
-                            from gateway.platforms.telegram import _strip_mdv2
+                            from channels.platforms.telegram import _strip_mdv2
                             plain = _strip_mdv2(formatted)
                         except Exception:
                             plain = message
@@ -1075,7 +1075,7 @@ async def _send_discord(token, chat_id, message, thread_id=None, media_files=Non
     except ImportError:
         return {"error": "aiohttp not installed. Run: pip install aiohttp"}
     try:
-        from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
+        from channels.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
         _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
         _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
         auth_headers = {"Authorization": f"Bot {token}"}
@@ -1255,7 +1255,7 @@ async def _send_slack(token, chat_id, message):
     except ImportError:
         return {"error": "aiohttp not installed. Run: pip install aiohttp"}
     try:
-        from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
+        from channels.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
         _proxy = resolve_proxy_url()
         _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
         url = "https://slack.com/api/chat.postMessage"
@@ -1313,7 +1313,7 @@ async def _send_signal(extra, chat_id, message, media_files=None):
     except ImportError:
         return {"error": "httpx not installed"}
 
-    from gateway.platforms.signal_rate_limit import (
+    from channels.platforms.signal_rate_limit import (
         SIGNAL_BATCH_PACING_NOTICE_THRESHOLD,
         SIGNAL_MAX_ATTACHMENTS_PER_MSG,
         SIGNAL_RATE_LIMIT_MAX_ATTEMPTS,
@@ -1545,7 +1545,7 @@ async def _send_sms(auth_token, chat_id, message):
     message = message.strip()
 
     try:
-        from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
+        from channels.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
         _proxy = resolve_proxy_url()
         _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
         creds = f"{account_sid}:{auth_token}"
@@ -1641,7 +1641,7 @@ async def _send_matrix(token, extra, chat_id, message):
 async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, thread_id=None):
     """Send via the Matrix adapter so native Matrix media uploads are preserved."""
     try:
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
     except ImportError:
         return {"error": "Matrix dependencies not installed. Run: pip install 'mautrix[encryption]'"}
 
@@ -1755,7 +1755,7 @@ async def _send_dingtalk(extra, chat_id, message):
 async def _send_wecom(extra, chat_id, message):
     """Send via WeCom using the adapter's WebSocket send pipeline."""
     try:
-        from gateway.platforms.wecom import WeComAdapter, check_wecom_requirements
+        from channels.platforms.wecom import WeComAdapter, check_wecom_requirements
         if not check_wecom_requirements():
             return {"error": "WeCom requirements not met. Need aiohttp + WECOM_BOT_ID/SECRET."}
     except ImportError:
@@ -1782,7 +1782,7 @@ async def _send_wecom(extra, chat_id, message):
 async def _send_weixin(pconfig, chat_id, message, media_files=None):
     """Send via Weixin iLink using the native adapter helper."""
     try:
-        from gateway.platforms.weixin import check_weixin_requirements, send_weixin_direct
+        from channels.platforms.weixin import check_weixin_requirements, send_weixin_direct
         if not check_weixin_requirements():
             return {"error": "Weixin requirements not met. Need aiohttp + cryptography."}
     except ImportError:
@@ -1803,7 +1803,7 @@ async def _send_weixin(pconfig, chat_id, message, media_files=None):
 async def _send_bluebubbles(extra, chat_id, message):
     """Send via BlueBubbles iMessage server using the adapter's REST API."""
     try:
-        from gateway.platforms.bluebubbles import BlueBubblesAdapter, check_bluebubbles_requirements
+        from channels.platforms.bluebubbles import BlueBubblesAdapter, check_bluebubbles_requirements
         if not check_bluebubbles_requirements():
             return {"error": "BlueBubbles requirements not met (need aiohttp + httpx)."}
     except ImportError:
@@ -1830,10 +1830,10 @@ async def _send_bluebubbles(extra, chat_id, message):
 async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=None):
     """Send via Feishu/Lark using the adapter's send pipeline."""
     try:
-        from gateway.platforms.feishu import FeishuAdapter, FEISHU_AVAILABLE
+        from channels.platforms.feishu import FeishuAdapter, FEISHU_AVAILABLE
         if not FEISHU_AVAILABLE:
             return {"error": "Feishu dependencies not installed. Run: pip install 'hermes-agent[feishu]'"}
-        from gateway.platforms.feishu import FEISHU_DOMAIN, LARK_DOMAIN
+        from channels.platforms.feishu import FEISHU_DOMAIN, LARK_DOMAIN
     except ImportError:
         return {"error": "Feishu dependencies not installed. Run: pip install 'hermes-agent[feishu]'"}
 
@@ -1899,12 +1899,12 @@ def _check_send_message():
     """
     if os.environ.get("HERMES_KANBAN_TASK"):
         return True
-    from gateway.session_context import get_session_env
+    from channels.session_context import get_session_env
     platform = get_session_env("HERMES_SESSION_PLATFORM", "")
     if platform and platform != "local":
         return True
     try:
-        from gateway.status import is_gateway_running
+        from channels.runtime_status import is_gateway_running
         return is_gateway_running()
     except Exception:
         return False
@@ -1994,7 +1994,7 @@ async def _send_yuanbao(chat_id, message, media_files=None):
       - DM:    "direct:<account_id>" or just "<account_id>"
     """
     try:
-        from gateway.platforms.yuanbao import get_active_adapter, send_yuanbao_direct
+        from channels.platforms.yuanbao import get_active_adapter, send_yuanbao_direct
     except ImportError:
         return _error("Yuanbao adapter module not available.")
 
