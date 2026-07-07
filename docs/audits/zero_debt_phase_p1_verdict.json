@@ -41,6 +41,11 @@
       "ok": true
     },
     {
+      "id": "p1_legacy_removed:gateway/slash_access.py",
+      "message": "removed",
+      "ok": true
+    },
+    {
       "id": "p1_legacy_removed:gateway/platform_registry.py",
       "message": "removed",
       "ok": true
@@ -107,6 +112,26 @@
     },
     {
       "id": "p1_target_exists:channels/whatsapp_identity.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/slash_commands/__init__.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/slash_commands/access.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/slash_commands/confirmation.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p1_target_exists:channels/slash_commands/handlers.py",
       "message": "exists",
       "ok": true
     },
