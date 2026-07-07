@@ -1249,7 +1249,7 @@ def _define_discord_view_classes() -> None:
         """Three-button view for generic slash-command confirmations.
 
         Used by ``/reload-mcp`` and any future slash command routed through
-        ``GatewayRunner._request_slash_confirm``.  Buttons map to the
+        ``channels.slash_commands.confirmation.request_slash_confirm``.  Buttons map to the
         gateway's three choices:
 
           * "Approve Once"   → ``choice="once"``

@@ -441,12 +441,11 @@ async def test_gateway_create_autosubscribes_on_explicit_board(kanban_home):
     flag appears before the subcommand, and the subscription must land in
     that board's DB rather than the ambient/default board.
     """
-    from gateway.run import GatewayRunner
     from gateway.config import Platform
+    from channels.slash_commands.handlers import handle_kanban_command
 
     kb.create_board("projx")
 
-    runner = object.__new__(GatewayRunner)
     source = SimpleNamespace(
         platform=Platform.TELEGRAM,
         chat_id="chat1",
@@ -458,7 +457,7 @@ async def test_gateway_create_autosubscribes_on_explicit_board(kanban_home):
         source=source,
     )
 
-    out = await GatewayRunner._handle_kanban_command(runner, event)
+    out = await handle_kanban_command(event=event, active_profile_name=lambda: None)
 
     assert "subscribed" in out.lower()
 

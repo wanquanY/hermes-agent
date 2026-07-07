@@ -119,11 +119,46 @@ def test_legacy_platform_contract_files_are_removed() -> None:
 
 
 def test_legacy_slash_command_shadow_owner_is_removed() -> None:
-    legacy_file = REPO_ROOT / "gateway" / "slash_commands.py"
-    if legacy_file.exists():
+    legacy_files = [
+        REPO_ROOT / "gateway" / "slash_commands.py",
+        REPO_ROOT / "gateway" / "slash_access.py",
+    ]
+    offenders = [path.relative_to(REPO_ROOT).as_posix() for path in legacy_files if path.exists()]
+    if offenders:
         raise AssertionError(
-            "gateway/slash_commands.py is a shadow mixin with no production "
-            "entry-point imports; P1 must not keep or recreate it"
+            "P1 slash command owners live in channels/slash_commands. "
+            "Legacy gateway slash owners must not remain:\n  "
+            + "\n  ".join(offenders)
+        )
+
+
+def test_gateway_runner_does_not_own_slash_command_runtime() -> None:
+    run_py = REPO_ROOT / "gateway" / "run.py"
+    text = run_py.read_text(encoding="utf-8")
+    forbidden = [
+        "def _check_slash_access(",
+        "def _handle_whoami_command(",
+        "def _handle_kanban_command(",
+        "def _maybe_confirm_destructive_slash(",
+        "def _request_slash_confirm(",
+    ]
+    offenders = [pattern for pattern in forbidden if pattern in text]
+    if offenders:
+        raise AssertionError(
+            "GatewayRunner must delegate slash command runtime ownership to "
+            "channels/slash_commands, not define these owners:\n  "
+            + "\n  ".join(offenders)
+        )
+
+
+def test_slash_command_target_owner_exists() -> None:
+    owner = REPO_ROOT / "channels" / "slash_commands"
+    required = ["__init__.py", "access.py", "handlers.py", "confirmation.py"]
+    missing = [name for name in required if not (owner / name).exists()]
+    if missing:
+        raise AssertionError(
+            "P1 slash command target owner is incomplete:\n  "
+            + "\n  ".join(f"channels/slash_commands/{name}" for name in missing)
         )
 
 

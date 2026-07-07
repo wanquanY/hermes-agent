@@ -215,7 +215,7 @@ class BaseDeliveryMixin:
         """Send a three-option slash-command confirmation prompt.
 
         Used by the gateway's generic slash-confirm primitive (see
-        ``GatewayRunner._request_slash_confirm``) for commands that have a
+        ``channels.slash_commands.confirmation.request_slash_confirm``) for commands that have a
         non-destructive but expensive side effect the user should explicitly
         acknowledge — the current caller is ``/reload-mcp``, which
         invalidates the provider prompt cache.

@@ -7065,9 +7065,15 @@ class GatewayRunner:
             # can't bypass gating just because an agent happens to be busy.
             # /status above is intentionally pre-gate so users always see
             # session state. /help and /whoami fall under the always-allowed
-            # floor inside _check_slash_access.
+            # floor inside channels.slash_commands.check_slash_access.
             if _evt_cmd and _cmd_def_inner is not None:
-                _denied = self._check_slash_access(source, _cmd_def_inner.name)
+                from channels.slash_commands import check_slash_access
+
+                _denied = check_slash_access(
+                    gateway_config=self.config,
+                    source=source,
+                    canonical_cmd=_cmd_def_inner.name,
+                )
                 if _denied is not None:
                     return _denied
 
@@ -7213,7 +7219,13 @@ class GatewayRunner:
             # has blocked waiting for a peer — letting that be dispatched
             # mid-run is the whole point of the board.
             if _cmd_def_inner and _cmd_def_inner.name == "kanban":
-                return await self._handle_kanban_command(event)
+                from channels.slash_commands import handle_kanban_command
+
+                return await handle_kanban_command(
+                    event=event,
+                    notifier_profile=getattr(self, "_kanban_notifier_profile", None),
+                    active_profile_name=self._active_profile_name,
+                )
 
             # /goal is safe mid-run for status/pause/clear (inspection and
             # control-plane only — doesn't interrupt the running turn).
@@ -7407,7 +7419,13 @@ class GatewayRunner:
         # ``user_allowed_commands`` (plus the always-allowed floor: /help,
         # /whoami). Plain chat is unaffected — only slash commands gate.
         if command and canonical and is_gateway_known_command(canonical):
-            _denied = self._check_slash_access(source, canonical)
+            from channels.slash_commands import check_slash_access
+
+            _denied = check_slash_access(
+                gateway_config=self.config,
+                source=source,
+                canonical_cmd=canonical,
+            )
             if _denied is not None:
                 return _denied
 
@@ -7471,7 +7489,10 @@ class GatewayRunner:
                 return self._telegram_topic_root_new_message()
             async def _do_reset():
                 return await self._handle_reset_command(event)
-            return await self._maybe_confirm_destructive_slash(
+            from channels.slash_commands import maybe_confirm_destructive_slash
+
+            return await maybe_confirm_destructive_slash(
+                runtime=self._slash_confirmation_runtime(),
                 event=event,
                 command="new",
                 title="/new",
@@ -7495,7 +7516,9 @@ class GatewayRunner:
             return await self._handle_profile_command(event)
 
         if canonical == "whoami":
-            return await self._handle_whoami_command(event)
+            from channels.slash_commands import handle_whoami_command
+
+            return await handle_whoami_command(gateway_config=self.config, event=event)
 
         if canonical == "status":
             return await self._handle_status_command(event)
@@ -7537,7 +7560,13 @@ class GatewayRunner:
             return await self._handle_personality_command(event)
 
         if canonical == "kanban":
-            return await self._handle_kanban_command(event)
+            from channels.slash_commands import handle_kanban_command
+
+            return await handle_kanban_command(
+                event=event,
+                notifier_profile=getattr(self, "_kanban_notifier_profile", None),
+                active_profile_name=self._active_profile_name,
+            )
 
         if canonical == "suggestions":
             return await self._handle_suggestions_command(event)
@@ -7548,7 +7577,10 @@ class GatewayRunner:
         if canonical == "undo":
             async def _do_undo():
                 return await self._handle_undo_command(event)
-            return await self._maybe_confirm_destructive_slash(
+            from channels.slash_commands import maybe_confirm_destructive_slash
+
+            return await maybe_confirm_destructive_slash(
+                runtime=self._slash_confirmation_runtime(),
                 event=event,
                 command="undo",
                 title="/undo",
@@ -9457,200 +9489,6 @@ class GatewayRunner:
         ]
 
         return "\n".join(lines)
-
-
-    def _check_slash_access(
-        self, source: SessionSource, canonical_cmd: str
-    ) -> Optional[str]:
-        """Return a denial message if ``source`` cannot run ``canonical_cmd``,
-        else None. Used by both the cold and running-agent dispatch paths
-        in ``_handle_message`` so admin/user gating can't be bypassed by
-        an in-flight agent.
-
-        Backward-compat semantics live in
-        :func:`gateway.slash_access.policy_for_source` — when the operator
-        hasn't set ``allow_admin_from`` for the scope, the policy returns
-        ``enabled=False`` and this method always returns None.
-        """
-        from gateway.slash_access import policy_for_source as _policy_for_source
-
-        if not canonical_cmd:
-            return None
-        policy = _policy_for_source(self.config, source)
-        if not policy.enabled or policy.can_run(source.user_id, canonical_cmd):
-            return None
-        logger.info(
-            "Slash command /%s denied for %s:%s (not admin, not in user_allowed_commands)",
-            canonical_cmd,
-            source.platform.value if source.platform else "?",
-            source.user_id,
-        )
-        allowed_preview = sorted(policy.user_allowed_commands)
-        if allowed_preview:
-            suffix = (
-                "You can run: "
-                + ", ".join(f"/{c}" for c in allowed_preview[:12])
-                + ("…" if len(allowed_preview) > 12 else "")
-                + ". Use /whoami for the full list."
-            )
-        else:
-            suffix = (
-                "No slash commands are enabled for non-admins on this "
-                "platform. Ask an admin to add you to allow_admin_from "
-                "or to set user_allowed_commands."
-            )
-        return f"⛔ /{canonical_cmd} is admin-only here. {suffix}"
-
-
-    async def _handle_whoami_command(self, event: MessageEvent) -> str:
-        """Handle /whoami — show the user's slash command access on this scope.
-
-        Always works (it's in the always-allowed floor of slash_access).
-        Reports: platform, scope (DM vs group), the user's tier
-        (admin / user / unrestricted), and the slash commands they can
-        actually run on this scope.
-        """
-        from gateway.slash_access import policy_for_source as _policy_for_source
-
-        source = event.source
-        policy = _policy_for_source(self.config, source)
-        platform = source.platform.value if source and source.platform else "?"
-        chat_type = (source.chat_type if source else "") or "dm"
-        scope = "DM" if chat_type.lower() in {"dm", "direct", "private", ""} else "group/channel"
-        user_id = (source.user_id if source else None) or "?"
-
-        if not policy.enabled:
-            return (
-                f"**You** — {platform} ({scope})\n"
-                f"User ID: `{user_id}`\n"
-                f"Tier: unrestricted (no admin list configured for this scope)\n"
-                f"Slash commands: all available"
-            )
-
-        if policy.is_admin(user_id):
-            return (
-                f"**You** — {platform} ({scope})\n"
-                f"User ID: `{user_id}`\n"
-                f"Tier: **admin**\n"
-                f"Slash commands: all available"
-            )
-
-        # Non-admin user. Show what's actually reachable.
-        floor = ["help", "whoami"]  # mirrors slash_access._ALWAYS_ALLOWED_FOR_USERS
-        configured = sorted(policy.user_allowed_commands)
-        # Combine + dedupe, preserve order: floor first, then operator additions.
-        seen: set[str] = set()
-        runnable: list[str] = []
-        for c in floor + configured:
-            if c not in seen:
-                seen.add(c)
-                runnable.append(c)
-        runnable_str = ", ".join(f"/{c}" for c in runnable) if runnable else "(none)"
-        return (
-            f"**You** — {platform} ({scope})\n"
-            f"User ID: `{user_id}`\n"
-            f"Tier: user\n"
-            f"Slash commands you can run: {runnable_str}"
-        )
-
-
-    async def _handle_kanban_command(self, event: MessageEvent) -> str:
-        """Handle /kanban — delegate to the shared kanban CLI.
-
-        Run the potentially-blocking DB work in a thread pool so the
-        gateway event loop stays responsive.  Read operations (list,
-        show, context, tail) are permitted while an agent is running;
-        mutations are allowed too because the board is profile-agnostic
-        and does not touch the running agent's state.
-
-        For ``/kanban create`` invocations we also auto-subscribe the
-        originating gateway source (platform + chat + thread) to the new
-        task's terminal events, so the user hears back when the worker
-        completes / blocks / auto-blocks / crashes without having to poll.
-        """
-        import asyncio
-        import re
-        import shlex
-        from hermes_cli.kanban import run_slash
-
-        text = (event.text or "").strip()
-        # Strip the leading "/kanban" (with or without slash), leaving args.
-        if text.startswith("/"):
-            text = text.lstrip("/")
-        if text.startswith("kanban"):
-            text = text[len("kanban"):].lstrip()
-
-        tokens = shlex.split(text) if text else []
-        requested_board = None
-        action = None
-        i = 0
-        while i < len(tokens):
-            tok = tokens[i]
-            if tok == "--board":
-                if i + 1 >= len(tokens):
-                    break
-                requested_board = tokens[i + 1]
-                i += 2
-                continue
-            if tok.startswith("--board="):
-                requested_board = tok.split("=", 1)[1]
-                i += 1
-                continue
-            action = tok
-            break
-
-        is_create = action == "create"
-
-        try:
-            output = await asyncio.to_thread(run_slash, text)
-        except Exception as exc:  # pragma: no cover - defensive
-            return t("gateway.kanban.error_prefix", error=exc)
-
-        # Auto-subscribe on create. Parse the task id from the CLI's standard
-        # success line ("Created t_abcd  (ready, assignee=...)"). If the user
-        # passed --json we don't subscribe; they're clearly scripting and
-        # can call /kanban notify-subscribe explicitly.
-        if is_create and output:
-            m = re.search(r"Created\s+(t_[0-9a-f]+)\b", output)
-            if m:
-                task_id = m.group(1)
-                try:
-                    source = event.source
-                    platform = getattr(source, "platform", None)
-                    platform_str = (
-                        platform.value if hasattr(platform, "value") else str(platform or "")
-                    ).lower()
-                    chat_id = str(getattr(source, "chat_id", "") or "")
-                    thread_id = str(getattr(source, "thread_id", "") or "")
-                    user_id = str(getattr(source, "user_id", "") or "") or None
-                    if platform_str and chat_id:
-                        def _sub():
-                            from hermes_cli import kanban_db as _kb
-                            conn = _kb.connect(board=requested_board)
-                            try:
-                                _kb.add_notify_sub(
-                                    conn, task_id=task_id,
-                                    platform=platform_str, chat_id=chat_id,
-                                    thread_id=thread_id or None,
-                                    user_id=user_id,
-                                    notifier_profile=getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name(),
-                                )
-                            finally:
-                                conn.close()
-                        await asyncio.to_thread(_sub)
-                        output = (
-                            output.rstrip()
-                            + "\n"
-                            + t("gateway.kanban.subscribed_suffix", task_id=task_id)
-                        )
-                except Exception as exc:
-                    logger.warning("kanban create auto-subscribe failed: %s", exc)
-
-        # Gateway messages have practical length caps; truncate long
-        # listings to keep the UX reasonable.
-        if len(output) > 3800:
-            output = output[:3800] + "\n" + t("gateway.kanban.truncated_suffix")
-        return output or t("gateway.kanban.no_output")
 
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
@@ -13162,7 +13000,10 @@ class GatewayRunner:
             return result
 
         prompt_message = t("gateway.reload_mcp.confirm_prompt")
-        return await self._request_slash_confirm(
+        from channels.slash_commands import request_slash_confirm
+
+        return await request_slash_confirm(
+            runtime=self._slash_confirmation_runtime(),
             event=event,
             command="reload-mcp",
             title="/reload-mcp",
@@ -13403,176 +13244,34 @@ class GatewayRunner:
         lines.append("Invoke a bundle with `/<slug>` to load all its skills.")
         return "\n".join(lines)
 
-    # ------------------------------------------------------------------
-    # Slash-command confirmation primitive (generic)
-    # ------------------------------------------------------------------
-    # Used by slash commands that have a non-destructive but expensive
-    # side effect worth an explicit user confirmation (currently only
-    # /reload-mcp, which invalidates the prompt cache).  Two delivery
-    # paths:
-    #   1. Button UI — adapters that override ``send_slash_confirm``
-    #      (Telegram, Discord, Slack, Matrix, Feishu) render three
-    #      inline buttons.  The adapter routes the button click back via
-    #      ``tools.slash_confirm.resolve(session_key, confirm_id, choice)``.
-    #   2. Text fallback — adapters that don't override the hook get a
-    #      plain text prompt.  Users reply with /approve, /always, or
-    #      /cancel; the early intercept in ``_handle_message`` matches
-    #      those replies against ``tools.slash_confirm.get_pending()``.
-
-    async def _maybe_confirm_destructive_slash(
-        self,
-        *,
-        event: MessageEvent,
-        command: str,
-        title: str,
-        detail: str,
-        execute,
-    ) -> Union[str, "EphemeralReply", None]:
-        """Gate a destructive session slash command (/new, /reset, /undo).
-
-        ``execute`` is an async callable ``execute() -> str | EphemeralReply``
-        that performs the destructive action.  If the
-        ``approvals.destructive_slash_confirm`` config gate is off, ``execute``
-        runs immediately (returning its result).  Otherwise this routes
-        through ``_request_slash_confirm`` — native yes/no buttons on
-        Telegram/Discord/Slack, text fallback elsewhere.
-
-        Three-option resolution:
-
-          - ``once``  — run ``execute`` and return its result
-          - ``always`` — persist ``approvals.destructive_slash_confirm: false``,
-                        then run ``execute``
-          - ``cancel`` — return a "cancelled" message; do not run ``execute``
-        """
-        # Gate check.
-        confirm_required = True
-        try:
-            cfg = self._read_user_config()
-            approvals = cfg.get("approvals") if isinstance(cfg, dict) else None
-            if isinstance(approvals, dict):
-                confirm_required = bool(approvals.get("destructive_slash_confirm", True))
-        except Exception:
-            pass
-
-        if not confirm_required:
-            return await execute()
-
-        session_key = self._session_key_for_source(event.source)
-
-        async def _on_confirm(choice: str):
-            if choice == "cancel":
-                return f"🟡 /{command} cancelled. Conversation unchanged."
-            if choice == "always":
-                try:
-                    from cli import save_config_value
-                    save_config_value("approvals.destructive_slash_confirm", False)
-                    logger.info(
-                        "User opted out of destructive slash confirm (session=%s)",
-                        session_key,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to persist destructive_slash_confirm=false: %s", exc,
-                    )
-            result = await execute()
-            if choice == "always":
-                note = (
-                    "\n\nℹ️ Future /clear, /new, /reset, and /undo will run "
-                    "without confirmation. Re-enable via "
-                    "`approvals.destructive_slash_confirm: true` in config.yaml."
-                )
-                if isinstance(result, str):
-                    return result + note
-                # EphemeralReply or other — leave untouched; the opt-out note
-                # would otherwise mangle structured replies.  The persist itself
-                # already happened above; user gets the same UX next time.
-                return result
-            return result
-
-        prompt_message = (
-            f"⚠️ **Confirm /{command}**\n\n"
-            f"{detail}\n\n"
-            "Choose:\n"
-            "• **Approve Once** — proceed this time only\n"
-            "• **Always Approve** — proceed and silence this prompt permanently\n"
-            "• **Cancel** — keep current conversation\n\n"
-            "_Text fallback: reply `/approve`, `/always`, or `/cancel`._"
-        )
-        return await self._request_slash_confirm(
-            event=event,
-            command=command,
-            title=title,
-            message=prompt_message,
-            handler=_on_confirm,
+    def _slash_confirmation_runtime(self):
+        """Build slash-confirm dependencies without owning the runtime logic."""
+        from channels.slash_commands.confirmation import (
+            SlashConfirmationRuntime,
+            counter_id_factory,
         )
 
-    async def _request_slash_confirm(
-        self,
-        *,
-        event: MessageEvent,
-        command: str,
-        title: str,
-        message: str,
-        handler,
-    ) -> Optional[str]:
-        """Ask the user to confirm an expensive slash command.
-
-        ``handler`` is an async callable ``handler(choice: str) -> str``
-        where ``choice`` is ``"once"``, ``"always"``, or ``"cancel"``.
-        The handler runs on the event loop when the user responds; its
-        return value is sent back as a gateway message.
-
-        Returns a short acknowledgment string to send immediately (before
-        the user's response).  If buttons rendered successfully the ack
-        is ``None`` (buttons are self-explanatory); if we fell back to
-        text the message itself IS the ack.
-        """
-        from tools import slash_confirm as _slash_confirm_mod
-
-        source = event.source
-        session_key = self._session_key_for_source(source)
-        # Bare-runner test harnesses (object.__new__(GatewayRunner)) skip
-        # __init__ and don't have the counter attribute — fall back to a
-        # local counter so tests don't AttributeError.  Real runs always
-        # have the instance attribute.
         counter = getattr(self, "_slash_confirm_counter", None)
         if counter is None:
             import itertools as _itertools
+
             counter = _itertools.count(1)
             self._slash_confirm_counter = counter
-        confirm_id = f"{next(counter)}"
+        return SlashConfirmationRuntime(
+            adapters=self.adapters,
+            session_key_for_source=self._session_key_for_source,
+            read_user_config=self._read_user_config,
+            save_config_value=self._save_config_value,
+            thread_metadata_for_source=self._thread_metadata_for_source,
+            reply_anchor_for_event=self._reply_anchor_for_event,
+            confirm_id_factory=counter_id_factory(counter),
+        )
 
-        # Register the pending confirm FIRST so a super-fast button click
-        # cannot race the send_slash_confirm return.
-        _slash_confirm_mod.register(session_key, confirm_id, command, handler)
+    @staticmethod
+    def _save_config_value(key_path: str, value: Any) -> Any:
+        from cli import save_config_value
 
-        adapter = self.adapters.get(source.platform)
-        metadata = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
-
-        used_buttons = False
-        if adapter is not None:
-            try:
-                button_result = await adapter.send_slash_confirm(
-                    chat_id=source.chat_id,
-                    title=title,
-                    message=message,
-                    session_key=session_key,
-                    confirm_id=confirm_id,
-                    metadata=metadata,
-                )
-                if button_result and getattr(button_result, "success", False):
-                    used_buttons = True
-            except Exception as exc:
-                logger.debug(
-                    "send_slash_confirm failed for %s on %s: %s",
-                    command, source.platform, exc,
-                )
-
-        if used_buttons:
-            # Buttons rendered — no redundant text ack.
-            return None
-        # Text fallback — return the prompt message as the direct reply.
-        return message
+        return save_config_value(key_path, value)
 
     def _read_user_config(self) -> Dict[str, Any]:
         """Read the user's raw config.yaml (cached) for gate lookups.

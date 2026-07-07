@@ -35,6 +35,7 @@ _SCAN_EXCLUDED_DIRS = {
 _P1_LEGACY_PATHS = [
     "gateway/platforms",
     "gateway/slash_commands.py",
+    "gateway/slash_access.py",
     "gateway/platform_registry.py",
     "gateway/session_context.py",
     "gateway/status.py",
@@ -52,6 +53,10 @@ _P1_TARGET_PATHS = [
     "channels/session_identity.py",
     "channels/sticker_cache.py",
     "channels/whatsapp_identity.py",
+    "channels/slash_commands/__init__.py",
+    "channels/slash_commands/access.py",
+    "channels/slash_commands/confirmation.py",
+    "channels/slash_commands/handlers.py",
     "channels/platforms/__init__.py",
     "channels/platforms/base.py",
     "channels/platforms/base_delivery.py",
@@ -133,6 +138,8 @@ _P1_LEGACY_IMPORT_TOKENS = [
     "import gateway.whatsapp_identity",
     "from gateway.slash_commands",
     "import gateway.slash_commands",
+    "from gateway.slash_access",
+    "import gateway.slash_access",
 ]
 
 _P2_SESSIONDB_TOKENS = (

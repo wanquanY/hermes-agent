@@ -589,7 +589,7 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
         # Approval button state: message_id → session_key
         self._approval_state: Dict[int, str] = {}
         # Slash-confirm button state: confirm_id → session_key (for /reload-mcp
-        # and any other slash-confirm prompts; see GatewayRunner._request_slash_confirm).
+        # and any other slash-confirm prompts; see channels.slash_commands.confirmation.
         self._slash_confirm_state: Dict[str, str] = {}
         # Clarify button state: clarify_id → session_key (for the clarify tool's
         # multiple-choice prompts; see GatewayRunner clarify_callback wiring).
