@@ -306,6 +306,60 @@ def test_deactivate_member_chat_view_sources_only_deactivates_matching_view_rows
     ]
 
 
+def test_annotate_stripped_speaker_prefix_updates_latest_projected_message():
+    conn = _make_conn()
+    repo = MessageRepoImpl(conn)
+    repo.append(
+        "s1",
+        MessageSpec(
+            session_id="s1",
+            role="assistant",
+            content="older projection",
+            conversation_message_id="conv-message-1",
+            metadata={"existing": True},
+        ),
+    )
+    repo.append(
+        "s1",
+        MessageSpec(
+            session_id="s1",
+            role="assistant",
+            content="latest projection",
+            conversation_message_id="conv-message-1",
+        ),
+    )
+    repo.append(
+        "s2",
+        MessageSpec(
+            session_id="s2",
+            role="assistant",
+            content="other session",
+            conversation_message_id="conv-message-1",
+        ),
+    )
+
+    metadata = repo.annotate_stripped_speaker_prefix(
+        "s1",
+        "conv-message-1",
+        "小多",
+    )
+
+    assert metadata == {
+        "stripped_speaker_prefix": "小多",
+        "strippedSpeakerPrefix": "小多",
+    }
+    rows = conn.execute(
+        """
+        SELECT session_id, content, metadata_json
+          FROM messages
+         ORDER BY id
+        """
+    ).fetchall()
+    assert "stripped_speaker_prefix" not in (rows[0]["metadata_json"] or "")
+    assert "小多" in (rows[1]["metadata_json"] or "")
+    assert "stripped_speaker_prefix" not in (rows[2]["metadata_json"] or "")
+
+
 def test_conversation_message_append_updates_session_projection_via_session_repo():
     conn = _make_conversation_conn()
     sessions = SessionRepoImpl(conn)

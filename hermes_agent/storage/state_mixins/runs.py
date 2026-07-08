@@ -22,6 +22,7 @@ from hermes_agent.domain.run_lifecycle import DEFAULT_ORPHANED_ACTIVE_RUN_STALE_
 from hermes_agent.domain.run_lifecycle import orphaned_active_run_decision
 from hermes_agent.domain.seq_allocator import allocate_run_event_seq
 from hermes_agent.domain.seq_allocator import ensure_session_counter
+from hermes_agent.repositories.message_repo import MessageRepoImpl
 from hermes_agent.repositories.run_repo import RunRepoImpl
 from hermes_agent.domain.run_event_codec import (
     decode_run_event_row,
@@ -458,29 +459,11 @@ def _annotate_projected_message_stripped_prefix_locked(
     stripped_speaker_prefix = str(stripped_speaker_prefix or "").strip()
     if not session_id or not conversation_message_id or not stripped_speaker_prefix:
         return {}
-    row = conn.execute(
-        """
-        SELECT id, metadata_json
-        FROM messages
-        WHERE session_id = ?
-          AND conversation_message_id = ?
-        ORDER BY id DESC
-        LIMIT 1
-        """,
-        (session_id, conversation_message_id),
-    ).fetchone()
-    if row is None:
-        return {}
-    metadata = _json_loads(_row_value(row, "metadata_json"), {})
-    if not isinstance(metadata, dict):
-        metadata = {}
-    metadata[_STRIPPED_SPEAKER_PREFIX_METADATA_KEY] = stripped_speaker_prefix
-    metadata["strippedSpeakerPrefix"] = stripped_speaker_prefix
-    conn.execute(
-        "UPDATE messages SET metadata_json = ? WHERE id = ?",
-        (_json_dumps(metadata), int(_row_value(row, "id") or 0)),
+    return MessageRepoImpl(conn).annotate_stripped_speaker_prefix(
+        session_id,
+        conversation_message_id,
+        stripped_speaker_prefix,
     )
-    return metadata
 
 
 def _event_subagent_id(event: Dict[str, Any]) -> str:
