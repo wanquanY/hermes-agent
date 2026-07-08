@@ -1,7 +1,7 @@
 {
   "gates": {
     "p2:aggregate_table_single_owner": {
-      "file_count": 9,
+      "file_count": 8,
       "files": [
         {
           "first_lines": [
@@ -169,19 +169,6 @@
           "first_lines": [
             {
               "line": "",
-              "text": "INSERT INTO agent_profiles (                     id, slug, name, avatar, description, cate",
-              "tokens": [
-                "agent_profiles"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_agent/storage/state_mixins/agent_profiles.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": "",
               "text": "INSERT OR IGNORE INTO sessions (id, source, started_at)                 VALUES (?, 'runtim",
               "tokens": [
                 "sessions"
@@ -219,7 +206,7 @@
           "path": "hermes_agent/storage/state_mixins/member_chat.py"
         }
       ],
-      "total_offenders": 26
+      "total_offenders": 25
     },
     "p2:hermes_state_store_no_methods": {
       "file_count": 1,
@@ -253,7 +240,7 @@
       "total_offenders": 0
     },
     "p2:no_silent_swallow_in_v3": {
-      "file_count": 8,
+      "file_count": 7,
       "files": [
         {
           "first_lines": [
@@ -317,20 +304,6 @@
           "first_lines": [
             {
               "line": "",
-              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/agent_profiles.py:48: ValueError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
-            },
-            {
-              "line": "",
-              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/agent_profiles.py:56: ValueError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
-            }
-          ],
-          "offenders": 2,
-          "path": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/agent_profiles.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": "",
               "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/runs.py:995: sqlite3.OperationalError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
             }
           ],
@@ -380,7 +353,7 @@
           "path": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/gateway/runtime_config.py"
         }
       ],
-      "total_offenders": 30
+      "total_offenders": 28
     },
     "p2:state_store_decomposed": {
       "file_count": 9,
@@ -409,10 +382,10 @@
           "first_lines": [
             {
               "line": "",
-              "text": "hermes_agent/storage/state_mixins/agent_profiles.py: 748"
+              "text": "hermes_agent/storage/state_mixins/agent_profiles.py: 89"
             }
           ],
-          "offenders": 748,
+          "offenders": 89,
           "path": "hermes_agent/storage/state_mixins/agent_profiles.py"
         },
         {
@@ -476,7 +449,7 @@
           "path": "hermes_agent/storage/state_mixins/team_registry.py"
         }
       ],
-      "total_offenders": 13238
+      "total_offenders": 12579
     }
   },
   "phase": "P2",
