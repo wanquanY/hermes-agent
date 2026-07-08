@@ -24,6 +24,8 @@ from hermes_agent.domain.seq_allocator import allocate_run_event_seq
 from hermes_agent.domain.seq_allocator import ensure_session_counter
 from hermes_agent.repositories.message_repo import MessageRepoImpl
 from hermes_agent.repositories.run_repo import RunRepoImpl
+from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionRunProjection
+from hermes_agent.repositories.team_mission_repo import TeamMissionRepoImpl
 from hermes_agent.domain.run_event_codec import (
     decode_run_event_row,
     encode_run_event_frame,
@@ -831,153 +833,31 @@ class RunStateMixin:
         sidebar's running/status correct without a read-time live merge. Best-effort
         — a missing session_index table or any error must never fail the run write.
         """
-        sid = str(session_id or "").strip()
-        if not sid:
-            return
-        is_active = str(status or "") not in TERMINAL_RUN_STATUSES
-        run_scope_key = str(runtime_scope_key or "").strip()
-        # Resolve the bound team-mission conversation row, if this run belongs to
-        # a team mission. A node run uses session_id = "team:mission-X:node:Y"
-        # which is NOT the conversation row the sidebar reads, so without this
-        # extra hop a worker/verifier/synthesis run never reaches the sidebar.
-        conv_sid = ""
-        conv_scope_key = ""
+        conversation_session_id = ""
+        conversation_scope_key = ""
+        clear_team_mission_rows = False
         try:
-            row = conn.execute(
-                """
-                SELECT tmc.conversation_session_id, tmc.conversation_id
-                  FROM team_mission_run_bindings tmrb
-                  JOIN team_missions tm
-                    ON tm.mission_id = tmrb.mission_id
-                  JOIN team_mission_conversations tmc
-                    ON tmc.conversation_id = tm.conversation_id
-                 WHERE tmrb.run_id = ?
-                """,
-                (run_id,),
-            ).fetchone()
-            if row:
-                conv_sid = str(row[0] or "").strip()
-                conversation_id = str(row[1] or "").strip()
-                if conversation_id:
-                    conv_scope_key = f"team:{conversation_id}:leader-conversation"
-        except sqlite3.OperationalError:
-            conv_sid = ""
-            conv_scope_key = ""
-        try:
-            if is_active:
-                # Asymmetric design: this hook is the "lit" signal — set running
-                # whenever any relevant run is active. It updates BOTH the run's
-                # own session row AND, if the run is bound to a team mission, the
-                # conversation's session row. The "unlit" signal (clear) is
-                # owned exclusively by mission lifecycle for team_mission rows
-                # below, so we never need to worry about flicker between sibling
-                # runs in a mission.
-                if conv_sid and conv_sid != sid:
-                    cur = conn.execute(
-                        """
-                        UPDATE session_index
-                           SET running = 1, status = 'running',
-                               active_run_id = ?, active_execution_session_id = ?,
-                               runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
-                               updated_at = MAX(updated_at, ?)
-                         WHERE session_id = ?
-                        """,
-                        (
-                            run_id,
-                            str(execution_session_id or ""),
-                            run_scope_key,
-                            float(updated_at or 0),
-                            sid,
-                        ),
-                    )
-                    conv_cur = conn.execute(
-                        """
-                        UPDATE session_index
-                           SET running = 1, status = 'running',
-                               active_run_id = ?, active_execution_session_id = ?,
-                               runtime_scope_key = COALESCE(NULLIF(?, ''), NULLIF(?, ''), runtime_scope_key),
-                               updated_at = MAX(updated_at, ?)
-                         WHERE session_id = ?
-                        """,
-                        (
-                            run_id,
-                            str(execution_session_id or ""),
-                            conv_scope_key,
-                            run_scope_key,
-                            float(updated_at or 0),
-                            conv_sid,
-                        ),
-                    )
-                    logger.debug(
-                        "[doxie-session-index] project_run set_running session_id=%s conv_session_id=%s run_id=%s status=%s rows=%s",
-                        sid, conv_sid, run_id, status, int(cur.rowcount or 0) + int(conv_cur.rowcount or 0),
-                    )
-                else:
-                    cur = conn.execute(
-                        """
-                        UPDATE session_index
-                           SET running = 1, status = 'running',
-                               active_run_id = ?, active_execution_session_id = ?,
-                               runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
-                               updated_at = MAX(updated_at, ?)
-                         WHERE session_id = ?
-                        """,
-                        (
-                            run_id,
-                            str(execution_session_id or ""),
-                            conv_scope_key or run_scope_key,
-                            float(updated_at or 0),
-                            sid,
-                        ),
-                    )
-                    logger.debug(
-                        "[doxie-session-index] project_run set_running session_id=%s run_id=%s status=%s rows=%s",
-                        sid, run_id, status, cur.rowcount,
-                    )
-            else:
-                # Clear BOTH the run's own session row AND the bound team-mission
-                # conversation row (conv_sid) — symmetric with the set path above,
-                # which lights up both. A first/leader-only team turn runs under a
-                # session id (leader or team:mission-X:node:root) that differs from
-                # the conversation's session_index row, so clearing only `sid` left
-                # the sidebar spinner stuck until a list read's repair pass healed
-                # it (the "first message status doesn't auto-update, refresh fixes
-                # it" bug). The two guards below keep multi-node missions flicker-
-                # free: a sibling run terminating mid-mission is blocked by the
-                # active_run_id match AND the mission-terminal check, so the
-                # conversation row only clears when its run is the active one and
-                # its mission (if any) has actually finished.
-                clear_ids = [sid]
-                if conv_sid and conv_sid != sid:
-                    clear_ids.append(conv_sid)
-                id_placeholders = ",".join("?" for _ in clear_ids)
-                cur = conn.execute(
-                    f"""
-                    UPDATE session_index
-                       SET running = 0, status = 'idle',
-                           active_run_id = '', active_execution_session_id = '',
-                           updated_at = MAX(updated_at, ?)
-                     WHERE session_id IN ({id_placeholders})
-                       AND (active_run_id = ? OR active_run_id = '')
-                       AND (
-                           session_kind != 'team_mission'
-                           OR COALESCE(mission_id, '') = ''
-                           OR mission_id IN (
-                               SELECT mission_id FROM team_missions
-                                WHERE LOWER(COALESCE(status,'')) IN
-                                      ('completed','failed','cancelled','canceled','interrupted')
-                           )
-                       )
-                    """,
-                    (float(updated_at or 0), *clear_ids, run_id),
-                )
-                logger.debug(
-                    "[doxie-session-index] project_run clear session_id=%s conv_session_id=%s run_id=%s status=%s rows=%s",
-                    sid, conv_sid, run_id, status, cur.rowcount,
-                )
-        except sqlite3.OperationalError:
-            # session_index table absent (legacy worker db) — nothing to project.
-            pass
+            binding = TeamMissionRepoImpl(conn).get_run_conversation_binding(run_id)
+        except sqlite3.OperationalError as exc:
+            logger.debug("team mission run binding lookup skipped for %s: %s", run_id, exc)
+            binding = None
+        if binding is not None:
+            conversation_session_id = binding.conversation_session_id
+            conversation_scope_key = binding.conversation_scope_key
+            clear_team_mission_rows = binding.mission_is_terminal
+        SessionRepoImpl(conn).project_run_state(
+            SessionRunProjection(
+                session_id=session_id,
+                run_id=run_id,
+                conversation_session_id=conversation_session_id,
+                conversation_scope_key=conversation_scope_key,
+                clear_team_mission_rows=clear_team_mission_rows,
+                execution_session_id=execution_session_id,
+                runtime_scope_key=runtime_scope_key,
+                status=status,
+                updated_at=float(updated_at or 0),
+            )
+        )
 
     def create_run_if_session_idle(
         self,

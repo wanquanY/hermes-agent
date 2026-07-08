@@ -18,10 +18,14 @@ import re
 import sqlite3
 import time
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol, runtime_checkable
 
+from hermes_agent.domain.run_state_machine import TERMINAL_RUN_STATUSES
 from hermes_agent.repositories.base import RepositoryConnection
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -111,6 +115,21 @@ class SessionMessageSnapshotProjection:
 
 
 @dataclass(frozen=True)
+class SessionRunProjection:
+    """Session-index projection for a run lifecycle state."""
+
+    session_id: str
+    run_id: str
+    conversation_session_id: str = ""
+    conversation_scope_key: str = ""
+    clear_team_mission_rows: bool = False
+    execution_session_id: str = ""
+    runtime_scope_key: str = ""
+    status: str = "running"
+    updated_at: float = 0.0
+
+
+@dataclass(frozen=True)
 class BranchSpec:
     """Payload for branch() — spawn a child session from a source."""
 
@@ -171,6 +190,8 @@ class SessionRepo(Protocol):
         session_id: str,
         projection: SessionMessageSnapshotProjection,
     ) -> None: ...
+
+    def project_run_state(self, projection: SessionRunProjection) -> None: ...
 
     def resolve_resume_session_id(self, session_id: str) -> str: ...
 
@@ -624,11 +645,148 @@ class SessionRepoImpl:
         )
         self._refresh_index_from_session(stable, timestamp=last_message_ts)
 
+    def project_run_state(self, projection: SessionRunProjection) -> None:
+        sid = str(projection.session_id or "").strip()
+        run_id = str(projection.run_id or "").strip()
+        if not sid or not run_id:
+            return
+        is_active = str(projection.status or "") not in TERMINAL_RUN_STATUSES
+        run_scope_key = str(projection.runtime_scope_key or "").strip()
+        execution_session_id = str(projection.execution_session_id or "")
+        updated_at = float(projection.updated_at or 0)
+        conv_sid = str(projection.conversation_session_id or "").strip()
+        conv_scope_key = str(projection.conversation_scope_key or "").strip()
+        try:
+            if is_active:
+                self._project_active_run_to_index(
+                    sid=sid,
+                    conv_sid=conv_sid,
+                    run_id=run_id,
+                    execution_session_id=execution_session_id,
+                    run_scope_key=run_scope_key,
+                    conv_scope_key=conv_scope_key,
+                    updated_at=updated_at,
+                    status=str(projection.status or ""),
+                )
+                return
+            self._clear_terminal_run_from_index(
+                sid=sid,
+                conv_sid=conv_sid,
+                run_id=run_id,
+                updated_at=updated_at,
+                status=str(projection.status or ""),
+                clear_team_mission_rows=projection.clear_team_mission_rows,
+            )
+        except sqlite3.OperationalError as exc:
+            logger.debug("session_index run projection skipped for %s/%s: %s", sid, run_id, exc)
+
     def resolve_resume_session_id(self, session_id: str) -> str:
         stable = str(session_id or "").strip()
         if not stable:
             return stable
         return self._compression_tip(stable)
+
+    def _project_active_run_to_index(
+        self,
+        *,
+        sid: str,
+        conv_sid: str,
+        run_id: str,
+        execution_session_id: str,
+        run_scope_key: str,
+        conv_scope_key: str,
+        updated_at: float,
+        status: str,
+    ) -> None:
+        if conv_sid and conv_sid != sid:
+            cur = self._conn.execute(
+                """
+                UPDATE session_index
+                   SET running = 1, status = 'running',
+                       active_run_id = ?, active_execution_session_id = ?,
+                       runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
+                       updated_at = MAX(updated_at, ?)
+                 WHERE session_id = ?
+                """,
+                (run_id, execution_session_id, run_scope_key, updated_at, sid),
+            )
+            conv_cur = self._conn.execute(
+                """
+                UPDATE session_index
+                   SET running = 1, status = 'running',
+                       active_run_id = ?, active_execution_session_id = ?,
+                       runtime_scope_key = COALESCE(NULLIF(?, ''), NULLIF(?, ''), runtime_scope_key),
+                       updated_at = MAX(updated_at, ?)
+                 WHERE session_id = ?
+                """,
+                (run_id, execution_session_id, conv_scope_key, run_scope_key, updated_at, conv_sid),
+            )
+            logger.debug(
+                "[doxie-session-index] project_run set_running session_id=%s conv_session_id=%s run_id=%s status=%s rows=%s",
+                sid,
+                conv_sid,
+                run_id,
+                status,
+                int(cur.rowcount or 0) + int(conv_cur.rowcount or 0),
+            )
+            return
+        cur = self._conn.execute(
+            """
+            UPDATE session_index
+               SET running = 1, status = 'running',
+                   active_run_id = ?, active_execution_session_id = ?,
+                   runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
+                   updated_at = MAX(updated_at, ?)
+             WHERE session_id = ?
+            """,
+            (run_id, execution_session_id, conv_scope_key or run_scope_key, updated_at, sid),
+        )
+        logger.debug(
+            "[doxie-session-index] project_run set_running session_id=%s run_id=%s status=%s rows=%s",
+            sid,
+            run_id,
+            status,
+            cur.rowcount,
+        )
+
+    def _clear_terminal_run_from_index(
+        self,
+        *,
+        sid: str,
+        conv_sid: str,
+        run_id: str,
+        updated_at: float,
+        status: str,
+        clear_team_mission_rows: bool,
+    ) -> None:
+        clear_ids = [sid]
+        if conv_sid and conv_sid != sid:
+            clear_ids.append(conv_sid)
+        id_placeholders = ",".join("?" for _ in clear_ids)
+        cur = self._conn.execute(
+            f"""
+            UPDATE session_index
+               SET running = 0, status = 'idle',
+                   active_run_id = '', active_execution_session_id = '',
+                   updated_at = MAX(updated_at, ?)
+             WHERE session_id IN ({id_placeholders})
+               AND (active_run_id = ? OR active_run_id = '')
+               AND (
+                   session_kind != 'team_mission'
+                   OR COALESCE(mission_id, '') = ''
+                   OR ? = 1
+               )
+            """,
+            (updated_at, *clear_ids, run_id, 1 if clear_team_mission_rows else 0),
+        )
+        logger.debug(
+            "[doxie-session-index] project_run clear session_id=%s conv_session_id=%s run_id=%s status=%s rows=%s",
+            sid,
+            conv_sid,
+            run_id,
+            status,
+            cur.rowcount,
+        )
 
     def _session_select_sql(self, suffix: str) -> str:
         return (

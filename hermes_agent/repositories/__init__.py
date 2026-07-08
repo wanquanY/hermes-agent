@@ -45,6 +45,7 @@ from hermes_agent.repositories.session_repo import (
     SessionNotFound,
     SessionRepo,
     SessionRepoImpl,
+    SessionRunProjection,
     SessionSpec,
 )
 from hermes_agent.repositories.team_mission_repo import (
@@ -60,6 +61,7 @@ from hermes_agent.repositories.team_mission_repo import (
     MissionSpec,
     NodeSpec,
     NodeStatus,
+    RunConversationBinding,
     TeamMissionRepo,
     TeamMissionRepoImpl,
 )
@@ -85,6 +87,7 @@ __all__ = [
     "RepositoryConnection",
     "RepositoryContext",
     "Run",
+    "RunConversationBinding",
     "RunRepo",
     "RunRepoImpl",
     "RunSpec",
@@ -96,6 +99,7 @@ __all__ = [
     "SessionNotFound",
     "SessionRepo",
     "SessionRepoImpl",
+    "SessionRunProjection",
     "SessionSpec",
     "Activity",
     "ActivitySpec",

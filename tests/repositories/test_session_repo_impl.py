@@ -16,6 +16,7 @@ from hermes_agent.repositories import (
     SessionNotFound,
     SessionRepo,
     SessionRepoImpl,
+    SessionRunProjection,
     SessionSpec,
 )
 
@@ -63,6 +64,7 @@ def _make_conn() -> sqlite3.Connection:
             waiting_approval INTEGER NOT NULL DEFAULT 0,
             active_run_id TEXT NOT NULL DEFAULT '',
             active_execution_session_id TEXT NOT NULL DEFAULT '',
+            mission_id TEXT NOT NULL DEFAULT '',
             pending_approval_count INTEGER NOT NULL DEFAULT 0,
             message_count INTEGER NOT NULL DEFAULT 0,
             started_at REAL NOT NULL DEFAULT 0,
@@ -260,6 +262,96 @@ def test_update_index_noop_when_no_fields_provided():
     ).fetchone()["updated_at"]
     # No columns provided → row untouched.
     assert before == after
+
+
+def test_project_run_state_marks_existing_session_index_running():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="s1", source="test", runtime_scope_key="old-scope"))
+
+    repo.project_run_state(
+        SessionRunProjection(
+            session_id="s1",
+            run_id="run-1",
+            execution_session_id="exec-1",
+            runtime_scope_key="scope-1",
+            status="running",
+            updated_at=100.0,
+        )
+    )
+
+    row = conn.execute(
+        """
+        SELECT status, running, active_run_id, active_execution_session_id,
+               runtime_scope_key, updated_at
+          FROM session_index
+         WHERE session_id = 's1'
+        """
+    ).fetchone()
+    got = dict(row)
+    assert got.pop("updated_at") >= 100.0
+    assert got == {
+        "status": "running",
+        "running": 1,
+        "active_run_id": "run-1",
+        "active_execution_session_id": "exec-1",
+        "runtime_scope_key": "scope-1",
+    }
+
+
+def test_project_run_state_updates_bound_team_conversation_index():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="team:mission-1:node:root", source="runtime"))
+    repo.create(
+        SessionSpec(
+            session_id="team-conversation-1",
+            source="team_mission",
+            session_kind="team_mission",
+            conversation_kind="team",
+        )
+    )
+
+    repo.project_run_state(
+        SessionRunProjection(
+            session_id="team:mission-1:node:root",
+            run_id="run-node-1",
+            conversation_session_id="team-conversation-1",
+            conversation_scope_key="team:conversation-1:leader-conversation",
+            execution_session_id="exec-node-1",
+            runtime_scope_key="team:mission-1:node:root",
+            status="running",
+            updated_at=200.0,
+        )
+    )
+
+    rows = conn.execute(
+        """
+        SELECT session_id, status, running, active_run_id,
+               active_execution_session_id, runtime_scope_key
+          FROM session_index
+         WHERE session_id IN ('team:mission-1:node:root', 'team-conversation-1')
+         ORDER BY session_id
+        """
+    ).fetchall()
+    assert [dict(row) for row in rows] == [
+        {
+            "session_id": "team-conversation-1",
+            "status": "running",
+            "running": 1,
+            "active_run_id": "run-node-1",
+            "active_execution_session_id": "exec-node-1",
+            "runtime_scope_key": "team:conversation-1:leader-conversation",
+        },
+        {
+            "session_id": "team:mission-1:node:root",
+            "status": "running",
+            "running": 1,
+            "active_run_id": "run-node-1",
+            "active_execution_session_id": "exec-node-1",
+            "runtime_scope_key": "team:mission-1:node:root",
+        },
+    ]
 
 
 def test_record_message_append_updates_session_and_index_projection():

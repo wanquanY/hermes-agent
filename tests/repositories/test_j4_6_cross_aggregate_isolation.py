@@ -48,6 +48,7 @@ _AGGREGATE_TABLES = {
         "team_mission_nodes",
         "team_mission_edges",
         "team_mission_run_bindings",
+        "team_mission_conversations",
         "team_mission_events",  # legacy; may still be referenced in migration paths
         "activities",
         "activity_commands",

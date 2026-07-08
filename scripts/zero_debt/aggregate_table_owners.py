@@ -50,6 +50,7 @@ TABLE_OWNERS: dict[str, set[str]] = {
     "team_mission_nodes": {"hermes_agent/repositories/team_mission_repo.py"},
     "team_mission_edges": {"hermes_agent/repositories/team_mission_repo.py"},
     "team_mission_run_bindings": {"hermes_agent/repositories/team_mission_repo.py"},
+    "team_mission_conversations": {"hermes_agent/repositories/team_mission_repo.py"},
     "activities": {"hermes_agent/repositories/team_mission_repo.py"},
     "activity_commands": {"hermes_agent/repositories/team_mission_repo.py"},
 }

@@ -16,6 +16,7 @@ from hermes_agent.repositories import (
     MissionNode,
     MissionSpec,
     NodeSpec,
+    RunConversationBinding,
     TeamMissionRepo,
     TeamMissionRepoImpl,
 )
@@ -34,6 +35,7 @@ def _make_conn() -> sqlite3.Connection:
         CREATE TABLE team_missions (
             mission_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL DEFAULT '',
             title TEXT,
             status TEXT NOT NULL DEFAULT 'pending',
             created_at REAL NOT NULL,
@@ -65,6 +67,10 @@ def _make_conn() -> sqlite3.Connection:
             run_id TEXT NOT NULL,
             bound_at REAL NOT NULL,
             PRIMARY KEY (mission_id, node_id)
+        );
+        CREATE TABLE team_mission_conversations (
+            conversation_id TEXT PRIMARY KEY,
+            conversation_session_id TEXT NOT NULL
         );
         CREATE TABLE v3_activities (
             activity_id TEXT PRIMARY KEY,
@@ -188,6 +194,42 @@ def test_bind_run_updates_node_and_binding_row():
         "SELECT run_id FROM team_mission_run_bindings WHERE mission_id='m1' AND node_id='n1'"
     ).fetchone()
     assert row["run_id"] == "run-A"
+
+
+def test_get_run_conversation_binding_returns_session_projection_target():
+    conn = _make_conn()
+    repo = TeamMissionRepoImpl(conn)
+    repo.create_mission(
+        "s1",
+        MissionSpec(
+            mission_id="m1",
+            session_id="s1",
+            metadata={"conversation_id": "conversation-1"},
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE team_missions
+           SET conversation_id = 'conversation-1'
+         WHERE mission_id = 'm1'
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO team_mission_conversations (conversation_id, conversation_session_id)
+        VALUES ('conversation-1', 'team-session-1')
+        """
+    )
+    repo.add_node(NodeSpec(mission_id="m1", node_id="n1"))
+    repo.bind_run("m1", "n1", "run-A")
+
+    binding = repo.get_run_conversation_binding("run-A")
+
+    assert binding == RunConversationBinding(
+        conversation_session_id="team-session-1",
+        conversation_scope_key="team:conversation-1:leader-conversation",
+        mission_is_terminal=False,
+    )
 
 
 def test_update_node_status_transitions():

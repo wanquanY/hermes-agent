@@ -138,6 +138,13 @@ class Activity:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class RunConversationBinding:
+    conversation_session_id: str
+    conversation_scope_key: str
+    mission_is_terminal: bool = False
+
+
 _ACTIVITY_KINDS = frozenset({
     "async_agent_dispatch",
     "async_team_dispatch",
@@ -170,6 +177,8 @@ class TeamMissionRepo(Protocol):
     def get_node(self, mission_id: str, node_id: str) -> MissionNode | None: ...
 
     def bind_run(self, mission_id: str, node_id: str, run_id: str) -> None: ...
+
+    def get_run_conversation_binding(self, run_id: str) -> RunConversationBinding | None: ...
 
     def update_node_status(
         self,
@@ -370,6 +379,35 @@ class TeamMissionRepoImpl:
              WHERE mission_id = ? AND node_id = ?
             """,
             (stable_run, now, stable_mission, stable_node),
+        )
+
+    def get_run_conversation_binding(self, run_id: str) -> RunConversationBinding | None:
+        stable_run = str(run_id or "").strip()
+        if not stable_run:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT tmc.conversation_session_id, tmc.conversation_id, tm.status
+              FROM team_mission_run_bindings tmrb
+              JOIN team_missions tm
+                ON tm.mission_id = tmrb.mission_id
+              JOIN team_mission_conversations tmc
+                ON tmc.conversation_id = tm.conversation_id
+             WHERE tmrb.run_id = ?
+            """,
+            (stable_run,),
+        ).fetchone()
+        if row is None:
+            return None
+        conversation_session_id = str(row[0] or "").strip()
+        conversation_id = str(row[1] or "").strip()
+        mission_status = str(row[2] or "").strip().lower()
+        if not conversation_session_id:
+            return None
+        return RunConversationBinding(
+            conversation_session_id=conversation_session_id,
+            conversation_scope_key=f"team:{conversation_id}:leader-conversation" if conversation_id else "",
+            mission_is_terminal=mission_status in {"completed", "failed", "cancelled", "canceled", "interrupted"},
         )
 
     def update_node_status(
