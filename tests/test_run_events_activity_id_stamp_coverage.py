@@ -15,7 +15,7 @@ from hermes_team_mission.runtime.conversation_mirror import mirror_event_to_conv
 from tui_gateway.run_worker import EventFrame, OutgoingFrame, RunTerminalFrame
 from tui_gateway.services import run_control
 from tui_gateway.services.worker_frame_router import WorkerFrameRouter
-from tui_gateway.services.worker_publish_bridge import WorkerPublishBridge
+from hermes_agent.orchestration.worker_publish_bridge import WorkerPublishBridge
 
 
 def _db(tmp_path: Path) -> SessionDB:

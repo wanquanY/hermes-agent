@@ -37,7 +37,7 @@ from tui_gateway.run_worker import (
     RunTerminalFrame,
     WorkerRunBackend,
 )
-from tui_gateway.services.worker_publish_bridge import WorkerPublishBridge
+from hermes_agent.orchestration.worker_publish_bridge import WorkerPublishBridge
 
 _log = logging.getLogger(__name__)
 

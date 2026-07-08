@@ -26,7 +26,7 @@ from tui_gateway.run_worker import (
     InteractiveRequestFrame,
     OutgoingFrame,
 )
-from tui_gateway.services.worker_publish_bridge import WorkerPublishBridge
+from hermes_agent.orchestration.worker_publish_bridge import WorkerPublishBridge
 
 
 # Helpers -----------------------------------------------------------

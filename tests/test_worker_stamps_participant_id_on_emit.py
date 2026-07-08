@@ -12,7 +12,7 @@ from hermes_state import SessionDB
 from hermes_team_mission.domain.run_context import RunContext
 from tui_gateway.run_worker import EventFrame, OutgoingFrame
 from tui_gateway.services import run_control
-from tui_gateway.services.worker_publish_bridge import (
+from hermes_agent.orchestration.worker_publish_bridge import (
     WorkerPublishBridge,
     get_active_run_context,
 )

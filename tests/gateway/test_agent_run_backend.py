@@ -210,7 +210,7 @@ async def test_bridge_installs_and_uninstalls(monkeypatch) -> None:
 
     real_install_method = None
 
-    import tui_gateway.services.worker_publish_bridge as bridge_mod
+    import hermes_agent.orchestration.worker_publish_bridge as bridge_mod
     original_cls = bridge_mod.WorkerPublishBridge
 
     class _RecordingBridge(original_cls):

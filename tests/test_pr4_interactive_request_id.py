@@ -30,7 +30,7 @@ import pytest
 import tools.approval as approval_module
 import tools.clarify_gateway as clarify_module
 from tui_gateway.run_worker import InteractiveRequestFrame
-from tui_gateway.services.worker_publish_bridge import WorkerPublishBridge
+from hermes_agent.orchestration.worker_publish_bridge import WorkerPublishBridge
 
 
 # =========================================================================

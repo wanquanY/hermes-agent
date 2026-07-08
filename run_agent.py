@@ -1337,7 +1337,7 @@ class AIAgent:
             if context is not None:
                 return context
         try:
-            from tui_gateway.services.worker_publish_bridge import get_active_run_context
+            from hermes_agent.orchestration.worker_publish_bridge import get_active_run_context
 
             return get_active_run_context()
         except Exception:
@@ -2095,7 +2095,7 @@ class AIAgent:
             if participant_id:
                 return participant_id
         try:
-            from tui_gateway.services.worker_publish_bridge import get_active_run_context
+            from hermes_agent.orchestration.worker_publish_bridge import get_active_run_context
 
             active_context = get_active_run_context()
             return str(getattr(active_context, "participant_id", "") or "").strip()
