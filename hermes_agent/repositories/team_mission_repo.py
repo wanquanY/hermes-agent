@@ -236,6 +236,8 @@ class TeamMissionRepo(Protocol):
         limit: int = 200,
     ) -> list[dict[str, Any]]: ...
 
+    def migrate_legacy_activities_kind_mission_check(self) -> bool: ...
+
 
 class TeamMissionRepoImpl:
     """SQLite-backed TeamMissionRepo (spec §4.4 + §6.5).
@@ -723,6 +725,81 @@ class TeamMissionRepoImpl:
             (stable_activity, _activity_command_limit(limit, 200)),
         ).fetchall()
         return [_activity_command_row_to_dict(row) for row in rows]
+
+    def migrate_legacy_activities_kind_mission_check(self) -> bool:
+        row = self._conn.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'activities'
+            """
+        ).fetchone()
+        sql = str(_row_value(row, "sql", 0) or "")
+        if not sql or "'mission'" in sql:
+            return False
+        columns = self._conn.execute('PRAGMA table_info("activities")').fetchall()
+        live_columns = [
+            str(_row_value(column, "name", 1) or "")
+            for column in columns
+            if str(_row_value(column, "name", 1) or "")
+        ]
+        desired_columns = [
+            "activity_id",
+            "conversation_id",
+            "parent_activity_id",
+            "kind",
+            "target_profile_id",
+            "target_team_id",
+            "target_mission_id",
+            "status",
+            "prompt_summary",
+            "result_summary",
+            "result_json",
+            "started_at",
+            "completed_at",
+            "notify_parent",
+            "read_at",
+            "created_at",
+            "updated_at",
+        ]
+        copy_columns = [column for column in desired_columns if column in live_columns]
+        if not copy_columns:
+            return False
+        self._conn.execute("DROP INDEX IF EXISTS idx_activities_conv")
+        self._conn.execute("DROP INDEX IF EXISTS idx_activities_parent")
+        self._conn.execute("DROP INDEX IF EXISTS idx_activities_mission")
+        self._conn.execute("DROP TABLE IF EXISTS activities_legacy_kind_check")
+        self._conn.execute("ALTER TABLE activities RENAME TO activities_legacy_kind_check")
+        self._conn.execute(
+            """
+            CREATE TABLE activities (
+                activity_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                parent_activity_id TEXT,
+                kind TEXT NOT NULL CHECK (kind IN ('chat', 'agent_dispatch', 'team_dispatch', 'member_chat', 'mission')),
+                target_profile_id TEXT,
+                target_team_id TEXT,
+                target_mission_id TEXT,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+                prompt_summary TEXT,
+                result_summary TEXT,
+                result_json TEXT,
+                started_at REAL,
+                completed_at REAL,
+                notify_parent INTEGER NOT NULL DEFAULT 1,
+                read_at REAL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        column_sql = ", ".join(f'"{column}"' for column in copy_columns)
+        self._conn.execute(
+            f"INSERT INTO activities ({column_sql}) "
+            f"SELECT {column_sql} FROM activities_legacy_kind_check"
+        )
+        self._conn.execute("DROP TABLE activities_legacy_kind_check")
+        return True
 
     # ------------------------------------------------------------------
     # Legacy Activity table — current gateway/UI read model.

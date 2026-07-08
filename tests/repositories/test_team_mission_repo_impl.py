@@ -364,3 +364,52 @@ def test_activity_commands_are_team_mission_repo_owned():
     assert dispatched["state"] == "dispatched"
     assert dispatched["result_event_id"] == 42
     assert repo.update_activity_command_state("cmd-1", next_state="accepted") == {}
+
+
+def test_migrate_legacy_activities_kind_check_allows_mission_rows():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE activities (
+            activity_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            parent_activity_id TEXT,
+            kind TEXT NOT NULL CHECK (kind IN ('chat', 'agent_dispatch', 'team_dispatch', 'member_chat')),
+            target_profile_id TEXT,
+            target_team_id TEXT,
+            target_mission_id TEXT,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+            prompt_summary TEXT,
+            result_summary TEXT,
+            result_json TEXT,
+            started_at REAL,
+            completed_at REAL,
+            notify_parent INTEGER NOT NULL DEFAULT 1,
+            read_at REAL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        INSERT INTO activities (
+            activity_id, conversation_id, kind, status, created_at, updated_at
+        ) VALUES ('a1', 'c1', 'chat', 'pending', 1, 1);
+        """
+    )
+    repo = TeamMissionRepoImpl(conn)
+
+    assert repo.migrate_legacy_activities_kind_mission_check() is True
+
+    original = conn.execute("SELECT activity_id, kind FROM activities WHERE activity_id = 'a1'").fetchone()
+    assert dict(original) == {"activity_id": "a1", "kind": "chat"}
+    conn.execute(
+        """
+        INSERT INTO activities (
+            activity_id, conversation_id, kind, status, created_at, updated_at
+        ) VALUES ('mission:1', 'c1', 'mission', 'running', 2, 2)
+        """
+    )
+    mission = conn.execute(
+        "SELECT activity_id, kind FROM activities WHERE activity_id = 'mission:1'"
+    ).fetchone()
+    assert dict(mission) == {"activity_id": "mission:1", "kind": "mission"}
+    assert repo.migrate_legacy_activities_kind_mission_check() is False

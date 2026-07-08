@@ -53,6 +53,7 @@ _AGGREGATE_TABLES = {
         "team_mission_conversations",
         "team_mission_events",  # legacy; may still be referenced in migration paths
         "activities",
+        "activities_legacy_kind_check",
         "activity_commands",
         "v3_activities",
     },
@@ -68,6 +69,7 @@ _AGGREGATE_TABLES = {
 # System-owned tables that L2 domain services legitimately use.
 _DOMAIN_SHARED_TABLES = {
     "seq_counter",  # SeqAllocator; RepoImpls call SeqAllocator.allocate_only(...)
+    "sqlite_master",  # SQLite schema introspection for owner-managed migrations.
 }
 
 
