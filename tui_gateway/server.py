@@ -1052,9 +1052,9 @@ def _emit_approval_request(sid: str, data: dict | None) -> None:
     """Emit an approval request through the shared command-redaction path."""
     payload = dict(data or {})
     if "command" in payload:
-        from gateway.run import _redact_approval_command
+        from hermes_agent.gateway.runtime_config import redact_approval_command
 
-        payload["command"] = _redact_approval_command(payload.get("command"))
+        payload["command"] = redact_approval_command(payload.get("command"))
     _emit("approval.request", sid, payload)
 
 
