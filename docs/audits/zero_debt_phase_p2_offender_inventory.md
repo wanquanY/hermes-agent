@@ -8,7 +8,7 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 62 | 18 |
+| `p2:no_sessiondb_production` | 61 | 17 |
 | `p2:no_legacy_identity_alias_internal` | 1188 | 80 |
 
 ## p2:no_sessiondb_production
@@ -32,7 +32,6 @@ Status: `preflight_only`
 | 1 | `hermes_state_team_registry.py` | `56` class SessionDBTeamRegistryMixin: |
 | 1 | `hermes_team_mission/runtime/history.py` | `7` from hermes_state_run_event_codec import decode_run_event_row |
 | 1 | `hermes_team_mission/state/memory.py` | `8` from hermes_state_run_event_codec import decode_run_event_row |
-| 1 | `tui_gateway/services/run_control.py` | `45` from hermes_state_runs import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES |
 
 ## p2:no_legacy_identity_alias_internal
 
@@ -40,7 +39,7 @@ Status: `preflight_only`
 |---:|---|---|
 | 108 | `tui_gateway/methods/run.py` | `26` def _stored_session_id_from_params(params: dict) -> str: |
 | 95 | `hermes_team_mission/state/session_conversations.py` | `62` active_tmc.stable_session_id = active_runs.session_id |
-| 94 | `tui_gateway/services/run_control.py` | `34` stable_session_id as _stable_session_id, |
+| 94 | `tui_gateway/services/run_control.py` | `38` stable_session_id as _stable_session_id, |
 | 58 | `tui_gateway/methods/prompt.py` | `68` "stored_session_id": str(session.get("session_key") or sid), |
 | 55 | `hermes_team_mission/gateway/runtime_methods.py` | `247` "stored_session_id": str( |
 | 49 | `hermes_state_runs.py` | `731` runtime_session_id=str(row["runtime_session_id"] or ""), |

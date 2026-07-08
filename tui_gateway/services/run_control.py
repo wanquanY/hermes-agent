@@ -20,9 +20,13 @@ from collections import defaultdict, deque
 from collections.abc import Callable
 from typing import Any, TYPE_CHECKING
 
-from hermes_runtime_event_payloads import primary_deliverable_text
-from hermes_agent.domain.participants import agent_participant_id, leader_participant_id, member_participant_id
 from agent.dovie_diagnostics import emit_dovie_diagnostic, emit_dovie_runtime_diagnostic
+from hermes_agent.domain.participants import agent_participant_id
+from hermes_agent.domain.participants import leader_participant_id
+from hermes_agent.domain.participants import member_participant_id
+from hermes_agent.domain.run_state_machine import ACTIVE_RUN_STATUSES
+from hermes_agent.domain.run_state_machine import TERMINAL_RUN_STATUSES
+from hermes_runtime_event_payloads import primary_deliverable_text
 from tui_gateway.services import team_mission_activity_events as _team_activity_events
 from tui_gateway.services.run_control_events import (
     delta_event_for_subscription as _delta_event_for_subscription,
@@ -40,19 +44,6 @@ from tui_gateway.transport import Transport
 
 if TYPE_CHECKING:
     from hermes_team_mission.domain.run_context import RunContext
-
-try:
-    from hermes_state_runs import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES
-except Exception:  # pragma: no cover - keeps gateway importable in mocked tests.
-    ACTIVE_RUN_STATUSES = {
-        "queued",
-        "starting",
-        "running",
-        "waiting_approval",
-        "cancelling",
-        "finalizing",
-    }
-    TERMINAL_RUN_STATUSES = {"completed", "failed", "interrupted", "cancelled"}
 
 _MAX_EVENTS_PER_SESSION = 2000
 _POLL_INTERVAL_SECONDS = 0.25

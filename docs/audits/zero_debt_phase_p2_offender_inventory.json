@@ -88,35 +88,35 @@
         {
           "first_lines": [
             {
-              "line": 34,
+              "line": 38,
               "text": "stable_session_id as _stable_session_id,",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 217,
+              "line": 208,
               "text": "\"session_id\": str(run.get(\"session_id\") or run.get(\"stored_session_id\") or \"\"),",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 220,
+              "line": 211,
               "text": "\"runtime_session_id\": str(run.get(\"runtime_session_id\") or \"\"),",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 235,
+              "line": 226,
               "text": "def _live_runtime_session_ids_snapshot() -> set[str]:",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 266,
+              "line": 257,
               "text": "live_runtime_session_ids=_live_runtime_session_ids_snapshot(),",
               "tokens": [
                 "runtime_session_id"
@@ -2624,7 +2624,7 @@
       "total_offenders": 1188
     },
     "p2:no_sessiondb_production": {
-      "file_count": 18,
+      "file_count": 17,
       "files": [
         {
           "first_lines": [
@@ -2963,22 +2963,9 @@
           ],
           "offenders": 1,
           "path": "hermes_team_mission/state/memory.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 45,
-              "text": "from hermes_state_runs import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "tui_gateway/services/run_control.py"
         }
       ],
-      "total_offenders": 62
+      "total_offenders": 61
     }
   },
   "phase": "P2",
