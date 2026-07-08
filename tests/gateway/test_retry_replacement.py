@@ -8,20 +8,27 @@ from gateway.config import GatewayConfig
 from channels.platforms.base import MessageEvent, MessageType
 from gateway.run import GatewayRunner
 from gateway.session import SessionStore
+from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+from hermes_agent.storage.session_repository_db import connect_session_repository_db
+
+
+def _session_store_with_storage(tmp_path):
+    conn = connect_session_repository_db(tmp_path / "state.db")
+    repo = SessionRepoImpl(conn)
+    return SessionStore(
+        sessions_dir=tmp_path,
+        config=GatewayConfig(),
+        session_repo=repo,
+        storage_conn=conn,
+    ), repo
 
 
 @pytest.mark.asyncio
-async def test_gateway_retry_replaces_last_user_turn_in_transcript(tmp_path, monkeypatch):
-    # Pin DEFAULT_DB_PATH so SessionDB() doesn't write to the real ~/.hermes/state.db.
-    # (Module-level constant snapshot, see test_load_transcript_db_only.)
-    import hermes_state
-    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
-
+async def test_gateway_retry_replaces_last_user_turn_in_transcript(tmp_path):
+    store, repo = _session_store_with_storage(tmp_path)
     config = GatewayConfig()
-    store = SessionStore(sessions_dir=tmp_path, config=config)
-
     session_id = "retry_session"
-    store._db.create_session(session_id=session_id, source="test")
+    repo.create(SessionSpec(session_id=session_id, source="test"))
     for msg in [
         {"role": "session_meta", "tools": []},
         {"role": "user", "content": "first question"},

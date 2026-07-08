@@ -19,21 +19,24 @@ from unittest.mock import patch
 
 from gateway.config import Platform, GatewayConfig
 from gateway.session import SessionSource, SessionStore, build_session_key
+from hermes_agent.repositories.session_repo import SessionRepoImpl
+from hermes_agent.storage.session_repository_db import connect_session_repository_db
 
 
 @pytest.fixture()
-def store(tmp_path, monkeypatch):
+def store(tmp_path):
     """SessionStore with SQLite — load_transcript reads from DB only.
 
-    Pin DEFAULT_DB_PATH to tmp_path so SessionDB() can't write to the real
-    ~/.hermes/state.db. (DEFAULT_DB_PATH is a module-level constant computed
-    at hermes_state import time, before pytest's HERMES_HOME monkeypatch
-    fires — the autouse fixture's HERMES_HOME override doesn't help here.)
+    The gateway path is wired to the repository/read-model owner directly.
     """
-    import hermes_state
-    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+    conn = connect_session_repository_db(tmp_path / "state.db")
     config = GatewayConfig()
-    s = SessionStore(sessions_dir=tmp_path, config=config)
+    s = SessionStore(
+        sessions_dir=tmp_path,
+        config=config,
+        session_repo=SessionRepoImpl(conn),
+        storage_conn=conn,
+    )
     return s
 
 

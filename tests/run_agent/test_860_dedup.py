@@ -915,50 +915,60 @@ class TestAppendToTranscriptSkipDb:
         """With skip_db=True and a real DB, message does NOT appear in SQLite."""
         from gateway.config import GatewayConfig
         from gateway.session import SessionStore
-        from hermes_state import SessionDB
+        from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+        from hermes_agent.storage.session_repository_db import connect_session_repository_db
 
-        db_path = tmp_path / "test_skip.db"
-        db = SessionDB(db_path=db_path)
+        conn = connect_session_repository_db(tmp_path / "test_skip.db")
+        session_repo = SessionRepoImpl(conn)
 
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path, config=config)
-        store._db = db
+            store = SessionStore(
+                sessions_dir=tmp_path,
+                config=config,
+                session_repo=session_repo,
+                storage_conn=conn,
+            )
         store._loaded = True
 
         session_id = "test-skip-db-real"
-        db.create_session(session_id=session_id, source="test")
+        session_repo.create(SessionSpec(session_id=session_id, source="test"))
 
         msg = {"role": "assistant", "content": "hello world"}
         store.append_to_transcript(session_id, msg, skip_db=True)
 
         # SQLite should NOT have the message
-        rows = db.get_messages(session_id)
+        rows = conn.execute("SELECT * FROM messages WHERE session_id = ?", (session_id,)).fetchall()
         assert len(rows) == 0, f"Expected 0 DB rows with skip_db=True, got {len(rows)}"
 
     def test_default_writes_to_sqlite(self, tmp_path):
         """Without skip_db, message appears in SQLite."""
         from gateway.config import GatewayConfig
         from gateway.session import SessionStore
-        from hermes_state import SessionDB
+        from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+        from hermes_agent.storage.session_repository_db import connect_session_repository_db
 
-        db_path = tmp_path / "test_both.db"
-        db = SessionDB(db_path=db_path)
+        conn = connect_session_repository_db(tmp_path / "test_both.db")
+        session_repo = SessionRepoImpl(conn)
 
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path, config=config)
-        store._db = db
+            store = SessionStore(
+                sessions_dir=tmp_path,
+                config=config,
+                session_repo=session_repo,
+                storage_conn=conn,
+            )
         store._loaded = True
 
         session_id = "test-default-write"
-        db.create_session(session_id=session_id, source="test")
+        session_repo.create(SessionSpec(session_id=session_id, source="test"))
 
         msg = {"role": "user", "content": "test message"}
         store.append_to_transcript(session_id, msg)
 
         # SQLite should have the message
-        rows = db.get_messages(session_id)
+        rows = conn.execute("SELECT * FROM messages WHERE session_id = ?", (session_id,)).fetchall()
         assert len(rows) == 1
 
 

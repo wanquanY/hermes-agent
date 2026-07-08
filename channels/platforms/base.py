@@ -114,6 +114,7 @@ from channels.platforms.base_models import (
     MessageType,
     ProcessingOutcome,
     SendResult,
+    _RETRYABLE_ERROR_PATTERNS,
     classify_send_error,
     coerce_plaintext_gateway_command,
     merge_pending_message_event,

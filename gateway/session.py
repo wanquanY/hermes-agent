@@ -71,6 +71,8 @@ from channels.whatsapp_identity import (
     canonical_whatsapp_identifier,
     normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
 )
+from hermes_agent.read_models.message_history import MessageHistoryReadModel
+from hermes_agent.repositories.message_repo import MessageRepository
 from hermes_agent.repositories.session_repo import SessionFilter, SessionRepo, SessionSpec
 from hermes_agent.storage.session_repository_db import connect_session_repository_db
 from utils import atomic_replace
@@ -471,22 +473,34 @@ class SessionStore:
     
     def __init__(self, sessions_dir: Path, config: GatewayConfig,
                  has_active_processes_fn=None,
-                 session_repo: Optional[SessionRepo] = None):
+                 session_repo: Optional[SessionRepo] = None,
+                 storage_conn: sqlite3.Connection | None = None):
         self.sessions_dir = sessions_dir
         self.config = config
         self._entries: Dict[str, SessionEntry] = {}
         self._loaded = False
         self._lock = threading.Lock()
         self._has_active_processes_fn = has_active_processes_fn
-        self._transcript_db = None
-        self._session_repo_conn: sqlite3.Connection | None = None
+        self._storage_conn: sqlite3.Connection | None = storage_conn
+        if self._storage_conn is None and session_repo is None:
+            self._storage_conn = connect_session_repository_db()
         if session_repo is not None:
             self._session_repo = session_repo
         else:
-            self._session_repo_conn = connect_session_repository_db()
             from hermes_agent.repositories.session_repo import SessionRepoImpl
 
-            self._session_repo = SessionRepoImpl(self._session_repo_conn)
+            assert self._storage_conn is not None
+            self._session_repo = SessionRepoImpl(self._storage_conn)
+        self._message_repo = (
+            MessageRepository(self._storage_conn)
+            if self._storage_conn is not None
+            else None
+        )
+        self._message_history = (
+            MessageHistoryReadModel(self._storage_conn)
+            if self._storage_conn is not None
+            else None
+        )
     
     def _ensure_loaded(self) -> None:
         """Load sessions index from disk if not already loaded."""
@@ -1035,30 +1049,12 @@ class SessionStore:
                      _flush_messages_to_session_db(), preventing the
                      duplicate-write bug (#860).
         """
-        transcript_db = None if skip_db else self._legacy_transcript_db()
-        if transcript_db:
-            try:
-                transcript_db.append_message(
-                    session_id=session_id,
-                    role=message.get("role", "unknown"),
-                    content=message.get("content"),
-                    tool_name=message.get("tool_name"),
-                    tool_calls=message.get("tool_calls"),
-                    tool_call_id=message.get("tool_call_id"),
-                    reasoning=message.get("reasoning") if message.get("role") == "assistant" else None,
-                    reasoning_content=message.get("reasoning_content") if message.get("role") == "assistant" else None,
-                    reasoning_details=message.get("reasoning_details") if message.get("role") == "assistant" else None,
-                    codex_reasoning_items=message.get("codex_reasoning_items") if message.get("role") == "assistant" else None,
-                    codex_message_items=message.get("codex_message_items") if message.get("role") == "assistant" else None,
-                    # Platform-side message id (yuanbao msg_id, telegram update_id, …).
-                    # Accept either explicit ``platform_message_id`` or the legacy
-                    # ``message_id`` key the JSONL transcript used.
-                    platform_message_id=(
-                        message.get("platform_message_id") or message.get("message_id")
-                    ),
-                )
-            except Exception as e:
-                logger.debug("Transcript DB operation failed: %s", e)
+        if skip_db or self._message_repo is None:
+            return
+        try:
+            self._message_repo.append_conversation_message(session_id, message)
+        except Exception as e:
+            logger.debug("Transcript repository operation failed: %s", e)
     
     def rewrite_transcript(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         """Replace the entire transcript for a session with new messages.
@@ -1066,12 +1062,12 @@ class SessionStore:
         Used by /retry, /undo, and /compress to persist modified conversation
         history. state.db is the canonical store.
         """
-        transcript_db = self._legacy_transcript_db()
-        if transcript_db:
-            try:
-                transcript_db.replace_messages(session_id, messages)
-            except Exception as e:
-                logger.debug("Failed to rewrite transcript in DB: %s", e)
+        if self._message_repo is None:
+            return
+        try:
+            self._message_repo.replace_conversation(session_id, messages)
+        except Exception as e:
+            logger.debug("Failed to rewrite transcript in repository: %s", e)
 
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages from a session's transcript.
@@ -1080,27 +1076,13 @@ class SessionStore:
         in spec 002 — pre-DB sessions on existing disks have already been
         migrated (their DB row holds the full message history).
         """
-        transcript_db = self._legacy_transcript_db()
-        if not transcript_db:
+        if self._message_history is None:
             return []
         try:
-            return transcript_db.get_messages_as_conversation(session_id)
+            return self._message_history.all_as_conversation(session_id)
         except Exception as e:
-            logger.debug("Could not load messages from DB: %s", e)
+            logger.debug("Could not load messages from repository: %s", e)
             return []
-
-    def _legacy_transcript_db(self):
-        """Return the existing transcript handle until P2 message ownership moves."""
-        if self._transcript_db is not None:
-            return self._transcript_db
-        try:
-            from hermes_state import SessionDB
-
-            self._transcript_db = SessionDB()
-        except Exception:
-            logger.debug("Transcript DB unavailable", exc_info=True)
-            self._transcript_db = None
-        return self._transcript_db
 
 
 def build_session_context(

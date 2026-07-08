@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from gateway import status
+import channels.runtime_status as status
 
 
 class TestGatewayPidState:
@@ -1054,4 +1054,3 @@ class TestActiveAgentsTurnBoundaryWrite:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         status.write_runtime_status(gateway_state="running", active_agents=-5)
         assert status.read_runtime_status()["active_agents"] == 0
-

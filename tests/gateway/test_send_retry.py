@@ -11,8 +11,9 @@ Verifies that:
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from channels.platforms.base import BasePlatformAdapter, SendResult, _RETRYABLE_ERROR_PATTERNS
-from channels.platforms.base import Platform, PlatformConfig
+from channels.config import Platform, PlatformConfig
+from channels.platforms.base import BasePlatformAdapter
+from channels.platforms.base_models import SendResult, _RETRYABLE_ERROR_PATTERNS
 
 
 # ---------------------------------------------------------------------------

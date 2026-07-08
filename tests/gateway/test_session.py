@@ -13,11 +13,25 @@ from gateway.session import (
     build_session_key,
     canonical_whatsapp_identifier,
 )
+from hermes_agent.repositories.session_repo import SessionSpec
 
 # Legacy name preserved for these tests; product renamed the function to
 # canonical_whatsapp_identifier.  Keep the tests referencing the old name
 # working without duplicating the suite.
 normalize_whatsapp_identifier = canonical_whatsapp_identifier
+
+
+def _session_store_with_storage(tmp_path):
+    from hermes_agent.repositories.session_repo import SessionRepoImpl
+    from hermes_agent.storage.session_repository_db import connect_session_repository_db
+
+    conn = connect_session_repository_db(tmp_path / "state.db")
+    return SessionStore(
+        sessions_dir=tmp_path,
+        config=GatewayConfig(),
+        session_repo=SessionRepoImpl(conn),
+        storage_conn=conn,
+    )
 
 
 class TestSessionSourceRoundtrip:
@@ -504,19 +518,12 @@ class TestSessionStoreRewriteTranscript:
     """Regression: /retry and /undo must persist truncated history to DB."""
 
     @pytest.fixture()
-    def store(self, tmp_path, monkeypatch):
-        import hermes_state
-        from hermes_state import SessionDB
-
-        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
-        config = GatewayConfig()
-        s = SessionStore(sessions_dir=tmp_path, config=config, session_repo=MagicMock())
-        s._transcript_db = SessionDB(db_path=tmp_path / "state.db")
-        return s
+    def store(self, tmp_path):
+        return _session_store_with_storage(tmp_path)
 
     def test_rewrite_replaces_transcript(self, store, tmp_path):
         session_id = "test_session_1"
-        store._transcript_db.create_session(session_id=session_id, source="test")
+        store._session_repo.create(SessionSpec(session_id=session_id, source="test"))
         # Write initial transcript
         for msg in [
             {"role": "user", "content": "hello"},
@@ -539,7 +546,7 @@ class TestSessionStoreRewriteTranscript:
 
     def test_rewrite_with_empty_list(self, store):
         session_id = "test_session_2"
-        store._transcript_db.create_session(session_id=session_id, source="test")
+        store._session_repo.create(SessionSpec(session_id=session_id, source="test"))
         store.append_to_transcript(session_id, {"role": "user", "content": "hi"})
 
         store.rewrite_transcript(session_id, [])
@@ -552,28 +559,16 @@ class TestLoadTranscriptDBOnly:
     """After spec 002, load_transcript reads only from state.db."""
 
     def test_db_only_returns_empty_for_nonexistent(self, tmp_path, monkeypatch):
-        import hermes_state
-        from hermes_state import SessionDB
-
-        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
-        config = GatewayConfig()
-        store = SessionStore(sessions_dir=tmp_path, config=config, session_repo=MagicMock())
-        store._transcript_db = SessionDB(db_path=tmp_path / "state.db")
+        store = _session_store_with_storage(tmp_path)
         result = store.load_transcript("nonexistent")
         assert result == []
 
     def test_db_only_returns_messages(self, tmp_path, monkeypatch):
-        import hermes_state
-        from hermes_state import SessionDB
-
-        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
-        config = GatewayConfig()
-        store = SessionStore(sessions_dir=tmp_path, config=config, session_repo=MagicMock())
-        store._transcript_db = SessionDB(db_path=tmp_path / "state.db")
+        store = _session_store_with_storage(tmp_path)
         sid = "db_only_session"
-        store._transcript_db.create_session(session_id=sid, source="gateway", model="m")
-        store._transcript_db.append_message(session_id=sid, role="user", content="db-q")
-        store._transcript_db.append_message(session_id=sid, role="assistant", content="db-a")
+        store._session_repo.create(SessionSpec(session_id=sid, source="gateway", model="m"))
+        store.append_to_transcript(sid, {"role": "user", "content": "db-q"})
+        store.append_to_transcript(sid, {"role": "assistant", "content": "db-a"})
 
         result = store.load_transcript(sid)
         assert len(result) == 2
@@ -1179,84 +1174,67 @@ class TestRewriteTranscriptPreservesReasoning:
     """rewrite_transcript must not drop reasoning fields from SQLite."""
 
     def test_reasoning_survives_rewrite(self, tmp_path):
-        from hermes_state import SessionDB
-
-        db = SessionDB(db_path=tmp_path / "test.db")
+        store = _session_store_with_storage(tmp_path)
         session_id = "reasoning-test"
-        db.create_session(session_id=session_id, source="cli")
+        store._session_repo.create(SessionSpec(session_id=session_id, source="cli"))
 
         # Insert a message WITH all three reasoning fields
-        db.append_message(
-            session_id=session_id,
-            role="assistant",
-            content="The answer is 42.",
-            reasoning="I need to think step by step.",
-            reasoning_content="provider scratchpad",
-            reasoning_details=[{"type": "summary", "text": "step by step"}],
-            codex_reasoning_items=[{"id": "r1", "type": "reasoning"}],
-        )
+        store.append_to_transcript(session_id, {
+            "role": "assistant",
+            "content": "The answer is 42.",
+            "reasoning": "I need to think step by step.",
+            "reasoning_content": "provider scratchpad",
+            "reasoning_details": [{"type": "summary", "text": "step by step"}],
+            "codex_reasoning_items": [{"id": "r1", "type": "reasoning"}],
+        })
 
         # Verify all three were stored
-        before = db.get_messages_as_conversation(session_id)
+        before = store.load_transcript(session_id)
         assert before[0].get("reasoning") == "I need to think step by step."
         assert before[0].get("reasoning_content") == "provider scratchpad"
         assert before[0].get("reasoning_details") == [{"type": "summary", "text": "step by step"}]
         assert before[0].get("codex_reasoning_items") == [{"id": "r1", "type": "reasoning"}]
 
-        # Now simulate /retry: build the SessionStore and call rewrite_transcript
-        config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path, config=config)
-        store._db = db
-        store._loaded = True
-
         # rewrite_transcript receives the messages that load_transcript returned
         store.rewrite_transcript(session_id, before)
 
         # Load again — all three reasoning fields must survive
-        after = db.get_messages_as_conversation(session_id)
+        after = store.load_transcript(session_id)
         assert after[0].get("reasoning") == "I need to think step by step."
         assert after[0].get("reasoning_content") == "provider scratchpad"
         assert after[0].get("reasoning_details") == [{"type": "summary", "text": "step by step"}]
         assert after[0].get("codex_reasoning_items") == [{"id": "r1", "type": "reasoning"}]
 
-    def test_db_rewrite_is_atomic_on_insert_failure(self, tmp_path, monkeypatch):
-        from hermes_state import SessionDB
+    def test_db_rewrite_is_atomic_on_insert_failure(self, tmp_path):
+        from hermes_agent.repositories.message_repo import MessageRepository
 
-        db = SessionDB(db_path=tmp_path / "test.db")
+        store = _session_store_with_storage(tmp_path)
         session_id = "atomic-rewrite-test"
-        db.create_session(session_id=session_id, source="cli")
-        db.append_message(session_id=session_id, role="user", content="before user")
-        db.append_message(session_id=session_id, role="assistant", content="before assistant")
+        store._session_repo.create(SessionSpec(session_id=session_id, source="cli"))
+        store.append_to_transcript(session_id, {"role": "user", "content": "before user"})
+        store.append_to_transcript(session_id, {"role": "assistant", "content": "before assistant"})
 
-        config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path, config=config)
-        store._db = db
-        store._loaded = True
-
-        # Force the second insert inside replace_messages to fail, simulating
+        # Force the second insert inside replace_conversation to fail, simulating
         # any storage-layer error that might abort a multi-row rewrite.
-        real_encode = SessionDB._encode_content
         calls = {"n": 0}
+        original_insert = MessageRepository._insert_message
 
-        def flaky_encode(cls, content):
+        def flaky_insert(self, session_id, message, timestamp):
             calls["n"] += 1
             if calls["n"] == 2:
                 raise RuntimeError("simulated storage failure")
-            return real_encode.__func__(cls, content)
+            return original_insert(self, session_id, message, timestamp)
 
-        monkeypatch.setattr(SessionDB, "_encode_content", classmethod(flaky_encode))
+        with patch.object(MessageRepository, "_insert_message", flaky_insert):
+            replacement = [
+                {"role": "user", "content": "after user"},
+                {"role": "assistant", "content": "after assistant"},
+            ]
 
-        replacement = [
-            {"role": "user", "content": "after user"},
-            {"role": "assistant", "content": "after assistant"},
-        ]
-
-        store.rewrite_transcript(session_id, replacement)
+            store.rewrite_transcript(session_id, replacement)
 
         # The rewrite must roll back atomically — original messages preserved.
-        after = db.get_messages_as_conversation(session_id)
+        after = store.load_transcript(session_id)
         assert [msg["content"] for msg in after] == [
             "before user",
             "before assistant",

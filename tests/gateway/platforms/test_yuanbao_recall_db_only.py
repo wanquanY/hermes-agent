@@ -10,24 +10,28 @@ rows), recall falls through to content-match.
 """
 from gateway.session import SessionStore
 from gateway.config import GatewayConfig
+from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+from hermes_agent.storage.session_repository_db import connect_session_repository_db
 
 
-def _pin_db(monkeypatch, tmp_path):
-    """Force SessionDB() to write into tmp_path instead of the real ~/.hermes."""
-    import hermes_state
-    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+def _session_store_with_storage(tmp_path):
+    conn = connect_session_repository_db(tmp_path / "state.db")
+    repo = SessionRepoImpl(conn)
+    return SessionStore(
+        sessions_dir=tmp_path,
+        config=GatewayConfig(),
+        session_repo=repo,
+        storage_conn=conn,
+    ), repo
 
 
-def test_recall_branch_a1_exact_id_match_round_trips_through_db(tmp_path, monkeypatch):
+def test_recall_branch_a1_exact_id_match_round_trips_through_db(tmp_path):
     """A user message persisted with ``message_id`` must round-trip through
     state.db so recall can find and redact it by exact id (branch A1)."""
-    _pin_db(monkeypatch, tmp_path)
-
-    config = GatewayConfig()
-    store = SessionStore(sessions_dir=tmp_path, config=config)
+    store, repo = _session_store_with_storage(tmp_path)
 
     sid = "test-yuanbao-recall-a1"
-    store._db.create_session(session_id=sid, source="yuanbao:group:G")
+    repo.create(SessionSpec(session_id=sid, source="yuanbao:group:G"))
     store.append_to_transcript(sid, {
         "role": "user",
         "content": "sensitive content",
@@ -58,16 +62,13 @@ def test_recall_branch_a1_exact_id_match_round_trips_through_db(tmp_path, monkey
     assert target["content"] == "sensitive content"
 
 
-def test_recall_branch_a2_content_match_when_no_platform_id(tmp_path, monkeypatch):
+def test_recall_branch_a2_content_match_when_no_platform_id(tmp_path):
     """Rows that lack a platform_message_id (e.g. agent-processed @bot
     messages) still match by content as a fallback."""
-    _pin_db(monkeypatch, tmp_path)
-
-    config = GatewayConfig()
-    store = SessionStore(sessions_dir=tmp_path, config=config)
+    store, repo = _session_store_with_storage(tmp_path)
 
     sid = "test-yuanbao-recall-a2"
-    store._db.create_session(session_id=sid, source="yuanbao:group:G")
+    repo.create(SessionSpec(session_id=sid, source="yuanbao:group:G"))
     # No message_id on the dict — simulates an agent-processed message
     # that did not carry the platform msg_id through.
     store.append_to_transcript(sid, {

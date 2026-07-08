@@ -252,7 +252,7 @@ def _read_json_file(path: Path) -> Optional[dict[str, Any]]:
         return None
     try:
         raw = path.read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     if not raw:
         return None
@@ -274,7 +274,7 @@ def _read_pid_record(pid_path: Optional[Path] = None) -> Optional[dict]:
 
     try:
         raw = pid_path.read_text().strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         # File was deleted between exists() and read_text(), or permission flipped.
         return None
     if not raw:
