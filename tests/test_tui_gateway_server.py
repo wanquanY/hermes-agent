@@ -2884,24 +2884,19 @@ def test_commands_catalog_filters_gateway_only_commands_and_keeps_status_visible
     assert "/set-home" not in canon
 
 
-def test_session_status_reads_live_gateway_agent(monkeypatch):
+def test_session_status_reads_live_gateway_agent(monkeypatch, tmp_path):
     agent = types.SimpleNamespace(
         model="live-model",
         provider="live-provider",
         session_total_tokens=1234,
     )
     server._sessions["sid"] = _session(agent=agent, running=True)
-
-    class _DB:
-        def get_session(self, key):
-            assert key == "session-key"
-            return {
-                "title": "Live TUI",
-                "started_at": 1_700_000_000,
-                "updated_at": 1_700_000_060,
-            }
-
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    db = _title_gateway_db(tmp_path, rows=[("session-key", "Live TUI")])
+    db._conn.execute(
+        "UPDATE sessions SET started_at = ?, updated_at = ? WHERE id = ?",
+        (1_700_000_000, 1_700_000_060, "session-key"),
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     try:
         resp = server.handle_request(
             {"id": "1", "method": "session.status", "params": {"session_id": "sid"}}

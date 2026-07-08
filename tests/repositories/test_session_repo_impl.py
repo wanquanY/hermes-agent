@@ -150,6 +150,43 @@ def test_get_returns_session_or_none():
     assert got.session_id == "s1"
 
 
+def test_get_supports_legacy_session_schema_without_updated_at_or_kind_columns():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            title TEXT,
+            display_title TEXT,
+            display_title_source TEXT,
+            started_at REAL NOT NULL,
+            last_active REAL,
+            ended_at REAL,
+            parent_session_id TEXT
+        );
+        INSERT INTO sessions (
+            id, source, title, display_title, display_title_source,
+            started_at, last_active, ended_at, parent_session_id
+        ) VALUES (
+            'legacy-team', 'team_mission', 'Legacy', 'Legacy Display', 'user',
+            10, 20, NULL, ''
+        );
+        """
+    )
+    repo = SessionRepoImpl(conn)
+
+    got = repo.get("legacy-team")
+
+    assert got is not None
+    assert got.session_id == "legacy-team"
+    assert got.display_title == "Legacy Display"
+    assert got.session_kind == "hermes_session"
+    assert got.conversation_kind == "team"
+    assert got.updated_at == 20
+
+
 def test_list_default_excludes_ended_sessions():
     conn = _make_conn()
     repo = SessionRepoImpl(conn)

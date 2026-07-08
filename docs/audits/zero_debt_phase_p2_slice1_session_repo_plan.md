@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_5`
+状态：`in_progress_checkpoint_6`
 
 ## 前置门槛
 
@@ -13,7 +13,7 @@
 P1 human sign-off 已通过，P2 已开始执行。当前 checkpoint 已完成
 `gateway.SessionStore`、TUI `session.create` 的 repo-backed 写入迁移，以及
 TUI `session.list/session.most_recent/session.index.list` 的 read-model owner
-迁移，以及 TUI `session.title` 的 repo-backed metadata 写入迁移。
+迁移，以及 TUI `session.title/session.status` 的 repo-backed metadata 迁移。
 
 ## 目标
 
@@ -328,3 +328,47 @@ python -m py_compile hermes_agent/repositories/session_repo.py tui_gateway/metho
 - `session.delete/status/usage/resume/messages` 仍有 legacy DB facade 依赖。
 - `SessionDB.set_session_title/get_session_title/get_session_by_title` 旧方法
   仍存在，待所有非 gateway 调用者迁移后删除。
+
+## Checkpoint 6 证据
+
+已完成：
+
+- `tui_gateway.methods.session` 的 `session.status` 不再调用
+  `db.get_session/db.get_session_by_title` 读取 stored metadata，改由
+  `SessionRepoImpl.get/get_by_title` 读取 title/created/updated。
+- `session.status` 的运行态仍通过 `_session_run_snapshot/run_control`
+  projection 负责；本 checkpoint 不把 run-state owner 混进 session repo。
+- `SessionRepoImpl` 增加 legacy `sessions` schema projection 支持：旧库缺少
+  `updated_at/session_kind/conversation_kind` 时，分别通过
+  `last_active/start_at` 与明确表达式派生，避免 repo 接入真实旧库时报
+  `OperationalError`。
+- `tests/test_tui_gateway_server.py::test_session_status_reads_live_gateway_agent`
+  改成真实 SQLite/repo-backed stored metadata。
+- `tests/repositories/test_session_repo_impl.py` 增加 legacy schema projection
+  regression test。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/repositories/session_repo.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py
+.venv/bin/pytest tests/test_tui_gateway_server.py::test_session_status_reads_live_gateway_agent tests/gateway/test_session_list_allowed_sources.py::test_session_status_reads_stored_profile_session_without_runtime tests/tui_gateway/test_protocol.py::test_session_status_returns_machine_readable_run_state tests/repositories/test_session_repo_impl.py -q
+.venv/bin/ruff check hermes_agent/repositories/session_repo.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py
+.venv/bin/pytest tests/test_tui_gateway_server.py -k "session_status or session_title" tests/gateway/test_session_list_allowed_sources.py::test_session_status_reads_stored_profile_session_without_runtime tests/tui_gateway/test_protocol.py::test_session_status_returns_machine_readable_run_state tests/tui_gateway/test_ws_dispatch.py::test_run_status_uses_control_plane_executor tests/repositories/test_session_repo_impl.py -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Session status/title/repo/routing 组合测试：`13 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `session.delete/usage/resume/messages` 仍有 legacy DB facade 依赖。
+- `session.status` 的 run-state projection 仍经 `run_control`，后续应在
+  RunState owner slice 中统一收口。

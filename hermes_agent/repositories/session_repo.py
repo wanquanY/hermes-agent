@@ -136,6 +136,7 @@ class SessionRepoImpl:
 
     def __init__(self, conn: RepositoryConnection) -> None:
         self._conn = conn
+        self._session_columns = _table_columns(conn, "sessions")
 
     # ------------------------------------------------------------------
     # spec §4.1 API
@@ -205,13 +206,7 @@ class SessionRepoImpl:
         if not stable:
             return None
         row = self._conn.execute(
-            """
-            SELECT id, source, title, display_title, session_kind,
-                   conversation_kind, started_at, updated_at, ended_at,
-                   parent_session_id
-              FROM sessions
-             WHERE id = ?
-            """,
+            self._session_select_sql("WHERE id = ?"),
             (stable,),
         ).fetchone()
         if row is None:
@@ -225,25 +220,15 @@ class SessionRepoImpl:
             clauses.append("source = ?")
             params.append(str(filter.source))
         if filter.session_kind is not None:
-            clauses.append("session_kind = ?")
+            clauses.append(f"{self._session_kind_expr()} = ?")
             params.append(str(filter.session_kind))
         if filter.conversation_kind is not None:
-            clauses.append("conversation_kind = ?")
+            clauses.append(f"{self._conversation_kind_expr()} = ?")
             params.append(str(filter.conversation_kind))
         if not filter.include_ended:
             clauses.append("ended_at IS NULL")
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-        sql = (
-            f"""
-            SELECT id, source, title, display_title, session_kind,
-                   conversation_kind, started_at, updated_at, ended_at,
-                   parent_session_id
-              FROM sessions
-              {where}
-             ORDER BY started_at DESC
-             LIMIT ?
-            """
-        )
+        sql = self._session_select_sql(f"{where} ORDER BY started_at DESC LIMIT ?")
         params.append(int(filter.limit))
         rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_session(r) for r in rows]
@@ -306,13 +291,7 @@ class SessionRepoImpl:
         if not normalized:
             return None
         row = self._conn.execute(
-            """
-            SELECT id, source, title, display_title, session_kind,
-                   conversation_kind, started_at, updated_at, ended_at,
-                   parent_session_id
-              FROM sessions
-             WHERE title = ?
-            """,
+            self._session_select_sql("WHERE title = ?"),
             (normalized,),
         ).fetchone()
         if row is None:
@@ -336,23 +315,20 @@ class SessionRepoImpl:
                 raise ValueError(
                     f"Title {normalized_title!r} is already in use by session {conflict['id']}"
                 )
+        now = time.time()
+        assignments = ["title = ?", "display_title = COALESCE(?, '')", "display_title_source = ?"]
+        values: list[Any] = [normalized_title, normalized_title or "", normalized_source]
+        if "updated_at" in self._session_columns:
+            assignments.append("updated_at = ?")
+            values.append(now)
+        elif "last_active" in self._session_columns:
+            assignments.append("last_active = ?")
+            values.append(now)
+        values.append(stable)
         rowcount = int(
             self._conn.execute(
-                """
-                UPDATE sessions
-                   SET title = ?,
-                       display_title = COALESCE(?, ''),
-                       display_title_source = ?,
-                       updated_at = ?
-                 WHERE id = ?
-                """,
-                (
-                    normalized_title,
-                    normalized_title or "",
-                    normalized_source,
-                    time.time(),
-                    stable,
-                ),
+                f"UPDATE sessions SET {', '.join(assignments)} WHERE id = ?",
+                values,
             ).rowcount
             or 0
         )
@@ -367,6 +343,47 @@ class SessionRepoImpl:
                 (normalized_title or "", time.time(), stable),
             )
         return rowcount > 0
+
+    def _session_select_sql(self, suffix: str) -> str:
+        return (
+            "SELECT "
+            "id, source, title, "
+            f"{self._display_title_expr()} AS display_title, "
+            f"{self._session_kind_expr()} AS session_kind, "
+            f"{self._conversation_kind_expr()} AS conversation_kind, "
+            "started_at, "
+            f"{self._updated_at_expr()} AS updated_at, "
+            "ended_at, "
+            f"{self._parent_session_id_expr()} AS parent_session_id "
+            f"FROM sessions {suffix}"
+        )
+
+    def _display_title_expr(self) -> str:
+        if "display_title" in self._session_columns:
+            return "display_title"
+        return "title"
+
+    def _session_kind_expr(self) -> str:
+        if "session_kind" in self._session_columns:
+            return "session_kind"
+        return "'hermes_session'"
+
+    def _conversation_kind_expr(self) -> str:
+        if "conversation_kind" in self._session_columns:
+            return "conversation_kind"
+        return "CASE WHEN source = 'team_mission' THEN 'team' ELSE 'direct' END"
+
+    def _updated_at_expr(self) -> str:
+        if "updated_at" in self._session_columns:
+            return "updated_at"
+        if "last_active" in self._session_columns:
+            return "COALESCE(last_active, started_at)"
+        return "started_at"
+
+    def _parent_session_id_expr(self) -> str:
+        if "parent_session_id" in self._session_columns:
+            return "parent_session_id"
+        return "''"
 
     def branch(self, source_id: str, spec: BranchSpec) -> Session:
         stable_src = str(source_id or "").strip()
@@ -507,6 +524,16 @@ def _encode_model_config(value: dict[str, Any] | str | None) -> str | None:
 
 def _sanitize_title(title: str) -> str:
     return " ".join(str(title or "").strip().split())
+
+
+def _table_columns(conn: RepositoryConnection, table_name: str) -> set[str]:
+    try:
+        return {
+            str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+            for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+    except Exception:
+        return set()
 
 
 __all__ = [

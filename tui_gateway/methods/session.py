@@ -2195,19 +2195,26 @@ def _(rid, params: dict) -> dict:
     runtime_sid, session = _resolve_runtime_session(requested)
     key = str((session or {}).get("session_key") or requested)
     agent = (session or {}).get("agent")
-    meta = {}
     db = _db_for_session_request(params, key)
-    if db and key:
+    repo = _session_repo_for_db(db) if db else None
+    meta_title = ""
+    meta_started_at = 0.0
+    meta_updated_at = 0.0
+    if repo and key:
         try:
-            meta = db.get_session(key) or {}
-            if not meta:
-                by_title = db.get_session_by_title(key)
+            stored = repo.get(key)
+            if not stored:
+                by_title = repo.get_by_title(key)
                 if by_title:
-                    key = by_title["id"]
-                    meta = by_title
+                    key = by_title.session_id
+                    stored = by_title
+            if stored:
+                meta_title = stored.title
+                meta_started_at = stored.started_at
+                meta_updated_at = stored.updated_at
         except Exception:
-            meta = {}
-    if db and not meta and session is None:
+            pass
+    if db and repo and not meta_started_at and session is None:
         return _err(rid, 4007, "session not found")
 
     def _dt(value, fallback: datetime | None = None) -> datetime:
@@ -2218,12 +2225,10 @@ def _(rid, params: dict) -> dict:
                 pass
         return fallback or datetime.now()
 
-    created = _dt(meta.get("started_at"))
+    created = _dt(meta_started_at)
     updated = created
-    for field in ("updated_at", "last_updated_at", "last_activity_at"):
-        if meta.get(field):
-            updated = _dt(meta.get(field), created)
-            break
+    if meta_updated_at:
+        updated = _dt(meta_updated_at, created)
 
     usage = _get_usage(agent) if agent is not None else {}
     provider = getattr(agent, "provider", None) or "unknown"
@@ -2234,7 +2239,7 @@ def _(rid, params: dict) -> dict:
         f"Session ID: {key}",
         f"Path: {display_hermes_home()}",
     ]
-    title = (meta.get("title") or "").strip()
+    title = (meta_title or "").strip()
     if title:
         lines.append(f"Title: {title}")
     lines.extend(
