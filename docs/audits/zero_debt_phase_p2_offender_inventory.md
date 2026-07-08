@@ -8,7 +8,7 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 33 | 3 |
+| `p2:no_sessiondb_production` | 26 | 2 |
 | `p2:no_legacy_identity_alias_internal` | 1181 | 78 |
 
 ## p2:no_sessiondb_production
@@ -16,7 +16,6 @@ Status: `preflight_only`
 | Offenders | File | First evidence |
 |---:|---|---|
 | 25 | `hermes_state.py` | `35` from hermes_state_activities import ActivitiesMixin |
-| 7 | `gateway/run.py` | `1759` from hermes_state import SessionDB |
 | 1 | `hermes_agent/storage/migrations/0001_declarative_baseline.py` | `22` from hermes_state import SCHEMA_SQL |
 
 ## p2:no_legacy_identity_alias_internal

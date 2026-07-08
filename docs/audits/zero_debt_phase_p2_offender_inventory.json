@@ -2577,7 +2577,7 @@
       "total_offenders": 1181
     },
     "p2:no_sessiondb_production": {
-      "file_count": 3,
+      "file_count": 2,
       "files": [
         {
           "first_lines": [
@@ -2623,48 +2623,6 @@
         {
           "first_lines": [
             {
-              "line": 1759,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 1760,
-              "text": "self._session_db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 2161,
-              "text": "# Only honor a real True from the SessionDB. Any other value",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 6143,
-              "text": "logger.debug(\"SessionDB close error: %s\", _e)",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 6145,
-              "text": "\"Shutdown phase: SessionDB close done at +%.2fs\",",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 7,
-          "path": "gateway/run.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 22,
               "text": "from hermes_state import SCHEMA_SQL",
               "tokens": [
@@ -2676,7 +2634,7 @@
           "path": "hermes_agent/storage/migrations/0001_declarative_baseline.py"
         }
       ],
-      "total_offenders": 33
+      "total_offenders": 26
     }
   },
   "phase": "P2",

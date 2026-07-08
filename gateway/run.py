@@ -1756,8 +1756,7 @@ class GatewayRunner:
         self._session_db = None
         self._session_db_error: Optional[str] = None
         try:
-            from hermes_state import SessionDB
-            self._session_db = SessionDB()
+            self._session_db = open_cli_session_store()
         except Exception as e:
             # WARNING (not DEBUG) so the failure appears in errors.log — matches
             # cli.py's handling of the same init path.  Users hitting NFS-mounted
@@ -2158,7 +2157,7 @@ class GatewayRunner:
         except Exception:
             logger.debug("Failed to read Telegram topic mode state", exc_info=True)
             return False
-        # Only honor a real True from the SessionDB. Any other value
+        # Only honor a real True from the session store. Any other value
         # (including MagicMock instances from test fixtures that didn't
         # opt into topic mode) means topic mode is off for this chat.
         return raw is True
@@ -6140,9 +6139,9 @@ class GatewayRunner:
                 try:
                     _db.close()
                 except Exception as _e:
-                    logger.debug("SessionDB close error: %s", _e)
+                    logger.debug("session store close error: %s", _e)
             logger.info(
-                "Shutdown phase: SessionDB close done at +%.2fs",
+                "Shutdown phase: session store close done at +%.2fs",
                 _phase_elapsed(),
             )
 
@@ -9519,7 +9518,7 @@ class GatewayRunner:
         # Pull token totals from the SQLite session DB rather than the
         # in-memory SessionStore.  The agent's per-turn token deltas are
         # persisted into sessions_db (run_agent.py), not into SessionEntry,
-        # so session_entry.total_tokens is always 0.  SessionDB is the
+        # so session_entry.total_tokens is always 0.  The session store is the
         # single source of truth; reading it here keeps /status accurate
         # without duplicating token writes into two stores.
         db_total_tokens = 0
@@ -12787,7 +12786,7 @@ class GatewayRunner:
 
         # Resolve provider/base_url/api_key for the account-usage fetch.
         # Prefer the live agent; fall back to persisted billing data on the
-        # SessionDB row so `/usage` still returns account info between turns
+        # session-store row so `/usage` still returns account info between turns
         # when no agent is resident.
         provider = getattr(agent, "provider", None) if agent and agent is not _AGENT_PENDING_SENTINEL else None
         base_url = getattr(agent, "base_url", None) if agent and agent is not _AGENT_PENDING_SENTINEL else None
