@@ -9,6 +9,7 @@ from dovie_extension.display_transcript import (
     sanitize_session_list_item,
     sanitize_transcript_messages,
 )
+from hermes_agent.domain.session_deletion import SessionDeletionService
 from hermes_agent.read_models.session_index import SessionIndexQuery, SessionIndexReadModel
 from hermes_agent.read_models.session_list import SessionListQuery, SessionListReadModel
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
@@ -158,6 +159,13 @@ def _session_index_read_model_for_db(db):
     if conn is None:
         return None
     return SessionIndexReadModel(conn)
+
+
+def _session_deletion_service_for_db(db):
+    conn = getattr(db, "_conn", None)
+    if conn is None:
+        return None
+    return SessionDeletionService(conn)
 
 
 def _requested_runtime_executor(params: dict | None = None) -> str:
@@ -1997,12 +2005,15 @@ def _(rid, params: dict) -> dict:
     active = {s.get("session_key") for s in snapshot if s.get("session_key")}
     if target in active:
         return _err(rid, 4023, "cannot delete an active session")
+    deletion_service = _session_deletion_service_for_db(db)
+    if deletion_service is None:
+        return _err(rid, 5036, "session deletion service unavailable")
     sessions_dir = Path(get_hermes_home()) / "sessions"
     try:
-        deleted = db.delete_session(target, sessions_dir=sessions_dir)
+        deletion = deletion_service.delete(target, sessions_dir=sessions_dir)
     except Exception as e:
         return _err(rid, 5036, f"delete failed: {e}")
-    if not deleted:
+    if not deletion.session_deleted:
         # The sessions row is gone but session_index may still carry an
         # orphan — typical for a session whose creation flow failed mid-way
         # (e.g. a model-switch error terminates the run before any message
@@ -2013,28 +2024,9 @@ def _(rid, params: dict) -> dict:
         # orphan case fixed earlier. Sweep the index row too and report
         # success so the client treats it as deleted (it IS deleted — the
         # only state that survived was the index row).
-        index_removed = 0
-        if hasattr(db, "delete_session_index"):
-            try:
-                index_removed = int(db.delete_session_index(target) or 0)
-            except Exception:
-                logger.debug(
-                    "session.delete: session_index cleanup failed", exc_info=True
-                )
-        if index_removed > 0:
+        if deletion.index_deleted:
             return _ok(rid, {"deleted": target, "via": "session_index_cleanup"})
         return _err(rid, 4007, "session not found")
-    # Also sweep session_index whenever the sessions row was removed — the
-    # write path normally keeps them in sync, but a crashed projector / older
-    # row created before session_index existed would otherwise leave a stale
-    # index entry pointing at the now-missing session.
-    if hasattr(db, "delete_session_index"):
-        try:
-            db.delete_session_index(target)
-        except Exception:
-            logger.debug(
-                "session.delete: session_index post-sweep failed", exc_info=True
-            )
     return _ok(rid, {"deleted": target})
 
 

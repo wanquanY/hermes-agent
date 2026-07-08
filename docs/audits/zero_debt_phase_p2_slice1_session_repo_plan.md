@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_6`
+状态：`in_progress_checkpoint_7`
 
 ## 前置门槛
 
@@ -13,7 +13,8 @@
 P1 human sign-off 已通过，P2 已开始执行。当前 checkpoint 已完成
 `gateway.SessionStore`、TUI `session.create` 的 repo-backed 写入迁移，以及
 TUI `session.list/session.most_recent/session.index.list` 的 read-model owner
-迁移，以及 TUI `session.title/session.status` 的 repo-backed metadata 迁移。
+迁移，以及 TUI `session.title/session.status` 的 repo-backed metadata 迁移，
+并将 TUI `session.delete` 迁到独立 domain deletion service。
 
 ## 目标
 
@@ -370,5 +371,56 @@ python scripts/zero_debt/verdict.py --phase P2 --json
 剩余工作：
 
 - `session.delete/usage/resume/messages` 仍有 legacy DB facade 依赖。
+- `session.status` 的 run-state projection 仍经 `run_control`，后续应在
+  RunState owner slice 中统一收口。
+
+## Checkpoint 7 证据
+
+已完成：
+
+- 新增 `hermes_agent/domain/session_deletion.py`，由
+  `SessionDeletionService` 接管 session destructive lifecycle：
+  `sessions` 行删除、`session_index` 清理、`messages` 删除、
+  `session_lineage` 断链、`session_branch_requests` 清理，以及
+  `HERMES_HOME/sessions` 下 transcript/request dump 文件清理。
+- `SessionDeletionService` 刻意不放入 `SessionRepoImpl`：
+  deletion 跨越 session metadata、message transcript、branch lineage、
+  sidebar index 和文件系统，属于 destructive domain service，不是单一
+  repository aggregate 的 CRUD 方法。
+- `tui_gateway.methods.session` 的 `session.delete` 不再调用
+  `db.delete_session` 或 `db.delete_session_index`；active-session fail-closed
+  检查仍在 gateway 入口执行，真正删除交给 `SessionDeletionService`。
+- `tests/test_tui_gateway_server.py` 的 `session.delete` 用例从 fake legacy DB
+  method 迁到真实 SQLite/service 链路；成功路径断言 `sessions`、
+  `session_index` 和 transcript 文件均被清理。
+- 新增 `tests/domain/test_session_deletion.py`，覆盖完整 graph/file cleanup、
+  orphan `session_index` cleanup，以及 minimal legacy schema。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/domain/session_deletion.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py tests/domain/test_session_deletion.py
+.venv/bin/pytest tests/domain/test_session_deletion.py tests/test_tui_gateway_server.py -k session_delete -q
+.venv/bin/ruff check hermes_agent/domain/session_deletion.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py tests/domain/test_session_deletion.py
+.venv/bin/pytest tests/test_tui_gateway_server.py -k "session_delete or session_status or session_title" tests/repositories/test_session_repo_impl.py tests/gateway/test_session_list_allowed_sources.py::test_session_status_reads_stored_profile_session_without_runtime -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Session deletion domain/gateway 定向测试：`8 passed`
+- Session delete/status/title/repo 组合测试：`20 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `session.usage/resume/messages` 仍有 legacy DB facade 依赖。
+- `SessionDB.delete_session/delete_session_index` 旧方法仍存在，待所有直接
+  production 调用者迁移后删除。
 - `session.status` 的 run-state projection 仍经 `run_control`，后续应在
   RunState owner slice 中统一收口。
