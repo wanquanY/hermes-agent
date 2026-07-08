@@ -98,7 +98,7 @@ class TestHandleBackgroundCommand:
             created_tasks.append(mock_task)
             return mock_task
 
-        with patch("gateway.run.asyncio.create_task", side_effect=capture_task):
+        with patch("hermes_gateway.background_tasks.asyncio.create_task", side_effect=capture_task):
             event = _make_event(text="/background Summarize the top HN stories")
             result = await runner._handle_background_command(event)
 
@@ -133,7 +133,7 @@ class TestHandleBackgroundCommand:
             reply_to_message_id="462",
         )
 
-        with patch("gateway.run.asyncio.create_task", side_effect=capture_task):
+        with patch("hermes_gateway.background_tasks.asyncio.create_task", side_effect=capture_task):
             result = await runner._handle_background_command(event)
 
         assert "Background task started" in result
@@ -146,7 +146,7 @@ class TestHandleBackgroundCommand:
         runner = _make_runner()
         long_prompt = "A" * 100
 
-        with patch("gateway.run.asyncio.create_task", side_effect=lambda c, **kw: (c.close(), MagicMock())[1]):
+        with patch("hermes_gateway.background_tasks.asyncio.create_task", side_effect=lambda c, **kw: (c.close(), MagicMock())[1]):
             event = _make_event(text=f"/background {long_prompt}")
             result = await runner._handle_background_command(event)
 
@@ -160,7 +160,7 @@ class TestHandleBackgroundCommand:
         runner = _make_runner()
         task_ids = set()
 
-        with patch("gateway.run.asyncio.create_task", side_effect=lambda c, **kw: (c.close(), MagicMock())[1]):
+        with patch("hermes_gateway.background_tasks.asyncio.create_task", side_effect=lambda c, **kw: (c.close(), MagicMock())[1]):
             for i in range(5):
                 event = _make_event(text=f"/background task {i}")
                 result = await runner._handle_background_command(event)
@@ -177,7 +177,7 @@ class TestHandleBackgroundCommand:
         """The /background command works for all platforms."""
         for platform in [Platform.TELEGRAM, Platform.DISCORD, Platform.SLACK]:
             runner = _make_runner()
-            with patch("gateway.run.asyncio.create_task", side_effect=lambda c, **kw: (c.close(), MagicMock())[1]):
+            with patch("hermes_gateway.background_tasks.asyncio.create_task", side_effect=lambda c, **kw: (c.close(), MagicMock())[1]):
                 event = _make_event(
                     text="/background test task",
                     platform=platform,
@@ -289,7 +289,7 @@ class TestRunBackgroundTask:
         runner._run_in_executor_with_context = AsyncMock(
             return_value={"final_response": "done", "messages": []}
         )
-        monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+        monkeypatch.setattr("hermes_gateway.background_tasks.load_gateway_config", lambda: {})
 
         mock_adapter = AsyncMock()
         mock_adapter.send = AsyncMock()
