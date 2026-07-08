@@ -13,6 +13,7 @@ from typing import Any
 
 from hermes_agent.domain.interaction import InternalRunEventType
 from hermes_agent.domain.interaction import InteractionFrameType
+from tui_gateway.services.run_events import list_runtime_events
 
 _log = logging.getLogger(__name__)
 
@@ -133,9 +134,14 @@ class InteractionRegistry:
         """Recover pending interactions from internal run_events for one session."""
 
         db = self._db
-        if db is None or not hasattr(db, "list_run_events"):
+        if db is None:
             return []
-        events = db.list_run_events(session_id, include_internal=True, limit=5000)
+        events = list_runtime_events(
+            db,
+            session_id,
+            include_internal=True,
+            limit=5000,
+        )
         by_request: dict[str, dict[str, Any]] = {}
         for event in events:
             if not isinstance(event, dict):

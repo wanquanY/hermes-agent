@@ -138,6 +138,27 @@ def test_pending_interactions_recovery_excludes_resolved_and_expired(tmp_path: P
     ]
 
 
+def test_pending_interactions_recovery_uses_run_event_read_model(tmp_path: Path, monkeypatch) -> None:
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("conversation-session-1", "hermes")
+    persist_interaction_event(db, "interaction.requested", _entry("req-pending", anchor_seq=42))
+
+    def fail_legacy_list(*args, **kwargs):
+        raise AssertionError("legacy db.list_run_events must not be called")
+
+    monkeypatch.setattr(db, "list_run_events", fail_legacy_list)
+
+    assert pending_interactions(db, "conversation-session-1") == [
+        {
+            "request_id": "req-pending",
+            "kind": "approval",
+            "status": "pending",
+            "anchor_seq": 42,
+            "seq": 1,
+        }
+    ]
+
+
 def test_interaction_lifecycle_requires_db_append_run_event() -> None:
     with pytest.raises(RuntimeError, match="append_run_event"):
         persist_interaction_event(None, "interaction.requested", _entry("req-1"))

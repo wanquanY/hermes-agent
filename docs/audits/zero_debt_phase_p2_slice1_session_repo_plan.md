@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_16`
+状态：`in_progress_checkpoint_17`
 
 ## 前置门槛
 
@@ -770,8 +770,48 @@ python scripts/zero_debt/verdict.py --phase P2 --json
 
 剩余工作：
 
-- `interaction_registry` pending recovery 仍有 legacy event reader，需要迁到
-  interaction/read-model owner。
+- `run_control` terminal publish 与 run-state memory owner 仍待后续写侧切片
+  收口。
+- Team transcript projector/backfill 仍需要目标 owner。
+- `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。
+
+## Checkpoint 17 证据
+
+已完成：
+
+- `InteractionRegistry.list_pending()` 不再调用 `db.list_run_events`，
+  改为通过 `tui_gateway.services.run_events.list_runtime_events()` 读取
+  `include_internal=True` 的 internal lifecycle events。
+- `tests/gateway/test_interaction_persistence.py` 新增防回退测试：
+  monkeypatch `db.list_run_events` 为失败函数后，`pending_interactions()`
+  仍能从 read model 恢复 pending request。
+- 当前 `rg "list_run_events|list_filtered_run_events|list_tool_events_as_canonical"`
+  的生产结果只剩：
+  - `worker_supervisor.py` 的 worker DB proxy 白名单/说明字符串；
+  - `session_history.py` 关于历史 DB cursor 行为的注释；
+  - `run.py` 的 read-model helper 名称 `_list_filtered_run_events`。
+
+已运行：
+
+```bash
+python -m py_compile tui_gateway/services/interaction_registry.py tests/gateway/test_interaction_persistence.py
+.venv/bin/pytest tests/gateway/test_interaction_persistence.py tests/gateway/test_worker_frame_router.py::test_interaction_request_publishes_independent_frame_and_persists_internal tests/gateway/test_worker_frame_router.py::test_interaction_request_persistence_failure_blocks_delivery -q
+.venv/bin/ruff check tui_gateway/services/interaction_registry.py tests/gateway/test_interaction_persistence.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py tests/observability/test_interaction_registry_single_owner.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Interaction persistence/recovery 定向测试：`11 passed`
+- P2 + interaction observability tests：`11 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
 - `run_control` terminal publish 与 run-state memory owner 仍待后续写侧切片
   收口。
 - Team transcript projector/backfill 仍需要目标 owner。
