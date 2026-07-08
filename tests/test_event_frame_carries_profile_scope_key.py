@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from tui_gateway.run_worker import EventFrame
-from tui_gateway.services.worker_frame_router import WorkerFrameRouter
+from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
 
 
 class _Sender:

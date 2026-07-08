@@ -268,7 +268,7 @@ class TestRespondThreeStateContract:
 
     def test_pending_registry_register_and_lookup(self):
         """PendingRegistry register → lookup → mark_resolved 基本流程。"""
-        from tui_gateway.services.worker_frame_router import PendingRegistry
+        from hermes_agent.orchestration.worker_frame_router import PendingRegistry
 
         registry = PendingRegistry()
         registry.register(
@@ -289,7 +289,7 @@ class TestRespondThreeStateContract:
 
     def test_pending_registry_miss_returns_none(self):
         """lookup 不存在的 request_id 返回 None（miss 语义）。"""
-        from tui_gateway.services.worker_frame_router import PendingRegistry
+        from hermes_agent.orchestration.worker_frame_router import PendingRegistry
 
         registry = PendingRegistry()
         entry = registry.lookup('nonexistent')
@@ -297,7 +297,7 @@ class TestRespondThreeStateContract:
 
     def test_mark_resolved_already_resolved_returns_false(self):
         """mark_resolved 已 resolved 的 entry 返回 False（幂等）。"""
-        from tui_gateway.services.worker_frame_router import PendingRegistry
+        from hermes_agent.orchestration.worker_frame_router import PendingRegistry
 
         registry = PendingRegistry()
         registry.register(

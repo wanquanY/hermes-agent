@@ -12,7 +12,7 @@ from hermes_team_mission.gateway import runtime_methods
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway.run_worker import EventFrame
 from tui_gateway.services import run_control
-from tui_gateway.services.worker_frame_router import WorkerFrameRouter
+from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
 
 
 class _FakeSender:

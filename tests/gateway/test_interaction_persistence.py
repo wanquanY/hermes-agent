@@ -8,7 +8,7 @@ import pytest
 from hermes_state import SessionDB
 from tui_gateway.services.interaction_registry import pending_interactions
 from tui_gateway.services.interaction_registry import persist_interaction_event
-from tui_gateway.services.worker_frame_router import PendingEntry
+from hermes_agent.orchestration.worker_frame_router import PendingEntry
 
 
 def _rows(db_path: Path) -> list[sqlite3.Row]:

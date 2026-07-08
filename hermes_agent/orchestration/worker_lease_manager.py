@@ -17,7 +17,7 @@ from typing import Any, Awaitable, Callable, Optional
 from agent.dovie_diagnostics import emit_dovie_runtime_diagnostic
 from tui_gateway.run_worker import RunTerminalFrame
 from tui_gateway.services.runtime_scope import RuntimeScope
-from tui_gateway.services.worker_supervisor import RunWorker, WorkerSupervisor
+from hermes_agent.orchestration.worker_supervisor import RunWorker, WorkerSupervisor
 
 _log = logging.getLogger(__name__)
 

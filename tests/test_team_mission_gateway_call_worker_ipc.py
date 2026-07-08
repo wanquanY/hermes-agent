@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from hermes_team_mission.runtime import profile_scope
 from hermes_team_mission.state.store import TeamMissionStateStore
-from tui_gateway.services.worker_supervisor import DB_RPC_ALLOWED_METHODS
+from hermes_agent.orchestration.worker_supervisor import DB_RPC_ALLOWED_METHODS
 from hermes_agent.orchestration.worker_rpc_proxy import set_default_worker_rpc_proxy
 
 

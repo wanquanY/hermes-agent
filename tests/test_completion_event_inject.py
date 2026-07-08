@@ -23,7 +23,7 @@ from tui_gateway.run_worker import (
     decode_incoming,
 )
 from tui_gateway.services.agent_runner import _run_context_from_frame
-from tui_gateway.services.worker_frame_router import WorkerFrameRouter
+from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
 
 
 class _NoopBackend(WorkerRunBackend):

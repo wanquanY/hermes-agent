@@ -32,7 +32,7 @@ import pytest
 
 import tools.approval as approval_module
 import tools.clarify_gateway as clarify_module
-from tui_gateway.services.worker_frame_router import (
+from hermes_agent.orchestration.worker_frame_router import (
     PendingEntry,
     PendingRegistry,
     _MISSING,

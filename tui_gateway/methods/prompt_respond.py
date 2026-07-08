@@ -40,7 +40,7 @@ def _pending_registry():
 
     reg = getattr(server, "_interactive_registry", None)
     if reg is None:
-        from tui_gateway.services.worker_frame_router import PendingRegistry
+        from hermes_agent.orchestration.worker_frame_router import PendingRegistry
 
         reg = PendingRegistry(
             publish_event=_publish_interaction_event,

@@ -17,7 +17,7 @@ from hermes_team_mission.state.session_views import transform_to_member_perspect
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway.run_worker import ActivityEventFrame, EventFrame, RunStartFrame, RunTerminalFrame
 from tui_gateway.services.runtime_scope import RuntimeScope
-from tui_gateway.services.worker_frame_router import WorkerFrameRouter
+from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
 from hermes_agent.orchestration.worker_lease_manager import WorkerLeaseManager
 from hermes_agent.orchestration.worker_supervisor import RunWorker
 

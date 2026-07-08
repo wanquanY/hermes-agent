@@ -32,7 +32,7 @@ from tui_gateway.run_worker import (
     LogFrame,
     RunTerminalFrame,
 )
-from tui_gateway.services.worker_frame_router import WorkerFrameRouter
+from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
 
 
 class _FakeSupervisor:
@@ -445,7 +445,7 @@ async def test_run_terminal_clears_stale_pending_for_session() -> None:
 async def test_on_log_uses_main_logger(caplog) -> None:
     import logging
     router, _sup, _events, _ = _make_router()
-    with caplog.at_level(logging.WARNING, logger="tui_gateway.services.worker_frame_router"):
+    with caplog.at_level(logging.WARNING, logger="hermes_agent.orchestration.worker_frame_router"):
         await router.on_log("profile:x", LogFrame(level="warn", text="hello"))
     assert any("hello" in m for m in caplog.messages)
 

@@ -14,7 +14,7 @@ from tui_gateway import server
 from tui_gateway.methods.dispatch import dispatch_agent_async
 from tui_gateway.run_worker import ActivityEventFrame, EventFrame, RunTerminalFrame
 from tui_gateway.services import run_control
-from tui_gateway.services.worker_frame_router import WorkerFrameRouter
+from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
 
 
 CONVERSATION_ID = "conversation-three-layer"

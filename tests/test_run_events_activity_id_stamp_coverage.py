@@ -14,7 +14,7 @@ from hermes_team_mission.domain.run_context import RunContext
 from hermes_team_mission.runtime.conversation_mirror import mirror_event_to_conversation
 from tui_gateway.run_worker import EventFrame, OutgoingFrame, RunTerminalFrame
 from tui_gateway.services import run_control
-from tui_gateway.services.worker_frame_router import WorkerFrameRouter
+from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
 from hermes_agent.orchestration.worker_publish_bridge import WorkerPublishBridge
 
 

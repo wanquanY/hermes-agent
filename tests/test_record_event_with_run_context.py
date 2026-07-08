@@ -10,7 +10,7 @@ from hermes_state import SessionDB
 from hermes_team_mission.domain.run_context import RunContext
 from tui_gateway.run_worker import EventFrame
 from tui_gateway.services.run_control import record_event
-from tui_gateway.services.worker_frame_router import WorkerFrameRouter
+from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
 
 
 def _run_context(
