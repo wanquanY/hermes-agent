@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hermes_agent.repositories.base import RepositoryConnection
+from hermes_agent.repositories.message_repo import MessageRepo, MessageRepoImpl
 
 
 @dataclass(frozen=True)
@@ -24,8 +25,9 @@ class SessionDeletionResult:
 class SessionDeletionService:
     """SQLite-backed session deletion service."""
 
-    def __init__(self, conn: RepositoryConnection) -> None:
+    def __init__(self, conn: RepositoryConnection, message_repo: MessageRepo | None = None) -> None:
         self._conn = conn
+        self._messages = message_repo if message_repo is not None else MessageRepoImpl(conn)
 
     def delete(self, session_id: str, *, sessions_dir: Path | None = None) -> SessionDeletionResult:
         stable = str(session_id or "").strip()
@@ -37,7 +39,7 @@ class SessionDeletionService:
                 _orphan_children(self._conn, stable)
                 _delete_branch_requests(self._conn, stable)
                 _delete_lineage(self._conn, stable)
-                _delete_messages(self._conn, stable)
+                self._messages.delete_by_session(stable)
                 self._conn.execute("DELETE FROM sessions WHERE id = ?", (stable,))
             index_deleted = _delete_session_index(self._conn, stable)
         if existed:
@@ -89,12 +91,6 @@ def _delete_lineage(conn: RepositoryConnection, session_id: str) -> None:
     if not _table_exists(conn, "session_lineage"):
         return
     conn.execute("DELETE FROM session_lineage WHERE session_id = ?", (session_id,))
-
-
-def _delete_messages(conn: RepositoryConnection, session_id: str) -> None:
-    if not _table_exists(conn, "messages"):
-        return
-    conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
 
 
 def _delete_session_index(conn: RepositoryConnection, session_id: str) -> bool:

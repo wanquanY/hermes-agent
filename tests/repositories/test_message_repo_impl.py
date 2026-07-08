@@ -221,6 +221,19 @@ def test_merge_metadata_missing_message_raises():
         repo.merge_metadata("s1", 9999, {"x": 1})
 
 
+def test_delete_by_session_removes_only_target_messages():
+    conn = _make_conn()
+    repo = MessageRepoImpl(conn)
+    repo.append("s1", MessageSpec(session_id="s1", role="user", content="one"))
+    repo.append("s1", MessageSpec(session_id="s1", role="assistant", content="two"))
+    repo.append("s2", MessageSpec(session_id="s2", role="user", content="keep"))
+
+    assert repo.delete_by_session("s1") == 2
+
+    rows = conn.execute("SELECT session_id, content FROM messages ORDER BY id").fetchall()
+    assert [(row["session_id"], row["content"]) for row in rows] == [("s2", "keep")]
+
+
 def test_conversation_message_append_updates_session_projection_via_session_repo():
     conn = _make_conversation_conn()
     sessions = SessionRepoImpl(conn)

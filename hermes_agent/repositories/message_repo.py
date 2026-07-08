@@ -98,6 +98,8 @@ class MessageRepo(Protocol):
         patch: dict[str, Any],
     ) -> Message: ...
 
+    def delete_by_session(self, session_id: str) -> int: ...
+
 
 class MessageRepoImpl:
     """SQLite-backed MessageRepo (spec §4.3)."""
@@ -254,6 +256,18 @@ class MessageRepoImpl:
         got = self._fetch_by_id(int(message_id))
         assert got is not None
         return got
+
+    def delete_by_session(self, session_id: str) -> int:
+        stable_sid = str(session_id or "").strip()
+        if not stable_sid:
+            return 0
+        try:
+            cursor = self._conn.execute("DELETE FROM messages WHERE session_id = ?", (stable_sid,))
+        except sqlite3.OperationalError as exc:
+            if "no such table: messages" in str(exc).lower():
+                return 0
+            raise
+        return int(cursor.rowcount or 0)
 
     def _fetch_by_id(self, message_id: int) -> Message | None:
         row = self._conn.execute(
