@@ -5,8 +5,8 @@ When a message is sent to a platform (via send_message or cron delivery),
 this module appends a "delivery-mirror" record to the target session's
 transcript so the receiving-side agent has context about what was sent.
 
-Standalone -- works from CLI, cron, and gateway contexts without needing
-the full SessionStore machinery.
+Standalone -- works from CLI, cron, and gateway contexts through the shared
+CLI session store owner.
 """
 
 import json
@@ -34,7 +34,7 @@ def mirror_to_session(
     Append a delivery-mirror message to the target session's transcript.
 
     Finds the gateway session that matches the given platform + chat_id,
-    then writes a mirror entry to both the JSONL transcript and SQLite DB.
+    then writes a mirror entry to the durable message store.
 
     Returns True if mirrored successfully, False if no matching session or error.
     All errors are caught -- this is never fatal.
@@ -64,7 +64,7 @@ def mirror_to_session(
             "mirror_source": source_label,
         }
 
-        _append_to_sqlite(session_id, mirror_msg)
+        _append_to_message_store(session_id, mirror_msg)
 
         logger.debug("Mirror: wrote to session %s (from %s)", session_id, source_label)
         return True
@@ -150,19 +150,20 @@ def _find_session_id(
 
 
 
-def _append_to_sqlite(session_id: str, message: dict) -> None:
-    """Append a message to the SQLite session database."""
-    db = None
+def _append_to_message_store(session_id: str, message: dict) -> None:
+    """Append a message through the shared CLI session store."""
+    store = None
     try:
-        from hermes_state import SessionDB
-        db = SessionDB()
-        db.append_message(
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+
+        store = open_cli_session_store()
+        store.append_message(
             session_id=session_id,
             role=message.get("role", "assistant"),
             content=message.get("content"),
         )
     except Exception as e:
-        logger.debug("Mirror SQLite write failed: %s", e)
+        logger.debug("Mirror message store write failed: %s", e)
     finally:
-        if db is not None:
-            db.close()
+        if store is not None:
+            store.close()
