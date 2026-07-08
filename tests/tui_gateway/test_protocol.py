@@ -1431,29 +1431,72 @@ def test_events_subscribe_returns_subscription_id_and_unsubscribes(capture):
     assert unsubscribed["result"]["removed"] == 1
 
 
-def test_run_events_replays_without_creating_subscription(server, monkeypatch):
+def test_run_events_replays_without_creating_subscription(server, monkeypatch, tmp_path):
+    from hermes_agent.domain.event_ledger import EventLedger
     from tui_gateway.services import run_control
 
-    class _RunDB:
-        def list_run_events(self, session_id, *, after_seq=0, active_only=False, runtime_scope_key="", run_id="", limit=2000):
-            assert session_id == "stored-run-events"
-            assert after_seq == 1
-            assert active_only is False
-            assert runtime_scope_key == "profile:agent-a"
-            assert run_id == "run-a"
-            assert limit == 321
-            return [
-                {
-                    "type": "message.delta",
-                    "stored_session_id": session_id,
-                    "run_id": "run-a",
-                    "runtime_scope_key": runtime_scope_key,
-                    "seq": 2,
-                    "payload": {"text": "hello"},
-                }
-            ]
-
-    monkeypatch.setattr(server, "_get_db", lambda: _RunDB())
+    db = _resume_gateway_db(tmp_path)
+    db._conn.execute(
+        """
+        CREATE TABLE run_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            run_id TEXT,
+            turn_id TEXT,
+            runtime_session_id TEXT,
+            runtime_scope_key TEXT,
+            participant_id TEXT,
+            activity_id TEXT,
+            event_type TEXT,
+            seq INTEGER,
+            timestamp REAL,
+            payload_json TEXT,
+            event_json TEXT,
+            status TEXT,
+            frame_blob BLOB,
+            frame_format TEXT,
+            retention_class TEXT,
+            interaction_request_id TEXT,
+            interaction_kind TEXT,
+            interaction_status TEXT,
+            anchor_seq INTEGER,
+            projection_state TEXT,
+            runtime_source_seq INTEGER,
+            projected_tool_event_id TEXT
+        )
+        """
+    )
+    payload = {"text": "hello"}
+    EventLedger(db._conn).append_runtime_frame(
+        session_id="stored-run-events",
+        run_id="run-a",
+        turn_id="turn-a",
+        runtime_session_id="runtime-run-a",
+        runtime_scope_key="profile:agent-a",
+        participant_id="",
+        activity_id="",
+        event_type="message.delta",
+        seq=2,
+        timestamp=123.0,
+        payload_json=json.dumps(payload, ensure_ascii=False),
+        event_json=json.dumps(
+            {
+                "type": "message.delta",
+                "stored_session_id": "stored-run-events",
+                "session_id": "runtime-run-a",
+                "run_id": "run-a",
+                "runtime_scope_key": "profile:agent-a",
+                "seq": 2,
+                "payload": payload,
+            },
+            ensure_ascii=False,
+        ),
+        status="",
+        frame_blob=None,
+        frame_format="",
+        retention_class="",
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: db)
 
     resp = server.handle_request(
         {

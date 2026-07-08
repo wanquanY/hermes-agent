@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_13`
+状态：`in_progress_checkpoint_14`
 
 ## 前置门槛
 
@@ -725,4 +725,54 @@ python scripts/zero_debt/verdict.py --phase P2 --json
 - Team transcript projector/backfill 仍需要目标 owner。
 - Event read side 仍有 `list_run_events` 直连，需要 run-event read-model
   切片继续削减旧 DB facade。
+- `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。
+
+## Checkpoint 14 证据
+
+已完成：
+
+- 新增 `RunEventReadModel`，由 `EventLedger` 查询物理 row，并在新 owner
+  内完成 event decode、reference payload rehydrate、participant/activity
+  projection。
+- 新增 `tui_gateway.services.run_events`，作为 gateway 层唯一 run-event
+  read-model 接线入口。
+- `session.messages` 的 `include_run_events` 和 `session.events` 不再调用
+  legacy DB event reader，改走 `RunEventReadModel`。
+- `run.events` 不再通过 subscription replay 间接触发 legacy DB event reader；
+  纯 replay 直接从 `RunEventReadModel` 读取。
+- `subagent.runs.*` 使用的 filtered event helper 不再调用 legacy filtered
+  reader，改走 `RunEventReadModel.list_filtered()`。
+- 新 read model 没有新增 legacy module import；P2 identity alias baseline
+  从 `1201` 降到 `1200`。
+- 相关测试从 fake event reader 改为真实 SQLite `run_events` row。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/run_events.py tui_gateway/services/run_events.py tui_gateway/methods/session_history.py tui_gateway/methods/run.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_protocol.py
+.venv/bin/pytest tests/test_pr2_session_cursor.py tests/tui_gateway/test_protocol.py -k "run_events_replays or session_events or session_messages" tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py::test_session_messages_returns_paged_transcript -q
+.venv/bin/ruff check hermes_agent/read_models/run_events.py tui_gateway/services/run_events.py tui_gateway/methods/session_history.py tui_gateway/methods/run.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py tests/observability/test_zero_debt_gates.py
+.venv/bin/pytest tests/test_pr2_session_cursor.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py tests/read_models/test_message_history.py tests/gateway/test_agent_runner.py tests/gateway/test_worker_frame_router.py -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Run-event cursor/replay/profile/list 定向测试：`16 passed`
+- Session/run/profile/list/read-model/agent-runner/router 组合测试：
+  `163 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- Tool canonical projection 仍有一处 `list_tool_events_as_canonical`
+  legacy reader，需单独迁到 tool/run-event projection owner。
+- `run_control` subscription poller、activity/team-mission event replay 仍有
+  legacy event reader，需要后续 subscription/activity 切片。
+- Team transcript projector/backfill 仍需要目标 owner。
 - `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。

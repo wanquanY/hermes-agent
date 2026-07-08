@@ -17,6 +17,7 @@ from tui_gateway.services.message_history import (
     message_history_read_model_for_db,
     message_repository_for_db,
 )
+from tui_gateway.services.run_events import list_runtime_events
 
 _server = bind_server_globals(globals())
 
@@ -140,28 +141,31 @@ def _(rid, params: dict) -> dict:
     run_events_warning = ""
     if include_run_events:
         try:
-            list_run_events = getattr(db, "list_run_events", None)
-            if callable(list_run_events):
-                run_events = list_run_events(
-                    target,
-                    after_seq=after_seq,
-                    runtime_scope_key=_requested_runtime_scope_key(params),
-                    activity_id=activity_id,
-                    limit=_bounded_page_limit(params.get("run_events_limit", params.get("runEventsLimit")), default=2000, maximum=5000),
+            run_events = list_runtime_events(
+                db,
+                target,
+                after_seq=after_seq,
+                runtime_scope_key=_requested_runtime_scope_key(params),
+                activity_id=activity_id,
+                limit=_bounded_page_limit(
+                    params.get("run_events_limit", params.get("runEventsLimit")),
+                    default=2000,
+                    maximum=5000,
+                ),
+            )
+            # PR-2 §4.2: before_seq is not a DB-level filter — apply it
+            # as a Python post-filter so callers can page backwards.
+            if before_seq > 0:
+                run_events = [e for e in run_events if int((e or {}).get("seq") or 0) < before_seq]
+            # PR-2 §4.2: when no cursor is supplied the legacy behavior
+            # returns the full event set.  Mark it deprecated so callers
+            # migrate to the cursor path.
+            if not cursor_active:
+                run_events_warning = (
+                    "include_run_events without after_seq/before_seq returns the "
+                    "full event window and is deprecated; pass after_seq for "
+                    "cursor-based pagination."
                 )
-                # PR-2 §4.2: before_seq is not a DB-level filter — apply it
-                # as a Python post-filter so callers can page backwards.
-                if before_seq > 0:
-                    run_events = [e for e in run_events if int((e or {}).get("seq") or 0) < before_seq]
-                # PR-2 §4.2: when no cursor is supplied the legacy behavior
-                # returns the full event set.  Mark it deprecated so callers
-                # migrate to the cursor path.
-                if not cursor_active:
-                    run_events_warning = (
-                        "include_run_events without after_seq/before_seq returns the "
-                        "full event window and is deprecated; pass after_seq for "
-                        "cursor-based pagination."
-                    )
         except Exception as exc:
             return _err(rid, 5000, f"run event page failed: {exc}")
     run_events_max_seq = _max_seq(run_events)
@@ -228,11 +232,9 @@ def _(rid, params: dict) -> dict:
         default=200,
         maximum=5000,
     )
-    list_run_events = getattr(db, "list_run_events", None)
-    if not callable(list_run_events):
-        return _err(rid, 5000, "run_events are not available")
     try:
-        events = list_run_events(
+        events = list_runtime_events(
+            db,
             target,
             after_seq=after_seq,
             runtime_scope_key=_requested_runtime_scope_key(params),

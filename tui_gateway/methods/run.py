@@ -7,6 +7,7 @@ import uuid
 
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
+from tui_gateway.services.run_events import list_filtered_events, list_runtime_events
 from tui_gateway.services.runtime_pool import (
     RuntimeLease,
     RuntimeLeaseError,
@@ -574,15 +575,14 @@ def _(rid, params: dict) -> dict:
         db=db,
         current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
     )
-    _, events = run_control.subscribe_session_with_id(
-        stored_session_id=stable_session_id,
-        transport=None,
+    events = list_runtime_events(
+        db,
+        stable_session_id,
         after_seq=after_seq,
         active_only=bool(params.get("active_only") or params.get("activeOnly")),
         runtime_scope_key=runtime_scope_key,
         run_id=run_id,
         limit=_bounded_limit(params.get("limit"), default=2000, maximum=5000),
-        db=db,
     )
     return _ok(
         rid,
@@ -607,41 +607,17 @@ def _list_filtered_run_events(
     db = _run_db_for_stable_session(stored_session_id) if stored_session_id else _get_db()
     if db is None:
         return []
-    list_filtered = getattr(db, "list_run_events_filtered", None)
-    if callable(list_filtered):
-        return list_filtered(
-            stored_session_id,
-            after_seq=after_seq,
-            runtime_scope_key=runtime_scope_key,
-            event_type_prefix=event_type_prefix,
-            event_types=event_types,
-            payload_contains=payload_contains,
-            limit=limit,
-        )
-    list_events = getattr(db, "list_run_events", None)
-    if not callable(list_events):
-        return []
-    events = list_events(
+    events = list_filtered_events(
+        db,
         stored_session_id,
         after_seq=after_seq,
         runtime_scope_key=runtime_scope_key,
+        event_type_prefix=event_type_prefix,
+        event_types=event_types,
+        payload_contains=payload_contains,
         limit=limit,
     )
-    normalized_types = {
-        str(item or "").strip()
-        for item in (event_types or ())
-        if str(item or "").strip()
-    }
-    prefix = str(event_type_prefix or "").strip()
-    out = []
-    for event in events:
-        event_type = str((event or {}).get("type") or "").strip()
-        if normalized_types and event_type not in normalized_types:
-            continue
-        if prefix and not event_type.startswith(prefix):
-            continue
-        out.append(event)
-    return out
+    return events
 
 
 @method("subagent.runs.list")

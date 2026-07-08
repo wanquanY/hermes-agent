@@ -17,8 +17,6 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
         def release(self):
             raise AssertionError("read-only session.messages must not release profile env lock")
 
-    seen: dict[str, str] = {}
-
     class _DB:
         def __init__(self):
             self._conn = connect_session_repository_db(tmp_path / "profile-state.db")
@@ -56,12 +54,6 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
                 ("stored-session", "user", "hello", 1.0),
             )
 
-        def list_run_events(self, *_args, **_kwargs):
-            from hermes_constants import get_hermes_home
-
-            seen["home"] = str(get_hermes_home())
-            return []
-
     monkeypatch.setattr(server, "_profile_env_lock", _ExplodingEnvLock())
     monkeypatch.setattr(session_methods, "_get_db", lambda: _DB())
 
@@ -85,7 +77,6 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
     assert resp["result"]["messages"] == [
         {"role": "user", "text": "hello", "message_id": "1", "timestamp": 1.0}
     ]
-    assert seen["home"] == str(profile_home.resolve())
     assert os.environ.get("DOVIE_TEST_PROFILE_ENV") is None
 
 

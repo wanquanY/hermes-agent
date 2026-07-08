@@ -17,8 +17,10 @@ History:
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
+from hermes_agent.domain.event_ledger import EventLedger
 from hermes_state import SessionDB
 from hermes_agent.storage.session_repository_db import ensure_session_repository_schema
 from tui_gateway import server
@@ -930,39 +932,75 @@ def test_conversation_activity_list_is_control_plane_read_for_profile_scope():
 
 
 def test_session_messages_returns_paged_transcript(monkeypatch):
-    class _MessagesDB(_StubDB):
-        def list_run_events(self, *args, **kwargs):
-            assert args[0] == "s1"
-            assert kwargs["runtime_scope_key"] == "profile:agent-default:version:v1"
-            return [
-                {
-                    "type": "tool.complete",
-                    "stored_session_id": "s1",
-                    "run_id": "run-1",
-                    "turn_id": "turn-1",
-                    "seq": 4,
-                    "payload": {
-                        "name": "create_agent_profile_draft",
-                        "result": {"dovie_event": "agent_profile_draft_saved", "draft": {"id": "draft-1"}},
-                    },
-                },
-            ]
-
-        def list_tool_events(self, *args, **kwargs):
-            assert args[0] == "s1"
-            return [
-                {
-                    "tool_call_id": "tool-1",
-                    "name": "create_agent_profile_draft",
-                    "status": "completed",
-                    "result": {"dovie_event": "agent_profile_draft_saved"},
-                },
-            ]
-
-    db = _MessagesDB([{"id": "s1", "source": "tui", "title": "S1"}])
+    db = _StubDB([{"id": "s1", "source": "tui", "title": "S1"}])
     db.insert_message("s1", "user", "oldest", timestamp=1.0)
     older_id = db.insert_message("s1", "user", "older", timestamp=10.0)
     newer_id = db.insert_message("s1", "assistant", "newer", timestamp=30.0)
+    db._conn.execute(
+        """
+        CREATE TABLE run_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            run_id TEXT,
+            turn_id TEXT,
+            runtime_session_id TEXT,
+            runtime_scope_key TEXT,
+            participant_id TEXT,
+            activity_id TEXT,
+            event_type TEXT,
+            seq INTEGER,
+            timestamp REAL,
+            payload_json TEXT,
+            event_json TEXT,
+            status TEXT,
+            frame_blob BLOB,
+            frame_format TEXT,
+            retention_class TEXT,
+            interaction_request_id TEXT,
+            interaction_kind TEXT,
+            interaction_status TEXT,
+            anchor_seq INTEGER,
+            projection_state TEXT,
+            runtime_source_seq INTEGER,
+            projected_tool_event_id TEXT,
+            projected_message_id TEXT
+        )
+        """
+    )
+    payload = {
+        "name": "create_agent_profile_draft",
+        "result": {"dovie_event": "agent_profile_draft_saved", "draft": {"id": "draft-1"}},
+    }
+    EventLedger(db._conn).append_runtime_frame(
+        session_id="s1",
+        run_id="run-1",
+        turn_id="turn-1",
+        runtime_session_id="runtime-run-1",
+        runtime_scope_key="profile:agent-default:version:v1",
+        participant_id="",
+        activity_id="",
+        event_type="tool.complete",
+        seq=4,
+        timestamp=40.0,
+        payload_json=json.dumps(payload, ensure_ascii=False),
+        event_json=json.dumps(
+            {
+                "type": "tool.complete",
+                "stored_session_id": "s1",
+                "session_id": "runtime-run-1",
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "runtime_scope_key": "profile:agent-default:version:v1",
+                "seq": 4,
+                "payload": payload,
+            },
+            ensure_ascii=False,
+        ),
+        status="",
+        frame_blob=None,
+        frame_format="",
+        retention_class="",
+    )
     cursor = server._methods["session.messages"].__globals__["_encode_page_cursor"]({"id": newer_id})
     monkeypatch.setattr(server, "_get_db", lambda: db)
 
