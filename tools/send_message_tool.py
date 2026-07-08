@@ -317,7 +317,7 @@ def _handle_send(args):
         # Mirror the sent message into the target's gateway session
         if isinstance(result, dict) and result.get("success") and mirror_text:
             try:
-                from gateway.mirror import mirror_to_session
+                from hermes_gateway.mirror import mirror_to_session
                 from channels.session_context import get_session_env
                 source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
                 user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None

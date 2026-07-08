@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-import gateway.mirror as mirror_mod
-from gateway.mirror import (
+import hermes_gateway.mirror as mirror_mod
+from hermes_gateway.mirror import (
     mirror_to_session,
     _find_session_id,
 )
@@ -164,7 +164,7 @@ class TestMirrorToSession:
 
         with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
              patch.object(mirror_mod, "_SESSIONS_INDEX", index_file), \
-             patch("gateway.mirror._append_to_message_store") as mock_store:
+             patch("hermes_gateway.mirror._append_to_message_store") as mock_store:
             result = mirror_to_session("telegram", "12345", "Hello!", source_label="cli")
 
         assert result is True
@@ -194,7 +194,7 @@ class TestMirrorToSession:
 
         with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
              patch.object(mirror_mod, "_SESSIONS_INDEX", index_file), \
-             patch("gateway.mirror._append_to_message_store") as mock_store:
+             patch("hermes_gateway.mirror._append_to_message_store") as mock_store:
             result = mirror_to_session("telegram", "-1001", "Hello topic!", source_label="cron", thread_id="10")
 
         assert result is True
@@ -217,7 +217,7 @@ class TestMirrorToSession:
 
         with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
              patch.object(mirror_mod, "_SESSIONS_INDEX", index_file), \
-             patch("gateway.mirror._append_to_message_store") as mock_store:
+             patch("hermes_gateway.mirror._append_to_message_store") as mock_store:
             result = mirror_to_session(
                 "telegram",
                 "-1001",
@@ -240,7 +240,7 @@ class TestMirrorToSession:
         assert result is False
 
     def test_error_returns_false(self, tmp_path):
-        with patch("gateway.mirror._find_session_id", side_effect=Exception("boom")):
+        with patch("hermes_gateway.mirror._find_session_id", side_effect=Exception("boom")):
             result = mirror_to_session("telegram", "123", "msg")
 
         assert result is False
@@ -249,7 +249,7 @@ class TestMirrorToSession:
 class TestAppendToMessageStore:
     def test_connection_is_closed_after_use(self, tmp_path):
         """Verify _append_to_message_store closes the storage connection."""
-        from gateway.mirror import _append_to_message_store
+        from hermes_gateway.mirror import _append_to_message_store
         mock_store = MagicMock()
 
         with patch(
@@ -263,7 +263,7 @@ class TestAppendToMessageStore:
 
     def test_connection_closed_even_on_error(self, tmp_path):
         """Verify connection is closed even when append_message raises."""
-        from gateway.mirror import _append_to_message_store
+        from hermes_gateway.mirror import _append_to_message_store
         mock_store = MagicMock()
         mock_store.append_message.side_effect = Exception("store error")
 
