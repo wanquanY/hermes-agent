@@ -585,9 +585,9 @@ def scan_sessions(
     at the end.
     """
     try:
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
     except Exception as exc:
-        return {"sessions": [], "aggregate": {}, "error": f"Could not import SessionDB: {exc}", "scan_meta": {"mode": "failed", "sessions_total": 0, "sessions_rescanned": 0, "sessions_reused": 0}}
+        return {"sessions": [], "aggregate": {}, "error": f"Could not import session store: {exc}", "scan_meta": {"mode": "failed", "sessions_total": 0, "sessions_rescanned": 0, "sessions_reused": 0}}
 
     checkpoint = load_checkpoint()
     previous_sessions = checkpoint.get("sessions") if isinstance(checkpoint.get("sessions"), dict) else {}
@@ -599,7 +599,7 @@ def scan_sessions(
     # requests a small sample (e.g. a smoke test).
     db_limit = -1 if (limit is None or limit <= 0) else int(limit)
 
-    db = SessionDB()
+    db = open_cli_session_store()
     try:
         sessions_meta = db.list_sessions_rich(limit=db_limit, include_children=True, project_compression_tips=False)
         total_sessions = len(sessions_meta)
