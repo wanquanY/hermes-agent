@@ -2043,6 +2043,9 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5007)
+    repo = _session_repo_for_db(db)
+    if repo is None:
+        return _err(rid, 5007, "session repository unavailable")
     requested = str(
         params.get("stored_session_id")
         or params.get("storedSessionId")
@@ -2060,11 +2063,11 @@ def _(rid, params: dict) -> dict:
 
     if not session:
         try:
-            stored_row = db.get_session(key)
+            stored_row = repo.get(key)
             if not stored_row:
-                by_title = db.get_session_by_title(key)
+                by_title = repo.get_by_title(key)
                 if by_title:
-                    key = str(by_title.get("id") or key)
+                    key = by_title.session_id or key
                     stored_row = by_title
             if not stored_row:
                 return _err(rid, 4007, "session not found")
@@ -2074,15 +2077,15 @@ def _(rid, params: dict) -> dict:
     if "title" not in params:
         fallback = (session or {}).get("pending_title") or ""
         try:
-            resolved_title = db.get_session_title(key) or ""
+            resolved_title = repo.get_title(key) or ""
             if fallback:
-                if db.set_session_title(key, fallback):
+                if repo.set_title(key, fallback):
                     if session:
                         session["pending_title"] = None
                     resolved_title = fallback
                 else:
-                    existing_row = db.get_session(key)
-                    existing_title = ((existing_row or {}).get("title") or "").strip()
+                    existing_row = repo.get(key)
+                    existing_title = ((existing_row.title if existing_row else "") or "").strip()
                     if existing_title == fallback:
                         if session:
                             session["pending_title"] = None
@@ -2102,13 +2105,13 @@ def _(rid, params: dict) -> dict:
             },
         )
     try:
-        if db.set_session_title(key, title):
+        if repo.set_title(key, title):
             if session:
                 session["pending_title"] = None
             return _ok(rid, {"pending": False, "title": title})
         # rowcount == 0 can mean "same value" as well as "missing row".
         # Queue only when the session row truly does not exist yet.
-        existing_row = db.get_session(key)
+        existing_row = repo.get(key)
         if existing_row:
             if session:
                 session["pending_title"] = None
@@ -2116,7 +2119,7 @@ def _(rid, params: dict) -> dict:
                 rid,
                 {
                     "pending": False,
-                    "title": (existing_row.get("title") or title),
+                    "title": (existing_row.title or title),
                 },
             )
         if not session:

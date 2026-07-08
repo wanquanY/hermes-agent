@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_4`
+状态：`in_progress_checkpoint_5`
 
 ## 前置门槛
 
@@ -13,7 +13,7 @@
 P1 human sign-off 已通过，P2 已开始执行。当前 checkpoint 已完成
 `gateway.SessionStore`、TUI `session.create` 的 repo-backed 写入迁移，以及
 TUI `session.list/session.most_recent/session.index.list` 的 read-model owner
-迁移。
+迁移，以及 TUI `session.title` 的 repo-backed metadata 写入迁移。
 
 ## 目标
 
@@ -289,3 +289,42 @@ python -m py_compile hermes_agent/read_models/session_index.py hermes_agent/read
 - `reconcile_session_index` 和 `_repair_session_index_*` 仍属于 legacy facade
   写副作用，需要拆到独立 writer-domain owner。
 - `session.messages/delete/title/status/usage` 等旧 DB path 仍待迁移。
+
+## Checkpoint 5 证据
+
+已完成：
+
+- `SessionRepoImpl` 新增 `get_title/get_by_title/set_title`，由 repo owner
+  负责 title metadata 的读写、唯一性检查、`display_title` 同步和
+  `session_index.title` 同步。
+- `tui_gateway.methods.session` 的 `session.title` 不再调用
+  `db.get_session_title/db.get_session_by_title/db.set_session_title`，改为
+  通过 `SessionRepoImpl` 操作 `sessions/session_index`。
+- `tests/test_tui_gateway_server.py` 的 `session.title` 用例迁到真实
+  SQLite + `SessionRepoImpl`，不再 mock legacy title DB 方法；异常路径只
+  mock repo interface。
+- `tests/repositories/test_session_repo_impl.py` 增加 title repo 不变量：
+  标题规范化、按 title 查找、`display_title` 同步、index 同步、auto source
+  拒绝和重复 title 拒绝。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/repositories/session_repo.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py tests/repositories/test_session_repo_impl.py
+.venv/bin/pytest tests/test_tui_gateway_server.py -k session_title -q
+.venv/bin/ruff check hermes_agent/repositories/session_repo.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py
+.venv/bin/pytest tests/test_tui_gateway_server.py -k "session_title or session_status or session_delete" tests/tui_gateway/test_protocol.py tests/tui_gateway/test_ws_dispatch.py::test_session_title_uses_control_plane_executor tests/tui_gateway/test_ws_dispatch.py::test_control_plane_session_title_is_not_proxied_to_runtime_worker tests/repositories/test_session_repo_impl.py tests/gateway/test_session_repository_dispatch.py -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+```
+
+当前验证结果：
+
+- Session title/repo/protocol/routing 组合测试：`22 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+
+剩余工作：
+
+- `session.delete/status/usage/resume/messages` 仍有 legacy DB facade 依赖。
+- `SessionDB.set_session_title/get_session_title/get_session_by_title` 旧方法
+  仍存在，待所有非 gateway 调用者迁移后删除。

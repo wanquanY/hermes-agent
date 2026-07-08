@@ -219,6 +219,43 @@ def test_update_index_noop_when_no_fields_provided():
     assert before == after
 
 
+def test_title_methods_update_sessions_and_index():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="s1", source="test", title="old"))
+
+    assert repo.get_title("s1") == "old"
+    assert repo.set_title("s1", "  new   title  ") is True
+    assert repo.get_title("s1") == "new title"
+
+    by_title = repo.get_by_title("new title")
+    assert by_title is not None
+    assert by_title.session_id == "s1"
+    session_row = conn.execute(
+        "SELECT title, display_title, display_title_source FROM sessions WHERE id='s1'"
+    ).fetchone()
+    assert dict(session_row) == {
+        "title": "new title",
+        "display_title": "new title",
+        "display_title_source": "user",
+    }
+    index_row = conn.execute(
+        "SELECT title FROM session_index WHERE session_id='s1'"
+    ).fetchone()
+    assert index_row["title"] == "new title"
+
+
+def test_title_methods_reject_auto_source_and_duplicate_titles():
+    repo = SessionRepoImpl(_make_conn())
+    repo.create(SessionSpec(session_id="s1", source="test", title="one"))
+    repo.create(SessionSpec(session_id="s2", source="test", title="two"))
+
+    assert repo.set_title("s1", "auto title", title_source="auto") is False
+    assert repo.get_title("s1") == "one"
+    with pytest.raises(ValueError):
+        repo.set_title("s1", "two")
+
+
 def test_branch_creates_child_session():
     conn = _make_conn()
     repo = SessionRepoImpl(conn)

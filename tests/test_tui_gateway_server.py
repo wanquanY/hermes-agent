@@ -1255,6 +1255,17 @@ def _session(agent=None, **extra):
     }
 
 
+def _title_gateway_db(tmp_path, rows=()):
+    from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+    from hermes_agent.storage.session_repository_db import connect_session_repository_db
+
+    conn = connect_session_repository_db(tmp_path / "title-state.db")
+    repo = SessionRepoImpl(conn)
+    for session_id, title in rows:
+        repo.create(SessionSpec(session_id=session_id, source="tui", title=title))
+    return types.SimpleNamespace(_conn=conn)
+
+
 def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
     calls = {"hooks": []}
 
@@ -1318,19 +1329,9 @@ def test_init_session_fires_reset_hook(monkeypatch):
         server._sessions.pop(sid, None)
 
 
-def test_session_title_queues_when_db_row_not_ready(monkeypatch):
-    class _FakeDB:
-        def get_session_title(self, _key):
-            return None
-
-        def get_session(self, _key):
-            return None
-
-        def set_session_title(self, _key, _title):
-            return False
-
+def test_session_title_queues_when_db_row_not_ready(monkeypatch, tmp_path):
     server._sessions["sid"] = _session(pending_title=None)
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(server, "_get_db", lambda: _title_gateway_db(tmp_path))
     try:
         set_resp = server.handle_request(
             {
@@ -1352,22 +1353,8 @@ def test_session_title_queues_when_db_row_not_ready(monkeypatch):
         server._sessions.pop("sid", None)
 
 
-def test_session_title_clears_pending_after_persist(monkeypatch):
-    class _FakeDB:
-        def __init__(self):
-            self.title = "old"
-
-        def get_session_title(self, _key):
-            return self.title
-
-        def get_session(self, _key):
-            return {"id": _key, "title": self.title}
-
-        def set_session_title(self, _key, title):
-            self.title = title
-            return True
-
-    db = _FakeDB()
+def test_session_title_clears_pending_after_persist(monkeypatch, tmp_path):
+    db = _title_gateway_db(tmp_path, rows=[("session-key", "old")])
     server._sessions["sid"] = _session(pending_title="stale")
     monkeypatch.setattr(server, "_get_db", lambda: db)
     try:
@@ -1386,23 +1373,13 @@ def test_session_title_clears_pending_after_persist(monkeypatch):
         server._sessions.pop("sid", None)
 
 
-def test_session_title_does_not_queue_noop_when_row_exists(monkeypatch):
-    class _FakeDB:
-        def __init__(self):
-            self.title = "same title"
-
-        def get_session_title(self, _key):
-            return self.title
-
-        def get_session(self, _key):
-            return {"id": _key, "title": self.title}
-
-        def set_session_title(self, _key, _title):
-            # Simulate sqlite UPDATE rowcount==0 for no-op update.
-            return False
-
+def test_session_title_does_not_queue_noop_when_row_exists(monkeypatch, tmp_path):
     server._sessions["sid"] = _session(pending_title="stale")
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(
+        server,
+        "_get_db",
+        lambda: _title_gateway_db(tmp_path, rows=[("session-key", "same title")]),
+    )
     try:
         resp = server.handle_request(
             {
@@ -1420,12 +1397,15 @@ def test_session_title_does_not_queue_noop_when_row_exists(monkeypatch):
 
 
 def test_session_title_get_falls_back_to_pending_when_db_read_throws(monkeypatch):
-    class _FakeDB:
-        def get_session_title(self, _key):
+    import tui_gateway.methods.session as session_methods
+
+    class _BrokenRepo:
+        def get_title(self, _key):
             raise RuntimeError("db temporarily locked")
 
     server._sessions["sid"] = _session(pending_title="queued title")
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(server, "_get_db", lambda: types.SimpleNamespace(_conn=object()))
+    monkeypatch.setattr(session_methods, "_session_repo_for_db", lambda _db: _BrokenRepo())
     try:
         resp = server.handle_request(
             {"id": "1", "method": "session.title", "params": {"session_id": "sid"}}
@@ -1435,22 +1415,8 @@ def test_session_title_get_falls_back_to_pending_when_db_read_throws(monkeypatch
         server._sessions.pop("sid", None)
 
 
-def test_session_title_get_retries_persist_for_pending_title(monkeypatch):
-    class _FakeDB:
-        def __init__(self):
-            self.title = ""
-
-        def get_session_title(self, _key):
-            return self.title
-
-        def set_session_title(self, _key, title):
-            self.title = title
-            return True
-
-        def get_session(self, _key):
-            return {"id": _key, "title": self.title}
-
-    db = _FakeDB()
+def test_session_title_get_retries_persist_for_pending_title(monkeypatch, tmp_path):
+    db = _title_gateway_db(tmp_path, rows=[("session-key", "")])
     server._sessions["sid"] = _session(pending_title="queued title")
     monkeypatch.setattr(server, "_get_db", lambda: db)
     try:
@@ -1463,22 +1429,8 @@ def test_session_title_get_retries_persist_for_pending_title(monkeypatch):
         server._sessions.pop("sid", None)
 
 
-def test_session_title_get_retries_pending_even_when_db_has_title(monkeypatch):
-    class _FakeDB:
-        def __init__(self):
-            self.title = "stored title"
-
-        def get_session_title(self, _key):
-            return self.title
-
-        def set_session_title(self, _key, title):
-            self.title = title
-            return True
-
-        def get_session(self, _key):
-            return {"id": _key, "title": self.title}
-
-    db = _FakeDB()
+def test_session_title_get_retries_pending_even_when_db_has_title(monkeypatch, tmp_path):
+    db = _title_gateway_db(tmp_path, rows=[("session-key", "stored title")])
     server._sessions["sid"] = _session(pending_title="queued title")
     monkeypatch.setattr(server, "_get_db", lambda: db)
     try:
@@ -1491,27 +1443,8 @@ def test_session_title_get_retries_pending_even_when_db_has_title(monkeypatch):
         server._sessions.pop("sid", None)
 
 
-def test_session_title_updates_stored_session_without_live_runtime(monkeypatch):
-    class _FakeDB:
-        def __init__(self):
-            self.row = {"id": "stored-only", "title": "old title"}
-
-        def get_session_title(self, key):
-            return self.row["title"] if key == self.row["id"] else None
-
-        def get_session(self, key):
-            return self.row if key == self.row["id"] else None
-
-        def get_session_by_title(self, _title):
-            return None
-
-        def set_session_title(self, key, title):
-            if key != self.row["id"]:
-                return False
-            self.row["title"] = title
-            return True
-
-    db = _FakeDB()
+def test_session_title_updates_stored_session_without_live_runtime(monkeypatch, tmp_path):
+    db = _title_gateway_db(tmp_path, rows=[("stored-only", "old title")])
     server._sessions.pop("stored-only", None)
     monkeypatch.setattr(server, "_get_db", lambda: db)
 
@@ -1536,13 +1469,9 @@ def test_session_title_updates_stored_session_without_live_runtime(monkeypatch):
     assert get_resp["result"]["session_key"] == "stored-only"
 
 
-def test_session_title_rejects_empty_title_with_specific_error_code(monkeypatch):
-    class _FakeDB:
-        def get_session_title(self, _key):
-            return ""
-
+def test_session_title_rejects_empty_title_with_specific_error_code(monkeypatch, tmp_path):
     server._sessions["sid"] = _session()
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(server, "_get_db", lambda: _title_gateway_db(tmp_path))
     try:
         resp = server.handle_request(
             {
@@ -1557,19 +1486,13 @@ def test_session_title_rejects_empty_title_with_specific_error_code(monkeypatch)
         server._sessions.pop("sid", None)
 
 
-def test_session_title_set_maps_valueerror_to_user_error(monkeypatch):
-    class _FakeDB:
-        def get_session_title(self, _key):
-            return ""
-
-        def get_session(self, _key):
-            return {"id": _key}
-
-        def set_session_title(self, _key, _title):
-            raise ValueError("Title already in use")
-
+def test_session_title_set_maps_valueerror_to_user_error(monkeypatch, tmp_path):
     server._sessions["sid"] = _session()
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(
+        server,
+        "_get_db",
+        lambda: _title_gateway_db(tmp_path, rows=[("session-key", ""), ("other", "dup")]),
+    )
     try:
         resp = server.handle_request(
             {
@@ -1586,18 +1509,18 @@ def test_session_title_set_maps_valueerror_to_user_error(monkeypatch):
 
 
 def test_session_title_set_errors_when_row_lookup_fails_after_noop(monkeypatch):
-    class _FakeDB:
-        def get_session_title(self, _key):
-            return ""
+    import tui_gateway.methods.session as session_methods
 
-        def get_session(self, _key):
-            raise RuntimeError("row lookup failed")
-
-        def set_session_title(self, _key, _title):
+    class _BrokenRepo:
+        def set_title(self, _key, _title):
             return False
 
+        def get(self, _key):
+            raise RuntimeError("row lookup failed")
+
     server._sessions["sid"] = _session()
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(server, "_get_db", lambda: types.SimpleNamespace(_conn=object()))
+    monkeypatch.setattr(session_methods, "_session_repo_for_db", lambda _db: _BrokenRepo())
     try:
         resp = server.handle_request(
             {

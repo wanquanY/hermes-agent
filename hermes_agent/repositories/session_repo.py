@@ -118,6 +118,12 @@ class SessionRepo(Protocol):
 
     def update_index(self, session_id: str, patch: SessionIndexPatch) -> None: ...
 
+    def get_title(self, session_id: str) -> str | None: ...
+
+    def get_by_title(self, title: str) -> Session | None: ...
+
+    def set_title(self, session_id: str, title: str, *, title_source: str = "user") -> bool: ...
+
     def branch(self, source_id: str, spec: BranchSpec) -> Session: ...
 
     def close(self, session_id: str, reason: str) -> None: ...
@@ -285,6 +291,83 @@ class SessionRepoImpl:
             params,
         )
 
+    def get_title(self, session_id: str) -> str | None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return None
+        row = self._conn.execute(
+            "SELECT title FROM sessions WHERE id = ?",
+            (stable,),
+        ).fetchone()
+        return str(row["title"] or "") if row else None
+
+    def get_by_title(self, title: str) -> Session | None:
+        normalized = _sanitize_title(title)
+        if not normalized:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT id, source, title, display_title, session_kind,
+                   conversation_kind, started_at, updated_at, ended_at,
+                   parent_session_id
+              FROM sessions
+             WHERE title = ?
+            """,
+            (normalized,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_session(row)
+
+    def set_title(self, session_id: str, title: str, *, title_source: str = "user") -> bool:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return False
+        normalized_source = str(title_source or "user").strip().lower() or "user"
+        if normalized_source == "auto":
+            return False
+        normalized_title = _sanitize_title(title)
+        if normalized_title:
+            conflict = self._conn.execute(
+                "SELECT id FROM sessions WHERE title = ? AND id != ?",
+                (normalized_title, stable),
+            ).fetchone()
+            if conflict:
+                raise ValueError(
+                    f"Title {normalized_title!r} is already in use by session {conflict['id']}"
+                )
+        rowcount = int(
+            self._conn.execute(
+                """
+                UPDATE sessions
+                   SET title = ?,
+                       display_title = COALESCE(?, ''),
+                       display_title_source = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (
+                    normalized_title,
+                    normalized_title or "",
+                    normalized_source,
+                    time.time(),
+                    stable,
+                ),
+            ).rowcount
+            or 0
+        )
+        if rowcount > 0:
+            self._conn.execute(
+                """
+                UPDATE session_index
+                   SET title = ?,
+                       updated_at = ?
+                 WHERE session_id = ?
+                """,
+                (normalized_title or "", time.time(), stable),
+            )
+        return rowcount > 0
+
     def branch(self, source_id: str, spec: BranchSpec) -> Session:
         stable_src = str(source_id or "").strip()
         stable_new = str(spec.new_session_id or "").strip()
@@ -420,6 +503,10 @@ def _encode_model_config(value: dict[str, Any] | str | None) -> str | None:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _sanitize_title(title: str) -> str:
+    return " ".join(str(title or "").strip().split())
 
 
 __all__ = [
