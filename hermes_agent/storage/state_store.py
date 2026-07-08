@@ -28,6 +28,7 @@ from agent.memory_manager import sanitize_context
 from hermes_agent.domain.event_ledger import EventLedger
 from hermes_agent.domain.seq_allocator import ensure_session_counter
 from hermes_agent.domain.conversation_participant_reconciler import ConversationParticipantReconciler
+from hermes_agent.domain.mission_activity_reconciler import MissionActivityReconciler
 from hermes_agent.domain.session_deletion import SessionDeletionService
 from hermes_agent.domain.session_index_reconciler import SessionIndexReconciler
 from hermes_agent.read_models.message_history import MessageHistoryReadModel, MessagePageQuery
@@ -82,7 +83,6 @@ DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 __path__ = [str(Path(__file__).with_name("hermes_state"))]
 
 SCHEMA_VERSION = 46
-MISSION_ACTIVITIES_BACKFILL_META_KEY = "mission_activities_backfill_cr_p3_1"
 RUN_EVENT_RETENTION_POLICY = RunEventRetentionPolicy()
 
 
@@ -1077,76 +1077,9 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         )
 
     def reconcile_mission_activities_one_shot(self) -> Dict[str, Any]:
-        """Backfill mission activities from authoritative mission links."""
-        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
-            marker = conn.execute(
-                "SELECT value FROM state_meta WHERE key = ?",
-                (MISSION_ACTIVITIES_BACKFILL_META_KEY,),
-            ).fetchone()
-            marked = bool(marker and str(marker["value"] or "") == "1")
-            if marked:
-                return {"ran": False, "inserted": 0}
-            try:
-                rows = conn.execute(
-                    """
-                    SELECT DISTINCT
-                        tmc.conversation_id,
-                        tmc.conversation_session_id,
-                        cm.mission_id AS active_mission_id,
-                        tmc.title,
-                        tmc.created_at,
-                        cm.updated_at
-                    FROM conversation_missions cm
-                    JOIN team_mission_conversations tmc
-                      ON tmc.conversation_id = cm.conversation_id
-                    WHERE COALESCE(cm.mission_id, '') != ''
-                    UNION
-                    SELECT
-                        tmc.conversation_id,
-                        tmc.conversation_session_id,
-                        tmc.active_mission_id,
-                        tmc.title,
-                        tmc.created_at,
-                        tmc.updated_at
-                    FROM team_mission_conversations tmc
-                    WHERE COALESCE(tmc.active_mission_id, '') != ''
-                    """
-                ).fetchall()
-            except sqlite3.OperationalError:
-                rows = []
-            inserted = 0
-            for row in rows:
-                mission_id = str(row["active_mission_id"] or "").strip()
-                conversation_session_id = str(row["conversation_session_id"] or row["conversation_id"] or "").strip()
-                if not mission_id or not conversation_session_id:
-                    continue
-                existed = conn.execute(
-                    """
-                    SELECT 1
-                    FROM activities
-                    WHERE kind = 'mission' AND target_mission_id = ?
-                    LIMIT 1
-                    """,
-                    (mission_id,),
-                ).fetchone()
-                self._ensure_mission_activity_on_conn(
-                    conn,
-                    conversation_id=conversation_session_id,
-                    mission_id=mission_id,
-                    status="running",
-                    prompt_summary=str(row["title"] or ""),
-                    now=float(row["updated_at"] or row["created_at"] or time.time()),
-                )
-                if existed is None:
-                    inserted += 1
-            conn.execute(
-                "INSERT INTO state_meta (key, value) VALUES (?, '1') "
-                "ON CONFLICT(key) DO UPDATE SET value = '1'",
-                (MISSION_ACTIVITIES_BACKFILL_META_KEY,),
-            )
-            return {"ran": True, "inserted": inserted}
-
-        return self._execute_write(_do)
+        return self._execute_write(
+            lambda conn: MissionActivityReconciler(conn).reconcile()
+        )
 
     # =========================================================================
     # Session lifecycle
