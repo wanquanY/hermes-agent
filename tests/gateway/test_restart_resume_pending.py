@@ -40,7 +40,7 @@ from hermes_gateway.freshness import (
     is_fresh_gateway_interruption,
     last_transcript_timestamp,
 )
-from gateway.run import _should_clear_resume_pending_after_turn
+from hermes_gateway.resume_pending import should_clear_resume_pending_after_turn
 from hermes_gateway.session import SessionEntry, SessionSource, SessionStore
 from tests.gateway.restart_test_helpers import (
     make_restart_runner,
@@ -61,13 +61,13 @@ def test_resume_pending_is_cleared_only_after_successful_turn():
     fallback, but the gateway cleared ``resume_pending`` before startup could
     auto-resume it.
     """
-    assert _should_clear_resume_pending_after_turn({"final_response": "done"}) is True
-    assert _should_clear_resume_pending_after_turn({"completed": True}) is True
-    assert _should_clear_resume_pending_after_turn({"interrupted": True}) is False
-    assert _should_clear_resume_pending_after_turn({"completed": False}) is False
-    assert _should_clear_resume_pending_after_turn({"failed": True}) is False
-    assert _should_clear_resume_pending_after_turn({"partial": True}) is False
-    assert _should_clear_resume_pending_after_turn({"error": "boom"}) is False
+    assert should_clear_resume_pending_after_turn({"final_response": "done"}) is True
+    assert should_clear_resume_pending_after_turn({"completed": True}) is True
+    assert should_clear_resume_pending_after_turn({"interrupted": True}) is False
+    assert should_clear_resume_pending_after_turn({"completed": False}) is False
+    assert should_clear_resume_pending_after_turn({"failed": True}) is False
+    assert should_clear_resume_pending_after_turn({"partial": True}) is False
+    assert should_clear_resume_pending_after_turn({"error": "boom"}) is False
 
 
 def _make_source(platform=Platform.TELEGRAM, chat_id="123", user_id="u1"):

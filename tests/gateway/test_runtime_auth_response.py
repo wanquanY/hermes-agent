@@ -1,8 +1,8 @@
-from gateway.run import _normalize_empty_agent_response
+from hermes_gateway.response_normalization import normalize_empty_agent_response
 
 
 def test_runtime_auth_failure_response_is_user_safe_when_final_response_contains_debug():
-    response = _normalize_empty_agent_response(
+    response = normalize_empty_agent_response(
         {"failed": True},
         "⚠️ Non-retryable error (HTTP 401) — trying fallback...\n"
         "❌ Runtime token has expired or was revoked",
@@ -13,7 +13,7 @@ def test_runtime_auth_failure_response_is_user_safe_when_final_response_contains
 
 
 def test_runtime_auth_failure_response_is_user_safe_when_error_only():
-    response = _normalize_empty_agent_response(
+    response = normalize_empty_agent_response(
         {
             "failed": True,
             "error": {

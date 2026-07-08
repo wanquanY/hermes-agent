@@ -11,7 +11,7 @@ do not get recycled into the pending-user-message follow-up path.
 
 from types import SimpleNamespace
 
-from gateway.run import _is_control_interrupt_message
+from hermes_gateway.interrupt_control import is_control_interrupt_message
 
 
 def _extract_channel_prompt(pending_event):
@@ -29,7 +29,7 @@ def _extract_channel_prompt(pending_event):
 def _extract_pending_text(interrupted, pending_event, interrupt_message):
     """Reproduce the fixed pending-text selection from gateway/run.py."""
     if interrupted and pending_event is None and interrupt_message:
-        if _is_control_interrupt_message(interrupt_message):
+        if is_control_interrupt_message(interrupt_message):
             return None
         return interrupt_message
     return None

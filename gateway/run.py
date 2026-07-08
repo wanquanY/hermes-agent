@@ -68,6 +68,30 @@ from hermes_gateway.bootstrap import (
     resolve_hermes_bin as _resolve_hermes_bin,
     restart_notification_pending as _restart_notification_pending_for_home,
 )
+from hermes_gateway.interrupt_control import is_control_interrupt_message as _is_control_interrupt_message
+from hermes_gateway.media_context import (
+    build_document_context_note as _build_document_context_note,
+    build_media_placeholder as _build_media_placeholder,
+    probe_audio_duration as _probe_audio_duration,
+)
+from hermes_gateway.pending_events import dequeue_pending_event as _dequeue_pending_event
+from hermes_gateway.process_notifications import (
+    drain_gateway_watch_events as _drain_gateway_watch_events,
+    format_gateway_process_notification as _format_gateway_process_notification,
+)
+from hermes_gateway.response_normalization import (
+    is_dovie_runtime_auth_failure as _is_dovie_runtime_auth_failure,
+    normalize_empty_agent_response as _normalize_empty_agent_response,
+)
+from hermes_gateway.resume_pending import (
+    preserve_queued_followup_history_offset as _preserve_queued_followup_history_offset,
+    should_clear_resume_pending_after_turn as _should_clear_resume_pending_after_turn,
+)
+from hermes_gateway.session_key import parse_session_key as _parse_session_key
+from hermes_gateway.skill_hint import (
+    check_unavailable_skill as _check_unavailable_skill_for_repo,
+    skill_slug_from_frontmatter as _skill_slug_from_frontmatter,
+)
 from hermes_gateway.freshness import (
     auto_continue_freshness_window as _auto_continue_freshness_window,
     coerce_gateway_timestamp as _coerce_gateway_timestamp,
@@ -402,118 +426,6 @@ def _try_resolve_fallback_provider() -> dict | None:
     return _try_resolve_fallback_provider(_hermes_home)
 
 
-def _build_media_placeholder(event) -> str:
-    """Build a text placeholder for media-only events so they aren't dropped.
-
-    When a photo/document is queued during active processing and later
-    dequeued, only .text is extracted.  If the event has no caption,
-    the media would be silently lost.  This builds a placeholder that
-    the vision enrichment pipeline will replace with a real description.
-    """
-    parts = []
-    media_urls = getattr(event, "media_urls", None) or []
-    media_types = getattr(event, "media_types", None) or []
-    for i, url in enumerate(media_urls):
-        mtype = media_types[i] if i < len(media_types) else ""
-        if mtype.startswith("image/") or getattr(event, "message_type", None) == MessageType.PHOTO:
-            parts.append(f"[User sent an image: {url}]")
-        elif mtype.startswith("audio/"):
-            parts.append(f"[User sent audio: {url}]")
-        else:
-            parts.append(f"[User sent a file: {url}]")
-    return "\n".join(parts)
-
-
-def _build_document_context_note(display_name: str, agent_path: str, mtype: str) -> str:
-    """Context note prepended to a user turn when they attach a document.
-
-    Text documents (``text/*``) have their content inlined upstream by the
-    platform adapter, so the note just confirms that and records the path.
-
-    Binary documents (PDF, DOCX, XLSX, …) cannot be inlined as text. The note
-    must tell the agent to *extract* the text itself before answering — earlier
-    wording ("Ask the user what they'd like you to do with it") steered the
-    model into punting back to the user, which is why attached PDFs/DOCX looked
-    "unreadable" to the agent even though it has the tools to read them.
-    """
-    if mtype.startswith("text/"):
-        return (
-            f"[The user sent a text document: '{display_name}'. "
-            f"Its content has been included below. "
-            f"The file is also saved at: {agent_path}]"
-        )
-    return (
-        f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "
-        f"Its text is not inlined here (it's a binary format such as PDF or DOCX). "
-        f"To read it, extract the document's text yourself — for example with the "
-        f"terminal tool or the ocr-and-documents skill — before answering, instead "
-        f"of asking the user to paste the contents.]"
-    )
-
-
-def _format_duration(seconds: float) -> str:
-    total = int(round(seconds))
-    if total < 0:
-        total = 0
-    hours, rem = divmod(total, 3600)
-    minutes, secs = divmod(rem, 60)
-    if hours:
-        return f"{hours}:{minutes:02d}:{secs:02d}"
-    return f"{minutes}:{secs:02d}"
-
-
-async def _probe_audio_duration(path: str) -> Optional[str]:
-    """Best-effort duration probe. Returns formatted MM:SS / HH:MM:SS, or None on failure."""
-    ext = os.path.splitext(path)[1].lower()
-
-    if ext == ".wav":
-        try:
-            def _wav_duration() -> float:
-                import wave
-                with wave.open(path, "rb") as wf:
-                    frames = wf.getnframes()
-                    rate = wf.getframerate() or 1
-                    return frames / float(rate)
-            secs = await asyncio.to_thread(_wav_duration)
-            return _format_duration(secs)
-        except Exception:
-            pass
-
-    if ext in (".ogg", ".opus", ".oga"):
-        try:
-            def _ogg_duration() -> float:
-                from mutagen.oggopus import OggOpus
-                return float(OggOpus(path).info.length)
-            secs = await asyncio.to_thread(_ogg_duration)
-            return _format_duration(secs)
-        except Exception:
-            pass
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
-        if proc.returncode == 0:
-            return _format_duration(float(stdout.decode().strip()))
-    except Exception:
-        pass
-
-    return None
-
-
-def _dequeue_pending_event(adapter, session_key: str) -> MessageEvent | None:
-    """Consume and return the full pending event for a session.
-
-    Queued follow-ups must preserve their media metadata so they can re-enter
-    the normal image/STT/document preprocessing path instead of being reduced
-    to a placeholder string.
-    """
-    return adapter.get_pending_message(session_key)
-
-
 _INTERRUPT_REASON_STOP = "Stop requested"
 _INTERRUPT_REASON_RESET = "Session reset requested"
 _INTERRUPT_REASON_TIMEOUT = "Execution timed out (inactivity)"
@@ -521,138 +433,10 @@ _INTERRUPT_REASON_SSE_DISCONNECT = "SSE client disconnected"
 _INTERRUPT_REASON_GATEWAY_SHUTDOWN = "Gateway shutting down"
 _INTERRUPT_REASON_GATEWAY_RESTART = "Gateway restarting"
 
-_CONTROL_INTERRUPT_MESSAGES = frozenset(
-    {
-        _INTERRUPT_REASON_STOP.lower(),
-        _INTERRUPT_REASON_RESET.lower(),
-        _INTERRUPT_REASON_TIMEOUT.lower(),
-        _INTERRUPT_REASON_SSE_DISCONNECT.lower(),
-        _INTERRUPT_REASON_GATEWAY_SHUTDOWN.lower(),
-        _INTERRUPT_REASON_GATEWAY_RESTART.lower(),
-    }
-)
-
-
-def _is_control_interrupt_message(message: Optional[str]) -> bool:
-    """Return True when an interrupt message is internal control flow."""
-    if not message:
-        return False
-    normalized = " ".join(str(message).strip().split()).lower()
-    return normalized in _CONTROL_INTERRUPT_MESSAGES
-
-
-def _skill_slug_from_frontmatter(skill_md: Path) -> tuple[str | None, str | None]:
-    """Derive the /command slug and declared frontmatter name from a SKILL.md.
-
-    Matches the exact normalization used by
-    :func:`agent.skill_commands.scan_skill_commands` so the slug here is the
-    same string a user types after the leading ``/`` (e.g. a skill with
-    frontmatter ``name: Stable Diffusion Image Generation`` resolves to
-    ``stable-diffusion-image-generation`` — NOT the parent directory name,
-    which is commonly shorter/different, e.g. ``stable-diffusion``).
-
-    Using the directory name silently broke :func:`_check_unavailable_skill`
-    for every skill whose directory name drifted from its frontmatter name
-    (19 such skills on a standard install as of 2026-05), causing a generic
-    "unknown command" response where a "disabled — enable with …" or
-    "not installed — install with …" hint was expected.
-
-    Returns ``(slug, declared_name)`` or ``(None, None)`` when the file
-    can't be read or lacks a ``name:`` in its frontmatter.
-    """
-    try:
-        content = skill_md.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return None, None
-    if not content.startswith("---"):
-        return None, None
-    end = content.find("\n---", 3)
-    if end < 0:
-        return None, None
-    declared_name: str | None = None
-    for line in content[3:end].splitlines():
-        line = line.strip()
-        if line.startswith("name:"):
-            raw = line.split(":", 1)[1].strip()
-            # Strip YAML quote wrappers if present
-            if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
-                raw = raw[1:-1]
-            declared_name = raw.strip()
-            break
-    if not declared_name:
-        return None, None
-    slug = declared_name.lower().replace(" ", "-").replace("_", "-")
-    # Mirror _SKILL_INVALID_CHARS and _SKILL_MULTI_HYPHEN from skill_commands
-    import re as _re
-    slug = _re.sub(r"[^a-z0-9-]", "", slug)
-    slug = _re.sub(r"-{2,}", "-", slug).strip("-")
-    if not slug:
-        return None, declared_name
-    return slug, declared_name
-
 
 def _check_unavailable_skill(command_name: str) -> str | None:
-    """Check if a command matches a known-but-inactive skill.
-
-    Returns a helpful message if the skill exists but is disabled or only
-    available as an optional install. Returns None if no match found.
-
-    The slug for each on-disk skill is derived from its frontmatter ``name:``
-    (via :func:`_skill_slug_from_frontmatter`), NOT from its containing
-    directory name — because the two can differ (e.g. directory
-    ``stable-diffusion`` + frontmatter ``Stable Diffusion Image Generation``
-    yields slug ``stable-diffusion-image-generation``). Matching on
-    directory name would miss that slug entirely and fall through to the
-    generic "unknown command" path.
-    """
-    # Normalize: command uses hyphens, skill names may use hyphens or underscores
-    normalized = command_name.lower().replace("_", "-")
-    try:
-        from tools.skills_tool import _get_disabled_skill_names
-        from agent.skill_utils import get_all_skills_dirs, is_excluded_skill_path
-        disabled = _get_disabled_skill_names()
-
-        # Check disabled skills across all dirs (local + external)
-        for skills_dir in get_all_skills_dirs():
-            if not skills_dir.exists():
-                continue
-            for skill_md in skills_dir.rglob("SKILL.md"):
-                if is_excluded_skill_path(skill_md):
-                    continue
-                slug, declared_name = _skill_slug_from_frontmatter(skill_md)
-                if not slug or not declared_name:
-                    continue
-                # disabled is keyed by the declared frontmatter name (what
-                # skills.disabled / skills.platform_disabled store).
-                if slug == normalized and declared_name in disabled:
-                    return (
-                        f"The **{command_name}** skill is installed but disabled.\n"
-                        f"Enable it with: `hermes skills config`"
-                    )
-
-        # Check optional skills (shipped with repo but not installed)
-        from hermes_constants import get_optional_skills_dir
-        repo_root = Path(__file__).resolve().parent.parent
-        optional_dir = get_optional_skills_dir(repo_root / "optional-skills")
-        if optional_dir.exists():
-            for skill_md in optional_dir.rglob("SKILL.md"):
-                if is_excluded_skill_path(skill_md):
-                    continue
-                slug, _declared = _skill_slug_from_frontmatter(skill_md)
-                if not slug:
-                    continue
-                if slug == normalized:
-                    # Build install path: official/<category>/<name>
-                    rel = skill_md.parent.relative_to(optional_dir)
-                    parts = list(rel.parts)
-                    install_path = f"official/{'/'.join(parts)}"
-                    return (
-                        f"The **{command_name}** skill is available but not installed.\n"
-                        f"Install it with: `hermes skills install {install_path}`"
-                    )
-    except Exception:
-        pass
-    return None
+    repo_root = Path(__file__).resolve().parent.parent
+    return _check_unavailable_skill_for_repo(command_name, repo_root=repo_root)
 
 
 def _platform_config_key(platform: "Platform") -> str:
@@ -693,213 +477,10 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     return resolve_gateway_model(config)
 
 
-def _parse_session_key(session_key: str) -> "dict | None":
-    """Parse a session key into its component parts.
-
-    Session keys follow the format
-    ``agent:main:{platform}:{chat_type}:{chat_id}[:{extra}...]``.
-    Returns a dict with ``platform``, ``chat_type``, ``chat_id``, and
-    optionally ``thread_id`` keys, or None if the key doesn't match.
-
-    The 6th element is only returned as ``thread_id`` for chat types where
-    it is unambiguous (``dm`` and ``thread``).  For group/channel sessions
-    the suffix may be a user_id (per-user isolation) rather than a
-    thread_id, so we leave ``thread_id`` out to avoid mis-routing.
-    """
-    parts = session_key.split(":")
-    if len(parts) >= 5 and parts[0] == "agent" and parts[1] == "main":
-        result = {
-            "platform": parts[2],
-            "chat_type": parts[3],
-            "chat_id": parts[4],
-        }
-        if len(parts) > 5 and parts[3] in {"dm", "thread"}:
-            result["thread_id"] = parts[5]
-        return result
-    return None
-
-
-def _format_gateway_process_notification(evt: dict) -> "str | None":
-    """Format a watch pattern event from completion_queue into a [IMPORTANT:] message."""
-    evt_type = evt.get("type", "completion")
-    _sid = evt.get("session_id", "unknown")
-    _cmd = evt.get("command", "unknown")
-
-    if evt_type == "watch_disabled":
-        return f"[IMPORTANT: {evt.get('message', '')}]"
-
-    if evt_type == "watch_match":
-        _pat = evt.get("pattern", "?")
-        _out = evt.get("output", "")
-        _sup = evt.get("suppressed", 0)
-        text = (
-            f"[IMPORTANT: Background process {_sid} matched "
-            f"watch pattern \"{_pat}\".\n"
-            f"Command: {_cmd}\n"
-            f"Matched output:\n{_out}"
-        )
-        if _sup:
-            text += f"\n({_sup} earlier matches were suppressed by rate limit)"
-        text += "]"
-        return text
-
-    if evt_type == "async_delegation":
-        # Reuse the shared rich formatter (self-contained task-source block).
-        from tools.process_registry import format_process_notification
-        return format_process_notification(evt)
-
-    return None
-
-
-def _drain_gateway_watch_events(completion_queue) -> "list[dict]":
-    """Drain gateway-owned watch events without spinning on requeued events.
-
-    Watch events are handled by the post-turn gateway drain. Process
-    completions are owned by their per-process watcher task, and async
-    delegation completions are owned by ``_async_delegation_watcher``.
-    Requeueing async events inside ``while not queue.empty()`` would make the
-    loop non-terminating, so detach the current batch first, then requeue any
-    events this drain does not own after the queue is empty.
-    """
-    watch_events: list[dict] = []
-    requeue: list[dict] = []
-    while not completion_queue.empty():
-        try:
-            evt = completion_queue.get_nowait()
-        except Exception:
-            break
-        evt_type = evt.get("type", "completion")
-        if evt_type in {"watch_match", "watch_disabled"}:
-            watch_events.append(evt)
-        elif evt_type == "async_delegation":
-            requeue.append(evt)
-        # else: process completion events are handled by the watcher task
-    for evt in requeue:
-        completion_queue.put(evt)
-    return watch_events
-
-
 # Module-level alias kept for gateway.run-internal tests while P5 retires this
 # module. Production callers must import hermes_gateway.runner_ref directly.
 from hermes_gateway.runner_ref import gateway_runner_ref as _gateway_runner_ref
 from hermes_gateway.runner_ref import set_gateway_runner
-
-
-def _normalize_empty_agent_response(
-    agent_result: dict,
-    response: str,
-    *,
-    history_len: int = 0,
-) -> str:
-    """Normalize empty/None agent responses into user-facing messages.
-
-    Consolidates the existing ``failed`` handler and adds a catch-all for
-    the case where the agent did work (api_calls > 0) but returned no text.
-    Fix for #18765.
-    """
-    if response:
-        if _is_dovie_runtime_auth_failure(response):
-            return _DOVIE_RUNTIME_AUTH_FAILURE_MESSAGE
-        return response
-
-    if agent_result.get("failed"):
-        error_detail = agent_result.get("error", "unknown error")
-        if _is_dovie_runtime_auth_failure(error_detail):
-            return _DOVIE_RUNTIME_AUTH_FAILURE_MESSAGE
-        error_str = str(error_detail).lower()
-        is_context_failure = any(
-            p in error_str
-            for p in ("context", "token", "too large", "too long", "exceed", "payload")
-        ) or ("400" in error_str and history_len > 50)
-        if is_context_failure:
-            return (
-                "⚠️ Session too large for the model's context window.\n"
-                "Use /compact to compress the conversation, or "
-                "/reset to start fresh."
-            )
-        return (
-            f"The request failed: {str(error_detail)[:300]}\n"
-            "Try again or use /reset to start a fresh session."
-        )
-
-    api_calls = int(agent_result.get("api_calls", 0) or 0)
-    if api_calls > 0 and not agent_result.get("interrupted"):
-        if agent_result.get("partial"):
-            err = agent_result.get("error", "processing incomplete")
-            return f"⚠️ Processing stopped: {str(err)[:200]}. Try again."
-        return (
-            "⚠️ Processing completed but no response was generated. "
-            "This may be a transient error — try sending your message again."
-        )
-
-    return response
-
-
-_DOVIE_RUNTIME_AUTH_FAILURE_MESSAGE = (
-    "⚠️ Dovie runtime 登录凭证已过期，正在刷新本地运行时。请稍后再试一次。"
-)
-
-
-def _is_dovie_runtime_auth_failure(value: object) -> bool:
-    text = str(value or "").lower()
-    return (
-        "runtime token has expired or was revoked" in text
-        or "runtime_token_error" in text
-        or "dovie_auth_required" in text
-        or "runtime_scope_forbidden" in text
-    )
-
-
-def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
-    """Return True only when a gateway turn really completed successfully.
-
-    Restart recovery uses ``resume_pending`` as a durable marker for sessions
-    interrupted during gateway drain.  A soft interrupt can still bubble out as
-    a syntactically normal agent result with an empty final response; clearing
-    the marker in that case loses the recovery signal and startup auto-resume
-    has nothing to schedule.
-    """
-    if not isinstance(agent_result, dict):
-        return False
-    if agent_result.get("interrupted"):
-        return False
-    if agent_result.get("failed") or agent_result.get("partial") or agent_result.get("error"):
-        return False
-    if agent_result.get("completed") is False:
-        return False
-    return True
-
-
-def _preserve_queued_followup_history_offset(
-    current_result: dict,
-    followup_result: dict,
-) -> dict:
-    """Carry the outer history offset through queued follow-up drains.
-
-    ``_process_message_background()`` persists transcript rows only once, after the
-    entire in-band queued-follow-up chain returns.  Each recursive ``_run_agent()``
-    call advances ``history_offset`` to the history it received, so without
-    correction the outermost persistence step sees only the *last* queued turn as
-    "new" and silently drops earlier turns from the same drain chain.
-
-    Preserve the earliest (outermost) history offset so the final transcript slice
-    still includes every queued turn that ran during the chain.
-    """
-    if not isinstance(followup_result, dict):
-        return followup_result
-    if not isinstance(current_result, dict):
-        return followup_result
-
-    current_offset = current_result.get("history_offset")
-    followup_offset = followup_result.get("history_offset")
-    if not isinstance(current_offset, int):
-        return followup_result
-    if isinstance(followup_offset, int) and followup_offset <= current_offset:
-        return followup_result
-
-    merged = dict(followup_result)
-    merged["history_offset"] = current_offset
-    return merged
 
 
 class GatewayRunner:
@@ -13581,7 +13162,7 @@ class GatewayRunner:
             # when we successfully transcribed the audio — it's redundant.
             _placeholder = "(The user sent a message with no text content)"
             if user_text and user_text.strip() == _placeholder:
-                return prefix, successful_transcripts
+                return prefix
             if user_text:
                 return f"{prefix}\n\n{user_text}"
             return prefix
