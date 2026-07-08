@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 import gateway.run as gateway_run
+import hermes_gateway.fast_command as fast_command
 from hermes_gateway.config import Platform
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionSource
@@ -125,9 +126,9 @@ def test_turn_route_skips_priority_processing_for_unsupported_models():
 async def test_handle_fast_command_persists_config(monkeypatch, tmp_path):
     runner = _make_runner()
 
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
-    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
+    monkeypatch.setattr(fast_command, "GATEWAY_HOME", tmp_path)
+    monkeypatch.setattr(fast_command, "load_gateway_config", lambda: {})
+    monkeypatch.setattr(fast_command, "resolve_gateway_model", lambda config=None: "gpt-5.4")
 
     response = await runner._handle_fast_command(_make_event("/fast fast"))
 
@@ -145,6 +146,7 @@ async def test_run_agent_passes_priority_processing_to_gateway_agent(monkeypatch
 
     (tmp_path / "config.yaml").write_text("agent:\n  service_tier: fast\n", encoding="utf-8")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(fast_command, "GATEWAY_HOME", tmp_path)
     monkeypatch.setattr(gateway_run, "_env_path", tmp_path / ".env")
     monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
