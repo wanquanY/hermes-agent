@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from hermes_constants import get_hermes_home
 from hermes_profile_dir import resolve_default_agent_dir
 
@@ -545,14 +546,12 @@ def rebase_team_mission_workspace_paths(*, old_path: str, new_path: str, db: Any
     active_db = db
     close_db = False
     if active_db is None:
-        from hermes_state import SessionDB
-
-        active_db = SessionDB()
+        active_db = open_cli_session_store()
         close_db = True
     try:
         conn = getattr(active_db, "_conn", None)
         if conn is None:
-            raise RuntimeError("SessionDB connection unavailable")
+            raise RuntimeError("session store connection unavailable")
         lock = getattr(active_db, "_lock", None)
         if lock is None:
             lock_cm = None
