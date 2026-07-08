@@ -57,12 +57,12 @@
     },
     {
       "id": "p2:state_store_decomposed",
-      "message": "state_store/state_mixins still own data-plane bulk: 10472 lines; hermes_agent/storage/state_store.py: 5264; hermes_agent/storage/state_mixins/activities.py: 237; hermes_agent/storage/state_mixins/agent_profiles.py: 89; hermes_agent/storage/state_mixins/branch.py: 422; hermes_agent/storage/state_mixins/member_chat.py: 137; hermes_agent/storage/state_mixins/participants.py: 525; hermes_agent/storage/state_mixins/runs.py: 2926; hermes_agent/storage/state_mixins/team_capabilities.py: 312; hermes_agent/storage/state_mixins/team_registry.py: 560",
+      "message": "state_store/state_mixins still own data-plane bulk: 10100 lines; hermes_agent/storage/state_store.py: 4892; hermes_agent/storage/state_mixins/activities.py: 237; hermes_agent/storage/state_mixins/agent_profiles.py: 89; hermes_agent/storage/state_mixins/branch.py: 422; hermes_agent/storage/state_mixins/member_chat.py: 137; hermes_agent/storage/state_mixins/participants.py: 525; hermes_agent/storage/state_mixins/runs.py: 2926; hermes_agent/storage/state_mixins/team_capabilities.py: 312; hermes_agent/storage/state_mixins/team_registry.py: 560",
       "ok": false
     },
     {
       "id": "p2:hermes_state_store_no_methods",
-      "message": "HermesStateStore still has 144 methods",
+      "message": "HermesStateStore still has 140 methods",
       "ok": false
     },
     {
