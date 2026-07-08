@@ -38,7 +38,7 @@ from hermes_state_run_event_reference import (
     reference_projected_run_event_payloads,
     rehydrate_referenced_run_event,
 )
-from hermes_state_runtime import (
+from hermes_agent.domain.session_runtime_state import (
     json_loads as runtime_json_loads,
     session_info_payload_hash,
     session_info_record,

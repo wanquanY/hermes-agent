@@ -1852,6 +1852,40 @@
         {
           "first_lines": [
             {
+              "line": 59,
+              "text": "runtime_session_id: str = \"\",",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            },
+            {
+              "line": 69,
+              "text": "\"runtime_session_id\": str(runtime_session_id or \"\").strip(),",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            },
+            {
+              "line": 95,
+              "text": "\"runtime_session_id\": str(value(\"runtime_session_id\") or \"\"),",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            },
+            {
+              "line": 111,
+              "text": "for key in (\"runtime_scope_key\", \"runtime_session_id\", \"run_id\", \"turn_id\"):",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            }
+          ],
+          "offenders": 4,
+          "path": "hermes_agent/domain/session_runtime_state.py"
+        },
+        {
+          "first_lines": [
+            {
               "line": 95,
               "text": "event.get(\"stored_session_id\")",
               "tokens": [
@@ -1882,40 +1916,6 @@
           ],
           "offenders": 4,
           "path": "hermes_state_run_event_reference.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 59,
-              "text": "runtime_session_id: str = \"\",",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 69,
-              "text": "\"runtime_session_id\": str(runtime_session_id or \"\").strip(),",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 95,
-              "text": "\"runtime_session_id\": str(value(\"runtime_session_id\") or \"\"),",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 111,
-              "text": "for key in (\"runtime_scope_key\", \"runtime_session_id\", \"run_id\", \"turn_id\"):",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            }
-          ],
-          "offenders": 4,
-          "path": "hermes_state_runtime.py"
         },
         {
           "first_lines": [
@@ -2672,13 +2672,6 @@
               ]
             },
             {
-              "line": 41,
-              "text": "from hermes_state_runtime import (",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
               "line": 48,
               "text": "from hermes_state_tool_events import (",
               "tokens": [
@@ -2686,7 +2679,7 @@
               ]
             }
           ],
-          "offenders": 3,
+          "offenders": 2,
           "path": "hermes_state_runs.py"
         },
         {
@@ -2703,7 +2696,7 @@
           "path": "hermes_agent/storage/migrations/0001_declarative_baseline.py"
         }
       ],
-      "total_offenders": 37
+      "total_offenders": 36
     }
   },
   "phase": "P2",

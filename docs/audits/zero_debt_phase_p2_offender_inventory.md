@@ -8,7 +8,7 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 37 | 4 |
+| `p2:no_sessiondb_production` | 36 | 4 |
 | `p2:no_legacy_identity_alias_internal` | 1181 | 78 |
 
 ## p2:no_sessiondb_production
@@ -17,7 +17,7 @@ Status: `preflight_only`
 |---:|---|---|
 | 26 | `hermes_state.py` | `35` from hermes_state_activities import ActivitiesMixin |
 | 7 | `gateway/run.py` | `1759` from hermes_state import SessionDB |
-| 3 | `hermes_state_runs.py` | `37` from hermes_state_run_event_reference import ( |
+| 2 | `hermes_state_runs.py` | `37` from hermes_state_run_event_reference import ( |
 | 1 | `hermes_agent/storage/migrations/0001_declarative_baseline.py` | `22` from hermes_state import SCHEMA_SQL |
 
 ## p2:no_legacy_identity_alias_internal
@@ -69,8 +69,8 @@ Status: `preflight_only`
 | 6 | `tui_gateway/services/worker_supervisor.py` | `633` stored_session_id=frame.stored_session_id, |
 | 5 | `hermes_team_mission/runtime/conversation_recovery.py` | `26` stable_session_id = _text( |
 | 5 | `tui_gateway/ws.py` | `90` "team_mission.conversation.runtime_session_ids", |
+| 4 | `hermes_agent/domain/session_runtime_state.py` | `59` runtime_session_id: str = "", |
 | 4 | `hermes_state_run_event_reference.py` | `95` event.get("stored_session_id") |
-| 4 | `hermes_state_runtime.py` | `59` runtime_session_id: str = "", |
 | 4 | `hermes_team_mission/runtime/approval_observer.py` | `121` 1. session_key == team_mission_conversations.stable_session_id (leader session). |
 | 4 | `tui_gateway/core/session_config.py` | `151` # that _emit will derive runtime_scope_key / stored_session_id |
 | 3 | `channels/platforms/api_server_responses.py` | `714` stored_session_id = None |
