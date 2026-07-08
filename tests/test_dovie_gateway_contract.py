@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 import threading
 import time
 
@@ -55,6 +56,15 @@ def test_dovie_gateway_capabilities_reports_complete_gateway_abi():
     assert manifest["missingCapabilities"] == []
 
 
+def test_dovie_gateway_manifest_does_not_probe_legacy_sessiondb():
+    source = (Path(__file__).resolve().parents[1] / "dovie_extension" / "manifest.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "hermes_state" not in source
+    assert "SessionDB" not in source
+
+
 def test_dovie_gateway_contract_is_served_by_extension_manifest():
     assert gateway_capabilities is extension_gateway_capabilities
     extension = load_extension()
@@ -80,6 +90,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert response["result"]["timelineContract"]["deprecations"] == []
     assert "run.submit" in response["result"]["methods"]
     assert "run.events" in response["result"]["methods"]
+    assert "session.events" in response["result"]["methods"]
     assert "events.unsubscribe" in response["result"]["methods"]
     assert "conversation.render_snapshot" in response["result"]["methods"]
     assert "team_mission.create" in response["result"]["methods"]

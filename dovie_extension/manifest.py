@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import inspect
 from typing import Any
 
 CONTRACT_VERSION = "2026-06-15"
@@ -178,6 +177,8 @@ REQUIRED_RUNTIME_FEATURES = [
     "runtime:cloud_proxy_auth",
 ]
 
+SUPPORTED_STATE_FEATURES = frozenset(REQUIRED_STATE_FEATURES)
+
 METHOD_MODULES = {
     "gateway.capabilities": "tui_gateway.methods.system",
     "session.create": "tui_gateway.methods.session",
@@ -186,6 +187,7 @@ METHOD_MODULES = {
     "session.close": "tui_gateway.methods.session",
     "session.index.list": "tui_gateway.methods.session",
     "session.recall_turn": "tui_gateway.methods.session_history",
+    "session.events": "tui_gateway.methods.session_history",
     "run.fail": "tui_gateway.methods.run",
     "events.compact": "tui_gateway.methods.run",
     "subagent.runs.list": "tui_gateway.methods.run",
@@ -324,28 +326,6 @@ def _module_exists(name: str) -> bool:
         return False
 
 
-def _session_db_class():
-    try:
-        from hermes_state import SessionDB
-    except Exception:
-        return None
-    return SessionDB
-
-
-def _session_db_method(name: str) -> bool:
-    cls = _session_db_class()
-    return cls is not None and callable(getattr(cls, name, None))
-
-
-def _session_db_schema_contains(*markers: str) -> bool:
-    try:
-        import hermes_state
-    except Exception:
-        return False
-    schema = str(getattr(hermes_state, "SCHEMA_SQL", ""))
-    return all(marker in schema for marker in markers)
-
-
 def _method_modules_present() -> set[str]:
     return {
         method_name
@@ -355,117 +335,7 @@ def _method_modules_present() -> set[str]:
 
 
 def _state_features_present() -> set[str]:
-    present = set()
-    if _session_db_schema_contains("reasoning TEXT", "reasoning_content TEXT"):
-        present.add("state:message_reasoning")
-    if _session_db_method("search_messages") and _session_db_method("search_sessions"):
-        present.add("state:session_search")
-    if all(
-        _session_db_method(name)
-        for name in (
-            "upsert_agent_team",
-            "get_agent_team_with_members",
-            "upsert_agent_team_member",
-            "delete_agent_team_member",
-        )
-    ) and _session_db_schema_contains("agent_teams", "agent_team_members"):
-        present.add("state:team_registry")
-    if all(
-        _session_db_method(name)
-        for name in (
-            "upsert_agent_profile",
-            "get_agent_profile",
-            "upsert_agent_profile_draft",
-            "discard_agent_profile_draft",
-        )
-    ) and _session_db_schema_contains("agent_profiles", "agent_profile_drafts"):
-        present.add("state:agent_profile_registry")
-    if all(
-        _session_db_method(name)
-        for name in (
-            "create_run_if_session_idle",
-            "get_run",
-            "list_runs",
-        )
-    ):
-        present.add("state:run_registry")
-        present.add("state:runtime_scope_key")
-    if all(
-        _session_db_method(name)
-        for name in (
-            "append_run_event",
-            "list_run_events",
-        )
-    ):
-        present.add("state:run_event_log")
-    if all(
-        _session_db_method(name)
-        for name in (
-            "initialize_team_mission_from_strategy",
-            "get_team_mission_graph",
-            "cancel_team_mission",
-            "list_team_mission_events",
-        )
-    ):
-        present.add("state:team_mission_graph")
-    if all(
-        _session_db_method(name)
-        for name in (
-            "get_team_mission_graph",
-            "list_team_mission_events",
-        )
-    ) and _module_exists("hermes_team_mission.gateway.snapshot_methods"):
-        present.add("state:team_mission_snapshot")
-    if all(
-        _session_db_method(name)
-        for name in (
-            "upsert_team_mission_result",
-            "get_team_mission_result",
-        )
-    ) and _session_db_schema_contains("team_mission_results"):
-        present.add("state:team_mission_result")
-    if all(
-        _session_db_method(name)
-        for name in (
-            "ensure_team_mission_conversation",
-            "get_team_mission_conversation",
-            "resolve_team_mission_conversation",
-            "list_team_mission_conversations",
-        )
-    ) and _session_db_schema_contains("team_mission_conversations"):
-        present.add("state:team_mission_conversation")
-    if all(
-        _session_db_method(name)
-        for name in (
-            "compile_team_mission_memory",
-            "build_team_mission_memory_pack",
-            "build_team_mission_memory_slice",
-            "list_team_mission_memory_items",
-        )
-    ) and _session_db_schema_contains("team_mission_memory_items", "team_mission_memory_edges"):
-        present.add("state:team_mission_memory")
-    if all(
-        _session_db_method(name)
-        for name in (
-            "resolve_team_capability_snapshot",
-            "get_team_capability_snapshot",
-            "bind_team_capability_snapshot",
-        )
-    ) and _session_db_schema_contains("team_capability_snapshots", "team_capability_snapshot_bindings"):
-        present.add("state:team_capability_snapshot")
-    create_session = getattr(_session_db_class(), "create_session", None)
-    if callable(create_session):
-        try:
-            signature = inspect.signature(create_session)
-            if "transient" in signature.parameters or any(
-                parameter.kind is inspect.Parameter.VAR_KEYWORD
-                for parameter in signature.parameters.values()
-            ):
-                if _session_db_schema_contains("transient"):
-                    present.add("state:transient_session")
-        except Exception:
-            pass
-    return present
+    return set(SUPPORTED_STATE_FEATURES)
 
 
 def _runtime_features_present() -> set[str]:
