@@ -678,12 +678,12 @@ def test_oneshot_distinguishes_disabled_mcp_from_unknown(monkeypatch, capsys):
     assert "mcp-off" in err
 
 
-def test_oneshot_wires_session_db_for_recall(monkeypatch):
-    """hermes -z bypasses HermesCLI, but recall still needs SessionDB."""
+def test_oneshot_wires_session_store_for_recall(monkeypatch):
+    """hermes -z bypasses HermesCLI, but recall still needs storage."""
     from hermes_cli.oneshot import _run_agent
 
     captured = {}
-    sentinel_db = object()
+    sentinel_store = object()
 
     class FakeAgent:
         def __init__(self, **kwargs):
@@ -696,10 +696,6 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
             captured["prompt"] = prompt
             return "ok"
 
-    class FakeSessionDB:
-        def __new__(cls):
-            return sentinel_db
-
     def mod(name, **attrs):
         module = types.ModuleType(name)
         for key, value in attrs.items():
@@ -707,7 +703,14 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
         return module
 
     monkeypatch.setitem(sys.modules, "run_agent", mod("run_agent", AIAgent=FakeAgent))
-    monkeypatch.setitem(sys.modules, "hermes_state", mod("hermes_state", SessionDB=FakeSessionDB))
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_agent.storage.cli_session_store",
+        mod(
+            "hermes_agent.storage.cli_session_store",
+            open_cli_session_store=lambda: sentinel_store,
+        ),
+    )
     monkeypatch.setitem(
         sys.modules,
         "hermes_cli.config",
@@ -739,7 +742,7 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
     )
 
     assert _run_agent("recall this") == "ok"
-    assert captured["session_db"] is sentinel_db
+    assert captured["session_db"] is sentinel_store
     assert captured["enabled_toolsets"] == ["session_search"]
     assert captured["prompt"] == "recall this"
 

@@ -199,17 +199,17 @@ def run_oneshot(
     return 0
 
 
-def _create_session_db_for_oneshot():
-    """Best-effort SessionDB for ``hermes -z`` / oneshot mode.
+def _create_session_store_for_oneshot():
+    """Best-effort storage owner for ``hermes -z`` / oneshot mode.
 
     Oneshot bypasses ``HermesCLI._init_agent()``, so it must wire the SQLite
     session store itself. Without this, the ``session_search``/recall tool is
-    advertised but every call returns "Session database not available.".
+    advertised but every call returns "message history unavailable".
     """
     try:
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        return SessionDB()
+        return open_cli_session_store()
     except Exception as exc:
         logging.debug("SQLite session store not available for oneshot mode: %s", exc)
         return None
@@ -300,7 +300,7 @@ def _run_agent(
     if toolsets_list is None and use_config_toolsets:
         toolsets_list = sorted(_get_platform_tools(cfg, "cli"))
 
-    session_db = _create_session_db_for_oneshot()
+    session_db = _create_session_store_for_oneshot()
     # Read fallback chain from profile config — supports both the new list
     # format (fallback_providers) and the legacy single-dict (fallback_model).
     # Mirrors the same normalization in cli.py so oneshot workers (e.g. kanban
