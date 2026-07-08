@@ -1728,35 +1728,35 @@
         {
           "first_lines": [
             {
-              "line": 622,
+              "line": 633,
               "text": "stored_session_id=frame.stored_session_id,",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 898,
+              "line": 909,
               "text": "stable = _stable_session_id_from_rpc(frame, args, kwargs)",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 906,
+              "line": 917,
               "text": "def _stable_session_id_from_rpc(",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 913,
+              "line": 924,
               "text": "stable = str(scope.get(\"stable_session_id\") or \"\").strip()",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 920,
+              "line": 931,
               "text": "for key in (\"stored_session_id\", \"session_id\", \"conversation_session_id\", \"conversation_id\"):",
               "tokens": [
                 "stored_session_id"
@@ -2624,7 +2624,7 @@
       "total_offenders": 1199
     },
     "p2:no_sessiondb_production": {
-      "file_count": 36,
+      "file_count": 35,
       "files": [
         {
           "first_lines": [
@@ -2905,33 +2905,6 @@
           ],
           "offenders": 3,
           "path": "hermes_state_run_event_reference.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 1,
-              "text": "\"\"\"Worker-side SessionDB proxy over the run-worker stdio protocol.",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 4,
-              "text": "object anywhere legacy code expects a ``SessionDB`` and every method call",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 85,
-              "text": "\"\"\"Duck-typed worker replacement for ``SessionDB``.",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 3,
-          "path": "tui_gateway/services/worker_db_proxy.py"
         },
         {
           "first_lines": [
@@ -3327,7 +3300,7 @@
           "path": "plugins/memory/holographic/store.py"
         }
       ],
-      "total_offenders": 116
+      "total_offenders": 113
     }
   },
   "phase": "P2",

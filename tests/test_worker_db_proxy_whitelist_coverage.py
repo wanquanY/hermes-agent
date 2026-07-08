@@ -31,15 +31,20 @@ IGNORED_DB_METHOD_NAMES = {
 # code path calls these methods through a statically visible DB handle.
 EXPLICITLY_ALLOWED_WITHOUT_STATIC_WORKER_CALL = {
     "create_activity",
+    "complete_team_mission_plan",
     "get_activity_for_mission",
+    "get_message_by_conversation_message_id",
     "get_session_index",
     "get_unread_completion_count",
     "list_active_mission_activities",
     "list_activities",
+    "list_team_mission_events",
+    "list_team_mission_run_events",
     "list_unread_completions",
     "update_session_cwd",
     "update_session_meta",
     "update_session_model",
+    "upsert_projected_conversation_message",
     "upsert_session",
 }
 

@@ -8,7 +8,7 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 116 | 36 |
+| `p2:no_sessiondb_production` | 113 | 35 |
 | `p2:no_legacy_identity_alias_internal` | 1199 | 80 |
 
 ## p2:no_sessiondb_production
@@ -22,7 +22,6 @@ Status: `preflight_only`
 | 6 | `hermes_team_mission/runtime/profile_scope.py` | `317` from hermes_state import SessionDB |
 | 5 | `hermes_team_mission/state/session_graph.py` | `4` from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS |
 | 3 | `hermes_state_run_event_reference.py` | `11` from hermes_state_run_event_codec import decode_run_event_row |
-| 3 | `tui_gateway/services/worker_db_proxy.py` | `1` """Worker-side SessionDB proxy over the run-worker stdio protocol. |
 | 2 | `hermes_state_tool_events.py` | `9` from hermes_state_run_event_codec import decode_run_event_row |
 | 2 | `hermes_team_mission/state/session_conversations.py` | `8` from hermes_state_participants import leader_participant_id, member_participant_id |
 | 2 | `tui_gateway/methods/session.py` | `1761` # Context compression ends the current SessionDB session and forks a |
@@ -98,7 +97,7 @@ Status: `preflight_only`
 | 6 | `hermes_team_mission/runtime/team_transcript_writer.py` | `420` or event.get("stored_session_id") |
 | 6 | `tui_gateway/services/runtime_pool.py` | `19` runtime_session_id: str |
 | 6 | `tui_gateway/services/subagent_snapshots.py` | `95` stored_session_id: str = "", |
-| 6 | `tui_gateway/services/worker_supervisor.py` | `622` stored_session_id=frame.stored_session_id, |
+| 6 | `tui_gateway/services/worker_supervisor.py` | `633` stored_session_id=frame.stored_session_id, |
 | 5 | `hermes_team_mission/runtime/conversation_recovery.py` | `26` stable_session_id = _text( |
 | 5 | `tui_gateway/ws.py` | `90` "team_mission.conversation.runtime_session_ids", |
 | 4 | `hermes_state_run_event_reference.py` | `95` event.get("stored_session_id") |

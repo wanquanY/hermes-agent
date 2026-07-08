@@ -1,8 +1,8 @@
-"""Worker-side SessionDB proxy over the run-worker stdio protocol.
+"""Worker-side DB RPC proxy over the run-worker stdio protocol.
 
 The worker process must not open ``state.db`` directly.  It sees this
-object anywhere legacy code expects a ``SessionDB`` and every method call
-is forwarded to the main process as a synchronous JSON-RPC request.
+object anywhere state access is required and every method call is forwarded to
+the main process as a synchronous JSON-RPC request.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ class _PendingCall:
 
 
 class WorkerDBProxy:
-    """Duck-typed worker replacement for ``SessionDB``.
+    """Duck-typed worker-side state access proxy.
 
     ``ipc_writer`` must expose ``write_json(dict)``.  ``ipc_reader`` is
     accepted for API symmetry with the protocol but replies are normally
