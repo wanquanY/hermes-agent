@@ -138,6 +138,36 @@ def test_create_provisions_session_index_row():
     assert row["title"] == "T1"
 
 
+def test_normalize_index_conversation_kind_repairs_invalid_and_team_rows():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    conn.executemany(
+        """
+        INSERT INTO session_index (
+            session_id, source, session_kind, conversation_kind, started_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("direct-invalid", "cli", "hermes_session", "", 1.0, 1.0),
+            ("team-source", "team_mission", "hermes_session", "direct", 1.0, 1.0),
+            ("team-kind", "cli", "team_mission", "direct", 1.0, 1.0),
+            ("already-direct", "cli", "hermes_session", "direct", 1.0, 1.0),
+        ],
+    )
+
+    assert repo.normalize_index_conversation_kind() == 3
+
+    rows = conn.execute(
+        "SELECT session_id, conversation_kind FROM session_index ORDER BY session_id"
+    ).fetchall()
+    assert {row["session_id"]: row["conversation_kind"] for row in rows} == {
+        "already-direct": "direct",
+        "direct-invalid": "direct",
+        "team-kind": "team",
+        "team-source": "team",
+    }
+
+
 def test_create_persists_tui_session_metadata():
     conn = _make_conn()
     repo = SessionRepoImpl(conn)

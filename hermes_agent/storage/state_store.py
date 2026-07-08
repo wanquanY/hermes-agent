@@ -28,6 +28,7 @@ from agent.memory_manager import sanitize_context
 from hermes_agent.domain.event_ledger import EventLedger
 from hermes_agent.domain.seq_allocator import ensure_session_counter
 from hermes_agent.domain.session_deletion import SessionDeletionService
+from hermes_agent.domain.session_index_reconciler import SessionIndexReconciler
 from hermes_agent.repositories.agent_profile_repo import AgentProfileRepoImpl
 from hermes_agent.repositories.message_repo import MessageRepoImpl, MessageRepository
 from hermes_agent.repositories.session_repo import SessionRepoImpl
@@ -454,27 +455,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             return 0
 
         def _do(conn: sqlite3.Connection) -> int:
-            cursor = conn.execute(
-                "UPDATE sessions SET source = ? WHERE id = ? AND COALESCE(source, '') != ?",
-                (normalized_source, sid, normalized_source),
-            )
-            source_rows = int(cursor.rowcount or 0)
-            try:
-                conn.execute(
-                    """
-                    UPDATE session_index
-                       SET source = ?,
-                           conversation_kind = CASE
-                               WHEN ? = 'team_mission' THEN 'team'
-                               ELSE conversation_kind
-                           END
-                     WHERE session_id = ?
-                    """,
-                    (normalized_source, normalized_source, sid),
-                )
-            except sqlite3.OperationalError:
-                pass
-            return source_rows
+            return SessionRepoImpl(conn).update_source(sid, normalized_source)
 
         return int(self._execute_write(_do) or 0)
 
@@ -638,76 +619,12 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         keep these fields current, so list endpoints do not need to aggregate
         over the messages table on every sidebar refresh.
         """
-        cursor.execute(
-            """
-            UPDATE sessions
-            SET
-                message_count = (
-                    SELECT COUNT(1)
-                    FROM messages m
-                    WHERE m.session_id = sessions.id
-                      AND m.active = 1
-                ),
-                preview = COALESCE((
-                    SELECT CASE
-                        WHEN LENGTH(raw.preview_raw) > 60 THEN SUBSTR(raw.preview_raw, 1, 60) || '...'
-                        ELSE raw.preview_raw
-                    END
-                    FROM (
-                        SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63) AS preview_raw
-                        FROM messages m
-                        WHERE m.session_id = sessions.id
-                          AND m.active = 1
-                          AND m.role = 'user'
-                          AND m.content IS NOT NULL
-                        ORDER BY m.timestamp, m.id
-                        LIMIT 1
-                    ) raw
-                ), ''),
-                last_active = (
-                    SELECT MAX(m.timestamp)
-                    FROM messages m
-                    WHERE m.session_id = sessions.id
-                      AND m.active = 1
-                )
-            """
-        )
-        rows = cursor.execute(
-            """
-            SELECT
-                s.id,
-                s.display_title_source,
-                m.content AS first_user_content
-            FROM sessions s
-            LEFT JOIN messages m
-              ON m.id = (
-                  SELECT m2.id
-                  FROM messages m2
-                  WHERE m2.session_id = s.id
-                    AND m2.active = 1
-                    AND m2.role = 'user'
-                    AND m2.content IS NOT NULL
-                  ORDER BY m2.timestamp, m2.id
-                  LIMIT 1
-              )
-            """
-        ).fetchall()
+        rows = cursor.execute("SELECT id FROM sessions ORDER BY id").fetchall()
+        repo = MessageRepository(cursor.connection, SessionRepoImpl(cursor.connection))
         for row in rows:
-            if str(row["display_title_source"] or "") == "user":
-                continue
-            display_title = self._message_display_title_text(row["first_user_content"])
-            cursor.execute(
-                """
-                UPDATE sessions
-                SET display_title = ?,
-                    display_title_source = CASE
-                        WHEN ? != '' THEN 'first_user_message'
-                        ELSE ''
-                    END
-                WHERE id = ?
-                """,
-                (display_title, display_title, row["id"]),
-            )
+            session_id = str(_sqlite_row_value(row, "id", 0, "") or "").strip()
+            if session_id:
+                repo.rebuild_session_projection(session_id)
 
     def _migrate_agent_profile_versions_to_latest_profiles(self, cursor: sqlite3.Cursor) -> None:
         """Fold the removed profile version table into latest profile rows."""
@@ -726,20 +643,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         """Normalize the explicit direct/team classification for sidebar rows."""
 
         try:
-            cursor.execute(
-                """
-                UPDATE session_index
-                   SET conversation_kind = CASE
-                       WHEN COALESCE(source, '') = 'team_mission'
-                         OR COALESCE(session_kind, '') = 'team_mission'
-                       THEN 'team'
-                       ELSE 'direct'
-                   END
-                 WHERE COALESCE(conversation_kind, '') NOT IN ('direct', 'team')
-                    OR (COALESCE(source, '') = 'team_mission' AND conversation_kind != 'team')
-                    OR (COALESCE(session_kind, '') = 'team_mission' AND conversation_kind != 'team')
-                """
-            )
+            SessionRepoImpl(cursor.connection).normalize_index_conversation_kind()
         except sqlite3.OperationalError:
             pass
 
@@ -1467,30 +1371,20 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
     ) -> None:
         """Shared INSERT OR IGNORE for session rows."""
         def _do(conn):
-            conn.execute(
-                """INSERT OR IGNORE INTO sessions (
-                   id, source, user_id, model, model_config, system_prompt,
-                   parent_session_id, started_at, updated_at, title, cwd, archived,
-                   session_kind, conversation_kind, transient
-                )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    session_id,
-                    source,
-                    user_id,
-                    model,
-                    json.dumps(model_config) if model_config else None,
-                    system_prompt,
-                    parent_session_id,
-                    (now := time.time()),
-                    now,
-                    title,
-                    cwd,
-                    1 if archived else 0,
-                    session_kind or "hermes_session",
-                    conversation_kind or "direct",
-                    1 if transient else 0,
-                ),
+            SessionRepoImpl(conn).ensure_session_record(
+                session_id,
+                source,
+                model=model,
+                model_config=model_config,
+                system_prompt=system_prompt,
+                user_id=user_id,
+                parent_session_id=parent_session_id,
+                transient=transient,
+                title=title,
+                cwd=cwd,
+                archived=archived,
+                session_kind=session_kind,
+                conversation_kind=conversation_kind,
             )
             ensure_session_counter(conn, session_id=session_id, updated_at=time.time())
         self._execute_write(_do)
@@ -1511,20 +1405,13 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         intentionally need to re-end a closed session with a new reason.
         """
         def _do(conn):
-            conn.execute(
-                "UPDATE sessions SET ended_at = ?, end_reason = ? "
-                "WHERE id = ? AND ended_at IS NULL",
-                (time.time(), end_reason, session_id),
-            )
+            SessionRepoImpl(conn).close(session_id, end_reason)
         self._execute_write(_do)
 
     def reopen_session(self, session_id: str) -> None:
         """Clear ended_at/end_reason so a session can be resumed."""
         def _do(conn):
-            conn.execute(
-                "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
-                (session_id,),
-            )
+            SessionRepoImpl(conn).reopen(session_id)
         self._execute_write(_do)
 
     def repair_orphaned_foreign_key_rows(self) -> int:
@@ -1562,19 +1449,13 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
         """Store the full assembled system prompt snapshot."""
         def _do(conn):
-            conn.execute(
-                "UPDATE sessions SET system_prompt = ? WHERE id = ?",
-                (system_prompt, session_id),
-            )
+            SessionRepoImpl(conn).update_system_prompt(session_id, system_prompt)
         self._execute_write(_do)
 
     def update_session_cwd(self, session_id: str, cwd: str) -> None:
         """Store the current working directory for a CLI/runtime session."""
         def _do(conn):
-            conn.execute(
-                "UPDATE sessions SET cwd = ?, updated_at = ? WHERE id = ?",
-                (str(cwd or ""), time.time(), session_id),
-            )
+            SessionRepoImpl(conn).update_cwd(session_id, str(cwd or ""))
         self._execute_write(_do)
 
     def get_scoped_system_prompt(self, session_id: str, scope_key: str) -> Optional[str]:
@@ -1655,74 +1536,26 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         the caller already holds cumulative totals (gateway path, where the
         cached agent accumulates across messages).
         """
-        # Ensure the session row exists so the UPDATE doesn't silently affect
-        # 0 rows.  Under concurrent load (cron + kanban + delegate_task) the
-        # initial create_session() may have failed due to SQLite locking.
-        # INSERT OR IGNORE is cheap and idempotent.
-        self._insert_session_row(session_id, "unknown", model=model)
-        if absolute:
-            sql = """UPDATE sessions SET
-                   input_tokens = ?,
-                   output_tokens = ?,
-                   cache_read_tokens = ?,
-                   cache_write_tokens = ?,
-                   reasoning_tokens = ?,
-                   estimated_cost_usd = COALESCE(?, 0),
-                   actual_cost_usd = CASE
-                       WHEN ? IS NULL THEN actual_cost_usd
-                       ELSE ?
-                   END,
-                   cost_status = COALESCE(?, cost_status),
-                   cost_source = COALESCE(?, cost_source),
-                   pricing_version = COALESCE(?, pricing_version),
-                   billing_provider = COALESCE(billing_provider, ?),
-                   billing_base_url = COALESCE(billing_base_url, ?),
-                   billing_mode = COALESCE(billing_mode, ?),
-                   model = COALESCE(model, ?),
-                   api_call_count = ?
-                   WHERE id = ?"""
-        else:
-            sql = """UPDATE sessions SET
-                   input_tokens = input_tokens + ?,
-                   output_tokens = output_tokens + ?,
-                   cache_read_tokens = cache_read_tokens + ?,
-                   cache_write_tokens = cache_write_tokens + ?,
-                   reasoning_tokens = reasoning_tokens + ?,
-                   estimated_cost_usd = COALESCE(estimated_cost_usd, 0) + COALESCE(?, 0),
-                   actual_cost_usd = CASE
-                       WHEN ? IS NULL THEN actual_cost_usd
-                       ELSE COALESCE(actual_cost_usd, 0) + ?
-                   END,
-                   cost_status = COALESCE(?, cost_status),
-                   cost_source = COALESCE(?, cost_source),
-                   pricing_version = COALESCE(?, pricing_version),
-                   billing_provider = COALESCE(billing_provider, ?),
-                   billing_base_url = COALESCE(billing_base_url, ?),
-                   billing_mode = COALESCE(billing_mode, ?),
-                   model = COALESCE(model, ?),
-                   api_call_count = COALESCE(api_call_count, 0) + ?
-                   WHERE id = ?"""
-        params = (
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_write_tokens,
-            reasoning_tokens,
-            estimated_cost_usd,
-            actual_cost_usd,
-            actual_cost_usd,
-            cost_status,
-            cost_source,
-            pricing_version,
-            billing_provider,
-            billing_base_url,
-            billing_mode,
-            model,
-            api_call_count,
-            session_id,
-        )
         def _do(conn):
-            conn.execute(sql, params)
+            SessionRepoImpl(conn).update_token_counts(
+                session_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                model=model,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
+                reasoning_tokens=reasoning_tokens,
+                estimated_cost_usd=estimated_cost_usd,
+                actual_cost_usd=actual_cost_usd,
+                cost_status=cost_status,
+                cost_source=cost_source,
+                pricing_version=pricing_version,
+                billing_provider=billing_provider,
+                billing_base_url=billing_base_url,
+                billing_mode=billing_mode,
+                api_call_count=api_call_count,
+                absolute=absolute,
+            )
         self._execute_write(_do)
 
     def ensure_session(
@@ -1741,23 +1574,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         cutoff = time.time() - 86400  # Only sessions older than 24 hours
 
         def _do(conn):
-            rows = conn.execute("""
-                SELECT id FROM sessions
-                WHERE source = 'tui'
-                  AND title IS NULL
-                  AND ended_at IS NOT NULL
-                  AND started_at < ?
-                  AND NOT EXISTS (
-                      SELECT 1 FROM messages WHERE messages.session_id = sessions.id
-                  )
-            """, (cutoff,)).fetchall()
-            ids = [r[0] if isinstance(r, (tuple, list)) else r["id"] for r in rows]
-            if ids:
-                placeholders = ",".join("?" * len(ids))
-                conn.execute(
-                    f"DELETE FROM sessions WHERE id IN ({placeholders})", ids
-                )
-            return ids
+            return SessionRepoImpl(conn).prune_empty_ghost_sessions(cutoff=cutoff)
 
         removed_ids = self._execute_write(_do) or []
         # Clean up any on-disk session files (belt-and-suspenders)
@@ -1774,34 +1591,8 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         and api_call_count=0.  Non-destructive: preserves all messages and sets
         end_reason='orphaned_compression'.  Fix for #20001.
         """
-        cutoff = time.time() - 604800  # 7 days
-
         def _do(conn):
-            now = time.time()
-            result = conn.execute(
-                """
-                UPDATE sessions
-                SET ended_at = ?,
-                    end_reason = 'orphaned_compression'
-                WHERE api_call_count = 0
-                  AND end_reason IS NULL
-                  AND ended_at IS NULL
-                  AND started_at < ?
-                  AND parent_session_id IS NOT NULL
-                  AND EXISTS (
-                      SELECT 1 FROM sessions p
-                      WHERE p.id = sessions.parent_session_id
-                        AND p.end_reason = 'compression'
-                        AND p.ended_at IS NOT NULL
-                  )
-                  AND EXISTS (
-                      SELECT 1 FROM messages m
-                      WHERE m.session_id = sessions.id
-                  )
-                """,
-                (now, cutoff),
-            )
-            return result.rowcount
+            return SessionRepoImpl(conn).finalize_orphaned_compression_sessions()
 
         return self._execute_write(_do) or 0
 
@@ -1905,30 +1696,12 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         normalized_source = str(title_source or "user").strip().lower() or "user"
         if normalized_source == "auto":
             return False
-        title = self.sanitize_title(title)
         def _do(conn):
-            if title:
-                # Check uniqueness (allow the same session to keep its own title)
-                cursor = conn.execute(
-                    "SELECT id FROM sessions WHERE title = ? AND id != ?",
-                    (title, session_id),
-                )
-                conflict = cursor.fetchone()
-                if conflict:
-                    raise ValueError(
-                        f"Title '{title}' is already in use by session {conflict['id']}"
-                    )
-            cursor = conn.execute(
-                """
-                UPDATE sessions
-                SET title = ?,
-                    display_title = COALESCE(?, ''),
-                    display_title_source = ?
-                WHERE id = ?
-                """,
-                (title, title or "", normalized_source, session_id),
-            )
-            return cursor.rowcount
+            return 1 if SessionRepoImpl(conn).set_title(
+                session_id,
+                title,
+                title_source=normalized_source,
+            ) else 0
         rowcount = self._execute_write(_do)
         return rowcount > 0
 
@@ -2431,18 +2204,9 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             "updated_at": updated,
             "last_activity": last_activity,
         }
-        cols = list(values.keys())
-        placeholders = ", ".join(f":{c}" for c in cols)
-        update_cols = [c for c in cols if c != "session_id"]
-        set_clause = ", ".join(f"{c}=excluded.{c}" for c in update_cols)
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
-            conn.execute(
-                f"INSERT INTO session_index ({', '.join(cols)}) VALUES ({placeholders}) "
-                f"ON CONFLICT(session_id) DO UPDATE SET {set_clause}",
-                values,
-            )
-            return values
+            return SessionRepoImpl(conn).upsert_session_index(values)
 
         return self._execute_write(_do)
 
@@ -2452,9 +2216,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             return 0
 
         def _do(conn: sqlite3.Connection) -> int:
-            return int(conn.execute(
-                "DELETE FROM session_index WHERE session_id = ?", (sid,)
-            ).rowcount or 0)
+            return 1 if SessionRepoImpl(conn).delete_index(sid) else 0
 
         return self._execute_write(_do)
 
@@ -2479,32 +2241,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         active.
         """
         try:
-            active_run_exists = self._session_index_active_run_exists_sql("session_index")
-            active_mission_exists = self._session_index_active_mission_exists_sql("session_index")
-            active_run_id_is_terminal = """
-                EXISTS (
-                    SELECT 1
-                      FROM runs indexed_active_run
-                     WHERE indexed_active_run.run_id = session_index.active_run_id
-                       AND LOWER(COALESCE(indexed_active_run.status,'')) IN
-                           ('completed','failed','cancelled','canceled','interrupted')
-                )
-            """
-            return int(conn.execute(
-                f"""
-                UPDATE session_index
-                   SET running = 0, status = 'idle', waiting_approval = 0,
-                       active_run_id = '', active_execution_session_id = '',
-                       pending_approval_count = 0
-                 WHERE active_run_id != ''
-                   AND ({active_run_id_is_terminal})
-                   AND NOT ({active_run_exists})
-                   AND (
-                       conversation_kind != 'team'
-                       OR NOT ({active_mission_exists})
-                   )
-                """
-            ).rowcount or 0)
+            return SessionIndexReconciler(conn).repair_terminal_active_runs()
         except sqlite3.OperationalError:
             return 0
 
@@ -2719,227 +2456,10 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         *,
         exclude_sources: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Backfill/repair the index from the source of truth (sessions table).
-
-        Upserts the static/display fields for every non-excluded session,
-        preserving any live status fields already projected by write-time hooks
-        (only inserts defaults for brand-new rows). Safe to run on startup and
-        periodically; the index is always rebuildable from this.
-        """
-        excluded = tuple(exclude_sources if exclude_sources is not None else ("tool", "cron"))
-        placeholders = ", ".join("?" for _ in excluded) if excluded else ""
-        # Team-mission member-node runtime sessions (id like "team:...:node:...")
-        # are data plane, never user-facing — they must not surface in the sidebar.
-        # Mirrors the frontend isTeamMissionInternalRuntimeSessionId rule. Their
-        # delegate_task / sub-agent children carry their OWN fresh id (the member
-        # node session is their parent_session_id) and must be excluded too, or
-        # every team task that runs delegate_task leaks worker chatter into the
-        # sidebar as unattributed `tui` sessions (parent's node session never
-        # surfaces, the child does — confusing the user with "Get latest GitHub
-        # stats" / empty "新会话" rows that don't belong to any conversation).
-        team_internal_clause = (
-            "NOT (id LIKE 'team:%' AND id LIKE '%:node:%') "
-            "AND NOT (COALESCE(parent_session_id,'') LIKE 'team:%:node:%') "
-        )
-        # Suppress regular delegate_task / sub-agent children too — they have a
-        # non-empty parent_session_id pointing at the user-visible conversation
-        # that spawned them, but no row in session_lineage (only user-issued
-        # /branch writes that). Compression-continuation children DO have a
-        # non-empty parent, but the parent always has `end_reason = 'compression'`
-        # by the time the child takes over the chat. So: hide anything with a
-        # parent whose parent isn't a compression handoff and isn't in the
-        # lineage table.  Mirrors the user's mental model — they never asked for
-        # the subagent's chat to be its own sidebar row.
-        subagent_clause = (
-            "NOT ("
-            "  COALESCE(parent_session_id,'') != ''"
-            "  AND NOT EXISTS (SELECT 1 FROM session_lineage l WHERE l.session_id = sessions.id)"
-            "  AND EXISTS ("
-            "    SELECT 1 FROM sessions p"
-            "    WHERE p.id = sessions.parent_session_id"
-            "    AND COALESCE(p.end_reason,'') NOT IN ('compression', 'compression_split')"
-            "  )"
-            ")"
-        )
-        where = [team_internal_clause, subagent_clause]
-        params: List[Any] = []
-        if excluded:
-            where.append(f"COALESCE(source,'') NOT IN ({placeholders})")
-            params.extend(excluded)
-        select_sql = (
-            "SELECT id, source, title, display_title, preview, started_at, "
-            "last_active, message_count, transient FROM sessions WHERE "
-            + " AND ".join(where)
-        )
+        """Backfill/repair the index from the source of truth."""
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
-            # Purge any team-internal node sessions that a prior reconcile leaked,
-            # plus their delegate_task / sub-agent children (id is a fresh tui id
-            # whose parent_session_id points at the team node session).
-            conn.execute(
-                "DELETE FROM session_index "
-                "WHERE session_id LIKE 'team:%' AND session_id LIKE '%:node:%'"
-            )
-            conn.execute(
-                "DELETE FROM session_index "
-                "WHERE session_id IN ("
-                " SELECT id FROM sessions "
-                " WHERE COALESCE(parent_session_id,'') LIKE 'team:%:node:%'"
-                ")"
-            )
-            # CR-P0.4: removed memberchat:* purge hack; member-chat
-            # conversations are first-class per three-layer redesign.
-            # Purge non-team delegate_task subagent children — same predicate
-            # as the SELECT subagent_clause above. A previous reconcile may have
-            # projected them before this filter existed.
-            conn.execute(
-                "DELETE FROM session_index "
-                "WHERE session_id IN ("
-                " SELECT s.id FROM sessions s"
-                " WHERE COALESCE(s.parent_session_id,'') != ''"
-                " AND NOT EXISTS (SELECT 1 FROM session_lineage l WHERE l.session_id = s.id)"
-                " AND EXISTS ("
-                "   SELECT 1 FROM sessions p"
-                "   WHERE p.id = s.parent_session_id"
-                "   AND COALESCE(p.end_reason,'') NOT IN ('compression', 'compression_split')"
-                " )"
-                ")"
-            )
-            rows = conn.execute(select_sql, tuple(params)).fetchall()
-            upserted = 0
-            for row in rows:
-                started = float(row["started_at"] or 0)
-                updated = float(row["last_active"] or row["started_at"] or 0)
-                title = str(row["display_title"] or row["title"] or "")
-                # Insert defaults for new rows; on conflict refresh only the
-                # static/display fields, never the live status projection.
-                conn.execute(
-                    """
-                    INSERT INTO session_index (
-                        session_id, title, preview, source, transient,
-                        conversation_kind, message_count, started_at, updated_at,
-                        last_activity
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(session_id) DO UPDATE SET
-                        title=excluded.title,
-                        preview=excluded.preview,
-                        source=excluded.source,
-                        transient=excluded.transient,
-                        conversation_kind=excluded.conversation_kind,
-                        message_count=excluded.message_count
-                    """,
-                    (
-                        str(row["id"]),
-                        title,
-                        str(row["preview"] or ""),
-                        str(row["source"] or "unknown"),
-                        1 if row["transient"] else 0,
-                        "team" if str(row["source"] or "") == "team_mission" else "direct",
-                        int(row["message_count"] or 0),
-                        started,
-                        updated,
-                        updated,
-                    ),
-                )
-                upserted += 1
-            inactive_conversation_count = int(conn.execute(
-                """
-                SELECT COUNT(*)
-                  FROM conversation_missions cm
-                  JOIN team_missions tm ON tm.mission_id = cm.mission_id
-                 WHERE cm.status = 'active'
-                   AND LOWER(COALESCE(tm.status,'')) IN
-                       ('completed','failed','cancelled','canceled','interrupted','draft','idle')
-                """
-            ).fetchone()[0] or 0)
-            if inactive_conversation_count:
-                now = time.time()
-                conn.execute(
-                    """
-                    UPDATE conversation_missions
-                       SET status = CASE LOWER(COALESCE((
-                                SELECT tm.status
-                                  FROM team_missions tm
-                                 WHERE tm.mission_id = conversation_missions.mission_id
-                            ), ''))
-                            WHEN 'completed' THEN 'completed'
-                            WHEN 'failed' THEN 'failed'
-                            ELSE 'cancelled'
-                           END,
-                           updated_at = ?
-                     WHERE status = 'active'
-                       AND mission_id IN (
-                           SELECT mission_id
-                             FROM team_missions
-                            WHERE LOWER(COALESCE(status,'')) IN
-                                  ('completed','failed','cancelled','canceled','interrupted','draft','idle')
-                       )
-                    """,
-                    (now,),
-                )
-            active_run_exists = self._session_index_active_run_exists_sql("session_index")
-            active_mission_exists = self._session_index_active_mission_exists_sql("session_index")
-            active_run_id_is_terminal = """
-                EXISTS (
-                    SELECT 1
-                      FROM runs indexed_active_run
-                     WHERE indexed_active_run.run_id = session_index.active_run_id
-                       AND LOWER(COALESCE(indexed_active_run.status,'')) IN
-                           ('completed','failed','cancelled','canceled','interrupted')
-                )
-            """
-            # Heal team-mission conversation rows whose mission is already terminal
-            # but whose status projection is still "running"/waiting (e.g. a cancel
-            # that bypassed the graph reducer) — otherwise the sidebar shows a
-            # finished team task as running after restart.
-            conn.execute(
-                f"""
-                UPDATE session_index
-                   SET running = 0, status = 'idle', waiting_approval = 0,
-                       active_run_id = '', active_execution_session_id = '',
-                       pending_approval_count = 0
-                 WHERE conversation_kind = 'team'
-                   AND (running = 1 OR waiting_approval = 1 OR status != 'idle'
-                        OR active_run_id != '' OR active_execution_session_id != '')
-                   AND mission_id IN (
-                       SELECT mission_id FROM team_missions
-                        WHERE LOWER(COALESCE(status,'')) IN
-                              ('completed','failed','cancelled','canceled','interrupted')
-                   )
-                   AND (active_run_id = '' OR ({active_run_id_is_terminal}))
-                   AND NOT ({active_run_exists})
-                   AND NOT ({active_mission_exists})
-                """
-            )
-            # Heal plan-rejection rows produced by older builds: the graph nodes
-            # were cancelled and the mission went back to draft, but the sidebar
-            # projection stayed waiting_approval forever because no terminal
-            # reducer/event fired. Draft missions with no active/approval nodes
-            # are idle, not approval-blocked.
-            conn.execute(
-                f"""
-                UPDATE session_index
-                   SET running = 0, status = 'idle', waiting_approval = 0,
-                       active_run_id = '', active_execution_session_id = '',
-                       pending_approval_count = 0
-                 WHERE conversation_kind = 'team'
-                   AND waiting_approval = 1
-                   AND mission_id IN (
-                       SELECT mission_id FROM team_missions
-                        WHERE LOWER(COALESCE(status,'')) IN ('draft', 'idle')
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1 FROM team_mission_nodes n
-                        WHERE n.mission_id = session_index.mission_id
-                          AND LOWER(COALESCE(n.status,'')) IN
-                              ('waiting_approval','running','starting')
-                   )
-                   AND NOT ({active_run_exists})
-                   AND NOT ({active_mission_exists})
-                """
-            )
-            self._repair_session_index_terminal_active_runs_locked(conn)
-            return {"reconciled": upserted}
+            return SessionIndexReconciler(conn).reconcile(exclude_sources=exclude_sources)
 
         return self._execute_write(_do)
 
@@ -3059,52 +2579,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
 
     def _rebuild_session_list_summary(self, conn: sqlite3.Connection, session_id: str) -> None:
         """Recompute list summary fields after active-message set changes."""
-        row = conn.execute(
-            """
-            SELECT content
-            FROM messages
-            WHERE session_id = ?
-              AND active = 1
-              AND role = 'user'
-              AND content IS NOT NULL
-            ORDER BY timestamp, id
-            LIMIT 1
-            """,
-            (session_id,),
-        ).fetchone()
-        first_user_content = row["content"] if row else None
-        preview = self._message_preview_text(first_user_content)
-        display_title = self._message_display_title_text(first_user_content)
-        conn.execute(
-            """
-            UPDATE sessions
-            SET
-                message_count = (
-                    SELECT COUNT(1)
-                    FROM messages m
-                    WHERE m.session_id = sessions.id
-                      AND m.active = 1
-                ),
-                preview = ?,
-                display_title = CASE
-                    WHEN COALESCE(display_title_source, '') = 'user' THEN COALESCE(display_title, '')
-                    ELSE ?
-                END,
-                display_title_source = CASE
-                    WHEN COALESCE(display_title_source, '') = 'user' THEN 'user'
-                    WHEN ? != '' THEN 'first_user_message'
-                    ELSE ''
-                END,
-                last_active = (
-                    SELECT MAX(m.timestamp)
-                    FROM messages m
-                    WHERE m.session_id = sessions.id
-                      AND m.active = 1
-                )
-            WHERE id = ?
-            """,
-            (preview, display_title, display_title, session_id),
-        )
+        MessageRepository(conn, SessionRepoImpl(conn)).rebuild_session_projection(session_id)
 
     def append_message(
         self,
@@ -4362,12 +3837,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
 
         def _do(conn):
             ids = MessageRepoImpl(conn).deactivate_from(session_id, target_message_id)
-            conn.execute(
-                "UPDATE sessions "
-                "SET rewind_count = COALESCE(rewind_count, 0) + 1 "
-                "WHERE id = ?",
-                (session_id,),
-            )
+            SessionRepoImpl(conn).increment_rewind_count(session_id)
             self._rebuild_session_list_summary(conn, session_id)
             return ids
 
@@ -5685,16 +5155,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         the session is already in a non-terminal handoff state.
         """
         def _do(conn):
-            cur = conn.execute(
-                "UPDATE sessions "
-                "SET handoff_state = 'pending', "
-                "    handoff_platform = ?, "
-                "    handoff_error = NULL "
-                "WHERE id = ? AND (handoff_state IS NULL "
-                "                  OR handoff_state IN ('completed', 'failed'))",
-                (platform, session_id),
-            )
-            return cur.rowcount > 0
+            return SessionRepoImpl(conn).request_handoff(session_id, platform)
         return self._execute_write(_do)
 
     def get_handoff_state(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -5738,32 +5199,19 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
     def claim_handoff(self, session_id: str) -> bool:
         """Atomically transition pending → running. Returns True if claimed."""
         def _do(conn):
-            cur = conn.execute(
-                "UPDATE sessions SET handoff_state = 'running' "
-                "WHERE id = ? AND handoff_state = 'pending'",
-                (session_id,),
-            )
-            return cur.rowcount > 0
+            return SessionRepoImpl(conn).claim_handoff(session_id)
         return self._execute_write(_do)
 
     def complete_handoff(self, session_id: str) -> None:
         """Mark a handoff as completed."""
         def _do(conn):
-            conn.execute(
-                "UPDATE sessions SET handoff_state = 'completed', "
-                "handoff_error = NULL WHERE id = ?",
-                (session_id,),
-            )
+            SessionRepoImpl(conn).complete_handoff(session_id)
         self._execute_write(_do)
 
     def fail_handoff(self, session_id: str, error: str) -> None:
         """Mark a handoff as failed and record the reason."""
         def _do(conn):
-            conn.execute(
-                "UPDATE sessions SET handoff_state = 'failed', "
-                "handoff_error = ? WHERE id = ?",
-                (error[:500], session_id),
-            )
+            SessionRepoImpl(conn).fail_handoff(session_id, error[:500])
         self._execute_write(_do)
 
 

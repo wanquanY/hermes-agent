@@ -456,3 +456,76 @@ def test_conversation_message_append_updates_session_projection_via_session_repo
     assert index_row["preview"] == "hello from user"
     assert index_row["message_count"] == 1
     assert index_row["last_activity"] == 1000.0
+
+
+def test_rebuild_session_projection_restores_session_and_index_from_active_messages():
+    conn = _make_conversation_conn()
+    sessions = SessionRepoImpl(conn)
+    sessions.create(SessionSpec(session_id="s1", source="test", title="Original"))
+    conn.executemany(
+        """
+        INSERT INTO messages (
+            session_id, role, content, tool_calls, timestamp, active
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("s1", "assistant", "ignored assistant", None, 1.0, 1),
+            ("s1", "user", "first user message", None, 2.0, 1),
+            ("s1", "assistant", "tool owner", '[{"name":"search"},{"name":"read"}]', 3.0, 1),
+            ("s1", "user", "inactive user", None, 4.0, 0),
+        ],
+    )
+    conn.execute(
+        """
+        UPDATE sessions
+           SET message_count = 99,
+               tool_call_count = 99,
+               preview = 'stale',
+               display_title = 'stale',
+               display_title_source = ''
+         WHERE id = 's1'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE session_index
+           SET title = 'stale',
+               preview = 'stale',
+               message_count = 99,
+               last_activity = 0
+         WHERE session_id = 's1'
+        """
+    )
+    conn.commit()
+
+    MessageRepository(conn, sessions).rebuild_session_projection("s1")
+
+    session_row = conn.execute(
+        """
+        SELECT message_count, tool_call_count, preview, display_title,
+               display_title_source, last_active
+          FROM sessions
+         WHERE id = 's1'
+        """
+    ).fetchone()
+    assert dict(session_row) == {
+        "message_count": 3,
+        "tool_call_count": 2,
+        "preview": "first user message",
+        "display_title": "first user message",
+        "display_title_source": "first_user_message",
+        "last_active": 3.0,
+    }
+    index_row = conn.execute(
+        """
+        SELECT title, preview, message_count, last_activity
+          FROM session_index
+         WHERE session_id = 's1'
+        """
+    ).fetchone()
+    assert dict(index_row) == {
+        "title": "first user message",
+        "preview": "first user message",
+        "message_count": 3,
+        "last_activity": 3.0,
+    }

@@ -575,6 +575,49 @@ class MessageRepository:
                 self._conn.rollback()
                 raise
 
+    def rebuild_session_projection(self, session_id: str) -> None:
+        stable_sid = str(session_id or "").strip()
+        if not stable_sid:
+            return
+        rows = self._conn.execute(
+            """
+            SELECT role, content, tool_calls, timestamp
+              FROM messages
+             WHERE session_id = ?
+               AND active = 1
+             ORDER BY timestamp ASC, id ASC
+            """,
+            (stable_sid,),
+        ).fetchall()
+        message_count = len(rows)
+        tool_call_count = 0
+        first_user_preview = ""
+        first_user_display_title = ""
+        last_message_ts: float | None = None
+        for row in rows:
+            role = str(row["role"] if isinstance(row, sqlite3.Row) else row[0] or "")
+            content = row["content"] if isinstance(row, sqlite3.Row) else row[1]
+            tool_calls = row["tool_calls"] if isinstance(row, sqlite3.Row) else row[2]
+            timestamp = row["timestamp"] if isinstance(row, sqlite3.Row) else row[3]
+            if role == "user" and not first_user_preview and content is not None:
+                decoded = _decode_content(content)
+                first_user_preview = _message_preview_text(decoded)
+                first_user_display_title = _message_display_title_text(decoded)
+            if tool_calls:
+                tool_call_count += _tool_call_count(tool_calls)
+            if timestamp is not None:
+                last_message_ts = float(timestamp)
+        self._sessions.replace_message_projection(
+            stable_sid,
+            SessionMessageSnapshotProjection(
+                message_count=message_count,
+                tool_call_count=tool_call_count,
+                first_user_preview=first_user_preview,
+                first_user_display_title=first_user_display_title,
+                last_message_ts=last_message_ts,
+            ),
+        )
+
     def upsert_team_message_by_id(
         self,
         *,
@@ -1194,6 +1237,13 @@ def _message_display_title_text(content: Any, limit: int = 100) -> str:
 def _tool_call_count(value: Any) -> int:
     if isinstance(value, list):
         return len(value)
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            decoded = _decode_content(value)
+        if isinstance(decoded, list):
+            return len(decoded)
     return 1 if value else 0
 
 

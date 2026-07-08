@@ -203,17 +203,65 @@ class SessionRepo(Protocol):
 
     def update_usage(self, session_id: str, fields: dict[str, Any]) -> bool: ...
 
+    def update_source(self, session_id: str, source: str) -> int: ...
+
+    def update_token_counts(
+        self,
+        session_id: str,
+        *,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        model: str | None = None,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        reasoning_tokens: int = 0,
+        estimated_cost_usd: float | None = None,
+        actual_cost_usd: float | None = None,
+        cost_status: str | None = None,
+        cost_source: str | None = None,
+        pricing_version: str | None = None,
+        billing_provider: str | None = None,
+        billing_base_url: str | None = None,
+        billing_mode: str | None = None,
+        api_call_count: int = 0,
+        absolute: bool = False,
+    ) -> None: ...
+
     def set_archived(self, session_id: str, archived: bool) -> bool: ...
 
     def update_system_prompt(self, session_id: str, system_prompt: str) -> bool: ...
 
     def request_handoff(self, session_id: str, platform: str) -> bool: ...
 
+    def claim_handoff(self, session_id: str) -> bool: ...
+
+    def complete_handoff(self, session_id: str) -> None: ...
+
     def fail_handoff(self, session_id: str, error: str) -> bool: ...
 
     def finalize_orphaned_compression_sessions(self) -> int: ...
 
+    def prune_empty_ghost_sessions(self, *, cutoff: float) -> list[str]: ...
+
     def ensure_runtime_session(self, session_id: str, *, started_at: float | None = None) -> bool: ...
+
+    def ensure_session_record(
+        self,
+        session_id: str,
+        source: str,
+        *,
+        model: str | None = None,
+        model_config: dict[str, Any] | None = None,
+        system_prompt: str | None = None,
+        user_id: str | None = None,
+        parent_session_id: str | None = None,
+        transient: bool = False,
+        title: str | None = None,
+        cwd: str | None = None,
+        archived: bool = False,
+        session_kind: str = "hermes_session",
+        conversation_kind: str = "direct",
+    ) -> bool: ...
 
     def exists(self, session_id: str) -> bool: ...
 
@@ -258,6 +306,10 @@ class SessionRepo(Protocol):
     def close(self, session_id: str, reason: str) -> None: ...
 
     def reopen(self, session_id: str) -> None: ...
+
+    def normalize_index_conversation_kind(self) -> int: ...
+
+    def increment_rewind_count(self, session_id: str) -> bool: ...
 
 
 class SessionRepoImpl:
@@ -537,6 +589,118 @@ class SessionRepoImpl:
         )
         return rowcount > 0
 
+    def update_source(self, session_id: str, source: str) -> int:
+        stable = str(session_id or "").strip()
+        normalized_source = str(source or "").strip()
+        if not stable or not normalized_source:
+            return 0
+        cursor = self._conn.execute(
+            "UPDATE sessions SET source = ? WHERE id = ? AND COALESCE(source, '') != ?",
+            (normalized_source, stable, normalized_source),
+        )
+        source_rows = int(cursor.rowcount or 0)
+        if _table_exists(self._conn, "session_index"):
+            self._conn.execute(
+                """
+                UPDATE session_index
+                   SET source = ?,
+                       conversation_kind = CASE
+                           WHEN ? = 'team_mission' THEN 'team'
+                           ELSE conversation_kind
+                       END
+                 WHERE session_id = ?
+                """,
+                (normalized_source, normalized_source, stable),
+            )
+        return source_rows
+
+    def update_token_counts(
+        self,
+        session_id: str,
+        *,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        model: str | None = None,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        reasoning_tokens: int = 0,
+        estimated_cost_usd: float | None = None,
+        actual_cost_usd: float | None = None,
+        cost_status: str | None = None,
+        cost_source: str | None = None,
+        pricing_version: str | None = None,
+        billing_provider: str | None = None,
+        billing_base_url: str | None = None,
+        billing_mode: str | None = None,
+        api_call_count: int = 0,
+        absolute: bool = False,
+    ) -> None:
+        self.ensure_session_record(session_id, "unknown", model=model)
+        if absolute:
+            sql = """UPDATE sessions SET
+                   input_tokens = ?,
+                   output_tokens = ?,
+                   cache_read_tokens = ?,
+                   cache_write_tokens = ?,
+                   reasoning_tokens = ?,
+                   estimated_cost_usd = COALESCE(?, 0),
+                   actual_cost_usd = CASE
+                       WHEN ? IS NULL THEN actual_cost_usd
+                       ELSE ?
+                   END,
+                   cost_status = COALESCE(?, cost_status),
+                   cost_source = COALESCE(?, cost_source),
+                   pricing_version = COALESCE(?, pricing_version),
+                   billing_provider = COALESCE(billing_provider, ?),
+                   billing_base_url = COALESCE(billing_base_url, ?),
+                   billing_mode = COALESCE(billing_mode, ?),
+                   model = COALESCE(model, ?),
+                   api_call_count = ?
+                   WHERE id = ?"""
+        else:
+            sql = """UPDATE sessions SET
+                   input_tokens = input_tokens + ?,
+                   output_tokens = output_tokens + ?,
+                   cache_read_tokens = cache_read_tokens + ?,
+                   cache_write_tokens = cache_write_tokens + ?,
+                   reasoning_tokens = reasoning_tokens + ?,
+                   estimated_cost_usd = COALESCE(estimated_cost_usd, 0) + COALESCE(?, 0),
+                   actual_cost_usd = CASE
+                       WHEN ? IS NULL THEN actual_cost_usd
+                       ELSE COALESCE(actual_cost_usd, 0) + ?
+                   END,
+                   cost_status = COALESCE(?, cost_status),
+                   cost_source = COALESCE(?, cost_source),
+                   pricing_version = COALESCE(?, pricing_version),
+                   billing_provider = COALESCE(billing_provider, ?),
+                   billing_base_url = COALESCE(billing_base_url, ?),
+                   billing_mode = COALESCE(billing_mode, ?),
+                   model = COALESCE(model, ?),
+                   api_call_count = COALESCE(api_call_count, 0) + ?
+                   WHERE id = ?"""
+        self._conn.execute(
+            sql,
+            (
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                reasoning_tokens,
+                estimated_cost_usd,
+                actual_cost_usd,
+                actual_cost_usd,
+                cost_status,
+                cost_source,
+                pricing_version,
+                billing_provider,
+                billing_base_url,
+                billing_mode,
+                model,
+                api_call_count,
+                str(session_id or "").strip(),
+            ),
+        )
+
     def set_archived(self, session_id: str, archived: bool) -> bool:
         stable = str(session_id or "").strip()
         if not stable:
@@ -595,8 +759,38 @@ class SessionRepoImpl:
         )
         return int(cursor.rowcount or 0) > 0
 
+    def claim_handoff(self, session_id: str) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable or "handoff_state" not in self._session_columns:
+            return False
+        cursor = self._conn.execute(
+            """
+            UPDATE sessions
+               SET handoff_state = 'running',
+                   updated_at = ?
+             WHERE id = ? AND handoff_state = 'pending'
+            """,
+            (time.time(), stable),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def complete_handoff(self, session_id: str) -> None:
+        stable = str(session_id or "").strip()
+        if not stable or "handoff_state" not in self._session_columns:
+            return
+        self._conn.execute(
+            """
+            UPDATE sessions
+               SET handoff_state = 'completed',
+                   handoff_error = NULL,
+                   updated_at = ?
+             WHERE id = ?
+            """,
+            (time.time(), stable),
+        )
+
     def finalize_orphaned_compression_sessions(self) -> int:
-        required = {"parent_session_id", "message_count", "ended_at", "end_reason"}
+        required = {"parent_session_id", "ended_at", "end_reason"}
         if not required.issubset(self._session_columns):
             return 0
         now = time.time()
@@ -613,6 +807,28 @@ class SessionRepoImpl:
             (now, now),
         )
         return int(cursor.rowcount or 0)
+
+    def prune_empty_ghost_sessions(self, *, cutoff: float) -> list[str]:
+        required = {"source", "title", "ended_at", "started_at"}
+        if not required.issubset(self._session_columns):
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT id FROM sessions
+            WHERE source = 'tui'
+              AND title IS NULL
+              AND ended_at IS NOT NULL
+              AND started_at < ?
+              AND COALESCE(message_count, 0) = 0
+            """,
+            (float(cutoff),),
+        ).fetchall()
+        ids = [str(_row_any(row, "id", "")) for row in rows]
+        ids = [sid for sid in ids if sid]
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            self._conn.execute(f"DELETE FROM sessions WHERE id IN ({placeholders})", ids)
+        return ids
 
     def ensure_runtime_session(self, session_id: str, *, started_at: float | None = None) -> bool:
         stable = str(session_id or "").strip()
@@ -637,6 +853,52 @@ class SessionRepoImpl:
             VALUES ({placeholders})
             """,
             values,
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def ensure_session_record(
+        self,
+        session_id: str,
+        source: str,
+        *,
+        model: str | None = None,
+        model_config: dict[str, Any] | None = None,
+        system_prompt: str | None = None,
+        user_id: str | None = None,
+        parent_session_id: str | None = None,
+        transient: bool = False,
+        title: str | None = None,
+        cwd: str | None = None,
+        archived: bool = False,
+        session_kind: str = "hermes_session",
+        conversation_kind: str = "direct",
+    ) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required")
+        now = time.time()
+        values_by_column: dict[str, Any] = {
+            "id": stable,
+            "source": str(source or "unknown"),
+            "user_id": user_id,
+            "model": model,
+            "model_config": json.dumps(model_config) if model_config else None,
+            "system_prompt": system_prompt,
+            "parent_session_id": parent_session_id,
+            "started_at": now,
+            "updated_at": now,
+            "title": title,
+            "cwd": cwd,
+            "archived": 1 if archived else 0,
+            "session_kind": session_kind or "hermes_session",
+            "conversation_kind": conversation_kind or "direct",
+            "transient": 1 if transient else 0,
+        }
+        columns = [column for column in values_by_column if column in self._session_columns]
+        placeholders = ", ".join("?" for _ in columns)
+        cursor = self._conn.execute(
+            f"INSERT OR IGNORE INTO sessions ({', '.join(columns)}) VALUES ({placeholders})",
+            [values_by_column[column] for column in columns],
         )
         return int(cursor.rowcount or 0) > 0
 
@@ -938,6 +1200,49 @@ class SessionRepoImpl:
             """,
             (time.time(), stable),
         )
+
+    def normalize_index_conversation_kind(self) -> int:
+        cursor = self._conn.execute(
+            """
+            UPDATE session_index
+               SET conversation_kind = CASE
+                   WHEN COALESCE(source, '') = 'team_mission'
+                     OR COALESCE(session_kind, '') = 'team_mission'
+                   THEN 'team'
+                   ELSE 'direct'
+               END
+             WHERE COALESCE(conversation_kind, '') NOT IN ('direct', 'team')
+                OR (COALESCE(source, '') = 'team_mission' AND conversation_kind != 'team')
+                OR (COALESCE(session_kind, '') = 'team_mission' AND conversation_kind != 'team')
+            """
+        )
+        return int(cursor.rowcount or 0)
+
+    def upsert_session_index(self, values: dict[str, Any]) -> dict[str, Any]:
+        cols = list(values.keys())
+        placeholders = ", ".join(f":{column}" for column in cols)
+        update_cols = [column for column in cols if column != "session_id"]
+        set_clause = ", ".join(f"{column}=excluded.{column}" for column in update_cols)
+        self._conn.execute(
+            f"INSERT INTO session_index ({', '.join(cols)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(session_id) DO UPDATE SET {set_clause}",
+            values,
+        )
+        return values
+
+    def increment_rewind_count(self, session_id: str) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return False
+        cursor = self._conn.execute(
+            """
+            UPDATE sessions
+               SET rewind_count = COALESCE(rewind_count, 0) + 1
+             WHERE id = ?
+            """,
+            (stable,),
+        )
+        return int(cursor.rowcount or 0) > 0
 
     def touch_message_activity(self, session_id: str, timestamp: float) -> None:
         stable = str(session_id or "").strip()
