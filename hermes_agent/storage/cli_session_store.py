@@ -41,6 +41,14 @@ class CliSessionStore:
         self._messages = MessageHistoryReadModel(conn)
         self._recall = SessionRecallReadModel(conn)
 
+    @property
+    def db_path(self) -> Path:
+        row = self._conn.execute("PRAGMA database_list").fetchone()
+        if row is None:
+            return Path("")
+        file_value = row["file"] if "file" in row.keys() else row[2]
+        return Path(str(file_value or ""))
+
     def close(self) -> None:
         self._conn.close()
 
@@ -149,6 +157,23 @@ class CliSessionStore:
         row = self._conn.execute("SELECT * FROM sessions WHERE title = ?", (normalized,)).fetchone()
         return dict(row) if row else None
 
+    def resolve_session_by_title(self, title: str) -> str | None:
+        normalized = sanitize_session_title(title)
+        if not normalized:
+            return None
+        exact = self.get_session_by_title(normalized)
+        escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        rows = self._conn.execute(
+            "SELECT id FROM sessions WHERE title LIKE ? ESCAPE '\\' "
+            "ORDER BY started_at DESC, id DESC",
+            (f"{escaped} #%",),
+        ).fetchall()
+        if rows:
+            return str(rows[0]["id"])
+        if exact:
+            return str(exact["id"])
+        return None
+
     def get_next_title_in_lineage(self, base_title: str) -> str:
         match = re.match(r"^(.*?) #(\d+)$", str(base_title or ""))
         base = match.group(1) if match else str(base_title or "")
@@ -251,6 +276,17 @@ class CliSessionStore:
             archived=archived,
         )
 
+    def message_count(self, session_id: str | None = None) -> int:
+        stable = str(session_id or "").strip()
+        if stable:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM messages WHERE session_id = ?",
+                (stable,),
+            ).fetchone()
+        else:
+            row = self._conn.execute("SELECT COUNT(*) AS count FROM messages").fetchone()
+        return int(row["count"] if row else 0)
+
     def search_messages(
         self,
         query: str,
@@ -295,6 +331,25 @@ class CliSessionStore:
             include_storage_metadata=include_storage_metadata,
             include_inactive=include_inactive,
         )
+
+    def export_session(self, session_id: str) -> dict[str, Any] | None:
+        session = self.get_session(session_id)
+        if not session:
+            return None
+        return {**session, "messages": self.get_messages(session_id, include_inactive=True)}
+
+    def export_all(self, source: str | None = None) -> list[dict[str, Any]]:
+        sessions = self.search_sessions(
+            source=source,
+            limit=100_000,
+            include_children=True,
+            archived="all",
+        )
+        exported: list[dict[str, Any]] = []
+        for session in sessions:
+            session_id = str(session.get("id") or "")
+            exported.append({**session, "messages": self.get_messages(session_id, include_inactive=True)})
+        return exported
 
     def append_message(
         self,
@@ -708,15 +763,128 @@ class CliSessionStore:
         stable = str(session_id or "").strip()
         if not stable:
             return False
+        has_session_lineage = self._table_exists("session_lineage")
+        lineage_columns = self._table_columns("session_lineage") if has_session_lineage else set()
+        has_branch_requests = self._table_exists("session_branch_requests")
         with self._lock:
-            cursor = self._conn.execute("DELETE FROM sessions WHERE id = ?", (stable,))
+            exists = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM sessions WHERE id = ?",
+                (stable,),
+            ).fetchone()
+            if int(exists["count"] if exists else 0) == 0:
+                return False
+            self._conn.execute(
+                "UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?",
+                (stable,),
+            )
+            if "parent_session_id" in lineage_columns:
+                self._conn.execute(
+                    "UPDATE session_lineage SET parent_session_id = NULL WHERE parent_session_id = ?",
+                    (stable,),
+                )
+            if has_branch_requests:
+                self._conn.execute(
+                    "DELETE FROM session_branch_requests WHERE source_session_id = ? OR result_session_id = ?",
+                    (stable, stable),
+                )
+            if has_session_lineage:
+                self._conn.execute("DELETE FROM session_lineage WHERE session_id = ?", (stable,))
+            self._conn.execute("DELETE FROM messages WHERE session_id = ?", (stable,))
+            self._conn.execute("DELETE FROM sessions WHERE id = ?", (stable,))
             self._conn.execute("DELETE FROM session_index WHERE session_id = ?", (stable,))
             self._conn.commit()
         if sessions_dir is not None:
-            path = Path(sessions_dir) / stable
-            if path.exists():
-                shutil.rmtree(path, ignore_errors=True)
-        return int(cursor.rowcount or 0) > 0
+            self._remove_session_files(Path(sessions_dir), stable)
+        return True
+
+    def prune_sessions(
+        self,
+        older_than_days: int = 90,
+        source: str | None = None,
+        sessions_dir: Path | None = None,
+    ) -> int:
+        cutoff = time.time() - (int(older_than_days or 0) * 86400)
+        params: list[Any] = [cutoff]
+        source_clause = ""
+        if source:
+            source_clause = " AND source = ?"
+            params.append(str(source))
+        rows = self._conn.execute(
+            f"SELECT id FROM sessions WHERE started_at < ? AND ended_at IS NOT NULL{source_clause}",
+            tuple(params),
+        ).fetchall()
+        session_ids = [str(row["id"] or "") for row in rows if str(row["id"] or "")]
+        if not session_ids:
+            return 0
+        placeholders = ",".join("?" for _ in session_ids)
+        has_session_lineage = self._table_exists("session_lineage")
+        lineage_columns = self._table_columns("session_lineage") if has_session_lineage else set()
+        has_branch_requests = self._table_exists("session_branch_requests")
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({placeholders})",
+                tuple(session_ids),
+            )
+            if "parent_session_id" in lineage_columns:
+                self._conn.execute(
+                    f"UPDATE session_lineage SET parent_session_id = NULL "
+                    f"WHERE parent_session_id IN ({placeholders})",
+                    tuple(session_ids),
+                )
+            if has_branch_requests:
+                self._conn.execute(
+                    f"DELETE FROM session_branch_requests "
+                    f"WHERE source_session_id IN ({placeholders}) OR result_session_id IN ({placeholders})",
+                    tuple(session_ids + session_ids),
+                )
+            if has_session_lineage:
+                self._conn.execute(
+                    f"DELETE FROM session_lineage WHERE session_id IN ({placeholders})",
+                    tuple(session_ids),
+                )
+            for stable in session_ids:
+                self._conn.execute("DELETE FROM messages WHERE session_id = ?", (stable,))
+                self._conn.execute("DELETE FROM session_index WHERE session_id = ?", (stable,))
+                self._conn.execute("DELETE FROM sessions WHERE id = ?", (stable,))
+            self._conn.commit()
+        if sessions_dir is not None:
+            for stable in session_ids:
+                self._remove_session_files(Path(sessions_dir), stable)
+        return len(session_ids)
+
+    @staticmethod
+    def _remove_session_files(sessions_dir: Path, session_id: str) -> None:
+        if not sessions_dir:
+            return
+        for suffix in (".json", ".jsonl"):
+            try:
+                (sessions_dir / f"{session_id}{suffix}").unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            for path in sessions_dir.glob(f"request_dump_{session_id}_*.json"):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            legacy_dir = sessions_dir / session_id
+            if legacy_dir.exists():
+                shutil.rmtree(legacy_dir, ignore_errors=True)
+        except OSError:
+            pass
+
+    def _table_exists(self, table: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+            (table,),
+        ).fetchone()
+        return row is not None
+
+    def _table_columns(self, table: str) -> set[str]:
+        if not self._table_exists(table):
+            return set()
+        rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(row["name"]) for row in rows}
 
     def prune_empty_ghost_sessions(self, sessions_dir: Path | None = None) -> int:
         rows = self._conn.execute(

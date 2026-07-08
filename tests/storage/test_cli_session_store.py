@@ -50,6 +50,21 @@ def test_cli_session_store_title_resume_and_handoff(tmp_path):
     assert store.get_handoff_state("child")["state"] == "failed"
 
 
+def test_cli_session_store_resolves_titles_to_latest_numbered_session(tmp_path):
+    store = open_cli_session_store(tmp_path / "state.db")
+
+    store.create_session("root", "cli", title="Planning")
+    store.create_session("child-2", "cli", title="Planning #2")
+    store.create_session("child-3", "cli", title="Planning #3")
+    with store._lock:
+        store._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (100.0, "child-2"))
+        store._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (200.0, "child-3"))
+        store._conn.commit()
+
+    assert store.resolve_session_by_title("Planning") == "child-3"
+    assert store.resolve_session_by_title("Missing") is None
+
+
 def test_cli_session_store_updates_usage_and_system_prompt(tmp_path):
     store = open_cli_session_store(tmp_path / "state.db")
 
@@ -83,6 +98,40 @@ def test_cli_session_store_meta_and_delete(tmp_path):
     assert json.loads(store.get_session("s1")["model_config"] or "{}") == {}
     assert store.delete_session("s1") is True
     assert store.get_session("s1") is None
+
+
+def test_cli_session_store_exports_counts_and_prunes_cli_sessions(tmp_path):
+    db_path = tmp_path / "state.db"
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    store = open_cli_session_store(db_path)
+
+    store.create_session("old", "cli")
+    store.create_session("new", "cli")
+    store.append_message("old", "user", "stale")
+    store.append_message("new", "user", "keep")
+    (sessions_dir / "old.jsonl").write_text("{}", encoding="utf-8")
+    with store._lock:
+        store._conn.execute(
+            "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
+            (100.0, 110.0, "old"),
+        )
+        store._conn.execute(
+            "UPDATE sessions SET started_at = ?, ended_at = NULL WHERE id = ?",
+            (9999999999.0, "new"),
+        )
+        store._conn.commit()
+
+    assert store.db_path == db_path
+    assert store.message_count() == 2
+    assert store.message_count("old") == 1
+    assert store.export_session("old")["messages"][0]["content"] == "stale"
+    assert {session["id"] for session in store.export_all(source="cli")} == {"old", "new"}
+
+    assert store.prune_sessions(older_than_days=1, source="cli", sessions_dir=sessions_dir) == 1
+    assert store.get_session("old") is None
+    assert store.get_session("new") is not None
+    assert not (sessions_dir / "old.jsonl").exists()
 
 
 def test_cli_session_store_replaces_and_searches_messages(tmp_path):

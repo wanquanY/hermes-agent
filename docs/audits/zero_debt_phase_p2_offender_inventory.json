@@ -1,47 +1,47 @@
 {
   "gates": {
     "p2:no_legacy_identity_alias_internal": {
-      "file_count": 79,
+      "file_count": 80,
       "files": [
         {
           "first_lines": [
             {
-              "line": 25,
+              "line": 26,
               "text": "def _stored_session_id_from_params(params: dict) -> str:",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 27,
+              "line": 28,
               "text": "params.get(\"stored_session_id\")",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 34,
+              "line": 35,
               "text": "def _run_db_for_stable_session(stored_session_id: str):",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 35,
+              "line": 36,
               "text": "stable = str(stored_session_id or \"\").strip()",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 36,
+              "line": 37,
               "text": "if stable and _is_control_plane_stable_session_id(stable):",
               "tokens": [
                 "stable_session_id"
               ]
             }
           ],
-          "offenders": 109,
+          "offenders": 108,
           "path": "tui_gateway/methods/run.py"
         },
         {
@@ -95,35 +95,35 @@
               ]
             },
             {
-              "line": 194,
+              "line": 217,
               "text": "\"session_id\": str(run.get(\"session_id\") or run.get(\"stored_session_id\") or \"\"),",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 197,
+              "line": 220,
               "text": "\"runtime_session_id\": str(run.get(\"runtime_session_id\") or \"\"),",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 212,
+              "line": 235,
               "text": "def _live_runtime_session_ids_snapshot() -> set[str]:",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 243,
+              "line": 266,
               "text": "live_runtime_session_ids=_live_runtime_session_ids_snapshot(),",
               "tokens": [
                 "runtime_session_id"
               ]
             }
           ],
-          "offenders": 95,
+          "offenders": 94,
           "path": "tui_gateway/services/run_control.py"
         },
         {
@@ -252,35 +252,35 @@
         {
           "first_lines": [
             {
-              "line": 136,
+              "line": 137,
               "text": "\"stored_session_id\",",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 280,
+              "line": 281,
               "text": "\"stored_session_id\": str(session.get(\"session_key\") or sid),",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 418,
+              "line": 419,
               "text": "stable_session_id = str(session.get(\"session_key\") or runtime_sid or \"\").strip()",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 419,
+              "line": 420,
               "text": "if not stable_session_id:",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 421,
+              "line": 422,
               "text": "db = _db_for_stable_session(stable_session_id)",
               "tokens": [
                 "stable_session_id"
@@ -300,28 +300,28 @@
               ]
             },
             {
-              "line": 100,
+              "line": 101,
               "text": "worker doesn't echo the original ``stored_session_id`` / ``turn_id``",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 107,
+              "line": 108,
               "text": "stored_session_id: str",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 123,
+              "line": 124,
               "text": "stored_session_id: str",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 386,
+              "line": 387,
               "text": "stored_session_id: str,",
               "tokens": [
                 "stored_session_id"
@@ -580,35 +580,35 @@
         {
           "first_lines": [
             {
-              "line": 132,
+              "line": 141,
               "text": "def _db_for_session_request(params: dict | None, stable_session_id: str = \"\"):",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 133,
+              "line": 142,
               "text": "stable = str(stable_session_id or \"\").strip()",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 134,
+              "line": 143,
               "text": "if stable and _is_control_plane_stable_session_id(stable):",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 335,
+              "line": 372,
               "text": "stable_session_id = str(session.get(\"session_key\") or runtime_sid or \"\")",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 337,
+              "line": 374,
               "text": "stable_session_id,",
               "tokens": [
                 "stable_session_id"
@@ -949,35 +949,35 @@
         {
           "first_lines": [
             {
-              "line": 182,
+              "line": 183,
               "text": "or params.get(\"stable_session_id\")",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 251,
+              "line": 252,
               "text": "session_id = _stored_session_id(params)",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 267,
+              "line": 268,
               "text": "def _stored_session_id(params: dict[str, Any]) -> str:",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 272,
+              "line": 273,
               "text": "or params.get(\"stored_session_id\")",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 274,
+              "line": 275,
               "text": "or params.get(\"stable_session_id\")",
               "tokens": [
                 "stable_session_id"
@@ -1079,28 +1079,28 @@
               ]
             },
             {
-              "line": 217,
+              "line": 216,
               "text": "session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 231,
+              "line": 230,
               "text": "str(runtime_session_id or \"\"),",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 383,
+              "line": 382,
               "text": "runtime_session_id: str,",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 411,
+              "line": 410,
               "text": "runtime_session_id = ?,",
               "tokens": [
                 "runtime_session_id"
@@ -1113,35 +1113,35 @@
         {
           "first_lines": [
             {
-              "line": 104,
+              "line": 105,
               "text": "def _worker_db_for_stable_session(stable_session_id: str):",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 105,
+              "line": 106,
               "text": "return db_proxy.scoped(stable_session_id)",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 129,
+              "line": 130,
               "text": "frame.stored_session_id,",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 162,
+              "line": 163,
               "text": "frame's ``stored_session_id`` (the stable id the agent uses for",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 183,
+              "line": 184,
               "text": "workspace_context = session_workspace_run_context(frame.stored_session_id, params)",
               "tokens": [
                 "stored_session_id"
@@ -1332,21 +1332,21 @@
               ]
             },
             {
-              "line": 1676,
+              "line": 1685,
               "text": "job[\"_runtime_session_id\"] = _cron_session_id",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 2285,
+              "line": 2294,
               "text": "runtime_session_id = job.get(\"_runtime_session_id\")",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 2286,
+              "line": 2295,
               "text": "if runtime_session_id:",
               "tokens": [
                 "runtime_session_id"
@@ -1482,35 +1482,35 @@
         {
           "first_lines": [
             {
-              "line": 169,
+              "line": 174,
               "text": "\"runtime_stable_session_id\": text(",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 170,
+              "line": 175,
               "text": "subject.get(\"runtime_stable_session_id\") or subject.get(\"runtimeStableSessionId\")",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 523,
+              "line": 528,
               "text": "(\"stable_session_id\", (\"stableSessionId\",)),",
               "tokens": [
                 "stable_session_id"
               ]
             },
             {
-              "line": 524,
+              "line": 529,
               "text": "(\"stored_session_id\", (\"storedSessionId\",)),",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 525,
+              "line": 530,
               "text": "(\"runtime_session_id\", (\"runtimeSessionId\",)),",
               "tokens": [
                 "runtime_session_id"
@@ -1852,42 +1852,6 @@
         {
           "first_lines": [
             {
-              "line": 12,
-              "text": "``stable_session_id / stored_session_id / runtime_session_id`` are legacy",
-              "tokens": [
-                "stored_session_id",
-                "stable_session_id",
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 80,
-              "text": "active_runtime_session_id: str | None = None",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 250,
-              "text": "\"active_runtime_session_id\",",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 251,
-              "text": "patch.active_runtime_session_id,",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            }
-          ],
-          "offenders": 4,
-          "path": "hermes_agent/repositories/session_repo.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 95,
               "text": "event.get(\"stored_session_id\")",
               "tokens": [
@@ -1990,28 +1954,28 @@
         {
           "first_lines": [
             {
-              "line": 150,
+              "line": 151,
               "text": "# that _emit will derive runtime_scope_key / stored_session_id",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 200,
+              "line": 201,
               "text": "(e.g. ``1cf7689d``), NOT the conversation's stored_session_id",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 202,
+              "line": 203,
               "text": "session_index table is keyed by stored_session_id, so feeding the",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 240,
+              "line": 241,
               "text": "_add(session.get(\"stored_session_id\"))",
               "tokens": [
                 "stored_session_id"
@@ -2074,6 +2038,33 @@
           ],
           "offenders": 3,
           "path": "channels/platforms/api_server_runs.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": 85,
+              "text": "active_runtime_session_id: str | None = None",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            },
+            {
+              "line": 256,
+              "text": "\"active_runtime_session_id\",",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            },
+            {
+              "line": 257,
+              "text": "patch.active_runtime_session_id,",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            }
+          ],
+          "offenders": 3,
+          "path": "hermes_agent/repositories/session_repo.py"
         },
         {
           "first_lines": [
@@ -2214,21 +2205,21 @@
         {
           "first_lines": [
             {
-              "line": 1933,
+              "line": 1932,
               "text": "runtime_session_id = str(getattr(self, \"session_id\", \"\") or \"\").strip()",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 1934,
+              "line": 1933,
               "text": "if runtime_session_id:",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 1935,
+              "line": 1934,
               "text": "target_session_id = runtime_session_id",
               "tokens": [
                 "runtime_session_id"
@@ -2295,21 +2286,21 @@
         {
           "first_lines": [
             {
-              "line": 496,
+              "line": 507,
               "text": "\"stored_session_id\": session_key,",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 574,
+              "line": 585,
               "text": "\"stored_session_id\": str(session.get(\"session_key\") or \"\"),",
               "tokens": [
                 "stored_session_id"
               ]
             },
             {
-              "line": 616,
+              "line": 627,
               "text": "\"stored_session_id\": str(session.get(\"session_key\") or \"\"),",
               "tokens": [
                 "stored_session_id"
@@ -2322,14 +2313,14 @@
         {
           "first_lines": [
             {
-              "line": 79,
+              "line": 78,
               "text": "\"team_mission.conversation.runtime_session_ids\",",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 260,
+              "line": 262,
               "text": "\"team_mission.conversation.runtime_session_ids\": \"hermes_team_mission.gateway.conversation_methods\",",
               "tokens": [
                 "runtime_session_id"
@@ -2528,6 +2519,19 @@
         {
           "first_lines": [
             {
+              "line": 114,
+              "text": "active_runtime_session_id TEXT NOT NULL DEFAULT '',",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            }
+          ],
+          "offenders": 1,
+          "path": "hermes_agent/storage/session_repository_db.py"
+        },
+        {
+          "first_lines": [
+            {
               "line": 213,
               "text": "\"stored_session_id\": row[\"id\"],",
               "tokens": [
@@ -2580,7 +2584,7 @@
         {
           "first_lines": [
             {
-              "line": 269,
+              "line": 265,
               "text": "conversation_session_id = _text(conversation.get(\"stable_session_id\")) or conversation_id",
               "tokens": [
                 "stable_session_id"
@@ -2606,7 +2610,7 @@
         {
           "first_lines": [
             {
-              "line": 85,
+              "line": 86,
               "text": "\"stored_session_id\": session_id,",
               "tokens": [
                 "stored_session_id"
@@ -2617,10 +2621,10 @@
           "path": "tui_gateway/services/interaction_registry.py"
         }
       ],
-      "total_offenders": 1201
+      "total_offenders": 1199
     },
     "p2:no_sessiondb_production": {
-      "file_count": 81,
+      "file_count": 39,
       "files": [
         {
           "first_lines": [
@@ -2665,93 +2669,6 @@
           ],
           "offenders": 32,
           "path": "hermes_state.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 1083,
-              "text": "\"\"\"Call ``SessionDB.maybe_auto_prune_and_vacuum`` using current config.",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 2887,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 2888,
-              "text": "self._session_db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 2890,
-              "text": "logger.warning(\"Failed to initialize SessionDB — session will NOT be indexed for search: %s\", e)",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 4630,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 22,
-          "path": "cli.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 946,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 947,
-              "text": "db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 1165,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 1166,
-              "text": "db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 1195,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 18,
-          "path": "hermes_cli/web_server.py"
         },
         {
           "first_lines": [
@@ -2835,218 +2752,6 @@
           ],
           "offenders": 16,
           "path": "gateway/run.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 782,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 784,
-              "text": "db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 921,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 923,
-              "text": "db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 974,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 10,
-          "path": "hermes_cli/main.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 3,
-              "text": "Sessions are persisted to the shared SessionDB (``~/.hermes/state.db``) so they",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 190,
-              "text": "shared SessionDB so they survive process restarts and are searchable",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 200,
-              "text": "db:            Optional SessionDB instance. When omitted, the default",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 201,
-              "text": "SessionDB (``~/.hermes/state.db``) is lazily created.",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 399,
-              "text": "# ---- persistence via SessionDB ------------------------------------------",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 9,
-          "path": "acp_adapter/session.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 10,
-              "text": "State is persisted in SessionDB's ``state_meta`` table keyed by",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 198,
-              "text": "# Persistence (SessionDB state_meta)",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 210,
-              "text": "\"\"\"Return a SessionDB instance for the current HERMES_HOME.",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 212,
-              "text": "SessionDB has no built-in singleton, but opening a new connection per",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 220,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 9,
-          "path": "hermes_cli/goals.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 72,
-              "text": "\"\"\"Get a SessionDB instance for reading message transcripts.\"\"\"",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 74,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 75,
-              "text": "return SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 77,
-              "text": "logger.debug(\"SessionDB unavailable: %s\", e)",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 188,
-              "text": "# Event Bridge — polls SessionDB for new messages, maintains event queue",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 8,
-          "path": "mcp_serve.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 991,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 993,
-              "text": "db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 1511,
-              "text": "# We check this BEFORE importing run_agent / constructing SessionDB so",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 1610,
-              "text": "# at module top keeps no_agent ticks from paying for AIAgent / SessionDB",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 1619,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 6,
-          "path": "cron/scheduler.py"
         },
         {
           "first_lines": [
@@ -3136,90 +2841,6 @@
         {
           "first_lines": [
             {
-              "line": 491,
-              "text": "\"\"\"Return a SessionDB for recall, lazily creating it if an entrypoint forgot.",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 503,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 505,
-              "text": "self._session_db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 508,
-              "text": "logger.debug(\"SessionDB unavailable for recall\", exc_info=True)",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 1614,
-              "text": "\"\"\"Stamp a stable per-run key used by SessionDB for idempotent append.\"\"\"",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 6,
-          "path": "run_agent.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 152,
-              "text": "self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 348,
-              "text": "\"\"\"Lazily initialise and return the shared SessionDB instance.",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 355,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 356,
-              "text": "self._session_db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 358,
-              "text": "logger.debug(\"SessionDB unavailable for API server: %s\", e)",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 5,
-          "path": "channels/platforms/api_server.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 4,
               "text": "from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS",
               "tokens": [
@@ -3261,272 +2882,6 @@
         {
           "first_lines": [
             {
-              "line": 402,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 403,
-              "text": "db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 405,
-              "text": "logging.debug(\"SessionDB unavailable for session_search\", exc_info=True)",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 406,
-              "text": "from hermes_state import format_session_db_unavailable",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 456,
-              "text": "from hermes_state import DEFAULT_DB_PATH",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 5,
-          "path": "tools/session_search_tool.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 685,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 688,
-              "text": "db = SessionDB(db_path=Path(profile_home) / \"state.db\")",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 764,
-              "text": "\"\"\"Yield the SessionDB that owns this session's row (profile-aware).",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 774,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 777,
-              "text": "db, close_db = SessionDB(db_path=Path(profile_home) / \"state.db\"), True",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 5,
-          "path": "tui_gateway/core/session_config.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 495,
-              "text": "\"\"\"Return the request-scoped control-plane ``SessionDB``.",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 544,
-              "text": "# fast path is correct here — the implicit SessionDB() also routes to",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 568,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 570,
-              "text": "ctrl_db = SessionDB(db_path=db_path)",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 577,
-              "text": "\"control-plane SessionDB unavailable at %s: %s\", db_path, exc,",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 5,
-          "path": "tui_gateway/server.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 97,
-              "text": "Works directly with a SessionDB instance (or raw sqlite3 connection)",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 103,
-              "text": "Initialize with a SessionDB instance.",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 106,
-              "text": "db: A SessionDB instance (from hermes_state.py)",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 3,
-          "path": "agent/insights.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 329,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 332,
-              "text": "return SessionDB",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 342,
-              "text": "import hermes_state",
-              "tokens": [
-                "import hermes_state"
-              ]
-            }
-          ],
-          "offenders": 3,
-          "path": "dovie_extension/manifest.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 464,
-              "text": "Uses SQLite (via SessionDB) for session metadata and message transcripts.",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 480,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 481,
-              "text": "self._db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 3,
-          "path": "gateway/session.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 209,
-              "text": "This is the transitional production bridge for ``SessionDB.append_run_event``:",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 573,
-              "text": "SessionDB callers continue using their legacy row decoder.",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 706,
-              "text": "this accessor on the ledger prevents SessionDB callers from treating",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 3,
-          "path": "hermes_agent/domain/event_ledger.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 203,
-              "text": "\"\"\"Best-effort SessionDB for ``hermes -z`` / oneshot mode.",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 210,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 212,
-              "text": "return SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 3,
-          "path": "hermes_cli/oneshot.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 11,
               "text": "from hermes_state_run_event_codec import decode_run_event_row",
               "tokens": [
@@ -3554,62 +2909,6 @@
         {
           "first_lines": [
             {
-              "line": 588,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 590,
-              "text": "return {\"sessions\": [], \"aggregate\": {}, \"error\": f\"Could not import SessionDB: {exc}\", \"scan_meta\": {\"mode\": \"failed\", \"sessions_total\": 0, \"sessions_rescanned\": 0, \"sessions_reused\": 0}}",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 602,
-              "text": "db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 3,
-          "path": "plugins/hermes-achievements/dashboard/plugin_api.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 548,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 550,
-              "text": "active_db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 555,
-              "text": "raise RuntimeError(\"SessionDB connection unavailable\")",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 3,
-          "path": "tui_gateway/services/runtime_state.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 1,
               "text": "\"\"\"Worker-side SessionDB proxy over the run-worker stdio protocol.",
               "tokens": [
@@ -3633,67 +2932,6 @@
           ],
           "offenders": 3,
           "path": "tui_gateway/services/worker_db_proxy.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 382,
-              "text": "# SessionDB instance.  A process running mismatched module versions",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 384,
-              "text": "# long-lived ``hermes_state.SessionDB`` class still bound to the",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "agent/conversation_compression.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 266,
-              "text": "\"\"\"POST /api/sessions/{session_id}/fork — branch via current SessionDB primitives.\"\"\"",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 286,
-              "text": "# SessionDB's native parent_session_id/end_reason visibility model rather",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "channels/platforms/api_server_sessions.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 157,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 158,
-              "text": "db = SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "gateway/mirror.py"
         },
         {
           "first_lines": [
@@ -3778,77 +3016,14 @@
         {
           "first_lines": [
             {
-              "line": 16,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 72,
-              "text": "return SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "hermes_team_mission/tools/leader.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 16,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 349,
-              "text": "return SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "hermes_team_mission/tools/planning.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 9,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 33,
-              "text": "return SessionDB()",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "hermes_team_mission/tools/profile.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 1716,
+              "line": 1761,
               "text": "# Context compression ends the current SessionDB session and forks a",
               "tokens": [
                 "SessionDB"
               ]
             },
             {
-              "line": 1804,
+              "line": 1846,
               "text": "from hermes_state_member_chat import project_messages_for_viewer",
               "tokens": [
                 "from hermes_state"
@@ -3868,7 +3043,7 @@
               ]
             },
             {
-              "line": 44,
+              "line": 45,
               "text": "from hermes_state_runs import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES",
               "tokens": [
                 "from hermes_state"
@@ -3877,66 +3052,6 @@
           ],
           "offenders": 2,
           "path": "tui_gateway/services/run_control.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 39,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 41,
-              "text": "session_db_factory = SessionDB",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "tui_gateway/services/session_store.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 1536,
-              "text": "from hermes_state import format_session_db_unavailable",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "agent/agent_runtime_helpers.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 337,
-              "text": "raise AttributeError(\"SessionDB has no update_scoped_system_prompt\")",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "agent/conversation_loop.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 674,
-              "text": "from hermes_state import format_session_db_unavailable",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "agent/tool_executor.py"
         },
         {
           "first_lines": [
@@ -3950,45 +3065,6 @@
           ],
           "offenders": 1,
           "path": "channels/platforms/api_server_support.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 396,
-              "text": "# SessionDB close, file unlinks, etc.  30s matches the unit-template",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "gateway/shutdown_forensics.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 12,
-              "text": "Phase D5 completes the SessionDB retirement.",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_agent/observability/silent_swallow_lint.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 23,
-              "text": "``owner`` bridges to the legacy ``SessionDB`` facade during D2-D5",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_agent/repositories/base.py"
         },
         {
           "first_lines": [
@@ -4028,19 +3104,6 @@
           ],
           "offenders": 1,
           "path": "hermes_cli/kanban_db.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 251,
-              "text": "session_title: optional human title (from SessionDB).",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_cli/session_recap.py"
         },
         {
           "first_lines": [
@@ -4215,19 +3278,6 @@
         {
           "first_lines": [
             {
-              "line": 905,
-              "text": "raise RuntimeError(\"SessionDB does not support team transcript message upsert\")",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_team_mission/runtime/team_transcript_writer.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 19,
               "text": "class SessionDBConversationMissionMixin:",
               "tokens": [
@@ -4328,113 +3378,9 @@
           ],
           "offenders": 1,
           "path": "plugins/memory/holographic/store.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 745,
-              "text": "AIAgent._compress_context ends the current SessionDB session and creates",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "tui_gateway/core/runtime_settings.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 271,
-              "text": "\"\"\"Run storage maintenance now for the current SessionDB profile.\"\"\"",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "tui_gateway/methods/system.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 3,
-              "text": "Registers ActivityReconciler per-SessionDB and exposes startup-time hook.",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "tui_gateway/services/activity_reconciler_service.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 101,
-              "text": "# The worker process must not materialize SessionDB. Keep the",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "tui_gateway/services/agent_runner.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 47,
-              "text": "raise RuntimeError(\"interaction persistence requires a SessionDB-like append_run_event\")",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "tui_gateway/services/interaction_registry.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 4,
-              "text": "code a static, auditable surface for the SessionDB participant lifecycle",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "tui_gateway/services/participant_lifecycle.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 80,
-              "text": "hydration.  The durable business state remains in SessionDB/Run Registry.",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "tui_gateway/services/runtime_pool.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 679,
-              "text": "raise AttributeError(f\"SessionDB has no method {db_method_name!r}\")",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "tui_gateway/services/worker_supervisor.py"
         }
       ],
-      "total_offenders": 284
+      "total_offenders": 125
     }
   },
   "phase": "P2",

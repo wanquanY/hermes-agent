@@ -70,6 +70,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from hermes_agent.storage.cli_session_store import open_cli_session_store
+
 
 def _add_accept_hooks_flag(parser) -> None:
     """Attach the ``--accept-hooks`` flag.  Shared across every agent
@@ -779,9 +781,7 @@ def _resolve_last_session(source: str = "cli") -> Optional[str]:
     """Look up the most recently-used session ID for a source."""
     db = None
     try:
-        from hermes_state import SessionDB
-
-        db = SessionDB()
+        db = open_cli_session_store()
         sessions = db.search_sessions(source=source, limit=1)
         return sessions[0]["id"] if sessions else None
     except Exception:
@@ -917,10 +917,9 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
       from an exit summary printed before the bug fix, or from notes) get
       resumed at the live tip instead of a stale parent with no messages.
     """
+    db = None
     try:
-        from hermes_state import SessionDB
-
-        db = SessionDB()
+        db = open_cli_session_store()
 
         # Try as exact session ID first
         session = db.get_session(name_or_id)
@@ -939,10 +938,15 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
             except Exception:
                 pass
 
-        db.close()
         return resolved_id
     except Exception:
         pass
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
     return None
 
 
@@ -971,9 +975,7 @@ def _print_tui_exit_summary(
 
     db = None
     try:
-        from hermes_state import SessionDB
-
-        db = SessionDB()
+        db = open_cli_session_store()
         session = db.get_session(target)
         if not session:
             return
@@ -12864,9 +12866,7 @@ Examples:
         import json as _json
 
         try:
-            from hermes_state import SessionDB
-
-            db = SessionDB()
+            db = open_cli_session_store()
         except Exception as e:
             print(f"Error: Could not open session database: {e}")
             return
@@ -13043,17 +13043,22 @@ Examples:
     )
 
     def cmd_insights(args):
+        db = None
         try:
-            from hermes_state import SessionDB
             from agent.insights import InsightsEngine
 
-            db = SessionDB()
+            db = open_cli_session_store()
             engine = InsightsEngine(db)
             report = engine.generate(days=args.days, source=args.source)
             print(engine.format_terminal(report))
-            db.close()
         except Exception as e:
             print(f"Error generating insights: {e}")
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
     insights_parser.set_defaults(func=cmd_insights)
 
