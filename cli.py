@@ -9849,14 +9849,14 @@ class HermesCLI:
                 i += 1
 
         try:
-            from hermes_state import SessionDB
             from agent.insights import InsightsEngine
+            from hermes_agent.storage.session_repository_db import connect_session_repository_db
 
-            db = SessionDB()
-            engine = InsightsEngine(db)
+            conn = connect_session_repository_db()
+            engine = InsightsEngine(conn)
             report = engine.generate(days=days, source=source)
             print(engine.format_terminal(report))
-            db.close()
+            conn.close()
         except Exception as e:
             print(f"  Error generating insights: {e}")
 

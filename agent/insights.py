@@ -94,19 +94,19 @@ class InsightsEngine:
     """
     Analyzes session history and produces usage insights.
 
-    Works directly with a SessionDB instance (or raw sqlite3 connection)
+    Works directly with a raw sqlite3 connection or an object exposing ``_conn``
     to query session and message data.
     """
 
     def __init__(self, db):
         """
-        Initialize with a SessionDB instance.
+        Initialize with a SQLite connection or connection-owning object.
 
         Args:
-            db: A SessionDB instance (from hermes_state.py)
+            db: sqlite3.Connection or an object with ``_conn``.
         """
         self.db = db
-        self._conn = db._conn
+        self._conn = getattr(db, "_conn", db)
 
     def generate(self, days: int = 30, source: str = None) -> Dict[str, Any]:
         """
