@@ -11,6 +11,8 @@ from hermes_agent.repositories import (
     Session,
     SessionFilter,
     SessionIndexPatch,
+    SessionMessageAppendProjection,
+    SessionMessageSnapshotProjection,
     SessionNotFound,
     SessionRepo,
     SessionRepoImpl,
@@ -37,9 +39,13 @@ def _make_conn() -> sqlite3.Connection:
             parent_session_id TEXT,
             started_at REAL NOT NULL,
             updated_at REAL NOT NULL,
+            last_active REAL,
             ended_at REAL,
             end_reason TEXT,
-            transient INTEGER NOT NULL DEFAULT 0
+            transient INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            tool_call_count INTEGER NOT NULL DEFAULT 0,
+            preview TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE session_index (
             session_id TEXT PRIMARY KEY,
@@ -254,6 +260,83 @@ def test_update_index_noop_when_no_fields_provided():
     ).fetchone()["updated_at"]
     # No columns provided → row untouched.
     assert before == after
+
+
+def test_record_message_append_updates_session_and_index_projection():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="s1", source="test", title="Original"))
+
+    repo.record_message_append(
+        "s1",
+        SessionMessageAppendProjection(
+            timestamp=123.0,
+            tool_call_count=2,
+            user_preview="hello preview",
+            user_display_title="hello title",
+        ),
+    )
+
+    session_row = conn.execute(
+        """
+        SELECT message_count, tool_call_count, preview, display_title,
+               display_title_source, last_active, updated_at
+          FROM sessions
+         WHERE id = 's1'
+        """
+    ).fetchone()
+    assert session_row["message_count"] == 1
+    assert session_row["tool_call_count"] == 2
+    assert session_row["preview"] == "hello preview"
+    assert session_row["display_title"] == "hello title"
+    assert session_row["display_title_source"] == "first_user_message"
+    assert session_row["last_active"] == 123.0
+    assert session_row["updated_at"] == 123.0
+
+    index_row = conn.execute(
+        """
+        SELECT title, preview, message_count, last_activity
+          FROM session_index
+         WHERE session_id = 's1'
+        """
+    ).fetchone()
+    assert index_row["title"] == "hello title"
+    assert index_row["preview"] == "hello preview"
+    assert index_row["message_count"] == 1
+    assert index_row["last_activity"] == 123.0
+
+
+def test_replace_message_projection_preserves_user_title_source():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="s1", source="test", title="Original"))
+    repo.set_title("s1", "Pinned title", title_source="user")
+
+    repo.replace_message_projection(
+        "s1",
+        SessionMessageSnapshotProjection(
+            message_count=3,
+            tool_call_count=1,
+            first_user_preview="new preview",
+            first_user_display_title="generated title",
+            last_message_ts=456.0,
+        ),
+    )
+
+    session_row = conn.execute(
+        """
+        SELECT message_count, tool_call_count, preview, display_title,
+               display_title_source, last_active
+          FROM sessions
+         WHERE id = 's1'
+        """
+    ).fetchone()
+    assert session_row["message_count"] == 3
+    assert session_row["tool_call_count"] == 1
+    assert session_row["preview"] == "new preview"
+    assert session_row["display_title"] == "Pinned title"
+    assert session_row["display_title_source"] == "user"
+    assert session_row["last_active"] == 456.0
 
 
 def test_title_methods_update_sessions_and_index():

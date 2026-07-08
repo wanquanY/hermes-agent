@@ -90,6 +90,27 @@ class SessionIndexPatch:
 
 
 @dataclass(frozen=True)
+class SessionMessageAppendProjection:
+    """Session-owned projection update for one appended transcript message."""
+
+    timestamp: float
+    tool_call_count: int = 0
+    user_preview: str = ""
+    user_display_title: str = ""
+
+
+@dataclass(frozen=True)
+class SessionMessageSnapshotProjection:
+    """Session-owned projection replacement for a rewritten transcript."""
+
+    message_count: int
+    tool_call_count: int
+    first_user_preview: str = ""
+    first_user_display_title: str = ""
+    last_message_ts: float | None = None
+
+
+@dataclass(frozen=True)
 class BranchSpec:
     """Payload for branch() — spawn a child session from a source."""
 
@@ -124,6 +145,18 @@ class SessionRepo(Protocol):
     def get_by_title(self, title: str) -> Session | None: ...
 
     def set_title(self, session_id: str, title: str, *, title_source: str = "user") -> bool: ...
+
+    def record_message_append(
+        self,
+        session_id: str,
+        projection: SessionMessageAppendProjection,
+    ) -> None: ...
+
+    def replace_message_projection(
+        self,
+        session_id: str,
+        projection: SessionMessageSnapshotProjection,
+    ) -> None: ...
 
     def resolve_resume_session_id(self, session_id: str) -> str: ...
 
@@ -351,6 +384,95 @@ class SessionRepoImpl:
             )
         return rowcount > 0
 
+    def record_message_append(
+        self,
+        session_id: str,
+        projection: SessionMessageAppendProjection,
+    ) -> None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required for record_message_append")
+        timestamp = float(projection.timestamp or time.time())
+        preview = str(projection.user_preview or "")
+        display_title = str(projection.user_display_title or "")
+        self._conn.execute(
+            """
+            UPDATE sessions
+               SET message_count = COALESCE(message_count, 0) + 1,
+                   tool_call_count = COALESCE(tool_call_count, 0) + ?,
+                   preview = CASE
+                       WHEN ? != '' AND COALESCE(preview, '') = '' THEN ?
+                       ELSE COALESCE(preview, '')
+                   END,
+                   display_title = CASE
+                       WHEN ? != '' AND COALESCE(display_title, '') = '' THEN ?
+                       ELSE COALESCE(display_title, '')
+                   END,
+                   display_title_source = CASE
+                       WHEN ? != '' AND COALESCE(display_title_source, '') = ''
+                           THEN 'first_user_message'
+                       ELSE COALESCE(display_title_source, '')
+                   END,
+                   last_active = ?,
+                   updated_at = ?
+             WHERE id = ?
+            """,
+            (
+                int(projection.tool_call_count or 0),
+                preview,
+                preview,
+                display_title,
+                display_title,
+                display_title,
+                timestamp,
+                timestamp,
+                stable,
+            ),
+        )
+        self._refresh_index_from_session(stable, timestamp=timestamp)
+
+    def replace_message_projection(
+        self,
+        session_id: str,
+        projection: SessionMessageSnapshotProjection,
+    ) -> None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required for replace_message_projection")
+        last_message_ts = projection.last_message_ts
+        self._conn.execute(
+            """
+            UPDATE sessions
+               SET message_count = ?,
+                   tool_call_count = ?,
+                   preview = ?,
+                   display_title = CASE
+                       WHEN COALESCE(display_title_source, '') = 'user'
+                           THEN COALESCE(display_title, '')
+                       ELSE ?
+                   END,
+                   display_title_source = CASE
+                       WHEN COALESCE(display_title_source, '') = 'user' THEN 'user'
+                       WHEN ? != '' THEN 'first_user_message'
+                       ELSE ''
+                   END,
+                   last_active = ?,
+                   updated_at = COALESCE(?, updated_at)
+             WHERE id = ?
+            """,
+            (
+                int(projection.message_count),
+                int(projection.tool_call_count),
+                str(projection.first_user_preview or ""),
+                str(projection.first_user_display_title or ""),
+                str(projection.first_user_display_title or ""),
+                last_message_ts,
+                last_message_ts,
+                stable,
+            ),
+        )
+        self._refresh_index_from_session(stable, timestamp=last_message_ts)
+
     def resolve_resume_session_id(self, session_id: str) -> str:
         stable = str(session_id or "").strip()
         if not stable:
@@ -468,6 +590,53 @@ class SessionRepoImpl:
              WHERE session_id = ?
             """,
             (now, stable),
+        )
+
+    def _refresh_index_from_session(self, session_id: str, *, timestamp: float | None) -> None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return
+        row = self._conn.execute(
+            """
+            SELECT COALESCE(NULLIF(display_title, ''), NULLIF(title, ''), '') AS title,
+                   COALESCE(preview, '') AS preview,
+                   COALESCE(message_count, 0) AS message_count
+              FROM sessions
+             WHERE id = ?
+            """,
+            (stable,),
+        ).fetchone()
+        if row is None:
+            return
+        title = _row_text(row, "title", 0)
+        preview = _row_text(row, "preview", 1)
+        message_count = _row_int(row, "message_count", 2)
+        now = time.time()
+        last_activity = float(timestamp) if timestamp is not None else None
+        if last_activity is None:
+            self._conn.execute(
+                """
+                UPDATE session_index
+                   SET title = ?,
+                       preview = ?,
+                       message_count = ?,
+                       updated_at = ?
+                 WHERE session_id = ?
+                """,
+                (title, preview, message_count, now, stable),
+            )
+            return
+        self._conn.execute(
+            """
+            UPDATE session_index
+               SET title = ?,
+                   preview = ?,
+                   message_count = ?,
+                   updated_at = MAX(COALESCE(updated_at, 0), ?),
+                   last_activity = MAX(COALESCE(last_activity, 0), ?)
+             WHERE session_id = ?
+            """,
+            (title, preview, message_count, last_activity, last_activity, stable),
         )
 
     def reopen(self, session_id: str) -> None:
@@ -671,11 +840,19 @@ def _row_text(row: Any, key: str, index: int) -> str:
     return str(row[index] or "")
 
 
+def _row_int(row: Any, key: str, index: int) -> int:
+    if isinstance(row, sqlite3.Row):
+        return int(row[key] or 0)
+    return int(row[index] or 0)
+
+
 __all__ = [
     "BranchSpec",
     "Session",
     "SessionFilter",
     "SessionIndexPatch",
+    "SessionMessageAppendProjection",
+    "SessionMessageSnapshotProjection",
     "sanitize_session_title",
     "SessionNotFound",
     "SessionRepo",

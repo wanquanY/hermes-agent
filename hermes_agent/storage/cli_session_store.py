@@ -19,6 +19,7 @@ from agent.memory_manager import sanitize_context
 from hermes_agent.read_models.message_history import MessageHistoryReadModel
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.repositories.agent_profile_repo import AgentProfileRepoImpl
+from hermes_agent.repositories.message_repo import MessageRepository
 from hermes_agent.repositories.session_repo import (
     SessionRepoImpl,
     SessionSpec,
@@ -40,6 +41,7 @@ class CliSessionStore:
         self._lock = lock_for_connection(conn)
         self._sessions = SessionRepoImpl(conn)
         self._profiles = AgentProfileRepoImpl(conn)
+        self._message_writer = MessageRepository(conn, self._sessions)
         self._messages = MessageHistoryReadModel(conn)
         self._recall = SessionRecallReadModel(conn)
 
@@ -448,163 +450,30 @@ class CliSessionStore:
             raise ValueError("session_id is required")
         if self.get_session(stable) is None:
             self.create_session(stable, source="cli")
-        now = time.time()
-        preview = _message_preview_text(content)
-        display_title = _message_display_title_text(content) if role == "user" else ""
-        with self._lock:
-            cursor = self._conn.execute(
-                """INSERT INTO messages (
-                    session_id, role, content, participant_id, tool_call_id,
-                    tool_calls, tool_name, timestamp, token_count, finish_reason,
-                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                    codex_message_items, platform_message_id, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    stable,
-                    str(role or "unknown"),
-                    _encode_content(content),
-                    str(participant_id or ""),
-                    tool_call_id,
-                    _json_or_none(tool_calls),
-                    tool_name,
-                    now,
-                    token_count,
-                    finish_reason,
-                    reasoning,
-                    reasoning_content,
-                    _json_or_none(reasoning_details),
-                    _json_or_none(codex_reasoning_items),
-                    _json_or_none(codex_message_items),
-                    platform_message_id,
-                    _json_or_none(metadata),
-                ),
-            )
-            message_id = int(cursor.lastrowid or 0)
-            self._conn.execute(
-                """
-                UPDATE sessions
-                   SET message_count = COALESCE(message_count, 0) + 1,
-                       tool_call_count = COALESCE(tool_call_count, 0) + ?,
-                       preview = CASE
-                           WHEN ? != '' AND COALESCE(preview, '') = '' THEN ?
-                           ELSE COALESCE(preview, '')
-                       END,
-                       display_title = CASE
-                           WHEN ? != '' AND COALESCE(display_title, '') = '' THEN ?
-                           ELSE COALESCE(display_title, '')
-                       END,
-                       display_title_source = CASE
-                           WHEN ? != '' AND COALESCE(display_title_source, '') = '' THEN 'first_user_message'
-                           ELSE COALESCE(display_title_source, '')
-                       END,
-                       last_active = ?,
-                       updated_at = ?
-                 WHERE id = ?
-                """,
-                (
-                    _tool_call_count(tool_calls),
-                    preview,
-                    preview,
-                    display_title,
-                    display_title,
-                    display_title,
-                    now,
-                    now,
-                    stable,
-                ),
-            )
-            self._conn.commit()
-        return message_id
+        message: dict[str, Any] = {
+            "role": str(role or "unknown"),
+            "content": content,
+            "participant_id": str(participant_id or ""),
+            "tool_call_id": tool_call_id,
+            "tool_calls": tool_calls,
+            "tool_name": tool_name,
+            "token_count": token_count,
+            "finish_reason": finish_reason,
+            "reasoning": reasoning,
+            "reasoning_content": reasoning_content,
+            "reasoning_details": reasoning_details,
+            "codex_reasoning_items": codex_reasoning_items,
+            "codex_message_items": codex_message_items,
+            "platform_message_id": platform_message_id,
+            "metadata": metadata,
+        }
+        return self._message_writer.append_conversation_message(stable, message)
 
     def replace_messages(self, session_id: str, messages: list[dict[str, Any]]) -> None:
         stable = str(session_id or "").strip()
         if not stable:
             raise ValueError("session_id is required")
-        now_ts = time.time()
-        total_messages = 0
-        total_tool_calls = 0
-        first_user_preview = ""
-        first_user_display_title = ""
-        last_message_ts: float | None = None
-        with self._lock:
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
-                self._conn.execute("DELETE FROM messages WHERE session_id = ?", (stable,))
-                for msg in messages:
-                    role = str(msg.get("role") or "unknown")
-                    tool_calls = msg.get("tool_calls")
-                    content = msg.get("content")
-                    message_ts = now_ts
-                    self._conn.execute(
-                        """INSERT INTO messages (
-                            session_id, role, content, participant_id, tool_call_id,
-                            tool_calls, tool_name, timestamp, token_count, finish_reason,
-                            reasoning, reasoning_content, reasoning_details,
-                            codex_reasoning_items, codex_message_items,
-                            platform_message_id, metadata_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            stable,
-                            role,
-                            _encode_content(content),
-                            str(msg.get("participant_id") or ""),
-                            msg.get("tool_call_id"),
-                            _json_or_none(tool_calls),
-                            msg.get("tool_name") or msg.get("name"),
-                            message_ts,
-                            msg.get("token_count"),
-                            msg.get("finish_reason"),
-                            msg.get("reasoning") if role == "assistant" else None,
-                            msg.get("reasoning_content") if role == "assistant" else None,
-                            _json_or_none(msg.get("reasoning_details") if role == "assistant" else None),
-                            _json_or_none(msg.get("codex_reasoning_items") if role == "assistant" else None),
-                            _json_or_none(msg.get("codex_message_items") if role == "assistant" else None),
-                            msg.get("platform_message_id") or msg.get("message_id"),
-                            _json_or_none(msg.get("metadata")),
-                        ),
-                    )
-                    total_messages += 1
-                    total_tool_calls += _tool_call_count(tool_calls)
-                    if role == "user" and not first_user_preview:
-                        first_user_preview = _message_preview_text(content)
-                        first_user_display_title = _message_display_title_text(content)
-                    last_message_ts = message_ts
-                    now_ts += 1e-6
-                self._conn.execute(
-                    """
-                    UPDATE sessions
-                       SET message_count = ?,
-                           tool_call_count = ?,
-                           preview = ?,
-                           display_title = CASE
-                               WHEN COALESCE(display_title_source, '') = 'user'
-                                   THEN COALESCE(display_title, '')
-                               ELSE ?
-                           END,
-                           display_title_source = CASE
-                               WHEN COALESCE(display_title_source, '') = 'user' THEN 'user'
-                               WHEN ? != '' THEN 'first_user_message'
-                               ELSE ''
-                           END,
-                           last_active = ?,
-                           updated_at = ?
-                     WHERE id = ?
-                    """,
-                    (
-                        total_messages,
-                        total_tool_calls,
-                        first_user_preview,
-                        first_user_display_title,
-                        first_user_display_title,
-                        last_message_ts,
-                        time.time(),
-                        stable,
-                    ),
-                )
-                self._conn.commit()
-            except Exception:
-                self._conn.rollback()
-                raise
+        self._message_writer.replace_conversation(stable, messages)
 
     def update_token_counts(self, session_id: str, **counts: Any) -> None:
         columns = {

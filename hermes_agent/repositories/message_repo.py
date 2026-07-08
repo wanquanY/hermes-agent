@@ -15,6 +15,12 @@ from typing import Any, Protocol, runtime_checkable
 
 from agent.memory_manager import sanitize_context
 from hermes_agent.repositories.base import RepositoryConnection
+from hermes_agent.repositories.session_repo import (
+    SessionMessageAppendProjection,
+    SessionMessageSnapshotProjection,
+    SessionRepo,
+    SessionRepoImpl,
+)
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
 _CONTENT_JSON_PREFIX = "\x00json:"
@@ -267,9 +273,10 @@ class MessageRepoImpl:
 
 
 class MessageRepository:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, session_repo: SessionRepo | None = None) -> None:
         self._conn = conn
         self._lock = lock_for_connection(conn)
+        self._sessions = session_repo if session_repo is not None else SessionRepoImpl(conn)
 
     def append_conversation_message(self, session_id: str, message: dict[str, Any]) -> int:
         stable_sid = str(session_id or "").strip()
@@ -309,10 +316,18 @@ class MessageRepository:
                     return projected_id
 
                 message_id = self._insert_message(stable_sid, message, timestamp)
-                self._update_session_after_append(
+                self._sessions.record_message_append(
                     stable_sid,
-                    message=message,
-                    timestamp=timestamp,
+                    SessionMessageAppendProjection(
+                        timestamp=timestamp,
+                        tool_call_count=_tool_call_count(message.get("tool_calls")),
+                        user_preview=_message_preview_text(message.get("content"))
+                        if role == "user"
+                        else "",
+                        user_display_title=_message_display_title_text(message.get("content"))
+                        if role == "user"
+                        else "",
+                    ),
                 )
                 self._conn.commit()
                 return message_id
@@ -367,10 +382,6 @@ class MessageRepository:
 
     def _replace_conversation_locked(self, session_id: str, messages: list[dict[str, Any]]) -> None:
         self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-        self._conn.execute(
-            "UPDATE sessions SET message_count = 0, tool_call_count = 0, preview = '', last_active = NULL WHERE id = ?",
-            (session_id,),
-        )
         total_messages = 0
         total_tool_calls = 0
         first_user_preview = ""
@@ -389,34 +400,14 @@ class MessageRepository:
             if tool_calls is not None:
                 total_tool_calls += len(tool_calls) if isinstance(tool_calls, list) else 1
             last_message_ts = timestamp
-        self._conn.execute(
-            """
-            UPDATE sessions
-            SET message_count = ?,
-                tool_call_count = ?,
-                preview = ?,
-                display_title = CASE
-                    WHEN COALESCE(display_title_source, '') = 'user' THEN COALESCE(display_title, '')
-                    ELSE ?
-                END,
-                display_title_source = CASE
-                    WHEN COALESCE(display_title_source, '') = 'user' THEN 'user'
-                    WHEN ? != '' THEN 'first_user_message'
-                    ELSE ''
-                END,
-                last_active = ?,
-                updated_at = COALESCE(?, updated_at)
-            WHERE id = ?
-            """,
-            (
-                total_messages,
-                total_tool_calls,
-                first_user_preview,
-                first_user_display_title,
-                first_user_display_title,
-                last_message_ts,
-                last_message_ts,
-                session_id,
+        self._sessions.replace_message_projection(
+            session_id,
+            SessionMessageSnapshotProjection(
+                message_count=total_messages,
+                tool_call_count=total_tool_calls,
+                first_user_preview=first_user_preview,
+                first_user_display_title=first_user_display_title,
+                last_message_ts=last_message_ts,
             ),
         )
 
@@ -637,85 +628,6 @@ class MessageRepository:
                 int(message_id),
             ),
         )
-
-    def _update_session_after_append(
-        self,
-        session_id: str,
-        *,
-        message: dict[str, Any],
-        timestamp: float,
-    ) -> None:
-        role = str(message.get("role") or "unknown")
-        content = message.get("content")
-        tool_calls = message.get("tool_calls")
-        preview = _message_preview_text(content) if role == "user" else ""
-        display_title = _message_display_title_text(content) if role == "user" else ""
-        self._conn.execute(
-            """
-            UPDATE sessions
-               SET message_count = COALESCE(message_count, 0) + 1,
-                   tool_call_count = COALESCE(tool_call_count, 0) + ?,
-                   preview = CASE
-                       WHEN ? != '' AND COALESCE(preview, '') = '' THEN ?
-                       ELSE COALESCE(preview, '')
-                   END,
-                   display_title = CASE
-                       WHEN ? != '' AND COALESCE(display_title, '') = '' THEN ?
-                       ELSE COALESCE(display_title, '')
-                   END,
-                   display_title_source = CASE
-                       WHEN ? != '' AND COALESCE(display_title_source, '') = '' THEN 'first_user_message'
-                       ELSE COALESCE(display_title_source, '')
-                   END,
-                   last_active = ?,
-                   updated_at = ?
-             WHERE id = ?
-            """,
-            (
-                _tool_call_count(tool_calls),
-                preview,
-                preview,
-                display_title,
-                display_title,
-                display_title,
-                timestamp,
-                timestamp,
-                session_id,
-            ),
-        )
-        try:
-            self._conn.execute(
-                """
-                UPDATE session_index
-                   SET title = (
-                           SELECT COALESCE(NULLIF(s.display_title, ''),
-                                           NULLIF(s.title, ''), '')
-                             FROM sessions s WHERE s.id = ?
-                       ),
-                       preview = (
-                           SELECT COALESCE(s.preview, '')
-                             FROM sessions s WHERE s.id = ?
-                       ),
-                       message_count = (
-                           SELECT COALESCE(s.message_count, 0)
-                             FROM sessions s WHERE s.id = ?
-                       ),
-                       updated_at = MAX(COALESCE(updated_at, 0), ?),
-                       last_activity = MAX(COALESCE(last_activity, 0), ?)
-                 WHERE session_id = ?
-                """,
-                (
-                    session_id,
-                    session_id,
-                    session_id,
-                    timestamp,
-                    timestamp,
-                    session_id,
-                ),
-            )
-        except sqlite3.OperationalError:
-            pass
-
 
 def _row_as_conversation(row: Any, *, include_storage_metadata: bool) -> dict[str, Any]:
     content = _decode_content(row["content"])
