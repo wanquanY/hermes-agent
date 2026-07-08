@@ -1068,8 +1068,8 @@ def connect(
             # startup threads do not race before _INITIALIZED_PATHS is populated.
             # WAL doesn't work on network filesystems (NFS/SMB/FUSE). Shared helper
             # falls back to DELETE with one WARNING so kanban stays usable there.
-            # See hermes_state._WAL_INCOMPAT_MARKERS for detection logic.
-            from hermes_state import apply_wal_with_fallback
+            from hermes_agent.storage.sqlite_wal import apply_wal_with_fallback
+
             apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")

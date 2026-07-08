@@ -8,14 +8,14 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 113 | 35 |
+| `p2:no_sessiondb_production` | 109 | 32 |
 | `p2:no_legacy_identity_alias_internal` | 1199 | 80 |
 
 ## p2:no_sessiondb_production
 
 | Offenders | File | First evidence |
 |---:|---|---|
-| 32 | `hermes_state.py` | `32` from hermes_state_activities import ActivitiesMixin |
+| 31 | `hermes_state.py` | `35` from hermes_state_activities import ActivitiesMixin |
 | 17 | `hermes_team_mission/state/session_mixin.py` | `3` from .conversation_missions import SessionDBConversationMissionMixin |
 | 12 | `gateway/run.py` | `1757` from hermes_state import SessionDB |
 | 6 | `hermes_state_runs.py` | `24` from hermes_state_run_event_codec import ( |
@@ -26,9 +26,7 @@ Status: `preflight_only`
 | 2 | `hermes_team_mission/state/session_conversations.py` | `8` from hermes_state_participants import leader_participant_id, member_participant_id |
 | 2 | `tui_gateway/methods/session.py` | `1761` # Context compression ends the current SessionDB session and forks a |
 | 2 | `tui_gateway/services/run_control.py` | `24` from hermes_state_participants import agent_participant_id, leader_participant_id, member_participant_id |
-| 1 | `channels/platforms/api_server_support.py` | `346` from hermes_state import apply_wal_with_fallback |
 | 1 | `hermes_agent/storage/migrations/0001_declarative_baseline.py` | `22` from hermes_state import SCHEMA_SQL |
-| 1 | `hermes_cli/kanban_db.py` | `1072` from hermes_state import apply_wal_with_fallback |
 | 1 | `hermes_state/migrations/merge_profile_dbs.py` | `4` the normal SessionDB lifecycle starts and must not import hermes_state.SessionDB. |
 | 1 | `hermes_state_agent_profiles.py` | `109` class SessionDBAgentProfileMixin: |
 | 1 | `hermes_state_branch.py` | `11` class SessionDBBranchMixin: |
@@ -49,7 +47,6 @@ Status: `preflight_only`
 | 1 | `hermes_team_mission/state/session_finalizers.py` | `7` class SessionDBTeamMissionFinalizerMixin: |
 | 1 | `hermes_team_mission/state/session_rows.py` | `7` class SessionDBTeamMissionRowsMixin: |
 | 1 | `hermes_team_mission/state/session_views.py` | `164` class SessionDBTeamMissionViewMixin: |
-| 1 | `plugins/memory/holographic/store.py` | `133` from hermes_state import apply_wal_with_fallback |
 
 ## p2:no_legacy_identity_alias_internal
 
@@ -63,7 +60,7 @@ Status: `preflight_only`
 | 55 | `hermes_team_mission/gateway/runtime_methods.py` | `247` "stored_session_id": str( |
 | 46 | `tui_gateway/server.py` | `137` "stored_session_id", |
 | 43 | `tui_gateway/services/worker_frame_router.py` | `27` ``stored_session_id`` if the worker omits it. Phase 6 rewires the |
-| 40 | `hermes_state.py` | `303` active_runtime_session_id TEXT NOT NULL DEFAULT '', |
+| 40 | `hermes_state.py` | `219` active_runtime_session_id TEXT NOT NULL DEFAULT '', |
 | 40 | `hermes_team_mission/state/conversation.py` | `31` f"OR EXISTS (SELECT 1 FROM sessions hist_s WHERE hist_s.id = {table_name}.stable_session_id AND COALESCE(hist_s.message_count, 0) > 0 LIMIT 1) " |
 | 38 | `hermes_team_mission/state/session_graph.py` | `78` conversation_session_id=_text(conversation.get("stable_session_id")), |
 | 37 | `hermes_team_mission/read_model.py` | `193` def _conversation_stable_session_id(conversation: dict[str, Any], mission: dict[str, Any]) -> str: |

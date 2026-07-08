@@ -341,9 +341,9 @@ class ResponseStore:
             self._db_path = None
         # Use shared WAL-fallback helper so response_store.db degrades
         # gracefully on NFS/SMB/FUSE-mounted HERMES_HOME (same filesystem
-        # issue addressed for state.db/kanban.db — see
-        # hermes_state._WAL_INCOMPAT_MARKERS).
-        from hermes_state import apply_wal_with_fallback
+        # issue addressed for state.db/kanban.db).
+        from hermes_agent.storage.sqlite_wal import apply_wal_with_fallback
+
         apply_wal_with_fallback(self._conn, db_label="response_store.db")
         self._conn.execute(
             """CREATE TABLE IF NOT EXISTS responses (
@@ -649,5 +649,4 @@ except ImportError:
     _cron_pause = None
     _cron_resume = None
     _cron_trigger = None
-
 

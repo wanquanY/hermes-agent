@@ -334,35 +334,35 @@
         {
           "first_lines": [
             {
-              "line": 303,
+              "line": 219,
               "text": "active_runtime_session_id TEXT NOT NULL DEFAULT '',",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 461,
+              "line": 377,
               "text": "runtime_session_id TEXT,",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 486,
+              "line": 402,
               "text": "runtime_session_id TEXT,",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 530,
+              "line": 446,
               "text": "runtime_session_id TEXT,",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 1573,
+              "line": 1489,
               "text": "session_id = str(event.get(\"stored_session_id\") or row[\"session_id\"] or \"\").strip()",
               "tokens": [
                 "stored_session_id"
@@ -2624,19 +2624,19 @@
       "total_offenders": 1199
     },
     "p2:no_sessiondb_production": {
-      "file_count": 35,
+      "file_count": 32,
       "files": [
         {
           "first_lines": [
             {
-              "line": 32,
+              "line": 35,
               "text": "from hermes_state_activities import ActivitiesMixin",
               "tokens": [
                 "from hermes_state"
               ]
             },
             {
-              "line": 33,
+              "line": 36,
               "text": "from hermes_state_agent_profiles import SessionDBAgentProfileMixin",
               "tokens": [
                 "from hermes_state",
@@ -2644,7 +2644,7 @@
               ]
             },
             {
-              "line": 34,
+              "line": 37,
               "text": "from hermes_state_branch import SessionDBBranchMixin",
               "tokens": [
                 "from hermes_state",
@@ -2652,7 +2652,7 @@
               ]
             },
             {
-              "line": 35,
+              "line": 38,
               "text": "from hermes_state_member_chat import SessionDBMemberChatMixin",
               "tokens": [
                 "from hermes_state",
@@ -2660,14 +2660,14 @@
               ]
             },
             {
-              "line": 36,
+              "line": 39,
               "text": "from hermes_state_participants import (",
               "tokens": [
                 "from hermes_state"
               ]
             }
           ],
-          "offenders": 32,
+          "offenders": 31,
           "path": "hermes_state.py"
         },
         {
@@ -2989,19 +2989,6 @@
         {
           "first_lines": [
             {
-              "line": 346,
-              "text": "from hermes_state import apply_wal_with_fallback",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "channels/platforms/api_server_support.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 22,
               "text": "from hermes_state import SCHEMA_SQL",
               "tokens": [
@@ -3011,19 +2998,6 @@
           ],
           "offenders": 1,
           "path": "hermes_agent/storage/migrations/0001_declarative_baseline.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 1072,
-              "text": "from hermes_state import apply_wal_with_fallback",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_cli/kanban_db.py"
         },
         {
           "first_lines": [
@@ -3285,22 +3259,9 @@
           ],
           "offenders": 1,
           "path": "hermes_team_mission/state/session_views.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 133,
-              "text": "from hermes_state import apply_wal_with_fallback",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "plugins/memory/holographic/store.py"
         }
       ],
-      "total_offenders": 113
+      "total_offenders": 109
     }
   },
   "phase": "P2",
