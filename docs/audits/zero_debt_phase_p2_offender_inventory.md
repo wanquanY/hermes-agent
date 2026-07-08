@@ -8,17 +8,16 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 35 | 4 |
+| `p2:no_sessiondb_production` | 33 | 3 |
 | `p2:no_legacy_identity_alias_internal` | 1181 | 78 |
 
 ## p2:no_sessiondb_production
 
 | Offenders | File | First evidence |
 |---:|---|---|
-| 26 | `hermes_state.py` | `35` from hermes_state_activities import ActivitiesMixin |
+| 25 | `hermes_state.py` | `35` from hermes_state_activities import ActivitiesMixin |
 | 7 | `gateway/run.py` | `1759` from hermes_state import SessionDB |
 | 1 | `hermes_agent/storage/migrations/0001_declarative_baseline.py` | `22` from hermes_state import SCHEMA_SQL |
-| 1 | `hermes_state_runs.py` | `48` from hermes_state_tool_events import ( |
 
 ## p2:no_legacy_identity_alias_internal
 
@@ -58,7 +57,7 @@ Status: `preflight_only`
 | 10 | `tui_gateway/services/worker_db_proxy.py` | `115` return self._call(name, args, kwargs, stable_session_id="") |
 | 9 | `cron/scheduler.py` | `1005` "runtime_session_id": job.get("_runtime_session_id"), |
 | 9 | `tui_gateway/services/agent_run_backend.py` | `138` requested_stored_session_id=frame.stored_session_id, |
-| 7 | `hermes_state_tool_events.py` | `73` event.get("stored_session_id"), |
+| 7 | `hermes_agent/read_models/tool_events.py` | `73` event.get("stored_session_id"), |
 | 7 | `tui_gateway/methods/conversation_activity.py` | `39` session.get("stored_session_id") |
 | 7 | `tui_gateway/services/team_mission_activity_events.py` | `174` "runtime_stable_session_id": text( |
 | 7 | `tui_gateway/services/worker_pool.py` | `56` stored_session_id: str |

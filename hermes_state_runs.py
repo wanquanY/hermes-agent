@@ -45,7 +45,7 @@ from hermes_agent.domain.session_runtime_state import (
     session_runtime_identity_matches,
     session_runtime_state_from_row,
 )
-from hermes_state_tool_events import (
+from hermes_agent.read_models.tool_events import (
     TOOL_EVENT_TYPES,
     list_tool_events_as_canonical,
     project_tool_event,

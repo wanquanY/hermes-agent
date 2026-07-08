@@ -157,7 +157,7 @@ class TestS5ToolEventsDualSeqIdentity:
 
     def test_canonical_seq_not_tool_events_seq_start(self, tmp_path):
         """canonical 事件的 seq 来自 run_events，不等于 tool_events.seq_start。"""
-        from hermes_state_tool_events import list_tool_events_as_canonical
+        from hermes_agent.read_models.tool_events import list_tool_events_as_canonical
 
         db_path = str(tmp_path / "test_s5.db")
         conn = self._create_db_with_run_events(db_path)
@@ -186,7 +186,7 @@ class TestS5ToolEventsDualSeqIdentity:
 
     def test_after_seq_cursor_filters_correctly(self, tmp_path):
         """after_seq cursor 在 canonical seq 上过滤。"""
-        from hermes_state_tool_events import list_tool_events_as_canonical
+        from hermes_agent.read_models.tool_events import list_tool_events_as_canonical
 
         db_path = str(tmp_path / "test_s5_cursor.db")
         conn = self._create_db_with_run_events(db_path)

@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 
 from hermes_state import SessionDB
-from hermes_state_tool_events import list_tool_events_as_canonical
+from hermes_agent.read_models.tool_events import list_tool_events_as_canonical
 from tui_gateway import server
 
 

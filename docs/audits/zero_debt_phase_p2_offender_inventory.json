@@ -1436,7 +1436,7 @@
             }
           ],
           "offenders": 7,
-          "path": "hermes_state_tool_events.py"
+          "path": "hermes_agent/read_models/tool_events.py"
         },
         {
           "first_lines": [
@@ -2577,7 +2577,7 @@
       "total_offenders": 1181
     },
     "p2:no_sessiondb_production": {
-      "file_count": 4,
+      "file_count": 3,
       "files": [
         {
           "first_lines": [
@@ -2617,7 +2617,7 @@
               ]
             }
           ],
-          "offenders": 26,
+          "offenders": 25,
           "path": "hermes_state.py"
         },
         {
@@ -2674,22 +2674,9 @@
           ],
           "offenders": 1,
           "path": "hermes_agent/storage/migrations/0001_declarative_baseline.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 48,
-              "text": "from hermes_state_tool_events import (",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_state_runs.py"
         }
       ],
-      "total_offenders": 35
+      "total_offenders": 33
     }
   },
   "phase": "P2",
