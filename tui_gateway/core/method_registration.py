@@ -8,7 +8,7 @@ from typing import Any
 
 from dovie_extension import load_extension
 
-METHOD_MODULES = (
+MODULES = (
     "session",
     "session_history",
     "session_interrupt",
@@ -51,7 +51,7 @@ METHOD_MODULES = (
 
 
 def register_method_modules(target: dict[str, Any]) -> None:
-    for module in METHOD_MODULES:
+    for module in MODULES:
         name = module if "." in module else f"tui_gateway.methods.{module}"
         if name in sys.modules:
             importlib.reload(sys.modules[name])

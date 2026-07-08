@@ -1,9 +1,6 @@
 """Method registry (spec §J6) — single source of truth for gateway methods.
 
-Replaces the legacy dual mechanism (``tui_gateway.core.method_registration
-::METHOD_MODULES`` + ``dovie_extension.gateway_methods
-::DOVIE_GATEWAY_METHOD_OVERRIDES``). Registration is the ONLY way to expose a
-handler; runtime "hot override" paths are banned.
+Registration is the only way to expose a handler; runtime hot override paths are banned.
 
 Startup validation (``validate()``) fails fast if any registered handler is
 missing a ``@requires_permission`` tag — spec §J8.

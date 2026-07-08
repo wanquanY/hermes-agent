@@ -1,9 +1,7 @@
 """L4 Gateway layer (spec §12 Phase G) — single registry + normalization + auth.
 
-The legacy dual-registration (``METHOD_MODULES`` +
-``DOVIE_GATEWAY_METHOD_OVERRIDES``) and the ``sessionId`` / ``session_id``
-dual-write are being retired here. Concrete method registration migrates
-over during Phase J.
+Gateway dispatch owns a single registry, request normalization, and auth.
+Legacy session-id aliases are folded at the pipeline boundary.
 """
 
 from __future__ import annotations

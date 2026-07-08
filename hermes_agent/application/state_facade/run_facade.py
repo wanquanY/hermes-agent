@@ -19,6 +19,7 @@ from hermes_agent.domain.run_state_machine import resolve_run_status_transition
 from hermes_agent.domain.run_state_machine import terminal_status_from_event
 from hermes_agent.domain.run_lifecycle import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS
 from hermes_agent.domain.run_lifecycle import DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS
+from hermes_agent.domain.run_lifecycle import _pid_is_alive
 from hermes_agent.domain.run_lifecycle import orphaned_active_run_decision
 from hermes_agent.domain.seq_allocator import allocate_run_event_seq
 from hermes_agent.domain.seq_allocator import ensure_session_counter
@@ -2074,6 +2075,7 @@ class RunStateMixin:
         self,
         *,
         live_runtime_ids: set[str] | None = None,
+        live_execution_session_ids: set[str] | None = None,
         current_pid: int | None = None,
         current_gateway_instance_id: str = "",
         stale_after_seconds: float = DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS,
@@ -2087,6 +2089,8 @@ class RunStateMixin:
         gateway processes sharing the same state DB. Older rows without owner
         metadata are only failed after a short stale window.
         """
+        if live_runtime_ids is None and live_execution_session_ids is not None:
+            live_runtime_ids = live_execution_session_ids
         live_runtime_ids = {
             str(value or "").strip()
             for value in (live_runtime_ids or set())

@@ -70,7 +70,7 @@ def test_dovie_gateway_contract_is_served_by_extension_manifest():
     extension = load_extension()
     assert isinstance(extension, DovieHermesExtension)
     assert extension.register_capabilities()["extensionVersion"] == extension.version
-    assert "run.events" in extension.gateway_method_overrides()
+    assert extension.gateway_method_overrides() == frozenset()
     assert extension.gateway_method_overrides() == dovie_gateway_method_overrides()
 
 
