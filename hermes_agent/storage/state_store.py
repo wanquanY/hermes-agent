@@ -2144,7 +2144,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         timestamp: float | None = None,
         tool_calls: Any = None,
     ) -> Dict[str, Any]:
-        return MessageRepository(conn, SessionRepoImpl(conn)).upsert_team_message_by_id(
+        return MessageRepository(conn, SessionRepoImpl(conn)).upsert_team_message_by_id_locked(
             session_id=session_id,
             conversation_message_id=conversation_message_id,
             role=role,

@@ -657,6 +657,37 @@ class MessageRepository:
                 self._conn.rollback()
                 raise
 
+    def upsert_team_message_by_id_locked(
+        self,
+        *,
+        session_id: str,
+        conversation_message_id: str,
+        role: str,
+        content: Any,
+        participant_id: str,
+        metadata: dict[str, Any],
+        status: str = "",
+        reasoning: Any = "",
+        tool_calls: Any = None,
+    ) -> dict[str, Any]:
+        stable_sid = str(session_id or "").strip()
+        stable_message_id = str(conversation_message_id or "").strip()
+        if not stable_sid:
+            raise ValueError("session_id is required")
+        if not stable_message_id:
+            raise ValueError("conversation_message_id is required")
+        return self._upsert_team_message_by_id_locked(
+            session_id=stable_sid,
+            conversation_message_id=stable_message_id,
+            role=role,
+            content=content,
+            participant_id=participant_id,
+            metadata=metadata,
+            status=status,
+            reasoning=reasoning,
+            tool_calls=tool_calls,
+        )
+
     def _replace_conversation_locked(self, session_id: str, messages: list[dict[str, Any]]) -> None:
         self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
         total_messages = 0
