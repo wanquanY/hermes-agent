@@ -523,5 +523,3 @@ class ParticipantsMixin:
         item["metadata"] = metadata
         return item
 
-
-SessionDBParticipantMixin = ParticipantsMixin

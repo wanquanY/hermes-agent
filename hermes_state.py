@@ -33,9 +33,9 @@ from hermes_agent.storage.sqlite_wal import apply_wal_with_fallback
 from hermes_agent.storage.sqlite_wal import wal_fallback_warned_paths as _wal_fallback_warned_paths
 from hermes_constants import get_hermes_home
 from hermes_state_activities import ActivitiesMixin
-from hermes_state_agent_profiles import SessionDBAgentProfileMixin
-from hermes_state_branch import SessionDBBranchMixin
-from hermes_state_member_chat import SessionDBMemberChatMixin
+from hermes_state_agent_profiles import AgentProfileStateMixin
+from hermes_state_branch import BranchStateMixin
+from hermes_state_member_chat import MemberChatStateMixin
 from hermes_state_participants import (
     ParticipantsMixin,
     agent_participant_id,
@@ -50,9 +50,9 @@ from hermes_agent.domain.run_event_index import runtime_source_seq_from_event
 from hermes_state_runtime import session_info_record
 from hermes_state_runs import SessionDBRunMixin
 from hermes_state_tool_events import backfill_tool_events_from_run_events
-from hermes_state_team_capabilities import SessionDBTeamCapabilityMixin
+from hermes_state_team_capabilities import TeamCapabilityStateMixin
 from hermes_team_mission.state.session_mixin import TeamMissionStateMixin
-from hermes_state_team_registry import SessionDBTeamRegistryMixin
+from hermes_state_team_registry import TeamRegistryStateMixin
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
 from hermes_team_mission.state.schema import reconcile_team_mission_node_primary_key
 from hermes_team_mission.state.schema import team_mission_deferred_index_sql
@@ -724,7 +724,7 @@ CREATE INDEX IF NOT EXISTS idx_team_capability_snapshot_bindings_conversation
     ON team_capability_snapshot_bindings(conversation_id);
 """
 
-class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, TeamMissionStateMixin, SessionDBMemberChatMixin, ParticipantsMixin, ActivitiesMixin, SessionDBRunMixin, SessionDBBranchMixin):
+class SessionDB(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapabilityStateMixin, TeamMissionStateMixin, MemberChatStateMixin, ParticipantsMixin, ActivitiesMixin, SessionDBRunMixin, BranchStateMixin):
     """
     SQLite-backed session storage with FTS5 search.
 

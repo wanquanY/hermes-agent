@@ -8,7 +8,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 
-class SessionDBBranchMixin:
+class BranchStateMixin:
     @staticmethod
     def _branch_fingerprint(
         source_session_id: str,

@@ -8,7 +8,7 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 48 | 13 |
+| `p2:no_sessiondb_production` | 42 | 7 |
 | `p2:no_legacy_identity_alias_internal` | 1183 | 78 |
 
 ## p2:no_sessiondb_production
@@ -21,12 +21,6 @@ Status: `preflight_only`
 | 2 | `tui_gateway/methods/session.py` | `1761` # Context compression ends the current SessionDB session and forks a |
 | 1 | `hermes_agent/storage/migrations/0001_declarative_baseline.py` | `22` from hermes_state import SCHEMA_SQL |
 | 1 | `hermes_state/migrations/merge_profile_dbs.py` | `4` the normal SessionDB lifecycle starts and must not import hermes_state.SessionDB. |
-| 1 | `hermes_state_agent_profiles.py` | `109` class SessionDBAgentProfileMixin: |
-| 1 | `hermes_state_branch.py` | `11` class SessionDBBranchMixin: |
-| 1 | `hermes_state_member_chat.py` | `199` class SessionDBMemberChatMixin: |
-| 1 | `hermes_state_participants.py` | `527` SessionDBParticipantMixin = ParticipantsMixin |
-| 1 | `hermes_state_team_capabilities.py` | `25` class SessionDBTeamCapabilityMixin: |
-| 1 | `hermes_state_team_registry.py` | `56` class SessionDBTeamRegistryMixin: |
 | 1 | `hermes_state_tool_events.py` | `655` Mirrors the decode path used by ``SessionDB.list_run_events`` minus the |
 
 ## p2:no_legacy_identity_alias_internal

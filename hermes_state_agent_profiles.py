@@ -106,7 +106,7 @@ def _draft_kind(value: Any, *, has_revision_target: bool = False) -> str:
     return "revision" if has_revision_target else "create"
 
 
-class SessionDBAgentProfileMixin:
+class AgentProfileStateMixin:
     """Canonical Hermes-owned agent profile registry.
 
     The registry owns product agent profile identity, latest published profile

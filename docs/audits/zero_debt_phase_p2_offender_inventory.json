@@ -2577,7 +2577,7 @@
       "total_offenders": 1183
     },
     "p2:no_sessiondb_production": {
-      "file_count": 13,
+      "file_count": 7,
       "files": [
         {
           "first_lines": [
@@ -2590,26 +2590,23 @@
             },
             {
               "line": 36,
-              "text": "from hermes_state_agent_profiles import SessionDBAgentProfileMixin",
+              "text": "from hermes_state_agent_profiles import AgentProfileStateMixin",
               "tokens": [
-                "from hermes_state",
-                "SessionDB"
+                "from hermes_state"
               ]
             },
             {
               "line": 37,
-              "text": "from hermes_state_branch import SessionDBBranchMixin",
+              "text": "from hermes_state_branch import BranchStateMixin",
               "tokens": [
-                "from hermes_state",
-                "SessionDB"
+                "from hermes_state"
               ]
             },
             {
               "line": 38,
-              "text": "from hermes_state_member_chat import SessionDBMemberChatMixin",
+              "text": "from hermes_state_member_chat import MemberChatStateMixin",
               "tokens": [
-                "from hermes_state",
-                "SessionDB"
+                "from hermes_state"
               ]
             },
             {
@@ -2749,84 +2746,6 @@
         {
           "first_lines": [
             {
-              "line": 109,
-              "text": "class SessionDBAgentProfileMixin:",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_state_agent_profiles.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 11,
-              "text": "class SessionDBBranchMixin:",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_state_branch.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 199,
-              "text": "class SessionDBMemberChatMixin:",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_state_member_chat.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 527,
-              "text": "SessionDBParticipantMixin = ParticipantsMixin",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_state_participants.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 25,
-              "text": "class SessionDBTeamCapabilityMixin:",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_state_team_capabilities.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 56,
-              "text": "class SessionDBTeamRegistryMixin:",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_state_team_registry.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 655,
               "text": "Mirrors the decode path used by ``SessionDB.list_run_events`` minus the",
               "tokens": [
@@ -2838,7 +2757,7 @@
           "path": "hermes_state_tool_events.py"
         }
       ],
-      "total_offenders": 48
+      "total_offenders": 42
     }
   },
   "phase": "P2",

@@ -22,7 +22,7 @@ def _row_value(row: sqlite3.Row | None, key: str, default: Any = None) -> Any:
         return default
 
 
-class SessionDBTeamCapabilityMixin:
+class TeamCapabilityStateMixin:
     """Canonical Hermes team capability snapshot persistence.
 
     DoXie supplies source facts. Hermes owns capability snapshot generation,

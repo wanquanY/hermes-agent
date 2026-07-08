@@ -53,7 +53,7 @@ def _string_list(value: Any) -> List[str]:
     return result
 
 
-class SessionDBTeamRegistryMixin:
+class TeamRegistryStateMixin:
     """Canonical Hermes-owned team registry.
 
     The registry stores product team configuration used by Team Mission.

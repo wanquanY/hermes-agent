@@ -196,7 +196,7 @@ def project_message_for_viewer(
     return projected[0] if projected else None
 
 
-class SessionDBMemberChatMixin:
+class MemberChatStateMixin:
     def recall_member_chat_view_messages(
         self,
         *,
