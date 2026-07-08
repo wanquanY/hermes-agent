@@ -121,6 +121,10 @@ class MessageRepo(Protocol):
 
     def delete_by_session(self, session_id: str) -> int: ...
 
+    def deactivate_from(self, session_id: str, since_message_id: int) -> list[int]: ...
+
+    def restore_from(self, session_id: str, since_message_id: int) -> int: ...
+
 
 class MessageRepoImpl:
     """SQLite-backed MessageRepo (spec §4.3)."""
@@ -410,6 +414,42 @@ class MessageRepoImpl:
             raise
         return int(cursor.rowcount or 0)
 
+    def deactivate_from(self, session_id: str, since_message_id: int) -> list[int]:
+        stable_sid = str(session_id or "").strip()
+        if not stable_sid:
+            return []
+        rows = self._conn.execute(
+            "SELECT id FROM messages WHERE session_id = ? AND id >= ? AND active = 1",
+            (stable_sid, int(since_message_id)),
+        ).fetchall()
+        ids = [int(row["id"] if isinstance(row, sqlite3.Row) else row[0]) for row in rows]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        self._conn.execute(
+            f"UPDATE messages SET active = 0 WHERE id IN ({placeholders})",
+            ids,
+        )
+        return ids
+
+    def restore_from(self, session_id: str, since_message_id: int) -> int:
+        stable_sid = str(session_id or "").strip()
+        if not stable_sid:
+            return 0
+        rows = self._conn.execute(
+            "SELECT id FROM messages WHERE session_id = ? AND id >= ? AND active = 0",
+            (stable_sid, int(since_message_id)),
+        ).fetchall()
+        ids = [int(row["id"] if isinstance(row, sqlite3.Row) else row[0]) for row in rows]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        cursor = self._conn.execute(
+            f"UPDATE messages SET active = 1 WHERE id IN ({placeholders})",
+            ids,
+        )
+        return int(cursor.rowcount or 0)
+
     def _fetch_by_id(self, message_id: int) -> Message | None:
         row = self._conn.execute(
             """
@@ -535,6 +575,45 @@ class MessageRepository:
                 self._conn.rollback()
                 raise
 
+    def upsert_team_message_by_id(
+        self,
+        *,
+        session_id: str,
+        conversation_message_id: str,
+        role: str,
+        content: Any,
+        participant_id: str,
+        metadata: dict[str, Any],
+        status: str = "",
+        reasoning: Any = "",
+        tool_calls: Any = None,
+    ) -> dict[str, Any]:
+        stable_sid = str(session_id or "").strip()
+        stable_message_id = str(conversation_message_id or "").strip()
+        if not stable_sid:
+            raise ValueError("session_id is required")
+        if not stable_message_id:
+            raise ValueError("conversation_message_id is required")
+        with self._lock:
+            self._begin_write()
+            try:
+                row = self._upsert_team_message_by_id_locked(
+                    session_id=stable_sid,
+                    conversation_message_id=stable_message_id,
+                    role=role,
+                    content=content,
+                    participant_id=participant_id,
+                    metadata=metadata,
+                    status=status,
+                    reasoning=reasoning,
+                    tool_calls=tool_calls,
+                )
+                self._conn.commit()
+                return row
+            except Exception:
+                self._conn.rollback()
+                raise
+
     def _replace_conversation_locked(self, session_id: str, messages: list[dict[str, Any]]) -> None:
         self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
         total_messages = 0
@@ -565,6 +644,116 @@ class MessageRepository:
                 last_message_ts=last_message_ts,
             ),
         )
+
+    def _upsert_team_message_by_id_locked(
+        self,
+        *,
+        session_id: str,
+        conversation_message_id: str,
+        role: str,
+        content: Any,
+        participant_id: str,
+        metadata: dict[str, Any],
+        status: str,
+        reasoning: Any,
+        tool_calls: Any,
+    ) -> dict[str, Any]:
+        normalized_role = str(role or "assistant").strip() or "assistant"
+        normalized_participant_id = str(participant_id or "").strip()
+        next_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        next_metadata["session_id"] = session_id
+        next_metadata["conversation_message_id"] = conversation_message_id
+        projection_status = str(status or "").strip()
+        if projection_status:
+            next_metadata["projection_status"] = projection_status
+        metadata_json = json.dumps(next_metadata, ensure_ascii=False) if next_metadata else None
+        stored_content = _encode_content(content)
+        stored_reasoning = str(reasoning or "")
+        message_timestamp = time.time()
+        stored_tool_calls = _json_or_none(tool_calls) if tool_calls is not None else None
+
+        existing = self._select_team_message_by_conversation_id(
+            session_id,
+            conversation_message_id,
+        )
+        if existing is None:
+            existing = self._select_legacy_team_shadow_row(
+                session_id=session_id,
+                role=normalized_role,
+                content=content,
+                participant_id=normalized_participant_id,
+                metadata=next_metadata,
+            )
+        if existing is None:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO messages (
+                    session_id, role, content, participant_id, timestamp,
+                    conversation_message_id, metadata_json, reasoning, tool_calls
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    normalized_role,
+                    stored_content,
+                    normalized_participant_id,
+                    message_timestamp,
+                    conversation_message_id,
+                    metadata_json,
+                    stored_reasoning,
+                    stored_tool_calls,
+                ),
+            )
+            row_id = int(cursor.lastrowid or 0)
+            self._sessions.record_message_append(
+                session_id,
+                SessionMessageAppendProjection(timestamp=message_timestamp),
+            )
+        else:
+            merged_metadata = _merge_metadata(
+                _json_or(existing["metadata_json"], {}),
+                next_metadata,
+            )
+            next_reasoning = stored_reasoning or str(existing["reasoning"] or "")
+            next_tool_calls = (
+                stored_tool_calls
+                if stored_tool_calls is not None
+                else existing["tool_calls"]
+            )
+            self._conn.execute(
+                """
+                UPDATE messages
+                   SET role = ?,
+                       content = ?,
+                       participant_id = ?,
+                       timestamp = ?,
+                       conversation_message_id = ?,
+                       metadata_json = ?,
+                       reasoning = ?,
+                       tool_calls = ?,
+                       active = 1
+                 WHERE id = ?
+                """,
+                (
+                    normalized_role,
+                    stored_content,
+                    normalized_participant_id,
+                    message_timestamp,
+                    conversation_message_id,
+                    json.dumps(merged_metadata, ensure_ascii=False),
+                    next_reasoning,
+                    next_tool_calls,
+                    int(existing["id"]),
+                ),
+            )
+            row_id = int(existing["id"])
+            self._sessions.touch_message_activity(session_id, message_timestamp)
+        row = self._conn.execute(
+            f"SELECT {_conversation_message_columns()} FROM messages WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+        return _row_as_conversation(row, include_storage_metadata=True)
 
     def _select_metadata_target(
         self,
@@ -613,6 +802,59 @@ class MessageRepository:
                 client_message_id=target_client_message_id,
             ):
                 return row
+        return None
+
+    def _select_team_message_by_conversation_id(
+        self,
+        session_id: str,
+        conversation_message_id: str,
+    ) -> sqlite3.Row | None:
+        return self._conn.execute(
+            f"SELECT {_conversation_message_columns()} "
+            "FROM messages "
+            "WHERE session_id = ? AND conversation_message_id = ? "
+            "ORDER BY id LIMIT 1",
+            (session_id, conversation_message_id),
+        ).fetchone()
+
+    def _select_legacy_team_shadow_row(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        content: Any,
+        participant_id: str,
+        metadata: dict[str, Any],
+    ) -> sqlite3.Row | None:
+        run_id = _metadata_text(metadata, "run_id", "runId")
+        if not run_id:
+            return None
+        turn_id = _metadata_text(metadata, "turn_id", "turnId")
+        rows = self._conn.execute(
+            f"SELECT {_conversation_message_columns()} "
+            "FROM messages "
+            "WHERE session_id = ? "
+            "  AND role = ? "
+            "  AND COALESCE(conversation_message_id, '') = '' "
+            "  AND active = 1 "
+            "ORDER BY id",
+            (session_id, role),
+        ).fetchall()
+        for row in rows:
+            existing_metadata = _json_or(row["metadata_json"], {})
+            if not isinstance(existing_metadata, dict):
+                continue
+            if _metadata_text(existing_metadata, "run_id", "runId") != run_id:
+                continue
+            existing_turn_id = _metadata_text(existing_metadata, "turn_id", "turnId")
+            if turn_id and existing_turn_id and existing_turn_id != turn_id:
+                continue
+            existing_participant_id = str(row["participant_id"] or "").strip()
+            if participant_id and existing_participant_id and existing_participant_id != participant_id:
+                continue
+            if _decode_content(row["content"]) != content:
+                continue
+            return row
         return None
 
     def _insert_message(self, session_id: str, message: dict[str, Any], timestamp: float) -> int:

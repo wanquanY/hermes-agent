@@ -247,6 +247,8 @@ class SessionRepo(Protocol):
 
     def reset_message_projection(self, session_id: str) -> None: ...
 
+    def touch_message_activity(self, session_id: str, timestamp: float) -> None: ...
+
     def project_run_state(self, projection: SessionRunProjection) -> None: ...
 
     def resolve_resume_session_id(self, session_id: str) -> str: ...
@@ -935,6 +937,29 @@ class SessionRepoImpl:
              WHERE session_id = ?
             """,
             (time.time(), stable),
+        )
+
+    def touch_message_activity(self, session_id: str, timestamp: float) -> None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required for touch_message_activity")
+        ts = float(timestamp or time.time())
+        self._conn.execute(
+            """
+            UPDATE sessions
+               SET last_active = MAX(COALESCE(last_active, 0), ?)
+             WHERE id = ?
+            """,
+            (ts, stable),
+        )
+        self._conn.execute(
+            """
+            UPDATE session_index
+               SET updated_at = MAX(COALESCE(updated_at, 0), ?),
+                   last_activity = MAX(COALESCE(last_activity, 0), ?)
+             WHERE session_id = ?
+            """,
+            (ts, ts, stable),
         )
 
     def project_run_state(self, projection: SessionRunProjection) -> None:
