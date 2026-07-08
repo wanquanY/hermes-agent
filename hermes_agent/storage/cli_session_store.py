@@ -62,6 +62,14 @@ class CliSessionStore:
             self.update_system_prompt(session_id, str(system_prompt))
         return str(session_id or "")
 
+    def ensure_session(self, session_id: str, source: str = "unknown", **kwargs: Any) -> str:
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required")
+        if self.get_session(stable) is None:
+            self.create_session(stable, source, **kwargs)
+        return stable
+
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         stable = str(session_id or "").strip()
         if not stable:

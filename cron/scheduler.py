@@ -40,6 +40,7 @@ from typing import Any, List, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hermes_constants import get_hermes_home
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import load_config, _expand_env_vars
 from hermes_time import now as _hermes_now
@@ -987,14 +988,13 @@ def _append_dovie_session_message(
     if not content or (success and SILENT_MARKER in content.upper()):
         return None
 
+    session_store = None
     try:
-        from hermes_state import SessionDB
-
-        db = SessionDB()
-        db.ensure_session(target_session_id, source="tui", model=job.get("model"))
+        session_store = open_cli_session_store()
+        session_store.ensure_session(target_session_id, source="tui", model=job.get("model"))
         trigger_content = _dovie_trigger_content(job)
         if trigger_content:
-            db.append_message(
+            session_store.append_message(
                 target_session_id,
                 "user",
                 trigger_content,
@@ -1006,7 +1006,7 @@ def _append_dovie_session_message(
                     "result_binding_mode": mode,
                 },
             )
-        db.append_message(
+        session_store.append_message(
             target_session_id,
             "assistant",
             content,
@@ -1027,6 +1027,16 @@ def _append_dovie_session_message(
             exc,
         )
         return str(exc)
+    finally:
+        if session_store is not None:
+            try:
+                session_store.close()
+            except Exception as exc:
+                logger.debug(
+                    "Job '%s': failed to close Dovie result session store: %s",
+                    job.get("id", "?"),
+                    exc,
+                )
     return None
 
 
@@ -1508,7 +1518,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     # stdout to telegram" watchdog pattern. The agent path is skipped
     # entirely: no AIAgent, no prompt, no tool loop, no token spend.
     #
-    # We check this BEFORE importing run_agent / constructing SessionDB so
+    # We check this BEFORE importing run_agent / constructing the session store so
     # a pure-script tick never pays for the agent machinery it isn't going
     # to use. Keep this block self-contained.
     #
@@ -1607,17 +1617,16 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     # ---------------------------------------------------------------
     # Default (LLM) path — import and construct the agent machinery now
     # that we know we actually need it. Doing these imports here instead of
-    # at module top keeps no_agent ticks from paying for AIAgent / SessionDB
+    # at module top keeps no_agent ticks from paying for AIAgent / session-store
     # construction costs.
     # ---------------------------------------------------------------
     from run_agent import AIAgent
 
     # Initialize SQLite session store so cron job messages are persisted
     # and discoverable via session_search (same pattern as gateway/run.py).
-    _session_db = None
+    _session_store = None
     try:
-        from hermes_state import SessionDB
-        _session_db = SessionDB()
+        _session_store = open_cli_session_store()
     except Exception as e:
         logger.debug("Job '%s': SQLite session store not available: %s", job.get("id", "?"), e)
 
@@ -1943,7 +1952,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             skip_memory=True,  # Cron system prompts would corrupt user representations
             platform="cron",
             session_id=_cron_session_id,
-            session_db=_session_db,
+            session_db=_session_store,
         )
         
         # Run the agent with an *inactivity*-based timeout: the job can run
@@ -2122,13 +2131,13 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         clear_session_vars(_ctx_tokens)
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")
-        if _session_db:
+        if _session_store:
             try:
-                _session_db.end_session(_cron_session_id, "cron_complete")
+                _session_store.end_session(_cron_session_id, "cron_complete")
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to end session: %s", job_id, e)
             try:
-                _session_db.close()
+                _session_store.close()
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to close SQLite session store: %s", job_id, e)
         # Release subprocesses, terminal sandboxes, browser daemons, and the
