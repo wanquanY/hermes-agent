@@ -1852,6 +1852,40 @@
         {
           "first_lines": [
             {
+              "line": 95,
+              "text": "event.get(\"stored_session_id\")",
+              "tokens": [
+                "stored_session_id"
+              ]
+            },
+            {
+              "line": 97,
+              "text": "or payload.get(\"stored_session_id\")",
+              "tokens": [
+                "stored_session_id"
+              ]
+            },
+            {
+              "line": 139,
+              "text": "event.get(\"stored_session_id\")",
+              "tokens": [
+                "stored_session_id"
+              ]
+            },
+            {
+              "line": 140,
+              "text": "or payload.get(\"stored_session_id\")",
+              "tokens": [
+                "stored_session_id"
+              ]
+            }
+          ],
+          "offenders": 4,
+          "path": "hermes_agent/domain/run_event_reference.py"
+        },
+        {
+          "first_lines": [
+            {
               "line": 59,
               "text": "runtime_session_id: str = \"\",",
               "tokens": [
@@ -1882,40 +1916,6 @@
           ],
           "offenders": 4,
           "path": "hermes_agent/domain/session_runtime_state.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 95,
-              "text": "event.get(\"stored_session_id\")",
-              "tokens": [
-                "stored_session_id"
-              ]
-            },
-            {
-              "line": 97,
-              "text": "or payload.get(\"stored_session_id\")",
-              "tokens": [
-                "stored_session_id"
-              ]
-            },
-            {
-              "line": 139,
-              "text": "event.get(\"stored_session_id\")",
-              "tokens": [
-                "stored_session_id"
-              ]
-            },
-            {
-              "line": 140,
-              "text": "or payload.get(\"stored_session_id\")",
-              "tokens": [
-                "stored_session_id"
-              ]
-            }
-          ],
-          "offenders": 4,
-          "path": "hermes_state_run_event_reference.py"
         },
         {
           "first_lines": [
@@ -2665,26 +2665,6 @@
         {
           "first_lines": [
             {
-              "line": 37,
-              "text": "from hermes_state_run_event_reference import (",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 48,
-              "text": "from hermes_state_tool_events import (",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "hermes_state_runs.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 22,
               "text": "from hermes_state import SCHEMA_SQL",
               "tokens": [
@@ -2694,9 +2674,22 @@
           ],
           "offenders": 1,
           "path": "hermes_agent/storage/migrations/0001_declarative_baseline.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": 48,
+              "text": "from hermes_state_tool_events import (",
+              "tokens": [
+                "from hermes_state"
+              ]
+            }
+          ],
+          "offenders": 1,
+          "path": "hermes_state_runs.py"
         }
       ],
-      "total_offenders": 36
+      "total_offenders": 35
     }
   },
   "phase": "P2",

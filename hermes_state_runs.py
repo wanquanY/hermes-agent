@@ -34,7 +34,7 @@ from hermes_agent.domain.run_event_index import (
     project_run_event_search_index_from_row,
     runtime_source_seq_from_event,
 )
-from hermes_state_run_event_reference import (
+from hermes_agent.domain.run_event_reference import (
     reference_projected_run_event_payloads,
     rehydrate_referenced_run_event,
 )
