@@ -154,3 +154,34 @@ def test_gateway_session_lists_emit_conversation_kind(monkeypatch, tmp_path: Pat
     index_rows = {item["id"]: item for item in index_list["result"]["sessions"]}
     assert index_rows["direct-session"]["conversation_kind"] == "direct"
     assert index_rows["team-session"]["conversation_kind"] == "team"
+
+
+def test_gateway_session_index_list_uses_read_model_not_sessiondb_method(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    db = SessionDB(tmp_path / "state.db")
+    db.upsert_session_index(
+        session_id="direct-session",
+        source="cli",
+        title="Direct",
+        conversation_kind="direct",
+        started_at=10,
+        updated_at=20,
+    )
+
+    class _ReadOnlyGatewayDB:
+        def __init__(self, source: SessionDB) -> None:
+            self._conn = source._conn
+
+        def reconcile_session_index(self) -> None:
+            return None
+
+    monkeypatch.setattr(session_methods, "_get_db", lambda: _ReadOnlyGatewayDB(db))
+    monkeypatch.setattr(session_methods, "_SESSION_INDEX_RECONCILED", False)
+
+    response = server._methods["session.index.list"](1, {})
+
+    assert "error" not in response
+    assert [item["id"] for item in response["result"]["sessions"]] == ["direct-session"]

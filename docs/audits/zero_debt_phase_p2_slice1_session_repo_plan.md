@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_3`
+状态：`in_progress_checkpoint_4`
 
 ## 前置门槛
 
@@ -12,7 +12,8 @@
 
 P1 human sign-off 已通过，P2 已开始执行。当前 checkpoint 已完成
 `gateway.SessionStore`、TUI `session.create` 的 repo-backed 写入迁移，以及
-TUI `session.list/session.most_recent` 的 read-model owner 迁移。
+TUI `session.list/session.most_recent/session.index.list` 的 read-model owner
+迁移。
 
 ## 目标
 
@@ -247,3 +248,44 @@ python scripts/zero_debt/verdict.py --phase P2 --json
 - `tui_gateway/services/worker_supervisor.py` 仍暴露 legacy worker proxy method
   allowlist，需随 worker storage owner 迁移移除。
 - `gateway/session.py` transcript 相关 legacy storage 仍需在 message slice 迁出。
+
+## Checkpoint 4 证据
+
+已完成：
+
+- 新增 `hermes_agent/read_models/session_index.py`，由
+  `SessionIndexReadModel` 接管 `session_index` sidebar 富投影 SQL。
+- `tui_gateway.methods.session` 的 `session.index.list` 不再调用
+  `db.list_session_index`，改为通过 `SessionIndexReadModel` 从 SQLite
+  connection 读取。
+- 保留 `_ensure_session_index_reconciled(db)` 作为阶段内显式 writer/backfill
+  hook；read model 保持只读，`reconcile/repair` 后续迁到独立 writer-domain
+  owner。
+- 新增 `test_gateway_session_index_list_uses_read_model_not_sessiondb_method`，
+  证明 handler 在 DB wrapper 不暴露 `list_session_index` 时仍能通过 `_conn`
+  read-model 返回 sidebar rows。
+- 新 read-model 没有增加 P2 legacy identity alias offender baseline。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/session_index.py hermes_agent/read_models/__init__.py tui_gateway/methods/session.py tests/gateway/test_session_kind_column.py
+.venv/bin/pytest tests/gateway/test_session_kind_column.py tests/gateway/test_session_list_team_enrichment.py -q
+.venv/bin/ruff check hermes_agent/read_models/session_index.py hermes_agent/read_models/__init__.py tui_gateway/methods/session.py tests/gateway/test_session_kind_column.py
+.venv/bin/pytest tests/gateway/test_session_kind_column.py tests/gateway/test_session_list_team_enrichment.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_ws_dispatch.py::test_session_list_uses_control_plane_executor tests/tui_gateway/test_ws_dispatch.py::test_control_plane_session_list_is_not_proxied_to_runtime_worker -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+```
+
+当前验证结果：
+
+- 组合 session index/list/protocol/ws-dispatch 测试：`132 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+
+剩余工作：
+
+- `SessionDB.list_session_index` 旧方法仍存在，测试也仍有直接调用；需要在
+  后续 repository/read-model parity slice 中迁移直接调用者后删除旧方法。
+- `reconcile_session_index` 和 `_repair_session_index_*` 仍属于 legacy facade
+  写副作用，需要拆到独立 writer-domain owner。
+- `session.messages/delete/title/status/usage` 等旧 DB path 仍待迁移。

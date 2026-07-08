@@ -9,6 +9,7 @@ from dovie_extension.display_transcript import (
     sanitize_session_list_item,
     sanitize_transcript_messages,
 )
+from hermes_agent.read_models.session_index import SessionIndexQuery, SessionIndexReadModel
 from hermes_agent.read_models.session_list import SessionListQuery, SessionListReadModel
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
 from tui_gateway.methods._shared import bind_server_globals
@@ -150,6 +151,13 @@ def _session_list_read_model_for_db(db):
     if conn is None:
         return None
     return SessionListReadModel(conn)
+
+
+def _session_index_read_model_for_db(db):
+    conn = getattr(db, "_conn", None)
+    if conn is None:
+        return None
+    return SessionIndexReadModel(conn)
 
 
 def _requested_runtime_executor(params: dict | None = None) -> str:
@@ -1578,8 +1586,8 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5006)
-    lister = getattr(db, "list_session_index", None)
-    if not callable(lister):
+    read_model = _session_index_read_model_for_db(db)
+    if read_model is None:
         return _err(rid, 5006, "session_index unavailable")
     try:
         _ensure_session_index_reconciled(db)
@@ -1597,20 +1605,14 @@ def _(rid, params: dict) -> dict:
         ).strip().lower()
         if requested_conversation_kind not in {"direct", "team"}:
             requested_conversation_kind = ""
-        list_kwargs = {
-            "limit": limit,
-            "cursor": cursor or None,
-            "include_transient": include_transient,
-        }
-        if requested_conversation_kind:
-            list_kwargs["conversation_kind"] = requested_conversation_kind
-        try:
-            result = lister(**list_kwargs)
-        except TypeError:
-            if not requested_conversation_kind:
-                raise
-            list_kwargs.pop("conversation_kind", None)
-            result = lister(**list_kwargs)
+        result = read_model.list(
+            SessionIndexQuery(
+                limit=limit,
+                cursor=cursor or None,
+                include_transient=include_transient,
+                conversation_kind=requested_conversation_kind or None,
+            )
+        )
         rows = [
             _session_index_row_with_active_mission_running(db, row)
             for row in (result.get("sessions") or [])
