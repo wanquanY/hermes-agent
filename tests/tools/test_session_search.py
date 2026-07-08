@@ -99,6 +99,20 @@ class TestSchema:
         assert "no llm" in desc
 
 
+def test_session_search_without_read_model_does_not_open_legacy_session_db(monkeypatch):
+    import hermes_state
+
+    def fail_session_db(*_args, **_kwargs):
+        raise AssertionError("session_search must not construct SessionDB")
+
+    monkeypatch.setattr(hermes_state, "SessionDB", fail_session_db)
+
+    result = json.loads(session_search(query="anything", db=None))
+
+    assert result["success"] is False
+    assert "read model" in result["error"]
+
+
 class TestHiddenSources:
     def test_tool_source_hidden(self):
         assert "tool" in _HIDDEN_SESSION_SOURCES

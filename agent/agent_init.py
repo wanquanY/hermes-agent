@@ -1062,6 +1062,7 @@ def init_agent(
     
     # SQLite session store (optional -- provided by CLI or gateway)
     agent._session_db = session_db
+    agent._session_recall_read_model = None
     agent._parent_session_id = parent_session_id
     agent._last_flushed_db_idx = 0  # per-message-buffer DB-write cursor
     agent._last_flushed_db_buffer_id = None

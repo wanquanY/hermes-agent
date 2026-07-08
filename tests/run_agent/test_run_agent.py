@@ -52,6 +52,26 @@ def test_is_destructive_command_treats_install_as_mutating():
     assert run_agent._is_destructive_command("install template.env .env") is True
 
 
+def test_session_recall_uses_read_model_owner_without_legacy_fallback(agent, monkeypatch):
+    from hermes_agent.read_models.session_recall import SessionRecallReadModel
+
+    sentinel = object()
+
+    def open_default(*_args, **_kwargs):
+        return sentinel
+
+    def fail_session_db(*_args, **_kwargs):
+        raise AssertionError("AIAgent recall must not construct SessionDB")
+
+    monkeypatch.setattr(SessionRecallReadModel, "open_default", open_default)
+    monkeypatch.setattr(run_agent, "SessionDB", fail_session_db, raising=False)
+    agent._session_db = None
+    agent._session_recall_read_model = None
+
+    assert agent._get_session_db_for_recall() is sentinel
+    assert agent._get_session_db_for_recall() is sentinel
+
+
 @pytest.fixture()
 def agent():
     """Minimal AIAgent with mocked OpenAI client and tool loading."""

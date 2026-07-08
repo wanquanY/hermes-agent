@@ -488,24 +488,23 @@ class AIAgent:
         )
 
     def _get_session_db_for_recall(self):
-        """Return a SessionDB for recall, lazily creating it if an entrypoint forgot.
-
-        Most frontends pass ``session_db`` into ``AIAgent`` explicitly, but recall
-        is important enough that a missing constructor argument should degrade by
-        opening the default state DB instead of making the advertised
-        ``session_search`` tool unusable.
-        """
+        """Return the explicit session recall read model."""
         if getattr(self, "_session_persistence_disabled", False):
             return None
-        if self._session_db is not None:
-            return self._session_db
+        cached = getattr(self, "_session_recall_read_model", None)
+        if cached is not None:
+            return cached
         try:
-            from hermes_state import SessionDB
+            from hermes_agent.read_models.session_recall import SessionRecallReadModel
 
-            self._session_db = SessionDB()
-            return self._session_db
+            if self._session_db is not None:
+                cached = SessionRecallReadModel.from_session_db(self._session_db)
+            else:
+                cached = SessionRecallReadModel.open_default()
+            self._session_recall_read_model = cached
+            return cached
         except Exception as exc:
-            logger.debug("SessionDB unavailable for recall", exc_info=True)
+            logger.debug("Session recall read model unavailable", exc_info=True)
             return None
 
     def _ensure_db_session(self) -> None:
