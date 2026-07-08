@@ -15,6 +15,7 @@ from tui_gateway.methods.session import (
 from tui_gateway.services.message_history import (
     load_conversation_history,
     message_history_read_model_for_db,
+    message_repository_for_db,
 )
 
 _server = bind_server_globals(globals())
@@ -267,11 +268,11 @@ def _(rid, params: dict) -> dict:
     target, resolve_err = _resolve_session_row_id(rid, db, target)
     if resolve_err:
         return resolve_err
-    merge_message_metadata = getattr(db, "merge_message_metadata", None)
-    if not callable(merge_message_metadata):
+    message_repo = message_repository_for_db(db)
+    if message_repo is None:
         return _err(rid, 5000, "message metadata merge is not available")
     try:
-        message = merge_message_metadata(
+        message = message_repo.merge_metadata(
             target,
             metadata,
             message_id=params.get("message_id") or params.get("messageId"),
@@ -421,7 +422,9 @@ def _rewrite_live_and_persisted_history(session: dict, history: list[dict]) -> N
     session_key = str(session.get("session_key") or "")
     db = _get_db()
     if db is not None and session_key:
-        db.replace_messages(session_key, history)
+        message_repo = message_repository_for_db(db)
+        if message_repo is not None:
+            message_repo.replace_conversation(session_key, history)
     session["history"] = history
     session["history_version"] = int(session.get("history_version", 0)) + 1
     agent = session.get("agent")
@@ -487,7 +490,10 @@ def _recall_stored_turn(rid, sid: str, target: dict[str, str]) -> dict | None:
         if recalled is None:
             return _err(rid, 4019, "turn not found or already recalled")
         next_history, draft, removed = recalled
-        db.replace_messages(session_key, next_history)
+        message_repo = message_repository_for_db(db)
+        if message_repo is None:
+            return _err(rid, 5036, "message repository unavailable")
+        message_repo.replace_conversation(session_key, next_history)
         messages = sanitize_transcript_messages(_history_to_messages(next_history))
     except Exception as exc:
         return _err(rid, 5036, f"recall failed: {exc}")

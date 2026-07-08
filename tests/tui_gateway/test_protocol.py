@@ -618,12 +618,6 @@ def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server
         rows=[("stored-1", "Stored")],
         history_reader=history_reader,
     )
-    db.replaced = None
-
-    def replace_messages(sid, messages):
-        db.replaced = (sid, messages)
-
-    db.replace_messages = replace_messages
     make_agent = MagicMock()
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", make_agent)
@@ -638,9 +632,14 @@ def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server
 
     assert "error" not in resp
     make_agent.assert_not_called()
-    assert db.replaced is not None
-    assert db.replaced[0] == "stored-1"
-    assert [message["metadata"]["turn_id"] for message in db.replaced[1]] == ["turn-2"]
+    stored_rows = db._conn.execute(
+        "SELECT role, content, timestamp, metadata_json FROM messages WHERE session_id = ? ORDER BY id",
+        ("stored-1",),
+    ).fetchall()
+    assert [(row["role"], row["content"], row["timestamp"]) for row in stored_rows] == [
+        ("user", "next", 3.0)
+    ]
+    assert [json.loads(row["metadata_json"])["turn_id"] for row in stored_rows] == ["turn-2"]
     assert resp["result"]["stored_session_id"] == "stored-1"
     assert resp["result"]["removed_messages"] == 2
     assert resp["result"]["draft"]["text"] == "请读这个文件"
@@ -677,12 +676,6 @@ def test_session_recall_turn_matches_stored_client_message_id(server, monkeypatc
         rows=[("stored-1", "Stored")],
         history_reader=history_reader,
     )
-    db.replaced = None
-
-    def replace_messages(sid, messages):
-        db.replaced = (sid, messages)
-
-    db.replace_messages = replace_messages
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", MagicMock())
 
@@ -699,7 +692,11 @@ def test_session_recall_turn_matches_stored_client_message_id(server, monkeypatc
     )
 
     assert "error" not in resp
-    assert db.replaced == ("stored-1", [])
+    stored_count = db._conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+        ("stored-1",),
+    ).fetchone()[0]
+    assert stored_count == 0
     assert resp["result"]["turn_id"] == "turn-local"
     assert resp["result"]["draft"]["text"] == "恢复这个草稿"
 

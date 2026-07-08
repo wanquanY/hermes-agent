@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import threading
 from dataclasses import dataclass
 from typing import Any
 
 from agent.memory_manager import sanitize_context
+from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,7 @@ class MessageHistoryReadModel:
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
-        self._lock = _connection_lock(conn)
+        self._lock = lock_for_connection(conn)
 
     def page_as_conversation(self, session_id: str, query: MessagePageQuery) -> dict[str, Any]:
         with self._lock:
@@ -436,20 +436,6 @@ def _row_text(row: Any, key: str, index: int) -> str:
     if isinstance(row, sqlite3.Row):
         return str(row[key] or "")
     return str(row[index] or "")
-
-
-_CONNECTION_LOCKS: dict[int, threading.RLock] = {}
-_CONNECTION_LOCKS_GUARD = threading.Lock()
-
-
-def _connection_lock(conn: sqlite3.Connection) -> threading.RLock:
-    key = id(conn)
-    with _CONNECTION_LOCKS_GUARD:
-        lock = _CONNECTION_LOCKS.get(key)
-        if lock is None:
-            lock = threading.RLock()
-            _CONNECTION_LOCKS[key] = lock
-        return lock
 
 
 __all__ = ["MessageHistoryReadModel", "MessagePageQuery"]

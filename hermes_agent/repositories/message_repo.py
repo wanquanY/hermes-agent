@@ -1,4 +1,8 @@
-"""MessageRepo protocol + concrete impl (spec §4.3) — messages aggregate root."""
+"""SQLite message write repository.
+
+This owner replaces gateway calls into the legacy DB facade for targeted
+message mutations. Read projection remains in ``MessageHistoryReadModel``.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
+from agent.memory_manager import sanitize_context
 from hermes_agent.repositories.base import RepositoryConnection
+from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
+
+_CONTENT_JSON_PREFIX = "\x00json:"
 
 
 class PageDirection(str, Enum):
@@ -91,8 +99,6 @@ class MessageRepoImpl:
     def __init__(self, conn: RepositoryConnection) -> None:
         self._conn = conn
 
-    # ------------------------------------------------------------------
-
     def append(self, session_id: str, message: MessageSpec) -> Message:
         stable_sid = str(session_id or "").strip()
         role = str(message.role or "").strip()
@@ -127,8 +133,7 @@ class MessageRepoImpl:
         last_row = cursor.lastrowid
         if last_row is None:
             raise RuntimeError("INSERT INTO messages returned no lastrowid")
-        message_id = int(last_row)
-        got = self._fetch_by_id(message_id)
+        got = self._fetch_by_id(int(last_row))
         assert got is not None
         return got
 
@@ -148,10 +153,7 @@ class MessageRepoImpl:
         clauses = ["session_id = ?", "active = 1"]
         params: list[Any] = [stable_sid]
         if cursor_id is not None:
-            if direction is PageDirection.TAIL:
-                clauses.append("id < ?")
-            else:
-                clauses.append("id > ?")
+            clauses.append("id < ?" if direction is PageDirection.TAIL else "id > ?")
             params.append(int(cursor_id))
         order = "ASC" if direction is PageDirection.HEAD else "DESC"
         sql = (
@@ -163,13 +165,12 @@ class MessageRepoImpl:
             f"ORDER BY id {order} "
             "LIMIT ?"
         )
-        params.append(limit + 1)  # peek one extra for has_more
+        params.append(limit + 1)
         rows = self._conn.execute(sql, params).fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
-        messages = [_row_to_message(r) for r in rows]
+        messages = [_row_to_message(row) for row in rows]
         if direction is PageDirection.TAIL:
-            # TAIL returns newest first; reverse so caller can render chronologically.
             messages.reverse()
         next_cursor_id: int | None = None
         prev_cursor_id: int | None = None
@@ -186,10 +187,6 @@ class MessageRepoImpl:
         )
 
     def search_fts(self, query: str, **filters: Any) -> list[Message]:
-        """Substring search fallback — FTS wiring lands with Phase D4 tests once
-        the messages_fts virtual tables are present in the harness. Substring
-        keeps this repo useful in isolation.
-        """
         q = str(query or "").strip()
         if not q:
             return []
@@ -211,15 +208,13 @@ class MessageRepoImpl:
         )
         params.append(limit)
         rows = self._conn.execute(sql, params).fetchall()
-        return [_row_to_message(r) for r in rows]
+        return [_row_to_message(row) for row in rows]
 
     def replace_all(self, session_id: str, history: list[MessageSpec]) -> None:
         stable_sid = str(session_id or "").strip()
         if not stable_sid:
             raise ValueError("session_id is required")
-        self._conn.execute(
-            "UPDATE messages SET active = 0 WHERE session_id = ?", (stable_sid,)
-        )
+        self._conn.execute("UPDATE messages SET active = 0 WHERE session_id = ?", (stable_sid,))
         for spec in history:
             self.append(stable_sid, spec)
 
@@ -254,8 +249,6 @@ class MessageRepoImpl:
         assert got is not None
         return got
 
-    # ------------------------------------------------------------------
-
     def _fetch_by_id(self, message_id: int) -> Message | None:
         row = self._conn.execute(
             """
@@ -273,11 +266,225 @@ class MessageRepoImpl:
         return _row_to_message(row)
 
 
-def _row_to_message(row: Any) -> Message:
-    def _g(name, idx):
-        return row[name] if isinstance(row, sqlite3.Row) else row[idx]
+class MessageRepository:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self._lock = lock_for_connection(conn)
 
-    metadata_raw = _g("metadata_json", 12) or ""
+    def merge_metadata(
+        self,
+        session_id: str,
+        metadata: dict[str, Any],
+        *,
+        message_id: str | int | None = None,
+        role: str | None = None,
+        run_id: str | None = None,
+        turn_id: str | None = None,
+        client_message_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not metadata:
+            return None
+        with self._lock:
+            row = self._select_metadata_target(
+                session_id,
+                message_id=message_id,
+                role=role,
+                run_id=run_id,
+                turn_id=turn_id,
+                client_message_id=client_message_id,
+            )
+            if row is None:
+                return None
+            next_metadata = _merge_metadata(_row_metadata(row), metadata)
+            raw = json.dumps(next_metadata, ensure_ascii=False)
+            self._conn.execute(
+                "UPDATE messages SET metadata_json = ? WHERE id = ?",
+                (raw, row["id"]),
+            )
+            self._conn.commit()
+            updated = dict(row)
+            updated["metadata_json"] = raw
+            return _row_as_conversation(updated, include_storage_metadata=True)
+
+    def replace_conversation(self, session_id: str, messages: list[dict[str, Any]]) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            self._conn.execute(
+                "UPDATE sessions SET message_count = 0, tool_call_count = 0, preview = '', last_active = NULL WHERE id = ?",
+                (session_id,),
+            )
+            total_messages = 0
+            total_tool_calls = 0
+            first_user_preview = ""
+            first_user_display_title = ""
+            last_message_ts: float | None = None
+            fallback_ts = time.time()
+            for index, message in enumerate(messages):
+                timestamp = _message_timestamp(message, fallback_ts + index * 1e-6)
+                self._insert_message(session_id, message, timestamp)
+                total_messages += 1
+                role = str(message.get("role") or "unknown")
+                if role == "user" and not first_user_preview:
+                    first_user_preview = _message_preview_text(message.get("content"))
+                    first_user_display_title = _message_display_title_text(message.get("content"))
+                tool_calls = message.get("tool_calls")
+                if tool_calls is not None:
+                    total_tool_calls += len(tool_calls) if isinstance(tool_calls, list) else 1
+                last_message_ts = timestamp
+            self._conn.execute(
+                """
+                UPDATE sessions
+                SET message_count = ?,
+                    tool_call_count = ?,
+                    preview = ?,
+                    display_title = CASE
+                        WHEN COALESCE(display_title_source, '') = 'user' THEN COALESCE(display_title, '')
+                        ELSE ?
+                    END,
+                    display_title_source = CASE
+                        WHEN COALESCE(display_title_source, '') = 'user' THEN 'user'
+                        WHEN ? != '' THEN 'first_user_message'
+                        ELSE ''
+                    END,
+                    last_active = ?
+                WHERE id = ?
+                """,
+                (
+                    total_messages,
+                    total_tool_calls,
+                    first_user_preview,
+                    first_user_display_title,
+                    first_user_display_title,
+                    last_message_ts,
+                    session_id,
+                ),
+            )
+            self._conn.commit()
+
+    def _select_metadata_target(
+        self,
+        session_id: str,
+        *,
+        message_id: str | int | None,
+        role: str | None,
+        run_id: str | None,
+        turn_id: str | None,
+        client_message_id: str | None,
+    ) -> sqlite3.Row | None:
+        target_message_id = str(message_id or "").strip()
+        if target_message_id:
+            try:
+                numeric_message_id = int(target_message_id)
+            except (TypeError, ValueError):
+                numeric_message_id = None
+            if numeric_message_id is not None:
+                row = self._conn.execute(
+                    "SELECT * FROM messages WHERE id = ? AND session_id = ?",
+                    (numeric_message_id, session_id),
+                ).fetchone()
+                if row is not None:
+                    return row
+        target_run_id = str(run_id or "").strip()
+        target_turn_id = str(turn_id or "").strip()
+        target_client_message_id = str(client_message_id or "").strip()
+        if not (target_run_id or target_turn_id or target_client_message_id):
+            return None
+        target_role = str(role or "").strip()
+        active_clause = "AND role = ?" if target_role else ""
+        params: list[Any] = [session_id]
+        if target_role:
+            params.append(target_role)
+        rows = self._conn.execute(
+            "SELECT * FROM messages WHERE session_id = ? "
+            f"{active_clause} "
+            "AND metadata_json IS NOT NULL ORDER BY id DESC",
+            tuple(params),
+        ).fetchall()
+        for row in rows:
+            if _metadata_matches(
+                _row_metadata(row),
+                run_id=target_run_id,
+                turn_id=target_turn_id,
+                client_message_id=target_client_message_id,
+            ):
+                return row
+        return None
+
+    def _insert_message(self, session_id: str, message: dict[str, Any], timestamp: float) -> None:
+        role = str(message.get("role") or "unknown")
+        tool_calls = message.get("tool_calls")
+        self._conn.execute(
+            """INSERT INTO messages (
+                session_id, role, content, participant_id, tool_call_id,
+                tool_calls, tool_name, timestamp, token_count, finish_reason,
+                reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
+                codex_message_items, platform_message_id, conversation_message_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                role,
+                _encode_content(message.get("content")),
+                str(message.get("participant_id") or ""),
+                message.get("tool_call_id"),
+                json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
+                message.get("tool_name"),
+                timestamp,
+                message.get("token_count"),
+                message.get("finish_reason"),
+                message.get("reasoning") if role == "assistant" else None,
+                message.get("reasoning_content") if role == "assistant" else None,
+                _json_or_none(message.get("reasoning_details")) if role == "assistant" else None,
+                _json_or_none(message.get("codex_reasoning_items")) if role == "assistant" else None,
+                _json_or_none(message.get("codex_message_items")) if role == "assistant" else None,
+                _platform_message_id(message),
+                str(message.get("conversation_message_id") or ""),
+                _json_or_none(message.get("metadata")),
+            ),
+        )
+
+
+def _row_as_conversation(row: Any, *, include_storage_metadata: bool) -> dict[str, Any]:
+    content = _decode_content(row["content"])
+    if row["role"] in {"user", "assistant"} and isinstance(content, str):
+        content = sanitize_context(content).strip()
+    message: dict[str, Any] = {"role": row["role"], "content": content}
+    if include_storage_metadata:
+        message["message_id"] = str(row["id"])
+        message["timestamp"] = row["timestamp"]
+    elif row["platform_message_id"]:
+        message["message_id"] = row["platform_message_id"]
+    for source_key, target_key in (
+        ("conversation_message_id", "conversation_message_id"),
+        ("participant_id", "participant_id"),
+        ("tool_call_id", "tool_call_id"),
+        ("tool_name", "tool_name"),
+    ):
+        value = str(row[source_key] or "").strip()
+        if value:
+            message[target_key] = value
+    if row["tool_calls"]:
+        message["tool_calls"] = _json_or(row["tool_calls"], [])
+    if row["role"] == "assistant":
+        for source_key in ("finish_reason", "reasoning", "reasoning_content"):
+            if row[source_key] is not None and row[source_key] != "":
+                message[source_key] = row[source_key]
+        for source_key in (
+            "reasoning_details",
+            "codex_reasoning_items",
+            "codex_message_items",
+        ):
+            if row[source_key]:
+                message[source_key] = _json_or(row[source_key], None)
+    if row["metadata_json"]:
+        message["metadata"] = _json_or(row["metadata_json"], None)
+    return message
+
+
+def _row_to_message(row: Any) -> Message:
+    def _get(name: str, index: int) -> Any:
+        return row[name] if isinstance(row, sqlite3.Row) else row[index]
+
+    metadata_raw = _get("metadata_json", 12) or ""
     try:
         metadata = json.loads(metadata_raw) if metadata_raw else {}
     except json.JSONDecodeError:
@@ -285,21 +492,130 @@ def _row_to_message(row: Any) -> Message:
     if not isinstance(metadata, dict):
         metadata = {}
     return Message(
-        id=int(_g("id", 0) or 0),
-        session_id=str(_g("session_id", 1) or ""),
-        role=str(_g("role", 2) or ""),
-        content=str(_g("content", 3) or ""),
-        participant_id=str(_g("participant_id", 4) or ""),
-        tool_call_id=str(_g("tool_call_id", 5) or ""),
-        tool_calls=str(_g("tool_calls", 6) or ""),
-        tool_name=str(_g("tool_name", 7) or ""),
-        timestamp=float(_g("timestamp", 8) or 0),
-        reasoning=str(_g("reasoning", 9) or ""),
-        conversation_message_id=str(_g("conversation_message_id", 10) or ""),
-        platform_message_id=str(_g("platform_message_id", 11) or ""),
+        id=int(_get("id", 0) or 0),
+        session_id=str(_get("session_id", 1) or ""),
+        role=str(_get("role", 2) or ""),
+        content=str(_get("content", 3) or ""),
+        participant_id=str(_get("participant_id", 4) or ""),
+        tool_call_id=str(_get("tool_call_id", 5) or ""),
+        tool_calls=str(_get("tool_calls", 6) or ""),
+        tool_name=str(_get("tool_name", 7) or ""),
+        timestamp=float(_get("timestamp", 8) or 0),
+        reasoning=str(_get("reasoning", 9) or ""),
+        conversation_message_id=str(_get("conversation_message_id", 10) or ""),
+        platform_message_id=str(_get("platform_message_id", 11) or ""),
         metadata=metadata,
-        active=bool(int(_g("active", 13) or 0)),
+        active=bool(int(_get("active", 13) or 0)),
     )
+
+
+def _encode_content(content: Any) -> Any:
+    if content is None or isinstance(content, (str, bytes, int, float)):
+        return content
+    try:
+        return _CONTENT_JSON_PREFIX + json.dumps(content, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(content)
+
+
+def _decode_content(content: Any) -> Any:
+    if isinstance(content, str) and content.startswith(_CONTENT_JSON_PREFIX):
+        try:
+            return json.loads(content[len(_CONTENT_JSON_PREFIX):])
+        except (json.JSONDecodeError, TypeError):
+            return content
+    return content
+
+
+def _row_metadata(row: Any) -> dict[str, Any]:
+    return _json_or(row["metadata_json"], {}) if row["metadata_json"] else {}
+
+
+def _merge_metadata(current: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    base = dict(current) if isinstance(current, dict) else {}
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            base[key] = _merge_metadata(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def _metadata_matches(
+    metadata: dict[str, Any],
+    *,
+    run_id: str,
+    turn_id: str,
+    client_message_id: str,
+) -> bool:
+    return any(
+        expected and str(metadata.get(key) or "").strip() == expected
+        for key, expected in (
+            ("run_id", run_id),
+            ("turn_id", turn_id),
+            ("client_message_id", client_message_id),
+        )
+    )
+
+
+def _message_timestamp(message: dict[str, Any], fallback: float) -> float:
+    try:
+        return float(message.get("timestamp"))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _platform_message_id(message: dict[str, Any]) -> str:
+    explicit = str(message.get("platform_message_id") or "").strip()
+    if explicit:
+        return explicit
+    candidate = str(message.get("message_id") or "").strip()
+    if candidate and not (candidate.isdigit() and message.get("timestamp") is not None):
+        return candidate
+    return ""
+
+
+def _message_preview_text(content: Any, limit: int = 60) -> str:
+    preview = _plain_content_text(content, fallback="[multimodal content]")
+    return preview[:limit] + "..." if len(preview) > limit else preview
+
+
+def _message_display_title_text(content: Any, limit: int = 100) -> str:
+    title = _plain_content_text(content, fallback="[multimodal content]")
+    return title[:limit].rstrip() if len(title) > limit else title
+
+
+def _plain_content_text(content: Any, *, fallback: str) -> str:
+    decoded = _decode_content(content)
+    if isinstance(decoded, list):
+        parts = [
+            str(item.get("text") or item.get("content") or "")
+            if isinstance(item, dict)
+            else str(item or "")
+            for item in decoded
+        ]
+        text = " ".join(part for part in parts if part).strip()
+        if not text and decoded:
+            text = fallback
+    elif isinstance(decoded, dict):
+        text = str(decoded.get("text") or decoded.get("content") or "").strip()
+    else:
+        text = str(decoded or "").strip()
+    return " ".join(text.split())
+
+
+def _json_or_none(value: Any) -> str | None:
+    if not value:
+        return None
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _json_or(value: Any, default: Any) -> Any:
+    try:
+        decoded = json.loads(value) if isinstance(value, str) else value
+    except (json.JSONDecodeError, TypeError):
+        return default
+    return decoded if decoded is not None else default
 
 
 __all__ = [
@@ -307,6 +623,7 @@ __all__ = [
     "MessagePage",
     "MessageRepo",
     "MessageRepoImpl",
+    "MessageRepository",
     "MessageSpec",
     "PageDirection",
 ]
