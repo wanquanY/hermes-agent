@@ -35,6 +35,7 @@ from tui_gateway.services.run_control_events import (
     stream_text_delta as _stream_text_delta,
     terminal_delivery_identity as _terminal_delivery_identity,
 )
+from tui_gateway.services.run_events import list_runtime_events, run_event_read_model_for_db
 from tui_gateway.transport import Transport
 
 if TYPE_CHECKING:
@@ -999,14 +1000,11 @@ def _poll_subscription_events() -> None:
             stable = str(subscription.get("stored_session_id") or "").strip()
             activity_id = str(subscription.get("activity_id") or "").strip()
             if subscription_kind == "activity":
-                method = None
                 if not _team_activity_events.uses_event_log(activity_id, db=db):
-                    method = _db_method(db, "list_run_events_by_activity")
-                    if method is None:
+                    if run_event_read_model_for_db(db) is None:
                         continue
             else:
-                method = _db_method(db, "list_run_events")
-                if method is None:
+                if run_event_read_model_for_db(db) is None:
                     continue
             transport = subscription.get("transport")
             if transport is None:
@@ -1031,7 +1029,8 @@ def _poll_subscription_events() -> None:
                         event_activity_id=_event_activity_id,
                     )
                 else:
-                    events = method(
+                    events = list_runtime_events(
+                        db,
                         stable,
                         after_seq=last_seq,
                         active_only=False,
@@ -2506,7 +2505,7 @@ def subscribe_activity(
             }
             _subscription_ids_by_activity[normalized_activity_id].add(normalized_subscription_id)
             _subscription_ids_by_transport[transport].add(normalized_subscription_id)
-            if uses_team_mission_event_log or _db_method(db, "list_run_events_by_activity") is not None:
+            if uses_team_mission_event_log or run_event_read_model_for_db(db) is not None:
                 _start_subscription_poller_locked()
         _team_activity_terminal_log(
             "subscribe-registered",
@@ -2625,13 +2624,14 @@ def subscribe_session_with_id(
             }
             _subscription_ids_by_session[stable].add(normalized_subscription_id)
             _subscription_ids_by_transport[transport].add(normalized_subscription_id)
-            if _db_method(db, "list_run_events") is not None:
+            if run_event_read_model_for_db(db) is not None:
                 _start_subscription_poller_locked()
         memory_events = list(_events_by_session.get(stable, ()))
     events: list[dict[str, Any]] = []
-    if method := _db_method(db, "list_run_events"):
+    if run_event_read_model_for_db(db) is not None:
         try:
-            events = method(
+            events = list_runtime_events(
+                db,
                 stable,
                 after_seq=after_seq,
                 active_only=False,

@@ -106,6 +106,58 @@ class RunEventReadModel:
             limit=limit,
         )
 
+    def list_activity_events(
+        self,
+        activity_id: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 2000,
+        include_internal: bool = False,
+    ) -> list[dict[str, Any]]:
+        normalized_activity_id = str(activity_id or "").strip()
+        if not normalized_activity_id:
+            return []
+        with self._lock:
+            try:
+                rows = EventLedger(self._conn).list_activity_rows(
+                    normalized_activity_id,
+                    after_seq=int(after_seq or 0),
+                    limit=limit,
+                    include_internal=include_internal,
+                )
+            except sqlite3.OperationalError as exc:
+                if "no such table: run_events" in str(exc):
+                    return []
+                raise
+            return self._decode_rows(rows)
+
+    def list_mission_activity_events(
+        self,
+        mission_id: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 2000,
+        include_internal: bool = False,
+        reverse: bool = False,
+    ) -> list[dict[str, Any]]:
+        normalized_mission_id = str(mission_id or "").strip()
+        if not normalized_mission_id:
+            return []
+        with self._lock:
+            try:
+                rows = EventLedger(self._conn).list_mission_activity_rows(
+                    normalized_mission_id,
+                    after_seq=int(after_seq or 0),
+                    limit=limit,
+                    include_internal=include_internal,
+                    reverse=reverse,
+                )
+            except sqlite3.OperationalError as exc:
+                if "no such table: run_events" in str(exc):
+                    return []
+                raise
+            return self._decode_rows(rows)
+
     def _decode_rows(self, rows: list[Any]) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         for row in rows:
@@ -158,6 +210,10 @@ def _decode_run_event_row(row: Any) -> dict[str, Any]:
     event.setdefault("turn_id", _row_value(row, "turn_id", ""))
     event.setdefault("participant_id", _row_value(row, "participant_id", ""))
     event.setdefault("seq", int(_row_value(row, "seq", 0) or 0))
+    runtime_source_seq = int(_row_value(row, "runtime_source_seq", 0) or 0)
+    if runtime_source_seq > 0:
+        event.setdefault("runtime_source_seq", runtime_source_seq)
+        event.setdefault("runtimeSourceSeq", runtime_source_seq)
     event.setdefault("timestamp", float(_row_value(row, "timestamp", 0) or 0))
     interaction_request_id = _text(_row_value(row, "interaction_request_id", ""))
     if interaction_request_id:

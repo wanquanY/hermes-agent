@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_15`
+状态：`in_progress_checkpoint_16`
 
 ## 前置门槛
 
@@ -770,8 +770,69 @@ python scripts/zero_debt/verdict.py --phase P2 --json
 
 剩余工作：
 
-- `run_control` subscription poller、activity/team-mission event replay 仍有
-  legacy event reader，需要后续 subscription/activity 切片。
+- `interaction_registry` pending recovery 仍有 legacy event reader，需要迁到
+  interaction/read-model owner。
+- `run_control` terminal publish 与 run-state memory owner 仍待后续写侧切片
+  收口。
+- Team transcript projector/backfill 仍需要目标 owner。
+- `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。
+
+## Checkpoint 16 证据
+
+已完成：
+
+- `RunEventReadModel` 新增 activity replay API：
+  `list_activity_events()` / `list_mission_activity_events()`，复用
+  `EventLedger.list_activity_rows()` / `list_mission_activity_rows()`。
+- `tui_gateway.services.run_events` 暴露对应 gateway-facing accessors。
+- `run_control` session subscription replay/poller 不再调用
+  `db.list_run_events`，改为 `list_runtime_events()`。
+- `runtime.activity.subscribe` 的可用性判断不再依赖
+  `db.list_run_events_by_activity`，改为检查 run-event read model。
+- `team_mission_activity_events` 的 activity/mission replay 不再调用
+  `db.list_run_events_by_activity` / `db.list_run_events_by_mission_activity`，
+  改为 read-model service。
+- `conversation_render_snapshot` 的 mission last-seq 计算不再直连 legacy DB
+  event reader，改为 `list_mission_activity_events(..., reverse=True)`。
+- `hermes_team_mission.state.event_log.event_seq()` 优先识别
+  `runtime_source_seq/runtimeSourceSeq`，避免 run-event canonical seq 覆盖
+  runtime-source seq 后污染 team mission `source_seq`。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/run_events.py hermes_team_mission/state/event_log.py tui_gateway/services/run_events.py tui_gateway/services/run_control.py tui_gateway/services/team_mission_activity_events.py tui_gateway/methods/activity.py tui_gateway/methods/conversation_render_snapshot.py
+.venv/bin/pytest tests/test_runtime_activity_subscribe.py -q
+.venv/bin/pytest tests/test_team_mission_conversation_mirror.py::test_team_mission_poll_delivers_domain_projection_for_directly_delivered_node_stream_tail tests/test_team_mission_conversation_mirror.py::test_team_mission_poll_delivers_domain_projection_for_directly_delivered_node_terminal -q
+.venv/bin/ruff check hermes_agent/read_models/run_events.py hermes_team_mission/state/event_log.py tui_gateway/services/run_events.py tui_gateway/services/run_control.py tui_gateway/services/team_mission_activity_events.py tui_gateway/methods/activity.py tui_gateway/methods/conversation_render_snapshot.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Runtime activity subscribe：`24 passed`
+- Team mission subscription poll 定向测试：`2 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+额外发现：
+
+- `tests/test_team_mission_conversation_mirror.py::test_conversation_list_recovers_terminal_mission_with_active_mirror_run`
+  参数化组暴露 `run_control` in-memory run state 按裸 `run_id` 全局复用的旧缺陷：
+  每个 case 使用新的 SQLite DB/profile，但复用同一个 mirror `run_id`，后续 case 会被前一个
+  terminal memory state 污染。该问题属于后续 run-state owner/identity scope
+  切片，不混入本次 read-model replay 迁移。
+
+剩余工作：
+
+- `interaction_registry` pending recovery 仍有 legacy event reader，需要迁到
+  interaction/read-model owner。
+- `run_control` terminal publish 与 run-state memory owner 仍待后续写侧切片
+  收口。
 - Team transcript projector/backfill 仍需要目标 owner。
 - `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。
 

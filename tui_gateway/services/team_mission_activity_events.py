@@ -10,6 +10,11 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from hermes_team_mission.state.event_log import projection_event
+from tui_gateway.services.run_events import (
+    list_activity_events as _list_activity_run_events,
+    list_mission_activity_events as _list_mission_run_events,
+    run_event_read_model_for_db,
+)
 
 _TERMINAL_DELIVERY_LOG_COUNTS: dict[tuple[str, str, str, str, str, str], int] = {}
 
@@ -691,7 +696,12 @@ def _project_run_event_for_subscription(
     if event_type.startswith("team_mission."):
         return event_for_subscription(event, activity_id)
     try:
-        source_seq = int(event.get("seq") or 0)
+        source_seq = int(
+            event.get("runtime_source_seq")
+            or event.get("runtimeSourceSeq")
+            or event.get("seq")
+            or 0
+        )
     except (TypeError, ValueError):
         source_seq = 0
     projected = projection_event(
@@ -715,19 +725,17 @@ def _list_mission_activity_run_events(
     if not normalized_mission_id:
         return []
     if str(activity_id or "").strip().startswith("act-node:"):
-        method = _db_method(db, "list_run_events_by_activity")
-        if method is None:
+        if run_event_read_model_for_db(db) is None:
             return []
-        events = method(activity_id, after_seq=after_seq, limit=limit)
+        events = _list_activity_run_events(db, activity_id, after_seq=after_seq, limit=limit)
     else:
-        method = _db_method(db, "list_run_events_by_mission_activity")
-        if method is not None:
-            events = method(normalized_mission_id, after_seq=after_seq, limit=limit, reverse=reverse)
-        else:
-            fallback = _db_method(db, "list_run_events_by_activity")
-            if fallback is None:
-                return []
-            events = fallback(f"mission:{normalized_mission_id}", after_seq=after_seq, limit=limit)
+        events = _list_mission_run_events(
+            db,
+            normalized_mission_id,
+            after_seq=after_seq,
+            limit=limit,
+            reverse=reverse,
+        )
     return [event for event in events if isinstance(event, dict)]
 
 
@@ -828,8 +836,7 @@ def list_activity_events(
             reason="target_mission_not_bound",
         )
         return []
-    method = _db_method(db, "list_run_events_by_activity")
-    if method is None:
+    if run_event_read_model_for_db(db) is None:
         _emit_activity_diagnostic(
             "list-activity-events-drop-no-run-event-activity-index",
             activity_id=activity_id,
@@ -840,7 +847,7 @@ def list_activity_events(
         )
         return []
     try:
-        events = method(activity_id, after_seq=after_seq, limit=limit)
+        events = _list_activity_run_events(db, activity_id, after_seq=after_seq, limit=limit)
     except Exception as exc:
         _emit_activity_diagnostic(
             "list-activity-events-run-event-index-error",

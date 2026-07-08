@@ -21,6 +21,7 @@ from hermes_team_mission.domain.activity import (
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
 from tui_gateway.services import team_mission_activity_events as _team_activity_events
+from tui_gateway.services.run_events import run_event_read_model_for_db
 
 _server = bind_server_globals(globals())
 
@@ -263,8 +264,7 @@ def runtime_activity_subscribe(rid, params: dict) -> dict:
     db, err = _db_or_error(rid)
     if err:
         return err
-    list_by_activity = getattr(db, "list_run_events_by_activity", None)
-    if not callable(list_by_activity):
+    if run_event_read_model_for_db(db) is None:
         return _err(rid, 5008, "state.db unavailable")
 
     subscription_id, replay = run_control.subscribe_activity(

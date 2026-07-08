@@ -408,7 +408,7 @@ def source_event_type(event: Dict[str, Any] | None) -> str:
 
 def event_seq(event: Dict[str, Any] | None) -> int:
     event = event if isinstance(event, dict) else {}
-    for key in ("source_seq", "sourceSeq", "seq"):
+    for key in ("source_seq", "sourceSeq", "runtime_source_seq", "runtimeSourceSeq", "seq"):
         try:
             value = int(event.get(key) or 0)
         except (TypeError, ValueError):
@@ -416,7 +416,7 @@ def event_seq(event: Dict[str, Any] | None) -> int:
         if value > 0:
             return value
     payload = event_payload(event)
-    for key in ("source_seq", "sourceSeq", "seq"):
+    for key in ("source_seq", "sourceSeq", "runtime_source_seq", "runtimeSourceSeq", "seq"):
         try:
             value = int(payload.get(key) or 0)
         except (TypeError, ValueError):

@@ -7,6 +7,7 @@ from typing import Any
 
 from hermes_team_mission.runtime.team_transcript_writer import main_transcript_message_decision
 from tui_gateway.methods._shared import bind_server_globals
+from tui_gateway.services.run_events import list_mission_activity_events
 
 _server = bind_server_globals(globals())
 logger = logging.getLogger(__name__)
@@ -439,27 +440,9 @@ def _mission_activity_last_seq(db: Any, mission_id: str) -> int:
     mission_id = _text(mission_id)
     if not mission_id:
         return 0
-    method = getattr(db, "list_run_events_by_mission_activity", None)
-    if callable(method):
-        try:
-            events = method(mission_id, limit=1, reverse=True)
-            return max((int(event.get("seq") or 0) for event in events if isinstance(event, dict)), default=0)
-        except Exception:
-            return 0
-    if db is None or not hasattr(db, "_lock") or not hasattr(db, "_conn"):
-        return 0
     try:
-        with db._lock:
-            row = db._conn.execute(
-                """
-                SELECT COALESCE(MAX(seq), 0) AS last_seq
-                  FROM run_events
-                 WHERE activity_id = ?
-                    OR activity_id LIKE ?
-                """,
-                (f"mission:{mission_id}", f"act-node:{mission_id}:%"),
-            ).fetchone()
-            return int((row["last_seq"] if row is not None else 0) or 0)
+        events = list_mission_activity_events(db, mission_id, limit=1, reverse=True)
+        return max((int(event.get("seq") or 0) for event in events if isinstance(event, dict)), default=0)
     except Exception:
         return 0
 

@@ -84,8 +84,50 @@ def list_tool_events(
     )
 
 
+def list_activity_events(
+    db: Any,
+    activity_id: str,
+    *,
+    after_seq: int = 0,
+    limit: int = 2000,
+    include_internal: bool = False,
+) -> list[dict[str, Any]]:
+    read_model = run_event_read_model_for_db(db)
+    if read_model is None:
+        return []
+    return read_model.list_activity_events(
+        activity_id,
+        after_seq=after_seq,
+        limit=limit,
+        include_internal=include_internal,
+    )
+
+
+def list_mission_activity_events(
+    db: Any,
+    mission_id: str,
+    *,
+    after_seq: int = 0,
+    limit: int = 2000,
+    include_internal: bool = False,
+    reverse: bool = False,
+) -> list[dict[str, Any]]:
+    read_model = run_event_read_model_for_db(db)
+    if read_model is None:
+        return []
+    return read_model.list_mission_activity_events(
+        mission_id,
+        after_seq=after_seq,
+        limit=limit,
+        include_internal=include_internal,
+        reverse=reverse,
+    )
+
+
 __all__ = [
+    "list_activity_events",
     "list_filtered_events",
+    "list_mission_activity_events",
     "list_runtime_events",
     "list_tool_events",
     "run_event_read_model_for_db",
