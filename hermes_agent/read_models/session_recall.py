@@ -2,7 +2,7 @@
 
 This is the production owner for the ``session_search`` tool's read side. It
 keeps recall on explicit SQLite read-model APIs instead of reaching through the
-legacy ``SessionDB`` facade from runtime code.
+legacy state facade from runtime code.
 """
 
 from __future__ import annotations

@@ -45,7 +45,7 @@ class InteractionRegistry:
         if not internal_type:
             return {}
         if db is None or not hasattr(db, "append_run_event"):
-            raise RuntimeError("interaction persistence requires a SessionDB-like append_run_event")
+            raise RuntimeError("interaction persistence requires append_run_event support")
 
         session_id = str(
             getattr(entry, "session_key", "")

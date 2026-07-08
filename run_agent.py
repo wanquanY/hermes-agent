@@ -1610,7 +1610,7 @@ class AIAgent:
         *,
         turn_message_index: int,
     ) -> Dict[str, Any]:
-        """Stamp a stable per-run key used by SessionDB for idempotent append."""
+        """Stamp a stable per-run key used by storage for idempotent append."""
         if not isinstance(metadata, dict):
             return metadata
         run_id = str(metadata.get("run_id") or metadata.get("runId") or "").strip()
@@ -1712,7 +1712,7 @@ class AIAgent:
 
         The in-memory cursor is scoped to the current message buffer/run/turn.
         Rebuilt histories fall back to the explicit turn boundary and rely on
-        SessionDB's persisted run-message key for idempotency.
+        Persisted run-message key for idempotency.
         """
         if not self._session_db:
             return

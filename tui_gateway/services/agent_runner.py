@@ -99,7 +99,7 @@ def setup_worker_environment() -> None:
 
         db_proxy = get_default_worker_db_proxy()
         if db_proxy is not None:
-            # The worker process must not materialize SessionDB. Keep the
+            # The worker process must not materialize the legacy state facade. Keep the
             # legacy resolver shape but return the IPC proxy everywhere the
             # prompt/run-control stack asks for a DB handle.
             def _worker_db_for_stable_session(stable_session_id: str):

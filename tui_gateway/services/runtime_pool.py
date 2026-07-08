@@ -77,7 +77,7 @@ def acquire_runtime_lease(
 
     Existing runtimes are reused by stored session id; otherwise the caller's
     resume callback reconstructs a lightweight runtime with no transcript
-    hydration.  The durable business state remains in SessionDB/Run Registry.
+    hydration. The durable business state remains in the session/run registries.
     """
     target = str(stored_session_id or "").strip()
     if not target:

@@ -676,7 +676,7 @@ class WorkerSupervisor:
                 raise RuntimeError("state.db unavailable")
             target = getattr(db, db_method_name, None)
             if not callable(target):
-                raise AttributeError(f"SessionDB has no method {db_method_name!r}")
+                raise AttributeError(f"worker database proxy has no method {db_method_name!r}")
             lock_key = _db_rpc_lock_key(frame, args, kwargs)
             async with self._db_rpc_lock_for(lock_key):
                 result = await asyncio.to_thread(target, *args, **kwargs)

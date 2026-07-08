@@ -268,7 +268,7 @@ def _(rid, params: dict) -> dict:
 
 @method("storage.maintenance.run")
 def _(rid, params: dict) -> dict:
-    """Run storage maintenance now for the current SessionDB profile."""
+    """Run storage maintenance now for the current profile store."""
     try:
         from tui_gateway.services.storage_maintenance import (
             register_session_db_for_maintenance,

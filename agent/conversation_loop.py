@@ -334,7 +334,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             if scoped_prompt_key:
                 update_scoped = getattr(agent._session_db, "update_scoped_system_prompt", None)
                 if not callable(update_scoped):
-                    raise AttributeError("SessionDB has no update_scoped_system_prompt")
+                    raise AttributeError("session store has no update_scoped_system_prompt")
                 update_scoped(agent.session_id, scoped_prompt_key, agent._cached_system_prompt)
             else:
                 agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)

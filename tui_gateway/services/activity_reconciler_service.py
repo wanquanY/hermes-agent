@@ -1,6 +1,6 @@
 """ADR-0001 §Phase 1.C reconciler service registration.
 
-Registers ActivityReconciler per-SessionDB and exposes startup-time hook.
+Registers ActivityReconciler per session store and exposes startup-time hook.
 """
 
 from __future__ import annotations

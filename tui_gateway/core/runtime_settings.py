@@ -742,7 +742,7 @@ def _sync_session_key_after_compress(
 ) -> None:
     """Re-anchor session_key when AIAgent._compress_context rotates session_id.
 
-    AIAgent._compress_context ends the current SessionDB session and creates
+    AIAgent._compress_context ends the current persisted session and creates
     a new continuation session, rotating ``agent.session_id``.  The TUI
     gateway keeps the gateway-side ``session_key`` separate (used for
     approval routing, slash worker init, DB title/history lookups, yolo

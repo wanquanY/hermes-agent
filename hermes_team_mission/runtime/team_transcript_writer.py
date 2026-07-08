@@ -902,7 +902,7 @@ def _upsert_team_message_by_id(
 ) -> dict[str, Any]:
     upsert = getattr(db, "_upsert_team_message_by_id", None)
     if not callable(upsert):
-        raise RuntimeError("SessionDB does not support team transcript message upsert")
+        raise RuntimeError("session store does not support team transcript message upsert")
     return upsert(
         session_id=session_id,
         conversation_message_id=conversation_message_id,

@@ -379,9 +379,9 @@ def compress_context(
     _lock_sid = agent.session_id or ""
     _lock_holder: Optional[str] = None
     # Probe whether the lock subsystem is actually available on this
-    # SessionDB instance.  A process running mismatched module versions
+    # session-store instance. A process running mismatched module versions
     # (e.g. ``conversation_compression.py`` reloaded after a pull but the
-    # long-lived ``hermes_state.SessionDB`` class still bound to the
+    # long-lived storage class still bound to the
     # pre-#34351 version in memory) has the call site but not the method.
     # In that case ``try_acquire_compression_lock`` raises AttributeError —
     # NOT a ``sqlite3.Error`` — so the method's own fail-open guard never

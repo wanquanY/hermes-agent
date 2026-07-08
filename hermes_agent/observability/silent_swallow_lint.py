@@ -9,7 +9,7 @@ handler body.
 The banned form is easy to introduce but always hides real production
 failures — spec §12 Phase I mandates zero occurrences under
 ``hermes_agent/``. Legacy code outside that root is grandfathered until
-Phase D5 completes the SessionDB retirement.
+Phase D5 completes legacy state-facade retirement.
 """
 
 from __future__ import annotations

@@ -20,7 +20,7 @@ RepositoryConnection = sqlite3.Connection
 class RepositoryContext:
     """Injected context for repository instantiation.
 
-    ``owner`` bridges to the legacy ``SessionDB`` facade during D2-D5
+    ``owner`` bridges to the legacy state facade during D2-D5
     migration and will be dropped in D5 (spec §12).
     """
 

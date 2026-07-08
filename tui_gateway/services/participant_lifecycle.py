@@ -1,7 +1,7 @@
 """Worker-side facade for conversation participant lifecycle DB calls.
 
 This module deliberately does not auto-populate participants. It gives worker
-code a static, auditable surface for the SessionDB participant lifecycle
+code a static, auditable surface for the participant lifecycle
 helpers exposed through the worker DB proxy.
 """
 
