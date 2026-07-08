@@ -38,7 +38,7 @@
 | `hermes_agent/storage/` | Storage layer | Migrations and low-level storage primitives. |
 | `hermes_team_mission/` | Transitional domain package | Must migrate or fold into target owners by vertical slice; not deleted by name first. |
 | `tui_gateway/server.py` | Transport entry | WebSocket/JSON-RPC process entry survives, internals are replaced. |
-| `channels/config.py` | Channel configuration owner | Owns `Platform`, `HomeChannel`, and `PlatformConfig`; `gateway.config` only re-exports during gateway retirement. |
+| `channels/config.py` | Channel configuration owner | Owns `Platform`, `HomeChannel`, and `PlatformConfig`; `hermes_gateway.config` only re-exports during gateway retirement. |
 | `channels/platform_registry.py` | Channel registry owner | Owns platform connected-check registry after P1. |
 | `channels/session_identity.py` | Channel session identity owner | Owns `SessionSource`, `SessionContext`, and session-key construction after P1. |
 | `channels/session_context.py` | Channel session context owner | Owns active session context extraction after P1. |

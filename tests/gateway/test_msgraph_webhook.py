@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig, _apply_env_overrides
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig, _apply_env_overrides
 from channels.platforms.msgraph_webhook import MSGraphWebhookAdapter
 
 

@@ -1009,7 +1009,7 @@ if not _configured_cwd or _configured_cwd in {".", "auto", "cwd"}:
     _fallback = os.getenv("MESSAGING_CWD") or str(Path.home())
     os.environ["TERMINAL_CWD"] = _fallback
 
-from gateway.config import (
+from hermes_gateway.config import (
     Platform,
     _BUILTIN_PLATFORM_VALUES,
     GatewayConfig,
@@ -1035,7 +1035,7 @@ from channels.platforms.base import (
     _reply_anchor_for_event,
     merge_pending_message_event,
 )
-from gateway.restart import (
+from hermes_gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
     parse_restart_drain_timeout,
@@ -1805,7 +1805,7 @@ class GatewayRunner:
             logger.debug("checkpoint auto-maintenance skipped: %s", exc)
 
         # DM pairing store for code-based user authorization
-        from gateway.pairing import PairingStore
+        from hermes_gateway.pairing import PairingStore
         self.pairing_store = PairingStore()
         
         # Event hook system
@@ -4300,7 +4300,7 @@ class GatewayRunner:
         
         # Build initial channel directory for send_message name resolution
         try:
-            from gateway.channel_directory import build_channel_directory
+            from hermes_gateway.channel_directory import build_channel_directory
             directory = await build_channel_directory(self.adapters)
             ch_count = sum(len(chs) for chs in directory.get("platforms", {}).values())
             logger.info("Channel directory built: %d target(s)", ch_count)
@@ -4449,7 +4449,7 @@ class GatewayRunner:
 
     async def _process_handoff(self, row: Dict[str, Any]) -> None:
         """Execute one handoff row. Raises on failure (caller marks failed)."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         from gateway.session import SessionSource, build_session_key
         from channels.platforms.base import MessageEvent
 
@@ -4819,7 +4819,7 @@ class GatewayRunner:
         cross boards, so delivery semantics are unchanged — this is
         purely a fan-out of the single-DB poll.
         """
-        from gateway.config import Platform as _Platform
+        from hermes_gateway.config import Platform as _Platform
         try:
             from hermes_cli import kanban_db as _kb
         except Exception:
@@ -5786,7 +5786,7 @@ class GatewayRunner:
 
                         # Rebuild channel directory with the new adapter
                         try:
-                            from gateway.channel_directory import build_channel_directory
+                            from hermes_gateway.channel_directory import build_channel_directory
                             await build_channel_directory(self.adapters)
                         except Exception:
                             pass
@@ -9828,7 +9828,7 @@ class GatewayRunner:
             count = self._running_agent_count()
             if count:
                 return t("gateway.draining", count=count)
-            return EphemeralReply(t("gateway.restart.in_progress"))
+            return EphemeralReply(t("hermes_gateway.restart.in_progress"))
 
         # Save the requester's routing info so the new gateway process can
         # notify them once it comes back online.
@@ -9882,7 +9882,7 @@ class GatewayRunner:
             self.request_restart(detached=True, via_service=False)
         if active_agents:
             return t("gateway.draining", count=active_agents)
-        return EphemeralReply(t("gateway.restart.restarting"))
+        return EphemeralReply(t("hermes_gateway.restart.restarting"))
 
     def _is_stale_restart_redelivery(self, event: MessageEvent) -> bool:
         """Return True if this /restart is a Telegram re-delivery we already handled.
@@ -9988,7 +9988,7 @@ class GatewayRunner:
         if not entries:
             return t("gateway.commands.none")
 
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         page_size = 15 if event.source.platform == Platform.TELEGRAM else 20
         total_pages = max(1, (len(entries) + page_size - 1) // page_size)
         page = max(1, min(requested_page, total_pages))
@@ -12009,7 +12009,7 @@ class GatewayRunner:
         try:
             user_config: dict = _load_gateway_config()
         except Exception as e:
-            return t("gateway.config_read_failed", error=e)
+            return t("hermes_gateway.config_read_failed", error=e)
 
         effective = resolve_footer_config(user_config, platform_key)
 
@@ -12043,7 +12043,7 @@ class GatewayRunner:
             atomic_yaml_write(config_path, user_config)
         except Exception as e:
             logger.warning("Failed to save runtime_footer.enabled: %s", e)
-            return t("gateway.config_save_failed", error=e)
+            return t("hermes_gateway.config_save_failed", error=e)
 
         state = t("gateway.footer.state_on") if new_state else t("gateway.footer.state_off")
         example = ""
@@ -15276,7 +15276,7 @@ class GatewayRunner:
         _stream_consumer = None
         _scfg = getattr(getattr(self, "config", None), "streaming", None)
         if _scfg is None:
-            from gateway.config import StreamingConfig
+            from hermes_gateway.config import StreamingConfig
             _scfg = StreamingConfig()
 
         platform_key = _platform_config_key(source.platform)
@@ -15568,7 +15568,7 @@ class GatewayRunner:
         )
         # Disable tool progress for webhooks - they don't support message editing,
         # so each progress line would be sent as a separate message.
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         tool_progress_enabled = progress_mode != "off" and source.platform != Platform.WEBHOOK
         # Natural assistant status messages are intentionally independent from
         # tool progress and token streaming. Users can keep tool_progress quiet
@@ -16227,7 +16227,7 @@ class GatewayRunner:
             _stream_delta_cb = None
             _scfg = getattr(getattr(self, 'config', None), 'streaming', None)
             if _scfg is None:
-                from gateway.config import StreamingConfig
+                from hermes_gateway.config import StreamingConfig
                 _scfg = StreamingConfig()
 
             # Per-platform streaming gate: display.platforms.<plat>.streaming
@@ -17725,7 +17725,7 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
 
         if tick_count % CHANNEL_DIR_EVERY == 0 and adapters:
             try:
-                from gateway.channel_directory import build_channel_directory
+                from hermes_gateway.channel_directory import build_channel_directory
                 if loop is not None:
                     # build_channel_directory is async (Slack web calls), and
                     # this ticker runs in a background thread. Schedule onto

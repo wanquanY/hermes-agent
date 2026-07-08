@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig, load_gateway_config
+from hermes_gateway.config import Platform, PlatformConfig, load_gateway_config
 
 # Platform uses _missing_() for dynamic members, so "google_chat" is
 # resolvable via Platform("google_chat") even without a static
@@ -2577,7 +2577,7 @@ class TestAuthorizationEmailMatch:
         The adapter assigns ``user_id = sender_email`` so the generic
         check_ids path picks it up. No platform-specific bridge needed.
         """
-        from gateway.config import GatewayConfig
+        from hermes_gateway.config import GatewayConfig
         from gateway.run import GatewayRunner
         from gateway.session import SessionSource
 
@@ -2598,7 +2598,7 @@ class TestAuthorizationEmailMatch:
         assert runner._is_user_authorized(source) is True
 
     def test_allowlist_denies_wrong_email(self, monkeypatch):
-        from gateway.config import GatewayConfig
+        from hermes_gateway.config import GatewayConfig
         from gateway.run import GatewayRunner
         from gateway.session import SessionSource
 
@@ -2624,7 +2624,7 @@ class TestAuthorizationEmailMatch:
         """If sender has no email, ``user_id`` falls back to the resource
         name. Operators who allowlist by ``users/{id}`` still match.
         """
-        from gateway.config import GatewayConfig
+        from hermes_gateway.config import GatewayConfig
         from gateway.run import GatewayRunner
         from gateway.session import SessionSource
 

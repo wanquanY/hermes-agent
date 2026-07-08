@@ -160,7 +160,7 @@ def send_message_tool(args, **kw):
 def _handle_list():
     """Return formatted list of available messaging targets."""
     try:
-        from gateway.channel_directory import format_directory_for_display
+        from hermes_gateway.channel_directory import format_directory_for_display
         return json.dumps({"targets": format_directory_for_display()})
     except Exception as e:
         return json.dumps(_error(f"Failed to load channel directory: {e}"))
@@ -187,7 +187,7 @@ def _handle_send(args):
     # Resolve human-friendly channel names to numeric IDs
     if target_ref and not is_explicit:
         try:
-            from gateway.channel_directory import resolve_channel_name
+            from hermes_gateway.channel_directory import resolve_channel_name
             resolved = resolve_channel_name(platform_name, target_ref)
             if resolved:
                 chat_id, thread_id, _ = _parse_target_ref(platform_name, resolved)
@@ -207,7 +207,7 @@ def _handle_send(args):
         return tool_error("Interrupted")
 
     try:
-        from gateway.config import load_gateway_config, Platform
+        from hermes_gateway.config import load_gateway_config, Platform
         config = load_gateway_config()
     except Exception as e:
         return json.dumps(_error(f"Failed to load gateway config: {e}"))
@@ -227,7 +227,7 @@ def _handle_send(args):
             wx_token = os.getenv("WEIXIN_TOKEN", "").strip()
             wx_account = os.getenv("WEIXIN_ACCOUNT_ID", "").strip()
             if wx_token and wx_account:
-                from gateway.config import PlatformConfig
+                from hermes_gateway.config import PlatformConfig
                 pconfig = PlatformConfig(
                     enabled=True,
                     token=wx_token,
@@ -260,7 +260,7 @@ def _handle_send(args):
         if not home and platform_name == "weixin":
             wx_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip()
             if wx_home:
-                from gateway.config import HomeChannel
+                from hermes_gateway.config import HomeChannel
                 home = HomeChannel(platform=platform, chat_id=wx_home, name="Weixin Home")
         if home:
             chat_id = home.chat_id
@@ -562,7 +562,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     using the same smart-splitting algorithm as the gateway adapters
     (preserves code-block boundaries, adds part indicators).
     """
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
     from channels.platforms.base import BasePlatformAdapter, utf16_len
     from channels.platforms.discord import DiscordAdapter
     from channels.platforms.slack import SlackAdapter
@@ -1094,7 +1094,7 @@ async def _send_discord(token, chat_id, message, thread_id=None, media_files=Non
             # cache → GET /channels/{id} probe (with result memoized).
             _channel_type = None
             try:
-                from gateway.channel_directory import lookup_channel_type
+                from hermes_gateway.channel_directory import lookup_channel_type
                 _channel_type = lookup_channel_type("discord", chat_id)
             except Exception:
                 pass
@@ -1762,7 +1762,7 @@ async def _send_wecom(extra, chat_id, message):
         return {"error": "WeCom adapter not available."}
 
     try:
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         pconfig = PlatformConfig(extra=extra)
         adapter = WeComAdapter(pconfig)
         connected = await adapter.connect()
@@ -1810,7 +1810,7 @@ async def _send_bluebubbles(extra, chat_id, message):
         return {"error": "BlueBubbles adapter not available."}
 
     try:
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         pconfig = PlatformConfig(extra=extra)
         adapter = BlueBubblesAdapter(pconfig)
         connected = await adapter.connect()

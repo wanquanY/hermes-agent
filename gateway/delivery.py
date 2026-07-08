@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 MAX_PLATFORM_OUTPUT = 4000
 TRUNCATED_VISIBLE = 3800
 
-from .config import Platform, GatewayConfig
+from hermes_gateway.config import Platform, GatewayConfig
 from .session import SessionSource
 
 
@@ -252,7 +252,6 @@ class DeliveryRouter:
         if target.thread_id and "thread_id" not in send_metadata:
             send_metadata["thread_id"] = target.thread_id
         return await adapter.send(target.chat_id, content, metadata=send_metadata or None)
-
 
 
 

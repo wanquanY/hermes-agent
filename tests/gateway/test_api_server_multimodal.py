@@ -13,7 +13,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 from channels.platforms.api_server import (
     APIServerAdapter,
     _content_has_visible_payload,

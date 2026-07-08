@@ -17,7 +17,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from gateway.config import (
+from hermes_gateway.config import (
     GatewayConfig,
     HomeChannel,
     Platform,

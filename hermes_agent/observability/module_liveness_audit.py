@@ -52,7 +52,7 @@ DEFAULT_SELF_INCLUDE = True
 
 @dataclass(frozen=True)
 class ModuleLivenessReport:
-    module: str                # dotted path, e.g. "gateway.channel_directory"
+    module: str                # dotted path, e.g. "hermes_gateway.channel_directory"
     file_path: str             # repo-relative path
     imported_by: tuple[str, ...]   # dotted paths of importers under live roots
     is_live: bool

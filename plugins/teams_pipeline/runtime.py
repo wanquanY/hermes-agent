@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from gateway.config import Platform
+from hermes_gateway.config import Platform
 from plugins.teams_pipeline.pipeline import TeamsMeetingPipeline
 from plugins.teams_pipeline.store import TeamsPipelineStore, resolve_teams_pipeline_store_path
 from plugins.teams_pipeline.subscriptions import build_graph_client
@@ -74,8 +74,8 @@ def build_pipeline_runtime_config(gateway_config: Any) -> dict[str, Any]:
 
 def build_pipeline_runtime(gateway: Any) -> TeamsMeetingPipeline:
     teams_sender = None
-    teams_config = gateway.config.platforms.get(Platform("teams"))
-    pipeline_config = build_pipeline_runtime_config(gateway.config)
+    teams_config = hermes_gateway.config.platforms.get(Platform("teams"))
+    pipeline_config = build_pipeline_runtime_config(hermes_gateway.config)
     teams_delivery = dict(pipeline_config.get("teams_delivery") or {})
     if teams_config and teams_config.enabled and teams_delivery.get("enabled"):
         try:

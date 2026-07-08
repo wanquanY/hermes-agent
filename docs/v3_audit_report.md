@@ -101,7 +101,7 @@
 - `tui_gateway/services/platform_connections.py:516/540/593/612/642/680` 仍 import `gateway.platforms.feishu/qqbot/weixin`
 - `tui_gateway/server.py:946` import `gateway.run`
 - `tui_gateway/methods/system.py:108` import `gateway.status`
-- `tui_gateway/methods/handoff.py:38` import `gateway.config`
+- `tui_gateway/methods/handoff.py:38` import `hermes_gateway.config`
 - `pyproject.toml [tool.setuptools.packages.find]` 仍含 `"gateway", "gateway.*"`
 
 #### Phase M — drop runtime_source_seq

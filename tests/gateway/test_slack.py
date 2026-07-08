@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 from channels.platforms.base import (
     MessageEvent,
     MessageType,
@@ -1835,7 +1835,7 @@ class TestReactions:
 
         # Simulate the base class calling on_processing_start
         from channels.platforms.base import MessageEvent, MessageType, SessionSource
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         source = SessionSource(
             platform=Platform.SLACK,
             chat_id="C123",
@@ -1875,7 +1875,7 @@ class TestReactions:
         adapter._app.client.reactions_remove = AsyncMock()
 
         from channels.platforms.base import MessageEvent, MessageType, SessionSource, ProcessingOutcome
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         source = SessionSource(
             platform=Platform.SLACK,
             chat_id="C123",
@@ -1945,7 +1945,7 @@ class TestReactions:
 
         # Hooks should also be no-ops when disabled
         from channels.platforms.base import MessageEvent, MessageType, SessionSource, ProcessingOutcome
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         source = SessionSource(
             platform=Platform.SLACK,
             chat_id="C123",

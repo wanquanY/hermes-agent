@@ -27,7 +27,7 @@ from typing import Any, Callable, Optional
 from channels.platforms.base import BasePlatformAdapter as _BasePlatformAdapter
 from channels.platforms.base import _custom_unit_to_cp
 from channels.platforms.base import MEDIA_TAG_CLEANUP_RE
-from gateway.config import (
+from hermes_gateway.config import (
     DEFAULT_STREAMING_EDIT_INTERVAL as _DEFAULT_STREAMING_EDIT_INTERVAL,
     DEFAULT_STREAMING_BUFFER_THRESHOLD as _DEFAULT_STREAMING_BUFFER_THRESHOLD,
     DEFAULT_STREAMING_CURSOR as _DEFAULT_STREAMING_CURSOR,

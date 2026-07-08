@@ -1,7 +1,7 @@
 """Channel platform configuration contracts.
 
 This module owns the platform-facing configuration types used by channel
-adapters. Gateway-wide loading and validation stays in ``gateway.config``.
+adapters. Gateway-wide loading and validation stays in ``hermes_gateway.config``.
 """
 
 from __future__ import annotations

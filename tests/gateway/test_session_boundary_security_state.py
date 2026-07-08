@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gateway.config import Platform
+from hermes_gateway.config import Platform
 from channels.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 from tools import approval as approval_mod

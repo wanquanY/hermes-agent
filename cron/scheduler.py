@@ -563,7 +563,7 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
 
         # Resolve human-friendly labels like "Alice (dm)" to real IDs.
         try:
-            from gateway.channel_directory import resolve_channel_name
+            from hermes_gateway.channel_directory import resolve_channel_name
             resolved = resolve_channel_name(platform_key, chat_id)
             if resolved:
                 parsed_chat_id, parsed_thread_id, resolved_is_explicit = _parse_target_ref(platform_key, resolved)
@@ -769,7 +769,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         return None  # local-only jobs don't deliver — not a failure
 
     from tools.send_message_tool import _send_to_platform
-    from gateway.config import load_gateway_config, Platform
+    from hermes_gateway.config import load_gateway_config, Platform
 
     # Optionally wrap the content with a header/footer so the user knows this
     # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false

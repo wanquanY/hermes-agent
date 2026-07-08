@@ -3,7 +3,7 @@
 import os
 from unittest.mock import patch
 
-from gateway.config import (
+from hermes_gateway.config import (
     GatewayConfig,
     HomeChannel,
     Platform,

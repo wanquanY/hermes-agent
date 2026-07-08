@@ -2,9 +2,9 @@ import asyncio
 from collections import OrderedDict
 from unittest.mock import AsyncMock, MagicMock
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
-from gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
+from hermes_gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 

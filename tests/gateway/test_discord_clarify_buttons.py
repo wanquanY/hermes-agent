@@ -30,7 +30,7 @@ from channels.platforms.discord import (  # noqa: E402
     ClarifyChoiceView,
     DiscordAdapter,
 )
-from gateway.config import PlatformConfig  # noqa: E402
+from hermes_gateway.config import PlatformConfig  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

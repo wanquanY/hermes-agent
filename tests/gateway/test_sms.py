@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig, HomeChannel
+from hermes_gateway.config import Platform, PlatformConfig, HomeChannel
 
 
 # ── Config loading ──────────────────────────────────────────────────
@@ -21,7 +21,7 @@ class TestSmsConfigLoading:
     """Verify _apply_env_overrides wires SMS correctly."""
 
     def test_env_overrides_create_sms_config(self):
-        from gateway.config import load_gateway_config
+        from hermes_gateway.config import load_gateway_config
 
         env = {
             "TWILIO_ACCOUNT_SID": "ACtest123",
@@ -36,7 +36,7 @@ class TestSmsConfigLoading:
             assert pc.api_key == "token_abc"
 
     def test_env_overrides_set_home_channel(self):
-        from gateway.config import load_gateway_config
+        from hermes_gateway.config import load_gateway_config
 
         env = {
             "TWILIO_ACCOUNT_SID": "ACtest123",

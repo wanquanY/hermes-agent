@@ -6279,7 +6279,7 @@ class HermesCLI:
 
         # Validate platform name + home channel via the live gateway config.
         try:
-            from gateway.config import load_gateway_config, Platform
+            from hermes_gateway.config import load_gateway_config, Platform
         except Exception as exc:  # pragma: no cover — gateway pkg always shipped
             _cprint(f"  Could not load gateway config: {exc}")
             return True
@@ -8008,7 +8008,7 @@ class HermesCLI:
 
     def _show_gateway_status(self):
         """Show status of the gateway and connected messaging platforms."""
-        from gateway.config import load_gateway_config, Platform
+        from hermes_gateway.config import load_gateway_config, Platform
         
         print()
         print("+" + "-" * 60 + "+")

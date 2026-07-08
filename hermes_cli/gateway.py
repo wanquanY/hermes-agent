@@ -18,7 +18,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 from channels.runtime_status import terminate_pid
-from gateway.restart import (
+from hermes_gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
     parse_restart_drain_timeout,
@@ -3757,7 +3757,7 @@ def _platform_status(platform: dict) -> str:
         # check_fn (typically just dependency / env presence).
         if entry.is_connected is not None:
             try:
-                from gateway.config import PlatformConfig
+                from hermes_gateway.config import PlatformConfig
                 synthetic = PlatformConfig(enabled=True)
                 configured = bool(entry.is_connected(synthetic))
             except Exception:

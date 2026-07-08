@@ -5,7 +5,7 @@ import os
 import pytest
 from pathlib import Path
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 from channels.platforms.webhook import WebhookAdapter, _DYNAMIC_ROUTES_FILENAME
 
 

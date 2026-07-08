@@ -23,7 +23,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 from channels.platforms.base import MessageEvent, SendResult
 from channels.platforms.webhook import WebhookAdapter, _INSECURE_NO_AUTH
 

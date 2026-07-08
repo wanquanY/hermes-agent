@@ -55,7 +55,7 @@ def _hash_chat_id(value: str) -> str:
     return _hash_id(value)
 
 
-from .config import (
+from hermes_gateway.config import (
     Platform,
     GatewayConfig,
     SessionResetPolicy,  # noqa: F401 — re-exported via gateway/__init__.py

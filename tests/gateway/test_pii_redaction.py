@@ -8,7 +8,7 @@ from gateway.session import (
     _hash_sender_id,
     _hash_chat_id,
 )
-from gateway.config import Platform, HomeChannel
+from hermes_gateway.config import Platform, HomeChannel
 
 
 # ---------------------------------------------------------------------------

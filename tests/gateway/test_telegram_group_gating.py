@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from gateway.config import Platform, PlatformConfig, load_gateway_config
+from hermes_gateway.config import Platform, PlatformConfig, load_gateway_config
 from channels.platforms.base import MessageType
 from gateway.session import SessionSource
 
@@ -654,7 +654,7 @@ def test_top_level_require_mention_bridges_to_telegram(monkeypatch, tmp_path):
 
     # The adapter's extra dict must also carry the setting so that
     # _telegram_require_mention() works even without the env var.
-    tg_cfg = config.platforms.get(__import__("gateway.config", fromlist=["Platform"]).Platform.TELEGRAM)
+    tg_cfg = config.platforms.get(__import__("hermes_gateway.config", fromlist=["Platform"]).Platform.TELEGRAM)
     if tg_cfg is not None:
         assert tg_cfg.extra.get("require_mention") is True
 

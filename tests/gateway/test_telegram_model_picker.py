@@ -31,7 +31,7 @@ def _ensure_telegram_mock():
 
 _ensure_telegram_mock()
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 from channels.platforms.telegram import TelegramAdapter
 
 

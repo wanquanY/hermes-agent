@@ -9,7 +9,7 @@ import logging
 
 import pytest
 
-from gateway.config import PlatformConfig, Platform, _validate_gateway_config
+from hermes_gateway.config import PlatformConfig, Platform, _validate_gateway_config
 
 
 # ---------------------------------------------------------------------------
@@ -19,7 +19,7 @@ from gateway.config import PlatformConfig, Platform, _validate_gateway_config
 
 def _make_gateway_config(platform, token, enabled=True, **extra_kwargs):
     """Create a minimal GatewayConfig-like object for validation testing."""
-    from gateway.config import GatewayConfig
+    from hermes_gateway.config import GatewayConfig
 
     config = GatewayConfig(platforms={})
     pconfig = PlatformConfig(enabled=enabled, token=token, **extra_kwargs)

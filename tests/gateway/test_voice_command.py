@@ -166,7 +166,7 @@ class TestHandleVoiceCommand:
         assert data["telegram:123"] == "off"
 
     def test_sync_voice_mode_state_to_adapter_restores_off_chats(self, runner):
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         runner._voice_mode = {"telegram:123": "off", "telegram:456": "all"}
         adapter = SimpleNamespace(
             _auto_tts_disabled_chats=set(),
@@ -185,7 +185,7 @@ class TestHandleVoiceCommand:
         ``/voice on`` was relying on a "not in disabled set" default that
         silently enabled auto-TTS for every chat.
         """
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         runner._voice_mode = {
             "telegram:off_chat": "off",
             "telegram:on_chat": "voice_only",
@@ -206,7 +206,7 @@ class TestHandleVoiceCommand:
 
     def test_sync_pushes_config_default_onto_adapter(self, runner, monkeypatch):
         """Issue #16007: ``voice.auto_tts`` must propagate to ``_auto_tts_default``."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
 
         fake_cfg = {"voice": {"auto_tts": True}}
         monkeypatch.setattr(
@@ -225,7 +225,7 @@ class TestHandleVoiceCommand:
         assert adapter._auto_tts_default is True
 
     def test_restart_restores_voice_off_state(self, runner, tmp_path):
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         runner._VOICE_MODE_PATH.write_text(json.dumps({"telegram:123": "off"}))
 
         restored_runner = _make_runner(tmp_path)
@@ -435,7 +435,7 @@ class TestSendVoiceReply:
 
     @pytest.mark.asyncio
     async def test_auto_voice_reply_uses_thread_metadata_helper(self, runner):
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
 
         mock_adapter = AsyncMock()
         mock_adapter.send_voice = AsyncMock()
@@ -512,7 +512,7 @@ class TestDiscordPlayTtsSkip:
 
     def _make_discord_adapter(self):
         from channels.platforms.discord import DiscordAdapter
-        from gateway.config import Platform, PlatformConfig
+        from hermes_gateway.config import Platform, PlatformConfig
         config = PlatformConfig(enabled=True, extra={})
         config.token = "fake-token"
         adapter = object.__new__(DiscordAdapter)
@@ -905,14 +905,14 @@ class TestVoiceChannelCommands:
     @pytest.mark.asyncio
     async def test_input_no_adapter(self, runner):
         """No Discord adapter — early return, no crash."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         # No adapters set
         await runner._handle_voice_channel_input(111, 42, "Hello")
 
     @pytest.mark.asyncio
     async def test_input_no_text_channel(self, runner):
         """No text channel mapped for guild — early return."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {}
         mock_adapter._client = MagicMock()
@@ -922,7 +922,7 @@ class TestVoiceChannelCommands:
     @pytest.mark.asyncio
     async def test_input_creates_event_and_dispatches(self, runner):
         """Voice input creates synthetic event and calls handle_message."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
         mock_adapter._voice_sources = {}
@@ -942,7 +942,7 @@ class TestVoiceChannelCommands:
     @pytest.mark.asyncio
     async def test_input_reuses_bound_source_metadata(self, runner):
         """Voice input should share the linked text channel session metadata."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
 
         bound_source = SessionSource(
             chat_id="123",
@@ -974,7 +974,7 @@ class TestVoiceChannelCommands:
     @pytest.mark.asyncio
     async def test_input_posts_transcript_in_text_channel(self, runner):
         """Voice input sends transcript message to text channel."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
         mock_adapter._voice_sources = {}
@@ -992,7 +992,7 @@ class TestVoiceChannelCommands:
     @pytest.mark.asyncio
     async def test_input_suppresses_duplicate_transcript(self, runner):
         """Near-immediate duplicate STT output should not dispatch twice."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
 
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
@@ -1012,7 +1012,7 @@ class TestVoiceChannelCommands:
     @pytest.mark.asyncio
     async def test_input_suppresses_near_duplicate_transcript(self, runner):
         """Small STT wording drift should still be treated as the same utterance."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
 
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
@@ -1067,7 +1067,7 @@ class TestDiscordVoiceChannelMethods:
 
     def _make_adapter(self):
         from channels.platforms.discord import DiscordAdapter
-        from gateway.config import Platform, PlatformConfig
+        from hermes_gateway.config import Platform, PlatformConfig
         config = PlatformConfig(enabled=True, extra={})
         config.token = "fake-token"
         adapter = object.__new__(DiscordAdapter)
@@ -1850,7 +1850,7 @@ class TestVoiceTimeoutCleansRunnerState:
     @staticmethod
     def _make_discord_adapter():
         from channels.platforms.discord import DiscordAdapter
-        from gateway.config import PlatformConfig, Platform
+        from hermes_gateway.config import PlatformConfig, Platform
         config = PlatformConfig(enabled=True, extra={})
         config.token = "fake-token"
         adapter = object.__new__(DiscordAdapter)
@@ -1941,7 +1941,7 @@ class TestPlaybackTimeout:
     @staticmethod
     def _make_discord_adapter():
         from channels.platforms.discord import DiscordAdapter
-        from gateway.config import PlatformConfig, Platform
+        from hermes_gateway.config import PlatformConfig, Platform
         config = PlatformConfig(enabled=True, extra={})
         config.token = "fake-token"
         adapter = object.__new__(DiscordAdapter)
@@ -2125,7 +2125,7 @@ class TestVoiceChannelAwareness:
 
     def _make_adapter(self):
         from channels.platforms.discord import DiscordAdapter
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         config = PlatformConfig(enabled=True, extra={})
         config.token = "fake-token"
         adapter = object.__new__(DiscordAdapter)
@@ -2594,7 +2594,7 @@ class TestVoiceTTSPlayback:
     @staticmethod
     def _make_discord_adapter():
         from channels.platforms.discord import DiscordAdapter
-        from gateway.config import PlatformConfig, Platform
+        from hermes_gateway.config import PlatformConfig, Platform
         config = PlatformConfig(enabled=True, extra={})
         config.token = "fake-token"
         adapter = object.__new__(DiscordAdapter)
@@ -2666,7 +2666,7 @@ class TestVoiceTTSPlayback:
     def _call_should_reply(self, runner, voice_mode, msg_type, response="Hello",
                            agent_msgs=None, already_sent=False):
         from channels.platforms.base import MessageType, MessageEvent, SessionSource
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         runner._voice_mode["discord:ch1"] = voice_mode
         source = SessionSource(
             platform=Platform.DISCORD, chat_id="ch1",
@@ -2774,7 +2774,7 @@ class TestUDPKeepalive:
     async def test_keepalive_sends_silence_frame(self):
         """Listen loop sends silence frame via send_packet after interval."""
         from channels.platforms.discord import DiscordAdapter
-        from gateway.config import PlatformConfig, Platform
+        from hermes_gateway.config import PlatformConfig, Platform
 
         config = PlatformConfig(enabled=True, extra={})
         config.token = "fake"

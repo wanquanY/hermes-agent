@@ -1,7 +1,7 @@
 """Tests for the BlueBubbles iMessage gateway adapter."""
 import pytest
 
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 
 
 def _make_adapter(monkeypatch, **extra):
@@ -25,7 +25,7 @@ class TestBlueBubblesConfigLoading:
         monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
         monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
         monkeypatch.setenv("BLUEBUBBLES_WEBHOOK_PORT", "9999")
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
 
         config = GatewayConfig()
         _apply_env_overrides(config)
@@ -40,7 +40,7 @@ class TestBlueBubblesConfigLoading:
         monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
         monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
         monkeypatch.setenv("BLUEBUBBLES_HOME_CHANNEL", "user@example.com")
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
 
         config = GatewayConfig()
         _apply_env_overrides(config)
@@ -51,7 +51,7 @@ class TestBlueBubblesConfigLoading:
     def test_not_connected_without_password(self, monkeypatch):
         monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
         monkeypatch.delenv("BLUEBUBBLES_PASSWORD", raising=False)
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
 
         config = GatewayConfig()
         _apply_env_overrides(config)

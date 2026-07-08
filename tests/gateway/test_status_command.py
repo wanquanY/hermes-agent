@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
@@ -495,7 +495,7 @@ async def test_status_command_bypasses_active_session_guard():
     import asyncio
     from channels.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
     from gateway.session import build_session_key
-    from gateway.config import Platform, PlatformConfig, GatewayConfig
+    from hermes_gateway.config import Platform, PlatformConfig, GatewayConfig
 
     source = _make_source()
     session_key = build_session_key(source)

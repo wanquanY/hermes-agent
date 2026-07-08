@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 
 
 def _ensure_discord_mock():

@@ -399,7 +399,7 @@ def revoke_pairing(platform_id: str, user_id: str) -> dict[str, Any]:
 
 def channel_directory(platform_id: str | None = None) -> dict[str, Any]:
     try:
-        from gateway.channel_directory import DIRECTORY_PATH
+        from hermes_gateway.channel_directory import DIRECTORY_PATH
 
         import json
 
@@ -812,7 +812,7 @@ def _gateway_runtime_log_path() -> Path:
 
 
 def _pairing_store():
-    from gateway.pairing import PairingStore
+    from hermes_gateway.pairing import PairingStore
 
     return PairingStore()
 

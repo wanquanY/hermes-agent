@@ -906,7 +906,7 @@ async def get_status():
     gateway_updated_at = None
     configured_gateway_platforms: set[str] | None = None
     try:
-        from gateway.config import load_gateway_config
+        from hermes_gateway.config import load_gateway_config
 
         gateway_config = load_gateway_config()
         configured_gateway_platforms = {
@@ -3781,7 +3781,7 @@ _ACTION_LOG_FILES.setdefault("mcp-install", "action-mcp-install.log")
 # Pairing endpoints — approve / revoke / list messaging pairing codes.
 #
 # These are how a remote admin onboards messaging users (Telegram, Discord, …)
-# without shell access.  Wraps gateway.pairing.PairingStore directly.
+# without shell access.  Wraps hermes_gateway.pairing.PairingStore directly.
 # ---------------------------------------------------------------------------
 
 
@@ -3796,7 +3796,7 @@ class PairingRevoke(BaseModel):
 
 
 def _pairing_store():
-    from gateway.pairing import PairingStore
+    from hermes_gateway.pairing import PairingStore
 
     return PairingStore()
 

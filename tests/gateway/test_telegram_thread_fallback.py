@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.config import PlatformConfig, Platform
+from hermes_gateway.config import PlatformConfig, Platform
 from channels.platforms.base import (
     MessageEvent,
     MessageType,

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
 
 from channels.platform_registry import PlatformRegistry, PlatformEntry, platform_registry
-from gateway.config import Platform, PlatformConfig, GatewayConfig
+from hermes_gateway.config import Platform, PlatformConfig, GatewayConfig
 
 
 # ── Platform enum dynamic members ─────────────────────────────────────────
@@ -472,7 +472,7 @@ class TestApplyYamlConfigFnDispatch:
             )
             monkeypatch.setenv("HERMES_HOME", str(home))
 
-            from gateway.config import load_gateway_config
+            from hermes_gateway.config import load_gateway_config
             load_gateway_config()
 
             assert os.environ.get(env_var) == "true"
@@ -493,7 +493,7 @@ class TestApplyYamlConfigFnDispatch:
             )
             monkeypatch.setenv("HERMES_HOME", str(home))
 
-            from gateway.config import load_gateway_config
+            from hermes_gateway.config import load_gateway_config
             cfg = load_gateway_config()
 
             plat = Platform("myextraplat")
@@ -526,7 +526,7 @@ class TestApplyYamlConfigFnDispatch:
             )
             monkeypatch.setenv("HERMES_HOME", str(home))
 
-            from gateway.config import load_gateway_config
+            from hermes_gateway.config import load_gateway_config
             load_gateway_config()
 
             assert captured["yaml_cfg"].get("top_level_key") == 1
@@ -574,7 +574,7 @@ class TestApplyYamlConfigFnDispatch:
             monkeypatch.setenv("HERMES_HOME", str(home))
 
             # Must not raise.
-            from gateway.config import load_gateway_config
+            from hermes_gateway.config import load_gateway_config
             load_gateway_config()
 
             assert good_called["count"] == 1
@@ -597,7 +597,7 @@ class TestApplyYamlConfigFnDispatch:
             home = self._write_config(tmp_path, "telegram:\n  k: v\n")
             monkeypatch.setenv("HERMES_HOME", str(home))
 
-            from gateway.config import load_gateway_config
+            from hermes_gateway.config import load_gateway_config
             load_gateway_config()
 
             assert called["count"] == 0
@@ -621,7 +621,7 @@ class TestApplyYamlConfigFnDispatch:
             )
             monkeypatch.setenv("HERMES_HOME", str(home))
 
-            from gateway.config import load_gateway_config
+            from hermes_gateway.config import load_gateway_config
             load_gateway_config()
 
             assert called["count"] == 0
@@ -647,7 +647,7 @@ class TestApplyYamlConfigFnDispatch:
             )
             monkeypatch.setenv("HERMES_HOME", str(home))
 
-            from gateway.config import load_gateway_config
+            from hermes_gateway.config import load_gateway_config
             load_gateway_config()
 
             # Pre-existing env var was NOT clobbered by the hook.
@@ -696,7 +696,7 @@ class TestPluginPlatformSharedKeyBridge:
             )
             monkeypatch.setenv("HERMES_HOME", str(home))
 
-            from gateway.config import load_gateway_config, Platform
+            from hermes_gateway.config import load_gateway_config, Platform
             cfg = load_gateway_config()
 
             plat = Platform("mysharedplat")

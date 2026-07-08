@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from gateway.config import Platform
+from hermes_gateway.config import Platform
 from gateway.run import GatewayRunner
 from gateway.session import SessionContext, SessionSource
 from channels.session_context import (

@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 from channels.platforms.base import BasePlatformAdapter, SendResult
 
 

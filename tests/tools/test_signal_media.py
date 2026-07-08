@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 
-from gateway.config import Platform
+from hermes_gateway.config import Platform
 
 
 def _make_httpx_mock():

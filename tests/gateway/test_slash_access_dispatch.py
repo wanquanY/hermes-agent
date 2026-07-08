@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
@@ -488,7 +488,7 @@ async def test_gating_isolated_per_platform():
     """When Discord is gated and Telegram isn't, the same user_id on
     Telegram must be unrestricted."""
     from gateway.run import GatewayRunner
-    from gateway.config import GatewayConfig, Platform, PlatformConfig
+    from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(

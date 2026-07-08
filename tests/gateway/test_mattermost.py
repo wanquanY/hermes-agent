@@ -5,7 +5,7 @@ import time
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 
 
 # ---------------------------------------------------------------------------
@@ -17,7 +17,7 @@ class TestMattermostConfigLoading:
         monkeypatch.setenv("MATTERMOST_TOKEN", "mm-tok-abc123")
         monkeypatch.setenv("MATTERMOST_URL", "https://mm.example.com")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -31,7 +31,7 @@ class TestMattermostConfigLoading:
         monkeypatch.delenv("MATTERMOST_TOKEN", raising=False)
         monkeypatch.delenv("MATTERMOST_URL", raising=False)
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -43,7 +43,7 @@ class TestMattermostConfigLoading:
         monkeypatch.setenv("MATTERMOST_HOME_CHANNEL", "ch_abc123")
         monkeypatch.setenv("MATTERMOST_HOME_CHANNEL_NAME", "General")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -57,7 +57,7 @@ class TestMattermostConfigLoading:
         monkeypatch.setenv("MATTERMOST_TOKEN", "mm-tok-abc123")
         monkeypatch.delenv("MATTERMOST_URL", raising=False)
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 

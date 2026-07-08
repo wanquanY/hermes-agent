@@ -518,7 +518,7 @@ class TestShouldSendMediaAsAudio:
         assert should_send_media_as_audio("telegram", ".opus") is False
 
     def test_accepts_platform_enum(self):
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         from channels.platforms.base import should_send_media_as_audio
         assert should_send_media_as_audio(Platform.TELEGRAM, ".mp3") is True
         assert should_send_media_as_audio(Platform.TELEGRAM, ".flac") is False
@@ -547,7 +547,7 @@ class TestTruncateMessage:
             async def get_chat_info(self, *a):
                 return {}
 
-        from gateway.config import Platform, PlatformConfig
+        from hermes_gateway.config import Platform, PlatformConfig
 
         config = PlatformConfig(enabled=True, token="test")
         return StubAdapter(config=config, platform=Platform.TELEGRAM)

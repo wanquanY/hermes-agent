@@ -322,7 +322,7 @@ Move channel adapters and slash command responsibilities out of legacy `gateway/
   - reduced all Yuanbao files below the 2000-line project file-size limit;
   - validated with Yuanbao unit/integration tests and P1 boundary gates.
 - Completed slice `channel support owners`:
-  - moved platform config ownership to `channels.config`; `gateway.config`
+  - moved platform config ownership to `channels.config`; `hermes_gateway.config`
     imports and re-exports while later gateway slices retire the old module;
   - moved platform registry, session identity/context, runtime status,
     sticker cache, and WhatsApp identity into `channels.*`;

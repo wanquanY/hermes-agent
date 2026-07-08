@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import (
+from hermes_gateway.config import (
     GatewayConfig,
     Platform,
     PlatformConfig,
@@ -428,7 +428,7 @@ class TestConfigIntegration:
         for v in ["TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "SLACK_BOT_TOKEN"]:
             monkeypatch.delenv(v, raising=False)
 
-        from gateway.config import load_gateway_config
+        from hermes_gateway.config import load_gateway_config
         config = load_gateway_config()
 
         assert Platform.HOMEASSISTANT in config.platforms
@@ -442,7 +442,7 @@ class TestConfigIntegration:
                    "DISCORD_BOT_TOKEN", "SLACK_BOT_TOKEN"]:
             monkeypatch.delenv(v, raising=False)
 
-        from gateway.config import load_gateway_config
+        from hermes_gateway.config import load_gateway_config
         config = load_gateway_config()
         assert Platform.HOMEASSISTANT not in config.platforms
 

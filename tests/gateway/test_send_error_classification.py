@@ -88,7 +88,7 @@ def test_telegram_send_failure_populates_error_kind():
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
 
-    from gateway.config import PlatformConfig
+    from hermes_gateway.config import PlatformConfig
     from channels.platforms.telegram import TelegramAdapter
 
     cfg = PlatformConfig(enabled=True, token="fake-token", extra={})
@@ -116,7 +116,7 @@ def test_telegram_too_long_sets_too_long_kind():
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
 
-    from gateway.config import PlatformConfig
+    from hermes_gateway.config import PlatformConfig
     from channels.platforms.telegram import TelegramAdapter
 
     cfg = PlatformConfig(enabled=True, token="fake-token", extra={})

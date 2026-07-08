@@ -8,7 +8,7 @@ import types
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 from channels.platforms.base import MessageType
 
 
@@ -249,7 +249,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_abc123")
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -265,7 +265,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.setenv("MATRIX_USER_ID", "@bot:example.org")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -280,7 +280,7 @@ class TestMatrixConfigLoading:
         monkeypatch.delenv("MATRIX_PASSWORD", raising=False)
         monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -291,7 +291,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.setenv("MATRIX_ENCRYPTION", "true")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -303,7 +303,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.delenv("MATRIX_ENCRYPTION", raising=False)
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -316,7 +316,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_HOME_ROOM", "!room123:example.org")
         monkeypatch.setenv("MATRIX_HOME_ROOM_NAME", "Bot Room")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -330,7 +330,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.setenv("MATRIX_USER_ID", "@hermes:example.org")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -1155,7 +1155,7 @@ class TestMatrixDeviceIdConfig:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.setenv("MATRIX_DEVICE_ID", "HERMES_BOT")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -1167,7 +1167,7 @@ class TestMatrixDeviceIdConfig:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.delenv("MATRIX_DEVICE_ID", raising=False)
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 

@@ -247,7 +247,7 @@ class TestSetupFeishuAdapterIntegration:
         env = self._make_env_from_setup()
 
         with patch.dict(os.environ, env, clear=True):
-            from gateway.config import PlatformConfig
+            from hermes_gateway.config import PlatformConfig
             from channels.platforms.feishu import FeishuAdapter
             adapter = FeishuAdapter(PlatformConfig())
             assert adapter._app_id == "cli_test_app"
@@ -262,7 +262,7 @@ class TestSetupFeishuAdapterIntegration:
 
         with patch.dict(os.environ, env, clear=True):
             from channels.platforms.feishu import FeishuAdapter
-            from gateway.config import PlatformConfig
+            from hermes_gateway.config import PlatformConfig
             # Verify adapter initializes without error and env var is correct.
             FeishuAdapter(PlatformConfig())
             assert os.getenv("FEISHU_ALLOW_ALL_USERS") == "true"
@@ -273,7 +273,7 @@ class TestSetupFeishuAdapterIntegration:
         env = self._make_env_from_setup(group_idx=0)
 
         with patch.dict(os.environ, env, clear=True):
-            from gateway.config import PlatformConfig
+            from hermes_gateway.config import PlatformConfig
             from channels.platforms.feishu import FeishuAdapter
             adapter = FeishuAdapter(PlatformConfig())
             assert adapter._group_policy == "open"

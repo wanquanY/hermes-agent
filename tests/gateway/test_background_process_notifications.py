@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform
+from hermes_gateway.config import GatewayConfig, Platform
 from gateway.run import GatewayRunner, _parse_session_key
 
 

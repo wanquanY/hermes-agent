@@ -18,6 +18,7 @@ Security features (based on OWASP + NIST SP 800-63-4 guidance):
 Storage: ~/.hermes/pairing/
 """
 
+import hashlib
 import json
 import os
 import secrets
@@ -183,6 +184,7 @@ class PairingStore:
                 "user_id": user_id,
                 "user_name": user_name,
                 "created_at": time.time(),
+                "hash": hashlib.sha256(code.encode("utf-8")).hexdigest(),
             }
             self._save_json(self._pending_path(platform), pending)
 

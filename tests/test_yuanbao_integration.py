@@ -21,7 +21,7 @@ if _REPO_ROOT not in sys.path:
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from gateway.config import Platform, PlatformConfig, GatewayConfig
+from hermes_gateway.config import Platform, PlatformConfig, GatewayConfig
 from channels.platforms.yuanbao import YuanbaoAdapter
 
 
@@ -140,7 +140,7 @@ class TestGatewayRunnerRegistration:
 
     def test_runner_creates_yuanbao_adapter(self):
         """GatewayRunner._create_adapter 能为 YUANBAO 返回 YuanbaoAdapter 实例"""
-        from gateway.config import GatewayConfig
+        from hermes_gateway.config import GatewayConfig
         from unittest.mock import patch
         config = make_config(enabled=True)
         gw_config = GatewayConfig(platforms={Platform.YUANBAO: config})
@@ -158,7 +158,7 @@ class TestGatewayRunnerRegistration:
 
     def test_runner_adapter_platform_attr(self):
         """创建的 adapter.PLATFORM 为 Platform.YUANBAO"""
-        from gateway.config import GatewayConfig
+        from hermes_gateway.config import GatewayConfig
         from unittest.mock import patch
         config = make_config(enabled=True)
         gw_config = GatewayConfig(platforms={Platform.YUANBAO: config})

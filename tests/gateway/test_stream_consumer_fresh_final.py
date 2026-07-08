@@ -189,17 +189,17 @@ class TestStreamingConfigFreshFinalField:
     """The gateway-level StreamingConfig carries the setting."""
 
     def test_default_enables_with_60s(self):
-        from gateway.config import StreamingConfig
+        from hermes_gateway.config import StreamingConfig
         cfg = StreamingConfig()
         assert cfg.fresh_final_after_seconds == 60.0
 
     def test_from_dict_uses_default_when_missing(self):
-        from gateway.config import StreamingConfig
+        from hermes_gateway.config import StreamingConfig
         cfg = StreamingConfig.from_dict({"enabled": True})
         assert cfg.fresh_final_after_seconds == 60.0
 
     def test_from_dict_respects_explicit_zero(self):
-        from gateway.config import StreamingConfig
+        from hermes_gateway.config import StreamingConfig
         cfg = StreamingConfig.from_dict({
             "enabled": True,
             "fresh_final_after_seconds": 0,
@@ -207,7 +207,7 @@ class TestStreamingConfigFreshFinalField:
         assert cfg.fresh_final_after_seconds == 0.0
 
     def test_to_dict_round_trip(self):
-        from gateway.config import StreamingConfig
+        from hermes_gateway.config import StreamingConfig
         original = StreamingConfig(fresh_final_after_seconds=90.0)
         restored = StreamingConfig.from_dict(original.to_dict())
         assert restored.fresh_final_after_seconds == 90.0

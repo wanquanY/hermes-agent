@@ -35,7 +35,7 @@ def _(rid, params: dict) -> dict:
     # missing home channel would leave the handoff pending forever, so reject
     # up front with a clear, actionable message (mirrors cli.py).
     try:
-        from gateway.config import Platform, load_gateway_config
+        from hermes_gateway.config import Platform, load_gateway_config
     except Exception as e:  # pragma: no cover — gateway pkg always ships
         return _err(rid, 5021, f"could not load gateway config: {e}")
     try:

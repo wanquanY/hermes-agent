@@ -3,7 +3,7 @@ import json
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
+from hermes_gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
 from channels.platforms.base import MessageEvent
 from gateway.session import (
     SessionSource,

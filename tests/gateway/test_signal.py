@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, AsyncMock
 from urllib.parse import quote
 
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 
 
 @pytest.fixture(autouse=True)
@@ -58,7 +58,7 @@ class TestSignalConfigLoading:
         monkeypatch.setenv("SIGNAL_HTTP_URL", "http://localhost:9090")
         monkeypatch.setenv("SIGNAL_ACCOUNT", "+15551234567")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -72,7 +72,7 @@ class TestSignalConfigLoading:
         monkeypatch.setenv("SIGNAL_HTTP_URL", "http://localhost:9090")
         # No SIGNAL_ACCOUNT
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -360,7 +360,7 @@ class TestSignalAuthorization:
     def test_signal_in_allowlist_maps(self):
         """Signal should be in the platform auth maps."""
         from gateway.run import GatewayRunner
-        from gateway.config import GatewayConfig
+        from hermes_gateway.config import GatewayConfig
 
         gw = GatewayRunner.__new__(GatewayRunner)
         gw.config = GatewayConfig()

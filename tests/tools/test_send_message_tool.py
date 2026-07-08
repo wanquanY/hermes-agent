@@ -26,7 +26,7 @@ def _reset_signal_scheduler():
     yield
     _reset_scheduler()
 
-from gateway.config import Platform
+from hermes_gateway.config import Platform
 from tools.send_message_tool import (
     _derive_forum_thread_name,
     _is_telegram_thread_not_found,
@@ -101,7 +101,7 @@ class TestSendMessageTool:
             },
             clear=False,
         ), \
-             patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("hermes_gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
@@ -126,9 +126,9 @@ class TestSendMessageTool:
     def test_resolved_telegram_topic_name_preserves_thread_id(self):
         config, telegram_cfg = _make_config()
 
-        with patch("gateway.config.load_gateway_config", return_value=config), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch("gateway.channel_directory.resolve_channel_name", return_value="-1001:17585"), \
+             patch("hermes_gateway.channel_directory.resolve_channel_name", return_value="-1001:17585"), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
              patch("gateway.mirror.mirror_to_session", return_value=True):
@@ -165,8 +165,8 @@ class TestSendMessageTool:
             },
         }))
 
-        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file), \
-             patch("gateway.config.load_gateway_config", return_value=config), \
+        with patch("hermes_gateway.channel_directory.DIRECTORY_PATH", cache_file), \
+             patch("hermes_gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
@@ -199,9 +199,9 @@ class TestSendMessageTool:
             get_home_channel=lambda _platform: None,
         )
 
-        with patch("gateway.config.load_gateway_config", return_value=config), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch("gateway.channel_directory.resolve_channel_name", return_value="C123ABCDEF:171.000001"), \
+             patch("hermes_gateway.channel_directory.resolve_channel_name", return_value="C123ABCDEF:171.000001"), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
              patch("gateway.mirror.mirror_to_session", return_value=True):
@@ -237,10 +237,10 @@ class TestSendMessageTool:
             get_home_channel=lambda _platform: None,
         )
 
-        with patch("gateway.config.load_gateway_config", return_value=config), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch(
-                 "gateway.channel_directory.resolve_channel_name",
+                 "hermes_gateway.channel_directory.resolve_channel_name",
                  return_value="!roomid:matrix.example.org:$thread123:matrix.example.org",
              ), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
@@ -270,7 +270,7 @@ class TestSendMessageTool:
     def test_mirror_receives_current_session_user_id(self):
         config, _telegram_cfg = _make_config()
 
-        with patch("gateway.config.load_gateway_config", return_value=config), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
@@ -305,7 +305,7 @@ class TestSendMessageTool:
         secret = tmp_path / "secret.pdf"
         secret.write_bytes(b"%PDF secret")
 
-        with patch("gateway.config.load_gateway_config", return_value=config), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
@@ -341,7 +341,7 @@ class TestSendMessageTool:
                 f"transport error: https://api.example.com/send?access_token={leaked}"
             )
 
-        with patch("gateway.config.load_gateway_config", return_value=config), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch("model_tools._run_async", side_effect=_raise_and_close):
             result = json.loads(
@@ -1534,7 +1534,7 @@ class TestSendDiscordForum:
         mock_session, _ = self._build_mock(200, response_data=thread_data)
 
         with patch("aiohttp.ClientSession", return_value=mock_session), \
-             patch("gateway.channel_directory.lookup_channel_type", return_value="forum"):
+             patch("hermes_gateway.channel_directory.lookup_channel_type", return_value="forum"):
             result = asyncio.run(
                 _send_discord("tok", "forum_ch", "Hello forum")
             )
@@ -1553,7 +1553,7 @@ class TestSendDiscordForum:
         mock_session, _ = self._build_mock(200, response_data=thread_data)
 
         with patch("aiohttp.ClientSession", return_value=mock_session), \
-             patch("gateway.channel_directory.lookup_channel_type", return_value="forum"):
+             patch("hermes_gateway.channel_directory.lookup_channel_type", return_value="forum"):
             asyncio.run(
                 _send_discord("tok", "forum_ch", "Hello")
             )
@@ -1566,7 +1566,7 @@ class TestSendDiscordForum:
         mock_session, _ = self._build_mock(200, response_data={"id": "msg1"})
 
         with patch("aiohttp.ClientSession", return_value=mock_session), \
-             patch("gateway.channel_directory.lookup_channel_type", return_value="channel"):
+             patch("hermes_gateway.channel_directory.lookup_channel_type", return_value="channel"):
             result = asyncio.run(
                 _send_discord("tok", "ch1", "Hello")
             )
@@ -1605,7 +1605,7 @@ class TestSendDiscordForum:
         session_iter = iter([probe_session, thread_session])
 
         with patch("aiohttp.ClientSession", side_effect=lambda **kw: next(session_iter)), \
-             patch("gateway.channel_directory.lookup_channel_type", return_value=None):
+             patch("hermes_gateway.channel_directory.lookup_channel_type", return_value=None):
             result = asyncio.run(
                 _send_discord("tok", "forum_ch", "Hello probe")
             )
@@ -1618,7 +1618,7 @@ class TestSendDiscordForum:
         mock_session, _ = self._build_mock(200, response_data={"id": "msg1"})
 
         with patch("aiohttp.ClientSession", return_value=mock_session), \
-             patch("gateway.channel_directory.lookup_channel_type", side_effect=Exception("io error")):
+             patch("hermes_gateway.channel_directory.lookup_channel_type", side_effect=Exception("io error")):
             result = asyncio.run(
                 _send_discord("tok", "ch1", "Hello")
             )
@@ -1632,7 +1632,7 @@ class TestSendDiscordForum:
         mock_session, _ = self._build_mock(403, response_text="Forbidden")
 
         with patch("aiohttp.ClientSession", return_value=mock_session), \
-             patch("gateway.channel_directory.lookup_channel_type", return_value="forum"):
+             patch("hermes_gateway.channel_directory.lookup_channel_type", return_value="forum"):
             result = asyncio.run(
                 _send_discord("tok", "forum_ch", "Hello")
             )
@@ -1711,7 +1711,7 @@ class TestSendDiscordForumMedia:
 
         monkeypatch.setattr(smt, "lookup_channel_type", lambda p, cid: "forum", raising=False)
         monkeypatch.setattr(
-            "gateway.channel_directory.lookup_channel_type", lambda p, cid: "forum"
+            "hermes_gateway.channel_directory.lookup_channel_type", lambda p, cid: "forum"
         )
 
         thread_resp = self._build_thread_resp()
@@ -1747,7 +1747,7 @@ class TestSendDiscordForumMedia:
     def test_forum_without_media_still_json_only(self, tmp_path, monkeypatch):
         """Forum + no media → JSON POST (no multipart overhead)."""
         monkeypatch.setattr(
-            "gateway.channel_directory.lookup_channel_type", lambda p, cid: "forum"
+            "hermes_gateway.channel_directory.lookup_channel_type", lambda p, cid: "forum"
         )
 
         thread_resp = self._build_thread_resp("t1", "m1")
@@ -1775,7 +1775,7 @@ class TestSendDiscordForumMedia:
     def test_forum_missing_media_file_collected_as_warning(self, tmp_path, monkeypatch):
         """Missing media files produce warnings but the thread is still created."""
         monkeypatch.setattr(
-            "gateway.channel_directory.lookup_channel_type", lambda p, cid: "forum"
+            "hermes_gateway.channel_directory.lookup_channel_type", lambda p, cid: "forum"
         )
 
         thread_resp = self._build_thread_resp()
@@ -1823,7 +1823,7 @@ class TestForumProbeCache:
     def test_probe_result_is_memoized(self, monkeypatch):
         """An API-probed channel type is cached so subsequent sends skip the probe."""
         monkeypatch.setattr(
-            "gateway.channel_directory.lookup_channel_type", lambda p, cid: None
+            "hermes_gateway.channel_directory.lookup_channel_type", lambda p, cid: None
         )
 
         # First probe response: type=15 (forum)
@@ -2242,7 +2242,7 @@ class TestSendSignalChunking:
 
 
 class _FakePlatform:
-    """Stand-in for the gateway.config.Platform enum.  Holds the .value
+    """Stand-in for the hermes_gateway.config.Platform enum.  Holds the .value
     attribute consulted by ``_send_via_adapter`` for registry lookups."""
 
     def __init__(self, value):

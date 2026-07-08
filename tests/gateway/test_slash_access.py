@@ -5,7 +5,7 @@ exercise the dispatch site live in test_slash_access_dispatch.py.
 """
 from __future__ import annotations
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.session import SessionSource
 from channels.slash_commands.access import (
     SlashAccessPolicy,

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from hermes_state import SessionDB
-from gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
@@ -1107,7 +1107,7 @@ def test_session_split_restores_source_thread_id_from_binding(tmp_path):
     source so that _thread_metadata_for_source returns the correct thread.
     """
     from gateway.run import GatewayRunner
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
 
     db = SessionDB(db_path=tmp_path / "state.db")
     db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")

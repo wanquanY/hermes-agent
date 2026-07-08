@@ -21,7 +21,7 @@ import pytest
 def _make_adapter():
     """Build a minimal APIServerAdapter with mocked internals."""
     from channels.platforms.api_server import APIServerAdapter
-    from gateway.config import PlatformConfig
+    from hermes_gateway.config import PlatformConfig
 
     config = PlatformConfig(enabled=True, token="test-key")
     adapter = APIServerAdapter(config)

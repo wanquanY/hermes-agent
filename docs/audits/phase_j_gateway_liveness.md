@@ -28,14 +28,14 @@ For each entry: the module and up to five importers. Migrate the target to `herm
 |---|---|
 | `gateway/__init__.py` | `acp_adapter.server`, `agent.agent_init`, `agent.codex_runtime`, `agent.conversation_compression`, `agent.dovie_attribution` (+85 more) |
 | `gateway/channel_directory.py` | `gateway.run`, `hermes_cli.send_cmd`, `tools.send_message_tool`, `tui_gateway.services.platform_connections` |
-| `gateway/config.py` | `gateway.channel_directory`, `gateway.platforms.api_server`, `gateway.platforms.base`, `gateway.platforms.bluebubbles`, `gateway.platforms.dingtalk` (+33 more) |
+| `gateway/config.py` | `hermes_gateway.channel_directory`, `gateway.platforms.api_server`, `gateway.platforms.base`, `gateway.platforms.bluebubbles`, `gateway.platforms.dingtalk` (+33 more) |
 | `gateway/delivery.py` | `gateway.run` |
 | `gateway/display_config.py` | `gateway.run`, `gateway.slash_commands` |
 | `gateway/hooks.py` | `gateway.run` |
 | `gateway/memory_monitor.py` | `gateway.run` |
 | `gateway/mirror.py` | `tools.send_message_tool` |
 | `gateway/pairing.py` | `gateway.run`, `hermes_cli.pairing`, `hermes_cli.web_server`, `tui_gateway.services.platform_connections` |
-| `gateway/platform_registry.py` | `agent.system_prompt`, `gateway.channel_directory`, `gateway.config`, `gateway.platforms.webhook`, `gateway.run` (+8 more) |
+| `gateway/platform_registry.py` | `agent.system_prompt`, `hermes_gateway.channel_directory`, `hermes_gateway.config`, `gateway.platforms.webhook`, `gateway.run` (+8 more) |
 | `gateway/platforms/__init__.py` | `gateway.platforms.api_server`, `gateway.platforms.bluebubbles`, `gateway.platforms.dingtalk`, `gateway.platforms.discord`, `gateway.platforms.email` (+35 more) |
 | `gateway/platforms/_http_client_limits.py` | `gateway.platforms.bluebubbles`, `gateway.platforms.dingtalk`, `gateway.platforms.qqbot.adapter`, `gateway.platforms.signal`, `gateway.platforms.wecom` (+1 more) |
 | `gateway/platforms/api_server.py` | `gateway.run` |

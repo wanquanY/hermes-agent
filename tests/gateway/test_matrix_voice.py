@@ -29,7 +29,7 @@ from channels.platforms.base import MessageType
 def _make_adapter():
     """Create a MatrixAdapter with mocked config."""
     from channels.platforms.matrix import MatrixAdapter
-    from gateway.config import PlatformConfig
+    from hermes_gateway.config import PlatformConfig
 
     config = PlatformConfig(
         enabled=True,

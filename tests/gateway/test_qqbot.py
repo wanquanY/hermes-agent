@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 
 
 # ---------------------------------------------------------------------------

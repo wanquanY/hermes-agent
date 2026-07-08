@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import MessageEvent, SendResult
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
@@ -203,7 +203,7 @@ def make_runner(platform: Platform, session_entry: SessionEntry = None) -> "Gate
     runner._restart_task_started = False
     runner._restart_detached = False
     runner._restart_via_service = False
-    from gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
+    from hermes_gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     runner._restart_drain_timeout = DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     runner._stop_task = None
     runner._busy_input_mode = "interrupt"

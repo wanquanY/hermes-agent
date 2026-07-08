@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter
 from gateway.run import GatewayRunner
 from channels.runtime_status import read_runtime_status

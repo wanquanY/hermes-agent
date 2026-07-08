@@ -24,7 +24,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.api_server import (
     APIServerAdapter,
     ResponseStore,
@@ -2475,14 +2475,14 @@ class TestConfigIntegration:
 
     def test_env_override_enables_api_server(self, monkeypatch):
         monkeypatch.setenv("API_SERVER_ENABLED", "true")
-        from gateway.config import load_gateway_config
+        from hermes_gateway.config import load_gateway_config
         config = load_gateway_config()
         assert Platform.API_SERVER in config.platforms
         assert config.platforms[Platform.API_SERVER].enabled is True
 
     def test_env_override_with_key(self, monkeypatch):
         monkeypatch.setenv("API_SERVER_KEY", "sk-mykey")
-        from gateway.config import load_gateway_config
+        from hermes_gateway.config import load_gateway_config
         config = load_gateway_config()
         assert Platform.API_SERVER in config.platforms
         assert config.platforms[Platform.API_SERVER].extra.get("key") == "sk-mykey"
@@ -2491,7 +2491,7 @@ class TestConfigIntegration:
         monkeypatch.setenv("API_SERVER_ENABLED", "true")
         monkeypatch.setenv("API_SERVER_PORT", "9999")
         monkeypatch.setenv("API_SERVER_HOST", "0.0.0.0")
-        from gateway.config import load_gateway_config
+        from hermes_gateway.config import load_gateway_config
         config = load_gateway_config()
         assert config.platforms[Platform.API_SERVER].extra.get("port") == 9999
         assert config.platforms[Platform.API_SERVER].extra.get("host") == "0.0.0.0"
@@ -2502,7 +2502,7 @@ class TestConfigIntegration:
             "API_SERVER_CORS_ORIGINS",
             "http://localhost:3000, http://127.0.0.1:3000",
         )
-        from gateway.config import load_gateway_config
+        from hermes_gateway.config import load_gateway_config
         config = load_gateway_config()
         assert config.platforms[Platform.API_SERVER].extra.get("cors_origins") == [
             "http://localhost:3000",

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gateway.config import Platform
+from hermes_gateway.config import Platform
 from gateway.run import GatewayRunner
 
 

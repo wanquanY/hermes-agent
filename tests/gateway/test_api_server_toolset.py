@@ -75,7 +75,7 @@ class TestApiServerAdapterToolset:
     def test_create_agent_reads_config_toolsets(self):
         """API server resolves toolsets from config like all other platforms."""
         from channels.platforms.api_server import APIServerAdapter
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
 
         adapter = APIServerAdapter(PlatformConfig())
 
@@ -107,7 +107,7 @@ class TestApiServerAdapterToolset:
     def test_create_agent_respects_config_override(self):
         """User can override API server toolsets via platform_toolsets in config.yaml."""
         from channels.platforms.api_server import APIServerAdapter
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
 
         adapter = APIServerAdapter(PlatformConfig())
 

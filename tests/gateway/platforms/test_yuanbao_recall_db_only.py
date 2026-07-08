@@ -9,7 +9,7 @@ JSONL file gone.  When a row has no platform id (e.g. agent-processed
 rows), recall falls through to content-match.
 """
 from gateway.session import SessionStore
-from gateway.config import GatewayConfig
+from hermes_gateway.config import GatewayConfig
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
 from hermes_agent.storage.session_repository_db import connect_session_repository_db
 

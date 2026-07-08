@@ -63,7 +63,7 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
 
     Returns the directory dict and writes it to DIRECTORY_PATH.
     """
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
 
     platforms: Dict[str, List[Dict[str, str]]] = {}
 

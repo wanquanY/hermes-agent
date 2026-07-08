@@ -9,7 +9,7 @@ import pytest
 import gateway.run as gateway_run
 from agent.i18n import t
 from channels.platforms.base import MessageEvent, MessageType
-from gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
+from hermes_gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
 from gateway.session import SessionEntry, build_session_key
 from tests.gateway.restart_test_helpers import make_restart_runner, make_restart_source
 
@@ -270,7 +270,7 @@ async def test_shutdown_notification_send_failure_does_not_block():
 @pytest.mark.asyncio
 async def test_shutdown_notification_suppressed_when_flag_disabled():
     """Active-session ping is muted when gateway_restart_notification=False on the platform."""
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
 
     runner, adapter = make_restart_runner()
     runner._restart_requested = True
@@ -286,7 +286,7 @@ async def test_shutdown_notification_suppressed_when_flag_disabled():
 @pytest.mark.asyncio
 async def test_shutdown_notification_home_channel_suppressed_when_flag_disabled():
     """Home-channel ping during shutdown is muted when the flag is False."""
-    from gateway.config import HomeChannel, Platform
+    from hermes_gateway.config import HomeChannel, Platform
 
     runner, adapter = make_restart_runner()
     runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(

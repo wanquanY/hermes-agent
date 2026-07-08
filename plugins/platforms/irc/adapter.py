@@ -50,7 +50,7 @@ from channels.platforms.base import (
     MessageType,
 )
 from channels.session_identity import SessionSource
-from gateway.config import PlatformConfig, Platform
+from hermes_gateway.config import PlatformConfig, Platform
 
 
 # ---------------------------------------------------------------------------

@@ -94,7 +94,7 @@ from channels.platforms.base import (
     SendResult,
     cache_image_from_bytes,
 )
-from gateway.config import Platform
+from hermes_gateway.config import Platform
 from channels.session_identity import SessionSource
 
 

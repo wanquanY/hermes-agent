@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform
+from hermes_gateway.config import GatewayConfig, Platform
 from channels.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionSource
 

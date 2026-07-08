@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform
+from hermes_gateway.config import GatewayConfig, Platform
 from channels.platforms.base import MessageEvent
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
@@ -355,10 +355,10 @@ async def test_none_user_id_does_not_generate_pairing_code(monkeypatch, tmp_path
 async def test_non_internal_event_without_user_triggers_pairing(monkeypatch, tmp_path):
     """Verify the normal (non-internal) path still triggers pairing for unknown users."""
     import gateway.run as gateway_run
-    import gateway.pairing as pairing_mod
+    import hermes_gateway.pairing as pairing_mod
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    # gateway.pairing.PAIRING_DIR is a module-level constant captured at
+    # hermes_gateway.pairing.PAIRING_DIR is a module-level constant captured at
     # import time from whichever HERMES_HOME was set then. Per-test
     # HERMES_HOME redirection in conftest doesn't retroactively move it.
     # Override directly so pairing rate-limit state lives in this test's

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 from channels.platforms.api_server import APIServerAdapter
 from channels.platforms.base import is_network_accessible
 

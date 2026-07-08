@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, mock_open
 
 import pytest
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 
 
 def _ensure_telegram_mock():

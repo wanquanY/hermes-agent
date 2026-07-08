@@ -913,7 +913,7 @@ class TestAppendToTranscriptSkipDb:
 
     def test_skip_db_prevents_sqlite_write(self, tmp_path):
         """With skip_db=True and a real DB, message does NOT appear in SQLite."""
-        from gateway.config import GatewayConfig
+        from hermes_gateway.config import GatewayConfig
         from gateway.session import SessionStore
         from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
         from hermes_agent.storage.session_repository_db import connect_session_repository_db
@@ -943,7 +943,7 @@ class TestAppendToTranscriptSkipDb:
 
     def test_default_writes_to_sqlite(self, tmp_path):
         """Without skip_db, message appears in SQLite."""
-        from gateway.config import GatewayConfig
+        from hermes_gateway.config import GatewayConfig
         from gateway.session import SessionStore
         from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
         from hermes_agent.storage.session_repository_db import connect_session_repository_db

@@ -5,7 +5,7 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 from channels.platforms.wecom_callback import WecomCallbackAdapter
 from channels.platforms.wecom_crypto import WXBizMsgCrypt
 

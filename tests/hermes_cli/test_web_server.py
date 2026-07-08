@@ -798,7 +798,7 @@ class TestWebServerEndpoints:
 
 
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
-        import gateway.config as gateway_config
+        import hermes_gateway.config as gateway_config
         import hermes_cli.web_server as web_server
 
         class _Platform:
@@ -834,7 +834,7 @@ class TestWebServerEndpoints:
         }
 
     def test_get_status_hides_stale_platforms_when_gateway_not_running(self, monkeypatch):
-        import gateway.config as gateway_config
+        import hermes_gateway.config as gateway_config
         import hermes_cli.web_server as web_server
 
         class _GatewayConfig:

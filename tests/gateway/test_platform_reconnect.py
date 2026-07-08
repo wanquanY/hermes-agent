@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 from gateway.run import GatewayRunner
 
@@ -123,7 +123,7 @@ class TestStartupPlatformIsolation:
                             return_value=0,
                         ):
                             with patch(
-                                "gateway.channel_directory.build_channel_directory",
+                                "hermes_gateway.channel_directory.build_channel_directory",
                                 new=AsyncMock(return_value={"platforms": {}}),
                             ):
                                 with patch("gateway.run.asyncio.create_task", side_effect=fake_create_task):

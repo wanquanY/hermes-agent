@@ -232,7 +232,7 @@ class TestGatewayQuickCommands:
 
     @pytest.mark.asyncio
     async def test_gateway_config_object_supports_quick_commands(self):
-        from gateway.config import GatewayConfig
+        from hermes_gateway.config import GatewayConfig
         from gateway.run import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)

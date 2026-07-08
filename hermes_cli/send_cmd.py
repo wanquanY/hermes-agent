@@ -135,7 +135,7 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
     identical.
     """
     try:
-        from gateway.channel_directory import (
+        from hermes_gateway.channel_directory import (
             format_directory_for_display,
             load_directory,
         )
@@ -239,7 +239,7 @@ def _load_hermes_env() -> None:
             pass
 
     # Step 2: bridge top-level config.yaml values into the environment so
-    # gateway.config.load_gateway_config() sees them. Scalars only; don't
+    # hermes_gateway.config.load_gateway_config() sees them. Scalars only; don't
     # override values already in the env.
     import os
     config_path = home / "config.yaml"

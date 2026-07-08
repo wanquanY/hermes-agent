@@ -1,6 +1,6 @@
 """Tests for the delivery routing module."""
 
-from gateway.config import Platform
+from hermes_gateway.config import Platform
 from gateway.delivery import DeliveryTarget
 from gateway.session import SessionSource
 

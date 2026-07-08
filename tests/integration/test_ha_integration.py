@@ -15,7 +15,7 @@ pytestmark = pytest.mark.integration
 
 from unittest.mock import AsyncMock
 
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 from channels.platforms.homeassistant import HomeAssistantAdapter
 from tests.fakes.fake_ha_server import FakeHAServer, ENTITY_STATES
 from tools.homeassistant_tool import (

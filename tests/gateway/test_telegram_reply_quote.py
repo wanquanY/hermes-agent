@@ -12,7 +12,7 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 
 
 def _ensure_telegram_mock():

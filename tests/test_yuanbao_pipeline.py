@@ -43,7 +43,7 @@ from channels.platforms.yuanbao import (
     InboundPipelineBuilder,
     YuanbaoAdapter,
 )
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 
 
 # ============================================================

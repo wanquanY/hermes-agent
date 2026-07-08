@@ -8,7 +8,7 @@ Stale-generation registrations are rejected.
 """
 import pytest
 
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter, SendResult
 
 

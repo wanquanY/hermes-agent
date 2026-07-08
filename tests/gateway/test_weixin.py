@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from gateway.config import PlatformConfig
-from gateway.config import GatewayConfig, HomeChannel, Platform, _apply_env_overrides
+from hermes_gateway.config import PlatformConfig
+from hermes_gateway.config import GatewayConfig, HomeChannel, Platform, _apply_env_overrides
 from channels.platforms.base import SendResult
 from channels.platforms import weixin
 from channels.platforms.weixin import ContextTokenStore, WeixinAdapter

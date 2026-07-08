@@ -29,7 +29,7 @@ def _ensure_discord_mock():
 
 
 import gateway.run as gateway_run
-from gateway.config import Platform
+from hermes_gateway.config import Platform
 from channels.platforms.base import MessageEvent
 from gateway.session import SessionSource
 

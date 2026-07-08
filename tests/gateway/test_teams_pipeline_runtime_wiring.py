@@ -7,7 +7,7 @@ from types import ModuleType
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 from gateway.run import GatewayRunner
 from plugins.teams_pipeline.runtime import (
     bind_gateway_runtime,

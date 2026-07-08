@@ -28,7 +28,7 @@ async def test_notifier_unsubs_after_completed_event(kanban_home):
     """
     import hermes_cli.kanban_db as kb
     from gateway.run import GatewayRunner
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
 
     conn = kb.connect()
     try:
@@ -87,7 +87,7 @@ async def test_notifier_unsubs_after_abnormal_events(kind, kanban_home):
     """
     import hermes_cli.kanban_db as kb
     from gateway.run import GatewayRunner
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
 
     conn = kb.connect()
 
@@ -151,7 +151,7 @@ async def test_notifier_second_blocked_delivers(kanban_home):
     """
     import hermes_cli.kanban_db as kb
     from gateway.run import GatewayRunner
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
 
     runner = object.__new__(GatewayRunner)
     runner._running = True
@@ -242,7 +242,7 @@ async def test_notifier_does_not_call_init_db(kanban_home):
     """Notifier watcher path must not invoke `_kb.init_db` (issue #21378)."""
     import hermes_cli.kanban_db as kb
     from gateway.run import GatewayRunner
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
 
     runner = object.__new__(GatewayRunner)
     runner._running = True
@@ -327,7 +327,7 @@ async def test_notifier_skips_subscription_owned_by_other_profile(kanban_home):
     """Each gateway keeps its watcher on, but only the subscribing profile claims."""
     import hermes_cli.kanban_db as kb
     from gateway.run import GatewayRunner
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
 
     conn = kb.connect()
     try:
@@ -383,7 +383,7 @@ async def test_notifier_delivers_subscription_owned_by_current_profile(kanban_ho
     """The gateway for the profile that created/subscribed the task reports it."""
     import hermes_cli.kanban_db as kb
     from gateway.run import GatewayRunner
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
 
     conn = kb.connect()
     try:
@@ -441,7 +441,7 @@ async def test_gateway_create_autosubscribes_on_explicit_board(kanban_home):
     flag appears before the subcommand, and the subscription must land in
     that board's DB rather than the ambient/default board.
     """
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
     from channels.slash_commands.handlers import handle_kanban_command
 
     kb.create_board("projx")
@@ -490,7 +490,7 @@ async def test_notifier_uploads_artifacts_on_completion(kanban_home, tmp_path):
     """
     import hermes_cli.kanban_db as kb
     from gateway.run import GatewayRunner
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
     from tools import kanban_tools as kt
 
     # Materialize real files so os.path.isfile passes inside the helper.
@@ -577,7 +577,7 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
     deliver any artifacts that do exist."""
     import hermes_cli.kanban_db as kb
     from gateway.run import GatewayRunner
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
     from tools import kanban_tools as kt
 
     real_pdf = tmp_path / "real.pdf"

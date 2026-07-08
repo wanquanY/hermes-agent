@@ -211,7 +211,7 @@ async def test_event_without_update_id_bypasses_dedup(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_different_platform_bypasses_dedup(tmp_path, monkeypatch):
     """Marker from Telegram doesn't block a /restart from another platform."""
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
     from gateway.session import SessionSource
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
