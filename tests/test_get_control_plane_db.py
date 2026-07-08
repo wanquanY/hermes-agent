@@ -62,14 +62,11 @@ def test_get_control_plane_db_honors_DOVIE_HERMES_CONTROL_HOME_env_for_testing(
     override.mkdir()
     created: list[Path] = []
 
-    class FakeSessionDB:
-        def __init__(self, db_path: Path):
-            self.db_path = Path(db_path)
-            created.append(self.db_path)
+    def fake_open_cli_session_store(db_path: Path):
+        created.append(Path(db_path))
+        return SimpleNamespace(db_path=Path(db_path))
 
-    import hermes_state
-
-    monkeypatch.setattr(hermes_state, "SessionDB", FakeSessionDB)
+    monkeypatch.setattr(server, "_open_cli_session_store", fake_open_cli_session_store)
     monkeypatch.setenv("DOVIE_HERMES_CONTROL_HOME", str(override))
 
     db = server._get_control_plane_db()

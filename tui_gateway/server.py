@@ -33,6 +33,7 @@ from tui_gateway.services.media import (
     estimate_image_tokens as _estimate_image_tokens,
     image_meta as _image_meta,
 )
+from hermes_agent.storage.cli_session_store import open_cli_session_store as _open_cli_session_store
 from tui_gateway.services.model_descriptor import (
     normalize_model_descriptor as _normalize_model_descriptor,
     set_session_model_descriptor as _set_session_model_descriptor,
@@ -492,7 +493,7 @@ atexit.register(_shutdown_sessions)
 
 
 def _get_db():
-    """Return the request-scoped control-plane ``SessionDB``.
+    """Return the request-scoped control-plane session store.
 
     Option D keeps one canonical control-plane DB: the Hermes root
     ``state.db``. ``DOVIE_HERMES_CONTROL_HOME`` remains only as an explicit
@@ -541,7 +542,7 @@ def _get_control_plane_db(*, use_active_profile: bool = True):
     if control_home == process_home:
         # Main gateway path: continue using the process-level `_db` slot via
         # the shared session_store helper (its `active_home == default_home`
-        # fast path is correct here — the implicit SessionDB() also routes to
+        # fast path is correct here — the implicit session store also routes to
         # process_home, matching active_home).
         result = _get_session_db_for_home(
             active_home=control_home,
@@ -565,16 +566,14 @@ def _get_control_plane_db(*, use_active_profile: bool = True):
         return cached
     db_path = control_home / "state.db"
     try:
-        from hermes_state import SessionDB
-
-        ctrl_db = SessionDB(db_path=db_path)
+        ctrl_db = _open_cli_session_store(db_path)
         _db_by_home[home_key] = ctrl_db
         _db_error_by_home.pop(home_key, None)
         return ctrl_db
     except Exception as exc:
         _db_error_by_home[home_key] = str(exc)
         logger.warning(
-            "control-plane SessionDB unavailable at %s: %s", db_path, exc,
+            "control-plane session store unavailable at %s: %s", db_path, exc,
         )
         return None
 
