@@ -235,3 +235,84 @@ class ActivitiesMixin:
 
     def get_activity(self, activity_id) -> dict | None:
         return self._activity_repo().get_legacy_activity(str(activity_id or ""))
+
+    def insert_activity_command(
+        self,
+        *,
+        command_id: str,
+        activity_id: str,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        def _do(conn: sqlite3.Connection) -> dict[str, Any]:
+            return self._activity_repo(conn).insert_activity_command(
+                command_id=command_id,
+                activity_id=activity_id,
+                kind=kind,
+                payload=payload,
+                metadata=metadata,
+            )
+
+        return self._execute_write(_do)  # type: ignore[attr-defined]
+
+    def get_activity_command(self, command_id: str) -> dict[str, Any]:
+        normalized_command_id = str(command_id or "").strip()
+        if not normalized_command_id:
+            return {}
+        return self._activity_repo().get_activity_command(normalized_command_id)
+
+    def list_pending_activity_commands(
+        self,
+        *,
+        states: tuple[str, ...] = ("accepted", "dispatched"),
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        normalized_states = tuple(
+            state
+            for state in (str(value or "").strip() for value in (states or ()))
+            if state
+        )
+        if not normalized_states:
+            return []
+        return self._activity_repo().list_pending_activity_commands(
+            states=normalized_states,
+            limit=limit,
+        )
+
+    def update_activity_command_state(
+        self,
+        command_id: str,
+        *,
+        next_state: str,
+        error_reason: str = "",
+        result_event_id: int | None = None,
+    ) -> dict[str, Any]:
+        normalized_command_id = str(command_id or "").strip()
+        normalized_next_state = str(next_state or "").strip()
+        if not normalized_command_id or not normalized_next_state:
+            return {}
+
+        def _do(conn: sqlite3.Connection) -> dict[str, Any]:
+            return self._activity_repo(conn).update_activity_command_state(
+                normalized_command_id,
+                next_state=normalized_next_state,
+                error_reason=error_reason,
+                result_event_id=result_event_id,
+            )
+
+        return self._execute_write(_do)  # type: ignore[attr-defined]
+
+    def list_activity_commands_for_activity(
+        self,
+        activity_id: str,
+        *,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        normalized_activity_id = str(activity_id or "").strip()
+        if not normalized_activity_id:
+            return []
+        return self._activity_repo().list_activity_commands_for_activity(
+            normalized_activity_id,
+            limit=limit,
+        )
