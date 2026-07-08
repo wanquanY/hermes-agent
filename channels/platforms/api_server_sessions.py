@@ -263,7 +263,7 @@ class APIServerSessionsMixin:
         })
 
     async def _handle_fork_session(self, request: "web.Request") -> "web.Response":
-        """POST /api/sessions/{session_id}/fork — branch via current SessionDB primitives."""
+        """POST /api/sessions/{session_id}/fork — create a child transcript session."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -282,9 +282,8 @@ class APIServerSessionsMixin:
             return web.json_response(_openai_error(f"Session already exists: {fork_id}", code="session_exists"), status=409)
 
         # Match the CLI /branch semantics: mark the original as branched, then
-        # create a child session that carries the transcript forward. This uses
-        # SessionDB's native parent_session_id/end_reason visibility model rather
-        # than inventing a parallel fork store.
+        # create a child session that carries the transcript forward using the
+        # repository-owned parent_session_id/end_reason visibility model.
         db.end_session(source_id, "branched")
         db.create_session(
             fork_id,

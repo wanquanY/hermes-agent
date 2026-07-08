@@ -90,6 +90,7 @@ from channels.platforms.api_server_support import (
     cors_middleware,
     security_headers_middleware,
 )
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +150,7 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         # resolves requests by session key, while API clients address the
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
-        self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self._session_db: Optional[Any] = None  # Lazy-init session store for session continuity
         # Concurrency cap shared across all agent-serving endpoints
         # (/v1/chat/completions, /v1/responses, /v1/runs). Read from
         # config.yaml gateway.api_server.max_concurrent_runs; 0 disables
@@ -345,17 +346,16 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
     # ------------------------------------------------------------------
 
     def _ensure_session_db(self):
-        """Lazily initialise and return the shared SessionDB instance.
+        """Lazily initialise and return the shared session store.
 
         Sessions are persisted to ``state.db`` so that ``hermes sessions list``
         shows API-server conversations alongside CLI and gateway ones.
         """
         if self._session_db is None:
             try:
-                from hermes_state import SessionDB
-                self._session_db = SessionDB()
+                self._session_db = open_cli_session_store()
             except Exception as e:
-                logger.debug("SessionDB unavailable for API server: %s", e)
+                logger.debug("Session store unavailable for API server: %s", e)
         return self._session_db
 
     # ------------------------------------------------------------------

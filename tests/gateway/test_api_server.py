@@ -3316,7 +3316,7 @@ class TestSessionIdHeader:
 
     @pytest.mark.asyncio
     async def test_provided_session_id_loads_history_from_db(self, auth_adapter):
-        """When X-Hermes-Session-Id is provided, history comes from SessionDB not request body."""
+        """When X-Hermes-Session-Id is provided, history comes from storage not request body."""
         mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}
         db_history = [
             {"role": "user", "content": "stored message 1"},
@@ -3352,14 +3352,14 @@ class TestSessionIdHeader:
 
     @pytest.mark.asyncio
     async def test_db_failure_falls_back_to_empty_history(self, auth_adapter):
-        """If SessionDB raises, history falls back to empty and request still succeeds."""
+        """If the session store raises, history falls back to empty and request still succeeds."""
         mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}
-        # Simulate DB failure: _session_db is None and SessionDB() constructor raises
+        # Simulate storage failure: _session_db is None and store construction raises.
         auth_adapter._session_db = None
         app = _create_app(auth_adapter)
         async with TestClient(TestServer(app)) as cli:
             with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run, \
-                 patch("hermes_state.SessionDB", side_effect=Exception("DB unavailable")):
+                 patch("channels.platforms.api_server.open_cli_session_store", side_effect=Exception("DB unavailable")):
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
 
                 resp = await cli.post(
