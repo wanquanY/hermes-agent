@@ -10,14 +10,18 @@ def _text(value: Any) -> str:
 
 
 def user_participant_id(user_id: str = "") -> str:
-    stable = _text(user_id) or "default"
+    stable = _text(user_id)
+    if not stable or stable == "default":
+        return "user"
     if stable.startswith("user:"):
         return stable
     return f"user:{stable}"
 
 
 def leader_participant_id(team_id: str) -> str:
-    stable = _text(team_id) or "team"
+    stable = _text(team_id)
+    if not stable:
+        raise ValueError("team_id required for leader participant")
     if stable.startswith("leader:"):
         return stable
     return f"leader:{stable}"
@@ -33,7 +37,9 @@ def member_participant_id(member_id: str) -> str:
 
 
 def agent_participant_id(agent_profile_id: str = "") -> str:
-    stable = _text(agent_profile_id) or "agent"
+    stable = _text(agent_profile_id)
+    if not stable or stable == "default":
+        return "agent"
     if stable.startswith("agent:"):
         return stable
     return f"agent:{stable}"
