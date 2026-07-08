@@ -355,10 +355,11 @@ def _row_as_conversation(row: Any, *, include_storage_metadata: bool) -> dict[st
         for source_key in (
             "finish_reason",
             "reasoning",
-            "reasoning_content",
         ):
             if row[source_key] is not None and row[source_key] != "":
                 message[source_key] = row[source_key]
+        if row["reasoning_content"] is not None:
+            message["reasoning_content"] = row["reasoning_content"]
         if row["reasoning_details"]:
             message["reasoning_details"] = _json_or(row["reasoning_details"], None)
         if row["codex_reasoning_items"]:
