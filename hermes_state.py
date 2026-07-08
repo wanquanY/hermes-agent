@@ -7,6 +7,7 @@ module path while tests and external callers are migrated.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from hermes_agent.storage.state_store import (
     DEFAULT_DB_PATH,
     SCHEMA_VERSION,
     HermesStateStore,
+    _wal_fallback_warned_paths,
     format_session_db_unavailable,
     get_last_init_error,
 )
@@ -41,6 +43,7 @@ __all__ = [
     "HermesStateStore",
     "SCHEMA_SQL",
     "SCHEMA_VERSION",
+    "_wal_fallback_warned_paths",
     "format_session_db_unavailable",
     "get_last_init_error",
 ]
