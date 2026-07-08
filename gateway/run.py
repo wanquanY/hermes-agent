@@ -76,6 +76,7 @@ from hermes_gateway.bootstrap import (
     restart_notification_pending as _restart_notification_pending_for_home,
 )
 from hermes_gateway.interrupt_control import is_control_interrupt_message as _is_control_interrupt_message
+from hermes_gateway.media_delivery import GatewayMediaDeliveryMixin
 from hermes_gateway.media_context import (
     build_document_context_note as _build_document_context_note,
     build_media_placeholder as _build_media_placeholder,
@@ -487,6 +488,7 @@ class GatewayRunner(
     GatewayProcessWatcherMixin,
     GatewayProxyModeMixin,
     GatewayInboundMediaMixin,
+    GatewayMediaDeliveryMixin,
     GatewayUpdateRestartMixin,
     GatewayVoiceMixin,
 ):
@@ -9492,119 +9494,6 @@ class GatewayRunner(
 
 
 
-    async def _deliver_media_from_response(
-        self,
-        response: str,
-        event: MessageEvent,
-        adapter,
-    ) -> None:
-        """Extract MEDIA: tags and local file paths from a response and deliver them.
-
-        Called after streaming has already sent the text to the user, so the
-        text itself is already delivered — this only handles file attachments
-        that the normal _process_message_background path would have caught.
-        """
-        from pathlib import Path
-        from urllib.parse import quote as _quote
-
-        try:
-            # Capture [[as_document]] before extract_media strips it, so the
-            # dispatch partition below can route image-extension files
-            # through send_document (preserving bytes) instead of
-            # send_multiple_images (Telegram sendPhoto recompresses to ~1280px).
-            force_document_attachments = "[[as_document]]" in response
-
-            from channels.platforms.base import BasePlatformAdapter, should_send_media_as_audio
-
-            media_files, _ = adapter.extract_media(response)
-            media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
-            _, cleaned = adapter.extract_images(response)
-            local_files, _ = adapter.extract_local_files(cleaned)
-            local_files = BasePlatformAdapter.filter_local_delivery_paths(local_files)
-
-            _thread_meta = self._thread_metadata_for_source(event.source, self._reply_anchor_for_event(event))
-
-            _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
-            _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
-
-            # Partition out images so they can be sent as a single batch
-            # (e.g. Signal's multi-attachment RPC). When [[as_document]] was
-            # set, image-extension files skip the photo path and route to
-            # send_document below — preserving original bytes.
-            image_paths: list = []
-            non_image_media: list = []
-            for media_path, is_voice in media_files:
-                ext = Path(media_path).suffix.lower()
-                if (ext in _IMAGE_EXTS
-                        and not is_voice
-                        and not force_document_attachments):
-                    image_paths.append(media_path)
-                else:
-                    non_image_media.append((media_path, is_voice))
-
-            non_image_local: list = []
-            for file_path in local_files:
-                if (Path(file_path).suffix.lower() in _IMAGE_EXTS
-                        and not force_document_attachments):
-                    image_paths.append(file_path)
-                else:
-                    non_image_local.append(file_path)
-
-            if image_paths:
-                try:
-                    images = [(f"file://{_quote(p)}", "") for p in image_paths]
-                    await adapter.send_multiple_images(
-                        chat_id=event.source.chat_id,
-                        images=images,
-                        metadata=_thread_meta,
-                    )
-                except Exception as e:
-                    logger.warning("[%s] Post-stream image batch delivery failed: %s", adapter.name, e)
-
-            for media_path, is_voice in non_image_media:
-                try:
-                    ext = Path(media_path).suffix.lower()
-                    if should_send_media_as_audio(event.source.platform, ext, is_voice=is_voice):
-                        await adapter.send_voice(
-                            chat_id=event.source.chat_id,
-                            audio_path=media_path,
-                            metadata=_thread_meta,
-                        )
-                    elif ext in _VIDEO_EXTS:
-                        await adapter.send_video(
-                            chat_id=event.source.chat_id,
-                            video_path=media_path,
-                            metadata=_thread_meta,
-                        )
-                    else:
-                        await adapter.send_document(
-                            chat_id=event.source.chat_id,
-                            file_path=media_path,
-                            metadata=_thread_meta,
-                        )
-                except Exception as e:
-                    logger.warning("[%s] Post-stream media delivery failed: %s", adapter.name, e)
-
-            for file_path in non_image_local:
-                try:
-                    ext = Path(file_path).suffix.lower()
-                    if ext in _VIDEO_EXTS:
-                        await adapter.send_video(
-                            chat_id=event.source.chat_id,
-                            video_path=file_path,
-                            metadata=_thread_meta,
-                        )
-                    else:
-                        await adapter.send_document(
-                            chat_id=event.source.chat_id,
-                            file_path=file_path,
-                            metadata=_thread_meta,
-                        )
-                except Exception as e:
-                    logger.warning("[%s] Post-stream file delivery failed: %s", adapter.name, e)
-
-        except Exception as e:
-            logger.warning("Post-stream media extraction failed: %s", e)
 
     async def _handle_rollback_command(self, event: MessageEvent) -> str:
         """Handle /rollback command — list or restore filesystem checkpoints."""
