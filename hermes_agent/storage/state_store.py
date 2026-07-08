@@ -27,6 +27,9 @@ from pathlib import Path
 from agent.memory_manager import sanitize_context
 from hermes_agent.domain.event_ledger import EventLedger
 from hermes_agent.domain.seq_allocator import ensure_session_counter
+from hermes_agent.domain.session_deletion import SessionDeletionService
+from hermes_agent.repositories.message_repo import MessageRepoImpl
+from hermes_agent.repositories.session_repo import SessionRepoImpl
 from hermes_agent.storage.fts_schema import FTS_SQL, FTS_TRIGRAM_SQL
 from hermes_agent.storage.sqlite_wal import WAL_INCOMPAT_MARKERS as _WAL_INCOMPAT_MARKERS
 from hermes_agent.storage.sqlite_wal import apply_wal_with_fallback
@@ -1766,36 +1769,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             return max(0, int(cursor.rowcount or 0))
 
         def _do(conn):
-            repaired = 0
-            repaired += affected(conn.execute(
-                """
-                DELETE FROM session_lineage
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM sessions s WHERE s.id = session_lineage.session_id
-                )
-                """
-            ))
-            repaired += affected(conn.execute(
-                """
-                UPDATE session_lineage
-                SET parent_session_id = NULL
-                WHERE parent_session_id IS NOT NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM sessions s WHERE s.id = session_lineage.parent_session_id
-                  )
-                """
-            ))
-            repaired += affected(conn.execute(
-                """
-                DELETE FROM session_branch_requests
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM sessions s WHERE s.id = session_branch_requests.source_session_id
-                )
-                   OR NOT EXISTS (
-                    SELECT 1 FROM sessions s WHERE s.id = session_branch_requests.result_session_id
-                )
-                """
-            ))
+            repaired = SessionRepoImpl(conn).repair_orphaned_branch_references()
             repaired += affected(conn.execute(
                 """
                 DELETE FROM team_capability_snapshot_bindings
@@ -5889,13 +5863,8 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
     def clear_messages(self, session_id: str) -> None:
         """Delete all messages for a session and reset its counters."""
         def _do(conn):
-            conn.execute(
-                "DELETE FROM messages WHERE session_id = ?", (session_id,)
-            )
-            conn.execute(
-                "UPDATE sessions SET message_count = 0, tool_call_count = 0, preview = '', last_active = NULL WHERE id = ?",
-                (session_id,),
-            )
+            MessageRepoImpl(conn).delete_by_session(session_id)
+            SessionRepoImpl(conn).reset_message_projection(session_id)
         self._execute_write(_do)
 
     @staticmethod
@@ -5938,40 +5907,13 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         files (``.json`` / ``.jsonl`` / ``request_dump_*``) for the deleted
         session. Returns True if the session was found and deleted.
         """
-        def _do(conn):
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE id = ?", (session_id,)
-            )
-            if cursor.fetchone()[0] == 0:
-                return False
-            # Orphan child sessions so FK constraint is satisfied
-            conn.execute(
-                "UPDATE sessions SET parent_session_id = NULL "
-                "WHERE parent_session_id = ?",
-                (session_id,),
-            )
-            conn.execute(
-                "UPDATE session_lineage SET parent_session_id = NULL "
-                "WHERE parent_session_id = ?",
-                (session_id,),
-            )
-            conn.execute(
-                "DELETE FROM session_branch_requests "
-                "WHERE source_session_id = ? OR result_session_id = ?",
-                (session_id, session_id),
-            )
-            conn.execute(
-                "DELETE FROM session_lineage WHERE session_id = ?",
-                (session_id,),
-            )
-            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-            return True
-
-        deleted = self._execute_write(_do)
-        if deleted:
-            self._remove_session_files(sessions_dir, session_id)
-        return deleted
+        stable = str(session_id or "").strip()
+        if not stable:
+            return False
+        return SessionDeletionService(self._conn).delete(
+            stable,
+            sessions_dir=sessions_dir,
+        ).session_deleted
 
     def prune_sessions(
         self,
@@ -5991,58 +5933,26 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         cutoff = time.time() - (older_than_days * 86400)
         removed_ids: list[str] = []
 
-        def _do(conn):
-            if source:
-                cursor = conn.execute(
-                    """SELECT id FROM sessions
-                       WHERE started_at < ? AND ended_at IS NOT NULL AND source = ?""",
-                    (cutoff, source),
-                )
-            else:
-                cursor = conn.execute(
-                    "SELECT id FROM sessions WHERE started_at < ? AND ended_at IS NOT NULL",
-                    (cutoff,),
-                )
-            session_ids = {row["id"] for row in cursor.fetchall()}
-
-            if not session_ids:
-                return 0
-
-            # Orphan any sessions whose parent is about to be deleted
-            placeholders = ",".join("?" * len(session_ids))
-            conn.execute(
-                f"UPDATE sessions SET parent_session_id = NULL "
-                f"WHERE parent_session_id IN ({placeholders})",
-                list(session_ids),
+        if source:
+            cursor = self._conn.execute(
+                """SELECT id FROM sessions
+                   WHERE started_at < ? AND ended_at IS NOT NULL AND source = ?""",
+                (cutoff, source),
             )
-            conn.execute(
-                f"UPDATE session_lineage SET parent_session_id = NULL "
-                f"WHERE parent_session_id IN ({placeholders})",
-                list(session_ids),
+        else:
+            cursor = self._conn.execute(
+                "SELECT id FROM sessions WHERE started_at < ? AND ended_at IS NOT NULL",
+                (cutoff,),
             )
-            conn.execute(
-                f"DELETE FROM session_branch_requests "
-                f"WHERE source_session_id IN ({placeholders}) "
-                f"OR result_session_id IN ({placeholders})",
-                list(session_ids) + list(session_ids),
-            )
-            conn.execute(
-                f"DELETE FROM session_lineage "
-                f"WHERE session_id IN ({placeholders})",
-                list(session_ids),
-            )
-
-            for sid in session_ids:
-                conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
-                conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
-                removed_ids.append(sid)
-            return len(session_ids)
-
-        count = self._execute_write(_do)
-        # Clean up on-disk files outside the DB transaction
+        removed_ids = [str(row["id"] or "") for row in cursor.fetchall() if str(row["id"] or "")]
+        if not removed_ids:
+            return 0
+        deleted = 0
+        deletion = SessionDeletionService(self._conn)
         for sid in removed_ids:
-            self._remove_session_files(sessions_dir, sid)
-        return count
+            if deletion.delete(sid, sessions_dir=sessions_dir).session_deleted:
+                deleted += 1
+        return deleted
 
     # ── Meta key/value (for scheduler bookkeeping) ──
 

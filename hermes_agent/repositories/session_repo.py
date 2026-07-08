@@ -215,6 +215,18 @@ class SessionRepo(Protocol):
 
     def ensure_runtime_session(self, session_id: str, *, started_at: float | None = None) -> bool: ...
 
+    def exists(self, session_id: str) -> bool: ...
+
+    def orphan_child_references(self, parent_session_id: str) -> None: ...
+
+    def delete_branch_references(self, session_id: str) -> None: ...
+
+    def repair_orphaned_branch_references(self) -> int: ...
+
+    def delete_row(self, session_id: str) -> bool: ...
+
+    def delete_index(self, session_id: str) -> bool: ...
+
     def create_materialized_branch_session(self, spec: MaterializedBranchSessionSpec) -> bool: ...
 
     def record_branch_lineage(self, spec: BranchLineageSpec) -> None: ...
@@ -232,6 +244,8 @@ class SessionRepo(Protocol):
         session_id: str,
         projection: SessionMessageSnapshotProjection,
     ) -> None: ...
+
+    def reset_message_projection(self, session_id: str) -> None: ...
 
     def project_run_state(self, projection: SessionRunProjection) -> None: ...
 
@@ -624,6 +638,110 @@ class SessionRepoImpl:
         )
         return int(cursor.rowcount or 0) > 0
 
+    def exists(self, session_id: str) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable or "id" not in self._session_columns:
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM sessions WHERE id = ? LIMIT 1",
+            (stable,),
+        ).fetchone()
+        return row is not None
+
+    def orphan_child_references(self, parent_session_id: str) -> None:
+        stable = str(parent_session_id or "").strip()
+        if not stable:
+            return
+        if "parent_session_id" in self._session_columns:
+            self._conn.execute(
+                "UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?",
+                (stable,),
+            )
+        if _table_exists(self._conn, "session_lineage") and _column_exists(
+            self._conn,
+            "session_lineage",
+            "parent_session_id",
+        ):
+            self._conn.execute(
+                "UPDATE session_lineage SET parent_session_id = NULL WHERE parent_session_id = ?",
+                (stable,),
+            )
+
+    def delete_branch_references(self, session_id: str) -> None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return
+        if _table_exists(self._conn, "session_branch_requests"):
+            self._conn.execute(
+                "DELETE FROM session_branch_requests "
+                "WHERE source_session_id = ? OR result_session_id = ?",
+                (stable, stable),
+            )
+        if _table_exists(self._conn, "session_lineage"):
+            self._conn.execute("DELETE FROM session_lineage WHERE session_id = ?", (stable,))
+
+    def repair_orphaned_branch_references(self) -> int:
+        repaired = 0
+        if _table_exists(self._conn, "session_lineage"):
+            repaired += _affected(
+                self._conn.execute(
+                    """
+                    DELETE FROM session_lineage
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM sessions s WHERE s.id = session_lineage.session_id
+                    )
+                    """
+                )
+            )
+            if _column_exists(self._conn, "session_lineage", "parent_session_id"):
+                repaired += _affected(
+                    self._conn.execute(
+                        """
+                        UPDATE session_lineage
+                        SET parent_session_id = NULL
+                        WHERE parent_session_id IS NOT NULL
+                          AND NOT EXISTS (
+                              SELECT 1 FROM sessions s
+                              WHERE s.id = session_lineage.parent_session_id
+                          )
+                        """
+                    )
+                )
+        if _table_exists(self._conn, "session_branch_requests"):
+            repaired += _affected(
+                self._conn.execute(
+                    """
+                    DELETE FROM session_branch_requests
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM sessions s
+                        WHERE s.id = session_branch_requests.source_session_id
+                    )
+                       OR NOT EXISTS (
+                        SELECT 1 FROM sessions s
+                        WHERE s.id = session_branch_requests.result_session_id
+                    )
+                    """
+                )
+            )
+        return repaired
+
+    def delete_row(self, session_id: str) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return False
+        cursor = self._conn.execute("DELETE FROM sessions WHERE id = ?", (stable,))
+        return int(cursor.rowcount or 0) > 0
+
+    def delete_index(self, session_id: str) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable or not _table_exists(self._conn, "session_index"):
+            return False
+        cursor = self._conn.execute(
+            "DELETE FROM session_index WHERE session_id = ?",
+            (stable,),
+        )
+        return int(cursor.rowcount or 0) > 0
+
     def create_materialized_branch_session(self, spec: MaterializedBranchSessionSpec) -> bool:
         stable = str(spec.new_session_id or "").strip()
         if not stable:
@@ -791,6 +909,33 @@ class SessionRepoImpl:
             ),
         )
         self._refresh_index_from_session(stable, timestamp=last_message_ts)
+
+    def reset_message_projection(self, session_id: str) -> None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required for reset_message_projection")
+        self._conn.execute(
+            """
+            UPDATE sessions
+               SET message_count = 0,
+                   tool_call_count = 0,
+                   preview = '',
+                   last_active = NULL
+             WHERE id = ?
+            """,
+            (stable,),
+        )
+        self._conn.execute(
+            """
+            UPDATE session_index
+               SET preview = '',
+                   message_count = 0,
+                   last_activity = NULL,
+                   updated_at = ?
+             WHERE session_id = ?
+            """,
+            (time.time(), stable),
+        )
 
     def project_run_state(self, projection: SessionRunProjection) -> None:
         sid = str(projection.session_id or "").strip()
@@ -1251,6 +1396,18 @@ def _table_columns(conn: RepositoryConnection, table_name: str) -> set[str]:
         }
     except Exception:
         return set()
+
+
+def _table_exists(conn: RepositoryConnection, table_name: str) -> bool:
+    return bool(_table_columns(conn, table_name))
+
+
+def _column_exists(conn: RepositoryConnection, table_name: str, column_name: str) -> bool:
+    return column_name in _table_columns(conn, table_name)
+
+
+def _affected(cursor: Any) -> int:
+    return max(0, int(getattr(cursor, "rowcount", 0) or 0))
 
 
 def _row_text(row: Any, key: str, index: int) -> str:

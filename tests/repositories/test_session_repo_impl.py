@@ -82,7 +82,7 @@ def _make_conn() -> sqlite3.Connection:
         );
         CREATE TABLE session_lineage (
             session_id TEXT PRIMARY KEY,
-            parent_session_id TEXT NOT NULL,
+            parent_session_id TEXT,
             root_session_id TEXT NOT NULL,
             branch_from_message_row_id INTEGER NOT NULL,
             branch_from_turn_id TEXT,
@@ -534,6 +534,50 @@ def test_materialized_branch_session_lineage_and_request_are_session_owned():
     }
 
 
+def test_repair_orphaned_branch_references_is_session_owned():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="live", source="test"))
+    repo.create(SessionSpec(session_id="child", source="test"))
+    conn.execute(
+        """
+        INSERT INTO session_lineage (
+            session_id, parent_session_id, root_session_id,
+            branch_from_message_row_id, branch_origin, branch_mode,
+            branch_depth, created_at
+        ) VALUES ('missing', 'live', 'live', 1, 'user_message_action', 'materialized_prefix', 1, 1)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO session_lineage (
+            session_id, parent_session_id, root_session_id,
+            branch_from_message_row_id, branch_origin, branch_mode,
+            branch_depth, created_at
+        ) VALUES ('child', 'missing-parent', 'live', 1, 'user_message_action', 'materialized_prefix', 1, 1)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO session_branch_requests (
+            idempotency_key, source_session_id, branch_fingerprint,
+            result_session_id, created_at
+        ) VALUES ('bad', 'live', 'missing-result', 'fp', 1)
+        """
+    )
+
+    assert repo.repair_orphaned_branch_references() == 3
+
+    assert conn.execute(
+        "SELECT 1 FROM session_lineage WHERE session_id = 'missing'"
+    ).fetchone() is None
+    child = conn.execute(
+        "SELECT parent_session_id FROM session_lineage WHERE session_id = 'child'"
+    ).fetchone()
+    assert child["parent_session_id"] is None
+    assert conn.execute("SELECT COUNT(*) FROM session_branch_requests").fetchone()[0] == 0
+
+
 def test_record_message_append_updates_session_and_index_projection():
     conn = _make_conn()
     repo = SessionRepoImpl(conn)
@@ -609,6 +653,49 @@ def test_replace_message_projection_preserves_user_title_source():
     assert session_row["display_title"] == "Pinned title"
     assert session_row["display_title_source"] == "user"
     assert session_row["last_active"] == 456.0
+
+
+def test_reset_message_projection_clears_session_and_index_counters():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="s1", source="test", title="Original"))
+    repo.record_message_append(
+        "s1",
+        SessionMessageAppendProjection(
+            timestamp=123.0,
+            tool_call_count=2,
+            user_preview="hello preview",
+            user_display_title="hello title",
+        ),
+    )
+
+    repo.reset_message_projection("s1")
+
+    session_row = conn.execute(
+        """
+        SELECT message_count, tool_call_count, preview, last_active
+          FROM sessions
+         WHERE id = 's1'
+        """
+    ).fetchone()
+    assert dict(session_row) == {
+        "message_count": 0,
+        "tool_call_count": 0,
+        "preview": "",
+        "last_active": None,
+    }
+    index_row = conn.execute(
+        """
+        SELECT preview, message_count, last_activity
+          FROM session_index
+         WHERE session_id = 's1'
+        """
+    ).fetchone()
+    assert dict(index_row) == {
+        "preview": "",
+        "message_count": 0,
+        "last_activity": None,
+    }
 
 
 def test_session_metadata_updates_are_owned_by_session_repo():
