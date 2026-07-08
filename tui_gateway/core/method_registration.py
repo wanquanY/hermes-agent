@@ -6,8 +6,6 @@ import importlib
 import sys
 from typing import Any
 
-from dovie_extension import load_extension
-
 MODULES = (
     "session",
     "session_history",
@@ -57,8 +55,6 @@ def register_method_modules(target: dict[str, Any]) -> None:
             importlib.reload(sys.modules[name])
         else:
             importlib.import_module(name)
-
-    load_extension().register_gateway_methods(target)
 
     from tui_gateway.methods import prompt, slash, system
 

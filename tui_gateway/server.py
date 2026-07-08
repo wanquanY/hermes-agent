@@ -12,11 +12,16 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Iterator, MutableMapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
+from hermes_agent.gateway.auth import requires_permission
+from hermes_agent.gateway import pipeline as _gateway_pipeline
+from hermes_agent.gateway.pipeline import AllowAllResolver, LegacyJsonRpcFrame
+from hermes_agent.gateway.registry import MethodRegistry, RegistryError
 from hermes_constants import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
@@ -70,7 +75,6 @@ from tui_gateway.services.transcript_messages import (
     history_to_messages as _history_to_messages,
     tool_context as _tool_ctx,
 )
-from dovie_extension import load_extension
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +178,6 @@ except Exception:
 from tui_gateway.render import make_stream_renderer, render_diff, render_message
 
 _sessions: dict[str, dict] = {}
-_methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _answers: dict[str, str] = {}
 _db = None
@@ -289,6 +292,116 @@ _current_method: contextvars.ContextVar[str] = contextvars.ContextVar(
     "tui_gateway_current_method",
     default="",
 )
+_METHOD_REGISTRY = MethodRegistry()
+_GATEWAY_PERMISSION_RESOLVER = AllowAllResolver()
+
+
+def _permission_for_gateway_method(name: str) -> str:
+    return f"gateway.{str(name or '').strip() or 'unknown'}"
+
+
+def _read_only_gateway_method(name: str) -> bool:
+    return str(name or "").strip() in _READ_ONLY_DB_METHODS
+
+
+def _adapt_legacy_method(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+    method_name = str(name or "").strip()
+
+    @requires_permission(
+        _permission_for_gateway_method(method_name),
+        read_only=_read_only_gateway_method(method_name),
+    )
+    def _handler(params: dict[str, Any], ctx) -> LegacyJsonRpcFrame:
+        profile_token = _enter_profile_context(_profile_context_for_params(params))
+        method_token = _current_method.set(method_name)
+        try:
+            return LegacyJsonRpcFrame(fn(ctx.request_id, params))
+        finally:
+            _current_method.reset(method_token)
+            _leave_profile_context(profile_token)
+
+    setattr(_handler, "__legacy_jsonrpc_handler__", fn)
+    setattr(_handler, "__module__", getattr(fn, "__module__", __name__))
+    setattr(_handler, "__qualname__", getattr(fn, "__qualname__", method_name))
+    setattr(_handler, "__name__", getattr(fn, "__name__", method_name.replace(".", "_")))
+    setattr(_handler, "__legacy_gateway_raw_params__", True)
+    return _handler
+
+
+def _register_legacy_method(
+    name: str,
+    fn: Callable[..., Any],
+    *,
+    replace: bool = False,
+) -> None:
+    handler = _adapt_legacy_method(name, fn)
+    if replace:
+        _METHOD_REGISTRY.replace(name, handler)
+        return
+    try:
+        _METHOD_REGISTRY.register(name, handler)
+    except RegistryError:
+        pass
+
+
+class _RegistryMethodView(MutableMapping[str, Callable[..., Any]]):
+    """Compatibility mapping backed by the single gateway registry."""
+
+    def __getitem__(self, key: str) -> Callable[..., Any]:
+        entry = _METHOD_REGISTRY.get(key)
+        if entry is None:
+            raise KeyError(key)
+        legacy = getattr(entry.handler, "__legacy_jsonrpc_handler__", None)
+        if callable(legacy):
+            return legacy
+
+        def _call(rid: Any, params: dict | None = None) -> dict:
+            return _gateway_pipeline.dispatch(
+                _METHOD_REGISTRY,
+                {"id": rid, "method": key, "params": params or {}},
+                resolver=_GATEWAY_PERMISSION_RESOLVER,
+            )
+
+        return _call
+
+    def __setitem__(self, key: str, value: Callable[..., Any]) -> None:
+        _register_legacy_method(key, value, replace=True)
+
+    def __delitem__(self, key: str) -> None:
+        if key not in _METHOD_REGISTRY:
+            raise KeyError(key)
+        _METHOD_REGISTRY.unregister(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(_METHOD_REGISTRY.names())
+
+    def __len__(self) -> int:
+        return len(_METHOD_REGISTRY)
+
+    def clear(self) -> None:
+        _METHOD_REGISTRY.clear()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def setdefault(
+        self,
+        key: str,
+        default: Callable[..., Any] | None = None,
+    ) -> Callable[..., Any] | None:
+        current = self.get(key)
+        if current is not None:
+            return current
+        if default is not None:
+            self[key] = default
+        return default
+
+
+_methods: MutableMapping[str, Callable[..., Any]] = _RegistryMethodView()
+
 # ── Async RPC dispatch (#12546) ──────────────────────────────────────
 # A handful of handlers block the dispatcher loop in entry.py for seconds
 # to minutes (slash.exec, cli.exec, shell.exec, session.resume,
@@ -333,9 +446,6 @@ sys.stdout = sys.stderr
 # contextvar or session. Stream resolved through a lambda so runtime monkey-
 # patches of `_real_stdout` (used extensively in tests) still land correctly.
 _stdio_transport = StdioTransport(lambda: _real_stdout, _stdout_lock)
-
-_DOVIE_EXTENSION = load_extension()
-_EXTRACTED_METHOD_OVERRIDES = _DOVIE_EXTENSION.gateway_method_overrides()
 
 
 def _load_busy_input_mode() -> str:
@@ -959,10 +1069,10 @@ def _err(rid, code: int, msg: str) -> dict:
 def method(name: str):
     def dec(fn):
         owner_module = str(getattr(fn, "__module__", ""))
-        if owner_module.startswith(("tui_gateway.methods.", "hermes_team_mission.gateway.")):
-            _methods[name] = fn
-        else:
-            _methods.setdefault(name, fn)
+        replace = owner_module.startswith(
+            ("tui_gateway.methods.", "hermes_team_mission.gateway.")
+        )
+        _register_legacy_method(name, fn, replace=replace)
         return fn
 
     return dec
@@ -992,26 +1102,16 @@ def handle_request(req: dict) -> dict | None:
     if isinstance(normalized, dict):
         return normalized
 
-    rid, method, params = normalized
-    fn = _methods.get(method)
-    if (
-        fn is None
-        or (
-            method in _EXTRACTED_METHOD_OVERRIDES
-            and str(getattr(fn, "__module__", "")) == __name__
-        )
-    ):
+    rid, method, _params = normalized
+    if _METHOD_REGISTRY.get(method) is None:
         _register_extracted_method_modules()
-        fn = _methods.get(method)
-    if not fn:
+    if _METHOD_REGISTRY.get(method) is None:
         return _err(rid, -32601, f"unknown method: {method}")
-    profile_token = _enter_profile_context(_profile_context_for_params(params))
-    method_token = _current_method.set(method)
-    try:
-        return fn(rid, params)
-    finally:
-        _current_method.reset(method_token)
-        _leave_profile_context(profile_token)
+    return _gateway_pipeline.dispatch(
+        _METHOD_REGISTRY,
+        req,
+        resolver=_GATEWAY_PERMISSION_RESOLVER,
+    )
 
 
 def _push_profile_context_for_request(req: dict) -> Any:
@@ -1668,7 +1768,6 @@ def _register_extracted_method_modules() -> None:
     from tui_gateway.core.method_registration import register_method_modules
 
     register_method_modules(globals())
-    _DOVIE_EXTENSION.register_gateway_methods(_methods)
     integrations = sys.modules.get("tui_gateway.methods.integrations")
     if integrations is not None:
         for name, value in injected_integrations.items():

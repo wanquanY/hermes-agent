@@ -204,7 +204,17 @@ def _verdict_for_phase(phase: str) -> dict:
 
 
 def test_p3_verdict_defines_gateway_registry_structure_gates() -> None:
-    verdict = _verdict_for_phase("P3")
+    result = subprocess.run(
+        [sys.executable, str(VERDICT), "--phase", "P3", "--json"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    verdict = json.loads(result.stdout)
+    assert verdict["phase"] == "P3"
+    assert verdict["status"] == "pass"
     checks = {check["id"]: check for check in verdict["checks"]}
     for gate_id in (
         "p3:no_method_modules",
@@ -212,6 +222,7 @@ def test_p3_verdict_defines_gateway_registry_structure_gates() -> None:
         "p3:single_dispatch_registry",
     ):
         assert gate_id in checks
+        assert checks[gate_id]["ok"]
     assert verdict["next_required_human_signoff"] == (
         "docs/audits/zero_debt_phase_p3_human_signoff.md"
     )

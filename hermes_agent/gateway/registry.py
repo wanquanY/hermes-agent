@@ -56,6 +56,32 @@ class MethodRegistry:
         self._by_name[normalized] = entry
         return entry
 
+    def replace(self, name: str, handler: Callable[..., Any]) -> MethodRegistration:
+        """Register or replace a method in the single registry.
+
+        This path is reserved for module reload and test injection. Normal
+        production registration should use ``register()`` so duplicate owners
+        still fail fast.
+        """
+        normalized = _normalize_method_name(name)
+        if not normalized:
+            raise RegistryError("method name is required")
+        perm = get_permission(handler)
+        if perm is None:
+            raise RegistryError(
+                f"method {normalized!r} handler {handler.__qualname__} is "
+                "missing @requires_permission — spec §J8 forbids ambient authority"
+            )
+        entry = MethodRegistration(name=normalized, handler=handler, permission=perm)
+        self._by_name[normalized] = entry
+        return entry
+
+    def unregister(self, name: str) -> None:
+        self._by_name.pop(_normalize_method_name(name), None)
+
+    def clear(self) -> None:
+        self._by_name.clear()
+
     def get(self, name: str) -> MethodRegistration | None:
         return self._by_name.get(_normalize_method_name(name))
 

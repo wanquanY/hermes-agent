@@ -162,6 +162,16 @@ def _db_method(db: Any, name: str):
     return method if callable(method) else None
 
 
+def _has_run_state_schema(conn: Any) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'runs'"
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
+
+
 def _db_label(db: Any = None) -> str:
     value = getattr(db, "db_path", "") if db is not None else ""
     return str(value or "")
@@ -2270,7 +2280,7 @@ def terminate_run(
     atomic_result = None
     if db is not None:
         conn = getattr(db, "_conn", None)
-        if conn is not None:
+        if conn is not None and _has_run_state_schema(conn):
             try:
                 from hermes_agent.domain.run_terminator import (
                     TerminateCause,
@@ -2699,7 +2709,15 @@ def subscribe_session_with_id(
             _subscription_ids_by_transport[transport].add(normalized_subscription_id)
             if run_event_read_model_for_db(db) is not None:
                 _start_subscription_poller_locked()
-        memory_events = list(_events_by_session.get(_memory_session_key(stable, db), ()))
+        memory_key = _memory_session_key(stable, db)
+        memory_events = list(_events_by_session.get(memory_key, ()))
+        if stable:
+            scoped_suffix = f"\x1f{stable}"
+            for key, scoped_events in _events_by_session.items():
+                if key == memory_key:
+                    continue
+                if key == stable or str(key).endswith(scoped_suffix):
+                    memory_events.extend(scoped_events)
     events: list[dict[str, Any]] = []
     if run_event_read_model_for_db(db) is not None:
         try:
@@ -2841,6 +2859,12 @@ def get_run(run_id: str, db: Any = None) -> dict[str, Any] | None:
         state = _run_state_by_id.get(_memory_run_key(normalized, db))
         if state is None:
             state = _run_state_by_id.get(normalized)
+        if state is None:
+            scoped_suffix = f"\x1f{normalized}"
+            for key, candidate in _run_state_by_id.items():
+                if str(key).endswith(scoped_suffix):
+                    state = candidate
+                    break
         memory = dict(state) if state else None
     if not memory:
         return persisted if isinstance(persisted, dict) else None

@@ -123,6 +123,13 @@ class DispatchContext:
     caller_scope: str = ""
 
 
+@dataclass(frozen=True)
+class LegacyJsonRpcFrame:
+    """Full JSON-RPC envelope returned by a legacy gateway handler."""
+
+    frame: dict[str, Any]
+
+
 class PermissionResolver:
     """Callback plugin — resolves whether the caller may invoke the method."""
 
@@ -190,8 +197,10 @@ def dispatch(
             method=entry.name,
         )
 
+    handler_params = raw_params if getattr(entry.handler, "__legacy_gateway_raw_params__", False) else params
+
     try:
-        result = entry.handler(params, ctx)
+        result = entry.handler(handler_params, ctx)
     except MethodError as exc:
         # Handler classified the failure explicitly (spec §J9 ErrorCode).
         return err(
@@ -202,8 +211,12 @@ def dispatch(
             **(exc.details or {}),
         )
     except TypeError as exc:
+        if getattr(entry.handler, "__legacy_gateway_raw_params__", False):
+            raise
         return err(request_id, ErrorCode.INVALID_PARAMS, str(exc), method=entry.name)
     except Exception as exc:  # spec §J11 — bubble up, but log via caller
+        if getattr(entry.handler, "__legacy_gateway_raw_params__", False):
+            raise
         return err(
             request_id,
             ErrorCode.UPSTREAM_FAILURE,
@@ -213,6 +226,8 @@ def dispatch(
 
     # Symmetric alias fold on the response side: whatever the legacy
     # handler happens to emit, the wire result exposes ``session_id`` only.
+    if isinstance(result, LegacyJsonRpcFrame):
+        return result.frame
     return {"id": request_id, "result": fold_response_aliases(result)}
 
 
