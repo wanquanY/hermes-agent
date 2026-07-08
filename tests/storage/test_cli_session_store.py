@@ -81,3 +81,33 @@ def test_cli_session_store_meta_and_delete(tmp_path):
     assert json.loads(store.get_session("s1")["model_config"] or "{}") == {}
     assert store.delete_session("s1") is True
     assert store.get_session("s1") is None
+
+
+def test_cli_session_store_replaces_and_searches_messages(tmp_path):
+    store = open_cli_session_store(tmp_path / "state.db")
+
+    store.create_session("acp-1", "acp", model_config={"cwd": "/work"})
+    store.replace_messages(
+        "acp-1",
+        [
+            {"role": "user", "content": "configure nginx for ACP"},
+            {
+                "role": "assistant",
+                "content": "I'll inspect the config",
+                "reasoning": "needs file lookup",
+                "tool_calls": [{"function": {"name": "read_file"}}],
+            },
+        ],
+    )
+
+    replay = store.get_messages_as_conversation("acp-1")
+    assert [message["role"] for message in replay] == ["user", "assistant"]
+    assert replay[1]["reasoning"] == "needs file lookup"
+    assert replay[1]["tool_calls"] == [{"function": {"name": "read_file"}}]
+    assert store.search_sessions(source="acp")[0]["id"] == "acp-1"
+    assert store.search_messages("nginx", source_filter=["acp"])[0]["session_id"] == "acp-1"
+
+    store.replace_messages("acp-1", [{"role": "user", "content": "replacement only"}])
+    assert [message["content"] for message in store.get_messages_as_conversation("acp-1")] == [
+        "replacement only"
+    ]

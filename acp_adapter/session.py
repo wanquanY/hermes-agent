@@ -1,10 +1,10 @@
 """ACP session manager — maps ACP sessions to Hermes AIAgent instances.
 
-Sessions are persisted to the shared SessionDB (``~/.hermes/state.db``) so they
-survive process restarts and appear in ``session_search``.  When the editor
-reconnects after idle/restart, the ``load_session`` / ``resume_session`` calls
-find the persisted session in the database and restore the full conversation
-history.
+Sessions are persisted to the shared SQLite session store
+(``~/.hermes/state.db``) so they survive process restarts and appear in
+``session_search``.  When the editor reconnects after idle/restart, the
+``load_session`` / ``resume_session`` calls find the persisted session in the
+database and restore the full conversation history.
 """
 from __future__ import annotations
 
@@ -187,7 +187,7 @@ class SessionManager:
     """Thread-safe manager for ACP sessions backed by Hermes AIAgent instances.
 
     Sessions are held in-memory for fast access **and** persisted to the
-    shared SessionDB so they survive process restarts and are searchable
+    shared SQLite session store so they survive process restarts and are searchable
     via ``session_search``.
     """
 
@@ -197,8 +197,8 @@ class SessionManager:
             agent_factory: Optional callable that creates an AIAgent-like object.
                            Used by tests. When omitted, a real AIAgent is created
                            using the current Hermes runtime provider configuration.
-            db:            Optional SessionDB instance. When omitted, the default
-                           SessionDB (``~/.hermes/state.db``) is lazily created.
+            db:            Optional session store. When omitted, the default
+                           SQLite store (``~/.hermes/state.db``) is lazily created.
         """
         self._sessions: Dict[str, SessionState] = {}
         self._lock = Lock()
@@ -396,12 +396,12 @@ class SessionManager:
         if state is not None:
             self._persist(state)
 
-    # ---- persistence via SessionDB ------------------------------------------
+    # ---- persistence via shared SQLite session store -------------------------
 
     def _get_db(self):
-        """Lazily initialise and return the SessionDB instance.
+        """Lazily initialise and return the shared session store.
 
-        Returns ``None`` if the DB is unavailable (e.g. import error in a
+        Returns ``None`` if the store is unavailable (e.g. import error in a
         minimal test environment).
 
         Note: we resolve ``HERMES_HOME`` dynamically rather than relying on
@@ -412,12 +412,13 @@ class SessionManager:
         if self._db_instance is not None:
             return self._db_instance
         try:
-            from hermes_state import SessionDB
+            from hermes_agent.storage.cli_session_store import open_cli_session_store
+
             hermes_home = get_hermes_home()
-            self._db_instance = SessionDB(db_path=hermes_home / "state.db")
+            self._db_instance = open_cli_session_store(hermes_home / "state.db")
             return self._db_instance
         except Exception:
-            logger.debug("SessionDB unavailable for ACP persistence", exc_info=True)
+            logger.debug("Session store unavailable for ACP persistence", exc_info=True)
             return None
 
     def _persist(self, state: SessionState) -> None:

@@ -17,6 +17,7 @@ from typing import Any
 
 from agent.memory_manager import sanitize_context
 from hermes_agent.read_models.message_history import MessageHistoryReadModel
+from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.repositories.session_repo import (
     SessionRepoImpl,
     SessionSpec,
@@ -38,6 +39,7 @@ class CliSessionStore:
         self._lock = lock_for_connection(conn)
         self._sessions = SessionRepoImpl(conn)
         self._messages = MessageHistoryReadModel(conn)
+        self._recall = SessionRecallReadModel(conn)
 
     def close(self) -> None:
         self._conn.close()
@@ -136,28 +138,60 @@ class CliSessionStore:
     def list_sessions_rich(
         self,
         *,
+        source: str | None = None,
         limit: int = 20,
+        offset: int = 0,
         exclude_sources: list[str] | None = None,
+        include_children: bool = False,
         order_by_last_active: bool = True,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        return self._recall.list_sessions_rich(
+            source=source,
+            exclude_sources=exclude_sources,
+            limit=limit,
+            offset=offset,
+            include_children=include_children,
+            order_by_last_active=order_by_last_active,
+            **kwargs,
+        )
+
+    def search_sessions(
+        self,
+        source: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
         **_kwargs: Any,
     ) -> list[dict[str, Any]]:
-        where: list[str] = ["(parent_session_id IS NULL OR parent_session_id = '')"]
-        params: list[Any] = []
-        if exclude_sources:
-            placeholders = ",".join("?" for _ in exclude_sources)
-            where.append(f"source NOT IN ({placeholders})")
-            params.extend(str(value) for value in exclude_sources)
-        order = (
-            "COALESCE(last_active, updated_at, started_at) DESC, started_at DESC, id DESC"
-            if order_by_last_active
-            else "started_at DESC, id DESC"
+        return self._recall.list_sessions_rich(
+            source=source,
+            limit=limit,
+            offset=offset,
+            include_children=True,
+            order_by_last_active=True,
         )
-        rows = self._conn.execute(
-            f"SELECT *, COALESCE(last_active, updated_at, started_at) AS last_active "
-            f"FROM sessions WHERE {' AND '.join(where)} ORDER BY {order} LIMIT ?",
-            params + [max(1, min(int(limit or 20), 100))],
-        ).fetchall()
-        return [dict(row) for row in rows]
+
+    def search_messages(
+        self,
+        query: str,
+        source_filter: list[str] | None = None,
+        exclude_sources: list[str] | None = None,
+        role_filter: list[str] | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        sort: str | None = None,
+        include_inactive: bool = False,
+    ) -> list[dict[str, Any]]:
+        return self._recall.search_messages(
+            query,
+            source_filter=source_filter,
+            exclude_sources=exclude_sources,
+            role_filter=role_filter,
+            limit=limit,
+            offset=offset,
+            sort=sort,
+            include_inactive=include_inactive,
+        )
 
     def get_messages(self, session_id: str, include_inactive: bool = False) -> list[dict[str, Any]]:
         active_clause = "" if include_inactive else " AND active = 1"
@@ -274,6 +308,96 @@ class CliSessionStore:
             )
             self._conn.commit()
         return message_id
+
+    def replace_messages(self, session_id: str, messages: list[dict[str, Any]]) -> None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required")
+        now_ts = time.time()
+        total_messages = 0
+        total_tool_calls = 0
+        first_user_preview = ""
+        first_user_display_title = ""
+        last_message_ts: float | None = None
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("DELETE FROM messages WHERE session_id = ?", (stable,))
+                for msg in messages:
+                    role = str(msg.get("role") or "unknown")
+                    tool_calls = msg.get("tool_calls")
+                    content = msg.get("content")
+                    message_ts = now_ts
+                    self._conn.execute(
+                        """INSERT INTO messages (
+                            session_id, role, content, participant_id, tool_call_id,
+                            tool_calls, tool_name, timestamp, token_count, finish_reason,
+                            reasoning, reasoning_content, reasoning_details,
+                            codex_reasoning_items, codex_message_items,
+                            platform_message_id, metadata_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            stable,
+                            role,
+                            _encode_content(content),
+                            str(msg.get("participant_id") or ""),
+                            msg.get("tool_call_id"),
+                            _json_or_none(tool_calls),
+                            msg.get("tool_name") or msg.get("name"),
+                            message_ts,
+                            msg.get("token_count"),
+                            msg.get("finish_reason"),
+                            msg.get("reasoning") if role == "assistant" else None,
+                            msg.get("reasoning_content") if role == "assistant" else None,
+                            _json_or_none(msg.get("reasoning_details") if role == "assistant" else None),
+                            _json_or_none(msg.get("codex_reasoning_items") if role == "assistant" else None),
+                            _json_or_none(msg.get("codex_message_items") if role == "assistant" else None),
+                            msg.get("platform_message_id") or msg.get("message_id"),
+                            _json_or_none(msg.get("metadata")),
+                        ),
+                    )
+                    total_messages += 1
+                    total_tool_calls += _tool_call_count(tool_calls)
+                    if role == "user" and not first_user_preview:
+                        first_user_preview = _message_preview_text(content)
+                        first_user_display_title = _message_display_title_text(content)
+                    last_message_ts = message_ts
+                    now_ts += 1e-6
+                self._conn.execute(
+                    """
+                    UPDATE sessions
+                       SET message_count = ?,
+                           tool_call_count = ?,
+                           preview = ?,
+                           display_title = CASE
+                               WHEN COALESCE(display_title_source, '') = 'user'
+                                   THEN COALESCE(display_title, '')
+                               ELSE ?
+                           END,
+                           display_title_source = CASE
+                               WHEN COALESCE(display_title_source, '') = 'user' THEN 'user'
+                               WHEN ? != '' THEN 'first_user_message'
+                               ELSE ''
+                           END,
+                           last_active = ?,
+                           updated_at = ?
+                     WHERE id = ?
+                    """,
+                    (
+                        total_messages,
+                        total_tool_calls,
+                        first_user_preview,
+                        first_user_display_title,
+                        first_user_display_title,
+                        last_message_ts,
+                        time.time(),
+                        stable,
+                    ),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def update_token_counts(self, session_id: str, **counts: Any) -> None:
         columns = {
