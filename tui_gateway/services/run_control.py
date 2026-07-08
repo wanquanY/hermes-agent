@@ -175,6 +175,28 @@ def _db_label(db: Any = None) -> str:
     return str(value or "")
 
 
+def _memory_scope_key(db: Any = None) -> str:
+    """Return the control-plane memory scope for a concrete DB/profile.
+
+    Live run ids are not globally unique across profile homes. Persisted state
+    is scoped by SQLite DB, so the in-process mirror must use the same boundary
+    instead of keying by bare run_id.
+    """
+    return _db_label(db).strip()
+
+
+def _memory_run_key(run_id: str, db: Any = None) -> str:
+    normalized = str(run_id or "").strip()
+    scope = _memory_scope_key(db)
+    return f"{scope}\x1f{normalized}" if scope and normalized else normalized
+
+
+def _memory_session_key(session_id: str, db: Any = None) -> str:
+    normalized = str(session_id or "").strip()
+    scope = _memory_scope_key(db)
+    return f"{scope}\x1f{normalized}" if scope and normalized else normalized
+
+
 def _json_for_log(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
@@ -791,6 +813,7 @@ def _sync_canonical_frame_identity(
     stable: str,
     run_id: str,
     event_type: str = "",
+    db: Any = None,
 ) -> None:
     """Write authoritative post-persist ids back into the outbound frame.
 
@@ -823,10 +846,13 @@ def _sync_canonical_frame_identity(
             frame_payload["seq"] = canonical_seq
         with _lock:
             if stable:
-                _last_seq_by_session[stable] = max(
-                    int(_last_seq_by_session.get(stable) or 0), canonical_seq
+                memory_session_key = _memory_session_key(stable, db)
+                _last_seq_by_session[memory_session_key] = max(
+                    int(_last_seq_by_session.get(memory_session_key) or 0), canonical_seq
                 )
-            state = _run_state_by_id.get(run_id) if run_id else None
+            state = _run_state_by_id.get(_memory_run_key(run_id, db)) if run_id else None
+            if state is None and run_id:
+                state = _run_state_by_id.get(run_id)
             if isinstance(state, dict):
                 state["last_seq"] = max(int(state.get("last_seq") or 0), canonical_seq)
         _diagnostic_warning(
@@ -856,6 +882,9 @@ def _sync_canonical_frame_identity(
         frame_payload["runtime_source_seq"] = runtime_source_seq
 
 
+_sync_canonical_frame_seq = _sync_canonical_frame_identity
+
+
 def _active_run_ids_for_session(stable: str, db: Any = None) -> set[str]:
     active_ids: set[str] = set()
     if method := _db_method(db, "list_runs"):
@@ -870,11 +899,14 @@ def _active_run_ids_for_session(stable: str, db: Any = None) -> set[str]:
                     active_ids.add(run_id)
         except Exception:
             logger.debug("failed to load active run ids from db", exc_info=True)
+    memory_session_key = _memory_session_key(stable, db)
     with _lock:
-        for run_id in _run_ids_by_session.get(stable, ()):
-            state = _run_state_by_id.get(run_id) or {}
+        for run_key in _run_ids_by_session.get(memory_session_key, ()):
+            state = _run_state_by_id.get(run_key) or {}
             if str(state.get("status") or "") in ACTIVE_RUN_STATUSES:
-                active_ids.add(run_id)
+                run_id = str(state.get("run_id") or "").strip()
+                if run_id:
+                    active_ids.add(run_id)
     return active_ids
 
 
@@ -1133,9 +1165,12 @@ def _ensure_run(
     runtime_scope_key: str = "",
     turn_id: str = "",
     runtime_session_id: str = "",
+    db: Any = None,
 ) -> dict[str, Any]:
     now = time.time()
-    state = _run_state_by_id.get(run_id)
+    memory_run_key = _memory_run_key(run_id, db)
+    memory_session_key = _memory_session_key(stable_session_id, db)
+    state = _run_state_by_id.get(memory_run_key)
     if state is None:
         state = {
             "run_id": run_id,
@@ -1149,9 +1184,9 @@ def _ensure_run(
             "last_seq": 0,
             "error": "",
         }
-        _run_state_by_id[run_id] = state
-        if run_id not in _run_ids_by_session[stable_session_id]:
-            _run_ids_by_session[stable_session_id].append(run_id)
+        _run_state_by_id[memory_run_key] = state
+        if memory_run_key not in _run_ids_by_session[memory_session_key]:
+            _run_ids_by_session[memory_session_key].append(memory_run_key)
     else:
         state["updated_at"] = now
         if turn_id:
@@ -1186,6 +1221,7 @@ def mark_run_started(
             runtime_scope_key=runtime_scope_key or stable,
             turn_id=turn_id,
             runtime_session_id=str(runtime_session_id or "").strip(),
+            db=db,
         )
         state["status"] = "running"
         state["error"] = ""
@@ -1253,6 +1289,7 @@ def create_run_if_session_idle(
                         runtime_scope_key=runtime_scope_key or stable,
                         turn_id=turn_id,
                         runtime_session_id=runtime_session_id,
+                        db=db,
                     )
                     state.update(run)
                 return {"run": run, "conflict": None, "created": created}
@@ -1301,8 +1338,10 @@ def create_run_if_session_idle(
             }
 
     with _lock:
-        for active_run_id in _run_ids_by_session.get(stable, ()):
-            active = _run_state_by_id.get(active_run_id) or {}
+        memory_session_key = _memory_session_key(stable, db)
+        for active_run_key in _run_ids_by_session.get(memory_session_key, ()):
+            active = _run_state_by_id.get(active_run_key) or {}
+            active_run_id = str(active.get("run_id") or "").strip()
             if (
                 active_run_id != normalized_run_id
                 and str(active.get("status") or "") in ACTIVE_RUN_STATUSES
@@ -1329,6 +1368,7 @@ def create_run_if_session_idle(
             runtime_scope_key=runtime_scope_key or stable,
             turn_id=turn_id,
             runtime_session_id=runtime_session_id,
+            db=db,
         )
         state["status"] = "queued"
         if isinstance(metadata, dict) and metadata:
@@ -1352,11 +1392,11 @@ def next_event_seq(stored_session_id: str, fallback_seq: int = 0, db: Any = None
             persisted_next = 0
     with _lock:
         next_seq = max(
-            int(_last_seq_by_session.get(stable) or 0) + 1,
+            int(_last_seq_by_session.get(_memory_session_key(stable, db)) or 0) + 1,
             int(fallback_seq or 0),
             persisted_next,
         )
-        _last_seq_by_session[stable] = next_seq
+        _last_seq_by_session[_memory_session_key(stable, db)] = next_seq
         return next_seq
 
 
@@ -1662,13 +1702,16 @@ def record_event(
 
     with _lock:
         if stable:
-            _events_by_session[stable].append(frame)
-            _last_seq_by_session[stable] = max(
-                int(_last_seq_by_session.get(stable) or 0),
+            memory_session_key = _memory_session_key(stable, db)
+            _events_by_session[memory_session_key].append(frame)
+            _last_seq_by_session[memory_session_key] = max(
+                int(_last_seq_by_session.get(memory_session_key) or 0),
                 int(frame.get("seq") or 0),
             )
         if stable and run_id and not synthetic_run_identity:
-            existing_state = _run_state_by_id.get(run_id)
+            existing_state = _run_state_by_id.get(_memory_run_key(run_id, db))
+            if existing_state is None:
+                existing_state = _run_state_by_id.get(run_id)
             existing_state_stable = str((existing_state or {}).get("stored_session_id") or "").strip()
             memory_terminal_reopen = bool(
                 existing_state is not None
@@ -1683,7 +1726,7 @@ def record_event(
             if reopens_terminal_run:
                 if stable:
                     try:
-                        _events_by_session[stable].remove(frame)
+                        _events_by_session[_memory_session_key(stable, db)].remove(frame)
                     except (KeyError, ValueError):
                         pass
                 return []
@@ -1703,6 +1746,7 @@ def record_event(
                     ),
                     turn_id=turn_id,
                     runtime_session_id=runtime_session_id,
+                    db=db,
                 )
                 state["last_seq"] = int(frame.get("seq") or state.get("last_seq") or 0)
                 if owner_metadata:
@@ -1782,6 +1826,7 @@ def record_event(
                 stable=stable,
                 run_id=run_id,
                 event_type=event_type,
+                db=db,
             )
             if (
                 isinstance(saved, dict)
@@ -1812,7 +1857,7 @@ def record_event(
                 # every transport in ``result``.
                 with _lock:
                     try:
-                        _events_by_session[stable].remove(frame)
+                        _events_by_session[_memory_session_key(stable, db)].remove(frame)
                     except (KeyError, ValueError):
                         pass
                 logger.debug(
@@ -1921,9 +1966,10 @@ def record_event(
                             mirror_subscribers = set()
                             with _lock:
                                 if mirror_stable:
-                                    _events_by_session[mirror_stable].append(mirrored)
-                                    _last_seq_by_session[mirror_stable] = max(
-                                        int(_last_seq_by_session.get(mirror_stable) or 0),
+                                    mirror_session_key = _memory_session_key(mirror_stable, db)
+                                    _events_by_session[mirror_session_key].append(mirrored)
+                                    _last_seq_by_session[mirror_session_key] = max(
+                                        int(_last_seq_by_session.get(mirror_session_key) or 0),
                                         int(mirrored.get("seq") or 0),
                                     )
                                     for subscription_id in list(_subscription_ids_by_session.get(mirror_stable, set())):
@@ -2626,7 +2672,7 @@ def subscribe_session_with_id(
             _subscription_ids_by_transport[transport].add(normalized_subscription_id)
             if run_event_read_model_for_db(db) is not None:
                 _start_subscription_poller_locked()
-        memory_events = list(_events_by_session.get(stable, ()))
+        memory_events = list(_events_by_session.get(_memory_session_key(stable, db), ()))
     events: list[dict[str, Any]] = []
     if run_event_read_model_for_db(db) is not None:
         try:
@@ -2765,7 +2811,9 @@ def get_run(run_id: str, db: Any = None) -> dict[str, Any] | None:
         except Exception:
             persisted = None
     with _lock:
-        state = _run_state_by_id.get(normalized)
+        state = _run_state_by_id.get(_memory_run_key(normalized, db))
+        if state is None:
+            state = _run_state_by_id.get(normalized)
         memory = dict(state) if state else None
     if not memory:
         return persisted if isinstance(persisted, dict) else None
@@ -2805,10 +2853,18 @@ def list_runs(
             persisted = []
     with _lock:
         if stable:
-            ids = list(_run_ids_by_session.get(stable, ()))
-            memory = [dict(_run_state_by_id[run_id]) for run_id in ids if run_id in _run_state_by_id]
+            memory_session_key = _memory_session_key(stable, db)
+            ids = list(_run_ids_by_session.get(memory_session_key, ()))
+            if not ids and memory_session_key != stable:
+                ids = list(_run_ids_by_session.get(stable, ()))
+            memory = [dict(_run_state_by_id[run_key]) for run_key in ids if run_key in _run_state_by_id]
         else:
-            memory = [dict(run) for run in _run_state_by_id.values()]
+            scope_key = _memory_scope_key(db)
+            memory = [
+                dict(run)
+                for key, run in _run_state_by_id.items()
+                if not scope_key or str(key).startswith(f"{scope_key}\x1f")
+            ]
     if scope:
         memory = [run for run in memory if str(run.get("runtime_scope_key") or "") == scope]
     if normalized_statuses:
@@ -2854,7 +2910,8 @@ def session_status(
     ]
     last_seq = 0
     with _lock:
-        events = _events_by_session.get(str(stored_session_id or "").strip(), ())
+        stable = str(stored_session_id or "").strip()
+        events = _events_by_session.get(_memory_session_key(stable, db), ())
         for event in events:
             last_seq = max(last_seq, int(event.get("seq") or 0))
     if isinstance(persisted_status, dict):

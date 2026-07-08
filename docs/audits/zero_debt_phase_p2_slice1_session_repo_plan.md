@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_17`
+状态：`in_progress_checkpoint_18`
 
 ## 前置门槛
 
@@ -772,6 +772,50 @@ python scripts/zero_debt/verdict.py --phase P2 --json
 
 - `run_control` terminal publish 与 run-state memory owner 仍待后续写侧切片
   收口。
+- Team transcript projector/backfill 仍需要目标 owner。
+- `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。
+
+## Checkpoint 18 证据
+
+已完成：
+
+- `run_control` 的 in-memory run/event cursor 不再以裸 `run_id` /
+  stable session id 作为全局 key；新增 DB/profile scoped memory key：
+  `_memory_scope_key()`、`_memory_run_key()`、`_memory_session_key()`。
+- `_run_state_by_id`、`_run_ids_by_session`、`_events_by_session`、
+  `_last_seq_by_session` 的生产读写路径按 DB scope 隔离，wire/state dict
+  内仍保留原始 `run_id` 与 `stored_session_id`，不改变外部协议。
+- 修复真实暴露的跨 DB/profile 污染：不同 SQLite profile 使用相同
+  team-mission mirror `run_id` 时，不再从前一个 profile 的 memory event
+  replay 推进 cursor，导致 terminal `message.complete` 被误判已投递。
+- 保留 `_sync_canonical_frame_seq` 内部 alias 指向
+  `_sync_canonical_frame_identity`，维持已有测试/内部调用语义。
+- P2 identity alias offender baseline 从 `1200` 降到 `1199`。
+
+已运行：
+
+```bash
+python -m py_compile tui_gateway/services/run_control.py tests/observability/test_zero_debt_gates.py
+.venv/bin/pytest tests/test_team_mission_conversation_mirror.py::test_conversation_list_recovers_terminal_mission_with_active_mirror_run tests/test_runtime_activity_subscribe.py tests/test_pr1_event_identity_contract.py -q
+.venv/bin/ruff check tui_gateway/services/run_control.py tests/observability/test_zero_debt_gates.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Team mission terminal recovery / runtime activity subscribe /
+  PR1 event identity contract：`71 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `run_control` terminal write path 仍有 legacy `append_run_event` facade
+  ownership，需要后续 run-event writer repository/domain service 切片。
 - Team transcript projector/backfill 仍需要目标 owner。
 - `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。
 
