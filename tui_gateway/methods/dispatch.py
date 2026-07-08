@@ -251,16 +251,16 @@ async def dispatch_agent_async(
     target_profile_context = _profile_context(profile, conversation_id=conversation_id)
 
     if pool is None:
-        from tui_gateway.services.worker_runtime import worker_pool
+        from hermes_agent.orchestration.worker_runtime import worker_pool
 
         pool = worker_pool()
     if supervisor is None:
-        from tui_gateway.services.worker_runtime import worker_supervisor
+        from hermes_agent.orchestration.worker_runtime import worker_supervisor
 
         supervisor = worker_supervisor()
     if router is None:
         try:
-            from tui_gateway.services.worker_runtime import worker_frame_router
+            from hermes_agent.orchestration.worker_runtime import worker_frame_router
 
             router = worker_frame_router()
         except Exception:

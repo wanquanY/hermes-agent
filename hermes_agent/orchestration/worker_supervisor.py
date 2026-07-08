@@ -52,7 +52,10 @@ def _background_task_context() -> contextvars.Context:
         from tui_gateway.transport import bind_transport
         ctx.run(bind_transport, None)
     except Exception:
-        pass
+        _log.debug(
+            "[worker-supervisor] failed to clear request transport for background task",
+            exc_info=True,
+        )
     return ctx
 
 
@@ -68,6 +71,10 @@ def _create_worker_task(coro, *, name: str) -> asyncio.Task:
             finally:
                 reset_transport(token)
         except Exception:
+            _log.debug(
+                "[worker-supervisor] failed to bind clean transport before creating task",
+                exc_info=True,
+            )
             return asyncio.create_task(coro, name=name)
 
 
@@ -653,7 +660,7 @@ class WorkerSupervisor:
                     from tui_gateway.services.profile_context import leave_profile_context
                     leave_profile_context(token)
                 except Exception:
-                    pass
+                    _log.exception("[worker-supervisor] failed to leave profile context")
 
     async def _handle_db_rpc(self, worker: RunWorker, frame: DBRpcRequestFrame) -> None:
         reply = await self._execute_worker_jsonrpc(frame, worker=worker)
@@ -780,10 +787,13 @@ class WorkerSupervisor:
         )
         try:
             try:
-                from tui_gateway.services.worker_runtime import remember_worker_runtime_loop
+                from hermes_agent.orchestration.worker_runtime import remember_worker_runtime_loop
                 remember_worker_runtime_loop(asyncio.get_running_loop())
             except Exception:
-                pass
+                _log.debug(
+                    "[worker-supervisor] failed to remember worker runtime loop before gateway RPC",
+                    exc_info=True,
+                )
             from tui_gateway import server as _server
 
             target = _server._methods.get(gateway_method)
@@ -803,7 +813,9 @@ class WorkerSupervisor:
                         try:
                             reset_transport(token)
                         except Exception:
-                            pass
+                            _log.exception(
+                                "[worker-supervisor] failed to reset transport after gateway RPC"
+                            )
 
             result = await asyncio.to_thread(_invoke_gateway_method)
             return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
@@ -854,31 +866,49 @@ class WorkerSupervisor:
                             )
                             await process.stdin.drain()
                         except (BrokenPipeError, ConnectionResetError):
-                            pass
+                            _log.debug(
+                                "[worker-supervisor] worker stdin closed before shutdown frame",
+                                extra={"scope_key": worker.scope_key, "conversation_id": worker.conversation_id},
+                            )
                         try:
                             process.stdin.close()
                         except Exception:
-                            pass
+                            _log.debug(
+                                "[worker-supervisor] failed to close worker stdin",
+                                exc_info=True,
+                            )
             except Exception:
-                pass
+                _log.debug(
+                    "[worker-supervisor] cooperative worker shutdown failed",
+                    exc_info=True,
+                )
             try:
                 await asyncio.wait_for(process.wait(), timeout=_DEFAULT_SHUTDOWN_TIMEOUT_S)
             except asyncio.TimeoutError:
                 try:
                     process.terminate()
                 except ProcessLookupError:
-                    pass
+                    _log.debug(
+                        "[worker-supervisor] process already exited before SIGTERM",
+                        extra={"scope_key": worker.scope_key, "conversation_id": worker.conversation_id},
+                    )
                 try:
                     await asyncio.wait_for(process.wait(), timeout=_SIGTERM_GRACE_S)
                 except asyncio.TimeoutError:
                     try:
                         process.kill()
                     except ProcessLookupError:
-                        pass
+                        _log.debug(
+                            "[worker-supervisor] process already exited before SIGKILL",
+                            extra={"scope_key": worker.scope_key, "conversation_id": worker.conversation_id},
+                        )
                     try:
                         await process.wait()
                     except Exception:
-                        pass
+                        _log.debug(
+                            "[worker-supervisor] failed while waiting for killed worker process",
+                            exc_info=True,
+                        )
         # Cancel reader / dispatcher (read loop may already be at EOF).
         for task in (worker.read_task, worker.dispatch_task):
             if task is None or task.done():
@@ -886,8 +916,16 @@ class WorkerSupervisor:
             task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            except asyncio.CancelledError:
+                _log.debug(
+                    "[worker-supervisor] worker task cancelled during shutdown",
+                    extra={"scope_key": worker.scope_key, "conversation_id": worker.conversation_id},
+                )
+            except Exception:
+                _log.debug(
+                    "[worker-supervisor] worker task failed while shutting down",
+                    exc_info=True,
+                )
 
 
 def _decode_db_rpc_params(params: Any) -> tuple[list[Any], dict[str, Any]]:

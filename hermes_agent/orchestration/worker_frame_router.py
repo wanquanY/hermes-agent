@@ -1039,7 +1039,9 @@ class WorkerFrameRouter:
 
                     leave_profile_context(token)
                 except Exception:
-                    pass
+                    _log.exception(
+                        "[worker-router] failed to leave profile context after activity terminal handling"
+                    )
 
 
 def _level_for(name: str) -> int:

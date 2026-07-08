@@ -286,7 +286,7 @@ def _proxy_run_submit_via_worker(submit_params: dict) -> dict:
     import asyncio
     import uuid as _uuid
     from tui_gateway.server import current_transport
-    from tui_gateway.services.worker_runtime import (
+    from hermes_agent.orchestration.worker_runtime import (
         ControlPlaneTransport,
         current_worker_runtime_loop,
         primary_dispatch,

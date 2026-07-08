@@ -17,7 +17,7 @@ from tui_gateway.run_worker import (
     _build_default_handler,
     encode_incoming,
 )
-from tui_gateway.services import worker_runtime
+from hermes_agent.orchestration import worker_runtime
 from tui_gateway.services.agent_run_backend import AgentRunBackend
 from tui_gateway.services.runtime_scope import RuntimeScope
 from hermes_agent.orchestration.worker_supervisor import RunWorker

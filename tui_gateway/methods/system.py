@@ -116,7 +116,7 @@ def _(rid, params: dict) -> dict:
     else:
         error = ""
     try:
-        from tui_gateway.services.worker_runtime import worker_supervisor
+        from hermes_agent.orchestration.worker_runtime import worker_supervisor
 
         worker_supervisor_snapshot = worker_supervisor().snapshot()
     except Exception as exc:

@@ -8,7 +8,7 @@ import pytest
 
 from hermes_state import SessionDB
 from tui_gateway import server
-from tui_gateway.services import worker_runtime
+from hermes_agent.orchestration import worker_runtime
 
 
 def _db(tmp_path: Path) -> SessionDB:

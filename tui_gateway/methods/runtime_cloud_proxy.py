@@ -95,7 +95,7 @@ async def apply_runtime_cloud_proxy_update(params: dict[str, Any]) -> dict[str, 
 
     workers_notified = 0
     if env_updates:
-        from tui_gateway.services.worker_runtime import worker_supervisor
+        from hermes_agent.orchestration.worker_runtime import worker_supervisor
 
         workers_notified = await worker_supervisor().broadcast_runtime_env_update(env_updates)
 

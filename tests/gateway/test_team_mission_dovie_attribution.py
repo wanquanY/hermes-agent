@@ -14,7 +14,7 @@ from hermes_state import SessionDB
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway import server
 from tui_gateway.run_worker import RunStartFrame, dovie_product_context_from_frame
-from tui_gateway.services import worker_runtime
+from hermes_agent.orchestration import worker_runtime
 
 
 CONVERSATION_ID = "conversation-1"
@@ -395,7 +395,7 @@ async def test_worker_dispatch_warns_when_dovie_context_missing(
     caplog: pytest.LogCaptureFixture,
     worker_dispatch: _FakeSupervisor,
 ) -> None:
-    caplog.set_level(logging.WARNING, logger="tui_gateway.services.worker_runtime")
+    caplog.set_level(logging.WARNING, logger="hermes_agent.orchestration.worker_runtime")
     await _dispatch_submit_params_to_frame(
         {
             "conversation_session_id": CONVERSATION_SESSION_ID,

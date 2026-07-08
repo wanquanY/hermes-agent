@@ -208,7 +208,6 @@ _P4_WORKER_SERVICE_PATHS = [
     "tui_gateway/services/worker_pool.py",
     "tui_gateway/services/worker_publish_bridge.py",
     "tui_gateway/services/worker_rpc_proxy.py",
-    "tui_gateway/services/worker_runtime.py",
     "tui_gateway/services/worker_supervisor.py",
 ]
 _P4_WORKER_MAX_TOTAL_LINES = 100

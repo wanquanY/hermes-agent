@@ -33,7 +33,7 @@ command 或 worker dispatch metadata,不直接写 `run_events`;实际写入落�
 | `tui_gateway/services/worker_frame_router.py:237` | worker `EventFrame` → main publish | worker stdout params | `record_run_start.run_context_json` parsed to RunContext | ✓ | worker event replay/publish OK |
 | `tui_gateway/services/worker_frame_router.py:356` | abnormal `RunTerminalFrame` | router synthesized terminal kwargs | `dispatch_activity_id` or RunContext activity_id | ✓ | 本 PR 补缺 |
 | `tui_gateway/services/worker_publish_bridge.py:266` | worker-side monkey-patched publish | agent/tool `publish_recorded_event` params | active worker RunContext | ✓ | 本 PR 补缺; prevents worker-side original persist NULL before main replay |
-| `tui_gateway/services/worker_runtime.py:670` | primary worker dispatch bookkeeping | run.submit/prompt.submit params | `run_context_json` or `dispatch_activity_id` retained in `RunInfo` | ✓ | source for router stamp |
+| `hermes_agent/orchestration/worker_runtime.py:670` | primary worker dispatch bookkeeping | run.submit/prompt.submit params | `run_context_json` or `dispatch_activity_id` retained in `RunInfo` | ✓ | source for router stamp |
 | `tui_gateway/services/activity_reconciler.py:333` | `activity.command.*` events | reconciler self-built frame | explicit `activity_id` arg | ✓ | no RunContext needed |
 | `tui_gateway/methods/prompt.py:412` | ordinary prompt activity command | prompt submit params | `chat:<stable_session_id>` | ✓ | command event path OK; `_emit` runtime event path fixed above |
 | `tui_gateway/methods/dispatch.py:290` | agent dispatch worker run | dispatch params | `dispatch_activity_id` recorded in router | ✓ | terminal activity projection uses dispatch id |

@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from tui_gateway.services import worker_runtime
+from hermes_agent.orchestration import worker_runtime
 from tui_gateway.services.runtime_scope import RuntimeScope
 from hermes_agent.orchestration.worker_supervisor import RunWorker
 

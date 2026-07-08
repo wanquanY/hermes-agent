@@ -229,7 +229,17 @@ def test_p3_verdict_defines_gateway_registry_structure_gates() -> None:
 
 
 def test_p4_verdict_defines_worker_decomposition_and_relocation_gates() -> None:
-    verdict = _verdict_for_phase("P4")
+    result = subprocess.run(
+        [sys.executable, str(VERDICT), "--phase", "P4", "--json"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    verdict = json.loads(result.stdout)
+    assert verdict["phase"] == "P4"
+    assert verdict["status"] == "pass"
     checks = {check["id"]: check for check in verdict["checks"]}
     for gate_id in (
         "p4:worker_services_decomposed",
@@ -237,6 +247,7 @@ def test_p4_verdict_defines_worker_decomposition_and_relocation_gates() -> None:
         "p4:worker_single_owner",
     ):
         assert gate_id in checks
+        assert checks[gate_id]["ok"]
     assert verdict["next_required_human_signoff"] == (
         "docs/audits/zero_debt_phase_p4_human_signoff.md"
     )

@@ -50,7 +50,7 @@ def _run_sync(coro, *, method_name: str):
 
 async def _signal_activity_cancel(activity_id: str, fallback_conversation_id: str) -> bool:
     """Legacy ``activity.cancel`` worker-signaling path. Retire in Phase 1.E."""
-    from tui_gateway.services import worker_runtime
+    from hermes_agent.orchestration import worker_runtime
 
     router = worker_runtime.worker_frame_router()
     lookup = getattr(router, "lookup_activity_run", None)

@@ -236,7 +236,7 @@ class WorkerLeaseManager:
             try:
                 await task
             except asyncio.CancelledError:
-                pass
+                _log.debug("[worker-lease-manager] reap task cancelled during shutdown")
         await self._supervisor.shutdown_all()
         async with self._lock:
             self._states.clear()

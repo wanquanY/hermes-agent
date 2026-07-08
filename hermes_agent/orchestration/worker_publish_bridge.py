@@ -242,7 +242,7 @@ class WorkerPublishBridge:
             asyncio.run_coroutine_threadsafe(self._emit(frame), self._loop)
         except RuntimeError:
             # Loop has been closed between our check and the schedule.
-            pass
+            _log.debug("[worker-publish-bridge] event loop closed before emit could be scheduled")
         except Exception:
             _log.exception("[worker-publish-bridge] emit_threadsafe failed")
 

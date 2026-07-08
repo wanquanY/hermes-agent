@@ -29,7 +29,7 @@ These are the files under `hermes_state*.py`, `tui_gateway/`, `hermes_team_missi
 | `hermes_team_mission/gateway/runtime_methods.py` | 45 |
 | `tui_gateway/services/worker_frame_router.py` | 40 |
 | `tui_gateway/methods/prompt.py` | 36 |
-| `tui_gateway/services/worker_runtime.py` | 32 |
+| `hermes_agent/orchestration/worker_runtime.py` | 32 |
 | `tui_gateway/methods/workspace_artifacts.py` | 21 |
 | `tui_gateway/services/worker_publish_bridge.py` | 14 |
 | `tui_gateway/run_worker.py` | 13 |
