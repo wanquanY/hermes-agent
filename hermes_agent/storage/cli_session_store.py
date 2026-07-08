@@ -267,7 +267,7 @@ class CliSessionStore:
         return f"{base} #{max_num + 1}"
 
     def resolve_resume_session_id(self, session_id: str) -> str:
-        return self._sessions.resolve_resume_session_id(session_id)
+        return self._recall.resolve_resume_session_id(session_id)
 
     def get_compression_tip(self, session_id: str) -> str:
         return self._recall.get_compression_tip(session_id)

@@ -460,44 +460,14 @@ def test_reopen_clears_terminal_state():
     assert idx_row["active_run_id"] == ""
 
 
-def test_resolve_resume_session_id_follows_compression_tip_with_messages():
+def test_resolve_resume_session_id_follows_compression_tip_lineage():
     conn = _make_conn()
     repo = SessionRepoImpl(conn)
     repo.create(SessionSpec(session_id="parent", source="test"))
     repo.close("parent", reason="compression")
     repo.create(SessionSpec(session_id="tip", source="test", parent_session_id="parent"))
-    conn.executescript(
-        """
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1
-        );
-        INSERT INTO messages (session_id, active) VALUES ('tip', 1);
-        """
-    )
 
     assert repo.resolve_resume_session_id("parent") == "tip"
-
-
-def test_resolve_resume_session_id_follows_latest_child_when_parent_has_no_messages():
-    conn = _make_conn()
-    repo = SessionRepoImpl(conn)
-    repo.create(SessionSpec(session_id="parent", source="test"))
-    repo.create(SessionSpec(session_id="empty-child", source="test", parent_session_id="parent"))
-    repo.create(SessionSpec(session_id="message-child", source="test", parent_session_id="empty-child"))
-    conn.executescript(
-        """
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1
-        );
-        INSERT INTO messages (session_id, active) VALUES ('message-child', 1);
-        """
-    )
-
-    assert repo.resolve_resume_session_id("parent") == "message-child"
 
 
 def test_reopen_supports_legacy_session_schema_without_updated_at_or_end_reason():

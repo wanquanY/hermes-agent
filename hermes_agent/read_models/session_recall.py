@@ -211,6 +211,27 @@ class SessionRecallReadModel:
             current = str(row["id"] or "")
         return current
 
+    def resolve_resume_session_id(self, session_id: str) -> str:
+        """Resolve a user-facing session id to the transcript branch with messages."""
+
+        stable = str(session_id or "").strip()
+        if not stable:
+            return stable
+        target = self.get_compression_tip(stable)
+        if self._session_has_messages(target):
+            return target
+        current = target
+        seen = {current}
+        for _ in range(32):
+            child_id = self._latest_child_session_id(current)
+            if not child_id or child_id in seen:
+                return target
+            seen.add(child_id)
+            if self._session_has_messages(child_id):
+                return child_id
+            current = child_id
+        return target
+
     def session_count(
         self,
         source: str | None = None,
@@ -585,6 +606,32 @@ class SessionRecallReadModel:
             return {str(row["name"]) for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
         except sqlite3.Error:
             return set()
+
+    def _session_has_messages(self, session_id: str) -> bool:
+        if not self._table_exists("messages"):
+            return False
+        columns = self._table_columns("messages")
+        active_clause = " AND active = 1" if "active" in columns else ""
+        row = self._conn.execute(
+            f"SELECT 1 FROM messages WHERE session_id = ?{active_clause} LIMIT 1",
+            (str(session_id or ""),),
+        ).fetchone()
+        return row is not None
+
+    def _latest_child_session_id(self, session_id: str) -> str:
+        if "parent_session_id" not in self._table_columns("sessions"):
+            return ""
+        row = self._conn.execute(
+            """
+            SELECT id
+              FROM sessions
+             WHERE parent_session_id = ?
+             ORDER BY started_at DESC, id DESC
+             LIMIT 1
+            """,
+            (str(session_id or ""),),
+        ).fetchone()
+        return str(row["id"] or "") if row is not None else ""
 
 
 def unavailable_message() -> str:

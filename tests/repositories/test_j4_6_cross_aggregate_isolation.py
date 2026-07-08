@@ -57,6 +57,7 @@ _AGGREGATE_TABLES = {
         "agent_profiles",
         "agent_profile_versions",
         "agent_profile_growth_summary",
+        "agent_profile_drafts",
     },
 }
 
@@ -114,7 +115,7 @@ def _scan_table_references(path: Path) -> set[str]:
                 continue
             for match in _TABLE_REF_RE.finditer(node.value):
                 table = match.group(1).lower()
-                if table in {"select", "where", "if", "not", "exists"}:
+                if table in {"select", "where", "if", "not", "exists", "set"}:
                     continue
                 refs.add(table)
     return refs

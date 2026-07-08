@@ -13,6 +13,7 @@ from hermes_agent.domain.session_deletion import SessionDeletionService
 from hermes_agent.read_models.message_history import MessagePageQuery
 from hermes_agent.read_models.session_index import SessionIndexQuery, SessionIndexReadModel
 from hermes_agent.read_models.session_list import SessionListQuery, SessionListReadModel
+from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services.message_history import (
@@ -164,6 +165,13 @@ def _session_index_read_model_for_db(db):
     if conn is None:
         return None
     return SessionIndexReadModel(conn)
+
+
+def _session_recall_read_model_for_db(db):
+    conn = getattr(db, "_conn", None)
+    if conn is None:
+        return None
+    return SessionRecallReadModel(conn)
 
 
 def _session_deletion_service_for_db(db):
@@ -1767,8 +1775,9 @@ def _(rid, params: dict) -> dict:
     # the session that actually holds the messages (#15000). Skipped for lazy
     # watch windows, which attach to the exact branch they were opened on.
     if found and not is_truthy_value(params.get("lazy", False)):
+        recall_read_model = _session_recall_read_model_for_db(db)
         try:
-            tip = repo.resolve_resume_session_id(target)
+            tip = recall_read_model.resolve_resume_session_id(target) if recall_read_model else target
         except Exception:
             tip = target
         if tip and tip != target:

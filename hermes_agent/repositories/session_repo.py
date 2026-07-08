@@ -477,20 +477,7 @@ class SessionRepoImpl:
         stable = str(session_id or "").strip()
         if not stable:
             return stable
-        target = self._compression_tip(stable)
-        if _session_has_messages(self._conn, target):
-            return target
-        current = target
-        seen = {current}
-        for _ in range(32):
-            child_id = self._latest_child_session_id(current)
-            if not child_id or child_id in seen:
-                return target
-            seen.add(child_id)
-            if _session_has_messages(self._conn, child_id):
-                return child_id
-            current = child_id
-        return target
+        return self._compression_tip(stable)
 
     def _session_select_sql(self, suffix: str) -> str:
         return (
@@ -766,18 +753,6 @@ def _row_to_session(row: Any) -> Session:
     )
 
 
-def _session_has_messages(conn: RepositoryConnection, session_id: str) -> bool:
-    if "messages" not in _table_names(conn):
-        return False
-    columns = _table_columns(conn, "messages")
-    active_clause = " AND active = 1" if "active" in columns else ""
-    row = conn.execute(
-        f"SELECT 1 FROM messages WHERE session_id = ?{active_clause} LIMIT 1",
-        (session_id,),
-    ).fetchone()
-    return row is not None
-
-
 def _encode_model_config(value: dict[str, Any] | str | None) -> str | None:
     if value is None:
         return None
@@ -817,18 +792,6 @@ def _table_columns(conn: RepositoryConnection, table_name: str) -> set[str]:
         return {
             str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
             for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-        }
-    except Exception:
-        return set()
-
-
-def _table_names(conn: RepositoryConnection) -> set[str]:
-    try:
-        return {
-            str(row["name"] if isinstance(row, sqlite3.Row) else row[0])
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
         }
     except Exception:
         return set()
