@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import gateway.run as gateway_run
+import hermes_gateway.lifecycle_home as lifecycle_home
+import hermes_gateway.restart_lifecycle as restart_lifecycle
 from agent.i18n import t
 from channels.platforms.base import MessageEvent, MessageType
 from hermes_gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
@@ -164,7 +166,7 @@ async def test_launch_detached_restart_command_uses_setsid(monkeypatch):
     runner, _adapter = make_restart_runner()
     popen_calls = []
 
-    monkeypatch.setattr(gateway_run, "_resolve_hermes_bin", lambda: ["/usr/bin/hermes"])
+    monkeypatch.setattr(restart_lifecycle, "_resolve_hermes_bin", lambda: ["/usr/bin/hermes"])
     monkeypatch.setattr(gateway_run.os, "getpid", lambda: 321)
     monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/setsid" if cmd == "setsid" else None)
 

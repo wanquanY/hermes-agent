@@ -226,8 +226,8 @@ class TestUpdateCommandGatewayFlag:
         hermes_home.mkdir()
 
         mock_popen = MagicMock()
-        with patch("gateway.run._hermes_home", hermes_home), \
-             patch("gateway.run.__file__", fake_file), \
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home), \
+             patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}"), \
              patch("subprocess.Popen", mock_popen):
             result = await runner._handle_update_command(event)
@@ -274,7 +274,7 @@ class TestWatchUpdateProgress:
             , encoding="utf-8")
             (hermes_home / ".update_exit_code").write_text("0")
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             task = asyncio.create_task(write_exit_code())
             await runner._watch_update_progress(
                 poll_interval=0.1,
@@ -315,7 +315,7 @@ class TestWatchUpdateProgress:
             await asyncio.sleep(0.3)
             (hermes_home / ".update_exit_code").write_text("0")
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             task = asyncio.create_task(simulate_prompt_cycle())
             await runner._watch_update_progress(
                 poll_interval=0.1,
@@ -370,7 +370,7 @@ class TestWatchUpdateProgress:
             await asyncio.sleep(0.2)
             (hermes_home / ".update_exit_code").write_text("0")
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             task = asyncio.create_task(finish_after_prompt())
             await runner._watch_update_progress(
                 poll_interval=0.1,
@@ -402,7 +402,7 @@ class TestWatchUpdateProgress:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             await runner._watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
@@ -429,7 +429,7 @@ class TestWatchUpdateProgress:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             await runner._watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
@@ -456,7 +456,7 @@ class TestWatchUpdateProgress:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             await runner._watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
@@ -499,7 +499,7 @@ class TestWatchUpdateProgress:
             await asyncio.sleep(0.3)
             (hermes_home / ".update_exit_code").write_text("0")
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             task = asyncio.create_task(finish_after_polls())
             await runner._watch_update_progress(
                 poll_interval=0.1,
@@ -541,7 +541,7 @@ class TestWatchUpdateProgress:
         adapter1 = AsyncMock()
         runner1.adapters = {Platform.TELEGRAM: adapter1}
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             watch1 = asyncio.create_task(
                 runner1._watch_update_progress(
                     poll_interval=0.05,
