@@ -209,8 +209,8 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             # NONE 模式库需 VACUUM 一次切换(运维侧已处理)。必须在建表前设置。
             try:
                 self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("auto_vacuum incremental setup skipped: %s", exc)
 
             self._init_schema()
             try:
@@ -298,8 +298,8 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                     except BaseException:
                         try:
                             self._conn.rollback()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("rollback after failed state write failed: %s", exc)
                         raise
                 # Success — periodic best-effort checkpoint.
                 self._write_count += 1
@@ -506,8 +506,8 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                         "WAL checkpoint: %d/%d pages checkpointed",
                         result[2], result[1],
                     )
-        except Exception:
-            pass  # Best effort — never fatal.
+        except Exception as exc:
+            logger.debug("best-effort WAL checkpoint failed: %s", exc)
 
     def close(self):
         """Close the database connection.
@@ -519,8 +519,8 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             if self._conn:
                 try:
                     self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("close-time WAL checkpoint failed: %s", exc)
                 self._conn.close()
                 self._conn = None
 
@@ -636,16 +636,16 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
 
         try:
             cursor.execute("DROP TABLE IF EXISTS member_chat_runs")
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as exc:
+            logger.debug("member_chat_runs drop skipped: %s", exc)
 
     def _backfill_session_index_conversation_kind(self, cursor: sqlite3.Cursor) -> None:
         """Normalize the explicit direct/team classification for sidebar rows."""
 
         try:
             SessionRepoImpl(cursor.connection).normalize_index_conversation_kind()
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as exc:
+            logger.debug("session_index conversation kind backfill skipped: %s", exc)
 
     def _backfill_session_runtime_state(self, cursor: sqlite3.Cursor) -> None:
         """Build latest-only runtime state from existing session.info frames."""
@@ -1025,8 +1025,8 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title_unique "
                 "ON sessions(title) WHERE title IS NOT NULL"
             )
-        except sqlite3.OperationalError:
-            pass  # Index already exists
+        except sqlite3.OperationalError as exc:
+            logger.debug("sessions title unique index ensure skipped: %s", exc)
 
         self._conn.commit()
 
@@ -4471,17 +4471,17 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             p = sessions_dir / f"{session_id}{suffix}"
             try:
                 p.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.debug("failed to remove state session file %s: %s", p, exc)
         # request_dump files use session_id as a prefix component
         try:
             for p in sessions_dir.glob(f"request_dump_{session_id}_*.json"):
                 try:
                     p.unlink(missing_ok=True)
-                except OSError:
-                    pass
-        except OSError:
-            pass
+                except OSError as exc:
+                    logger.debug("failed to remove state request dump %s: %s", p, exc)
+        except OSError as exc:
+            logger.debug("failed to enumerate state request dumps for %s: %s", session_id, exc)
 
     def delete_session(
         self,
@@ -4998,8 +4998,8 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             # Best-effort WAL checkpoint first, then VACUUM.
             try:
                 self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("pre-vacuum WAL checkpoint failed: %s", exc)
             self._conn.execute("VACUUM")
 
     def maybe_auto_prune_and_vacuum(
@@ -5039,8 +5039,8 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                     if now - last_ts < min_interval_hours * 3600:
                         result["skipped"] = True
                         return result
-                except (TypeError, ValueError):
-                    pass  # corrupt meta; treat as no prior run
+                except (TypeError, ValueError) as exc:
+                    logger.debug("invalid last_auto_prune value %r: %s", last_raw, exc)
 
             pruned = self.prune_sessions(
                 older_than_days=retention_days,
@@ -5106,8 +5106,8 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                     if now - last_ts < min_interval_hours * 3600:
                         result["skipped"] = True
                         return result
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as exc:
+                    logger.debug("invalid last_compact value %r: %s", last_raw, exc)
 
             compacted = self.compact_run_events()
             result.update({

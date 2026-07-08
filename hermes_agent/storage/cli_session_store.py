@@ -8,6 +8,7 @@ import the legacy state facade.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import sqlite3
@@ -28,6 +29,8 @@ from hermes_agent.repositories.session_repo import (
 )
 from hermes_agent.storage.session_repository_db import connect_session_repository_db
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
+
+logger = logging.getLogger(__name__)
 
 
 def open_cli_session_store(db_path: Path | str | None = None):
@@ -669,19 +672,19 @@ class CliSessionStore:
         for suffix in (".json", ".jsonl"):
             try:
                 (sessions_dir / f"{session_id}{suffix}").unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.debug("failed to remove CLI session file %s%s: %s", session_id, suffix, exc)
         try:
             for path in sessions_dir.glob(f"request_dump_{session_id}_*.json"):
                 try:
                     path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger.debug("failed to remove CLI request dump %s: %s", path, exc)
             legacy_dir = sessions_dir / session_id
             if legacy_dir.exists():
                 shutil.rmtree(legacy_dir, ignore_errors=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.debug("failed to cleanup CLI session directory for %s: %s", session_id, exc)
 
     def _table_exists(self, table: str) -> bool:
         row = self._conn.execute(
@@ -744,8 +747,8 @@ class CliSessionStore:
         if vacuum:
             try:
                 self._conn.execute("VACUUM")
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                logger.debug("CLI auto-prune VACUUM failed: %s", exc)
         self.set_meta("last_auto_prune", str(now))
         return {"skipped": False, "pruned_sessions": pruned}
 

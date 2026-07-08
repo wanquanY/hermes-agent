@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import zlib
 from typing import Any
 
 RUN_EVENT_FRAME_FORMAT = "zlib+json:v1"
+logger = logging.getLogger(__name__)
 
 
 def _json_loads(value: Any, fallback: Any = None) -> Any:
@@ -53,8 +55,8 @@ def _event_from_row(row: Any) -> dict[str, Any]:
             event = _json_loads(zlib.decompress(raw).decode("utf-8"), {})
             if isinstance(event, dict):
                 return event
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("failed to decode compressed run event frame: %s", exc)
     event = _json_loads(_row_value(row, "event_json"), {})
     return event if isinstance(event, dict) else {}
 

@@ -31,8 +31,8 @@ def load_gateway_runtime_config(hermes_home: Path | None = None) -> dict:
 
         if config_path == get_config_path():
             return read_raw_config()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("failed to load gateway runtime config via hermes_cli config: %s", exc)
 
     try:
         if config_path.exists():
@@ -93,8 +93,8 @@ def _try_resolve_fallback_provider(hermes_home: Path | None = None) -> dict | No
             except Exception as fb_exc:
                 logger.debug("Fallback entry %s failed: %s", entry.get("provider"), fb_exc)
                 continue
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("failed to resolve fallback runtime config: %s", exc)
     return None
 
 

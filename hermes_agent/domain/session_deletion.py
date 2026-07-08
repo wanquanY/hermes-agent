@@ -7,12 +7,15 @@ transcript rows through ``MessageRepo``, and optional on-disk transcript files.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from hermes_agent.repositories.base import RepositoryConnection
 from hermes_agent.repositories.message_repo import MessageRepo, MessageRepoImpl
 from hermes_agent.repositories.session_repo import SessionRepo, SessionRepoImpl
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -58,16 +61,16 @@ def _remove_session_files(sessions_dir: Path | None, session_id: str) -> None:
         path = sessions_dir / f"{session_id}{suffix}"
         try:
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.debug("failed to remove session file %s: %s", path, exc)
     try:
         for path in sessions_dir.glob(f"request_dump_{session_id}_*.json"):
             try:
                 path.unlink(missing_ok=True)
-            except OSError:
-                pass
-    except OSError:
-        pass
+            except OSError as exc:
+                logger.debug("failed to remove request dump %s: %s", path, exc)
+    except OSError as exc:
+        logger.debug("failed to enumerate request dumps for %s: %s", session_id, exc)
 
 
 __all__ = ["SessionDeletionResult", "SessionDeletionService"]
