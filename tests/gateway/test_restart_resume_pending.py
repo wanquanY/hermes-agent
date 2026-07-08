@@ -34,13 +34,13 @@ import pytest
 
 from hermes_gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
 from channels.platforms.base import MessageEvent, MessageType, SendResult
-from gateway.run import (
-    _auto_continue_freshness_window,
-    _coerce_gateway_timestamp,
-    _is_fresh_gateway_interruption,
-    _last_transcript_timestamp,
-    _should_clear_resume_pending_after_turn,
+from hermes_gateway.freshness import (
+    auto_continue_freshness_window,
+    coerce_gateway_timestamp,
+    is_fresh_gateway_interruption,
+    last_transcript_timestamp,
 )
+from gateway.run import _should_clear_resume_pending_after_turn
 from gateway.session import SessionEntry, SessionSource, SessionStore
 from tests.gateway.restart_test_helpers import (
     make_restart_runner,
@@ -124,10 +124,10 @@ def _simulate_note_injection(
     window = (
         float(window_secs)
         if window_secs is not None
-        else _auto_continue_freshness_window()
+        else auto_continue_freshness_window()
     )
-    interruption_is_fresh = _is_fresh_gateway_interruption(
-        _last_transcript_timestamp(history),
+    interruption_is_fresh = is_fresh_gateway_interruption(
+        last_transcript_timestamp(history),
         window_secs=window,
     )
 
@@ -655,104 +655,104 @@ class TestResumePendingSystemNote:
 class TestFreshnessHelpers:
     def test_coerce_datetime(self):
         now = datetime.now()
-        assert _coerce_gateway_timestamp(now) == pytest.approx(now.timestamp(), abs=1e-3)
+        assert coerce_gateway_timestamp(now) == pytest.approx(now.timestamp(), abs=1e-3)
 
     def test_coerce_epoch_seconds(self):
-        assert _coerce_gateway_timestamp(1_700_000_000) == 1_700_000_000.0
-        assert _coerce_gateway_timestamp(1_700_000_000.5) == 1_700_000_000.5
+        assert coerce_gateway_timestamp(1_700_000_000) == 1_700_000_000.0
+        assert coerce_gateway_timestamp(1_700_000_000.5) == 1_700_000_000.5
 
     def test_coerce_epoch_milliseconds(self):
         # Values > 10^10 treated as ms
-        assert _coerce_gateway_timestamp(1_700_000_000_000) == 1_700_000_000.0
+        assert coerce_gateway_timestamp(1_700_000_000_000) == 1_700_000_000.0
 
     def test_coerce_iso_string(self):
         iso = "2026-04-18T12:00:00+00:00"
         expected = datetime.fromisoformat(iso).timestamp()
-        assert _coerce_gateway_timestamp(iso) == pytest.approx(expected, abs=1e-3)
+        assert coerce_gateway_timestamp(iso) == pytest.approx(expected, abs=1e-3)
 
     def test_coerce_iso_string_with_z_suffix(self):
         iso_z = "2026-04-18T12:00:00Z"
         expected = datetime.fromisoformat("2026-04-18T12:00:00+00:00").timestamp()
-        assert _coerce_gateway_timestamp(iso_z) == pytest.approx(expected, abs=1e-3)
+        assert coerce_gateway_timestamp(iso_z) == pytest.approx(expected, abs=1e-3)
 
     def test_coerce_numeric_string(self):
-        assert _coerce_gateway_timestamp("1700000000") == 1_700_000_000.0
+        assert coerce_gateway_timestamp("1700000000") == 1_700_000_000.0
 
     def test_coerce_rejects_garbage(self):
-        assert _coerce_gateway_timestamp(None) is None
-        assert _coerce_gateway_timestamp("") is None
-        assert _coerce_gateway_timestamp("not-a-timestamp") is None
-        assert _coerce_gateway_timestamp(True) is None  # bool rejected
-        assert _coerce_gateway_timestamp(False) is None
-        assert _coerce_gateway_timestamp([1, 2, 3]) is None
+        assert coerce_gateway_timestamp(None) is None
+        assert coerce_gateway_timestamp("") is None
+        assert coerce_gateway_timestamp("not-a-timestamp") is None
+        assert coerce_gateway_timestamp(True) is None  # bool rejected
+        assert coerce_gateway_timestamp(False) is None
+        assert coerce_gateway_timestamp([1, 2, 3]) is None
 
     def test_is_fresh_unknown_is_fresh(self):
         """Legacy-compat: unknown timestamp → fresh."""
-        assert _is_fresh_gateway_interruption(None) is True
-        assert _is_fresh_gateway_interruption("not-a-timestamp") is True
+        assert is_fresh_gateway_interruption(None) is True
+        assert is_fresh_gateway_interruption("not-a-timestamp") is True
 
     def test_is_fresh_window_bounds(self):
         now = 1_700_000_000.0
         # 1h window, 30min old → fresh
-        assert _is_fresh_gateway_interruption(
+        assert is_fresh_gateway_interruption(
             now - 1800, now=now, window_secs=3600,
         ) is True
         # 1h window, 2h old → stale
-        assert _is_fresh_gateway_interruption(
+        assert is_fresh_gateway_interruption(
             now - 7200, now=now, window_secs=3600,
         ) is False
         # 1h window, exactly at boundary → fresh (<=)
-        assert _is_fresh_gateway_interruption(
+        assert is_fresh_gateway_interruption(
             now - 3600, now=now, window_secs=3600,
         ) is True
 
     def test_is_fresh_zero_window_always_fresh(self):
         """Opt-out: window_secs=0 disables the gate entirely."""
-        assert _is_fresh_gateway_interruption(
+        assert is_fresh_gateway_interruption(
             0.0, now=1_700_000_000.0, window_secs=0,
         ) is True
-        assert _is_fresh_gateway_interruption(
+        assert is_fresh_gateway_interruption(
             -1.0, now=1_700_000_000.0, window_secs=-5,
         ) is True
 
-    def test_last_transcript_timestamp_skips_meta(self):
+    def testlast_transcript_timestamp_skips_meta(self):
         history = [
             {"role": "user", "content": "hi", "timestamp": 100.0},
             {"role": "assistant", "content": "hey", "timestamp": 200.0},
             {"role": "session_meta", "content": "tools:{}", "timestamp": 999.0},
             {"role": "system", "content": "ignore", "timestamp": 999.0},
         ]
-        assert _last_transcript_timestamp(history) == 200.0
+        assert last_transcript_timestamp(history) == 200.0
 
-    def test_last_transcript_timestamp_empty(self):
-        assert _last_transcript_timestamp([]) is None
-        assert _last_transcript_timestamp(None) is None
+    def testlast_transcript_timestamp_empty(self):
+        assert last_transcript_timestamp([]) is None
+        assert last_transcript_timestamp(None) is None
 
-    def test_last_transcript_timestamp_row_without_timestamp(self):
+    def testlast_transcript_timestamp_row_without_timestamp(self):
         """Legacy transcript row (no timestamp) returns None → caller
         treats as fresh."""
         history = [
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "hey"},
         ]
-        assert _last_transcript_timestamp(history) is None
+        assert last_transcript_timestamp(history) is None
 
-    def test_auto_continue_freshness_window_reads_env(self, monkeypatch):
+    def testauto_continue_freshness_window_reads_env(self, monkeypatch):
         monkeypatch.setenv("HERMES_AUTO_CONTINUE_FRESHNESS", "7200")
-        assert _auto_continue_freshness_window() == 7200.0
+        assert auto_continue_freshness_window() == 7200.0
 
-    def test_auto_continue_freshness_window_default_when_unset(self, monkeypatch):
+    def testauto_continue_freshness_window_default_when_unset(self, monkeypatch):
         monkeypatch.delenv("HERMES_AUTO_CONTINUE_FRESHNESS", raising=False)
         # Default is 1 hour
-        assert _auto_continue_freshness_window() == 3600.0
+        assert auto_continue_freshness_window() == 3600.0
 
-    def test_auto_continue_freshness_window_malformed_falls_back(self, monkeypatch):
+    def testauto_continue_freshness_window_malformed_falls_back(self, monkeypatch):
         monkeypatch.setenv("HERMES_AUTO_CONTINUE_FRESHNESS", "not-a-number")
-        assert _auto_continue_freshness_window() == 3600.0
+        assert auto_continue_freshness_window() == 3600.0
 
-    def test_auto_continue_freshness_window_empty_falls_back(self, monkeypatch):
+    def testauto_continue_freshness_window_empty_falls_back(self, monkeypatch):
         monkeypatch.setenv("HERMES_AUTO_CONTINUE_FRESHNESS", "")
-        assert _auto_continue_freshness_window() == 3600.0
+        assert auto_continue_freshness_window() == 3600.0
 
 
 # ---------------------------------------------------------------------------
@@ -938,7 +938,7 @@ async def test_startup_auto_resume_skips_stale_entries():
     runner, adapter = make_restart_runner()
     source = make_restart_source(chat_id="stale-chat")
     stale_marker = datetime.now() - timedelta(
-        seconds=_auto_continue_freshness_window() + 60
+        seconds=auto_continue_freshness_window() + 60
     )
     stale_entry = SessionEntry(
         session_key="agent:main:telegram:dm:stale-chat",
