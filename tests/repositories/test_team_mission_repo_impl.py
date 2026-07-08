@@ -85,6 +85,18 @@ def _make_conn() -> sqlite3.Connection:
             completed_at REAL,
             metadata_json TEXT
         );
+        CREATE TABLE activity_commands (
+            command_id TEXT PRIMARY KEY,
+            activity_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            intent_at REAL NOT NULL,
+            state TEXT NOT NULL,
+            state_changed_at REAL NOT NULL,
+            result_event_id INTEGER,
+            error_reason TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
         CREATE TABLE run_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT NOT NULL,
@@ -314,3 +326,41 @@ def test_update_activity_status_missing_raises():
     repo = TeamMissionRepoImpl(_make_conn())
     with pytest.raises(LookupError):
         repo.update_activity_status("nope", "completed")
+
+
+def test_activity_commands_are_team_mission_repo_owned():
+    conn = _make_conn()
+    repo = TeamMissionRepoImpl(conn)
+
+    created = repo.insert_activity_command(
+        command_id="cmd-1",
+        activity_id="activity-1",
+        kind="start",
+        payload={"mission": "m1"},
+        metadata={"source": "test"},
+    )
+    duplicate = repo.insert_activity_command(
+        command_id="cmd-1",
+        activity_id="activity-1",
+        kind="start",
+    )
+
+    assert duplicate == {}
+    assert created["command_id"] == "cmd-1"
+    assert created["state"] == "accepted"
+    assert created["payload"] == {"mission": "m1"}
+    assert created["metadata"] == {"source": "test"}
+    assert repo.get_activity_command("cmd-1")["kind"] == "start"
+    assert [row["command_id"] for row in repo.list_pending_activity_commands()] == ["cmd-1"]
+    assert [
+        row["command_id"] for row in repo.list_activity_commands_for_activity("activity-1")
+    ] == ["cmd-1"]
+
+    dispatched = repo.update_activity_command_state(
+        "cmd-1",
+        next_state="dispatched",
+        result_event_id=42,
+    )
+    assert dispatched["state"] == "dispatched"
+    assert dispatched["result_event_id"] == 42
+    assert repo.update_activity_command_state("cmd-1", next_state="accepted") == {}

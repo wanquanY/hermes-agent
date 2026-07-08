@@ -17,6 +17,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from hermes_agent.domain.seq_allocator import allocate_only
 from hermes_agent.repositories.base import RepositoryConnection
+from hermes_team_mission.domain.activity import is_legal_transition
 
 
 ActivityKind = Literal[
@@ -199,6 +200,41 @@ class TeamMissionRepo(Protocol):
     ) -> list[Activity]: ...
 
     def update_activity_status(self, activity_id: str, status: ActivityStatus) -> Activity: ...
+
+    def insert_activity_command(
+        self,
+        *,
+        command_id: str,
+        activity_id: str,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def get_activity_command(self, command_id: str) -> dict[str, Any]: ...
+
+    def list_pending_activity_commands(
+        self,
+        *,
+        states: tuple[str, ...] = ("accepted", "dispatched"),
+        limit: int = 500,
+    ) -> list[dict[str, Any]]: ...
+
+    def update_activity_command_state(
+        self,
+        command_id: str,
+        *,
+        next_state: str,
+        error_reason: str = "",
+        result_event_id: int | None = None,
+    ) -> dict[str, Any]: ...
+
+    def list_activity_commands_for_activity(
+        self,
+        activity_id: str,
+        *,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]: ...
 
 
 class TeamMissionRepoImpl:
@@ -543,6 +579,150 @@ class TeamMissionRepoImpl:
         if row is None:
             raise LookupError(f"activity {stable_aid!r} not found")
         return _row_to_activity(row)
+
+    def insert_activity_command(
+        self,
+        *,
+        command_id: str,
+        activity_id: str,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        stable_command = _text(command_id)
+        stable_activity = _text(activity_id)
+        stable_kind = _text(kind)
+        if not stable_command or not stable_activity:
+            return {}
+        now = time.time()
+        cursor = self._conn.execute(
+            """
+            INSERT INTO activity_commands (
+                command_id, activity_id, kind, payload_json, intent_at,
+                state, state_changed_at, result_event_id, error_reason,
+                metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, 'accepted', ?, NULL, '', ?)
+            ON CONFLICT(command_id) DO NOTHING
+            """,
+            (
+                stable_command,
+                stable_activity,
+                stable_kind,
+                _activity_command_json(payload),
+                now,
+                now,
+                _activity_command_json(metadata),
+            ),
+        )
+        if int(cursor.rowcount or 0) == 0:
+            return {}
+        return self.get_activity_command(stable_command)
+
+    def get_activity_command(self, command_id: str) -> dict[str, Any]:
+        stable_command = _text(command_id)
+        if not stable_command:
+            return {}
+        row = self._conn.execute(
+            "SELECT * FROM activity_commands WHERE command_id = ?",
+            (stable_command,),
+        ).fetchone()
+        return _activity_command_row_to_dict(row)
+
+    def list_pending_activity_commands(
+        self,
+        *,
+        states: tuple[str, ...] = ("accepted", "dispatched"),
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        normalized_states = tuple(state for state in (_text(value) for value in states or ()) if state)
+        if not normalized_states:
+            return []
+        bounded_limit = _activity_command_limit(limit, 500)
+        placeholders = ", ".join("?" for _ in normalized_states)
+        rows = self._conn.execute(
+            f"""
+            SELECT *
+              FROM activity_commands
+             WHERE state IN ({placeholders})
+             ORDER BY intent_at ASC, command_id ASC
+             LIMIT ?
+            """,
+            (*normalized_states, bounded_limit),
+        ).fetchall()
+        return [_activity_command_row_to_dict(row) for row in rows]
+
+    def update_activity_command_state(
+        self,
+        command_id: str,
+        *,
+        next_state: str,
+        error_reason: str = "",
+        result_event_id: int | None = None,
+    ) -> dict[str, Any]:
+        stable_command = _text(command_id)
+        stable_next_state = _text(next_state)
+        if not stable_command or not stable_next_state:
+            return {}
+        row = self._conn.execute(
+            "SELECT * FROM activity_commands WHERE command_id = ?",
+            (stable_command,),
+        ).fetchone()
+        if row is None:
+            return {}
+        current_state = _row_text(row, "state", 5)
+        if not is_legal_transition(current_state, stable_next_state):
+            return {}
+        next_error_reason = _text(error_reason) or _row_text(row, "error_reason", 8)
+        next_result_event_id = (
+            result_event_id
+            if result_event_id is not None
+            else _row_value(row, "result_event_id", 7)
+        )
+        now = time.time()
+        cursor = self._conn.execute(
+            """
+            UPDATE activity_commands
+               SET state = ?,
+                   state_changed_at = ?,
+                   result_event_id = ?,
+                   error_reason = ?
+             WHERE command_id = ?
+               AND state = ?
+            """,
+            (
+                stable_next_state,
+                now,
+                next_result_event_id,
+                next_error_reason,
+                stable_command,
+                current_state,
+            ),
+        )
+        if int(cursor.rowcount or 0) == 0:
+            return {}
+        return self.get_activity_command(stable_command)
+
+    def list_activity_commands_for_activity(
+        self,
+        activity_id: str,
+        *,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        stable_activity = _text(activity_id)
+        if not stable_activity:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT *
+              FROM activity_commands
+             WHERE activity_id = ?
+             ORDER BY intent_at ASC, command_id ASC
+             LIMIT ?
+            """,
+            (stable_activity, _activity_command_limit(limit, 200)),
+        ).fetchall()
+        return [_activity_command_row_to_dict(row) for row in rows]
 
     # ------------------------------------------------------------------
     # Legacy Activity table — current gateway/UI read model.
@@ -1129,6 +1309,40 @@ def _legacy_activity_row(row: Any) -> dict[str, Any] | None:
         return None
     item["notify_parent"] = bool(item.get("notify_parent"))
     return item
+
+
+def _activity_command_json(value: dict[str, Any] | None) -> str:
+    if not isinstance(value, dict):
+        value = {}
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _activity_command_json_dict(value: Any) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        decoded = json.loads(str(value))
+    except (TypeError, ValueError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _activity_command_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    item = dict(row)
+    item["payload"] = _activity_command_json_dict(item.get("payload_json"))
+    item["metadata"] = _activity_command_json_dict(item.get("metadata_json"))
+    item["error_reason"] = str(item.get("error_reason") or "")
+    return item
+
+
+def _activity_command_limit(limit: int, default: int) -> int:
+    try:
+        parsed = int(limit)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(parsed, 5000))
 
 
 def _text(value: Any) -> str:

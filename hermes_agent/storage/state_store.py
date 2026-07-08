@@ -31,6 +31,7 @@ from hermes_agent.domain.session_deletion import SessionDeletionService
 from hermes_agent.repositories.agent_profile_repo import AgentProfileRepoImpl
 from hermes_agent.repositories.message_repo import MessageRepoImpl
 from hermes_agent.repositories.session_repo import SessionRepoImpl
+from hermes_agent.repositories.team_mission_repo import TeamMissionRepoImpl
 from hermes_agent.storage.fts_schema import FTS_SQL, FTS_TRIGRAM_SQL
 from hermes_agent.storage.sqlite_wal import WAL_INCOMPAT_MARKERS as _WAL_INCOMPAT_MARKERS
 from hermes_agent.storage.sqlite_wal import apply_wal_with_fallback
@@ -62,7 +63,6 @@ from hermes_agent.storage.state_mixins.team_registry import TeamRegistryStateMix
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
 from hermes_team_mission.state.schema import reconcile_team_mission_node_primary_key
 from hermes_team_mission.state.maintenance import run_team_mission_startup_maintenance
-from hermes_team_mission.domain.activity import is_legal_transition
 from hermes_team_mission.runtime.run_event_retention import RunEventRetentionPolicy
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
@@ -367,43 +367,14 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist a fresh activity command in state='accepted'."""
-        normalized_command_id = str(command_id or "").strip()
-        normalized_activity_id = str(activity_id or "").strip()
-        normalized_kind = str(kind or "").strip()
-        if not normalized_command_id or not normalized_activity_id:
-            return {}
-        payload_json = self._activity_command_json(payload)
-        metadata_json = self._activity_command_json(metadata)
-        now = time.time()
-
         def _do(conn: sqlite3.Connection) -> dict[str, Any]:
-            cursor = conn.execute(
-                """
-                INSERT INTO activity_commands (
-                    command_id, activity_id, kind, payload_json, intent_at,
-                    state, state_changed_at, result_event_id, error_reason,
-                    metadata_json
-                )
-                VALUES (?, ?, ?, ?, ?, 'accepted', ?, NULL, '', ?)
-                ON CONFLICT(command_id) DO NOTHING
-                """,
-                (
-                    normalized_command_id,
-                    normalized_activity_id,
-                    normalized_kind,
-                    payload_json,
-                    now,
-                    now,
-                    metadata_json,
-                ),
+            return TeamMissionRepoImpl(conn).insert_activity_command(
+                command_id=command_id,
+                activity_id=activity_id,
+                kind=kind,
+                payload=payload,
+                metadata=metadata,
             )
-            if int(cursor.rowcount or 0) == 0:
-                return {}
-            row = conn.execute(
-                "SELECT * FROM activity_commands WHERE command_id = ?",
-                (normalized_command_id,),
-            ).fetchone()
-            return self._activity_command_row_to_dict(row)
 
         return self._execute_write(_do)
 
@@ -413,11 +384,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         if not normalized_command_id:
             return {}
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM activity_commands WHERE command_id = ?",
-                (normalized_command_id,),
-            ).fetchone()
-        return self._activity_command_row_to_dict(row)
+            return TeamMissionRepoImpl(self._conn).get_activity_command(normalized_command_id)
 
     def list_pending_activity_commands(
         self,
@@ -433,20 +400,11 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         )
         if not normalized_states:
             return []
-        bounded_limit = self._activity_command_limit(limit, 500)
-        placeholders = ", ".join("?" for _ in normalized_states)
         with self._lock:
-            rows = self._conn.execute(
-                f"""
-                SELECT *
-                  FROM activity_commands
-                 WHERE state IN ({placeholders})
-                 ORDER BY intent_at ASC, command_id ASC
-                 LIMIT ?
-                """,
-                (*normalized_states, bounded_limit),
-            ).fetchall()
-        return [self._activity_command_row_to_dict(row) for row in rows]
+            return TeamMissionRepoImpl(self._conn).list_pending_activity_commands(
+                states=normalized_states,
+                limit=limit,
+            )
 
     def update_activity_command_state(
         self,
@@ -463,48 +421,12 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             return {}
 
         def _do(conn: sqlite3.Connection) -> dict[str, Any]:
-            row = conn.execute(
-                "SELECT * FROM activity_commands WHERE command_id = ?",
-                (normalized_command_id,),
-            ).fetchone()
-            if row is None:
-                return {}
-            current_state = str(row["state"] or "")
-            if not is_legal_transition(current_state, normalized_next_state):
-                return {}
-            next_error_reason = str(error_reason or row["error_reason"] or "")
-            next_result_event_id = (
-                result_event_id
-                if result_event_id is not None
-                else row["result_event_id"]
+            return TeamMissionRepoImpl(conn).update_activity_command_state(
+                normalized_command_id,
+                next_state=normalized_next_state,
+                error_reason=error_reason,
+                result_event_id=result_event_id,
             )
-            now = time.time()
-            cursor = conn.execute(
-                """
-                UPDATE activity_commands
-                   SET state = ?,
-                       state_changed_at = ?,
-                       result_event_id = ?,
-                       error_reason = ?
-                 WHERE command_id = ?
-                   AND state = ?
-                """,
-                (
-                    normalized_next_state,
-                    now,
-                    next_result_event_id,
-                    next_error_reason,
-                    normalized_command_id,
-                    current_state,
-                ),
-            )
-            if int(cursor.rowcount or 0) == 0:
-                return {}
-            updated = conn.execute(
-                "SELECT * FROM activity_commands WHERE command_id = ?",
-                (normalized_command_id,),
-            ).fetchone()
-            return self._activity_command_row_to_dict(updated)
 
         return self._execute_write(_do)
 
@@ -518,19 +440,11 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         normalized_activity_id = str(activity_id or "").strip()
         if not normalized_activity_id:
             return []
-        bounded_limit = self._activity_command_limit(limit, 200)
         with self._lock:
-            rows = self._conn.execute(
-                """
-                SELECT *
-                  FROM activity_commands
-                 WHERE activity_id = ?
-                 ORDER BY intent_at ASC, command_id ASC
-                 LIMIT ?
-                """,
-                (normalized_activity_id, bounded_limit),
-            ).fetchall()
-        return [self._activity_command_row_to_dict(row) for row in rows]
+            return TeamMissionRepoImpl(self._conn).list_activity_commands_for_activity(
+                normalized_activity_id,
+                limit=limit,
+            )
 
     def update_session_source(self, session_id: str, source: str) -> int:
         """Update one session's canonical source through the public DB surface."""
