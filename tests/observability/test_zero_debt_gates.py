@@ -55,6 +55,13 @@ def test_manifest_defines_required_allowlists_and_gates() -> None:
         "`hermes_agent/gateway/pipeline.py`",
         "`no_sessiondb_production`",
         "`no_legacy_identity_alias_internal`",
+        "`single_dispatch_registry`",
+        "`worker_services_decomposed`",
+        "`no_relocated_worker_monolith`",
+        "`worker_single_owner`",
+        "`gateway_directory_removed`",
+        "`no_relocated_gateway_monolith`",
+        "`gateway_run_decomposed`",
         "`event_ledger_single_writer`",
         "`run_state_single_writer`",
         "`no_hermes_state_store_production_instantiation`",
@@ -62,6 +69,8 @@ def test_manifest_defines_required_allowlists_and_gates() -> None:
         "`hermes_state_store_no_methods`",
         "`aggregate_table_single_owner`",
         "`no_silent_swallow_in_v3`",
+        "`no_silent_swallow_in_clean_trees`",
+        "`no_relocated_god_objects`",
     ):
         assert token in text
 
@@ -174,6 +183,82 @@ def test_p2_verdict_reports_current_data_plane_debt() -> None:
     assert not checks["p2:no_silent_swallow_in_v3"]["ok"]
     assert verdict["next_required_human_signoff"] == (
         "docs/audits/zero_debt_phase_p2_human_signoff.md"
+    )
+
+
+def _verdict_for_phase(phase: str) -> dict:
+    result = subprocess.run(
+        [sys.executable, str(VERDICT), "--phase", phase, "--json"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    verdict = json.loads(result.stdout)
+    assert verdict["phase"] == phase
+    assert verdict["status"] == "fail"
+    assert verdict["checks"]
+    assert all(check["id"] != "phase:supported" for check in verdict["checks"])
+    return verdict
+
+
+def test_p3_verdict_defines_gateway_registry_structure_gates() -> None:
+    verdict = _verdict_for_phase("P3")
+    checks = {check["id"]: check for check in verdict["checks"]}
+    for gate_id in (
+        "p3:no_method_modules",
+        "p3:no_dovie_overrides",
+        "p3:single_dispatch_registry",
+    ):
+        assert gate_id in checks
+    assert verdict["next_required_human_signoff"] == (
+        "docs/audits/zero_debt_phase_p3_human_signoff.md"
+    )
+
+
+def test_p4_verdict_defines_worker_decomposition_and_relocation_gates() -> None:
+    verdict = _verdict_for_phase("P4")
+    checks = {check["id"]: check for check in verdict["checks"]}
+    for gate_id in (
+        "p4:worker_services_decomposed",
+        "p4:no_relocated_worker_monolith",
+        "p4:worker_single_owner",
+    ):
+        assert gate_id in checks
+    assert verdict["next_required_human_signoff"] == (
+        "docs/audits/zero_debt_phase_p4_human_signoff.md"
+    )
+
+
+def test_p5_verdict_defines_gateway_retirement_relocation_gates() -> None:
+    verdict = _verdict_for_phase("P5")
+    checks = {check["id"]: check for check in verdict["checks"]}
+    for gate_id in (
+        "p5:gateway_directory_removed",
+        "p5:no_legacy_gateway_imports",
+        "p5:no_relocated_gateway_monolith",
+        "p5:gateway_run_decomposed",
+    ):
+        assert gate_id in checks
+    assert verdict["next_required_human_signoff"] == (
+        "docs/audits/zero_debt_phase_p5_human_signoff.md"
+    )
+
+
+def test_p6_verdict_defines_closure_safety_net_gates() -> None:
+    verdict = _verdict_for_phase("P6")
+    checks = {check["id"]: check for check in verdict["checks"]}
+    for gate_id in (
+        "p6:no_silent_swallow_in_clean_trees",
+        "p6:no_relocated_god_objects",
+    ):
+        assert gate_id in checks
+    assert "p2:aggregate_table_single_owner" in checks
+    assert "p3:single_dispatch_registry" in checks
+    assert "p5:no_relocated_gateway_monolith" in checks
+    assert verdict["next_required_human_signoff"] == (
+        "docs/audits/zero_debt_phase_p6_human_signoff.md"
     )
 
 

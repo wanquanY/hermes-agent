@@ -93,7 +93,14 @@ These are final-state gates. P0 records them; later phases tighten from warning 
 | `no_legacy_identity_alias_internal` | `stored_session_id|stable_session_id|runtime_session_id` | `hermes_agent/gateway/pipeline.py` only, for inbound wire folding. |
 | `no_method_modules` | `METHOD_MODULES` | None after P3. |
 | `no_dovie_overrides` | `DOVIE_GATEWAY_METHOD_OVERRIDES` | None after P3. |
+| `single_dispatch_registry` | structure: `tui_gateway/server.py` dispatch must use `hermes_agent.gateway.pipeline` and no secondary method→handler map may remain | `hermes_agent/gateway/registry.py` only after P3. |
+| `worker_services_decomposed` | `tui_gateway/services/worker_*.py` line/method budget | Legacy worker services collapse to <=100 total lines after P4. |
+| `no_relocated_worker_monolith` | class method-count >80 under blessed trees | No worker god-object may move into `hermes_agent/`, `channels/`, or `hermes_gateway/` after P4. |
+| `worker_single_owner` | structural WorkerPool/runtime owner scan | Runtime worker lease/state ownership must have one target owner after P4. |
 | `no_legacy_gateway_imports` | `^from gateway|^import gateway` | None after P5. |
+| `gateway_directory_removed` | `gateway/` exists | Directory must be gone after P5. |
+| `no_relocated_gateway_monolith` | class method-count >80 under blessed trees | `GatewayRunner` or any renamed equivalent may not move into clean trees after P5. |
+| `gateway_run_decomposed` | `gateway/run.py` and target gateway file sizes | `gateway/run.py` gone; no target gateway file >800 lines after P5. |
 | `event_ledger_single_writer` | `INSERT INTO run_events` | `hermes_agent/domain/event_ledger.py` only after P2. |
 | `run_state_single_writer` | `UPDATE runs` | `hermes_agent/domain/run_terminator.py`, `hermes_agent/repositories/run_repo.py` only after P2. |
 | `no_hermes_state_store_production_instantiation` | `HermesStateStore(` | None after P2. Renaming `SessionDB` to `HermesStateStore` does not satisfy P2. |
@@ -101,6 +108,8 @@ These are final-state gates. P0 records them; later phases tighten from warning 
 | `hermes_state_store_no_methods` | `class HermesStateStore` method count | 0 after P2. The class may not remain as a renamed god-object. |
 | `aggregate_table_single_owner` | raw `INSERT/UPDATE/DELETE` to aggregate tables | Physical writes must be owned by the declared aggregate repository/domain owner only after P2. |
 | `no_silent_swallow_in_v3` | `except ...: pass` / equivalent silent swallow | 0 findings under `hermes_agent/` after P2. |
+| `no_silent_swallow_in_clean_trees` | silent swallow scan under `hermes_agent/` + `hermes_gateway/` | 0 findings after P6; `channels/` adapter容错不在本次强制清零范围. |
+| `no_relocated_god_objects` | class method-count >80 under blessed trees | No renamed/moved god-object survives final closure. |
 
 Production scan excludes: `tests/`, `docs/`, `.venv/`, `__pycache__/`, `.import_linter_cache/`, build outputs.
 

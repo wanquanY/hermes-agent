@@ -192,6 +192,39 @@ _P2_STATE_STORE_PATHS = [
 _P2_STATE_STORE_MAX_TOTAL_LINES = 100
 _P2_HERMES_STATE_STORE_MAX_METHODS = 0
 
+_GOD_OBJECT_MAX_CLASS_METHODS = 80
+_GOD_OBJECT_BLESSED_TREES = ("hermes_agent", "channels", "hermes_gateway")
+_GOD_OBJECT_EXCLUDE_PREFIXES = ("hermes_agent/storage/migrations/",)
+
+_P3_LEGACY_METHOD_TOKENS = ("METHOD_MODULES",)
+_P3_LEGACY_OVERRIDE_TOKENS = ("DOVIE_GATEWAY_METHOD_OVERRIDES",)
+_P3_GATEWAY_ALLOWLIST = {
+    "scripts/zero_debt/verdict.py",
+}
+
+_P4_WORKER_SERVICE_PATHS = [
+    "tui_gateway/services/worker_db_proxy.py",
+    "tui_gateway/services/worker_frame_router.py",
+    "tui_gateway/services/worker_pool.py",
+    "tui_gateway/services/worker_publish_bridge.py",
+    "tui_gateway/services/worker_rpc_proxy.py",
+    "tui_gateway/services/worker_runtime.py",
+    "tui_gateway/services/worker_supervisor.py",
+]
+_P4_WORKER_MAX_TOTAL_LINES = 100
+_P4_WORKER_ALLOWED_OWNER_FILES = {
+    "hermes_agent/orchestration/worker_pool.py",
+    "hermes_agent/orchestration/worker_runtime.py",
+    "hermes_agent/runtime/worker_pool.py",
+    "hermes_agent/runtime/worker_runtime.py",
+}
+
+_P5_GATEWAY_RUN_PATH = "gateway/run.py"
+_P5_GATEWAY_RUN_MAX_LINES = 0
+_P5_GATEWAY_TARGET_MAX_LINES = 800
+
+_P6_SILENT_SWALLOW_ROOTS = ("hermes_agent", "hermes_gateway")
+
 
 @dataclass(frozen=True)
 class Check:
@@ -468,6 +501,114 @@ def _class_method_count(rel_path: str, class_name: str) -> int:
     return 0
 
 
+def _god_object_offenders() -> list[str]:
+    offenders: list[str] = []
+    for tree_name in _GOD_OBJECT_BLESSED_TREES:
+        root = REPO_ROOT / tree_name
+        if not root.exists():
+            continue
+        for path in root.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            rel = path.relative_to(REPO_ROOT).as_posix()
+            if any(rel.startswith(prefix) for prefix in _GOD_OBJECT_EXCLUDE_PREFIXES):
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                methods = sum(
+                    isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    for child in node.body
+                )
+                if methods > _GOD_OBJECT_MAX_CLASS_METHODS:
+                    offenders.append(f"{rel}::{node.name}: {methods} methods")
+    return sorted(offenders)
+
+
+def _legacy_gateway_import_offenders() -> list[str]:
+    offenders: list[str] = []
+    for path in _production_python_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel.startswith("gateway/"):
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            continue
+        for lineno, line in enumerate(lines, start=1):
+            stripped = line.strip()
+            if stripped.startswith("from gateway") or stripped.startswith("import gateway"):
+                offenders.append(f"{rel}:{lineno}: {stripped}")
+    return offenders
+
+
+def _method_mapping_offenders() -> list[str]:
+    """Find non-target method->handler maps independent of constant names."""
+    offenders: list[str] = []
+    for path in _production_python_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel.startswith("hermes_agent/gateway/"):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets: list[ast.expr]
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+                value = node.value
+            else:
+                targets = [node.target]
+                value = node.value
+            if not isinstance(value, (ast.Dict, ast.List, ast.Tuple, ast.Set)):
+                continue
+            target_names = [
+                target.id
+                for target in targets
+                if isinstance(target, ast.Name)
+            ]
+            name_text = " ".join(target_names).lower()
+            if not any(token in name_text for token in ("method", "handler", "override", "registry")):
+                continue
+            try:
+                literal_text = ast.get_source_segment(path.read_text(encoding="utf-8"), value) or ""
+            except UnicodeDecodeError:
+                literal_text = ""
+            if "tui_gateway.methods" in literal_text or "gateway.methods" in literal_text:
+                offenders.append(f"{rel}:{getattr(node, 'lineno', 0)}: {', '.join(target_names)}")
+    return offenders
+
+
+def _server_dispatches_through_pipeline() -> bool:
+    path = REPO_ROOT / "tui_gateway" / "server.py"
+    text = _read(path)
+    return (
+        "hermes_agent.gateway.pipeline" in text
+        and ".dispatch(" in text
+        and "MethodRegistry" in text
+    )
+
+
+def _silent_swallow_offenders_for_roots(root_names: tuple[str, ...]) -> list[str]:
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from hermes_agent.observability.silent_swallow_lint import scan_paths
+
+    roots = [REPO_ROOT / root for root in root_names if (REPO_ROOT / root).exists()]
+    findings = scan_paths(roots)
+    return [
+        f"{finding.file}:{finding.line}: {finding.exception_type}: {finding.reason}"
+        for finding in findings
+    ]
+
+
 def _p2_hermes_state_store_instantiations() -> list[str]:
     offenders: list[str] = []
     for path in _production_python_files():
@@ -491,15 +632,7 @@ def _p2_hermes_state_store_instantiations() -> list[str]:
 
 
 def _p2_silent_swallow_offenders() -> list[str]:
-    if str(REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(REPO_ROOT))
-    from hermes_agent.observability.silent_swallow_lint import scan_paths
-
-    findings = scan_paths([REPO_ROOT / "hermes_agent"])
-    return [
-        f"{finding.file}:{finding.line}: {finding.exception_type}: {finding.reason}"
-        for finding in findings
-    ]
+    return _silent_swallow_offenders_for_roots(("hermes_agent",))
 
 
 def _p2_data_plane_checks() -> list[Check]:
@@ -666,6 +799,281 @@ def build_p2_verdict() -> dict[str, Any]:
     }
 
 
+def _p3_gateway_registry_checks() -> list[Check]:
+    method_module_offenders = _scan_lines_for_tokens(
+        tokens=_P3_LEGACY_METHOD_TOKENS,
+        allowlist=_P3_GATEWAY_ALLOWLIST,
+    )
+    override_offenders = _scan_lines_for_tokens(
+        tokens=_P3_LEGACY_OVERRIDE_TOKENS,
+        allowlist=_P3_GATEWAY_ALLOWLIST,
+    )
+    mapping_offenders = _method_mapping_offenders()
+    server_uses_pipeline = _server_dispatches_through_pipeline()
+    return [
+        Check(
+            id="p3:no_method_modules",
+            ok=not method_module_offenders,
+            message=(
+                "legacy METHOD_MODULES registration is gone"
+                if not method_module_offenders
+                else "\n".join(method_module_offenders[:30])
+            ),
+        ),
+        Check(
+            id="p3:no_dovie_overrides",
+            ok=not override_offenders,
+            message=(
+                "DOVIE_GATEWAY_METHOD_OVERRIDES is gone"
+                if not override_offenders
+                else "\n".join(override_offenders[:30])
+            ),
+        ),
+        Check(
+            id="p3:single_dispatch_registry",
+            ok=server_uses_pipeline and not mapping_offenders,
+            message=(
+                "tui_gateway/server.py dispatches through hermes_agent.gateway.pipeline and no secondary method maps remain"
+                if server_uses_pipeline and not mapping_offenders
+                else (
+                    ("tui_gateway/server.py does not dispatch through hermes_agent.gateway.pipeline\n"
+                     if not server_uses_pipeline else "")
+                    + ("\n".join(mapping_offenders[:30]) if mapping_offenders else "")
+                ).strip()
+            ),
+        ),
+    ]
+
+
+def build_p3_verdict() -> dict[str, Any]:
+    checks = [
+        *_required_file_checks(),
+        *_p3_gateway_registry_checks(),
+    ]
+    failed = [check for check in checks if not check.ok]
+    return {
+        "phase": "P3",
+        "status": "fail" if failed else "pass",
+        "checks": [check.as_dict() for check in checks],
+        "warnings": [*_working_state_warnings()],
+        "required_test_commands": [
+            ".venv/bin/pytest tests/observability/test_zero_debt_gates.py tests/gateway -q",
+            "python scripts/zero_debt/phase_closure.py --phase P3 --json",
+        ],
+        "next_required_human_signoff": "docs/audits/zero_debt_phase_p3_human_signoff.md",
+    }
+
+
+def _worker_service_method_count(rel_path: str) -> int:
+    path = REPO_ROOT / rel_path
+    if not path.exists():
+        return 0
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (SyntaxError, UnicodeDecodeError):
+        return 0
+    return sum(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) for node in ast.walk(tree))
+
+
+def _p4_worker_checks() -> list[Check]:
+    total_lines, line_details = _python_line_count(_P4_WORKER_SERVICE_PATHS)
+    method_details = [
+        f"{rel}: {_worker_service_method_count(rel)} methods"
+        for rel in _P4_WORKER_SERVICE_PATHS
+        if (REPO_ROOT / rel).exists()
+    ]
+    god_object_offenders = _god_object_offenders()
+    worker_owner_offenders = [
+        rel
+        for rel in _P4_WORKER_SERVICE_PATHS
+        if (REPO_ROOT / rel).exists()
+    ]
+    for path in _production_python_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel in _P4_WORKER_ALLOWED_OWNER_FILES:
+            continue
+        if not rel.startswith(("hermes_agent/", "tui_gateway/")):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        if "WorkerPool" in text and rel not in _P4_WORKER_SERVICE_PATHS:
+            worker_owner_offenders.append(rel)
+    worker_owner_offenders = sorted(set(worker_owner_offenders))
+    return [
+        Check(
+            id="p4:worker_services_decomposed",
+            ok=total_lines <= _P4_WORKER_MAX_TOTAL_LINES,
+            message=(
+                f"legacy worker services total lines {total_lines} <= {_P4_WORKER_MAX_TOTAL_LINES}"
+                if total_lines <= _P4_WORKER_MAX_TOTAL_LINES
+                else "legacy worker services still own runtime bulk: "
+                + f"{total_lines} lines; "
+                + "; ".join([*line_details, *method_details])
+            ),
+        ),
+        Check(
+            id="p4:no_relocated_worker_monolith",
+            ok=not god_object_offenders,
+            message=(
+                "no god-object class in blessed runtime trees"
+                if not god_object_offenders
+                else "\n".join(god_object_offenders[:30])
+            ),
+        ),
+        Check(
+            id="p4:worker_single_owner",
+            ok=not worker_owner_offenders,
+            message=(
+                "worker runtime has a single target owner"
+                if not worker_owner_offenders
+                else "worker runtime ownership still split:\n" + "\n".join(worker_owner_offenders[:30])
+            ),
+        ),
+    ]
+
+
+def build_p4_verdict() -> dict[str, Any]:
+    checks = [
+        *_required_file_checks(),
+        *_p4_worker_checks(),
+    ]
+    failed = [check for check in checks if not check.ok]
+    return {
+        "phase": "P4",
+        "status": "fail" if failed else "pass",
+        "checks": [check.as_dict() for check in checks],
+        "warnings": [*_working_state_warnings()],
+        "required_test_commands": [
+            ".venv/bin/pytest tests/observability/test_zero_debt_gates.py tests/tui_gateway tests/gateway -q",
+            "python scripts/zero_debt/phase_closure.py --phase P4 --json",
+        ],
+        "next_required_human_signoff": "docs/audits/zero_debt_phase_p4_human_signoff.md",
+    }
+
+
+def _p5_gateway_checks() -> list[Check]:
+    gateway_dir = REPO_ROOT / "gateway"
+    legacy_gateway_imports = _legacy_gateway_import_offenders()
+    god_object_offenders = _god_object_offenders()
+    gateway_run_lines = len(_read(REPO_ROOT / _P5_GATEWAY_RUN_PATH).splitlines())
+    target_monoliths: list[str] = []
+    for root_name in ("hermes_gateway", "hermes_agent/gateway"):
+        root = REPO_ROOT / root_name
+        if not root.exists():
+            continue
+        for path in root.rglob("*.py"):
+            rel = path.relative_to(REPO_ROOT).as_posix()
+            lines = len(path.read_text(encoding="utf-8").splitlines())
+            if lines > _P5_GATEWAY_TARGET_MAX_LINES:
+                target_monoliths.append(f"{rel}: {lines} lines")
+    return [
+        Check(
+            id="p5:gateway_directory_removed",
+            ok=not gateway_dir.exists(),
+            message="gateway/ is removed" if not gateway_dir.exists() else "gateway/ still exists",
+        ),
+        Check(
+            id="p5:no_legacy_gateway_imports",
+            ok=not legacy_gateway_imports,
+            message=(
+                "production code has no legacy gateway imports"
+                if not legacy_gateway_imports
+                else "\n".join(legacy_gateway_imports[:30])
+            ),
+        ),
+        Check(
+            id="p5:no_relocated_gateway_monolith",
+            ok=not god_object_offenders,
+            message=(
+                "no gateway god-object class was relocated into blessed trees"
+                if not god_object_offenders
+                else "\n".join(god_object_offenders[:30])
+            ),
+        ),
+        Check(
+            id="p5:gateway_run_decomposed",
+            ok=gateway_run_lines <= _P5_GATEWAY_RUN_MAX_LINES and not target_monoliths,
+            message=(
+                "gateway/run.py is gone and target gateway files are below monolith threshold"
+                if gateway_run_lines <= _P5_GATEWAY_RUN_MAX_LINES and not target_monoliths
+                else (
+                    f"{_P5_GATEWAY_RUN_PATH}: {gateway_run_lines} lines; "
+                    + ("target monoliths: " + "; ".join(target_monoliths) if target_monoliths else "")
+                )
+            ),
+        ),
+    ]
+
+
+def build_p5_verdict() -> dict[str, Any]:
+    checks = [
+        *_required_file_checks(),
+        *_p5_gateway_checks(),
+    ]
+    failed = [check for check in checks if not check.ok]
+    return {
+        "phase": "P5",
+        "status": "fail" if failed else "pass",
+        "checks": [check.as_dict() for check in checks],
+        "warnings": [*_working_state_warnings()],
+        "required_test_commands": [
+            ".venv/bin/pytest tests/observability/test_zero_debt_gates.py tests/gateway tests/tui_gateway -q",
+            "python scripts/zero_debt/phase_closure.py --phase P5 --json",
+        ],
+        "next_required_human_signoff": "docs/audits/zero_debt_phase_p5_human_signoff.md",
+    }
+
+
+def _p6_debt_closure_checks() -> list[Check]:
+    silent_swallow_offenders = _silent_swallow_offenders_for_roots(_P6_SILENT_SWALLOW_ROOTS)
+    god_object_offenders = _god_object_offenders()
+    return [
+        Check(
+            id="p6:no_silent_swallow_in_clean_trees",
+            ok=not silent_swallow_offenders,
+            message=(
+                "hermes_agent/hermes_gateway have no silent swallow handlers"
+                if not silent_swallow_offenders
+                else "\n".join(silent_swallow_offenders[:30])
+            ),
+        ),
+        Check(
+            id="p6:no_relocated_god_objects",
+            ok=not god_object_offenders,
+            message=(
+                "no god-object classes remain in blessed trees"
+                if not god_object_offenders
+                else "\n".join(god_object_offenders[:30])
+            ),
+        ),
+    ]
+
+
+def build_p6_verdict() -> dict[str, Any]:
+    checks = [
+        *_required_file_checks(),
+        *_p2_data_plane_checks(),
+        *_p3_gateway_registry_checks(),
+        *_p4_worker_checks(),
+        *_p5_gateway_checks(),
+        *_p6_debt_closure_checks(),
+    ]
+    failed = [check for check in checks if not check.ok]
+    return {
+        "phase": "P6",
+        "status": "fail" if failed else "pass",
+        "checks": [check.as_dict() for check in checks],
+        "warnings": [*_working_state_warnings()],
+        "required_test_commands": [
+            ".venv/bin/pytest tests/observability tests/repositories tests/gateway tests/tui_gateway -q",
+            "python scripts/zero_debt/phase_closure.py --phase P6 --json",
+        ],
+        "next_required_human_signoff": "docs/audits/zero_debt_phase_p6_human_signoff.md",
+    }
+
+
 def build_verdict(phase: str) -> dict[str, Any]:
     normalized = str(phase or "").upper()
     if normalized == "P0":
@@ -674,6 +1082,14 @@ def build_verdict(phase: str) -> dict[str, Any]:
         return build_p1_verdict()
     if normalized == "P2":
         return build_p2_verdict()
+    if normalized == "P3":
+        return build_p3_verdict()
+    if normalized == "P4":
+        return build_p4_verdict()
+    if normalized == "P5":
+        return build_p5_verdict()
+    if normalized == "P6":
+        return build_p6_verdict()
     return {
         "phase": normalized,
         "status": "fail",
