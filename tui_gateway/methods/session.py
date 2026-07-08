@@ -1758,11 +1758,14 @@ def _(rid, params: dict) -> dict:
     db = _db_for_stable_session(target)
     if db is None:
         return _err(rid, 4007, "session not found")
-    found = db.get_session(target)
+    repo = _session_repo_for_db(db)
+    if repo is None:
+        return _err(rid, 5000, "session repository unavailable")
+    found = repo.get(target)
     if not found:
-        found = db.get_session_by_title(target)
+        found = repo.get_by_title(target)
         if found:
-            target = found["id"]
+            target = found.session_id
         else:
             return _err(rid, 4007, "session not found")
     # Context compression ends the current SessionDB session and forks a
@@ -1775,12 +1778,12 @@ def _(rid, params: dict) -> dict:
     # watch windows, which attach to the exact branch they were opened on.
     if found and not is_truthy_value(params.get("lazy", False)):
         try:
-            tip = db.resolve_resume_session_id(target)
+            tip = repo.resolve_resume_session_id(target)
         except Exception:
             tip = target
         if tip and tip != target:
             target = tip
-            found = db.get_session(target) or found
+            found = repo.get(target) or found
     existing_workspace = _stored_workspace(target)
     raw_cwd = params.get("cwd") or (existing_workspace or {}).get("cwd")
     workspace_params = params
@@ -1834,7 +1837,7 @@ def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
     try:
-        db.reopen_session(target)
+        repo.reopen(target)
         history_reader = getattr(db, "get_conversation_message_read_model", None)
         if not callable(history_reader):
             history_reader = db.get_messages_as_conversation

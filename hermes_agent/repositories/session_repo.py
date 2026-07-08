@@ -124,6 +124,8 @@ class SessionRepo(Protocol):
 
     def set_title(self, session_id: str, title: str, *, title_source: str = "user") -> bool: ...
 
+    def resolve_resume_session_id(self, session_id: str) -> str: ...
+
     def branch(self, source_id: str, spec: BranchSpec) -> Session: ...
 
     def close(self, session_id: str, reason: str) -> None: ...
@@ -344,6 +346,25 @@ class SessionRepoImpl:
             )
         return rowcount > 0
 
+    def resolve_resume_session_id(self, session_id: str) -> str:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return stable
+        target = self._compression_tip(stable)
+        if _session_has_messages(self._conn, target):
+            return target
+        current = target
+        seen = {current}
+        for _ in range(32):
+            child_id = self._latest_child_session_id(current)
+            if not child_id or child_id in seen:
+                return target
+            seen.add(child_id)
+            if _session_has_messages(self._conn, child_id):
+                return child_id
+            current = child_id
+        return target
+
     def _session_select_sql(self, suffix: str) -> str:
         return (
             "SELECT "
@@ -449,16 +470,26 @@ class SessionRepoImpl:
         if not stable:
             raise ValueError("session_id is required for reopen")
         now = time.time()
-        self._conn.execute(
-            """
-            UPDATE sessions
-               SET ended_at = NULL,
-                   end_reason = NULL,
-                   updated_at = ?
-             WHERE id = ?
-            """,
-            (now, stable),
-        )
+        assignments: list[str] = []
+        params: list[Any] = []
+        if "ended_at" in self._session_columns:
+            assignments.append("ended_at = NULL")
+        if "end_reason" in self._session_columns:
+            assignments.append("end_reason = NULL")
+        if "updated_at" in self._session_columns:
+            assignments.append("updated_at = ?")
+            params.append(now)
+        elif "last_active" in self._session_columns:
+            assignments.append("last_active = ?")
+            params.append(now)
+        if assignments:
+            params.append(stable)
+            self._conn.execute(
+                f"UPDATE sessions SET {', '.join(assignments)} WHERE id = ?",
+                params,
+            )
+        else:
+            self._conn.execute("UPDATE sessions SET id = id WHERE id = ?", (stable,))
         self._conn.execute(
             """
             UPDATE session_index
@@ -471,6 +502,53 @@ class SessionRepoImpl:
             """,
             (now, stable),
         )
+
+    def _compression_tip(self, session_id: str) -> str:
+        required = {"parent_session_id", "started_at", "ended_at", "end_reason"}
+        if not required.issubset(self._session_columns):
+            return session_id
+        current = session_id
+        seen = {current}
+        for _ in range(100):
+            row = self._conn.execute(
+                """
+                SELECT id
+                  FROM sessions
+                 WHERE parent_session_id = ?
+                   AND started_at >= (
+                       SELECT ended_at
+                         FROM sessions
+                        WHERE id = ?
+                          AND end_reason = 'compression'
+                   )
+                 ORDER BY started_at DESC, id DESC
+                 LIMIT 1
+                """,
+                (current, current),
+            ).fetchone()
+            if row is None:
+                return current
+            next_id = _row_text(row, "id", 0)
+            if not next_id or next_id in seen:
+                return current
+            seen.add(next_id)
+            current = next_id
+        return current
+
+    def _latest_child_session_id(self, session_id: str) -> str:
+        if "parent_session_id" not in self._session_columns:
+            return ""
+        row = self._conn.execute(
+            """
+            SELECT id
+              FROM sessions
+             WHERE parent_session_id = ?
+             ORDER BY started_at DESC, id DESC
+             LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+        return _row_text(row, "id", 0) if row is not None else ""
 
 
 def _apply_column(
@@ -514,6 +592,18 @@ def _row_to_session(row: Any) -> Session:
     )
 
 
+def _session_has_messages(conn: RepositoryConnection, session_id: str) -> bool:
+    if "messages" not in _table_names(conn):
+        return False
+    columns = _table_columns(conn, "messages")
+    active_clause = " AND active = 1" if "active" in columns else ""
+    row = conn.execute(
+        f"SELECT 1 FROM messages WHERE session_id = ?{active_clause} LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    return row is not None
+
+
 def _encode_model_config(value: dict[str, Any] | str | None) -> str | None:
     if value is None:
         return None
@@ -534,6 +624,24 @@ def _table_columns(conn: RepositoryConnection, table_name: str) -> set[str]:
         }
     except Exception:
         return set()
+
+
+def _table_names(conn: RepositoryConnection) -> set[str]:
+    try:
+        return {
+            str(row["name"] if isinstance(row, sqlite3.Row) else row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    except Exception:
+        return set()
+
+
+def _row_text(row: Any, key: str, index: int) -> str:
+    if isinstance(row, sqlite3.Row):
+        return str(row[key] or "")
+    return str(row[index] or "")
 
 
 __all__ = [

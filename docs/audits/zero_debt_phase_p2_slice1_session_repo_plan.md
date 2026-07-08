@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_7`
+状态：`in_progress_checkpoint_8`
 
 ## 前置门槛
 
@@ -14,7 +14,9 @@ P1 human sign-off 已通过，P2 已开始执行。当前 checkpoint 已完成
 `gateway.SessionStore`、TUI `session.create` 的 repo-backed 写入迁移，以及
 TUI `session.list/session.most_recent/session.index.list` 的 read-model owner
 迁移，以及 TUI `session.title/session.status` 的 repo-backed metadata 迁移，
-并将 TUI `session.delete` 迁到独立 domain deletion service。
+将 TUI `session.delete` 迁到独立 domain deletion service，并将 TUI
+`session.resume` 的 stored metadata/reopen/compression-tip 解析迁到
+`SessionRepoImpl`。
 
 ## 目标
 
@@ -424,3 +426,57 @@ python scripts/zero_debt/verdict.py --phase P2 --json
   production 调用者迁移后删除。
 - `session.status` 的 run-state projection 仍经 `run_control`，后续应在
   RunState owner slice 中统一收口。
+
+## Checkpoint 8 证据
+
+已完成：
+
+- `SessionRepoImpl` 新增 `resolve_resume_session_id()`，接管
+  compression-continuation tip 解析和“空 parent 沿 child 找到首个有消息
+  session”的 resume target 语义。
+- `SessionRepoImpl.reopen()` 改为 schema-aware：真实旧库缺少
+  `updated_at/end_reason` 时仍能通过 `last_active/ended_at` 安全 reopen，
+  不再依赖 legacy `SessionDB.reopen_session`。
+- `tui_gateway.methods.session` 的 `session.resume` 不再调用
+  `db.get_session`、`db.get_session_by_title`、`db.resolve_resume_session_id`
+  或 `db.reopen_session`；stored metadata、title lookup、resume target
+  re-anchor 和 reopen 均由 `SessionRepoImpl` 负责。
+- 本 checkpoint 明确不迁 transcript/message reader：`history_reader` 仍暂时
+  读取 legacy message projection，后续由 message read-model slice 统一接管。
+- `tests/test_tui_gateway_server.py` 和 `tests/tui_gateway/test_protocol.py`
+  的 `session.resume` 用例从 fake legacy DB 方法迁到真实 SQLite +
+  `SessionRepoImpl` 链路。
+- `tests/repositories/test_session_repo_impl.py` 增加 resume target 和 legacy
+  reopen schema 回归测试。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/repositories/session_repo.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py tests/tui_gateway/test_protocol.py tests/repositories/test_session_repo_impl.py
+.venv/bin/pytest tests/test_tui_gateway_server.py -k session_resume -q
+.venv/bin/pytest tests/tui_gateway/test_protocol.py -k session_resume -q
+.venv/bin/pytest tests/repositories/test_session_repo_impl.py -q
+.venv/bin/pytest tests/test_tui_gateway_server.py -k "session_resume or session_status or session_title or session_delete" tests/tui_gateway/test_protocol.py -k "session_resume or session_status or session_title" tests/gateway/test_session_list_allowed_sources.py::test_session_status_reads_stored_profile_session_without_runtime -q
+.venv/bin/ruff check hermes_agent/repositories/session_repo.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py tests/tui_gateway/test_protocol.py tests/repositories/test_session_repo_impl.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- `session.resume` gateway/protocol 定向测试：`6 passed`
+- `SessionRepoImpl` 完整测试：`21 passed`
+- Session resume/status/title/delete 组合测试：`19 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `session.messages` / resume display history / prompt history reader 仍使用
+  legacy message projection，需要独立 message read-model owner。
+- `session.usage` 本身不依赖 DB，不是当前 P2 storage owner blocker。
+- `gateway/run.py`、`cli.py`、`run_agent.py` 仍存在直接 `SessionDB` 生产路径，
+  属于 P2 后续垂直切片。

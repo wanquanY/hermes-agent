@@ -46,6 +46,23 @@ def capture(server):
     return server, buf
 
 
+def _resume_gateway_db(tmp_path, rows=(), history_reader=None):
+    from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+    from hermes_agent.storage.session_repository_db import connect_session_repository_db
+
+    conn = connect_session_repository_db(tmp_path / "resume-state.db")
+    repo = SessionRepoImpl(conn)
+    for session_id, title in rows:
+        repo.create(SessionSpec(session_id=session_id, source="tui", title=title))
+
+    def _history(_sid, include_ancestors=False):
+        if callable(history_reader):
+            return history_reader(_sid, include_ancestors=include_ancestors)
+        return []
+
+    return types.SimpleNamespace(_conn=conn, get_messages_as_conversation=_history)
+
+
 # ── JSON-RPC envelope ────────────────────────────────────────────────
 
 
@@ -444,28 +461,23 @@ def test_sess_resolves_stored_session_id_to_running_runtime(server):
 # ── session.resume payload ────────────────────────────────────────────
 
 
-def test_session_resume_returns_hydrated_messages(server, monkeypatch):
-    class _DB:
-        def get_session(self, _sid):
-            return {"id": "20260409_010101_abc123"}
+def test_session_resume_returns_hydrated_messages(server, monkeypatch, tmp_path):
+    def history_reader(_sid, include_ancestors=False):
+        return [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "yo"},
+            {"role": "tool", "content": "searched"},
+            {"role": "assistant", "content": "   "},
+            {"role": "assistant", "content": None},
+            {"role": "narrator", "content": "skip"},
+        ]
 
-        def get_session_by_title(self, _title):
-            return None
-
-        def reopen_session(self, _sid):
-            return None
-
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
-            return [
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "yo"},
-                {"role": "tool", "content": "searched"},
-                {"role": "assistant", "content": "   "},
-                {"role": "assistant", "content": None},
-                {"role": "narrator", "content": "skip"},
-            ]
-
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    db = _resume_gateway_db(
+        tmp_path,
+        rows=[("20260409_010101_abc123", "Hydrated")],
+        history_reader=history_reader,
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_id=None: object())
     monkeypatch.setattr(server, "_init_session", lambda sid, key, agent, history, cols=80: None)
     monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test/model"})
@@ -487,20 +499,7 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
     ]
 
 
-def test_session_resume_reuses_live_running_runtime(server, monkeypatch):
-    class _DB:
-        def get_session(self, _sid):
-            return {"id": "stored-live"}
-
-        def get_session_by_title(self, _title):
-            return None
-
-        def reopen_session(self, _sid):
-            return None
-
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
-            return [{"role": "user", "content": "still running"}]
-
+def test_session_resume_reuses_live_running_runtime(server, monkeypatch, tmp_path):
     live_agent = MagicMock()
     server._sessions["runtime-live"] = {
         "agent": live_agent,
@@ -513,7 +512,8 @@ def test_session_resume_reuses_live_running_runtime(server, monkeypatch):
         "run_updated_at": 20,
     }
     make_agent = MagicMock()
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    db = _resume_gateway_db(tmp_path, rows=[("stored-live", "Stored Live")])
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", make_agent)
     monkeypatch.setattr(server, "_session_info", lambda *_args: {"model": "test/model"})
 

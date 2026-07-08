@@ -375,3 +375,96 @@ def test_reopen_clears_terminal_state():
     assert idx_row["running"] == 0
     assert idx_row["waiting_approval"] == 0
     assert idx_row["active_run_id"] == ""
+
+
+def test_resolve_resume_session_id_follows_compression_tip_with_messages():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="parent", source="test"))
+    repo.close("parent", reason="compression")
+    repo.create(SessionSpec(session_id="tip", source="test", parent_session_id="parent"))
+    conn.executescript(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO messages (session_id, active) VALUES ('tip', 1);
+        """
+    )
+
+    assert repo.resolve_resume_session_id("parent") == "tip"
+
+
+def test_resolve_resume_session_id_follows_latest_child_when_parent_has_no_messages():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="parent", source="test"))
+    repo.create(SessionSpec(session_id="empty-child", source="test", parent_session_id="parent"))
+    repo.create(SessionSpec(session_id="message-child", source="test", parent_session_id="empty-child"))
+    conn.executescript(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO messages (session_id, active) VALUES ('message-child', 1);
+        """
+    )
+
+    assert repo.resolve_resume_session_id("parent") == "message-child"
+
+
+def test_reopen_supports_legacy_session_schema_without_updated_at_or_end_reason():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            title TEXT,
+            display_title TEXT,
+            display_title_source TEXT,
+            started_at REAL NOT NULL,
+            last_active REAL,
+            ended_at REAL,
+            parent_session_id TEXT
+        );
+        CREATE TABLE session_index (
+            session_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'closed',
+            running INTEGER NOT NULL DEFAULT 1,
+            waiting_approval INTEGER NOT NULL DEFAULT 1,
+            active_run_id TEXT NOT NULL DEFAULT 'run-old',
+            updated_at REAL NOT NULL DEFAULT 0
+        );
+        INSERT INTO sessions (
+            id, source, title, display_title, display_title_source,
+            started_at, last_active, ended_at, parent_session_id
+        ) VALUES (
+            'legacy', 'tui', 'Legacy', 'Legacy', 'user', 10, 20, 30, ''
+        );
+        INSERT INTO session_index (session_id) VALUES ('legacy');
+        """
+    )
+    repo = SessionRepoImpl(conn)
+
+    repo.reopen("legacy")
+
+    session_row = conn.execute(
+        "SELECT ended_at, last_active FROM sessions WHERE id = 'legacy'"
+    ).fetchone()
+    assert session_row["ended_at"] is None
+    assert session_row["last_active"] > 20
+    index_row = conn.execute(
+        "SELECT status, running, waiting_approval, active_run_id FROM session_index WHERE session_id = 'legacy'"
+    ).fetchone()
+    assert dict(index_row) == {
+        "status": "idle",
+        "running": 0,
+        "waiting_approval": 0,
+        "active_run_id": "",
+    }

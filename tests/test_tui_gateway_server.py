@@ -867,28 +867,22 @@ def test_history_to_messages_renders_multimodal_content():
     ]
 
 
-def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
+def test_session_resume_uses_parent_lineage_for_display(monkeypatch, tmp_path):
     captured = {}
 
-    class FakeDB:
-        def get_session(self, target):
-            return {"id": target}
+    def history_reader(target, include_ancestors=False, **_kwargs):
+        captured.setdefault("history_calls", []).append((target, include_ancestors))
+        return (
+            [
+                {"role": "user", "content": "root prompt"},
+                {"role": "assistant", "content": "root answer"},
+            ]
+            if include_ancestors
+            else [{"role": "user", "content": "tip prompt"}]
+        )
 
-        def reopen_session(self, target):
-            captured["reopened"] = target
-
-        def get_messages_as_conversation(self, target, include_ancestors=False):
-            captured.setdefault("history_calls", []).append((target, include_ancestors))
-            return (
-                [
-                    {"role": "user", "content": "root prompt"},
-                    {"role": "assistant", "content": "root answer"},
-                ]
-                if include_ancestors
-                else [{"role": "user", "content": "tip prompt"}]
-            )
-
-    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+    db = _resume_gateway_db(tmp_path, rows=[("tip", "Tip")], history_reader=history_reader)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
     monkeypatch.setattr(server, "_set_session_context", lambda *args, **kwargs: [])
     monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
@@ -918,35 +912,43 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
     assert ("tip", True) in captured["history_calls"]
 
 
-def test_session_resume_reanchors_to_compression_tip(monkeypatch):
+def test_session_resume_reanchors_to_compression_tip(monkeypatch, tmp_path):
     """Regression: context compression ends the current session and forks a
     continuation child holding the post-compression turns. Resuming the parent
-    id must re-anchor to the tip (via db.resolve_resume_session_id) so history
+    id must re-anchor to the tip (via SessionRepoImpl.resolve_resume_session_id) so history
     loading and the rebuilt agent target the session that actually holds the
     messages — otherwise the resume reloads the stale pre-compression transcript
     and misses the live session keyed on the tip. This guards the LIVE
     methods/session.py handler against losing the re-anchor again."""
     captured = {}
 
-    class FakeDB:
-        def get_session(self, target):
-            return {"id": target}
+    def history_reader(target, include_ancestors=False, **_kwargs):
+        captured.setdefault("history_targets", []).append(target)
+        return [{"role": "user", "content": "x"}]
 
-        def get_session_by_title(self, target):
-            return None
-
-        def resolve_resume_session_id(self, session_id):
-            # Parent rotated into "tip" by compression.
-            return "tip" if session_id == "rotated_parent" else session_id
-
-        def reopen_session(self, target):
-            captured["reopened"] = target
-
-        def get_messages_as_conversation(self, target, include_ancestors=False):
-            captured.setdefault("history_targets", []).append(target)
-            return [{"role": "user", "content": "x"}]
-
-    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+    db = _resume_gateway_db(
+        tmp_path,
+        rows=[
+            ("rotated_parent", "Rotated"),
+            ("tip", "", "rotated_parent"),
+        ],
+        history_reader=history_reader,
+    )
+    db._conn.execute(
+        "UPDATE sessions SET started_at = 10, ended_at = 20, end_reason = 'compression' WHERE id = 'rotated_parent'"
+    )
+    db._conn.execute("UPDATE sessions SET started_at = 21, ended_at = NULL WHERE id = 'tip'")
+    db._conn.execute(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    db._conn.execute("INSERT INTO messages (session_id, active) VALUES ('tip', 1)")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
     monkeypatch.setattr(server, "_set_session_context", lambda *args, **kwargs: [])
     monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
@@ -971,35 +973,24 @@ def test_session_resume_reanchors_to_compression_tip(monkeypatch):
 
     assert resp.get("result"), f"got error: {resp.get('error')}"
     # Everything downstream must target the compression tip, not the parent.
-    assert captured.get("reopened") == "tip"
     assert captured.get("agent_target") == "tip"
     assert "rotated_parent" not in captured.get("history_targets", [])
     assert "tip" in captured.get("history_targets", [])
 
 
-def test_session_resume_reuses_existing_live_session_concurrently(monkeypatch):
+def test_session_resume_reuses_existing_live_session_concurrently(monkeypatch, tmp_path):
     target = "20260409_010101_abc123"
     created_sids: list[str] = []
     closed_sids: list[str] = []
     build_barrier = threading.Barrier(2, timeout=5)
 
-    class FakeDB:
-        def get_session(self, _target):
-            return {"id": target}
-
-        def get_session_by_title(self, _title):
-            return None
-
-        def reopen_session(self, _target):
-            return None
-
-        def get_messages_as_conversation(self, _target, include_ancestors=False, **_kwargs):
-            if include_ancestors:
-                return [
-                    {"role": "user", "content": "hello"},
-                    {"role": "assistant", "content": "yo"},
-                ]
-            return [{"role": "user", "content": "hello"}]
+    def history_reader(_target, include_ancestors=False, **_kwargs):
+        if include_ancestors:
+            return [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "yo"},
+            ]
+        return [{"role": "user", "content": "hello"}]
 
     class FakeAgent:
         def __init__(self, sid):
@@ -1019,7 +1010,8 @@ def test_session_resume_reuses_existing_live_session_concurrently(monkeypatch):
         build_barrier.wait()
         return FakeAgent(sid)
 
-    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+    db = _resume_gateway_db(tmp_path, rows=[(target, "Target")], history_reader=history_reader)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", make_agent)
     monkeypatch.setattr(server, "_SlashWorker", lambda _key, _model: FakeWorker())
     monkeypatch.setattr(server, "_start_notification_poller", lambda _sid, _session: threading.Event())
@@ -1069,16 +1061,9 @@ def test_session_resume_reuses_existing_live_session_concurrently(monkeypatch):
                 server._sessions.pop(sid, None)
 
 
-def test_session_resume_live_payload_uses_current_live_history(monkeypatch):
+def test_session_resume_live_payload_uses_current_live_history(monkeypatch, tmp_path):
     target = "20260409_020202_def456"
     runtime_sid = "live-resume"
-
-    class FakeDB:
-        def get_session(self, _target):
-            return {"id": target}
-
-        def get_session_by_title(self, _title):
-            return None
 
     live_session = {
         "agent": types.SimpleNamespace(model="test/model"),
@@ -1097,7 +1082,8 @@ def test_session_resume_live_payload_uses_current_live_history(monkeypatch):
         "tool_started_at": {},
     }
     server._sessions[runtime_sid] = live_session
-    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+    db = _resume_gateway_db(tmp_path, rows=[(target, "Target")])
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_session_info", lambda _agent, _session=None: {"model": "test/model"})
     import tui_gateway.methods.session as session_methods
 
@@ -1264,6 +1250,33 @@ def _title_gateway_db(tmp_path, rows=()):
     for session_id, title in rows:
         repo.create(SessionSpec(session_id=session_id, source="tui", title=title))
     return types.SimpleNamespace(_conn=conn)
+
+
+def _resume_gateway_db(tmp_path, rows=(), history_reader=None):
+    from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+    from hermes_agent.storage.session_repository_db import connect_session_repository_db
+
+    conn = connect_session_repository_db(tmp_path / "resume-state.db")
+    repo = SessionRepoImpl(conn)
+    for row in rows:
+        session_id = row[0]
+        title = row[1] if len(row) > 1 else ""
+        parent_session_id = row[2] if len(row) > 2 else ""
+        repo.create(
+            SessionSpec(
+                session_id=session_id,
+                source="tui",
+                title=title,
+                parent_session_id=parent_session_id,
+            )
+        )
+
+    def _history(_target, include_ancestors=False, **_kwargs):
+        if callable(history_reader):
+            return history_reader(_target, include_ancestors=include_ancestors, **_kwargs)
+        return []
+
+    return types.SimpleNamespace(_conn=conn, get_messages_as_conversation=_history)
 
 
 def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
