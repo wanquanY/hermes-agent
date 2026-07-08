@@ -146,6 +146,20 @@ class SessionRepo(Protocol):
 
     def set_title(self, session_id: str, title: str, *, title_source: str = "user") -> bool: ...
 
+    def update_cwd(self, session_id: str, cwd: str) -> bool: ...
+
+    def update_usage(self, session_id: str, fields: dict[str, Any]) -> bool: ...
+
+    def set_archived(self, session_id: str, archived: bool) -> bool: ...
+
+    def update_system_prompt(self, session_id: str, system_prompt: str) -> bool: ...
+
+    def request_handoff(self, session_id: str, platform: str) -> bool: ...
+
+    def fail_handoff(self, session_id: str, error: str) -> bool: ...
+
+    def finalize_orphaned_compression_sessions(self) -> int: ...
+
     def record_message_append(
         self,
         session_id: str,
@@ -383,6 +397,143 @@ class SessionRepoImpl:
                 (normalized_title or "", time.time(), stable),
             )
         return rowcount > 0
+
+    def update_cwd(self, session_id: str, cwd: str) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required for update_cwd")
+        if "cwd" not in self._session_columns:
+            return False
+        now = time.time()
+        rowcount = int(
+            self._conn.execute(
+                "UPDATE sessions SET cwd = ?, updated_at = ? WHERE id = ?",
+                (str(cwd or ""), now, stable),
+            ).rowcount
+            or 0
+        )
+        if rowcount:
+            self._conn.execute(
+                "UPDATE session_index SET updated_at = ? WHERE session_id = ?",
+                (now, stable),
+            )
+        return rowcount > 0
+
+    def update_usage(self, session_id: str, fields: dict[str, Any]) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required for update_usage")
+        allowed = {
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "reasoning_tokens",
+            "api_call_count",
+            "billing_provider",
+            "billing_base_url",
+            "billing_mode",
+            "estimated_cost_usd",
+            "actual_cost_usd",
+            "cost_status",
+            "cost_source",
+            "pricing_version",
+        }
+        assignments: list[str] = []
+        params: list[Any] = []
+        for key, value in (fields or {}).items():
+            if key in allowed and key in self._session_columns:
+                assignments.append(f"{key} = ?")
+                params.append(value)
+        if not assignments:
+            return False
+        assignments.append("updated_at = ?")
+        params.extend([time.time(), stable])
+        rowcount = int(
+            self._conn.execute(
+                f"UPDATE sessions SET {', '.join(assignments)} WHERE id = ?",
+                params,
+            ).rowcount
+            or 0
+        )
+        return rowcount > 0
+
+    def set_archived(self, session_id: str, archived: bool) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return False
+        if "archived" not in self._session_columns:
+            return False
+        cursor = self._conn.execute(
+            "UPDATE sessions SET archived = ?, updated_at = ? WHERE id = ?",
+            (1 if archived else 0, time.time(), stable),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def update_system_prompt(self, session_id: str, system_prompt: str) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required for update_system_prompt")
+        if "system_prompt" not in self._session_columns:
+            return False
+        cursor = self._conn.execute(
+            "UPDATE sessions SET system_prompt = ?, updated_at = ? WHERE id = ?",
+            (str(system_prompt or ""), time.time(), stable),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def request_handoff(self, session_id: str, platform: str) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return False
+        required = {"handoff_state", "handoff_platform", "handoff_error"}
+        if not required.issubset(self._session_columns):
+            return False
+        cursor = self._conn.execute(
+            """
+            UPDATE sessions
+               SET handoff_state = 'pending',
+                   handoff_platform = ?,
+                   handoff_error = NULL,
+                   updated_at = ?
+             WHERE id = ?
+               AND (handoff_state IS NULL OR handoff_state IN ('completed', 'failed'))
+            """,
+            (str(platform or ""), time.time(), stable),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def fail_handoff(self, session_id: str, error: str) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return False
+        required = {"handoff_state", "handoff_error"}
+        if not required.issubset(self._session_columns):
+            return False
+        cursor = self._conn.execute(
+            "UPDATE sessions SET handoff_state = 'failed', handoff_error = ?, updated_at = ? WHERE id = ?",
+            (str(error or ""), time.time(), stable),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def finalize_orphaned_compression_sessions(self) -> int:
+        required = {"parent_session_id", "message_count", "ended_at", "end_reason"}
+        if not required.issubset(self._session_columns):
+            return 0
+        now = time.time()
+        cursor = self._conn.execute(
+            """
+            UPDATE sessions
+               SET ended_at = COALESCE(ended_at, ?),
+                   end_reason = COALESCE(end_reason, 'compression_orphan'),
+                   updated_at = ?
+             WHERE parent_session_id IS NOT NULL
+               AND COALESCE(message_count, 0) = 0
+               AND ended_at IS NULL
+            """,
+            (now, now),
+        )
+        return int(cursor.rowcount or 0)
 
     def record_message_append(
         self,

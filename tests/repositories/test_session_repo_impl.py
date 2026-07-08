@@ -339,6 +339,75 @@ def test_replace_message_projection_preserves_user_title_source():
     assert session_row["last_active"] == 456.0
 
 
+def test_session_metadata_updates_are_owned_by_session_repo():
+    conn = _make_conn()
+    conn.executescript(
+        """
+        ALTER TABLE sessions ADD COLUMN cwd TEXT;
+        ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE sessions ADD COLUMN input_tokens INTEGER;
+        ALTER TABLE sessions ADD COLUMN output_tokens INTEGER;
+        ALTER TABLE sessions ADD COLUMN pricing_version TEXT;
+        ALTER TABLE sessions ADD COLUMN system_prompt TEXT;
+        ALTER TABLE sessions ADD COLUMN handoff_state TEXT;
+        ALTER TABLE sessions ADD COLUMN handoff_platform TEXT;
+        ALTER TABLE sessions ADD COLUMN handoff_error TEXT;
+        """
+    )
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="s1", source="test"))
+
+    assert repo.update_cwd("s1", "/workspace") is True
+    assert repo.update_usage(
+        "s1",
+        {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "pricing_version": "v1",
+            "not_a_session_field": "ignored",
+        },
+    ) is True
+    assert repo.set_archived("s1", True) is True
+    assert repo.update_system_prompt("s1", "system") is True
+    assert repo.request_handoff("s1", "telegram") is True
+    assert repo.fail_handoff("s1", "timeout") is True
+
+    row = conn.execute(
+        """
+        SELECT cwd, archived, input_tokens, output_tokens, pricing_version,
+               system_prompt, handoff_state, handoff_platform, handoff_error
+          FROM sessions
+         WHERE id = 's1'
+        """
+    ).fetchone()
+    assert dict(row) == {
+        "cwd": "/workspace",
+        "archived": 1,
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "pricing_version": "v1",
+        "system_prompt": "system",
+        "handoff_state": "failed",
+        "handoff_platform": "telegram",
+        "handoff_error": "timeout",
+    }
+
+
+def test_finalize_orphaned_compression_sessions_is_session_repo_owned():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="parent", source="test"))
+    repo.create(SessionSpec(session_id="orphan", source="test", parent_session_id="parent"))
+
+    assert repo.finalize_orphaned_compression_sessions() == 1
+
+    row = conn.execute(
+        "SELECT ended_at, end_reason FROM sessions WHERE id = 'orphan'"
+    ).fetchone()
+    assert row["ended_at"] is not None
+    assert row["end_reason"] == "compression_orphan"
+
+
 def test_title_methods_update_sessions_and_index():
     conn = _make_conn()
     repo = SessionRepoImpl(conn)

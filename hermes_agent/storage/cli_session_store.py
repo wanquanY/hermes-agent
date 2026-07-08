@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.memory_manager import sanitize_context
+from hermes_agent.domain.session_deletion import SessionDeletionService
 from hermes_agent.read_models.message_history import MessageHistoryReadModel
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.repositories.agent_profile_repo import AgentProfileRepoImpl
@@ -41,6 +42,7 @@ class CliSessionStore:
         self._lock = lock_for_connection(conn)
         self._sessions = SessionRepoImpl(conn)
         self._profiles = AgentProfileRepoImpl(conn)
+        self._session_deletion = SessionDeletionService(conn)
         self._message_writer = MessageRepository(conn, self._sessions)
         self._messages = MessageHistoryReadModel(conn)
         self._recall = SessionRecallReadModel(conn)
@@ -99,31 +101,13 @@ class CliSessionStore:
         return stable if self.get_session(stable) is not None else None
 
     def end_session(self, session_id: str, end_reason: str) -> None:
-        now = time.time()
         with self._lock:
-            self._conn.execute(
-                "UPDATE sessions SET ended_at = ?, end_reason = ?, updated_at = ? "
-                "WHERE id = ? AND ended_at IS NULL",
-                (now, str(end_reason or ""), now, str(session_id or "")),
-            )
-            self._conn.execute(
-                "UPDATE session_index SET status = 'closed', running = 0, updated_at = ? "
-                "WHERE session_id = ?",
-                (now, str(session_id or "")),
-            )
+            self._sessions.close(session_id, str(end_reason or ""))
             self._conn.commit()
 
     def reopen_session(self, session_id: str) -> None:
-        now = time.time()
         with self._lock:
-            self._conn.execute(
-                "UPDATE sessions SET ended_at = NULL, end_reason = NULL, updated_at = ? WHERE id = ?",
-                (now, str(session_id or "")),
-            )
-            self._conn.execute(
-                "UPDATE session_index SET status = 'idle', updated_at = ? WHERE session_id = ?",
-                (now, str(session_id or "")),
-            )
+            self._sessions.reopen(session_id)
             self._conn.commit()
 
     def get_session_title(self, session_id: str) -> str | None:
@@ -142,16 +126,8 @@ class CliSessionStore:
         stable = str(session_id or "").strip()
         if not stable:
             raise ValueError("session_id is required")
-        now = time.time()
         with self._lock:
-            self._conn.execute(
-                "UPDATE sessions SET cwd = ?, updated_at = ? WHERE id = ?",
-                (str(cwd or ""), now, stable),
-            )
-            self._conn.execute(
-                "UPDATE session_index SET updated_at = ? WHERE session_id = ?",
-                (now, stable),
-            )
+            self._sessions.update_cwd(stable, str(cwd or ""))
             self._conn.commit()
 
     def get_session_by_title(self, title: str) -> dict[str, Any] | None:
@@ -476,37 +452,8 @@ class CliSessionStore:
         self._message_writer.replace_conversation(stable, messages)
 
     def update_token_counts(self, session_id: str, **counts: Any) -> None:
-        columns = {
-            "input_tokens",
-            "output_tokens",
-            "cache_read_tokens",
-            "cache_write_tokens",
-            "reasoning_tokens",
-            "api_call_count",
-            "billing_provider",
-            "billing_base_url",
-            "billing_mode",
-            "estimated_cost_usd",
-            "actual_cost_usd",
-            "cost_status",
-            "cost_source",
-            "pricing_version",
-        }
-        assignments: list[str] = []
-        params: list[Any] = []
-        for key, value in counts.items():
-            if key in columns:
-                assignments.append(f"{key} = ?")
-                params.append(value)
-        if not assignments:
-            return
-        assignments.append("updated_at = ?")
-        params.extend([time.time(), str(session_id or "")])
         with self._lock:
-            self._conn.execute(
-                f"UPDATE sessions SET {', '.join(assignments)} WHERE id = ?",
-                params,
-            )
+            self._sessions.update_usage(session_id, counts)
             self._conn.commit()
 
     def set_session_archived(self, session_id: str, archived: bool) -> bool:
@@ -514,12 +461,9 @@ class CliSessionStore:
         if not stable:
             return False
         with self._lock:
-            cursor = self._conn.execute(
-                "UPDATE sessions SET archived = ?, updated_at = ? WHERE id = ?",
-                (1 if archived else 0, time.time(), stable),
-            )
+            updated = self._sessions.set_archived(stable, archived)
             self._conn.commit()
-        return int(cursor.rowcount or 0) > 0
+        return updated
 
     def latest_descendant(self, session_id: str) -> tuple[str | None, list[str]]:
         stable = self.resolve_session_id(session_id)
@@ -656,28 +600,14 @@ class CliSessionStore:
 
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
         with self._lock:
-            self._conn.execute(
-                "UPDATE sessions SET system_prompt = ?, updated_at = ? WHERE id = ?",
-                (str(system_prompt or ""), time.time(), str(session_id or "")),
-            )
+            self._sessions.update_system_prompt(session_id, system_prompt)
             self._conn.commit()
 
     def request_handoff(self, session_id: str, platform: str) -> bool:
         with self._lock:
-            cursor = self._conn.execute(
-                """
-                UPDATE sessions
-                   SET handoff_state = 'pending',
-                       handoff_platform = ?,
-                       handoff_error = NULL,
-                       updated_at = ?
-                 WHERE id = ?
-                   AND (handoff_state IS NULL OR handoff_state IN ('completed', 'failed'))
-                """,
-                (str(platform or ""), time.time(), str(session_id or "")),
-            )
+            updated = self._sessions.request_handoff(session_id, platform)
             self._conn.commit()
-        return int(cursor.rowcount or 0) > 0
+        return updated
 
     def get_handoff_state(self, session_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
@@ -694,49 +624,16 @@ class CliSessionStore:
 
     def fail_handoff(self, session_id: str, error: str) -> None:
         with self._lock:
-            self._conn.execute(
-                "UPDATE sessions SET handoff_state = 'failed', handoff_error = ?, updated_at = ? WHERE id = ?",
-                (str(error or ""), time.time(), str(session_id or "")),
-            )
+            self._sessions.fail_handoff(session_id, error)
             self._conn.commit()
 
     def delete_session(self, session_id: str, sessions_dir: Path | None = None) -> bool:
         stable = str(session_id or "").strip()
         if not stable:
             return False
-        has_session_lineage = self._table_exists("session_lineage")
-        lineage_columns = self._table_columns("session_lineage") if has_session_lineage else set()
-        has_branch_requests = self._table_exists("session_branch_requests")
         with self._lock:
-            exists = self._conn.execute(
-                "SELECT COUNT(*) AS count FROM sessions WHERE id = ?",
-                (stable,),
-            ).fetchone()
-            if int(exists["count"] if exists else 0) == 0:
-                return False
-            self._conn.execute(
-                "UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?",
-                (stable,),
-            )
-            if "parent_session_id" in lineage_columns:
-                self._conn.execute(
-                    "UPDATE session_lineage SET parent_session_id = NULL WHERE parent_session_id = ?",
-                    (stable,),
-                )
-            if has_branch_requests:
-                self._conn.execute(
-                    "DELETE FROM session_branch_requests WHERE source_session_id = ? OR result_session_id = ?",
-                    (stable, stable),
-                )
-            if has_session_lineage:
-                self._conn.execute("DELETE FROM session_lineage WHERE session_id = ?", (stable,))
-            self._conn.execute("DELETE FROM messages WHERE session_id = ?", (stable,))
-            self._conn.execute("DELETE FROM sessions WHERE id = ?", (stable,))
-            self._conn.execute("DELETE FROM session_index WHERE session_id = ?", (stable,))
-            self._conn.commit()
-        if sessions_dir is not None:
-            self._remove_session_files(Path(sessions_dir), stable)
-        return True
+            result = self._session_deletion.delete(stable, sessions_dir=sessions_dir)
+        return result.session_deleted
 
     def prune_sessions(
         self,
@@ -757,41 +654,13 @@ class CliSessionStore:
         session_ids = [str(row["id"] or "") for row in rows if str(row["id"] or "")]
         if not session_ids:
             return 0
-        placeholders = ",".join("?" for _ in session_ids)
-        has_session_lineage = self._table_exists("session_lineage")
-        lineage_columns = self._table_columns("session_lineage") if has_session_lineage else set()
-        has_branch_requests = self._table_exists("session_branch_requests")
-        with self._lock:
-            self._conn.execute(
-                f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({placeholders})",
-                tuple(session_ids),
-            )
-            if "parent_session_id" in lineage_columns:
-                self._conn.execute(
-                    f"UPDATE session_lineage SET parent_session_id = NULL "
-                    f"WHERE parent_session_id IN ({placeholders})",
-                    tuple(session_ids),
-                )
-            if has_branch_requests:
-                self._conn.execute(
-                    f"DELETE FROM session_branch_requests "
-                    f"WHERE source_session_id IN ({placeholders}) OR result_session_id IN ({placeholders})",
-                    tuple(session_ids + session_ids),
-                )
-            if has_session_lineage:
-                self._conn.execute(
-                    f"DELETE FROM session_lineage WHERE session_id IN ({placeholders})",
-                    tuple(session_ids),
-                )
-            for stable in session_ids:
-                self._conn.execute("DELETE FROM messages WHERE session_id = ?", (stable,))
-                self._conn.execute("DELETE FROM session_index WHERE session_id = ?", (stable,))
-                self._conn.execute("DELETE FROM sessions WHERE id = ?", (stable,))
-            self._conn.commit()
-        if sessions_dir is not None:
-            for stable in session_ids:
-                self._remove_session_files(Path(sessions_dir), stable)
-        return len(session_ids)
+        deleted = 0
+        for stable in session_ids:
+            with self._lock:
+                result = self._session_deletion.delete(stable, sessions_dir=sessions_dir)
+            if result.session_deleted:
+                deleted += 1
+        return deleted
 
     @staticmethod
     def _remove_session_files(sessions_dir: Path, session_id: str) -> None:
@@ -842,22 +711,10 @@ class CliSessionStore:
         return count
 
     def finalize_orphaned_compression_sessions(self) -> int:
-        now = time.time()
         with self._lock:
-            cursor = self._conn.execute(
-                """
-                UPDATE sessions
-                   SET ended_at = COALESCE(ended_at, ?),
-                       end_reason = COALESCE(end_reason, 'compression_orphan'),
-                       updated_at = ?
-                 WHERE parent_session_id IS NOT NULL
-                   AND COALESCE(message_count, 0) = 0
-                   AND ended_at IS NULL
-                """,
-                (now, now),
-            )
+            finalized = self._sessions.finalize_orphaned_compression_sessions()
             self._conn.commit()
-        return int(cursor.rowcount or 0)
+        return finalized
 
     def maybe_auto_prune_and_vacuum(
         self,
