@@ -7,7 +7,7 @@ continuation prompt back into the same session and keeps working until the
 goal is done, turn budget is exhausted, the user pauses/clears it, or the
 user sends a new message (which takes priority and pauses the goal loop).
 
-State is persisted in SessionDB's ``state_meta`` table keyed by
+State is persisted in the shared SQLite store's ``state_meta`` table keyed by
 ``goal:<session_id>`` so ``/resume`` picks it up.
 
 Design notes / invariants:
@@ -195,7 +195,7 @@ class GoalState:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Persistence (SessionDB state_meta)
+# Persistence (shared SQLite state_meta)
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -203,48 +203,48 @@ def _meta_key(session_id: str) -> str:
     return f"goal:{session_id}"
 
 
-_DB_CACHE: Dict[str, Any] = {}
+_STORE_CACHE: Dict[str, Any] = {}
 
 
-def _get_session_db() -> Optional[Any]:
-    """Return a SessionDB instance for the current HERMES_HOME.
+def _get_session_store() -> Optional[Any]:
+    """Return the shared session store for the current HERMES_HOME.
 
-    SessionDB has no built-in singleton, but opening a new connection per
+    The store has no built-in singleton, but opening a new connection per
     /goal call would thrash the file. We cache one instance per
-    ``hermes_home`` path so profile switches still pick up the right DB.
+    ``hermes_home`` path so profile switches still pick up the right store.
     Defensive against import/instantiation failures so tests and
     non-standard launchers can still use the GoalManager.
     """
     try:
         from hermes_constants import get_hermes_home
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         home = str(get_hermes_home())
     except Exception as exc:  # pragma: no cover
-        logger.debug("GoalManager: SessionDB bootstrap failed (%s)", exc)
+        logger.debug("GoalManager: session store bootstrap failed (%s)", exc)
         return None
 
-    cached = _DB_CACHE.get(home)
+    cached = _STORE_CACHE.get(home)
     if cached is not None:
         return cached
     try:
-        db = SessionDB()
+        store = open_cli_session_store()
     except Exception as exc:  # pragma: no cover
-        logger.debug("GoalManager: SessionDB() raised (%s)", exc)
+        logger.debug("GoalManager: session store open raised (%s)", exc)
         return None
-    _DB_CACHE[home] = db
-    return db
+    _STORE_CACHE[home] = store
+    return store
 
 
 def load_goal(session_id: str) -> Optional[GoalState]:
     """Load the goal for a session, or None if none exists."""
     if not session_id:
         return None
-    db = _get_session_db()
-    if db is None:
+    store = _get_session_store()
+    if store is None:
         return None
     try:
-        raw = db.get_meta(_meta_key(session_id))
+        raw = store.get_meta(_meta_key(session_id))
     except Exception as exc:
         logger.debug("GoalManager: get_meta failed: %s", exc)
         return None
@@ -258,20 +258,20 @@ def load_goal(session_id: str) -> Optional[GoalState]:
 
 
 def save_goal(session_id: str, state: GoalState) -> None:
-    """Persist a goal to SessionDB. No-op if DB unavailable."""
+    """Persist a goal to the shared session store. No-op if unavailable."""
     if not session_id:
         return
-    db = _get_session_db()
-    if db is None:
+    store = _get_session_store()
+    if store is None:
         return
     try:
-        db.set_meta(_meta_key(session_id), state.to_json())
+        store.set_meta(_meta_key(session_id), state.to_json())
     except Exception as exc:
         logger.debug("GoalManager: set_meta failed: %s", exc)
 
 
 def clear_goal(session_id: str) -> None:
-    """Mark a goal cleared in the DB (preserved for audit, status=cleared)."""
+    """Mark a goal cleared in storage (preserved for audit, status=cleared)."""
     state = load_goal(session_id)
     if state is None:
         return

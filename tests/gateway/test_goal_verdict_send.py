@@ -29,9 +29,9 @@ def hermes_home(tmp_path, monkeypatch):
 
     from hermes_cli import goals
 
-    goals._DB_CACHE.clear()
+    goals._STORE_CACHE.clear()
     yield home
-    goals._DB_CACHE.clear()
+    goals._STORE_CACHE.clear()
 
 
 def _make_source() -> SessionSource:

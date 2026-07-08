@@ -25,12 +25,12 @@ def hermes_home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(home))
 
-    # Bust the goal-module DB cache so it re-resolves HERMES_HOME.
+    # Bust the goal-module store cache so it re-resolves HERMES_HOME.
     from hermes_cli import goals
 
-    goals._DB_CACHE.clear()
+    goals._STORE_CACHE.clear()
     yield home
-    goals._DB_CACHE.clear()
+    goals._STORE_CACHE.clear()
 
 
 @pytest.fixture()
@@ -107,7 +107,7 @@ def test_goal_set_returns_send_with_notice(server, session):
     assert "Goal set" in result["notice"]
     assert "20-turn budget" in result["notice"]
 
-    # Persisted in SessionDB
+    # Persisted in shared session state.
     from hermes_cli.goals import GoalManager
 
     mgr = GoalManager(session_key)
