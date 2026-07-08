@@ -14761,7 +14761,7 @@ class GatewayRunner:
 
         if _streaming_enabled:
             try:
-                from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+                from hermes_gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
                 _adapter = self.adapters.get(source.platform)
                 if _adapter:
                     _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
@@ -15713,7 +15713,7 @@ class GatewayRunner:
             _want_interim_consumer = _want_interim_messages
             if _want_stream_deltas or _want_interim_consumer:
                 try:
-                    from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+                    from hermes_gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
                     _adapter = self.adapters.get(source.platform)
                     if _adapter:
                         # Platforms that don't support editing sent messages

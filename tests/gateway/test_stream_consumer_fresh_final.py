@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+from hermes_gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 
 
 def _make_adapter(*, supports_delete: bool = True) -> MagicMock:

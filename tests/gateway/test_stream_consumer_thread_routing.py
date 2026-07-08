@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.stream_consumer import (
+from hermes_gateway.stream_consumer import (
     GatewayStreamConsumer,
     StreamConsumerConfig,
 )

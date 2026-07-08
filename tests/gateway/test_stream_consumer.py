@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+from hermes_gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 
 
 # ── _clean_for_display unit tests ────────────────────────────────────────
@@ -137,7 +137,7 @@ class TestEditMessageFinalizeSignature:
     """Every concrete platform adapter must accept the ``finalize`` kwarg.
 
     stream_consumer._send_or_edit always passes ``finalize=`` to
-    ``adapter.edit_message(...)`` (see gateway/stream_consumer.py).  An
+    ``adapter.edit_message(...)`` (see hermes_gateway/stream_consumer.py).  An
     adapter that overrides edit_message without accepting finalize raises
     TypeError the first time streaming hits a segment break or final edit.
     Guard the contract with an explicit signature check so it cannot
