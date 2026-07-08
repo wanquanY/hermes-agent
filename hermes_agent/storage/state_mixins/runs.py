@@ -54,6 +54,7 @@ from hermes_agent.read_models.tool_events import (
     project_tool_event,
     tool_event_row_to_dict,
 )
+from hermes_agent.read_models.run_events import RunEventReadModel
 from hermes_team_mission.runtime.run_event_retention import (
     COALESCIBLE_STREAM_EVENT_TYPES,
     DEFAULT_RUN_EVENT_MAX_PER_SESSION,
@@ -1709,33 +1710,17 @@ class RunStateMixin:
         limit: int = 2000,
         include_internal: bool = False,
     ) -> List[Dict[str, Any]]:
-        stable = str(session_id or "").strip()
-        if not stable:
-            return []
-        with self._lock:
-            rows = EventLedger(self._conn).list_runtime_rows(
-                stable,
-                after_seq=int(after_seq or 0),
-                active_only=active_only,
-                active_statuses=ACTIVE_RUN_STATUSES,
-                runtime_scope_key=runtime_scope_key,
-                run_id=run_id,
-                activity_id=activity_id,
-                limit=limit,
-                include_internal=include_internal,
-            )
-        events = []
-        with self._lock:
-            for row in rows:
-                event = decode_run_event_row(row)
-                if isinstance(event, dict):
-                    event = rehydrate_referenced_run_event(self._conn, row, event)
-                    event = _event_with_participant_id(
-                        event,
-                        str(_row_value(row, "participant_id", "") or ""),
-                    )
-                    events.append(event)
-        return events
+        return RunEventReadModel(self._conn).list_runtime(
+            session_id,
+            after_seq=after_seq,
+            active_only=active_only,
+            active_statuses=tuple(ACTIVE_RUN_STATUSES),
+            runtime_scope_key=runtime_scope_key,
+            run_id=run_id,
+            activity_id=activity_id,
+            limit=limit,
+            include_internal=include_internal,
+        )
 
     def list_run_events_by_activity(
         self,
@@ -1745,36 +1730,12 @@ class RunStateMixin:
         limit: int = 2000,
         include_internal: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Return all run_events for an activity_id across sessions, ordered by seq."""
-        normalized_activity_id = str(activity_id or "").strip()
-        if not normalized_activity_id:
-            return []
-        with self._lock:
-            rows = EventLedger(self._conn).list_activity_rows(
-                normalized_activity_id,
-                after_seq=int(after_seq or 0),
-                limit=limit,
-                include_internal=include_internal,
-            )
-        events = []
-        with self._lock:
-            for row in rows:
-                event = decode_run_event_row(row)
-                if isinstance(event, dict):
-                    event = rehydrate_referenced_run_event(self._conn, row, event)
-                    event = _event_with_participant_id(
-                        event,
-                        str(_row_value(row, "participant_id", "") or ""),
-                    )
-                    event["activity_id"] = normalized_activity_id
-                    event["activityId"] = normalized_activity_id
-                    payload = event.get("payload")
-                    if isinstance(payload, dict):
-                        payload = dict(payload)
-                        payload.setdefault("activity_id", normalized_activity_id)
-                        event["payload"] = payload
-                    events.append(event)
-        return events
+        return RunEventReadModel(self._conn).list_activity_events(
+            activity_id,
+            after_seq=after_seq,
+            limit=limit,
+            include_internal=include_internal,
+        )
 
     def list_run_events_by_mission_activity(
         self,
@@ -1785,44 +1746,13 @@ class RunStateMixin:
         include_internal: bool = False,
         reverse: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Return run_events for mission-level activity replay.
-
-        Includes both the mission aggregate activity id (``mission:<id>``) and
-        node-scoped activity ids (``act-node:<id>:...``). ``team_mission_events``
-        is audit-only and is intentionally not read here.
-        """
-        normalized_mission_id = str(mission_id or "").strip()
-        if not normalized_mission_id:
-            return []
-        with self._lock:
-            rows = EventLedger(self._conn).list_mission_activity_rows(
-                normalized_mission_id,
-                after_seq=int(after_seq or 0),
-                limit=limit,
-                include_internal=include_internal,
-                reverse=reverse,
-            )
-        events = []
-        with self._lock:
-            for row in rows:
-                event = decode_run_event_row(row)
-                if isinstance(event, dict):
-                    event = rehydrate_referenced_run_event(self._conn, row, event)
-                    event = _event_with_participant_id(
-                        event,
-                        str(_row_value(row, "participant_id", "") or ""),
-                    )
-                    activity_id = str(_row_value(row, "activity_id", "") or "")
-                    if activity_id:
-                        event["activity_id"] = activity_id
-                        event["activityId"] = activity_id
-                        payload = event.get("payload")
-                        if isinstance(payload, dict):
-                            payload = dict(payload)
-                            payload.setdefault("activity_id", activity_id)
-                            event["payload"] = payload
-                    events.append(event)
-        return events
+        return RunEventReadModel(self._conn).list_mission_activity_events(
+            mission_id,
+            after_seq=after_seq,
+            limit=limit,
+            include_internal=include_internal,
+            reverse=reverse,
+        )
 
     def list_tool_events(
         self,
@@ -2070,38 +2000,15 @@ class RunStateMixin:
         payload_contains: str = "",
         limit: int = 2000,
     ) -> List[Dict[str, Any]]:
-        """Return a persisted event page filtered at the database boundary.
-
-        History views often need a small subset of the durable run event log
-        (for example subagent lifecycle metadata) without replaying every token
-        delta.  Keep that filtering inside the repository so UI hydration does
-        not depend on loading large event pages over the gateway.
-        """
-        stable = str(session_id or "").strip()
-        if not stable:
-            return []
-        with self._lock:
-            rows = EventLedger(self._conn).list_filtered_rows(
-                stable,
-                after_seq=int(after_seq or 0),
-                runtime_scope_key=runtime_scope_key,
-                event_types=event_types or (),
-                event_type_prefix=event_type_prefix,
-                payload_contains=payload_contains,
-                limit=limit,
-            )
-        events = []
-        with self._lock:
-            for row in rows:
-                event = decode_run_event_row(row)
-                if isinstance(event, dict):
-                    event = rehydrate_referenced_run_event(self._conn, row, event)
-                    event = _event_with_participant_id(
-                        event,
-                        str(_row_value(row, "participant_id", "") or ""),
-                    )
-                    events.append(event)
-        return events
+        return RunEventReadModel(self._conn).list_filtered(
+            session_id,
+            after_seq=after_seq,
+            runtime_scope_key=runtime_scope_key,
+            event_type_prefix=event_type_prefix,
+            event_types=event_types,
+            payload_contains=payload_contains,
+            limit=limit,
+        )
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         normalized = str(run_id or "").strip()
