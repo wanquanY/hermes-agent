@@ -162,3 +162,35 @@ def test_cli_session_store_replaces_and_searches_messages(tmp_path):
     assert [message["content"] for message in store.get_messages_as_conversation("acp-1")] == [
         "replacement only"
     ]
+
+
+def test_cli_session_store_exposes_agent_profile_registry(tmp_path):
+    store = open_cli_session_store(tmp_path / "state.db")
+
+    profile = store.upsert_agent_profile(
+        profile_id="agent-1",
+        slug="research-agent",
+        name="Research Agent",
+        hermes_profile_name="research-agent",
+        hermes_home_path=str(tmp_path / "profiles" / "research-agent"),
+        default_model="gpt-5",
+        recommended_skills=["search"],
+        current_version_id="snapshot-1",
+        current_version_number=1,
+    )
+    draft = store.upsert_agent_profile_draft(
+        draft_id="draft-1",
+        draft_kind="revision",
+        base_agent_profile_id=profile["id"],
+        target_agent_profile_id=profile["id"],
+        source_session_id="session-1",
+        name="Research Agent draft",
+        recommended_toolsets=["file"],
+    )
+
+    assert profile["runtimeScopeKey"] == "profile:agent-1"
+    assert store.get_agent_profile_by_slug("research-agent")["id"] == "agent-1"
+    assert store.list_agent_profiles()[0]["agentProfileVersionId"] == "snapshot-1"
+    assert store.get_agent_profile_draft(draft["id"])["draftKind"] == "revision"
+    assert store.list_agent_profile_drafts(source_session_id="session-1")[0]["id"] == "draft-1"
+    assert store.discard_agent_profile_draft("draft-1")["status"] == "discarded"

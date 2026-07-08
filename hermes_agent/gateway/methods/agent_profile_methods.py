@@ -164,18 +164,11 @@ def make_method_agent_profile_growth_summary(repo: AgentProfileRepo):
     return method_agent_profile_growth_summary
 
 
-def make_method_agent_profile_list(conn_provider):
-    """List profiles. The Repo Protocol doesn't yet expose a list method — we
-    scan ``agent_profiles`` directly at the method boundary (same pattern as
-    ``run.list``).
-    """
-
+def make_method_agent_profile_list(repo: AgentProfileRepo):
     @requires_permission("agent_profile.read", read_only=True)
     def method_agent_profile_list(
         params: dict[str, Any], ctx: DispatchContext
     ) -> dict[str, Any]:
-        import json
-
         status_filter = params.get("status")
         limit_raw = params.get("limit") or 100
         try:
@@ -185,45 +178,13 @@ def make_method_agent_profile_list(conn_provider):
                 ErrorCode.INVALID_PARAMS, "limit must be an integer"
             )
         limit = max(1, min(limit, 500))
-        # conn_provider is called without a session_id here — profiles are
-        # per-installation, not per-session.
-        conn = conn_provider(None)
-        clauses: list[str] = []
-        args: list[Any] = []
-        if status_filter:
-            clauses.append("status = ?")
-            args.append(str(status_filter))
-        sql = (
-            "SELECT id, slug, name, status, hermes_home_path, category, "
-            "tags_json, description, avatar, is_system_default, default_model, "
-            "current_version_id, current_version_number FROM agent_profiles "
-            f"{'WHERE ' + ' AND '.join(clauses) if clauses else ''} "
-            "ORDER BY id ASC LIMIT ?"
+        include_archived = bool(params.get("include_archived") or params.get("includeArchived"))
+        profiles = repo.list(
+            status=str(status_filter or ""),
+            include_archived=include_archived,
+            limit=limit,
         )
-        rows = conn.execute(sql, (*args, limit)).fetchall()
-
-        def _to_projection(row):
-            try:
-                tags = tuple(json.loads(row["tags_json"] or "[]"))
-            except json.JSONDecodeError:
-                tags = ()
-            return {
-                "profile_id": row["id"],
-                "slug": row["slug"],
-                "name": row["name"],
-                "status": row["status"],
-                "hermes_home_path": row["hermes_home_path"],
-                "category": row["category"] or "",
-                "tags": list(tags),
-                "description": row["description"] or "",
-                "avatar": row["avatar"] or "",
-                "is_system_default": bool(row["is_system_default"] or 0),
-                "default_model": row["default_model"] or "",
-                "current_version_id": row["current_version_id"],
-                "current_version_number": row["current_version_number"],
-            }
-
-        return {"profiles": [_to_projection(row) for row in rows]}
+        return {"profiles": [_profile_projection(profile) for profile in profiles]}
 
     return method_agent_profile_list
 
@@ -240,7 +201,4 @@ def register(
         "agent_profile.growth_summary",
         make_method_agent_profile_growth_summary(repo),
     )
-    if conn_provider is not None:
-        registry.register(
-            "agent_profile.list", make_method_agent_profile_list(conn_provider)
-        )
+    registry.register("agent_profile.list", make_method_agent_profile_list(repo))

@@ -167,7 +167,7 @@ def test_p2_verdict_reports_current_data_plane_debt() -> None:
         assert gate_id in checks
     assert checks["p2:no_sessiondb_production"]["ok"]
     assert checks["p2:no_legacy_identity_alias_internal"]["ok"]
-    assert not checks["p2:no_hermes_state_store_production_instantiation"]["ok"]
+    assert checks["p2:no_hermes_state_store_production_instantiation"]["ok"]
     assert not checks["p2:state_store_decomposed"]["ok"]
     assert not checks["p2:hermes_state_store_no_methods"]["ok"]
     assert not checks["p2:aggregate_table_single_owner"]["ok"]

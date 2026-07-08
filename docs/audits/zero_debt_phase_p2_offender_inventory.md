@@ -10,7 +10,7 @@ Status: `preflight_only`
 |---|---:|---:|
 | `p2:no_sessiondb_production` | 0 | 0 |
 | `p2:no_legacy_identity_alias_internal` | 0 | 0 |
-| `p2:no_hermes_state_store_production_instantiation` | 1 | 1 |
+| `p2:no_hermes_state_store_production_instantiation` | 0 | 0 |
 | `p2:state_store_decomposed` | 13238 | 9 |
 | `p2:hermes_state_store_no_methods` | 144 | 1 |
 | `p2:aggregate_table_single_owner` | 26 | 9 |
@@ -30,7 +30,6 @@ Status: `preflight_only`
 
 | Offenders | File | First evidence |
 |---:|---|---|
-| 1 | `hermes_agent/storage/cli_session_store.py` | `` hermes_agent/storage/cli_session_store.py:33: return HermesStateStore(Path(db_path) if db_path is not None else None) |
 
 ## p2:state_store_decomposed
 
@@ -72,7 +71,7 @@ Status: `preflight_only`
 |---:|---|---|
 | 1 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/repositories/message_repo.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/repositories/message_repo.py:716: sqlite3.OperationalError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |
 | 16 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_store.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_store.py:610: Exception: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |
-| 4 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:875: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |
+| 4 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:945: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |
 | 2 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/agent_profiles.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/agent_profiles.py:48: ValueError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |
 | 1 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/runs.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/runs.py:995: sqlite3.OperationalError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |
 | 3 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/domain/session_deletion.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/domain/session_deletion.py:125: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |

@@ -16,6 +16,7 @@ from hermes_agent.repositories.agent_profile_repo import (
     Profile,
     ProfileSpec,
     ProfileVersion,
+    ensure_agent_profile_repository_schema,
 )
 from hermes_agent.repositories.base import RepositoryConnection, RepositoryContext
 from hermes_agent.repositories.message_repo import (
@@ -76,6 +77,7 @@ __all__ = [
     "Profile",
     "ProfileSpec",
     "ProfileVersion",
+    "ensure_agent_profile_repository_schema",
     "RepositoryConnection",
     "RepositoryContext",
     "Run",

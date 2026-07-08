@@ -14,6 +14,7 @@ from hermes_agent.repositories import (
     Profile,
     ProfileSpec,
     ProfileVersion,
+    ensure_agent_profile_repository_schema,
 )
 
 
@@ -173,3 +174,63 @@ def test_add_version_requires_ids():
             "p",
             ProfileVersion(profile_id="p", version_id="", version_number=1),
         )
+
+
+def _make_full_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_agent_profile_repository_schema(conn)
+    return conn
+
+
+def test_full_registry_profile_crud_and_drafts_are_repo_owned():
+    conn = _make_full_conn()
+    repo = AgentProfileRepoImpl(conn)
+
+    profile = repo.upsert_agent_profile(
+        profile_id="agent-1",
+        slug="research-agent",
+        name="Research Agent",
+        hermes_home_path="/tmp/profiles/research-agent",
+        default_model="gpt-5",
+        default_provider="openai",
+        default_toolsets=["file", "terminal"],
+        recommended_skills=["search"],
+        current_version_id="snapshot-2",
+        current_version_number=2,
+        source_kind="dovie-public-market",
+        public_profile_id="public-profile-1",
+        public_version_id="public-version-2",
+        public_content_hash="sha256:abc",
+        metadata={"marketInstall": {"installedAt": "2026-06-14T04:00:00Z"}},
+        created_at="2026-06-14T00:00:00Z",
+        updated_at="2026-06-14T03:00:00Z",
+    )
+    assert profile["id"] == "agent-1"
+    assert profile["runtimeScopeKey"] == "profile:agent-1"
+    assert profile["agentProfileVersionId"] == "snapshot-2"
+    assert repo.get_agent_profile_by_slug("research-agent")["id"] == "agent-1"
+    assert repo.list_agent_profiles()[0]["recommendedSkills"] == ["search"]
+
+    draft = repo.upsert_agent_profile_draft(
+        draft_id="draft-1",
+        draft_kind="revision",
+        base_agent_profile_id="agent-1",
+        target_agent_profile_id="agent-1",
+        source_session_id="session-1",
+        source_agent_profile_id="agent-default",
+        name="Research Agent draft",
+        recommended_toolsets=["file"],
+        recommended_skills=["search"],
+        files={"soulMarkdown": "# Research Agent\n"},
+        created_at="2026-06-14T02:00:00Z",
+        updated_at="2026-06-14T02:00:00Z",
+    )
+    assert draft["id"] == "draft-1"
+    assert draft["draftKind"] == "revision"
+    assert repo.list_agent_profile_drafts(source_session_id="session-1")[0]["id"] == "draft-1"
+    assert repo.discard_agent_profile_draft("draft-1")["status"] == "discarded"
+    assert repo.list_agent_profile_drafts(source_session_id="session-1") == []
+    assert repo.archive_agent_profile("agent-1")["status"] == "archived"
+    assert repo.list_agent_profiles() == []
+    assert repo.list_agent_profiles(include_archived=True)[0]["id"] == "agent-1"

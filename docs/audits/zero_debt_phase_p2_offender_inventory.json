@@ -238,20 +238,9 @@
       "total_offenders": 144
     },
     "p2:no_hermes_state_store_production_instantiation": {
-      "file_count": 1,
-      "files": [
-        {
-          "first_lines": [
-            {
-              "line": "",
-              "text": "hermes_agent/storage/cli_session_store.py:33: return HermesStateStore(Path(db_path) if db_path is not None else None)"
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_agent/storage/cli_session_store.py"
-        }
-      ],
-      "total_offenders": 1
+      "file_count": 0,
+      "files": [],
+      "total_offenders": 0
     },
     "p2:no_legacy_identity_alias_internal": {
       "file_count": 0,
@@ -306,19 +295,19 @@
           "first_lines": [
             {
               "line": "",
-              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:875: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:945: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
             },
             {
               "line": "",
-              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:864: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:934: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
             },
             {
               "line": "",
-              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:951: sqlite3.Error: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:1021: sqlite3.Error: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
             },
             {
               "line": "",
-              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:870: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:940: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
             }
           ],
           "offenders": 4,

@@ -18,6 +18,7 @@ from typing import Any
 from agent.memory_manager import sanitize_context
 from hermes_agent.read_models.message_history import MessageHistoryReadModel
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
+from hermes_agent.repositories.agent_profile_repo import AgentProfileRepoImpl
 from hermes_agent.repositories.session_repo import (
     SessionRepoImpl,
     SessionSpec,
@@ -28,9 +29,7 @@ from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
 
 def open_cli_session_store(db_path: Path | str | None = None):
-    from hermes_agent.storage.state_store import HermesStateStore
-
-    return HermesStateStore(Path(db_path) if db_path is not None else None)
+    return CliSessionStore(connect_session_repository_db(db_path))
 
 
 class CliSessionStore:
@@ -40,6 +39,7 @@ class CliSessionStore:
         self._conn = conn
         self._lock = lock_for_connection(conn)
         self._sessions = SessionRepoImpl(conn)
+        self._profiles = AgentProfileRepoImpl(conn)
         self._messages = MessageHistoryReadModel(conn)
         self._recall = SessionRecallReadModel(conn)
 
@@ -175,6 +175,76 @@ class CliSessionStore:
         if exact:
             return str(exact["id"])
         return None
+
+    def upsert_agent_profile(self, **kwargs: Any) -> dict[str, Any]:
+        with self._lock:
+            return self._profiles.upsert_agent_profile(**kwargs)
+
+    def get_agent_profile(self, profile_id: str) -> dict[str, Any]:
+        with self._lock:
+            return self._profiles.get_agent_profile(profile_id)
+
+    def get_agent_profile_by_slug(self, slug: str) -> dict[str, Any]:
+        with self._lock:
+            return self._profiles.get_agent_profile_by_slug(slug)
+
+    def list_agent_profiles(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
+        with self._lock:
+            return self._profiles.list_agent_profiles(include_archived=include_archived)
+
+    def archive_agent_profile(self, profile_id: str) -> dict[str, Any]:
+        with self._lock:
+            return self._profiles.archive_agent_profile(profile_id)
+
+    def agent_profile_growth_summary(
+        self,
+        agent_profile_id: str,
+        *,
+        agent_profile_version_id: str = "",
+        range_preset: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> dict[str, Any]:
+        with self._lock:
+            return self._profiles.agent_profile_growth_summary(
+                agent_profile_id,
+                agent_profile_version_id=agent_profile_version_id,
+                range_preset=range_preset,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+    def upsert_agent_profile_draft(self, **kwargs: Any) -> dict[str, Any]:
+        with self._lock:
+            return self._profiles.upsert_agent_profile_draft(**kwargs)
+
+    def get_agent_profile_draft(self, draft_id: str) -> dict[str, Any]:
+        with self._lock:
+            return self._profiles.get_agent_profile_draft(draft_id)
+
+    def list_agent_profile_drafts(
+        self,
+        *,
+        include_published: bool = False,
+        include_discarded: bool = False,
+        statuses: list[str] | None = None,
+        source_session_id: str = "",
+        source_agent_profile_id: str = "",
+        workspace_id: str = "",
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            return self._profiles.list_agent_profile_drafts(
+                include_published=include_published,
+                include_discarded=include_discarded,
+                statuses=statuses,
+                source_session_id=source_session_id,
+                source_agent_profile_id=source_agent_profile_id,
+                workspace_id=workspace_id,
+            )
+
+    def discard_agent_profile_draft(self, draft_id: str) -> dict[str, Any]:
+        with self._lock:
+            return self._profiles.discard_agent_profile_draft(draft_id)
 
     def get_next_title_in_lineage(self, base_title: str) -> str:
         match = re.match(r"^(.*?) #(\d+)$", str(base_title or ""))

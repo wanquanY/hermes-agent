@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_constants import get_hermes_home
+from hermes_agent.repositories.agent_profile_repo import ensure_agent_profile_repository_schema
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +228,7 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
             "active": "INTEGER NOT NULL DEFAULT 1",
         },
     )
+    ensure_agent_profile_repository_schema(conn)
 
 
 def _ensure_columns(
