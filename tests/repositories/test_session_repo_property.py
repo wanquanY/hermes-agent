@@ -24,6 +24,9 @@ def _make_conn() -> sqlite3.Connection:
         CREATE TABLE sessions (
             id TEXT PRIMARY KEY,
             source TEXT NOT NULL DEFAULT '',
+            user_id TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            model_config TEXT,
             title TEXT,
             display_title TEXT,
             display_title_source TEXT,
@@ -33,7 +36,8 @@ def _make_conn() -> sqlite3.Connection:
             started_at REAL NOT NULL DEFAULT 0,
             updated_at REAL NOT NULL DEFAULT 0,
             ended_at REAL,
-            end_reason TEXT
+            end_reason TEXT,
+            transient INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE session_index (
             session_id TEXT PRIMARY KEY,
@@ -43,6 +47,7 @@ def _make_conn() -> sqlite3.Connection:
             title TEXT NOT NULL DEFAULT '',
             preview TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT '',
+            transient INTEGER NOT NULL DEFAULT 0,
             session_kind TEXT NOT NULL DEFAULT '',
             conversation_kind TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'idle',
