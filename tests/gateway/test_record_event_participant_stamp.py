@@ -38,7 +38,7 @@ def _record_message(db: SessionDB, *, run_id: str, payload: dict, frame_particip
     frame = {
         "type": "message.complete",
         "session_id": CONV_SESSION,
-        "stored_session_id": CONV_SESSION,
+        "conversation_session_id": CONV_SESSION,
         "run_id": run_id,
         "turn_id": f"turn-{run_id}",
         "seq": 1,

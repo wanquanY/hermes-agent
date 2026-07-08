@@ -1,6 +1,6 @@
 """Conversation Runtime Protocol P2 run context data structure.
 
-RunContext replaces the loose stored_session_id / runtime_scope_key /
+RunContext replaces the loose conversation_session_id / runtime_scope_key /
 agent_profile_id variables currently spread across worker-spawn parameters.
 This PR only carries the structure through spawn payloads; runtime event
 routing consumes it in a later Conversation Runtime Protocol phase.

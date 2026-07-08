@@ -22,7 +22,7 @@ def _wire_gateway_db(monkeypatch, db: SessionDB) -> None:
 def _create_conversation(db: SessionDB, *, active_mission_id: str = "") -> None:
     db.upsert_team_mission_conversation(
         conversation_id=CONVERSATION_ID,
-        stable_session_id=CONVERSATION_SESSION_ID,
+        conversation_session_id=CONVERSATION_SESSION_ID,
         team_id="team-1",
         title="Team conversation",
         status="active",
@@ -48,7 +48,7 @@ def _create_index(
         running=True,
         status="running",
         active_run_id=active_run_id,
-        active_runtime_session_id=f"runtime-{active_run_id}",
+        active_execution_session_id=f"runtime-{active_run_id}",
         started_at=1.0,
         updated_at=2.0,
     )
@@ -99,7 +99,7 @@ def _bind_member_run(
         run_id=run_id,
         session_id=session_id,
         runtime_scope_key=session_id,
-        runtime_session_id=f"runtime-{run_id}",
+        execution_session_id=f"runtime-{run_id}",
         status=status,
     )
     db.bind_team_mission_run(
@@ -107,7 +107,7 @@ def _bind_member_run(
         node_id=node_id,
         run_id=run_id,
         session_id=session_id,
-        runtime_session_id=f"runtime-{run_id}",
+        execution_session_id=f"runtime-{run_id}",
         runtime_scope_key=session_id,
         role="worker",
     )
@@ -123,8 +123,8 @@ def _cancel_via_gateway(monkeypatch, db: SessionDB, mission_id: str) -> tuple[di
         canceled.append(dict(params))
         db.upsert_run(
             run_id=params["run_id"],
-            session_id=params["stored_session_id"],
-            runtime_session_id=params["runtime_session_id"],
+            session_id=params["conversation_session_id"],
+            execution_session_id=params["execution_session_id"],
             runtime_scope_key=params["runtime_scope_key"],
             status="cancelled",
         )

@@ -16,7 +16,7 @@ from tui_gateway.transport import Transport
 
 @dataclass(frozen=True)
 class RuntimeLease:
-    runtime_session_id: str
+    execution_session_id: str
     session: dict[str, Any]
     reused: bool
 
@@ -64,7 +64,7 @@ def _context_mode_matches(session: dict[str, Any], params: dict[str, Any]) -> bo
 def acquire_runtime_lease(
     *,
     rid: str,
-    stored_session_id: str,
+    conversation_session_id: str,
     params: dict[str, Any],
     resolve_runtime_session: ResolveRuntimeSession,
     resume_runtime_session: ResumeRuntimeSession,
@@ -79,7 +79,7 @@ def acquire_runtime_lease(
     resume callback reconstructs a lightweight runtime with no transcript
     hydration. The durable business state remains in the session/run registries.
     """
-    target = str(stored_session_id or "").strip()
+    target = str(conversation_session_id or "").strip()
     if not target:
         return RuntimeLeaseError(
             {
@@ -87,7 +87,7 @@ def acquire_runtime_lease(
                 "id": rid,
                 "error": {
                     "code": 4006,
-                    "message": "stored_session_id or session_id required",
+                    "message": "conversation_session_id or session_id required",
                 },
             }
         )
@@ -105,7 +105,7 @@ def acquire_runtime_lease(
             and _context_mode_matches(session, params)
         ):
             session["transport"] = transport or session.get("transport") or fallback_transport
-            return RuntimeLease(runtime_session_id=sid, session=session, reused=True)
+            return RuntimeLease(execution_session_id=sid, session=session, reused=True)
 
     resume = resume_runtime_session(
         rid,
@@ -148,4 +148,4 @@ def acquire_runtime_lease(
     session["transport"] = transport or session.get("transport") or fallback_transport
     if expected_scope:
         session["runtime_scope_key"] = expected_scope
-    return RuntimeLease(runtime_session_id=sid, session=session, reused=False)
+    return RuntimeLease(execution_session_id=sid, session=session, reused=False)

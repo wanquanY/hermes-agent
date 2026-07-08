@@ -8,7 +8,7 @@ stdout.
 Protocol (one JSON object per line, UTF-8, ``\\n``-terminated):
 
     inbound (main → worker)
-      {"op":"run.start", "run_id", "turn_id", "stored_session_id",
+      {"op":"run.start", "run_id", "turn_id", "conversation_session_id",
        "prompt", "params", "dovie_product_context"}
       {"op":"run.cancel", "run_id"}
       {"op":"interactive.response", "kind", "request_id", "answer"}
@@ -54,7 +54,7 @@ _stdout_write_lock = threading.RLock()
 class RunStartFrame:
     run_id: str
     turn_id: str
-    stored_session_id: str
+    conversation_session_id: str
     prompt: str
     params: dict[str, Any] = field(default_factory=dict)
     dovie_product_context: str = ""
@@ -129,14 +129,14 @@ class InteractiveRequestFrame:
     # Worker-known context. Optional so older worker builds (or echo-
     # only test stubs) keep working — the router cross-fills from its
     # ``run_table`` when these are empty.
-    stored_session_id: str = ""
+    conversation_session_id: str = ""
 
 
 @dataclass(frozen=True)
 class RunTerminalFrame:
     run_id: str
     status: str
-    stored_session_id: str = ""
+    conversation_session_id: str = ""
     turn_id: str = ""
     message: str = ""
 
@@ -269,7 +269,7 @@ def decode_incoming(line: str) -> IncomingFrame:
         return RunStartFrame(
             run_id=_require_str(obj, "run_id", op=op),
             turn_id=_require_str(obj, "turn_id", op=op),
-            stored_session_id=_require_str(obj, "stored_session_id", op=op),
+            conversation_session_id=_require_str(obj, "conversation_session_id", op=op),
             prompt=_optional_str(obj, "prompt"),
             params=params,
             dovie_product_context=dovie_product_context,
@@ -314,7 +314,7 @@ def encode_incoming(frame: IncomingFrame) -> str:
             "op": "run.start",
             "run_id": frame.run_id,
             "turn_id": frame.turn_id,
-            "stored_session_id": frame.stored_session_id,
+            "conversation_session_id": frame.conversation_session_id,
             "prompt": frame.prompt,
             "params": frame.params,
         }
@@ -379,13 +379,13 @@ def decode_outgoing(line: str) -> OutgoingFrame:
             kind=_require_str(obj, "kind", op=op),
             request_id=_require_str(obj, "request_id", op=op),
             payload=_optional_mapping(obj, "payload"),
-            stored_session_id=_optional_str(obj, "stored_session_id"),
+            conversation_session_id=_optional_str(obj, "conversation_session_id"),
         )
     if op == "run.terminal":
         return RunTerminalFrame(
             run_id=_require_str(obj, "run_id", op=op),
             status=_require_str(obj, "status", op=op),
-            stored_session_id=_optional_str(obj, "stored_session_id"),
+            conversation_session_id=_optional_str(obj, "conversation_session_id"),
             turn_id=_optional_str(obj, "turn_id"),
             message=_optional_str(obj, "message"),
         )
@@ -408,16 +408,16 @@ def encode_outgoing(frame: OutgoingFrame) -> str:
             "request_id": frame.request_id,
             "payload": frame.payload,
         }
-        if frame.stored_session_id:
-            body["stored_session_id"] = frame.stored_session_id
+        if frame.conversation_session_id:
+            body["conversation_session_id"] = frame.conversation_session_id
     elif isinstance(frame, RunTerminalFrame):
         body = {
             "op": "run.terminal",
             "run_id": frame.run_id,
             "status": frame.status,
         }
-        if frame.stored_session_id:
-            body["stored_session_id"] = frame.stored_session_id
+        if frame.conversation_session_id:
+            body["conversation_session_id"] = frame.conversation_session_id
         if frame.turn_id:
             body["turn_id"] = frame.turn_id
         if frame.message:
@@ -752,7 +752,7 @@ def _build_default_handler(
                     RunTerminalFrame(
                         run_id=frame.run_id,
                         status="failed",
-                        stored_session_id=frame.stored_session_id,
+                        conversation_session_id=frame.conversation_session_id,
                         turn_id=frame.turn_id,
                         message=str(exc),
                     )

@@ -274,7 +274,7 @@ def prior_node_attempts(db: Any, mission_id: str, node_id: str, *, limit: int = 
     with db._lock:
         rows = db._conn.execute(
             """
-            SELECT b.run_id, b.session_id, b.runtime_session_id, b.role, b.created_at,
+            SELECT b.run_id, b.session_id, b.execution_session_id, b.role, b.created_at,
                    r.status AS run_status, r.updated_at AS run_updated_at
               FROM team_mission_run_bindings b
               LEFT JOIN runs r ON r.run_id = b.run_id

@@ -226,16 +226,16 @@ def test_publish_run_terminal_event_does_not_preassign_runtime_seq(tmp_path: Pat
             session_id="s-terminal",
             runtime_scope_key="s-terminal",
             turn_id="turn-terminal",
-            runtime_session_id="runtime-terminal",
+            execution_session_id="runtime-terminal",
             status="running",
         )
 
         published = run_control.publish_run_terminal_event(
-            stored_session_id="s-terminal",
+            conversation_session_id="s-terminal",
             run_id="run-terminal",
             turn_id="turn-terminal",
             runtime_scope_key="s-terminal",
-            runtime_session_id="runtime-terminal",
+            execution_session_id="runtime-terminal",
             status="failed",
             message="worker crashed",
             db=db,

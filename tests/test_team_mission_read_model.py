@@ -20,7 +20,7 @@ def test_read_model_normalizes_mission_and_node_statuses_to_backend_enums():
             },
             "conversation": {
                 "conversation_id": "conversation-1",
-                "stable_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "team_id": "team-1",
                 "title": "Team room",
             },
@@ -61,7 +61,7 @@ def test_read_model_projects_empty_mission_as_conversation_shell():
             "conversation": {
                 "conversation_id": "conversation-only",
                 "team_id": "team-1",
-                "stable_session_id": "team-session-conversation-only",
+                "conversation_session_id": "team-session-conversation-only",
                 "title": "Leader chat only",
                 "status": "active",
                 "created_at": 10,
@@ -93,7 +93,7 @@ def test_read_model_derives_node_dependencies_from_edges_and_nodes():
                 "objective": "Exercise dependencies",
                 "status": "running",
             },
-            "conversation": {"conversation_id": "conversation-1", "stable_session_id": "team-session-1"},
+            "conversation": {"conversation_id": "conversation-1", "conversation_session_id": "team-session-1"},
             "graph": {
                 "nodes": [
                     {"node_id": "root", "mission_id": "mission-deps", "kind": "root", "status": "completed"},

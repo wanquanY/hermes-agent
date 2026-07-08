@@ -31,7 +31,7 @@ def _make_conn() -> sqlite3.Connection:
             session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             runtime_scope_key TEXT,
             turn_id TEXT,
-            runtime_session_id TEXT,
+            execution_session_id TEXT,
             status TEXT NOT NULL,
             started_at REAL NOT NULL,
             updated_at REAL NOT NULL,
@@ -53,6 +53,7 @@ def _make_conn() -> sqlite3.Connection:
             timestamp REAL NOT NULL,
             payload_json TEXT,
             event_json TEXT NOT NULL,
+            activity_id TEXT,
             UNIQUE(session_id, seq)
         );
         CREATE TABLE seq_counter (

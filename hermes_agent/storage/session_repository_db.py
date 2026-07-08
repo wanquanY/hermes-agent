@@ -11,10 +11,29 @@ from __future__ import annotations
 import logging
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
+
+
+class SessionRepositoryConnection(sqlite3.Connection):
+    """Connection type for repo-owned bootstrap compatibility.
+
+    Some older gateway tests and integration helpers create the `messages`
+    table by hand after opening the repository connection. The repository now
+    owns that table family and bootstraps it eagerly, so make the legacy DDL
+    idempotent without changing the schema or requiring callers to know the
+    bootstrap order.
+    """
+
+    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+        statement = sql.lstrip()
+        if statement.lower().startswith("create table messages"):
+            sql = sql.replace("CREATE TABLE messages", "CREATE TABLE IF NOT EXISTS messages", 1)
+            sql = sql.replace("create table messages", "CREATE TABLE IF NOT EXISTS messages", 1)
+        return super().execute(sql, parameters)
 
 
 def connect_session_repository_db(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -22,7 +41,13 @@ def connect_session_repository_db(db_path: Path | str | None = None) -> sqlite3.
 
     path = Path(db_path) if db_path is not None else get_hermes_home() / "state.db"
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False, timeout=1.0, isolation_level=None)
+    conn = sqlite3.connect(
+        path,
+        check_same_thread=False,
+        timeout=1.0,
+        isolation_level=None,
+        factory=SessionRepositoryConnection,
+    )
     conn.row_factory = sqlite3.Row
     _configure_connection(conn, db_label=str(path))
     ensure_session_repository_schema(conn)
@@ -111,7 +136,7 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
             running INTEGER NOT NULL DEFAULT 0,
             waiting_approval INTEGER NOT NULL DEFAULT 0,
             active_run_id TEXT NOT NULL DEFAULT '',
-            active_runtime_session_id TEXT NOT NULL DEFAULT '',
+            active_execution_session_id TEXT NOT NULL DEFAULT '',
             pending_approval_count INTEGER NOT NULL DEFAULT 0,
             team_id TEXT NOT NULL DEFAULT '',
             mission_id TEXT NOT NULL DEFAULT '',

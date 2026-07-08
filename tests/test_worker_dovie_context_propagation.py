@@ -200,7 +200,7 @@ async def test_primary_dispatch_run_start_payload_carries_dovie_context(
             "method": "run.submit",
             "params": {
                 "text": "hello",
-                "stored_session_id": "conv-1",
+                "conversation_session_id": "conv-1",
                 "runtime_scope_key": "profile:member-a",
                 "agent_profile_id": "member-a",
                 "dovie_product_context": _context("query-ipc"),
@@ -259,7 +259,7 @@ async def test_worker_run_start_sets_dovie_context_for_handler_scope() -> None:
         RunStartFrame(
             run_id="run-ctx",
             turn_id="turn-ctx",
-            stored_session_id="conv-ctx",
+            conversation_session_id="conv-ctx",
             prompt="hello",
             params={"dovie_product_context": _context_json("query-handler")},
             dovie_product_context=_context_json("query-handler"),
@@ -283,7 +283,7 @@ async def test_worker_run_start_clears_dovie_context_after_turn() -> None:
         RunStartFrame(
             run_id="run-clear",
             turn_id="turn-clear",
-            stored_session_id="conv-clear",
+            conversation_session_id="conv-clear",
             prompt="hello",
             params={"dovie_product_context": _context_json("query-clear")},
             dovie_product_context=_context_json("query-clear"),
@@ -312,7 +312,7 @@ async def test_agent_run_backend_refuses_second_turn_while_first_is_active() -> 
             RunStartFrame(
                 run_id="run-active",
                 turn_id="turn-active",
-                stored_session_id="conv-active",
+                conversation_session_id="conv-active",
                 prompt="first",
             ),
             proto.emit,
@@ -326,7 +326,7 @@ async def test_agent_run_backend_refuses_second_turn_while_first_is_active() -> 
         RunStartFrame(
             run_id="run-refused",
             turn_id="turn-refused",
-            stored_session_id="conv-refused",
+            conversation_session_id="conv-refused",
             prompt="second",
         ),
         proto.emit,
@@ -341,7 +341,7 @@ async def test_agent_run_backend_refuses_second_turn_while_first_is_active() -> 
         RunTerminalFrame(
             run_id="run-refused",
             status="failed",
-            stored_session_id="conv-refused",
+            conversation_session_id="conv-refused",
             turn_id="turn-refused",
             message="another run already active in this worker",
         )

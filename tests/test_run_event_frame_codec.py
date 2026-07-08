@@ -13,7 +13,7 @@ def _message_delta(seq: int, text: str = "hello") -> dict:
     return {
         "type": "message.delta",
         "session_id": "runtime-1",
-        "stored_session_id": "session-1",
+        "conversation_session_id": "session-1",
         "run_id": "run-1",
         "turn_id": "turn-1",
         "seq": seq,
@@ -88,7 +88,7 @@ def test_reference_run_event_payloads_slim_message_complete_and_rehydrates_from_
         event = {
             "type": "message.complete",
             "session_id": "runtime-1",
-            "stored_session_id": "session-1",
+            "conversation_session_id": "session-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "message_seq_in_run": 1,
@@ -142,7 +142,7 @@ def test_reference_run_event_payloads_slim_tool_complete_and_rehydrates_from_too
             {
                 "type": "tool.complete",
                 "session_id": "runtime-1",
-                "stored_session_id": "session-1",
+                "conversation_session_id": "session-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "participant_id": "agent:default",
@@ -212,7 +212,7 @@ def test_backfill_run_event_frame_blobs_migrates_legacy_rows(tmp_path):
             lambda conn: conn.execute(
                 """
                 INSERT INTO run_events (
-                    session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                    session_id, run_id, turn_id, execution_session_id, runtime_scope_key,
                     event_type, seq, timestamp, payload_json, event_json, status
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

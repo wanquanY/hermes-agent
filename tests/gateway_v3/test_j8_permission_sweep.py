@@ -56,7 +56,7 @@ CREATE TABLE session_index (
     running INTEGER NOT NULL DEFAULT 0,
     waiting_approval INTEGER NOT NULL DEFAULT 0,
     active_run_id TEXT NOT NULL DEFAULT '',
-    active_runtime_session_id TEXT NOT NULL DEFAULT '',
+    active_execution_session_id TEXT NOT NULL DEFAULT '',
     pending_approval_count INTEGER NOT NULL DEFAULT 0,
     message_count INTEGER NOT NULL DEFAULT 0,
     started_at REAL NOT NULL DEFAULT 0,

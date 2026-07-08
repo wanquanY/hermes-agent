@@ -23,18 +23,18 @@ def recover_conversation_active_run(
 ) -> dict[str, Any]:
     if not isinstance(conversation, dict):
         return {}
-    stable_session_id = _text(
-        conversation.get("stable_session_id")
-        or conversation.get("stableSessionId")
+    conversation_session_id = _text(
+        conversation.get("conversation_session_id")
+        or conversation.get("conversationSessionId")
     )
-    if not stable_session_id:
+    if not conversation_session_id:
         return {}
     try:
         recover_legacy_final_deliverables(db, conversation)
     except Exception:
         pass
     run_state = run_control.session_status(
-        stable_session_id,
+        conversation_session_id,
         db=db,
         current_gateway_instance_id=current_gateway_instance_id,
     )
@@ -63,7 +63,7 @@ def recover_conversation_active_run(
     if runtime_scope_key and runtime_scope_key != expected_scope:
         return run_state
     run_control.publish_run_terminal_event(
-        stored_session_id=stable_session_id,
+        conversation_session_id=conversation_session_id,
         run_id=active_run_id,
         turn_id=_text(run_state.get("active_turn_id")),
         runtime_scope_key=runtime_scope_key or expected_scope,

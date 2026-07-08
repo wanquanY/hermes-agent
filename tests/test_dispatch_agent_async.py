@@ -211,7 +211,7 @@ async def test_dispatch_pushes_run_start_frame_with_prompt(tmp_path: Path) -> No
     assert isinstance(frame, RunStartFrame)
     assert frame.run_id == "run-1"
     assert frame.turn_id == "turn-1"
-    assert frame.stored_session_id == "conv-child"
+    assert frame.conversation_session_id == "conv-child"
     assert frame.prompt == "Do the long task"
     assert frame.params["dispatch_activity_id"] == "act-1"
     assert frame.params["files"] == ["tests/a.py"]

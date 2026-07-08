@@ -93,7 +93,7 @@ async def test_worker_publish_wrapper_injects_participant_id_from_active_run_con
     sink = _Sink()
     context = _run_context(participant_id="member:alice")
     bridge = WorkerPublishBridge(emit=sink.emit, loop=asyncio.get_running_loop())
-    bridge.install(stored_session_id="conv-1", run_context=context)
+    bridge.install(conversation_session_id="conv-1", run_context=context)
     try:
         assert get_active_run_context() == context
         mod.publish_recorded_event({"type": "message.delta", "payload": {"delta": "hi"}})
@@ -120,7 +120,7 @@ async def test_worker_publish_wrapper_no_op_when_payload_already_has_participant
         "payload": {"delta": "hi", "participant_id": "leader:conv-1"},
     }
     bridge = WorkerPublishBridge(emit=sink.emit, loop=asyncio.get_running_loop())
-    bridge.install(stored_session_id="conv-1", run_context=_run_context())
+    bridge.install(conversation_session_id="conv-1", run_context=_run_context())
     try:
         mod.publish_recorded_event(params)
         await _drain_emit(sink)
@@ -140,7 +140,7 @@ async def test_worker_publish_wrapper_no_op_when_no_active_run_context(
     sink = _Sink()
     params = {"type": "message.delta", "payload": {"delta": "hi"}}
     bridge = WorkerPublishBridge(emit=sink.emit, loop=asyncio.get_running_loop())
-    bridge.install(stored_session_id="conv-1")
+    bridge.install(conversation_session_id="conv-1")
     try:
         assert get_active_run_context() is None
         mod.publish_recorded_event(params)
@@ -164,12 +164,12 @@ async def test_member_chat_event_stamped_member_not_leader_via_worker_wrap(
         execution_scope_key="team:conv-1:leader-conversation",
     )
     bridge = WorkerPublishBridge(emit=sink.emit, loop=asyncio.get_running_loop())
-    bridge.install(stored_session_id="conv-1", run_context=context)
+    bridge.install(conversation_session_id="conv-1", run_context=context)
     try:
         mod.publish_recorded_event(
             {
                 "type": "message.complete",
-                "stored_session_id": "conv-1",
+                "conversation_session_id": "conv-1",
                 "run_id": "run-member",
                 "runtime_scope_key": "team:conv-1:leader-conversation",
                 "payload": {
@@ -204,7 +204,7 @@ def test_main_record_event_uses_payload_participant_id_when_present(
             {
                 "type": "message.complete",
                 "session_id": "conv-1",
-                "stored_session_id": "conv-1",
+                "conversation_session_id": "conv-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "runtime_scope_key": "team:conv-1:leader-conversation",

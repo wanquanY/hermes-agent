@@ -28,7 +28,7 @@ def test_collect_storage_stats_reports_runtime_tables_artifacts_and_logs(tmp_pat
             {
                 "type": "message.delta",
                 "session_id": "runtime-1",
-                "stored_session_id": "session-1",
+                "conversation_session_id": "session-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "seq": 1,

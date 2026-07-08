@@ -52,7 +52,7 @@ def test_decode_run_start_minimum_fields() -> None:
                 "op": "run.start",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
-                "stored_session_id": "sess-1",
+                "conversation_session_id": "sess-1",
                 "prompt": "hi",
             }
         )
@@ -60,7 +60,7 @@ def test_decode_run_start_minimum_fields() -> None:
     assert isinstance(frame, RunStartFrame)
     assert frame.run_id == "run-1"
     assert frame.turn_id == "turn-1"
-    assert frame.stored_session_id == "sess-1"
+    assert frame.conversation_session_id == "sess-1"
     assert frame.prompt == "hi"
     assert frame.params == {}
 
@@ -72,7 +72,7 @@ def test_decode_run_start_with_params() -> None:
                 "op": "run.start",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
-                "stored_session_id": "sess-1",
+                "conversation_session_id": "sess-1",
                 "prompt": "",
                 "params": {"model": "claude-opus", "extras": {"k": 1}},
             }
@@ -194,7 +194,7 @@ def test_encode_non_ascii_payload_compact() -> None:
     "frame",
     [
         RunStartFrame(
-            run_id="r1", turn_id="t1", stored_session_id="s1",
+            run_id="r1", turn_id="t1", conversation_session_id="s1",
             prompt="hi", params={"model": "claude-opus"},
         ),
         RunCancelFrame(run_id="r2"),
@@ -279,7 +279,7 @@ async def test_run_dispatches_each_frame_and_stops_on_shutdown() -> None:
                         "op": "run.start",
                         "run_id": "r1",
                         "turn_id": "t1",
-                        "stored_session_id": "s1",
+                        "conversation_session_id": "s1",
                         "prompt": "",
                     }
                 ),
@@ -409,7 +409,7 @@ async def test_handler_dispatches_run_start_to_backend() -> None:
                         "op": "run.start",
                         "run_id": "r1",
                         "turn_id": "t1",
-                        "stored_session_id": "s1",
+                        "conversation_session_id": "s1",
                         "prompt": "hi",
                     }
                 ),
@@ -443,7 +443,7 @@ async def test_handler_emits_synthesized_terminal_on_backend_exception() -> None
                         "op": "run.start",
                         "run_id": "r-fail",
                         "turn_id": "t1",
-                        "stored_session_id": "s1",
+                        "conversation_session_id": "s1",
                         "prompt": "",
                     }
                 ),
@@ -517,7 +517,7 @@ async def test_stub_backend_emits_stubbed_terminal() -> None:
     backend = _StubBackend()
     await backend.start(
         RunStartFrame(
-            run_id="rx", turn_id="tx", stored_session_id="sx", prompt="",
+            run_id="rx", turn_id="tx", conversation_session_id="sx", prompt="",
         ),
         emit,
     )

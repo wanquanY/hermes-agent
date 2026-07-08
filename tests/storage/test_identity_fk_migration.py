@@ -36,7 +36,7 @@ def _create_legacy_v39_db(path: Path) -> None:
                 session_id TEXT NOT NULL,
                 runtime_scope_key TEXT,
                 turn_id TEXT,
-                runtime_session_id TEXT,
+                execution_session_id TEXT,
                 status TEXT NOT NULL,
                 started_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
@@ -54,7 +54,7 @@ def _create_legacy_v39_db(path: Path) -> None:
                 session_id TEXT NOT NULL,
                 run_id TEXT,
                 turn_id TEXT,
-                runtime_session_id TEXT,
+                execution_session_id TEXT,
                 runtime_scope_key TEXT,
                 participant_id TEXT NOT NULL DEFAULT '',
                 activity_id TEXT,
@@ -74,7 +74,7 @@ def _create_legacy_v39_db(path: Path) -> None:
                 UNIQUE(session_id, seq)
             );
             INSERT INTO run_events (
-                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                session_id, run_id, turn_id, execution_session_id, runtime_scope_key,
                 participant_id, activity_id, event_type, seq, timestamp, payload_json,
                 event_json, status, frame_blob, frame_format, retention_class,
                 projected_message_id, projected_tool_event_id, projection_state,
@@ -131,7 +131,7 @@ def _create_legacy_v39_db(path: Path) -> None:
             CREATE TABLE session_runtime_state (
                 session_id TEXT PRIMARY KEY,
                 runtime_scope_key TEXT,
-                runtime_session_id TEXT,
+                execution_session_id TEXT,
                 run_id TEXT,
                 turn_id TEXT,
                 status TEXT,

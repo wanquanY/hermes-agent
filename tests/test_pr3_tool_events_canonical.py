@@ -42,14 +42,14 @@ def _tool_event(
     name: str = "terminal",
     run_id: str = "run-1",
     turn_id: str = "turn-1",
-    stored_session_id: str = "session-1",
+    conversation_session_id: str = "session-1",
     payload: dict | None = None,
 ) -> dict:
     """Build a minimal tool.* run_event frame suitable for ``append_run_event``."""
     body: dict[str, Any] = {
         "type": event_type,
         "session_id": f"runtime-{run_id}",
-        "stored_session_id": stored_session_id,
+        "conversation_session_id": conversation_session_id,
         "run_id": run_id,
         "turn_id": turn_id,
         "participant_id": "agent:default",

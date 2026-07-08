@@ -186,7 +186,7 @@ async def test_get_or_spawn_reuses_inflight_worker_when_profile_env_changes() ->
         await pool.record_run_start(
             conversation_id="conv-1",
             run_id="run-1",
-            stored_session_id="conv-1",
+            conversation_session_id="conv-1",
             turn_id="turn-1",
         )
 
@@ -248,7 +248,7 @@ async def test_active_worker_not_reaped_while_run_inflight() -> None:
         await pool.record_run_start(
             conversation_id="conv-1",
             run_id="run-1",
-            stored_session_id="conv-1",
+            conversation_session_id="conv-1",
             turn_id="turn-1",
         )
         await pool.release("conv-1")
@@ -271,7 +271,7 @@ async def test_pool_is_single_source_for_active_runs() -> None:
         await pool.record_run_start(
             conversation_id="conv-1",
             run_id="run-1",
-            stored_session_id="conv-1",
+            conversation_session_id="conv-1",
             turn_id="turn-1",
         )
 
@@ -292,7 +292,7 @@ async def test_worker_crash_marks_inflight_runs_failed() -> None:
         await pool.record_run_start(
             conversation_id="conv-1",
             run_id="run-1",
-            stored_session_id="conv-1",
+            conversation_session_id="conv-1",
             turn_id="turn-1",
         )
         lease.worker.process.returncode = 1
@@ -307,7 +307,7 @@ async def test_worker_crash_marks_inflight_runs_failed() -> None:
         assert conversation_id == "conv-1"
         assert frame.run_id == "run-1"
         assert frame.status == "failed"
-        assert frame.stored_session_id == "conv-1"
+        assert frame.conversation_session_id == "conv-1"
         assert frame.turn_id == "turn-1"
         assert "worker crashed" in frame.message
     finally:
@@ -323,7 +323,7 @@ async def test_worker_pool_emits_events_with_profile_based_scope_key() -> None:
         await pool.record_run_start(
             conversation_id="conv-1",
             run_id="run-1",
-            stored_session_id="conv-1",
+            conversation_session_id="conv-1",
             turn_id="turn-1",
         )
         lease.worker.process.returncode = 1
@@ -333,7 +333,7 @@ async def test_worker_pool_emits_events_with_profile_based_scope_key() -> None:
         scope_key, conversation_id, frame = supervisor.terminal_events[0]
         assert scope_key == "profile:profile-1"
         assert conversation_id == "conv-1"
-        assert frame.stored_session_id == "conv-1"
+        assert frame.conversation_session_id == "conv-1"
     finally:
         await pool.shutdown()
 

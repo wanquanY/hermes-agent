@@ -59,7 +59,7 @@ class TeamMissionConversationMixin:
                                  FROM team_mission_conversations active_tmc
                                 WHERE active_tmc.conversation_id = {si}.conversation_id
                                   AND (
-                                      active_tmc.stable_session_id = active_runs.session_id
+                                      active_tmc.conversation_session_id = active_runs.session_id
                                       OR active_tmc.conversation_id = active_runs.session_id
                                   )
                            )
@@ -142,7 +142,7 @@ class TeamMissionConversationMixin:
                 f"""
                 SELECT si.session_id, si.conversation_id, si.mission_id,
                        si.runtime_scope_key, si.active_run_id,
-                       si.active_runtime_session_id
+                       si.active_execution_session_id
                   FROM session_index si
                  WHERE si.conversation_kind = 'team'
                    AND COALESCE(si.conversation_id, '') != ''
@@ -167,7 +167,7 @@ class TeamMissionConversationMixin:
             canonical_scope = f"team:{conversation_id}:leader-conversation"
             run = conn.execute(
                 f"""
-                SELECT r.run_id, r.runtime_session_id, r.runtime_scope_key
+                SELECT r.run_id, r.execution_session_id, r.runtime_scope_key
                   FROM runs r
                  WHERE LOWER(COALESCE(r.status, '')) IN ({status_placeholders})
                    AND (
@@ -216,7 +216,7 @@ class TeamMissionConversationMixin:
                 ),
             ).fetchone()
             run_id = _text(_row_value(run, "run_id", ""))
-            runtime_session_id = _text(_row_value(run, "runtime_session_id", ""))
+            execution_session_id = _text(_row_value(run, "execution_session_id", ""))
             run_scope = _text(_row_value(run, "runtime_scope_key", ""))
             next_scope = canonical_scope or run_scope
             existing_scope = _text(_row_value(row, "runtime_scope_key", ""))
@@ -231,24 +231,24 @@ class TeamMissionConversationMixin:
                          WHEN active_run_id = '' THEN ?
                          ELSE active_run_id
                        END,
-                       active_runtime_session_id = CASE
-                         WHEN active_runtime_session_id = '' THEN ?
-                         ELSE active_runtime_session_id
+                       active_execution_session_id = CASE
+                         WHEN active_execution_session_id = '' THEN ?
+                         ELSE active_execution_session_id
                        END
                  WHERE session_id = ?
                    AND (
                        runtime_scope_key = ''
                        OR (? != '' AND active_run_id = '')
-                       OR (? != '' AND active_runtime_session_id = '')
+                       OR (? != '' AND active_execution_session_id = '')
                    )
                 """,
                 (
                     next_scope,
                     run_id,
-                    runtime_session_id,
+                    execution_session_id,
                     session_id,
                     run_id,
-                    runtime_session_id,
+                    execution_session_id,
                 ),
             )
             if int(cursor.rowcount or 0):
@@ -274,10 +274,10 @@ class TeamMissionConversationMixin:
             or _conversation_id_from_metadata(mission_metadata)
             or (identifier if identifier.startswith("team-conversation-") else "")
         )
-        stable_session_id = (
-            _text(conversation.get("stable_session_id"))
-            or _stable_session_id_from_metadata(metadata)
-            or _stable_session_id_from_metadata(mission_metadata)
+        conversation_session_id = (
+            _text(conversation.get("conversation_session_id"))
+            or _conversation_session_id_from_metadata(metadata)
+            or _conversation_session_id_from_metadata(mission_metadata)
             or _text(mission.get("leader_session_id"))
             or (identifier if identifier.startswith("team-session-") else "")
             or conversation_id
@@ -290,13 +290,13 @@ class TeamMissionConversationMixin:
             or conversation_id
         )
         conversation["conversation_id"] = conversation_id
-        conversation["stable_session_id"] = stable_session_id
+        conversation["conversation_session_id"] = conversation_session_id
         conversation["team_id"] = team_id
         return conversation
 
     def assert_conversation_canonical(self, conv: Dict[str, Any]) -> Dict[str, Any]:
         assert _text((conv or {}).get("conversation_id")), "team mission conversation missing conversation_id"
-        assert _text((conv or {}).get("stable_session_id")), "team mission conversation missing stable_session_id"
+        assert _text((conv or {}).get("conversation_session_id")), "team mission conversation missing conversation_session_id"
         assert _text((conv or {}).get("team_id")), "team mission conversation missing team_id"
         return conv
 
@@ -305,7 +305,7 @@ class TeamMissionConversationMixin:
         *,
         conversation_id: str,
         team_id: str = "",
-        stable_session_id: str = "",
+        conversation_session_id: str = "",
         title: str = "",
         objective: str = "",
         workspace_id: str = "",
@@ -322,7 +322,7 @@ class TeamMissionConversationMixin:
         conversation_id = _text(conversation_id)
         if not conversation_id:
             return {}
-        stable_session_id = _text(stable_session_id) or conversation_id
+        conversation_session_id = _text(conversation_session_id) or conversation_id
         now = time.time()
         created = float(created_at or now)
         requested_updated = float(updated_at if updated_at is not None else now)
@@ -337,7 +337,7 @@ class TeamMissionConversationMixin:
             if isinstance(metadata, dict):
                 merged_metadata.update(metadata)
             merged_metadata["conversation_id"] = conversation_id
-            merged_metadata["stable_session_id"] = stable_session_id
+            merged_metadata["conversation_session_id"] = conversation_session_id
             existing_title = _text(_row_value(existing, "title", ""))
             requested_title = _text(title)
             existing_display_title_source = _text(
@@ -369,14 +369,14 @@ class TeamMissionConversationMixin:
             conn.execute(
                 """
                 INSERT INTO team_mission_conversations (
-                    conversation_id, team_id, stable_session_id, title, objective,
+                    conversation_id, team_id, conversation_session_id, title, objective,
                     workspace_id, workspace_path, status, created_by_user_id,
                     metadata_json, created_at, updated_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(conversation_id) DO UPDATE SET
                     team_id = COALESCE(NULLIF(excluded.team_id, ''), team_id),
-                    stable_session_id = excluded.stable_session_id,
+                    conversation_session_id = excluded.conversation_session_id,
                     title = COALESCE(NULLIF(?, ''), title),
                     objective = COALESCE(NULLIF(excluded.objective, ''), objective),
                     workspace_id = COALESCE(NULLIF(excluded.workspace_id, ''), workspace_id),
@@ -389,7 +389,7 @@ class TeamMissionConversationMixin:
                 (
                     conversation_id,
                     _text(team_id),
-                    stable_session_id,
+                    conversation_session_id,
                     insert_title,
                     _text(objective),
                     _text(workspace_id),
@@ -415,7 +415,7 @@ class TeamMissionConversationMixin:
                 INSERT OR IGNORE INTO sessions (id, source, started_at, transient)
                 VALUES (?, 'team_mission', ?, 0)
                 """,
-                (stable_session_id, created),
+                (conversation_session_id, created),
             )
             # CR-P4.1: active_mission_id is accepted only as a compatibility
             # input; the legacy column is no longer written.
@@ -443,7 +443,7 @@ class TeamMissionConversationMixin:
         status updates can target it. Best-effort."""
         if not record:
             return
-        sid = _text(record.get("stable_session_id")) or _text(record.get("conversation_id"))
+        sid = _text(record.get("conversation_session_id")) or _text(record.get("conversation_id"))
         if not sid:
             return
         title = _text(record.get("title"))
@@ -516,10 +516,10 @@ class TeamMissionConversationMixin:
            agent session key IS the conversation's session id).
         2. ``runtime_scope_key == session_key`` (any agent that stamped its
            scope into the index row).
-        3. ``team_mission_run_bindings.session_id / runtime_session_id``
+        3. ``team_mission_run_bindings.session_id / execution_session_id``
            JOIN onto the row matching the binding's ``mission_id`` (member
            node runtime scopes).
-        4. ``team_mission_conversations.stable_session_id`` JOIN onto the
+        4. ``team_mission_conversations.conversation_session_id`` JOIN onto the
            row matching the conversation's stable session id (team conv
            via stable id).
         5. Parse the ``team:<conv_id>:leader-conversation`` scope-key
@@ -581,7 +581,7 @@ class TeamMissionConversationMixin:
                       FROM team_mission_run_bindings tb
                       JOIN session_index si ON si.mission_id = tb.mission_id
                      WHERE tb.session_id = ?
-                        OR tb.runtime_session_id = ?
+                        OR tb.execution_session_id = ?
                         OR tb.runtime_scope_key = ?
                     """,
                     (sk, sk, sk),
@@ -598,7 +598,7 @@ class TeamMissionConversationMixin:
                       FROM team_mission_conversations tmc
                       JOIN session_index si
                         ON si.conversation_id = tmc.conversation_id
-                     WHERE tmc.stable_session_id = ?
+                     WHERE tmc.conversation_session_id = ?
                     """,
                     (sk,),
                 ).fetchall()
@@ -697,7 +697,7 @@ class TeamMissionConversationMixin:
                         """
                         UPDATE session_index
                            SET status = ?, running = 0, waiting_approval = 1,
-                               active_run_id = '', active_runtime_session_id = '',
+                               active_run_id = '', active_execution_session_id = '',
                                pending_approval_count = 0
                          WHERE mission_id = ?
                         """,
@@ -706,7 +706,7 @@ class TeamMissionConversationMixin:
                 active_run_exists = self._session_index_active_run_exists_sql("session_index")
                 active_mission_exists = self._session_index_active_mission_exists_sql("session_index")
                 # A not-running row must NOT keep a stale active_run_id /
-                # active_runtime_session_id. The sidebar derives running as
+                # active_execution_session_id. The sidebar derives running as
                 # (running || active_run_id), so a leftover active_run_id makes a
                 # finished team conversation spin forever even with running=0.
                 # Mission cancel is activity-scoped: only collapse the
@@ -716,7 +716,7 @@ class TeamMissionConversationMixin:
                     f"""
                     UPDATE session_index
                        SET status = ?, running = 0, waiting_approval = ?,
-                           active_run_id = '', active_runtime_session_id = '',
+                           active_run_id = '', active_execution_session_id = '',
                            pending_approval_count = 0
                      WHERE mission_id = ?
                        AND NOT ({active_run_exists})
@@ -759,7 +759,7 @@ class TeamMissionConversationMixin:
         self,
         *,
         conversation_id: str = "",
-        stable_session_id: str = "",
+        conversation_session_id: str = "",
         mission: Dict[str, Any] | None = None,
         mission_id: str = "",
         team_id: str = "",
@@ -786,7 +786,7 @@ class TeamMissionConversationMixin:
         resolved_conversation_id = (
             explicit_conversation_id
             or _text((self.get_team_mission_conversation_by_session(
-                _stable_session_id_from_metadata(
+                _conversation_session_id_from_metadata(
                     merged_metadata,
                     _text(mission.get("leader_session_id") or mission.get("team_id") or resolved_mission_id),
                 )
@@ -795,20 +795,20 @@ class TeamMissionConversationMixin:
         )
         if not resolved_conversation_id:
             return {}
-        resolved_stable_session_id = (
-            _text(stable_session_id)
-            or _stable_session_id_from_metadata(
+        resolved_conversation_session_id = (
+            _text(conversation_session_id)
+            or _conversation_session_id_from_metadata(
                 merged_metadata,
                 _text(mission.get("leader_session_id") or mission.get("team_id") or resolved_conversation_id),
             )
         )
         merged_metadata["conversation_id"] = resolved_conversation_id
-        merged_metadata["conversation_session_id"] = resolved_stable_session_id
-        merged_metadata["stableTeamSessionId"] = resolved_stable_session_id
+        merged_metadata["conversation_session_id"] = resolved_conversation_session_id
+        merged_metadata["conversationTeamSessionId"] = resolved_conversation_session_id
         conversation = self.upsert_team_mission_conversation(
             conversation_id=resolved_conversation_id,
             team_id=_text(team_id or mission.get("team_id")),
-            stable_session_id=resolved_stable_session_id,
+            conversation_session_id=resolved_conversation_session_id,
             title=_text(title),
             objective=_text(objective),
             workspace_id=_text(workspace_id or mission.get("workspace_id")),
@@ -829,14 +829,14 @@ class TeamMissionConversationMixin:
                         leader_session_id = COALESCE(NULLIF(leader_session_id, ''), ?)
                     WHERE mission_id = ?
                     """,
-                    (resolved_conversation_id, resolved_stable_session_id, resolved_mission_id),
+                    (resolved_conversation_id, resolved_conversation_session_id, resolved_mission_id),
                 )
 
             self._execute_write(_bind)
-        if resolved_stable_session_id and not self.get_session(resolved_stable_session_id):
-            self.create_session(resolved_stable_session_id, source="team_mission", transient=False)
+        if resolved_conversation_session_id and not self.get_session(resolved_conversation_session_id):
+            self.create_session(resolved_conversation_session_id, source="team_mission", transient=False)
         self._populate_team_conversation_participants(
-            conversation_session_id=resolved_stable_session_id,
+            conversation_session_id=resolved_conversation_session_id,
             team_id=_text(team_id or mission.get("team_id")),
             conversation_id=resolved_conversation_id,
             mission_id=resolved_mission_id,
@@ -924,9 +924,9 @@ class TeamMissionConversationMixin:
                 (conversation_id,),
             ).fetchone()) or {}
 
-    def get_team_mission_conversation_by_session(self, stable_session_id: str) -> Dict[str, Any]:
-        stable_session_id = _text(stable_session_id)
-        if not stable_session_id:
+    def get_team_mission_conversation_by_session(self, conversation_session_id: str) -> Dict[str, Any]:
+        conversation_session_id = _text(conversation_session_id)
+        if not conversation_session_id:
             return {}
         with self._lock:
             return self._team_mission_conversation_from_row(self._conn.execute(
@@ -934,9 +934,9 @@ class TeamMissionConversationMixin:
                 SELECT team_mission_conversations.*,
                        {self._PROJECTED_ACTIVE_MISSION_ID_SQL}
                 FROM team_mission_conversations
-                WHERE stable_session_id = ?
+                WHERE conversation_session_id = ?
                 """,
-                (stable_session_id,),
+                (conversation_session_id,),
             ).fetchone()) or {}
 
     def resolve_team_mission_conversation(self, identifier: str) -> Dict[str, Any]:
@@ -1034,7 +1034,7 @@ class TeamMissionConversationMixin:
                     ) AS activity_updated_at
                 FROM team_mission_conversations
                 LEFT JOIN sessions session_summary
-                  ON session_summary.id = team_mission_conversations.stable_session_id
+                  ON session_summary.id = team_mission_conversations.conversation_session_id
                 {where_sql}
                 ORDER BY activity_updated_at DESC, created_at DESC, conversation_id ASC
                 LIMIT ?
@@ -1069,7 +1069,7 @@ class TeamMissionConversationMixin:
             conversation["running"] = _text(conversation.get("conversation_id")) in active_conversation_ids
         return conversations
 
-    def list_team_mission_conversation_runtime_session_ids(
+    def list_team_mission_conversation_execution_session_ids(
         self,
         *,
         team_id: str = "",
@@ -1101,7 +1101,7 @@ class TeamMissionConversationMixin:
             clauses.append(
                 """(
                     c.conversation_id = ?
-                    OR c.stable_session_id = ?
+                    OR c.conversation_session_id = ?
                     OR EXISTS (
                         SELECT 1
                         FROM team_missions mission_filter
@@ -1136,7 +1136,7 @@ class TeamMissionConversationMixin:
         with self._lock:
             conversation_rows = self._conn.execute(
                 f"""
-                SELECT c.conversation_id, c.stable_session_id
+                SELECT c.conversation_id, c.conversation_session_id
                 FROM team_mission_conversations c
                 {where_sql}
                 ORDER BY COALESCE(c.updated_at, c.created_at, 0) DESC,
@@ -1152,10 +1152,10 @@ class TeamMissionConversationMixin:
                 for row in conversation_rows
                 if _text(_row_value(row, "conversation_id", ""))
             ]
-            stable_session_ids = [
-                _text(_row_value(row, "stable_session_id", ""))
+            conversation_session_ids = [
+                _text(_row_value(row, "conversation_session_id", ""))
                 for row in conversation_rows
-                if _text(_row_value(row, "stable_session_id", ""))
+                if _text(_row_value(row, "conversation_session_id", ""))
             ]
 
             mission_rows: list[sqlite3.Row] = []
@@ -1180,7 +1180,7 @@ class TeamMissionConversationMixin:
                     mission_placeholders = ",".join("?" for _ in mission_ids)
                     binding_rows = self._conn.execute(
                         f"""
-                        SELECT session_id, runtime_session_id
+                        SELECT session_id, execution_session_id
                         FROM team_mission_run_bindings
                         WHERE mission_id IN ({mission_placeholders})
                         ORDER BY created_at ASC, run_id ASC
@@ -1189,23 +1189,23 @@ class TeamMissionConversationMixin:
                     ).fetchall()
 
             active_run_rows: list[sqlite3.Row] = []
-            if stable_session_ids:
-                stable_placeholders = ",".join("?" for _ in stable_session_ids)
+            if conversation_session_ids:
+                stable_placeholders = ",".join("?" for _ in conversation_session_ids)
                 status_placeholders = ",".join("?" for _ in _ACTIVE_RUN_STATUSES)
                 active_run_rows = self._conn.execute(
                     f"""
-                    SELECT session_id, runtime_session_id
+                    SELECT session_id, execution_session_id
                     FROM runs
                     WHERE session_id IN ({stable_placeholders})
                       AND status IN ({status_placeholders})
                     ORDER BY updated_at DESC, started_at DESC, run_id ASC
                     """,
-                    (*stable_session_ids, *sorted(_ACTIVE_RUN_STATUSES)),
+                    (*conversation_session_ids, *sorted(_ACTIVE_RUN_STATUSES)),
                 ).fetchall()
 
         ids: list[str] = []
         seen_ids: set[str] = set()
-        append_unique(ids, seen_ids, *stable_session_ids)
+        append_unique(ids, seen_ids, *conversation_session_ids)
         for row in mission_rows:
             append_unique(ids, seen_ids, _row_value(row, "leader_session_id", ""))
         for row in active_run_rows:
@@ -1213,14 +1213,14 @@ class TeamMissionConversationMixin:
                 ids,
                 seen_ids,
                 _row_value(row, "session_id", ""),
-                _row_value(row, "runtime_session_id", ""),
+                _row_value(row, "execution_session_id", ""),
             )
         for row in binding_rows:
             append_unique(
                 ids,
                 seen_ids,
                 _row_value(row, "session_id", ""),
-                _row_value(row, "runtime_session_id", ""),
+                _row_value(row, "execution_session_id", ""),
             )
         return ids
 
@@ -1235,14 +1235,14 @@ class TeamMissionConversationMixin:
             if _text(mission.get("mission_id"))
         ]
         mission_id_set = set(mission_ids)
-        stable_session_id = _text(
-            conversation.get("stable_session_id")
-            or conversation.get("stableSessionId")
+        conversation_session_id = _text(
+            conversation.get("conversation_session_id")
+            or conversation.get("conversationSessionId")
         )
 
         last_message: Dict[str, Any] = {}
         final_deliverables: List[Dict[str, Any]] = []
-        if stable_session_id:
+        if conversation_session_id:
             with self._lock:
                 last_message_row = self._conn.execute(
                     """
@@ -1254,7 +1254,7 @@ class TeamMissionConversationMixin:
                     ORDER BY id DESC
                     LIMIT 1
                     """,
-                    (stable_session_id,),
+                    (conversation_session_id,),
                 ).fetchone()
                 final_rows = self._conn.execute(
                     """
@@ -1266,7 +1266,7 @@ class TeamMissionConversationMixin:
                       AND metadata_json LIKE ?
                     ORDER BY id ASC
                     """,
-                    (stable_session_id, "%final_deliverable%"),
+                    (conversation_session_id, "%final_deliverable%"),
                 ).fetchall()
             last_message = _message_summary_from_message(self._team_mission_message_from_row(last_message_row))
             for row in final_rows:
@@ -1298,9 +1298,9 @@ class TeamMissionConversationMixin:
             f"mission_id IN ({placeholders})",
             "status = ?",
         ]
-        if stable_session_id:
+        if conversation_session_id:
             memory_clauses.append("conversation_session_id = ?")
-            memory_params.append(stable_session_id)
+            memory_params.append(conversation_session_id)
         with self._lock:
             memory_rows = self._conn.execute(
                 f"""
@@ -1479,7 +1479,7 @@ class TeamMissionConversationMixin:
                 continue
             bindings.append(binding)
             bindings_by_mission.setdefault(_text(binding.get("mission_id")), []).append(binding)
-            for key in ("session_id", "runtime_session_id"):
+            for key in ("session_id", "execution_session_id"):
                 value = _text(binding.get(key))
                 if value and value not in seen_run_session_ids:
                     seen_run_session_ids.add(value)
@@ -1551,10 +1551,10 @@ class TeamMissionConversationMixin:
                         "status": node_status,
                         "run_id": _text(node.get("run_id")),
                         "runId": _text(node.get("run_id")),
-                        "stored_session_id": _text(node.get("stored_session_id")),
-                        "storedSessionId": _text(node.get("stored_session_id")),
-                        "runtime_session_id": _text(node.get("runtime_session_id")),
-                        "runtimeSessionId": _text(node.get("runtime_session_id")),
+                        "conversation_session_id": _text(node.get("conversation_session_id")),
+                        "conversationSessionId": _text(node.get("conversation_session_id")),
+                        "execution_session_id": _text(node.get("execution_session_id")),
+                        "executionSessionId": _text(node.get("execution_session_id")),
                         "runtime_scope_key": _text(node.get("runtime_scope_key")),
                         "runtimeScopeKey": _text(node.get("runtime_scope_key")),
                         "runtime_binding": dict(node.get("runtime_binding") or {}),
@@ -1633,16 +1633,16 @@ class TeamMissionConversationMixin:
         # clarify requests left the sidebar showing plain "running" while the
         # composer displayed an approval card the user had to act on. Walk every
         # session key tied to this conversation (leader + every node binding's
-        # session_id / runtime_session_id) and add a pending entry per pending
+        # session_id / execution_session_id) and add a pending entry per pending
         # in-process request.
         runtime_session_keys: List[str] = []
         seen_runtime_session_keys: set[str] = set()
-        leader_stable = _text(conversation.get("stable_session_id"))
+        leader_stable = _text(conversation.get("conversation_session_id"))
         for candidate in (
             leader_stable,
             *(value for binding in bindings for value in (
                 _text(binding.get("session_id")),
-                _text(binding.get("runtime_session_id")),
+                _text(binding.get("execution_session_id")),
             )),
         ):
             if candidate and candidate not in seen_runtime_session_keys:
@@ -1719,9 +1719,9 @@ class TeamMissionConversationMixin:
             "artifact_refs": list(deliverable_projection.get("artifact_refs") or []),
         }
 
-    def _team_mission_conversation_active_run(self, stable_session_id: str) -> Dict[str, Any]:
-        stable_session_id = _text(stable_session_id)
-        if not stable_session_id:
+    def _team_mission_conversation_active_run(self, conversation_session_id: str) -> Dict[str, Any]:
+        conversation_session_id = _text(conversation_session_id)
+        if not conversation_session_id:
             return {}
         placeholders = ",".join("?" for _ in _ACTIVE_RUN_STATUSES)
         with self._lock:
@@ -1734,7 +1734,7 @@ class TeamMissionConversationMixin:
                 ORDER BY updated_at DESC, started_at DESC, run_id ASC
                 LIMIT 1
                 """,
-                (stable_session_id, *sorted(_ACTIVE_RUN_STATUSES)),
+                (conversation_session_id, *sorted(_ACTIVE_RUN_STATUSES)),
             ).fetchone()
         try:
             return self._run_from_row(row) or {}
@@ -1759,7 +1759,7 @@ class TeamMissionConversationMixin:
                 **binding,
                 **dict(run or {}),
                 "run_id": run_id,
-                "runtime_session_id": _text((run or {}).get("runtime_session_id") or binding.get("runtime_session_id")),
+                "execution_session_id": _text((run or {}).get("execution_session_id") or binding.get("execution_session_id")),
                 "runtime_scope_key": _text((run or {}).get("runtime_scope_key") or binding.get("runtime_scope_key")),
                 "turn_id": _text((run or {}).get("turn_id") or binding.get("turn_id")),
             }
@@ -1767,14 +1767,14 @@ class TeamMissionConversationMixin:
                 active_run = merged_run
         return active_run
 
-    def _team_mission_conversation_message_count(self, stable_session_id: str) -> int:
-        stable_session_id = _text(stable_session_id)
-        if not stable_session_id:
+    def _team_mission_conversation_message_count(self, conversation_session_id: str) -> int:
+        conversation_session_id = _text(conversation_session_id)
+        if not conversation_session_id:
             return 0
         with self._lock:
             row = self._conn.execute(
                 "SELECT COALESCE(message_count, 0) AS message_count FROM sessions WHERE id = ?",
-                (stable_session_id,),
+                (conversation_session_id,),
             ).fetchone()
         try:
             return int(_row_value(row, "message_count", 0) or 0)
@@ -1798,8 +1798,8 @@ class TeamMissionConversationMixin:
         conversation = dict(conversation or self.get_team_mission_conversation(conversation_id) or {})
         if not conversation:
             return {}
-        stable_session_id = _text(conversation.get("stable_session_id") or conversation.get("stableSessionId"))
-        active_run = self._team_mission_conversation_active_run(stable_session_id)
+        conversation_session_id = _text(conversation.get("conversation_session_id") or conversation.get("conversationSessionId"))
+        active_run = self._team_mission_conversation_active_run(conversation_session_id)
         active_node_run = self._team_mission_active_node_run_from_bindings(
             [
                 item for item in summary.get("run_bindings") or []
@@ -1873,7 +1873,7 @@ class TeamMissionConversationMixin:
         projection = {
             **conversation,
             "conversation_id": conversation_id,
-            "stable_session_id": stable_session_id,
+            "conversation_session_id": conversation_session_id,
             "team_id": _text(conversation.get("team_id")),
             "active_mission_id": _text(summary.get("active_mission_id") or conversation.get("active_mission_id")),
             "activeMissionId": _text(summary.get("active_mission_id") or conversation.get("active_mission_id")),
@@ -1887,7 +1887,7 @@ class TeamMissionConversationMixin:
             "pending_approvals": pending_approvals,
             "active_run_id": _text(projected_active_run.get("run_id")) if running and projected_active_run else "",
             "active_turn_id": _text(projected_active_run.get("turn_id")) if running and projected_active_run else "",
-            "active_runtime_session_id": _text(projected_active_run.get("runtime_session_id")) if running and projected_active_run else "",
+            "active_execution_session_id": _text(projected_active_run.get("execution_session_id")) if running and projected_active_run else "",
             "runtime_scope_key": _text(projected_active_run.get("runtime_scope_key")) if running and projected_active_run else "",
             "run_started_at": projected_active_run.get("started_at") or 0 if running and projected_active_run else 0,
             "run_updated_at": run_updated_at,
@@ -1912,7 +1912,7 @@ class TeamMissionConversationMixin:
             "leaderReportMessageId": _text(summary.get("leader_report_message_id") or summary.get("leaderReportMessageId")),
             "leader_report_status": _text(summary.get("leader_report_status") or summary.get("leaderReportStatus")),
             "leaderReportStatus": _text(summary.get("leader_report_status") or summary.get("leaderReportStatus")),
-            "message_count": int(conversation.get("message_count") or 0) or self._team_mission_conversation_message_count(stable_session_id),
+            "message_count": int(conversation.get("message_count") or 0) or self._team_mission_conversation_message_count(conversation_session_id),
             "updated_at": updated_at,
         }
         return projection
@@ -1977,7 +1977,7 @@ class TeamMissionConversationMixin:
             source_seq=source_seq,
             team_mission_event_seq=projection_seq,
         )
-        stable_session_id = _text(payload.get("stable_session_id"))
+        conversation_session_id = _text(payload.get("conversation_session_id"))
         return {
             "type": _TEAM_MISSION_CONVERSATION_STATUS_EVENT_TYPE,
             "seq": projection_seq,
@@ -1990,8 +1990,8 @@ class TeamMissionConversationMixin:
             "sourceRunId": source_run_id,
             "conversation_id": conversation_id,
             "conversationId": conversation_id,
-            "stable_session_id": stable_session_id,
-            "stableSessionId": stable_session_id,
+            "conversation_session_id": conversation_session_id,
+            "conversationSessionId": conversation_session_id,
             "payload": payload,
         }
 

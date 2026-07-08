@@ -630,7 +630,7 @@ class WorkerSupervisor:
                     run_id=frame.run_id,
                     status=frame.status,
                     turn_id=frame.turn_id,
-                    stored_session_id=frame.stored_session_id,
+                    conversation_session_id=frame.conversation_session_id,
                     message=frame.message,
                 )
                 await self._on_run_terminal(scope_key, worker.conversation_id, frame)
@@ -906,7 +906,7 @@ def _db_for_worker_rpc(
     args: list[Any],
     kwargs: dict[str, Any],
 ) -> Any:
-    stable = _stable_session_id_from_rpc(frame, args, kwargs)
+    stable = _conversation_session_id_from_rpc(frame, args, kwargs)
     from tui_gateway import server as _server
 
     if stable:
@@ -914,21 +914,21 @@ def _db_for_worker_rpc(
     return _server._get_db()
 
 
-def _stable_session_id_from_rpc(
+def _conversation_session_id_from_rpc(
     frame: DBRpcRequestFrame,
     args: list[Any],
     kwargs: dict[str, Any],
 ) -> str:
     scope = getattr(frame, "db_scope", None)
     if isinstance(scope, dict):
-        stable = str(scope.get("stable_session_id") or "").strip()
+        stable = str(scope.get("conversation_session_id") or "").strip()
         if stable:
             return stable
     if isinstance(frame, DBRpcRequestFrame):
         raw_scope = getattr(frame, "db_scope", None)
         if isinstance(raw_scope, str) and raw_scope.strip():
             return raw_scope.strip()
-    for key in ("stored_session_id", "session_id", "conversation_session_id", "conversation_id"):
+    for key in ("conversation_session_id", "session_id", "conversation_session_id", "conversation_id"):
         value = str(kwargs.get(key) or "").strip()
         if value:
             return value
@@ -966,7 +966,7 @@ def _db_rpc_lock_key(
     args: list[Any],
     kwargs: dict[str, Any],
 ) -> str:
-    stable = _stable_session_id_from_rpc(frame, args, kwargs)
+    stable = _conversation_session_id_from_rpc(frame, args, kwargs)
     if stable:
         return f"session:{stable}"
     return "__control__"

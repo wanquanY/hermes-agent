@@ -5,7 +5,7 @@ team leader, @member) is:
 
     A run's user-visible ``message.complete`` event MUST land in the
     conversation's ``run_events`` table, addressable via
-    ``stored_session_id == conversation_session_id``.
+    ``conversation_session_id == conversation_session_id``.
 
 Regular, leader, and @member workers now publish user-visible events
 to the conversation session through RunContext + conversation-session
@@ -133,7 +133,7 @@ def _submit_member_once(monkeypatch, tmp_path: Path, db: SessionDB) -> dict:
 
 def test_regular_chat_message_complete_persists_on_conversation_session(tmp_path: Path):
     """Regular run.submit: worker publishes directly to the conversation
-    session. message.complete lands in run_events[stored_session_id=conv].
+    session. message.complete lands in run_events[conversation_session_id=conv].
     """
     db = _new_db(tmp_path)
     db.create_session(CONV_SESSION, source="user", transient=False)
@@ -143,7 +143,7 @@ def test_regular_chat_message_complete_persists_on_conversation_session(tmp_path
         {
             "type": "message.complete",
             "session_id": CONV_SESSION,
-            "stored_session_id": CONV_SESSION,
+            "conversation_session_id": CONV_SESSION,
             "run_id": "run-direct-1",
             "turn_id": "t1",
             "seq": 1,
@@ -163,14 +163,14 @@ def test_regular_chat_message_complete_persists_on_conversation_session(tmp_path
 def test_team_leader_message_complete_persists_on_conversation_session(tmp_path: Path):
     """Team leader run: same shape as regular but with team_mission
     conversation registration. Invariant identical: the leader run's
-    stored_session_id IS the conversation session.
+    conversation_session_id IS the conversation session.
     """
     db = _new_db(tmp_path)
     db.create_session(CONV_SESSION, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id="conv-1",
         team_id="team-1",
-        stable_session_id=CONV_SESSION,
+        conversation_session_id=CONV_SESSION,
         title="Team Conversation",
         objective="leader chat smoke",
         workspace_id="ws-1",
@@ -185,7 +185,7 @@ def test_team_leader_message_complete_persists_on_conversation_session(tmp_path:
         {
             "type": "message.complete",
             "session_id": CONV_SESSION,
-            "stored_session_id": CONV_SESSION,
+            "conversation_session_id": CONV_SESSION,
             "run_id": "run-leader-1",
             "turn_id": "t1",
             "seq": 1,
@@ -215,7 +215,7 @@ def test_member_chat_with_legacy_session_hints_routes_by_run_context(tmp_path: P
     db.upsert_team_mission_conversation(
         conversation_id="conv-1",
         team_id="team-1",
-        stable_session_id=CONV_SESSION,
+        conversation_session_id=CONV_SESSION,
         title="Team Conversation",
         objective="member chat smoke",
         workspace_id="ws-1",
@@ -230,7 +230,7 @@ def test_member_chat_with_legacy_session_hints_routes_by_run_context(tmp_path: P
         {
             "type": "message.complete",
             "session_id": MEMBER_SESSION,
-            "stored_session_id": MEMBER_SESSION,
+            "conversation_session_id": MEMBER_SESSION,
             "run_id": "run-member-1",
             "turn_id": "t1",
             "seq": 1,
@@ -277,7 +277,7 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
     db.upsert_team_mission_conversation(
         conversation_id="conv-1",
         team_id="team-1",
-        stable_session_id=CONV_SESSION,
+        conversation_session_id=CONV_SESSION,
         title="Team Conversation",
         objective="member chat unregistered race",
         workspace_id="ws-1",
@@ -294,7 +294,7 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
         {
             "type": "message.complete",
             "session_id": CONV_SESSION,
-            "stored_session_id": CONV_SESSION,
+            "conversation_session_id": CONV_SESSION,
             "run_id": "run-member-orphan",
             "turn_id": "t1",
             "seq": 1,
@@ -320,7 +320,7 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
     assert matching, (
         "INVARIANT VIOLATED: an @member worker's message.complete event with "
         "member_id + conversation_session_id in its payload reached "
-        "run_events[stored_session_id=conv]. The conversation timeline will "
+        "run_events[conversation_session_id=conv]. The conversation timeline will "
         "show no member reply. PR-C expects RunContext direct routing, not "
         "member_chat_runs or memberchat:* mirror state. Current conversation "
         "events seen: "
@@ -336,7 +336,7 @@ def test_member_reply_leading_known_speaker_prefix_is_stripped_before_canonical_
     db.upsert_team_mission_conversation(
         conversation_id="conv-1",
         team_id="team-1",
-        stable_session_id=CONV_SESSION,
+        conversation_session_id=CONV_SESSION,
         title="Team Conversation",
         objective="member chat prefix stripping",
         workspace_id="ws-1",
@@ -363,7 +363,7 @@ def test_member_reply_leading_known_speaker_prefix_is_stripped_before_canonical_
         {
             "type": "message.complete",
             "session_id": CONV_SESSION,
-            "stored_session_id": CONV_SESSION,
+            "conversation_session_id": CONV_SESSION,
             "run_id": "run-member-prefix",
             "turn_id": "t1",
             "seq": 1,
@@ -388,7 +388,7 @@ def test_member_reply_non_leading_known_speaker_prefix_is_not_stripped(tmp_path:
     db.upsert_team_mission_conversation(
         conversation_id="conv-1",
         team_id="team-1",
-        stable_session_id=CONV_SESSION,
+        conversation_session_id=CONV_SESSION,
         title="Team Conversation",
         objective="member chat prefix non-leading",
         workspace_id="ws-1",
@@ -415,7 +415,7 @@ def test_member_reply_non_leading_known_speaker_prefix_is_not_stripped(tmp_path:
         {
             "type": "message.complete",
             "session_id": CONV_SESSION,
-            "stored_session_id": CONV_SESSION,
+            "conversation_session_id": CONV_SESSION,
             "run_id": "run-member-prefix-mid",
             "turn_id": "t1",
             "seq": 1,
@@ -436,7 +436,7 @@ def test_member_reply_non_leading_known_speaker_prefix_is_not_stripped(tmp_path:
 
 def test_memberchat_session_is_not_the_visible_event_truth(monkeypatch, tmp_path: Path):
     """Reverse invariant: ``memberchat:*`` is an implementation detail.
-    No code path should treat run_events[stored_session_id=memberchat:*]
+    No code path should treat run_events[conversation_session_id=memberchat:*]
     as the source of truth for what the user sees in the conversation
     timeline.
 
@@ -465,7 +465,7 @@ def test_memberchat_session_is_not_the_visible_event_truth(monkeypatch, tmp_path
             {
                 **frame,
                 "session_id": captured["session_id"],
-                "stored_session_id": captured["stored_session_id"],
+                "conversation_session_id": captured["conversation_session_id"],
                 "run_id": captured["run_id"],
                 "turn_id": captured["turn_id"],
                 "seq": seq,
@@ -477,5 +477,5 @@ def test_memberchat_session_is_not_the_visible_event_truth(monkeypatch, tmp_path
     assert _memberchat_run_events(db) == []
     conv_events = _events_for_session(db, CONV_SESSION)
     assert [event["type"] for event in conv_events] == ["message.delta", "message.complete"]
-    assert {event["frame"]["stored_session_id"] for event in conv_events} == {CONV_SESSION}
+    assert {event["frame"]["conversation_session_id"] for event in conv_events} == {CONV_SESSION}
     assert conv_events[-1]["payload"]["text"] == "member reply from PR-C path"

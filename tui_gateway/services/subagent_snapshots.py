@@ -92,7 +92,7 @@ def compact_subagent_detail_events(events: list[dict[str, Any]]) -> list[dict[st
 def build_subagent_run_snapshots(
     events: list[dict[str, Any]],
     *,
-    stored_session_id: str = "",
+    conversation_session_id: str = "",
 ) -> list[dict[str, Any]]:
     runs: dict[str, dict[str, Any]] = {}
     for event in events:
@@ -107,7 +107,7 @@ def build_subagent_run_snapshots(
             continue
         snapshot = runs.get(subagent_id)
         if snapshot is None:
-            snapshot = _new_snapshot(event, payload, subagent_id, stored_session_id)
+            snapshot = _new_snapshot(event, payload, subagent_id, conversation_session_id)
             runs[subagent_id] = snapshot
         _apply_snapshot_event(snapshot, event, payload)
     return sorted(
@@ -124,11 +124,11 @@ def _new_snapshot(
     event: dict[str, Any],
     payload: dict[str, Any],
     subagent_id: str,
-    stored_session_id: str,
+    conversation_session_id: str,
 ) -> dict[str, Any]:
     session_id = str(
-        stored_session_id
-        or event.get("stored_session_id")
+        conversation_session_id
+        or event.get("conversation_session_id")
         or event.get("session_id")
         or ""
     ).strip()
@@ -136,7 +136,7 @@ def _new_snapshot(
         "id": subagent_id,
         "subagent_id": subagent_id,
         "session_id": session_id,
-        "stored_session_id": session_id,
+        "conversation_session_id": session_id,
         "runtime_scope_key": str(
             event.get("runtime_scope_key")
             or event.get("runtimeScopeKey")

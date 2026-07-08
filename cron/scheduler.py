@@ -1002,7 +1002,7 @@ def _append_dovie_session_message(
                     "source": "dovie_automation_trigger",
                     "job_id": job.get("id"),
                     "job_name": job.get("name"),
-                    "runtime_session_id": job.get("_runtime_session_id"),
+                    "execution_session_id": job.get("_execution_session_id"),
                     "result_binding_mode": mode,
                 },
             )
@@ -1014,7 +1014,7 @@ def _append_dovie_session_message(
                 "source": "dovie_automation",
                 "job_id": job.get("id"),
                 "job_name": job.get("name"),
-                "runtime_session_id": job.get("_runtime_session_id"),
+                "execution_session_id": job.get("_execution_session_id"),
                 "result_binding_mode": mode,
                 "success": success,
             },
@@ -1682,7 +1682,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         return True, "", SILENT_MARKER, None
     origin = _resolve_origin(job)
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
-    job["_runtime_session_id"] = _cron_session_id
+    job["_execution_session_id"] = _cron_session_id
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
     logger.info("Prompt: %s", prompt[:100])
@@ -2291,18 +2291,18 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                     error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
                 mark_kwargs = {"delivery_error": delivery_error}
-                runtime_session_id = job.get("_runtime_session_id")
-                if runtime_session_id:
-                    mark_kwargs["session_id"] = runtime_session_id
+                execution_session_id = job.get("_execution_session_id")
+                if execution_session_id:
+                    mark_kwargs["session_id"] = execution_session_id
                 mark_job_run(job["id"], success, error, **mark_kwargs)
                 return True
 
             except Exception as e:
                 logger.error("Error processing job %s: %s", job['id'], e)
                 mark_kwargs = {}
-                runtime_session_id = job.get("_runtime_session_id")
-                if runtime_session_id:
-                    mark_kwargs["session_id"] = runtime_session_id
+                execution_session_id = job.get("_execution_session_id")
+                if execution_session_id:
+                    mark_kwargs["session_id"] = execution_session_id
                 mark_job_run(job["id"], False, str(e), **mark_kwargs)
                 return False
 

@@ -39,7 +39,7 @@ def _force_running_index(
         running=True,
         status="running",
         active_run_id=active_run_id,
-        active_runtime_session_id=f"rt-{active_run_id}",
+        active_execution_session_id=f"rt-{active_run_id}",
         pending_approval_count=1,
         started_at=1.0,
         updated_at=2.0,
@@ -51,7 +51,7 @@ def _assert_idle(row: dict) -> None:
     assert row["status"] == "idle"
     assert row["waiting_approval"] == 0
     assert row["active_run_id"] == ""
-    assert row["active_runtime_session_id"] == ""
+    assert row["active_execution_session_id"] == ""
     assert row["pending_approval_count"] == 0
 
 

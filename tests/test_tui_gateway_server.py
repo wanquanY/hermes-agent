@@ -247,7 +247,7 @@ def test_subagent_runs_list_returns_lightweight_snapshots(monkeypatch):
             return [
                 {
                     "type": "subagent.start",
-                    "stored_session_id": "stored-1",
+                    "conversation_session_id": "stored-1",
                     "run_id": "run-1",
                     "seq": 10,
                     "timestamp": 100.0,
@@ -263,7 +263,7 @@ def test_subagent_runs_list_returns_lightweight_snapshots(monkeypatch):
                 },
                 {
                     "type": "subagent.complete",
-                    "stored_session_id": "stored-1",
+                    "conversation_session_id": "stored-1",
                     "run_id": "run-1",
                     "seq": 12,
                     "timestamp": 120.0,
@@ -280,7 +280,7 @@ def test_subagent_runs_list_returns_lightweight_snapshots(monkeypatch):
     resp = server.handle_request({
         "id": "1",
         "method": "subagent.runs.list",
-        "params": {"stored_session_id": "stored-1", "runtime_scope_key": "scope-1"},
+        "params": {"conversation_session_id": "stored-1", "runtime_scope_key": "scope-1"},
     })
 
     assert captured["session_id"] == "stored-1"
@@ -315,7 +315,7 @@ def test_subagent_events_list_filters_selected_subagent(monkeypatch):
     resp = server.handle_request({
         "id": "1",
         "method": "subagent.events.list",
-        "params": {"stored_session_id": "stored-1", "subagent_id": "sa-2"},
+        "params": {"conversation_session_id": "stored-1", "subagent_id": "sa-2"},
     })
 
     assert resp["result"]["events"] == [
@@ -339,7 +339,7 @@ def test_events_compact_invokes_run_event_compaction(monkeypatch):
     resp = server.handle_request({
         "id": "1",
         "method": "events.compact",
-        "params": {"stored_session_id": "stored-1", "vacuum": True},
+        "params": {"conversation_session_id": "stored-1", "vacuum": True},
     })
 
     assert captured == {"session_id": "stored-1", "vacuum": True}
@@ -1497,7 +1497,7 @@ def test_session_title_updates_stored_session_without_live_runtime(monkeypatch, 
         {
             "id": "1",
             "method": "session.title",
-            "params": {"stored_session_id": "stored-only", "title": "renamed"},
+            "params": {"conversation_session_id": "stored-only", "title": "renamed"},
         }
     )
     get_resp = server.handle_request(
@@ -4975,7 +4975,7 @@ def test_emit_does_not_echo_direct_stream_event_to_same_run_subscription(monkeyp
         active_runtime_scope_key="profile:agent-default",
     )
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="session-key",
+        conversation_session_id="session-key",
         transport=transport,
         active_only=True,
         runtime_scope_key="profile:agent-default",

@@ -16,7 +16,7 @@ TEAM_MISSION_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS team_mission_conversations (
     conversation_id TEXT PRIMARY KEY,
     team_id TEXT,
-    stable_session_id TEXT NOT NULL UNIQUE,
+    conversation_session_id TEXT NOT NULL UNIQUE,
     title TEXT NOT NULL,
     objective TEXT,
     workspace_id TEXT,
@@ -68,8 +68,8 @@ CREATE TABLE IF NOT EXISTS team_mission_nodes (
     assignee_profile_version_id TEXT,
     canonical_node_id TEXT,
     task_frame_id TEXT,
-    runtime_stable_session_id TEXT,
-    runtime_session_id TEXT,
+    runtime_conversation_session_id TEXT,
+    execution_session_id TEXT,
     runtime_scope_key TEXT,
     output_contract_json TEXT,
     metadata_json TEXT,
@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS team_mission_run_bindings (
     mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
     node_id TEXT,
     session_id TEXT NOT NULL,
-    runtime_session_id TEXT,
+    execution_session_id TEXT,
     runtime_scope_key TEXT,
     role TEXT NOT NULL,
     metadata_json TEXT,
@@ -313,8 +313,8 @@ def reconcile_team_mission_node_primary_key(cursor: sqlite3.Cursor) -> None:
             assignee_profile_version_id TEXT,
             canonical_node_id TEXT,
             task_frame_id TEXT,
-            runtime_stable_session_id TEXT,
-            runtime_session_id TEXT,
+            runtime_conversation_session_id TEXT,
+            execution_session_id TEXT,
             runtime_scope_key TEXT,
             output_contract_json TEXT,
             metadata_json TEXT,
@@ -331,16 +331,16 @@ def reconcile_team_mission_node_primary_key(cursor: sqlite3.Cursor) -> None:
         INSERT OR REPLACE INTO team_mission_nodes (
             node_id, mission_id, kind, title, objective, status,
             assignee_profile_id, assignee_profile_version_id,
-            canonical_node_id, task_frame_id, runtime_stable_session_id,
-            runtime_session_id, runtime_scope_key,
+            canonical_node_id, task_frame_id, runtime_conversation_session_id,
+            execution_session_id, runtime_scope_key,
             output_contract_json, metadata_json, position_x, position_y,
             created_at, updated_at
         )
         SELECT
             node_id, mission_id, kind, title, objective, status,
             assignee_profile_id, assignee_profile_version_id,
-            canonical_node_id, task_frame_id, runtime_stable_session_id,
-            runtime_session_id, runtime_scope_key,
+            canonical_node_id, task_frame_id, runtime_conversation_session_id,
+            execution_session_id, runtime_scope_key,
             output_contract_json, metadata_json, position_x, position_y,
             created_at, updated_at
         FROM team_mission_nodes_legacy_pk

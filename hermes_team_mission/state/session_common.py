@@ -176,9 +176,18 @@ def _event_seq(event: Dict[str, Any] | None) -> int:
     return 0
 
 
-def _should_emit_conversation_status_projection(event: Dict[str, Any] | None) -> bool:
+def _should_emit_conversation_status_projection(
+    event: Dict[str, Any] | None,
+    *,
+    node: Dict[str, Any] | None = None,
+) -> bool:
     event_type = _text((event or {}).get("type"))
-    return event_type in _TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES
+    if event_type not in _TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES:
+        return False
+    node_kind = _normalize_node_kind((node or {}).get("kind"), default="")
+    if node_kind == "synthesis":
+        return False
+    return True
 
 
 def _payload_text_value(payload: Dict[str, Any] | None) -> str:
@@ -250,15 +259,15 @@ def _conversation_id_from_metadata(metadata: Dict[str, Any] | None, fallback: st
     )
 
 
-def _stable_session_id_from_metadata(metadata: Dict[str, Any] | None, fallback: str = "") -> str:
+def _conversation_session_id_from_metadata(metadata: Dict[str, Any] | None, fallback: str = "") -> str:
     metadata = metadata if isinstance(metadata, dict) else {}
     return _text(
         metadata.get("conversation_session_id")
         or metadata.get("conversationSessionId")
-        or metadata.get("stable_session_id")
-        or metadata.get("stableSessionId")
-        or metadata.get("stable_team_session_id")
-        or metadata.get("stableTeamSessionId")
+        or metadata.get("conversation_session_id")
+        or metadata.get("conversationSessionId")
+        or metadata.get("conversation_team_session_id")
+        or metadata.get("conversationTeamSessionId")
         or metadata.get("team_session_id")
         or metadata.get("teamSessionId")
         or fallback
@@ -393,13 +402,13 @@ def _team_mission_runtime_event_identity(
     node_kind = _normalize_node_kind(node.get("kind"))
     output_contract = node.get("output_contract") if isinstance(node.get("output_contract"), dict) else {}
     output_contract_format = _text(output_contract.get("format"))
-    runtime_stable_session_id = _text(
+    runtime_conversation_session_id = _text(
         binding.get("session_id")
-        or node.get("runtime_stable_session_id")
-        or node.get("stored_session_id")
-        or node.get("actual_stable_session_id")
+        or node.get("runtime_conversation_session_id")
+        or node.get("conversation_session_id")
+        or node.get("actual_conversation_session_id")
     )
-    runtime_session_id = _text(binding.get("runtime_session_id") or node.get("runtime_session_id"))
+    execution_session_id = _text(binding.get("execution_session_id") or node.get("execution_session_id"))
     runtime_scope_key = _text(binding.get("runtime_scope_key") or node.get("runtime_scope_key"))
     task_id = (
         _task_id_from_node_and_binding(node, binding)
@@ -410,7 +419,7 @@ def _team_mission_runtime_event_identity(
         mission_metadata,
         _text(mission.get("conversation_id")),
     )
-    stable_session_id = _stable_session_id_from_metadata(
+    conversation_session_id = _conversation_session_id_from_metadata(
         mission_metadata,
         _text(mission.get("leader_session_id") or mission.get("team_id") or mission_id),
     )
@@ -424,8 +433,8 @@ def _team_mission_runtime_event_identity(
         "missionId": mission_id,
         "conversation_id": conversation_id,
         "conversationId": conversation_id,
-        "stable_session_id": stable_session_id,
-        "stableSessionId": stable_session_id,
+        "conversation_session_id": conversation_session_id,
+        "conversationSessionId": conversation_session_id,
         "node_id": node_id,
         "nodeId": node_id,
         "canonical_node_id": canonical_id,
@@ -436,10 +445,10 @@ def _team_mission_runtime_event_identity(
         "participantId": participant_id,
         "output_contract_format": output_contract_format,
         "outputContractFormat": output_contract_format,
-        "runtime_stable_session_id": runtime_stable_session_id,
-        "runtimeStableSessionId": runtime_stable_session_id,
-        "runtime_session_id": runtime_session_id,
-        "runtimeSessionId": runtime_session_id,
+        "runtime_conversation_session_id": runtime_conversation_session_id,
+        "runtimeConversationSessionId": runtime_conversation_session_id,
+        "execution_session_id": execution_session_id,
+        "executionSessionId": execution_session_id,
         "runtime_scope_key": runtime_scope_key,
         "runtimeScopeKey": runtime_scope_key,
         "task_id": task_id,
@@ -514,7 +523,7 @@ def _runtime_event_with_team_mission_identity(
     for key in (
         "mission_id",
         "conversation_id",
-        "stable_session_id",
+        "conversation_session_id",
         "node_id",
         "canonical_node_id",
         "participant_id",

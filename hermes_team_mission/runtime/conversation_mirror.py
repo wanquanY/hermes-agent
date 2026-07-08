@@ -22,8 +22,8 @@ def conversation_session_id(mission: dict[str, Any] | None) -> str:
     return text(
         metadata.get("conversation_session_id")
         or metadata.get("conversationSessionId")
-        or metadata.get("stable_team_session_id")
-        or metadata.get("stableTeamSessionId")
+        or metadata.get("conversation_team_session_id")
+        or metadata.get("conversationTeamSessionId")
         or metadata.get("team_session_id")
         or metadata.get("teamSessionId")
         or mission.get("leader_session_id")
@@ -296,8 +296,8 @@ def recover_legacy_final_deliverables(db: Any, conversation: dict[str, Any] | No
     if not isinstance(conversation, dict):
         return 0
     target_session_id = text(
-        conversation.get("stable_session_id")
-        or conversation.get("stableSessionId")
+        conversation.get("conversation_session_id")
+        or conversation.get("conversationSessionId")
     )
     if not target_session_id:
         return 0
@@ -387,7 +387,7 @@ def mirror_event_to_conversation(
         event_type=text(frame.get("type")),
         source=source,
         run_id=text(frame.get("run_id")),
-        session_id=text(frame.get("stored_session_id")),
+        session_id=text(frame.get("conversation_session_id")),
         target_session_id=text(target_session_id),
         has_binding=isinstance(binding, dict) and bool(binding),
     )

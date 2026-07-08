@@ -137,7 +137,7 @@ async def test_append_message_proxy_writes_through_main(monkeypatch: pytest.Monk
             id="1",
             method="db.append_message",
             params=[["session-1", "user", "hi"], {}],
-            db_scope={"stable_session_id": "session-1"},
+            db_scope={"conversation_session_id": "session-1"},
         )
     )
     assert reply.error is None
@@ -166,7 +166,7 @@ async def test_projector_read_model_methods_are_exposed_to_worker(
             id="1",
             method="db.get_conversation_message_read_model",
             params=[["team-session-1"], {}],
-            db_scope={"stable_session_id": "team-session-1"},
+            db_scope={"conversation_session_id": "team-session-1"},
         )
     )
     session_index_reply = await supervisor._execute_db_rpc(
@@ -174,7 +174,7 @@ async def test_projector_read_model_methods_are_exposed_to_worker(
             id="2",
             method="db.get_session_index",
             params=[["team-session-1"], {}],
-            db_scope={"stable_session_id": "team-session-1"},
+            db_scope={"conversation_session_id": "team-session-1"},
         )
     )
 
@@ -213,7 +213,7 @@ async def test_create_activity_proxy_writes_through_main(
                     "prompt_summary": "Review the report",
                 },
             ],
-            db_scope={"stable_session_id": "conv-1"},
+            db_scope={"conversation_session_id": "conv-1"},
         )
     )
 
@@ -314,7 +314,7 @@ async def test_concurrent_worker_calls_serialize(monkeypatch: pytest.MonkeyPatch
                     id=str(index),
                     method="db.slow_append_message",
                     params=[["session-1", "user", str(index)], {}],
-                    db_scope={"stable_session_id": "session-1"},
+                    db_scope={"conversation_session_id": "session-1"},
                 )
             )
             for index in range(5)
@@ -348,7 +348,7 @@ async def test_worker_db_rpc_locks_are_sharded_by_stable_session(
                     id=str(index),
                     method="db.slow_append_message",
                     params=[[f"session-{index}", "user", str(index)], {}],
-                    db_scope={"stable_session_id": f"session-{index}"},
+                    db_scope={"conversation_session_id": f"session-{index}"},
                 )
             )
             for index in range(5)

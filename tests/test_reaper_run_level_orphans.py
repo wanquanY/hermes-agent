@@ -13,7 +13,7 @@ def _db(tmp_path: Path) -> SessionDB:
 def _conversation(db: SessionDB, conversation_id: str = "conv-1") -> None:
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=f"{conversation_id}-session",
+        conversation_session_id=f"{conversation_id}-session",
         title="Conversation",
         status="active",
     )

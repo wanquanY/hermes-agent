@@ -82,7 +82,7 @@ class SessionIndexPatch:
     running: int | None = None
     waiting_approval: int | None = None
     active_run_id: str | None = None
-    active_runtime_session_id: str | None = None
+    active_execution_session_id: str | None = None
     pending_approval_count: int | None = None
     message_count: int | None = None
     last_activity: float | None = None
@@ -253,8 +253,8 @@ class SessionRepoImpl:
         _apply_column(
             assignments,
             params,
-            "active_runtime_session_id",
-            patch.active_runtime_session_id,
+            "active_execution_session_id",
+            patch.active_execution_session_id,
         )
         _apply_column(
             assignments,

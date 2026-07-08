@@ -112,7 +112,7 @@ class WorkerDBProxy:
             raise AttributeError(name)
 
         def proxy(*args: Any, **kwargs: Any) -> Any:
-            return self._call(name, args, kwargs, stable_session_id="")
+            return self._call(name, args, kwargs, conversation_session_id="")
 
         return proxy
 
@@ -120,8 +120,8 @@ class WorkerDBProxy:
     def db_path(self) -> str:
         return "worker-db-proxy"
 
-    def scoped(self, stable_session_id: str) -> "_ScopedWorkerDBProxy":
-        return _ScopedWorkerDBProxy(self, str(stable_session_id or "").strip())
+    def scoped(self, conversation_session_id: str) -> "_ScopedWorkerDBProxy":
+        return _ScopedWorkerDBProxy(self, str(conversation_session_id or "").strip())
 
     def close(self) -> None:
         with self._lock:
@@ -167,7 +167,7 @@ class WorkerDBProxy:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         *,
-        stable_session_id: str,
+        conversation_session_id: str,
     ) -> Any:
         req_id = self._next_id()
         pending = _PendingCall()
@@ -179,7 +179,7 @@ class WorkerDBProxy:
             "jsonrpc": "2.0",
             "id": req_id,
             "method": f"db.{method}",
-            "db_scope": {"stable_session_id": stable_session_id},
+            "db_scope": {"conversation_session_id": conversation_session_id},
             "params": [
                 serialize_db_value(list(args)),
                 serialize_db_value(dict(kwargs)),
@@ -235,14 +235,14 @@ def _is_disconnect_reply(reply: dict[str, Any]) -> bool:
 
 
 class _ScopedWorkerDBProxy:
-    def __init__(self, root: WorkerDBProxy, stable_session_id: str) -> None:
+    def __init__(self, root: WorkerDBProxy, conversation_session_id: str) -> None:
         self._root = root
-        self._stable_session_id = stable_session_id
+        self._conversation_session_id = conversation_session_id
 
     @property
     def db_path(self) -> str:
-        if self._stable_session_id:
-            return f"worker-db-proxy:{self._stable_session_id}"
+        if self._conversation_session_id:
+            return f"worker-db-proxy:{self._conversation_session_id}"
         return "worker-db-proxy"
 
     def close(self) -> None:
@@ -257,7 +257,7 @@ class _ScopedWorkerDBProxy:
                 name,
                 args,
                 kwargs,
-                stable_session_id=self._stable_session_id,
+                conversation_session_id=self._conversation_session_id,
             )
 
         return proxy

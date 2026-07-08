@@ -10,7 +10,7 @@ def _db(tmp_path: Path) -> SessionDB:
 def _create_conversation(db: SessionDB, conversation_id: str = "conv-1") -> dict:
     return db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=f"{conversation_id}-session",
+        conversation_session_id=f"{conversation_id}-session",
         title="Conversation",
         status="active",
     )
@@ -82,7 +82,7 @@ def test_sidebar_session_index_running_uses_conversation_missions(tmp_path: Path
     db = _db(tmp_path)
     db.upsert_team_mission_conversation(
         conversation_id="conv-1",
-        stable_session_id="conv-1-session",
+        conversation_session_id="conv-1-session",
         title="Conversation",
         status="active",
         active_mission_id="mission-active",

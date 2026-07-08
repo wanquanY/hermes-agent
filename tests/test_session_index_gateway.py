@@ -153,7 +153,7 @@ def test_session_index_list_emits_team_display_context_for_team_rows(monkeypatch
     )
     db.ensure_team_mission_conversation(
         conversation_id="conv-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="星舰",
         objective="抵达火星",

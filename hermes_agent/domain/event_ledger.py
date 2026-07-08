@@ -187,7 +187,7 @@ class EventLedger:
         session_id: str,
         run_id: str,
         turn_id: str,
-        runtime_session_id: str,
+        execution_session_id: str,
         runtime_scope_key: str,
         participant_id: str,
         activity_id: str | None,
@@ -216,7 +216,7 @@ class EventLedger:
         self._conn.execute(
             """
             INSERT OR IGNORE INTO run_events (
-                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                session_id, run_id, turn_id, execution_session_id, runtime_scope_key,
                 participant_id, activity_id, event_type,
                 seq, timestamp, payload_json, event_json, status,
                 frame_blob, frame_format, retention_class,
@@ -230,7 +230,7 @@ class EventLedger:
                 str(session_id or ""),
                 str(run_id or ""),
                 str(turn_id or ""),
-                str(runtime_session_id or ""),
+                str(execution_session_id or ""),
                 str(runtime_scope_key or ""),
                 str(participant_id or ""),
                 activity_id,
@@ -382,7 +382,7 @@ class EventLedger:
         row_id: int,
         run_id: str,
         turn_id: str,
-        runtime_session_id: str,
+        execution_session_id: str,
         runtime_scope_key: str,
         participant_id: str,
         activity_id: str | None,
@@ -410,7 +410,7 @@ class EventLedger:
             UPDATE run_events
             SET run_id = ?,
                 turn_id = ?,
-                runtime_session_id = ?,
+                execution_session_id = ?,
                 runtime_scope_key = ?,
                 participant_id = ?,
                 activity_id = ?,
@@ -429,7 +429,7 @@ class EventLedger:
             (
                 str(run_id or ""),
                 str(turn_id or ""),
-                str(runtime_session_id or ""),
+                str(execution_session_id or ""),
                 str(runtime_scope_key or ""),
                 str(participant_id or ""),
                 activity_id,
@@ -460,7 +460,7 @@ class EventLedger:
         runtime_source_seq: int = 0,
         run_id: str | None = None,
         turn_id: str | None = None,
-        runtime_session_id: str | None = None,
+        execution_session_id: str | None = None,
         runtime_scope_key: str | None = None,
         activity_id: str | None = None,
         timestamp: float | None = None,
@@ -500,9 +500,9 @@ class EventLedger:
         if turn_id is not None:
             assignments.append("turn_id = ?")
             params.append(str(turn_id or ""))
-        if runtime_session_id is not None:
-            assignments.append("runtime_session_id = ?")
-            params.append(str(runtime_session_id or ""))
+        if execution_session_id is not None:
+            assignments.append("execution_session_id = ?")
+            params.append(str(execution_session_id or ""))
         if runtime_scope_key is not None:
             assignments.append("runtime_scope_key = ?")
             params.append(str(runtime_scope_key or ""))
@@ -549,7 +549,7 @@ class EventLedger:
                 f"""
                 DELETE FROM run_events
                 WHERE session_id IN ({placeholders})
-                   OR runtime_session_id IN ({placeholders})
+                   OR execution_session_id IN ({placeholders})
                 """,
                 tuple(chunk + chunk),
             )

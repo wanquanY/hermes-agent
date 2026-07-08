@@ -63,7 +63,7 @@ def test_append_dovie_current_session_result(monkeypatch):
             "name": "Daily AI news",
             "model": "gpt-test",
             "prompt": "整理今天的 AI 资讯",
-            "_runtime_session_id": "cron_job-1_20260526",
+            "_execution_session_id": "cron_job-1_20260526",
             "dovie": {
                 "result_binding": {"mode": "current-session", "sessionId": "session-1"},
             },
@@ -103,7 +103,7 @@ def test_deliver_dovie_new_session_result(monkeypatch):
             "name": "Daily AI news",
             "model": "gpt-test",
             "prompt": "整理今天的 AI 资讯",
-            "_runtime_session_id": "cron_job-1_20260526",
+            "_execution_session_id": "cron_job-1_20260526",
             "dovie": {
                 "result_binding": {"mode": "new-session"},
             },

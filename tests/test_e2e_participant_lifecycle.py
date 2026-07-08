@@ -171,7 +171,7 @@ def _install_team_resolver(monkeypatch: pytest.MonkeyPatch, server: Any, seeded_
             "result": {
                 "conversation": {
                     "conversation_id": seeded_team["conversation_id"],
-                    "stable_session_id": seeded_team["conversation_session_id"],
+                    "conversation_session_id": seeded_team["conversation_session_id"],
                     "team_id": seeded_team["team_id"],
                 },
                 "mission": {"mission_id": seeded_team["mission_id"], "team_id": seeded_team["team_id"]},
@@ -225,7 +225,7 @@ def test_e2e_session_create_full_flow(gateway_modules, db: SessionDB, tmp_path: 
     )
 
     assert "error" not in response
-    session_id = response["result"]["stored_session_id"]
+    session_id = response["result"]["conversation_session_id"]
     participants = _participants_by_id(db, session_id)
     assert set(participants) == {"user", "agent:profile-direct"}
     assert participants["user"]["role"] == "user"
@@ -326,7 +326,7 @@ async def test_e2e_member_chat_emits_participant_id_in_message(
 
     transport = _CaptureTransport()
     run_control.subscribe_session(
-        stored_session_id=seeded_team["conversation_session_id"],
+        conversation_session_id=seeded_team["conversation_session_id"],
         transport=transport,
         db=db,
     )
@@ -343,7 +343,7 @@ async def test_e2e_member_chat_emits_participant_id_in_message(
         scope_key=captured_submit["runtime_scope_key"],
         conversation_id=seeded_team["conversation_id"],
         run_id="run-member-alpha",
-        stored_session_id=seeded_team["conversation_session_id"],
+        conversation_session_id=seeded_team["conversation_session_id"],
         turn_id="turn-member-alpha",
         run_context_json=captured_submit["run_context_json"],
     )
@@ -355,7 +355,7 @@ async def test_e2e_member_chat_emits_participant_id_in_message(
             params={
                 "type": "message.complete",
                 "session_id": seeded_team["conversation_session_id"],
-                "stored_session_id": seeded_team["conversation_session_id"],
+                "conversation_session_id": seeded_team["conversation_session_id"],
                 "run_id": "run-member-alpha",
                 "turn_id": "turn-member-alpha",
                 "seq": 1,
@@ -398,7 +398,7 @@ def test_e2e_render_snapshot_messages_have_participant_id_per_message(
         {
             "type": "message.complete",
             "session_id": session_id,
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": "run-user",
             "turn_id": "turn-user",
             "seq": 1,
@@ -417,7 +417,7 @@ def test_e2e_render_snapshot_messages_have_participant_id_per_message(
         {
             "type": "message.complete",
             "session_id": session_id,
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": "run-leader",
             "turn_id": "turn-leader",
             "seq": 2,
@@ -436,7 +436,7 @@ def test_e2e_render_snapshot_messages_have_participant_id_per_message(
         {
             "type": "message.complete",
             "session_id": session_id,
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": "run-alpha",
             "turn_id": "turn-alpha",
             "seq": 3,
@@ -476,7 +476,7 @@ def test_e2e_backfill_migration_creates_rows_for_existing_conversations(
     )
     db.upsert_team_mission_conversation(
         conversation_id=seeded_team["conversation_id"],
-        stable_session_id=seeded_team["conversation_session_id"],
+        conversation_session_id=seeded_team["conversation_session_id"],
         team_id=seeded_team["team_id"],
         title="Legacy Team",
     )
@@ -521,7 +521,7 @@ async def test_e2e_approval_observer_still_works_with_new_participants_table(
         EventFrame(
             params={
                 "type": "clarify.request",
-                "stored_session_id": session_id,
+                "conversation_session_id": session_id,
                 "run_id": "run-approval",
                 "payload": {"request_id": "clarify-1", "question": "Proceed?"},
             }

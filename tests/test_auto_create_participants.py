@@ -106,7 +106,7 @@ def test_session_create_inserts_user_and_agent_participants(monkeypatch, tmp_pat
     })
 
     assert "error" not in response
-    session_id = response["result"]["stored_session_id"]
+    session_id = response["result"]["conversation_session_id"]
     participants = _participants_by_id(db, session_id)
     assert set(participants) == {"user", "agent:profile-1"}
     assert participants["user"]["role"] == "user"
@@ -211,7 +211,7 @@ def test_member_chat_start_ensures_member_participant_idempotent(monkeypatch, tm
 
     assert "error" not in first
     assert "error" not in second
-    assert captured["stored_session_id"] == "team-session-1"
+    assert captured["conversation_session_id"] == "team-session-1"
     rows = [
         row
         for row in db.list_conversation_participants("team-session-1")
@@ -261,7 +261,7 @@ def test_one_shot_migration_backfills_existing_conversations(tmp_path: Path) -> 
     )
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team",
     )
@@ -324,4 +324,4 @@ def test_participant_create_failure_does_not_block_conversation_create(monkeypat
     })
 
     assert "error" not in response
-    assert db.get_session(response["result"]["stored_session_id"]) is not None
+    assert db.get_session(response["result"]["conversation_session_id"]) is not None

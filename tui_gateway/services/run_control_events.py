@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 
-def stable_session_id(params: dict[str, Any]) -> str:
+def conversation_session_id(params: dict[str, Any]) -> str:
     return str(
-        params.get("stored_session_id")
-        or params.get("storedSessionId")
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or params.get("session_id")
         or params.get("sessionId")
         or ""

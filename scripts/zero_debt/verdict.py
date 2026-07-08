@@ -516,14 +516,7 @@ def build_p2_verdict() -> dict[str, Any]:
         "phase": "P2",
         "status": "fail" if failed else "pass",
         "checks": [check.as_dict() for check in checks],
-        "warnings": [
-            *_working_state_warnings(),
-            (
-                "P2 verdict is the data-plane ownership gate. It is expected "
-                "to fail until P2 vertical slices migrate SessionDB/hermes_state "
-                "production ownership into repositories and domain services."
-            ),
-        ],
+        "warnings": [*_working_state_warnings()],
         "required_test_commands": [
             ".venv/bin/pytest tests/observability/test_zero_debt_gates.py -q",
             ".venv/bin/pytest tests/gateway tests/storage tests/tui_gateway -q",

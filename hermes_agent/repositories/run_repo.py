@@ -27,7 +27,7 @@ class RunSpec:
     session_id: str
     turn_id: str = ""
     runtime_scope_key: str = ""
-    runtime_session_id: str = ""
+    execution_session_id: str = ""
     status: str = "running"
 
 
@@ -41,7 +41,7 @@ class Run:
     completed_at: float | None = None
     turn_id: str = ""
     runtime_scope_key: str = ""
-    runtime_session_id: str = ""
+    execution_session_id: str = ""
     last_seq: int = 0
     terminal_seq: int = 0
     terminal_degraded: bool = False
@@ -97,7 +97,7 @@ class RunRepo(Protocol):
         session_id: str,
         runtime_scope_key: str = "",
         turn_id: str = "",
-        runtime_session_id: str = "",
+        execution_session_id: str = "",
         status: str = "running",
         started_at: float | None = None,
         updated_at: float | None = None,
@@ -182,7 +182,7 @@ class RunRepoImpl:
             """
             INSERT OR REPLACE INTO runs (
                 run_id, session_id, runtime_scope_key, turn_id,
-                runtime_session_id, status, started_at, updated_at
+                execution_session_id, status, started_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -190,7 +190,7 @@ class RunRepoImpl:
                 stable_sid,
                 str(spec.runtime_scope_key or ""),
                 str(spec.turn_id or ""),
-                str(spec.runtime_session_id or ""),
+                str(spec.execution_session_id or ""),
                 str(spec.status or "running"),
                 now,
                 now,
@@ -207,7 +207,7 @@ class RunRepoImpl:
         session_id: str,
         runtime_scope_key: str = "",
         turn_id: str = "",
-        runtime_session_id: str = "",
+        execution_session_id: str = "",
         status: str = "running",
         started_at: float | None = None,
         updated_at: float | None = None,
@@ -234,7 +234,7 @@ class RunRepoImpl:
             self._conn.execute(
                 """
                 INSERT INTO runs (
-                    run_id, session_id, runtime_scope_key, turn_id, runtime_session_id, status,
+                    run_id, session_id, runtime_scope_key, turn_id, execution_session_id, status,
                     started_at, updated_at, completed_at, last_seq, error,
                     metadata_json
                 )
@@ -245,7 +245,7 @@ class RunRepoImpl:
                     stable_sid,
                     normalized_scope,
                     str(turn_id or ""),
-                    str(runtime_session_id or ""),
+                    str(execution_session_id or ""),
                     incoming_status,
                     started,
                     updated,
@@ -281,7 +281,7 @@ class RunRepoImpl:
                 SET session_id = ?,
                     runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
                     turn_id = COALESCE(NULLIF(?, ''), turn_id),
-                    runtime_session_id = COALESCE(NULLIF(?, ''), runtime_session_id),
+                    execution_session_id = COALESCE(NULLIF(?, ''), execution_session_id),
                     status = ?,
                     updated_at = ?,
                     completed_at = ?,
@@ -297,7 +297,7 @@ class RunRepoImpl:
                     stable_sid,
                     normalized_scope,
                     str(turn_id or ""),
-                    str(runtime_session_id or ""),
+                    str(execution_session_id or ""),
                     next_status,
                     updated,
                     next_completed_at,
@@ -319,7 +319,7 @@ class RunRepoImpl:
         row = self._conn.execute(
             """
             SELECT run_id, session_id, status, started_at, updated_at,
-                   completed_at, turn_id, runtime_scope_key, runtime_session_id,
+                   completed_at, turn_id, runtime_scope_key, execution_session_id,
                    last_seq, terminal_seq, terminal_degraded, terminal_cause
               FROM runs
              WHERE run_id = ?
@@ -436,7 +436,7 @@ def _row_to_run(row: Any) -> Run:
         completed_at=float(completed_at_raw) if completed_at_raw is not None else None,
         turn_id=str(_g("turn_id", 6) or ""),
         runtime_scope_key=str(_g("runtime_scope_key", 7) or ""),
-        runtime_session_id=str(_g("runtime_session_id", 8) or ""),
+        execution_session_id=str(_g("execution_session_id", 8) or ""),
         last_seq=int(_g("last_seq", 9) or 0),
         terminal_seq=int(_g("terminal_seq", 10) or 0),
         terminal_degraded=bool(int(_g("terminal_degraded", 11) or 0)),

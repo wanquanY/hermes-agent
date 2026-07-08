@@ -143,10 +143,10 @@ def test_p2_verdict_reports_current_data_plane_debt() -> None:
         capture_output=True,
         check=False,
     )
-    assert result.returncode != 0
+    assert result.returncode == 0
     verdict = json.loads(result.stdout)
     assert verdict["phase"] == "P2"
-    assert verdict["status"] == "fail"
+    assert verdict["status"] == "pass"
     checks = {check["id"]: check for check in verdict["checks"]}
     for gate_id in (
         "p2:no_sessiondb_production",
@@ -156,7 +156,7 @@ def test_p2_verdict_reports_current_data_plane_debt() -> None:
     ):
         assert gate_id in checks
     assert checks["p2:no_sessiondb_production"]["ok"]
-    assert not checks["p2:no_legacy_identity_alias_internal"]["ok"]
+    assert checks["p2:no_legacy_identity_alias_internal"]["ok"]
     assert verdict["next_required_human_signoff"] == (
         "docs/audits/zero_debt_phase_p2_human_signoff.md"
     )
@@ -173,8 +173,8 @@ def test_p2_inventory_reports_current_offender_baseline() -> None:
     gates = inventory["gates"]
     assert gates["p2:no_sessiondb_production"]["total_offenders"] == 0
     assert gates["p2:no_sessiondb_production"]["file_count"] == 0
-    assert gates["p2:no_legacy_identity_alias_internal"]["total_offenders"] == 1181
-    assert gates["p2:no_legacy_identity_alias_internal"]["file_count"] == 79
+    assert gates["p2:no_legacy_identity_alias_internal"]["total_offenders"] == 0
+    assert gates["p2:no_legacy_identity_alias_internal"]["file_count"] == 0
 
     markdown = subprocess.check_output(
         [sys.executable, str(P2_INVENTORY), "--format", "markdown"],
@@ -196,7 +196,8 @@ def test_zero_debt_status_separates_verdict_from_closure() -> None:
     assert rows["P1"]["machine_verdict"] == "pass"
     assert rows["P1"]["closure"] == "pass"
     assert rows["P1"]["closure_failed_checks"] == []
-    assert rows["P2"]["machine_verdict"] == "fail"
+    assert rows["P2"]["machine_verdict"] == "pass"
     assert rows["P2"]["closure"] == "fail"
+    assert rows["P2"]["machine_failed_checks"] == []
     assert "p2:no_sessiondb_production" not in rows["P2"]["machine_failed_checks"]
-    assert "p2:no_legacy_identity_alias_internal" in rows["P2"]["machine_failed_checks"]
+    assert "p2:no_legacy_identity_alias_internal" not in rows["P2"]["machine_failed_checks"]

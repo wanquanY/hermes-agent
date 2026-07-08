@@ -59,7 +59,7 @@ def test_dispatch_handshake_ignores_extra_params():
         {
             "id": "req-2",
             "method": HANDSHAKE_METHOD_NAME,
-            "params": {"noise": "ignored", "storedSessionId": "s1"},
+            "params": {"noise": "ignored", "conversationSessionId": "s1"},
         },
         resolver=AllowAllResolver(),
     )

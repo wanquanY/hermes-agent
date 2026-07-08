@@ -11,7 +11,7 @@ def test_acquire_runtime_lease_reuses_live_runtime():
 
     lease = acquire_runtime_lease(
         rid="r1",
-        stored_session_id="stored-1",
+        conversation_session_id="stored-1",
         params={},
         resolve_runtime_session=lambda _target: ("runtime-1", session),
         resume_runtime_session=lambda _rid, _params: calls.__setitem__("resume", 1),
@@ -21,7 +21,7 @@ def test_acquire_runtime_lease_reuses_live_runtime():
     )
 
     assert isinstance(lease, RuntimeLease)
-    assert lease.runtime_session_id == "runtime-1"
+    assert lease.execution_session_id == "runtime-1"
     assert lease.session is session
     assert lease.reused is True
     assert session["transport"] == "transport"
@@ -38,7 +38,7 @@ def test_acquire_runtime_lease_rebuilds_missing_runtime_without_hydration():
 
     lease = acquire_runtime_lease(
         rid="r1",
-        stored_session_id="stored-2",
+        conversation_session_id="stored-2",
         params={"text": "hello"},
         resolve_runtime_session=lambda _target: ("", None),
         resume_runtime_session=resume,
@@ -48,7 +48,7 @@ def test_acquire_runtime_lease_rebuilds_missing_runtime_without_hydration():
     )
 
     assert isinstance(lease, RuntimeLease)
-    assert lease.runtime_session_id == "runtime-2"
+    assert lease.execution_session_id == "runtime-2"
     assert lease.reused is False
     assert captured["session_id"] == "stored-2"
     assert captured["hydrate"] == "none"
@@ -68,7 +68,7 @@ def test_acquire_runtime_lease_rebuilds_scope_mismatch():
 
     lease = acquire_runtime_lease(
         rid="r1",
-        stored_session_id="stored-3",
+        conversation_session_id="stored-3",
         params={},
         resolve_runtime_session=lambda _target: ("runtime-3a", live),
         resume_runtime_session=resume,
@@ -79,7 +79,7 @@ def test_acquire_runtime_lease_rebuilds_scope_mismatch():
     )
 
     assert isinstance(lease, RuntimeLease)
-    assert lease.runtime_session_id == "runtime-3b"
+    assert lease.execution_session_id == "runtime-3b"
     assert lease.reused is False
     assert captured["runtime_scope_key"] == "profile:new"
     assert sessions["runtime-3b"]["runtime_scope_key"] == "profile:new"
@@ -108,7 +108,7 @@ def test_acquire_runtime_lease_rebuilds_context_mode_mismatch():
 
     lease = acquire_runtime_lease(
         rid="r1",
-        stored_session_id="stored-team",
+        conversation_session_id="stored-team",
         params={"agent_context_mode": "team_leader"},
         resolve_runtime_session=lambda _target: ("runtime-profile", live),
         resume_runtime_session=resume,
@@ -119,7 +119,7 @@ def test_acquire_runtime_lease_rebuilds_context_mode_mismatch():
     )
 
     assert isinstance(lease, RuntimeLease)
-    assert lease.runtime_session_id == "runtime-team"
+    assert lease.execution_session_id == "runtime-team"
     assert lease.reused is False
     assert captured["agent_context_mode"] == "team_leader"
 
@@ -127,7 +127,7 @@ def test_acquire_runtime_lease_rebuilds_context_mode_mismatch():
 def test_acquire_runtime_lease_returns_resume_error():
     lease = acquire_runtime_lease(
         rid="r1",
-        stored_session_id="missing",
+        conversation_session_id="missing",
         params={},
         resolve_runtime_session=lambda _target: ("", None),
         resume_runtime_session=lambda _rid, _params: {
@@ -147,7 +147,7 @@ def test_acquire_runtime_lease_rejects_control_plane_only_session():
 
     lease = acquire_runtime_lease(
         rid="r1",
-        stored_session_id="stored-4",
+        conversation_session_id="stored-4",
         params={},
         resolve_runtime_session=lambda _target: ("runtime-4", control_plane),
         resume_runtime_session=lambda _rid, _params: {"result": {"session_id": "runtime-4b"}},

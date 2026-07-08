@@ -92,7 +92,7 @@ def test_team_mission_control_db_writes_through_team_mission_store(monkeypatch, 
         assert isinstance(db, TeamMissionStateStore)
         conversation = db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="session-1",
+            conversation_session_id="session-1",
             team_id="team-1",
             title="Team Mission",
         )
@@ -101,13 +101,13 @@ def test_team_mission_control_db_writes_through_team_mission_store(monkeypatch, 
             conversation_id="conversation-1",
             team_id="team-1",
             title="Create artifact",
-            metadata={"stable_session_id": "session-1"},
+            metadata={"conversation_session_id": "session-1"},
         )
         graph = db.get_team_mission_graph("mission-1")
     finally:
         db.close()
 
-    assert conversation["stable_session_id"] == "session-1"
+    assert conversation["conversation_session_id"] == "session-1"
     assert mission["mission_id"] == "mission-1"
     assert graph["mission"]["conversation_id"] == "conversation-1"
 

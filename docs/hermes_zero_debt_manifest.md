@@ -2,8 +2,8 @@
 
 ## Status
 
-- Manifest version: `2026-07-07-p1`
-- Active phase: `P1`
+- Manifest version: `2026-07-08-p2`
+- Active phase: `P2`
 - Branch policy: execute destructive work only on `feat/hermes-zero-debt`.
 - Ownership policy: one writable owner for the active branch; all other agent sessions are read-only.
 - Frontend contract freeze: DoXie timeline v3.1 is frozen for this effort. New feedback after P0 goes to v3.2 and does not mutate this execution contract.

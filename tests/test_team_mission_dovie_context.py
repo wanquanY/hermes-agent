@@ -152,7 +152,7 @@ def test_node_start_inherits_mission_cloud_query_and_sets_executing_profile(monk
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-worker",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }

@@ -47,7 +47,7 @@ def _make_conn() -> sqlite3.Connection:
             running INTEGER NOT NULL DEFAULT 0,
             waiting_approval INTEGER NOT NULL DEFAULT 0,
             active_run_id TEXT NOT NULL DEFAULT '',
-            active_runtime_session_id TEXT NOT NULL DEFAULT '',
+            active_execution_session_id TEXT NOT NULL DEFAULT '',
             pending_approval_count INTEGER NOT NULL DEFAULT 0,
             message_count INTEGER NOT NULL DEFAULT 0,
             started_at REAL NOT NULL DEFAULT 0,
@@ -135,7 +135,7 @@ def test_session_create_rejects_missing_source():
     assert resp["error"]["code"] == ErrorCode.INVALID_PARAMS.value
 
 
-def test_session_create_folds_stored_session_id_alias():
+def test_session_create_folds_conversation_session_id_alias():
     """Legacy alias in request still gets picked up and normalised."""
     conn, repo, registry = _wired()
     resp = dispatch(
@@ -143,7 +143,7 @@ def test_session_create_folds_stored_session_id_alias():
         {
             "id": "req",
             "method": "session.create",
-            "params": {"storedSessionId": "s1", "source": "test"},
+            "params": {"conversationSessionId": "s1", "source": "test"},
         },
         resolver=AllowAllResolver(),
     )

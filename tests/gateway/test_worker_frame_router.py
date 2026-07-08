@@ -103,7 +103,7 @@ async def test_interaction_request_publishes_independent_frame_and_persists_inte
         "sess-1",
         EventFrame(params={
             "type": "approval.request",
-            "stored_session_id": "sess-1",
+            "conversation_session_id": "sess-1",
             "payload": {
                 "request_id": "req-approval",
                 "command": "rm -rf /tmp/demo",
@@ -118,7 +118,7 @@ async def test_interaction_request_publishes_independent_frame_and_persists_inte
             "type": "interaction.requested",
             "kind": "approval",
             "request_id": "req-approval",
-            "stored_session_id": "sess-1",
+            "conversation_session_id": "sess-1",
             "session_id": "",
             "runtime_scope_key": "profile:x",
             "conversation_id": "sess-1",
@@ -134,7 +134,7 @@ async def test_interaction_request_publishes_independent_frame_and_persists_inte
                 "source_event_type": "approval.request",
                 "source_event": {
                     "type": "approval.request",
-                    "stored_session_id": "sess-1",
+                    "conversation_session_id": "sess-1",
                     "payload": {
                         "request_id": "req-approval",
                         "command": "rm -rf /tmp/demo",
@@ -161,7 +161,7 @@ async def test_interaction_request_persistence_failure_blocks_delivery() -> None
             "sess-1",
             EventFrame(params={
                 "type": "approval.request",
-                "stored_session_id": "sess-1",
+                "conversation_session_id": "sess-1",
                 "payload": {
                     "request_id": "req-approval",
                     "anchor_seq": 12,
@@ -184,13 +184,13 @@ async def test_on_interactive_request_records_pending_only() -> None:
             kind="clarify",
             request_id="req-1",
             payload={"question": "ok?"},
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
         ),
     )
     assert router.has_pending_request("req-1")
     # No event published — that's the worker's job, not the router's.
     assert events == []
-    # But the routing table did capture the stored_session_id.
+    # But the routing table did capture the conversation_session_id.
     snap = router.pending_snapshot()
     assert snap["pendingInteractive"] == [
         {
@@ -198,21 +198,21 @@ async def test_on_interactive_request_records_pending_only() -> None:
             "scopeKey": "profile:x",
             "conversationId": "sess-1",
             "kind": "clarify",
-            "storedSessionId": "sess-1",
+            "conversationSessionId": "sess-1",
         },
     ]
 
 
 @pytest.mark.asyncio
 async def test_on_interactive_request_cross_fills_stored_session_from_run() -> None:
-    """When the worker omits stored_session_id (e.g. an older worker
+    """When the worker omits conversation_session_id (e.g. an older worker
     build), the router fills it from the active run record so a later
     respond/lookup can still scope correctly."""
     router, _sup, events, _ = _make_router()
     router.record_run_start(
         scope_key="profile:x",
         run_id="run-1",
-        stored_session_id="sess-A",
+        conversation_session_id="sess-A",
         turn_id="t-1",
     )
     await router.on_interactive_request(
@@ -230,7 +230,7 @@ async def test_on_interactive_request_cross_fills_stored_session_from_run() -> N
             "scopeKey": "profile:x",
             "conversationId": "sess-A",
             "kind": "approval",
-            "storedSessionId": "sess-A",
+            "conversationSessionId": "sess-A",
         },
     ]
     assert events == []
@@ -258,7 +258,7 @@ async def test_on_run_terminal_skips_publish_on_completed() -> None:
         RunTerminalFrame(
             run_id="run-1",
             status="completed",
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
             turn_id="turn-1",
             message="",
         ),
@@ -277,18 +277,18 @@ async def test_on_run_terminal_publishes_on_failed() -> None:
         RunTerminalFrame(
             run_id="run-1",
             status="failed",
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
             turn_id="turn-1",
             message="kaboom",
         ),
     )
     assert terminals == [
         {
-            "stored_session_id": "sess-1",
+            "conversation_session_id": "sess-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "runtime_scope_key": "profile:x",
-            "runtime_session_id": "sess-1",
+            "execution_session_id": "sess-1",
             "activity_id": "",
             "status": "failed",
             "message": "kaboom",
@@ -304,7 +304,7 @@ async def test_on_run_terminal_publishes_on_cancelled() -> None:
         RunTerminalFrame(
             run_id="run-1",
             status="cancelled",
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
             turn_id="turn-1",
             message="user cancelled",
         ),
@@ -319,7 +319,7 @@ async def test_on_run_terminal_cross_fills_from_record_run_start() -> None:
     router.record_run_start(
         scope_key="profile:x",
         run_id="run-1",
-        stored_session_id="sess-A",
+        conversation_session_id="sess-A",
         turn_id="turn-A",
     )
     # Use failed so the publish path actually fires (completed skips publish).
@@ -327,7 +327,7 @@ async def test_on_run_terminal_cross_fills_from_record_run_start() -> None:
         "profile:x",
         RunTerminalFrame(run_id="run-1", status="failed"),
     )
-    assert terminals[0]["stored_session_id"] == "sess-A"
+    assert terminals[0]["conversation_session_id"] == "sess-A"
     assert terminals[0]["turn_id"] == "turn-A"
     # cleanup: run table no longer holds run-1
     snapshot = router.pending_snapshot()
@@ -353,7 +353,7 @@ async def test_respond_routes_to_correct_worker() -> None:
             kind="clarify",
             request_id="req-1",
             payload={"question": "?"},
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
         ),
     )
     ok = await router.respond("req-1", "yes", expected_kind="clarify")
@@ -383,7 +383,7 @@ async def test_respond_rejects_kind_mismatch() -> None:
         "profile:x",
         InteractiveRequestFrame(
             kind="approval", request_id="req-1", payload={},
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
         ),
     )
     ok = await router.respond("req-1", "yes", expected_kind="clarify")
@@ -401,7 +401,7 @@ async def test_respond_keeps_entry_on_send_failure() -> None:
         "profile:x",
         InteractiveRequestFrame(
             kind="clarify", request_id="req-1", payload={},
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
         ),
     )
     ok = await router.respond("req-1", "yes")
@@ -418,7 +418,7 @@ async def test_run_terminal_clears_stale_pending_for_session() -> None:
         "profile:x",
         InteractiveRequestFrame(
             kind="clarify", request_id="req-A1", payload={},
-            stored_session_id="sess-A",
+            conversation_session_id="sess-A",
         ),
     )
     # Pending for sess-B (different session, same scope)
@@ -426,13 +426,13 @@ async def test_run_terminal_clears_stale_pending_for_session() -> None:
         "profile:x",
         InteractiveRequestFrame(
             kind="clarify", request_id="req-B1", payload={},
-            stored_session_id="sess-B",
+            conversation_session_id="sess-B",
         ),
     )
     # Terminal for the sess-A run should drop only sess-A pending.
     router.record_run_start(
         scope_key="profile:x", run_id="run-A",
-        stored_session_id="sess-A", turn_id="t-A",
+        conversation_session_id="sess-A", turn_id="t-A",
     )
     await router.on_run_terminal(
         "profile:x", RunTerminalFrame(run_id="run-A", status="completed"),
@@ -454,7 +454,7 @@ def test_pending_snapshot_shape() -> None:
     router, _sup, _events, _ = _make_router()
     router.record_run_start(
         scope_key="profile:x", run_id="run-1",
-        stored_session_id="sess-1", turn_id="t-1",
+        conversation_session_id="sess-1", turn_id="t-1",
     )
     snap = router.pending_snapshot()
     assert {"pendingInteractive", "activeRuns"} <= snap.keys()
@@ -463,7 +463,7 @@ def test_pending_snapshot_shape() -> None:
                 "runId": "run-1",
                 "scopeKey": "profile:x",
                 "conversationId": "sess-1",
-                "storedSessionId": "sess-1",
+                "conversationSessionId": "sess-1",
             "turnId": "t-1",
         }
     ]

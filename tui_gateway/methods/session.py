@@ -138,9 +138,9 @@ def _profile_db_from_params(params: dict | None = None):
         return None
 
 
-def _db_for_session_request(params: dict | None, stable_session_id: str = ""):
-    stable = str(stable_session_id or "").strip()
-    if stable and _is_control_plane_stable_session_id(stable):
+def _db_for_session_request(params: dict | None, conversation_session_id: str = ""):
+    stable = str(conversation_session_id or "").strip()
+    if stable and _is_control_plane_conversation_session_id(stable):
         return _db_for_stable_session(stable)
     return _profile_db_from_params(params) or _get_db()
 
@@ -369,17 +369,17 @@ def _requested_tool_progress_mode(params: dict | None = None) -> str:
 
 def _session_run_snapshot(runtime_sid: str, session: dict | None, db=None) -> dict:
     session = session or {}
-    stable_session_id = str(session.get("session_key") or runtime_sid or "")
+    conversation_session_id = str(session.get("session_key") or runtime_sid or "")
     control_state = run_control.session_status(
-        stable_session_id,
+        conversation_session_id,
         db=db,
         current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
     )
     running = bool(session.get("running") or control_state.get("running"))
     return {
         "running": running,
-        "runtime_scope_key": str(control_state.get("runtime_scope_key") or session.get("active_runtime_scope_key") or stable_session_id),
-        "active_runtime_session_id": runtime_sid or "",
+        "runtime_scope_key": str(control_state.get("runtime_scope_key") or session.get("active_runtime_scope_key") or conversation_session_id),
+        "active_execution_session_id": runtime_sid or "",
         "active_run_id": str(session.get("active_run_id") or control_state.get("active_run_id") or "") if running else "",
         "active_turn_id": str(session.get("active_turn_id") or control_state.get("active_turn_id") or "") if running else "",
         "run_started_at": (session.get("run_started_at") or control_state.get("run_started_at") or 0) if running else 0,
@@ -532,7 +532,7 @@ def _is_team_mission_internal_session_row(
 ) -> bool:
     session_ids = {
         str(row.get("id") or "").strip(),
-        str(row.get("stored_session_id") or row.get("storedSessionId") or "").strip(),
+        str(row.get("conversation_session_id") or row.get("conversationSessionId") or "").strip(),
         str(row.get("session_id") or row.get("sessionId") or "").strip(),
     }
     session_ids.discard("")
@@ -563,8 +563,8 @@ def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str
     conversation = getter(session_id) if callable(getter) and session_id else {}
     if conversation:
         conversation_id = str(conversation.get("conversation_id") or "").strip()
-        stable_session_id = str(conversation.get("stable_session_id") or row.get("id") or "").strip()
-        if not conversation_id or not stable_session_id:
+        conversation_session_id = str(conversation.get("conversation_session_id") or row.get("id") or "").strip()
+        if not conversation_id or not conversation_session_id:
             return None
         updated_at = conversation.get("updated_at") or row.get("last_active") or row.get("started_at") or 0
         created_at = conversation.get("created_at") or row.get("started_at") or updated_at
@@ -577,9 +577,9 @@ def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str
         )
         return {
             **row,
-            "id": stable_session_id,
-            "stored_session_id": stable_session_id,
-            "session_id": stable_session_id,
+            "id": conversation_session_id,
+            "conversation_session_id": conversation_session_id,
+            "session_id": conversation_session_id,
             "session_kind": "team_mission",
             "conversation_kind": "team",
             "source": "team_mission",
@@ -1081,7 +1081,7 @@ def _(rid, params: dict) -> dict:
             rid,
             {
                 "session_id": key,
-                "stored_session_id": key,
+                "conversation_session_id": key,
                 "info": {
                     "model": model,
                     "tools": {},
@@ -1162,7 +1162,7 @@ def _(rid, params: dict) -> dict:
         rid,
         {
             "session_id": sid,
-            "stored_session_id": key,
+            "conversation_session_id": key,
             "message_count": len(seed_history),
             "messages": _history_to_messages(seed_history),
             "info": {
@@ -1319,7 +1319,7 @@ def _is_hidden_empty_index_draft(row: dict) -> bool:
     if (
         row.get("running")
         or str(row.get("active_run_id") or "").strip()
-        or str(row.get("active_runtime_session_id") or "").strip()
+        or str(row.get("active_execution_session_id") or "").strip()
     ):
         return False
     return True
@@ -1366,7 +1366,7 @@ def _session_index_list_item(row: dict) -> dict:
         "active_activity_count": row.get("active_activity_count") or 0,
         "unread_completion_count": row.get("unread_completion_count") or 0,
         "active_run_id": row.get("active_run_id") or "",
-        "active_runtime_session_id": row.get("active_runtime_session_id") or "",
+        "active_execution_session_id": row.get("active_execution_session_id") or "",
         "conversation_id": row.get("conversation_id") or "",
         "team_id": row.get("team_id") or "",
         "team_conversation_title": row.get("team_conversation_title") or "",
@@ -1707,7 +1707,7 @@ def _(rid, params: dict) -> dict:
 
 def _participant_view_for_resume(
     *,
-    stored_session_id: str,
+    conversation_session_id: str,
     agent_context_mode: str,
     params: dict | None = None,
 ) -> str:
@@ -1726,7 +1726,7 @@ def _participant_view_for_resume(
 
     Caller passes the resolved agent_context_mode so we don't re-derive.
     """
-    target = str(stored_session_id or "").strip()
+    target = str(conversation_session_id or "").strip()
     mode = str(agent_context_mode or "").strip().lower()
     if mode == "team_leader":
         return "leader"
@@ -1838,7 +1838,7 @@ def _(rid, params: dict) -> dict:
         # `viewer=""` and the projection is a no-op.
         agent_context_mode = _agent_context_mode_from_params(params)
         viewer_participant_id = _participant_view_for_resume(
-            stored_session_id=target,
+            conversation_session_id=target,
             agent_context_mode=agent_context_mode,
             params=params,
         )
@@ -2029,8 +2029,8 @@ def _(rid, params: dict) -> dict:
     if repo is None:
         return _err(rid, 5007, "session repository unavailable")
     requested = str(
-        params.get("stored_session_id")
-        or params.get("storedSessionId")
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or params.get("session_id")
         or ""
     ).strip()
@@ -2171,7 +2171,7 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     from hermes_constants import display_hermes_home
 
-    requested = str(params.get("session_id") or params.get("stored_session_id") or "").strip()
+    requested = str(params.get("session_id") or params.get("conversation_session_id") or "").strip()
     if not requested:
         return _err(rid, 4006, "session_id required")
     runtime_sid, session = _resolve_runtime_session(requested)
@@ -2238,7 +2238,7 @@ def _(rid, params: dict) -> dict:
         {
             "output": "\n".join(lines),
             "session_id": runtime_sid,
-            "stored_session_id": key,
+            "conversation_session_id": key,
             **_session_run_snapshot(runtime_sid, session or {"session_key": key}, db=db),
         },
     )
@@ -2439,6 +2439,6 @@ def _(rid, params: dict) -> dict:
         {
             "closed": True,
             "session_id": runtime_sid,
-            "stored_session_id": session.get("session_key") or sid,
+            "conversation_session_id": session.get("session_key") or sid,
         },
     )

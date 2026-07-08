@@ -65,7 +65,7 @@ def _log_prompt_stage(session: dict, sid: str, stage: str, **fields: Any) -> Non
     pairs = {
         "stage": stage,
         "sid": sid,
-        "stored_session_id": str(session.get("session_key") or sid),
+        "conversation_session_id": str(session.get("session_key") or sid),
         "run_id": run_id,
         "turn_id": turn_id,
         "runtime_scope_key": runtime_scope_key,
@@ -123,19 +123,19 @@ def _prompt_terminal_status_from_result(result: dict, raw: Any) -> str:
 def _mark_prompt_run_failed(
     *,
     run_id: str,
-    stored_session_id: str,
+    conversation_session_id: str,
     runtime_scope_key: str,
     turn_id: str = "",
     message: str = "",
 ) -> None:
-    db = _db_for_stable_session(stored_session_id)
-    if db is None or not run_id or not stored_session_id:
+    db = _db_for_stable_session(conversation_session_id)
+    if db is None or not run_id or not conversation_session_id:
         return
     run_control.terminate_run(
-        stored_session_id=stored_session_id,
+        conversation_session_id=conversation_session_id,
         run_id=run_id,
         turn_id=turn_id,
-        runtime_scope_key=runtime_scope_key or stored_session_id,
+        runtime_scope_key=runtime_scope_key or conversation_session_id,
         status="failed",
         message=message,
         db=db,
@@ -146,19 +146,19 @@ def _mark_prompt_run_failed(
 def _mark_prompt_run_cancelled(
     *,
     run_id: str,
-    stored_session_id: str,
+    conversation_session_id: str,
     runtime_scope_key: str,
     turn_id: str = "",
     message: str = "",
 ) -> dict:
-    db = _db_for_stable_session(stored_session_id)
+    db = _db_for_stable_session(conversation_session_id)
     event = None
-    if db is not None and run_id and stored_session_id:
+    if db is not None and run_id and conversation_session_id:
         event = run_control.terminate_run(
-            stored_session_id=stored_session_id,
+            conversation_session_id=conversation_session_id,
             run_id=run_id,
             turn_id=turn_id,
-            runtime_scope_key=runtime_scope_key or stored_session_id,
+            runtime_scope_key=runtime_scope_key or conversation_session_id,
             status="cancelled",
             message=message or "cancelled before prompt start",
             db=db,
@@ -168,8 +168,8 @@ def _mark_prompt_run_cancelled(
         "status": "cancelled",
         "run_id": run_id,
         "turn_id": turn_id,
-        "stored_session_id": stored_session_id,
-        "runtime_scope_key": runtime_scope_key or stored_session_id,
+        "conversation_session_id": conversation_session_id,
+        "runtime_scope_key": runtime_scope_key or conversation_session_id,
         "seq": int((event or {}).get("seq") or 0),
     }
 
@@ -191,7 +191,7 @@ def _fail_unavailable_runtime_agent(
     if not session.get("transient"):
         _mark_prompt_run_failed(
             run_id=run_id,
-            stored_session_id=str(session.get("session_key") or sid),
+            conversation_session_id=str(session.get("session_key") or sid),
             runtime_scope_key=str(
                 session.get("runtime_scope_key")
                 or session.get("active_runtime_scope_key")
@@ -297,23 +297,23 @@ class _MessageDeltaNormalizer:
 def _(rid, params: dict) -> dict:
     if not params.get("_run_registry_reserved"):
         target = str(
-            params.get("stored_session_id")
-            or params.get("storedSessionId")
+            params.get("conversation_session_id")
+            or params.get("conversationSessionId")
             or params.get("session_id")
             or ""
         ).strip()
         sid, session = _resolve_runtime_session(target)
-        stable_session_id = str((session or {}).get("session_key") or target).strip()
-        if not stable_session_id:
-            return _err(rid, 4006, "stored_session_id or session_id required")
+        conversation_session_id = str((session or {}).get("session_key") or target).strip()
+        if not conversation_session_id:
+            return _err(rid, 4006, "conversation_session_id or session_id required")
         return _methods["run.submit"](
             rid,
             {
                 **params,
-                "stored_session_id": stable_session_id,
-                "session_id": stable_session_id,
+                "conversation_session_id": conversation_session_id,
+                "session_id": conversation_session_id,
                 "_legacy_prompt_adapter": True,
-                **({"runtime_session_id": sid} if sid else {}),
+                **({"execution_session_id": sid} if sid else {}),
             },
         )
     return _execute_prompt_submit(rid, params)
@@ -346,13 +346,13 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
-    stable_session_id = str(
-        params.get("stored_session_id")
-        or params.get("storedSessionId")
+    conversation_session_id = str(
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or session.get("session_key")
         or sid
     ).strip()
-    effective_runtime_scope_key = runtime_scope_key or stable_session_id
+    effective_runtime_scope_key = runtime_scope_key or conversation_session_id
     approval_policy = str(
         params.get("approval_policy")
         or params.get("approvalPolicy")
@@ -367,9 +367,9 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             from tools.approval import disable_session_yolo, enable_session_yolo
 
             if approval_policy == "full_access":
-                enable_session_yolo(stable_session_id)
+                enable_session_yolo(conversation_session_id)
             else:
-                disable_session_yolo(stable_session_id)
+                disable_session_yolo(conversation_session_id)
         except Exception as e:
             return _err(rid, 5004, str(e))
     with session["history_lock"]:
@@ -388,7 +388,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 rid,
                 _mark_prompt_run_cancelled(
                     run_id=run_id,
-                    stored_session_id=stable_session_id,
+                    conversation_session_id=conversation_session_id,
                     runtime_scope_key=effective_runtime_scope_key,
                     turn_id=turn_id,
                     message="cancelled before prompt start",
@@ -399,7 +399,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             if not session.get("transient"):
                 _mark_prompt_run_failed(
                     run_id=run_id,
-                    stored_session_id=stable_session_id,
+                    conversation_session_id=conversation_session_id,
                     runtime_scope_key=effective_runtime_scope_key,
                     turn_id=turn_id,
                     message="session busy",
@@ -407,10 +407,10 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             return _err(rid, 4009, "session busy")
         # ADR-0001 Phase 1.D: audit-only activity_command for single-agent prompt.
         # Single-agent chat doubles as Activity (kind=chat) per ADR-0001 Q4.
-        _session_id = stable_session_id
+        _session_id = conversation_session_id
         if _session_id:
             record_legacy_activity_command(
-                _db_for_stable_session(stable_session_id),
+                _db_for_stable_session(conversation_session_id),
                 activity_id=f"chat:{_session_id}",
                 kind="start",
                 payload={
@@ -448,23 +448,23 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 flush=True,
             )
         if not session.get("transient"):
-            db = _db_for_stable_session(stable_session_id)
+            db = _db_for_stable_session(conversation_session_id)
             if db is not None:
                 try:
                     normalize_team_mission_conversation_session(
                         db,
-                        session_id=stable_session_id,
+                        session_id=conversation_session_id,
                         metadata={"dovie_product_context": dovie_product_context},
                     )
                 except Exception as exc:
                     logger.warning(
                         "team mission conversation session normalization skipped sid=%s: %s",
-                        stable_session_id,
+                        conversation_session_id,
                         exc,
                     )
             run_control.mark_run_started(
-                stored_session_id=stable_session_id,
-                runtime_session_id=sid,
+                conversation_session_id=conversation_session_id,
+                execution_session_id=sid,
                 run_id=run_id,
                 turn_id=turn_id,
                 runtime_scope_key=effective_runtime_scope_key,
@@ -492,7 +492,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             if not session.get("transient"):
                 _mark_prompt_run_failed(
                     run_id=run_id,
-                    stored_session_id=stable_session_id,
+                    conversation_session_id=conversation_session_id,
                     runtime_scope_key=effective_runtime_scope_key,
                     turn_id=turn_id,
                     message=f"model switch failed: {e}",
@@ -519,7 +519,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             or params.get("toolset_mode")
             or params.get("toolsetMode")
         ),
-        persist_session_id=None if session.get("transient") else stable_session_id,
+        persist_session_id=None if session.get("transient") else conversation_session_id,
     )
     _start_agent_build(sid, session)
 
@@ -544,7 +544,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                     session["pending_turn"] = None
                 _mark_prompt_run_failed(
                     run_id=run_id,
-                    stored_session_id=stable_session_id,
+                    conversation_session_id=conversation_session_id,
                     runtime_scope_key=effective_runtime_scope_key,
                     turn_id=turn_id,
                     message=err.get("error", {}).get("message", "agent initialization failed"),
@@ -578,7 +578,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                     session["pending_turn"] = None
                 _mark_prompt_run_failed(
                     run_id=run_id,
-                    stored_session_id=stable_session_id,
+                    conversation_session_id=conversation_session_id,
                     runtime_scope_key=effective_runtime_scope_key,
                     turn_id=turn_id,
                     message=f"runtime auth rebind failed: {e}",
@@ -618,7 +618,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             "turn_id": turn_id,
             "client_message_id": client_message_id,
             "session_id": sid,
-            "stored_session_id": stable_session_id,
+            "conversation_session_id": conversation_session_id,
             "runtime_scope_key": effective_runtime_scope_key,
         },
     )
@@ -804,8 +804,8 @@ def _run_prompt_submit(
     def terminalize_if_still_active(reason: str) -> None:
         if session.get("transient") or not turn_run_id:
             return
-        stored_session_id = str(session.get("session_key") or sid)
-        db = _db_for_stable_session(stored_session_id)
+        conversation_session_id = str(session.get("session_key") or sid)
+        db = _db_for_stable_session(conversation_session_id)
         if db is None:
             return
         try:
@@ -832,10 +832,10 @@ def _run_prompt_submit(
         was_cancelled = bool(turn_run_id and interrupted_run_id == turn_run_id)
         fallback_status = "cancelled" if was_cancelled else "failed"
         logger.warning(
-            "[dovie-prompt] terminal fallback for active run sid=%s stored_session_id=%s "
+            "[dovie-prompt] terminal fallback for active run sid=%s conversation_session_id=%s "
             "run_id=%s turn_id=%s status=%s fallback=%s reason=%s",
             sid,
-            stored_session_id,
+            conversation_session_id,
             turn_run_id,
             turn_id,
             status,
@@ -843,7 +843,7 @@ def _run_prompt_submit(
             reason,
         )
         run_control.terminate_run(
-            stored_session_id=stored_session_id,
+            conversation_session_id=conversation_session_id,
             run_id=turn_run_id,
             turn_id=turn_id,
             runtime_scope_key=str(
@@ -852,7 +852,7 @@ def _run_prompt_submit(
                 or session.get("session_key")
                 or sid
             ),
-            runtime_session_id=sid,
+            execution_session_id=sid,
             status=fallback_status,
             message=reason,
             db=db,
@@ -1179,7 +1179,7 @@ def _run_prompt_submit(
                 {
                     "stage": "agent-run-start",
                     "sid": sid,
-                    "stored_session_id": session.get("session_key") or sid,
+                    "conversation_session_id": session.get("session_key") or sid,
                     "run_id": turn_run_id,
                     "turn_id": turn_id,
                     "runtime_scope_key": session.get("runtime_scope_key") or "",
@@ -1283,7 +1283,7 @@ def _run_prompt_submit(
                     {
                         "stage": "agent-run-returned",
                         "sid": sid,
-                        "stored_session_id": session.get("session_key") or sid,
+                        "conversation_session_id": session.get("session_key") or sid,
                         "run_id": turn_run_id,
                         "turn_id": turn_id,
                         "result_type": type(result).__name__,
@@ -1318,7 +1318,7 @@ def _run_prompt_submit(
                     {
                         "stage": "agent-run-returned-compat",
                         "sid": sid,
-                        "stored_session_id": session.get("session_key") or sid,
+                        "conversation_session_id": session.get("session_key") or sid,
                         "run_id": turn_run_id,
                         "turn_id": turn_id,
                         "result_type": type(result).__name__,
@@ -1578,7 +1578,7 @@ def _run_prompt_submit(
                 {
                     "stage": "message-complete-emit",
                     "sid": sid,
-                    "stored_session_id": session.get("session_key") or sid,
+                    "conversation_session_id": session.get("session_key") or sid,
                     "run_id": turn_run_id,
                     "turn_id": turn_id,
                     "status": status,
@@ -1727,8 +1727,8 @@ def _run_prompt_submit(
         if goal_followup:
             followup_run_id = uuid.uuid4().hex
             followup_turn_id = uuid.uuid4().hex
-            stable_session_id = str(session.get("session_key") or sid)
-            followup_scope_key = str(session.get("runtime_scope_key") or stable_session_id)
+            conversation_session_id = str(session.get("session_key") or sid)
+            followup_scope_key = str(session.get("runtime_scope_key") or conversation_session_id)
             with session["history_lock"]:
                 if session.get("running"):
                     # User already sent something — their turn wins,
@@ -1744,12 +1744,12 @@ def _run_prompt_submit(
                 session["interrupted_run_id"] = ""
                 session["interrupted_turn_id"] = ""
             reservation = run_control.create_run_if_session_idle(
-                stored_session_id=stable_session_id,
-                runtime_session_id=sid,
+                conversation_session_id=conversation_session_id,
+                execution_session_id=sid,
                 run_id=followup_run_id,
                 turn_id=followup_turn_id,
                 runtime_scope_key=followup_scope_key,
-                db=_db_for_stable_session(stable_session_id),
+                db=_db_for_stable_session(conversation_session_id),
             )
             if isinstance(reservation, dict) and reservation.get("conflict"):
                 with session["history_lock"]:
@@ -1759,8 +1759,8 @@ def _run_prompt_submit(
                         session["active_turn_id"] = None
                 return
             run_control.mark_run_started(
-                stored_session_id=stable_session_id,
-                runtime_session_id=sid,
+                conversation_session_id=conversation_session_id,
+                execution_session_id=sid,
                 run_id=followup_run_id,
                 turn_id=followup_turn_id,
                 runtime_scope_key=followup_scope_key,
@@ -1768,7 +1768,7 @@ def _run_prompt_submit(
                     "gateway_pid": os.getpid(),
                     "gateway_instance_id": _GATEWAY_INSTANCE_ID,
                 },
-                db=_db_for_stable_session(stable_session_id),
+                db=_db_for_stable_session(conversation_session_id),
             )
             try:
                 _run_prompt_submit(

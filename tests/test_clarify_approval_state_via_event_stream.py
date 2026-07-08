@@ -55,7 +55,7 @@ async def test_clarify_request_event_triggers_project_state(
     await router.on_event(
         "scope-1",
         "conv-1",
-        EventFrame(params={"type": "clarify.request", "stored_session_id": "sess-1", "payload": {"request_id": "req-1"}}),
+        EventFrame(params={"type": "clarify.request", "conversation_session_id": "sess-1", "payload": {"request_id": "req-1"}}),
     )
 
     assert events[0]["payload"]["type"] == "interaction.requested"
@@ -80,7 +80,7 @@ async def test_clarify_resolved_event_triggers_project_state_cleared(
     await router.on_event(
         "scope-1",
         "conv-1",
-        EventFrame(params={"type": "clarify.resolved", "stored_session_id": "sess-1"}),
+        EventFrame(params={"type": "clarify.resolved", "conversation_session_id": "sess-1"}),
     )
 
     assert calls == [
@@ -102,7 +102,7 @@ async def test_approval_request_event_triggers_project_state(
     await router.on_event(
         "scope-1",
         "conv-1",
-        EventFrame(params={"type": "approval.request", "stored_session_id": "sess-2"}),
+        EventFrame(params={"type": "approval.request", "conversation_session_id": "sess-2"}),
     )
 
     assert calls == [
@@ -124,7 +124,7 @@ async def test_unrelated_event_type_does_not_trigger_projection(
     await router.on_event(
         "scope-1",
         "conv-1",
-        EventFrame(params={"type": "message.delta", "stored_session_id": "sess-1"}),
+        EventFrame(params={"type": "message.delta", "conversation_session_id": "sess-1"}),
     )
 
     assert events[0]["payload"]["type"] == "message.delta"
@@ -148,7 +148,7 @@ async def test_project_state_failure_does_not_break_publish_event(
     await router.on_event(
         "scope-1",
         "conv-1",
-        EventFrame(params={"type": "approval.resolved", "stored_session_id": "sess-3", "payload": {"request_id": "req-3"}}),
+        EventFrame(params={"type": "approval.resolved", "conversation_session_id": "sess-3", "payload": {"request_id": "req-3"}}),
     )
 
     assert events[0]["payload"]["type"] == "interaction.resolved"
@@ -163,14 +163,14 @@ async def test_project_state_failure_does_not_break_publish_event(
     ("params", "expected_session_key"),
     [
         (
-            {"type": "approval.request", "stored_session_id": "stored-sess"},
+            {"type": "approval.request", "conversation_session_id": "stored-sess"},
             "stored-sess",
         ),
         ({"type": "approval.request", "session_id": "fallback-sess"}, "fallback-sess"),
         ({"type": "approval.request", "session_key": "legacy-sess"}, "legacy-sess"),
     ],
 )
-async def test_session_key_resolves_from_stored_session_id_or_session_id_fallback(
+async def test_session_key_resolves_from_conversation_session_id_or_session_id_fallback(
     monkeypatch: pytest.MonkeyPatch,
     params: dict[str, Any],
     expected_session_key: str,

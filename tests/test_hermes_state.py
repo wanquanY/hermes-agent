@@ -108,7 +108,7 @@ def test_existing_session_info_events_backfill_session_runtime_state(tmp_path):
             {
                 "type": "session.info",
                 "session_id": "runtime-1",
-                "stored_session_id": "stored-1",
+                "conversation_session_id": "stored-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "runtime_scope_key": "profile:agent-default",
@@ -121,7 +121,7 @@ def test_existing_session_info_events_backfill_session_runtime_state(tmp_path):
             {
                 "type": "session.info",
                 "session_id": "runtime-1",
-                "stored_session_id": "stored-1",
+                "conversation_session_id": "stored-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "runtime_scope_key": "profile:agent-default",
@@ -140,7 +140,7 @@ def test_existing_session_info_events_backfill_session_runtime_state(tmp_path):
         state = migrated.get_session_runtime_state("stored-1")
 
         assert state["runtime_scope_key"] == "profile:agent-default"
-        assert state["runtime_session_id"] == "runtime-1"
+        assert state["execution_session_id"] == "runtime-1"
         assert state["run_id"] == "run-1"
         assert state["turn_id"] == "turn-1"
         assert state["status"] == "running"
@@ -156,7 +156,7 @@ def test_list_run_events_filtered_filters_subagent_events_at_db_boundary(db):
         {
             "type": "subagent.start",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "runtime_scope_key": "scope-1",
             "seq": 1,
@@ -168,7 +168,7 @@ def test_list_run_events_filtered_filters_subagent_events_at_db_boundary(db):
         {
             "type": "tool.complete",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "runtime_scope_key": "scope-1",
             "seq": 2,
@@ -180,7 +180,7 @@ def test_list_run_events_filtered_filters_subagent_events_at_db_boundary(db):
         {
             "type": "subagent.output_delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "runtime_scope_key": "scope-1",
             "seq": 3,
@@ -210,7 +210,7 @@ def test_append_run_event_coalesces_adjacent_subagent_output_deltas(db):
         {
             "type": "subagent.output_delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "seq": 1,
             "payload": {"subagent_id": "sa-1", "text": "第一"},
@@ -221,7 +221,7 @@ def test_append_run_event_coalesces_adjacent_subagent_output_deltas(db):
         {
             "type": "subagent.output_delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "seq": 2,
             "payload": {"subagent_id": "sa-1", "text": "段"},
@@ -232,7 +232,7 @@ def test_append_run_event_coalesces_adjacent_subagent_output_deltas(db):
         {
             "type": "subagent.tool",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "seq": 3,
             "payload": {"subagent_id": "sa-1", "tool_name": "terminal"},
@@ -243,7 +243,7 @@ def test_append_run_event_coalesces_adjacent_subagent_output_deltas(db):
         {
             "type": "subagent.output_delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "seq": 4,
             "payload": {"subagent_id": "sa-1", "text": "第二段"},
@@ -268,7 +268,7 @@ def test_append_run_event_coalesces_adjacent_subagent_reasoning_deltas(db):
         {
             "type": "subagent.reasoning_delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "seq": 1,
             "payload": {
@@ -283,7 +283,7 @@ def test_append_run_event_coalesces_adjacent_subagent_reasoning_deltas(db):
         {
             "type": "subagent.reasoning_delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "seq": 2,
             "payload": {
@@ -298,7 +298,7 @@ def test_append_run_event_coalesces_adjacent_subagent_reasoning_deltas(db):
         {
             "type": "subagent.reasoning_delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "seq": 3,
             "payload": {
@@ -324,7 +324,7 @@ def test_append_run_event_preserves_adjacent_main_message_deltas(db):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 1,
@@ -336,7 +336,7 @@ def test_append_run_event_preserves_adjacent_main_message_deltas(db):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 2,
@@ -348,7 +348,7 @@ def test_append_run_event_preserves_adjacent_main_message_deltas(db):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 3,
@@ -360,7 +360,7 @@ def test_append_run_event_preserves_adjacent_main_message_deltas(db):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 4,
@@ -384,7 +384,7 @@ def test_append_run_event_skips_delta_coalesce_when_target_seq_is_occupied(db):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "runtime_scope_key": "team:mission-1:leader",
@@ -397,7 +397,7 @@ def test_append_run_event_skips_delta_coalesce_when_target_seq_is_occupied(db):
         {
             "type": "tool.start",
             "session_id": "runtime-2",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-2",
             "turn_id": "turn-2",
             "runtime_scope_key": "team:mission-1:node:worker",
@@ -411,7 +411,7 @@ def test_append_run_event_skips_delta_coalesce_when_target_seq_is_occupied(db):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "runtime_scope_key": "team:mission-1:leader",
@@ -433,7 +433,7 @@ def test_append_run_event_preserves_message_deltas_across_tool_events(db):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 1,
@@ -445,7 +445,7 @@ def test_append_run_event_preserves_message_deltas_across_tool_events(db):
         {
             "type": "tool.progress",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 2,
@@ -457,7 +457,7 @@ def test_append_run_event_preserves_message_deltas_across_tool_events(db):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 3,
@@ -480,7 +480,7 @@ def test_append_run_event_treats_session_recalled_as_terminal_boundary(db):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 1,
@@ -493,7 +493,7 @@ def test_append_run_event_treats_session_recalled_as_terminal_boundary(db):
         {
             "type": "session.recalled",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 2,
@@ -523,7 +523,7 @@ def test_append_run_event_does_not_coalesce_message_delta_when_offset_restarts(d
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 1,
@@ -535,7 +535,7 @@ def test_append_run_event_does_not_coalesce_message_delta_when_offset_restarts(d
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 2,
@@ -547,7 +547,7 @@ def test_append_run_event_does_not_coalesce_message_delta_when_offset_restarts(d
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 3,
@@ -584,7 +584,7 @@ def test_append_run_event_preserves_cumulative_message_delta_as_source_event(db)
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 1,
@@ -596,7 +596,7 @@ def test_append_run_event_preserves_cumulative_message_delta_as_source_event(db)
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 2,
@@ -619,7 +619,7 @@ def test_append_run_event_coalesces_adjacent_reasoning_deltas_by_source(db):
         {
             "type": "reasoning.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 1,
@@ -631,7 +631,7 @@ def test_append_run_event_coalesces_adjacent_reasoning_deltas_by_source(db):
         {
             "type": "reasoning.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 2,
@@ -643,7 +643,7 @@ def test_append_run_event_coalesces_adjacent_reasoning_deltas_by_source(db):
         {
             "type": "reasoning.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 3,
@@ -671,7 +671,7 @@ def test_append_run_event_prunes_on_terminal_event(db, monkeypatch):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "seq": 7,
             "payload": {"text": "still running"},
@@ -682,7 +682,7 @@ def test_append_run_event_prunes_on_terminal_event(db, monkeypatch):
         {
             "type": "message.complete",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "seq": 8,
             "payload": {"status": "completed", "text": "done"},
@@ -706,7 +706,7 @@ def test_append_run_event_compacts_on_terminal_event(db, monkeypatch):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 1,
@@ -718,7 +718,7 @@ def test_append_run_event_compacts_on_terminal_event(db, monkeypatch):
         {
             "type": "message.complete",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 2,
@@ -741,7 +741,7 @@ def test_append_session_info_updates_runtime_state_and_deduplicates_raw_rows(db)
         {
             "type": "session.info",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "runtime_scope_key": "profile:agent-default",
@@ -754,7 +754,7 @@ def test_append_session_info_updates_runtime_state_and_deduplicates_raw_rows(db)
         {
             "type": "session.info",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "runtime_scope_key": "profile:agent-default",
@@ -770,7 +770,7 @@ def test_append_session_info_updates_runtime_state_and_deduplicates_raw_rows(db)
     assert duplicate["_persistence_disposition"] == "duplicate_session_info"
     assert duplicate["seq"] == 1
     assert state["runtime_scope_key"] == "profile:agent-default"
-    assert state["runtime_session_id"] == "runtime-1"
+    assert state["execution_session_id"] == "runtime-1"
     assert state["run_id"] == "run-1"
     assert state["turn_id"] == "turn-1"
     assert state["status"] == "starting"
@@ -788,7 +788,7 @@ def test_append_session_info_same_payload_new_run_is_not_deduplicated(db):
         {
             "type": "session.info",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "runtime_scope_key": "profile:agent-default",
@@ -801,7 +801,7 @@ def test_append_session_info_same_payload_new_run_is_not_deduplicated(db):
         {
             "type": "session.info",
             "session_id": "runtime-2",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-2",
             "turn_id": "turn-2",
             "runtime_scope_key": "profile:agent-default",
@@ -814,7 +814,7 @@ def test_append_session_info_same_payload_new_run_is_not_deduplicated(db):
     events = db.list_run_events("stored-1")
 
     assert "_persistence_disposition" not in second
-    assert state["runtime_session_id"] == "runtime-2"
+    assert state["execution_session_id"] == "runtime-2"
     assert state["run_id"] == "run-2"
     assert state["turn_id"] == "turn-2"
     assert state["source_seq"] == 2
@@ -829,7 +829,7 @@ def test_prune_duplicate_session_info_events_keeps_latest_duplicate(db):
         db._conn.execute(
             """
             INSERT INTO run_events (
-                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                session_id, run_id, turn_id, execution_session_id, runtime_scope_key,
                 event_type, seq, timestamp, payload_json, event_json, status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -845,7 +845,7 @@ def test_prune_duplicate_session_info_events_keeps_latest_duplicate(db):
                 payload,
                 (
                     '{"type":"session.info","session_id":"runtime-1",'
-                    '"stored_session_id":"stored-1","run_id":"run-1",'
+                    '"conversation_session_id":"stored-1","run_id":"run-1",'
                     '"turn_id":"turn-1","runtime_scope_key":"profile:agent-default",'
                     f'"seq":{seq},"timestamp":{float(seq)},"payload":{payload}}}'
                 ),
@@ -874,7 +874,7 @@ def test_append_run_event_deduplicates_repeated_terminal_for_run(db):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 1,
@@ -886,7 +886,7 @@ def test_append_run_event_deduplicates_repeated_terminal_for_run(db):
         {
             "type": "message.complete",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 2,
@@ -898,7 +898,7 @@ def test_append_run_event_deduplicates_repeated_terminal_for_run(db):
         {
             "type": "message.complete",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 3,
@@ -937,7 +937,7 @@ def test_append_run_event_projects_team_member_message_complete_to_read_model(db
         {
             "type": "message.complete",
             "session_id": "runtime-member-1",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": "team-member-run-1",
             "turn_id": "team-member-turn-1",
             "message_seq_in_run": 1,
@@ -981,7 +981,7 @@ def test_team_message_complete_event_does_not_duplicate_late_worker_flush(db):
         {
             "type": "message.complete",
             "session_id": "runtime-member-1",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": "team-member-run-1",
             "turn_id": "team-member-turn-1",
             "message_seq_in_run": 1,
@@ -1036,7 +1036,7 @@ def test_team_message_complete_event_does_not_claim_early_worker_flush(db):
         {
             "type": "message.complete",
             "session_id": "runtime-member-1",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": "team-member-run-1",
             "turn_id": "team-member-turn-1",
             "message_seq_in_run": 1,
@@ -1074,7 +1074,7 @@ def test_append_run_event_does_not_project_team_mission_node_message_complete(db
         {
             "type": "message.complete",
             "session_id": "runtime-node-1",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": "node-run-1",
             "turn_id": "node-turn-1",
             "message_seq_in_run": 1,
@@ -1100,7 +1100,7 @@ def test_append_run_event_ignores_stream_events_after_terminal_for_run(db):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 1,
@@ -1112,7 +1112,7 @@ def test_append_run_event_ignores_stream_events_after_terminal_for_run(db):
         {
             "type": "message.complete",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 2,
@@ -1124,7 +1124,7 @@ def test_append_run_event_ignores_stream_events_after_terminal_for_run(db):
         {
             "type": "message.delta",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 3,
@@ -1150,7 +1150,7 @@ def test_append_run_event_allows_higher_priority_terminal_upgrade(db):
         {
             "type": "message.complete",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 1,
@@ -1162,7 +1162,7 @@ def test_append_run_event_allows_higher_priority_terminal_upgrade(db):
         {
             "type": "message.complete",
             "session_id": "runtime-1",
-            "stored_session_id": "stored-1",
+            "conversation_session_id": "stored-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "seq": 2,
@@ -1184,7 +1184,7 @@ def test_compact_run_events_prunes_terminal_stream_rows_from_old_database(db):
         session_id="stored-1",
         runtime_scope_key="stored-1",
         turn_id="turn-1",
-        runtime_session_id="runtime-1",
+        execution_session_id="runtime-1",
         status="completed",
     )
 
@@ -1205,7 +1205,7 @@ def test_compact_run_events_prunes_terminal_stream_rows_from_old_database(db):
         db._conn.execute(
             """
             INSERT INTO run_events (
-                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                session_id, run_id, turn_id, execution_session_id, runtime_scope_key,
                 event_type, seq, timestamp, payload_json, event_json, status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -1221,7 +1221,7 @@ def test_compact_run_events_prunes_terminal_stream_rows_from_old_database(db):
                 payload,
                 (
                     f'{{"type":"{event_type}","session_id":"runtime-1",'
-                    '"stored_session_id":"stored-1","run_id":"run-1",'
+                    '"conversation_session_id":"stored-1","run_id":"run-1",'
                     '"turn_id":"turn-1","runtime_scope_key":"stored-1",'
                     f'"seq":{seq},"timestamp":{float(seq)},"payload":{payload}}}'
                 ),
@@ -1260,7 +1260,7 @@ def test_compact_run_events_preserves_tool_complete_for_terminal_run(db):
         session_id="stored-1",
         runtime_scope_key="stored-1",
         turn_id="turn-1",
-        runtime_session_id="runtime-1",
+        execution_session_id="runtime-1",
         status="completed",
     )
 
@@ -1288,7 +1288,7 @@ def test_compact_run_events_preserves_tool_complete_for_terminal_run(db):
         db._conn.execute(
             """
             INSERT INTO run_events (
-                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                session_id, run_id, turn_id, execution_session_id, runtime_scope_key,
                 event_type, seq, timestamp, payload_json, event_json, status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -1304,7 +1304,7 @@ def test_compact_run_events_preserves_tool_complete_for_terminal_run(db):
                 payload,
                 (
                     f'{{"type":"{event_type}","session_id":"runtime-1",'
-                    '"stored_session_id":"stored-1","run_id":"run-1",'
+                    '"conversation_session_id":"stored-1","run_id":"run-1",'
                     '"turn_id":"turn-1","runtime_scope_key":"stored-1",'
                     f'"seq":{seq},"timestamp":{float(seq)},"payload":{payload}}}'
                 ),
@@ -1327,7 +1327,7 @@ def test_compact_run_events_preserves_active_message_delta_rows(db):
         session_id="stored-1",
         runtime_scope_key="stored-1",
         turn_id="turn-1",
-        runtime_session_id="runtime-1",
+        execution_session_id="runtime-1",
         status="running",
     )
     for seq, payload in (
@@ -1338,7 +1338,7 @@ def test_compact_run_events_preserves_active_message_delta_rows(db):
         db._conn.execute(
             """
             INSERT INTO run_events (
-                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                session_id, run_id, turn_id, execution_session_id, runtime_scope_key,
                 event_type, seq, timestamp, payload_json, event_json, status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -1354,7 +1354,7 @@ def test_compact_run_events_preserves_active_message_delta_rows(db):
                 payload,
                 (
                     '{"type":"message.delta","session_id":"runtime-1",'
-                    '"stored_session_id":"stored-1","run_id":"run-1",'
+                    '"conversation_session_id":"stored-1","run_id":"run-1",'
                     '"turn_id":"turn-1","runtime_scope_key":"stored-1",'
                     f'"seq":{seq},"timestamp":{float(seq)},"payload":{payload}}}'
                 ),
@@ -1382,7 +1382,7 @@ def test_compact_run_events_prunes_terminal_stream_rows_without_run_row(db):
         db._conn.execute(
             """
             INSERT INTO run_events (
-                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                session_id, run_id, turn_id, execution_session_id, runtime_scope_key,
                 event_type, seq, timestamp, payload_json, event_json, status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -1398,7 +1398,7 @@ def test_compact_run_events_prunes_terminal_stream_rows_without_run_row(db):
                 payload,
                 (
                     f'{{"type":"{event_type}","session_id":"runtime-1",'
-                    '"stored_session_id":"stored-1","run_id":"run-missing",'
+                    '"conversation_session_id":"stored-1","run_id":"run-missing",'
                     '"turn_id":"turn-1","runtime_scope_key":"stored-1",'
                     f'"seq":{seq},"timestamp":{float(seq)},"payload":{payload}}}'
                 ),
@@ -1421,14 +1421,14 @@ def test_compact_run_events_deduplicates_existing_terminal_rows(db):
         session_id="stored-1",
         runtime_scope_key="profile:agent-default",
         turn_id="turn-1",
-        runtime_session_id="runtime-1",
+        execution_session_id="runtime-1",
         status="completed",
     )
     for seq, text in ((11, "first complete"), (12, "latest complete")):
         db._conn.execute(
             """
             INSERT INTO run_events (
-                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                session_id, run_id, turn_id, execution_session_id, runtime_scope_key,
                 event_type, seq, timestamp, payload_json, event_json, status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -1442,7 +1442,7 @@ def test_compact_run_events_deduplicates_existing_terminal_rows(db):
                 seq,
                 float(seq),
                 f'{{"status":"complete","text":"{text}"}}',
-                f'{{"type":"message.complete","session_id":"runtime-1","stored_session_id":"stored-1","run_id":"run-1","turn_id":"turn-1","runtime_scope_key":"profile:agent-default","seq":{seq},"payload":{{"status":"complete","text":"{text}"}}}}',
+                f'{{"type":"message.complete","session_id":"runtime-1","conversation_session_id":"stored-1","run_id":"run-1","turn_id":"turn-1","runtime_scope_key":"profile:agent-default","seq":{seq},"payload":{{"status":"complete","text":"{text}"}}}}',
                 "completed",
             ),
         )
@@ -2149,7 +2149,7 @@ class TestMessageStorage:
             idempotency_key="branch-key-1",
         )
 
-        assert result["stored_session_id"] == "branch-1"
+        assert result["conversation_session_id"] == "branch-1"
         assert result["parent_session_id"] == "source"
         assert result["root_session_id"] == "source"
         assert result["branch_mode"] == "materialized_prefix"
@@ -2227,8 +2227,8 @@ class TestMessageStorage:
             idempotency_key="branch-key-1",
         )
 
-        assert created["stored_session_id"] == "branch-1"
-        assert replayed["stored_session_id"] == "branch-1"
+        assert created["conversation_session_id"] == "branch-1"
+        assert replayed["conversation_session_id"] == "branch-1"
         assert replayed["replayed"] is True
         assert db.get_session("branch-duplicate") is None
 
@@ -4890,7 +4890,7 @@ class TestAutoMaintenance:
             session_id="stored-1",
             runtime_scope_key="stored-1",
             turn_id="turn-1",
-            runtime_session_id="runtime-1",
+            execution_session_id="runtime-1",
             status="completed",
         )
         for seq, payload in (
@@ -4901,7 +4901,7 @@ class TestAutoMaintenance:
             db._conn.execute(
                 """
                 INSERT INTO run_events (
-                    session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                    session_id, run_id, turn_id, execution_session_id, runtime_scope_key,
                     event_type, seq, timestamp, payload_json, event_json, status
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -4917,7 +4917,7 @@ class TestAutoMaintenance:
                     payload,
                     (
                         f'{{"type":"{"message.complete" if seq == 3 else "message.delta"}","session_id":"runtime-1",'
-                        '"stored_session_id":"stored-1","run_id":"run-1",'
+                        '"conversation_session_id":"stored-1","run_id":"run-1",'
                         '"turn_id":"turn-1","runtime_scope_key":"stored-1",'
                         f'"seq":{seq},"timestamp":{float(seq)},"payload":{payload}}}'
                     ),

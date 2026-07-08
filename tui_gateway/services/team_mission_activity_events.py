@@ -171,8 +171,8 @@ def _event_summary(event: dict[str, Any]) -> dict[str, Any]:
         "subject_type": text(subject.get("type")),
         "subject_id": text(subject.get("id")),
         "subject_node_id": text(subject.get("node_id") or subject.get("nodeId")),
-        "runtime_stable_session_id": text(
-            subject.get("runtime_stable_session_id") or subject.get("runtimeStableSessionId")
+        "runtime_conversation_session_id": text(
+            subject.get("runtime_conversation_session_id") or subject.get("runtimeConversationSessionId")
         ),
         "text_event": text(text_stream.get("event")),
         "text_len": len(text(text_stream.get("delta") or text_stream.get("text"))),
@@ -525,9 +525,9 @@ def transport_event_for_subscription(event: dict[str, Any], activity_id: str) ->
         fields=(
             ("mission_id", ("missionId",)),
             ("conversation_id", ("conversationId",)),
-            ("stable_session_id", ("stableSessionId",)),
-            ("stored_session_id", ("storedSessionId",)),
-            ("runtime_session_id", ("runtimeSessionId",)),
+            ("conversation_session_id", ("conversationSessionId",)),
+            ("conversation_session_id", ("conversationSessionId",)),
+            ("execution_session_id", ("executionSessionId",)),
             ("runtime_scope_key", ("runtimeScopeKey",)),
             ("run_id", ("runId",)),
             ("turn_id", ("turnId",)),
@@ -570,8 +570,8 @@ def transport_event_for_subscription(event: dict[str, Any], activity_id: str) ->
         fields=(
             ("mission_id", ("missionId",)),
             ("conversation_id", ("conversationId",)),
-            ("stored_session_id", ("storedSessionId", "stable_session_id", "stableSessionId")),
-            ("session_id", ("sessionId", "runtime_session_id", "runtimeSessionId")),
+            ("conversation_session_id", ("conversationSessionId", "conversation_session_id", "conversationSessionId")),
+            ("session_id", ("sessionId", "execution_session_id", "executionSessionId")),
             ("runtime_scope_key", ("runtimeScopeKey",)),
             ("run_id", ("runId",)),
             ("turn_id", ("turnId",)),

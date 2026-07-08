@@ -63,7 +63,7 @@ def _create_mission_via_gateway(db: SessionDB, monkeypatch, tmp_path: Path, miss
             "id": _rid,
             "result": {
                 "run_id": params.get("run_id") or "run-leader",
-                "stored_session_id": params.get("stored_session_id") or "",
+                "conversation_session_id": params.get("conversation_session_id") or "",
                 "runtime_scope_key": params.get("runtime_scope_key") or "",
                 "status": "running",
             },
@@ -141,7 +141,7 @@ def test_team_mission_complete_marks_mission_activity_completed(tmp_path: Path) 
     db = _db(tmp_path)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team",
         active_mission_id="mission-1",
@@ -177,7 +177,7 @@ def test_reconcile_mission_activities_one_shot_backfills_existing(tmp_path: Path
     db = _db(tmp_path)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Legacy active mission",
         active_mission_id="mission-legacy",
@@ -210,7 +210,7 @@ def test_render_snapshot_includes_missions_top_level_list(monkeypatch, tmp_path:
     db.create_session("team-session-1", source="team_mission")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team",
         active_mission_id="mission-1",

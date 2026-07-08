@@ -682,7 +682,7 @@ def test_prompt_submit_writes_legacy_audit_row_with_chat_activity_id(
     row = _command_by_source(gateway_db, "chat:prompt-session", "prompt.submit")
     assert row["kind"] == "start"
     assert row["payload"] == {"session_id": "prompt-session", "text_len": 5}
-    assert result["stored_session_id"] == "prompt-session"
+    assert result["conversation_session_id"] == "prompt-session"
 
 
 # -- Group D: state machine integrity ---------------------------------------

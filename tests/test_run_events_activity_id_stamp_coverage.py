@@ -74,7 +74,7 @@ def _setup_mission(db: SessionDB) -> None:
         mode="supervised_mission",
         status="running",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "conversation_id": "conversation-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "conversation_id": "conversation-1"},
     )
     for node_id, kind, session_id, run_id in (
         ("root", "root", "leader-session-1", "leader-run-1"),
@@ -95,7 +95,7 @@ def _setup_mission(db: SessionDB) -> None:
             node_id=node_id,
             run_id=run_id,
             session_id=session_id,
-            runtime_session_id=f"runtime-{node_id}",
+            execution_session_id=f"runtime-{node_id}",
             runtime_scope_key=f"team:mission-1:{node_id}",
             role=kind,
             metadata={"run_context_json": json.dumps(_run_context().to_payload())},
@@ -167,7 +167,7 @@ async def test_team_mission_node_message_complete_stamps_mission_prefix(tmp_path
             scope_key="team:mission-1:worker",
             conversation_id="worker-session-1",
             run_id="worker-run-1",
-            stored_session_id="worker-session-1",
+            conversation_session_id="worker-session-1",
             turn_id="turn-worker",
             run_context_json=json.dumps(_run_context().to_payload()),
         )
@@ -178,7 +178,7 @@ async def test_team_mission_node_message_complete_stamps_mission_prefix(tmp_path
                 params={
                     "type": "message.complete",
                     "session_id": "runtime-worker",
-                    "stored_session_id": "worker-session-1",
+                    "conversation_session_id": "worker-session-1",
                     "run_id": "worker-run-1",
                     "turn_id": "turn-worker",
                     "payload": {"status": "complete", "text": "done"},
@@ -200,7 +200,7 @@ def test_team_mission_live_conversation_mirror_is_disabled(tmp_path: Path) -> No
             event={
                 "type": "message.complete",
                 "session_id": "runtime-worker",
-                "stored_session_id": "synthesis-session-1",
+                "conversation_session_id": "synthesis-session-1",
                 "run_id": "synthesis-run-1",
                 "turn_id": "turn-worker",
                 "runtime_scope_key": "team:mission-1:worker",
@@ -239,7 +239,7 @@ async def test_member_chat_dispatch_stamps_act_member_chat_prefix(monkeypatch: p
     bridge = WorkerPublishBridge(emit=emit, loop=asyncio.get_running_loop())
     try:
         bridge.install(
-            stored_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             run_context=_run_context(
                 participant_id="member:alice",
                 activity_id="act-member_chat:team-session-1:alice",
@@ -376,7 +376,7 @@ async def test_no_run_events_row_with_null_activity_id_after_full_mission_run(tm
                 scope_key=scope,
                 conversation_id=session_id,
                 run_id=run_id,
-                stored_session_id=session_id,
+                conversation_session_id=session_id,
                 turn_id=f"turn-{run_id}",
                 run_context_json=json.dumps(_run_context().to_payload()),
             )
@@ -387,7 +387,7 @@ async def test_no_run_events_row_with_null_activity_id_after_full_mission_run(tm
                     params={
                         "type": "message.complete",
                         "session_id": f"runtime-{run_id}",
-                        "stored_session_id": session_id,
+                        "conversation_session_id": session_id,
                         "run_id": run_id,
                         "turn_id": f"turn-{run_id}",
                         "payload": {"status": "complete", "text": f"{run_id} done"},
@@ -399,7 +399,7 @@ async def test_no_run_events_row_with_null_activity_id_after_full_mission_run(tm
             scope_key="team:mission-1:worker",
             conversation_id="worker-session-1",
             run_id="crashed-run-1",
-            stored_session_id="worker-session-1",
+            conversation_session_id="worker-session-1",
             turn_id="turn-crashed",
             run_context_json=json.dumps(_run_context().to_payload()),
         )
@@ -409,7 +409,7 @@ async def test_no_run_events_row_with_null_activity_id_after_full_mission_run(tm
             RunTerminalFrame(
                 run_id="crashed-run-1",
                 status="failed",
-                stored_session_id="worker-session-1",
+                conversation_session_id="worker-session-1",
                 turn_id="turn-crashed",
                 message="worker failed",
             ),

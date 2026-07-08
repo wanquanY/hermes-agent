@@ -147,7 +147,7 @@ class RunOrchestrator:
         rows = conn.execute(
             """
             SELECT run_id, session_id, runtime_scope_key, turn_id,
-                   runtime_session_id, status
+                   execution_session_id, status
               FROM runs
              WHERE status IN ({placeholders})
             """.format(

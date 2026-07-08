@@ -234,7 +234,7 @@ class StorageMaintenanceService:
                     error=str(backfill_result.get("error") or "") if isinstance(backfill_result, dict) else "",
                 )
             )
-            if isinstance(backfill_result, dict):
+            if isinstance(backfill_result, dict) and not backfill_result.get("skipped"):
                 compaction_result["activity_id_backfill"] = backfill_result
         except Exception as exc:
             self._logger.debug("activity_id backfill startup pass failed: %s", exc)

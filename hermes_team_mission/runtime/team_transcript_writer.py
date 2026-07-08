@@ -417,9 +417,9 @@ def _event_conversation_session_id(event: dict[str, Any], payload: dict[str, Any
         or payload.get("conversationSessionId")
         or run_context.get("conversation_session_id")
         or run_context.get("conversationSessionId")
-        or event.get("stored_session_id")
-        or payload.get("stored_session_id")
-        or payload.get("storedSessionId")
+        or event.get("conversation_session_id")
+        or payload.get("conversation_session_id")
+        or payload.get("conversationSessionId")
         or fallback
     )
 
@@ -934,7 +934,7 @@ def _mission_report_context_for_run(db: Any, run_id: str, *, conn: Any | None = 
                 "node_id": _text(_row_value(row, "node_id")),
                 "run_id": _text(_row_value(row, "run_id")),
                 "session_id": _text(_row_value(row, "session_id")),
-                "runtime_session_id": _text(_row_value(row, "runtime_session_id")),
+                "execution_session_id": _text(_row_value(row, "execution_session_id")),
                 "runtime_scope_key": _text(_row_value(row, "runtime_scope_key")),
                 "role": _text(_row_value(row, "role")),
                 "metadata": _json_loads(_row_value(row, "metadata_json"), {}),
@@ -1695,13 +1695,13 @@ def _conversation_session_id_from_mission(mission: dict[str, Any] | None) -> str
     return _text(
         metadata.get("conversation_session_id")
         or metadata.get("conversationSessionId")
-        or metadata.get("stable_team_session_id")
-        or metadata.get("stableTeamSessionId")
-        or metadata.get("stable_session_id")
-        or metadata.get("stableSessionId")
+        or metadata.get("conversation_team_session_id")
+        or metadata.get("conversationTeamSessionId")
+        or metadata.get("conversation_session_id")
+        or metadata.get("conversationSessionId")
         or mission.get("leader_session_id")
         or mission.get("conversation_session_id")
-        or mission.get("stable_session_id")
+        or mission.get("conversation_session_id")
     )
 
 
@@ -1856,7 +1856,7 @@ class MissionSummaryWriter:
                     conversation = db.get_team_mission_conversation(conversation_id) or {}
                 except Exception:
                     conversation = {}
-                conversation_session_id = _text(conversation.get("stable_session_id"))
+                conversation_session_id = _text(conversation.get("conversation_session_id"))
         if not conversation_session_id:
             return {}
         summary_text = _text(summary_text)

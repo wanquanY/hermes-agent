@@ -3,7 +3,7 @@
 Two locks:
   1. P1 — the conversation_participants data layer + run→participant resolver.
   2. P0 — the routing invariant: a recorded run event reaches a conversation
-     purely by stored_session_id, with NO mission binding required. This is the
+     purely by conversation_session_id, with NO mission binding required. This is the
      physical basis for "conversation-first"; every later phase depends on it
      staying true, so it gets an explicit regression guard.
 """
@@ -117,7 +117,7 @@ def test_team_conversation_populates_participants_from_team_membership(tmp_path:
 
     db.ensure_team_mission_conversation(
         conversation_id="conv-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team Conversation",
     )
@@ -143,8 +143,8 @@ def test_team_conversation_populates_participants_from_team_membership(tmp_path:
 
 
 # ── P0: routing invariant ────────────────────────────────────────────
-def test_run_event_routes_by_stored_session_id_without_mission(tmp_path: Path):
-    """A run event reaches a conversation by stored_session_id alone.
+def test_run_event_routes_by_conversation_session_id_without_mission(tmp_path: Path):
+    """A run event reaches a conversation by conversation_session_id alone.
 
     No team_mission, no active_mission_id, no mission binding of any kind — yet
     the event is durably recorded against the conversation session and readable
@@ -160,7 +160,7 @@ def test_run_event_routes_by_stored_session_id_without_mission(tmp_path: Path):
         {
             "type": "message.delta",
             "session_id": "plain-conv",
-            "stored_session_id": "plain-conv",
+            "conversation_session_id": "plain-conv",
             "run_id": "run-x",
             "turn_id": "turn-x",
             "seq": 1,
@@ -192,7 +192,7 @@ def test_record_event_stamps_participant_id_for_leader(tmp_path: Path):
         role="member", profile_name="Alice",
     )
     db.ensure_team_mission_conversation(
-        conversation_id="conv-1", stable_session_id="team-session-1",
+        conversation_id="conv-1", conversation_session_id="team-session-1",
         team_id="team-1", title="T",
     )
     db.upsert_run(run_id="run-leader", session_id="team-session-1", status="running")
@@ -201,7 +201,7 @@ def test_record_event_stamps_participant_id_for_leader(tmp_path: Path):
         {
             "type": "message.delta",
             "session_id": "team-session-1",
-            "stored_session_id": "team-session-1",
+            "conversation_session_id": "team-session-1",
             "run_id": "run-leader",
             "turn_id": "t1",
             "seq": 1,
@@ -230,7 +230,7 @@ def test_record_event_stamps_participant_id_for_member_by_profile(tmp_path: Path
         role="member", profile_name="Alice",
     )
     db.ensure_team_mission_conversation(
-        conversation_id="conv-1", stable_session_id="team-session-1",
+        conversation_id="conv-1", conversation_session_id="team-session-1",
         team_id="team-1", title="T",
     )
     db.upsert_run(run_id="run-alice", session_id="team-session-1", status="running")
@@ -239,7 +239,7 @@ def test_record_event_stamps_participant_id_for_member_by_profile(tmp_path: Path
         {
             "type": "message.delta",
             "session_id": "team-session-1",
-            "stored_session_id": "team-session-1",
+            "conversation_session_id": "team-session-1",
             "run_id": "run-alice",
             "turn_id": "t1",
             "seq": 1,
@@ -267,7 +267,7 @@ def test_record_event_with_no_hints_does_not_stamp(tmp_path: Path):
         {
             "type": "message.delta",
             "session_id": "plain-conv",
-            "stored_session_id": "plain-conv",
+            "conversation_session_id": "plain-conv",
             "run_id": "run-y",
             "turn_id": "t1",
             "seq": 1,

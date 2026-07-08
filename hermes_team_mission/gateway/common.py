@@ -160,16 +160,16 @@ def _conversation_title_from_submit(db, params: dict, text: str) -> str:
         return ""
 
 
-def _ensure_team_mission_runtime_session_shell(stable_session_id: str) -> str:
-    stable_session_id = str(stable_session_id or "").strip()
-    if not stable_session_id or not os.getenv("DOVIE_HERMES_CONTROL_HOME"):
+def _ensure_team_mission_runtime_session_shell(conversation_session_id: str) -> str:
+    conversation_session_id = str(conversation_session_id or "").strip()
+    if not conversation_session_id or not os.getenv("DOVIE_HERMES_CONTROL_HOME"):
         return ""
     runtime_db = _get_runtime_db()
     if runtime_db is None:
         return "team mission runtime state db unavailable"
     try:
-        if not runtime_db.get_session(stable_session_id):
-            runtime_db.create_session(stable_session_id, source="team_mission", transient=False)
+        if not runtime_db.get_session(conversation_session_id):
+            runtime_db.create_session(conversation_session_id, source="team_mission", transient=False)
     except Exception:
         return "team mission runtime session shell unavailable"
     return ""
@@ -605,18 +605,18 @@ def _conversation_session_id_from_params(params: dict, metadata: dict | None = N
     return str(
         params.get("conversation_session_id")
         or params.get("conversationSessionId")
-        or params.get("stable_team_session_id")
-        or params.get("stableTeamSessionId")
+        or params.get("conversation_team_session_id")
+        or params.get("conversationTeamSessionId")
         or params.get("team_session_id")
         or params.get("teamSessionId")
-        or params.get("stored_session_id")
-        or params.get("storedSessionId")
+        or params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or params.get("session_id")
         or params.get("sessionId")
         or metadata.get("conversation_session_id")
         or metadata.get("conversationSessionId")
-        or metadata.get("stable_team_session_id")
-        or metadata.get("stableTeamSessionId")
+        or metadata.get("conversation_team_session_id")
+        or metadata.get("conversationTeamSessionId")
         or metadata.get("team_session_id")
         or metadata.get("teamSessionId")
         or ""
@@ -647,7 +647,7 @@ def _normalize_mission_metadata(params: dict, metadata: dict) -> dict:
     conversation_session_id = _conversation_session_id_from_params(params, normalized)
     if conversation_session_id:
         normalized.setdefault("conversation_session_id", conversation_session_id)
-        normalized.setdefault("stableTeamSessionId", conversation_session_id)
+        normalized.setdefault("conversationTeamSessionId", conversation_session_id)
     return normalized
 
 
@@ -1282,7 +1282,7 @@ def _active_node_run_from_bindings(db, bindings: list[dict] | None) -> dict:
             **binding,
             **run,
             "run_id": run_id,
-            "runtime_session_id": str(run.get("runtime_session_id") or binding.get("runtime_session_id") or ""),
+            "execution_session_id": str(run.get("execution_session_id") or binding.get("execution_session_id") or ""),
             "runtime_scope_key": str(run.get("runtime_scope_key") or binding.get("runtime_scope_key") or ""),
             "turn_id": str(run.get("turn_id") or binding.get("turn_id") or ""),
         }
@@ -1294,9 +1294,9 @@ def _active_node_run_from_bindings(db, bindings: list[dict] | None) -> dict:
 def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
     if not isinstance(conversation, dict):
         return {}
-    stable_session_id = str(
-        conversation.get("stable_session_id")
-        or conversation.get("stableSessionId")
+    conversation_session_id = str(
+        conversation.get("conversation_session_id")
+        or conversation.get("conversationSessionId")
         or ""
     ).strip()
     conversation_id = str(
@@ -1360,10 +1360,10 @@ def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
         for node in nodes
     )
     run_state = run_control.session_status(
-        stable_session_id,
+        conversation_session_id,
         db=db,
         current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
-    ) if stable_session_id else {}
+    ) if conversation_session_id else {}
     leader_running = bool(run_state.get("running"))
     node_running = bool(active_node_run)
     mission_running = bool(active_node_count) or mission_status in _TEAM_MISSION_ACTIVE_STATUSES
@@ -1377,10 +1377,10 @@ def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
     waiting_approval = approval_waiting or mission_status == "waiting_approval"
     active_run_id = str(run_state.get("active_run_id") or "") if leader_running else str(active_node_run.get("run_id") or "")
     active_turn_id = str(run_state.get("active_turn_id") or "") if leader_running else str(active_node_run.get("turn_id") or "")
-    active_runtime_session_id = (
-        str(run_state.get("active_runtime_session_id") or "")
+    active_execution_session_id = (
+        str(run_state.get("active_execution_session_id") or "")
         if leader_running
-        else str(active_node_run.get("runtime_session_id") or "")
+        else str(active_node_run.get("execution_session_id") or "")
     )
     active_runtime_scope_key = (
         str(run_state.get("runtime_scope_key") or "")
@@ -1419,7 +1419,7 @@ def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
         "activeMissionId": mission_id,
         "active_run_id": active_run_id if running else "",
         "active_turn_id": active_turn_id if running else "",
-        "active_runtime_session_id": active_runtime_session_id if running else "",
+        "active_execution_session_id": active_execution_session_id if running else "",
         "runtime_scope_key": active_runtime_scope_key if running else "",
         "run_started_at": run_started_at if running else 0,
         "run_updated_at": run_updated_at,
@@ -1759,7 +1759,7 @@ def _compact_graph_context(graph: dict) -> dict:
         "conversation": {
             "id": str((conversation or {}).get("conversation_id") or ""),
             "title": str((conversation or {}).get("title") or "")[:160],
-            "stable_session_id": str((conversation or {}).get("stable_session_id") or ""),
+            "conversation_session_id": str((conversation or {}).get("conversation_session_id") or ""),
             "active_mission_id": str((conversation or {}).get("active_mission_id") or ""),
         },
         "mission": {

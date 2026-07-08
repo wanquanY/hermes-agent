@@ -58,7 +58,7 @@ def _setup_db(monkeypatch, tmp_path: Path):
         run_id="run-worker",
         session_id="session-worker",
         runtime_scope_key=_RUNTIME_SCOPE_KEY,
-        runtime_session_id="runtime-worker",
+        execution_session_id="runtime-worker",
         status="running",
     )
     db.bind_team_mission_run(
@@ -66,7 +66,7 @@ def _setup_db(monkeypatch, tmp_path: Path):
         node_id="node-worker",
         run_id="run-worker",
         session_id="session-worker",
-        runtime_session_id="runtime-worker",
+        execution_session_id="runtime-worker",
         runtime_scope_key=_RUNTIME_SCOPE_KEY,
         role="worker",
     )
@@ -85,7 +85,7 @@ def _append_run_event(db, session_id: str, seq: int, event_type: str = "message.
         session_id,
         {
             "type": event_type,
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": "run-worker",
             "turn_id": "turn-worker",
             "runtime_scope_key": _RUNTIME_SCOPE_KEY,

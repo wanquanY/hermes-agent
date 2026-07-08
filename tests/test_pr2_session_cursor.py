@@ -36,14 +36,14 @@ def _frame(
     *,
     run_id: str,
     text: str,
-    stored_session_id: str = "sess-1",
+    conversation_session_id: str = "sess-1",
     seq: int = 0,
 ) -> dict[str, Any]:
     """A minimal message.complete frame suitable for ``append_run_event``."""
     return {
         "type": "message.complete",
         "session_id": f"runtime-{run_id}",
-        "stored_session_id": stored_session_id,
+        "conversation_session_id": conversation_session_id,
         "run_id": run_id,
         "turn_id": f"turn-{run_id}",
         "seq": seq,
@@ -51,15 +51,15 @@ def _frame(
     }
 
 
-def _seed_events(db: SessionDB, stored_session_id: str = "sess-1", n: int = 5) -> list[int]:
+def _seed_events(db: SessionDB, conversation_session_id: str = "sess-1", n: int = 5) -> list[int]:
     """Append ``n`` run_events; return the list of assigned seq values."""
     seqs: list[int] = []
     for i in range(n):
         db.append_run_event(
-            stored_session_id,
+            conversation_session_id,
             _frame(run_id=f"run-{i + 1}", text=f"event-{i + 1}"),
         )
-    for event in db.list_run_events(stored_session_id):
+    for event in db.list_run_events(conversation_session_id):
         seqs.append(int(event["seq"]))
     return seqs
 

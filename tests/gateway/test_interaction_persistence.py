@@ -164,7 +164,7 @@ def test_interaction_lifecycle_requires_db_append_run_event() -> None:
         persist_interaction_event(None, "interaction.requested", _entry("req-1"))
 
 
-def test_interaction_lifecycle_requires_stable_session_id() -> None:
+def test_interaction_lifecycle_requires_conversation_session_id() -> None:
     class _DB:
         def append_run_event(self, session_id, frame):
             return {"type": frame.get("type")}

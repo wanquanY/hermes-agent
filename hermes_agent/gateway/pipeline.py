@@ -35,6 +35,7 @@ never see the alias; ``SessionRepo`` never sees the alias. Frontend code is
 allowed to keep using the alias in transit — dispatch strips it here.
 """
 _SESSION_ID_ALIASES = (
+    "conversation_session_id",
     "stored_session_id",
     "stable_session_id",
     "runtime_session_id",

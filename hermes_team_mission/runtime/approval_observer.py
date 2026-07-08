@@ -118,9 +118,9 @@ def _missions_for_session_key(db: Any, session_key: str) -> list[str]:
     """Resolve a session_key to mission_ids whose conversation includes it.
 
     Three matches considered:
-    1. session_key == team_mission_conversations.stable_session_id (leader session).
+    1. session_key == team_mission_conversations.conversation_session_id (leader session).
     2. session_key == team_mission_run_bindings.session_id (member node session).
-    3. session_key == team_mission_run_bindings.runtime_session_id (worker runtime).
+    3. session_key == team_mission_run_bindings.execution_session_id (worker runtime).
     """
     found: list[str] = []
     seen: set[str] = set()
@@ -140,12 +140,12 @@ def _missions_for_session_key(db: Any, session_key: str) -> list[str]:
                   FROM team_missions tm
                   JOIN team_mission_conversations tmc
                     ON tmc.conversation_id = tm.conversation_id
-                 WHERE tmc.stable_session_id = ?
+                 WHERE tmc.conversation_session_id = ?
                  UNION
                 SELECT DISTINCT mission_id
                   FROM team_mission_run_bindings
                  WHERE session_id = ?
-                    OR runtime_session_id = ?
+                    OR execution_session_id = ?
                     OR runtime_scope_key = ?
                 """,
                 (session_key, session_key, session_key, session_key),

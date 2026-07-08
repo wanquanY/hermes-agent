@@ -39,7 +39,7 @@ def _db_with_bound_node(
         node_id=node_id,
         run_id=run_id,
         session_id=session_id,
-        runtime_session_id="runtime-1",
+        execution_session_id="runtime-1",
         runtime_scope_key="member-chat:conversation-1:alice",
         role="worker",
         metadata={"participant_id": participant_id},

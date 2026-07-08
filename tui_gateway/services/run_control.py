@@ -27,6 +27,7 @@ from hermes_agent.domain.participants import member_participant_id
 from hermes_agent.domain.run_state_machine import ACTIVE_RUN_STATUSES
 from hermes_agent.domain.run_state_machine import TERMINAL_RUN_STATUSES
 from hermes_runtime_event_payloads import primary_deliverable_text
+from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_kind
 from tui_gateway.services import team_mission_activity_events as _team_activity_events
 from tui_gateway.services.run_control_events import (
     delta_event_for_subscription as _delta_event_for_subscription,
@@ -35,7 +36,7 @@ from tui_gateway.services.run_control_events import (
     event_turn_id as _event_turn_id,
     payload_status as _payload_status,
     remember_terminal_delivery as _remember_direct_terminal_delivery,
-    stable_session_id as _stable_session_id,
+    conversation_session_id as _conversation_session_id,
     stream_text_delta as _stream_text_delta,
     terminal_delivery_identity as _terminal_delivery_identity,
 )
@@ -205,10 +206,10 @@ def _run_summary(run: dict[str, Any] | None) -> dict[str, Any]:
     metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
     return {
         "run_id": str(run.get("run_id") or ""),
-        "session_id": str(run.get("session_id") or run.get("stored_session_id") or ""),
+        "session_id": str(run.get("session_id") or run.get("conversation_session_id") or ""),
         "turn_id": str(run.get("turn_id") or ""),
         "runtime_scope_key": str(run.get("runtime_scope_key") or ""),
-        "runtime_session_id": str(run.get("runtime_session_id") or ""),
+        "execution_session_id": str(run.get("execution_session_id") or ""),
         "status": str(run.get("status") or ""),
         "updated_at": run.get("updated_at"),
         "gateway_pid": metadata.get("gateway_pid"),
@@ -223,7 +224,7 @@ def _gateway_instance_id_from_metadata(metadata: dict[str, Any] | None = None) -
     return str(metadata.get("gateway_instance_id") or "").strip()
 
 
-def _live_runtime_session_ids_snapshot() -> set[str]:
+def _live_execution_session_ids_snapshot() -> set[str]:
     with _lock:
         return {
             str(run.get("session_id") or "").strip()
@@ -254,7 +255,7 @@ def _recover_orphaned_active_runs(
     try:
         failed = int(
             method(
-                live_runtime_session_ids=_live_runtime_session_ids_snapshot(),
+                live_execution_session_ids=_live_execution_session_ids_snapshot(),
                 current_pid=os.getpid(),
                 current_gateway_instance_id=str(current_gateway_instance_id or "").strip(),
                 stale_after_seconds=stale_after_seconds,
@@ -432,6 +433,29 @@ def _event_has_team_mission_run_binding(event: dict[str, Any], db: Any = None) -
     return isinstance(binding, dict) and bool(binding)
 
 
+def _team_mission_runtime_event_allows_conversation_status(
+    *,
+    event_type: str,
+    binding: dict[str, Any],
+    db: Any = None,
+) -> bool:
+    if str(event_type or "").strip() not in _TEAM_MISSION_STATUS_SOURCE_EVENT_TYPES:
+        return False
+    mission_id = str((binding or {}).get("mission_id") or "").strip()
+    node_id = str((binding or {}).get("node_id") or "").strip()
+    node: dict[str, Any] = {}
+    if mission_id and node_id:
+        node_getter = _db_method(db, "get_team_mission_node")
+        if node_getter is not None:
+            try:
+                candidate_node = node_getter(mission_id, node_id)
+            except Exception:
+                candidate_node = None
+            node = dict(candidate_node) if isinstance(candidate_node, dict) else {}
+    node_kind = normalize_team_mission_node_kind(node.get("kind"), default="")
+    return node_kind != "synthesis"
+
+
 def _on_team_mission_event_appended(mission_id: str, event: dict[str, Any]) -> None:
     _team_activity_terminal_log(
         "event-log-appended",
@@ -503,7 +527,7 @@ def remember_transport_delivery(
 ) -> None:
     if transport is None or not isinstance(event, dict):
         return
-    stable = _stable_session_id(event)
+    stable = _conversation_session_id(event)
     with _lock:
         for subscription_id in list(_subscription_ids_by_transport.get(transport, set())):
             subscription = _subscriptions_by_id.get(subscription_id)
@@ -513,7 +537,7 @@ def remember_transport_delivery(
                 continue
             kind = str(subscription.get("kind") or "session")
             if kind == "session":
-                if stable and str(subscription.get("stored_session_id") or "").strip() != stable:
+                if stable and str(subscription.get("conversation_session_id") or "").strip() != stable:
                     continue
                 if not _session_subscription_matches_event(subscription, event):
                     continue
@@ -532,7 +556,7 @@ def _event_for_live_subscription_delivery(
     """Project a persisted event back to the live subscription ABI."""
     if transport is None or not isinstance(event, dict):
         return event
-    stable = _stable_session_id(event)
+    stable = _conversation_session_id(event)
     with _lock:
         subscriptions = [
             _subscriptions_by_id.get(subscription_id)
@@ -545,7 +569,7 @@ def _event_for_live_subscription_delivery(
             continue
         kind = str(subscription.get("kind") or "session")
         if kind == "session":
-            if stable and str(subscription.get("stored_session_id") or "").strip() != stable:
+            if stable and str(subscription.get("conversation_session_id") or "").strip() != stable:
                 continue
             if not _session_subscription_matches_event(subscription, event):
                 continue
@@ -620,8 +644,8 @@ def _team_mission_live_status_event_for_subscription(
     live_conversation["activity_state"] = "running"
     live_conversation["active_run_id"] = source_run_id
     live_conversation["active_turn_id"] = str(run.get("turn_id") or binding.get("turn_id") or "")
-    live_conversation["active_runtime_session_id"] = str(
-        run.get("runtime_session_id") or binding.get("runtime_session_id") or ""
+    live_conversation["active_execution_session_id"] = str(
+        run.get("execution_session_id") or binding.get("execution_session_id") or ""
     )
     live_conversation["runtime_scope_key"] = str(
         run.get("runtime_scope_key") or binding.get("runtime_scope_key") or ""
@@ -746,7 +770,7 @@ def _ensure_outbound_run_identity(params: dict[str, Any]) -> None:
     turn_id = _event_turn_id(params)
     if run_id and turn_id:
         return
-    stable = _stable_session_id(params)
+    stable = _conversation_session_id(params)
     payload = params.get("payload") if isinstance(params.get("payload"), dict) else None
     if not run_id:
         # Deterministic per (session, turn): every orphan frame of the same
@@ -946,7 +970,7 @@ def _filter_events_for_subscription(
             for event in events
             if (
                 _event_runtime_scope_key(event)
-                or str(event.get("stored_session_id") or "")
+                or str(event.get("conversation_session_id") or "")
             ).strip()
             == scope
         ]
@@ -974,7 +998,7 @@ def _event_matches_subscription(
     if scope:
         event_scope = (
             _event_runtime_scope_key(event)
-            or str(event.get("stored_session_id") or "")
+            or str(event.get("conversation_session_id") or "")
         ).strip()
         if event_scope != scope:
             return False
@@ -1020,7 +1044,7 @@ def _poll_subscription_events() -> None:
         for subscription in subscriptions:
             db = subscription.get("db")
             subscription_kind = str(subscription.get("kind") or "session")
-            stable = str(subscription.get("stored_session_id") or "").strip()
+            stable = str(subscription.get("conversation_session_id") or "").strip()
             activity_id = str(subscription.get("activity_id") or "").strip()
             if subscription_kind == "activity":
                 if not _team_activity_events.uses_event_log(activity_id, db=db):
@@ -1094,7 +1118,7 @@ def _poll_subscription_events() -> None:
                             event_type=event_type,
                             subscription_id=str(subscription.get("id") or ""),
                             subscription_kind=subscription_kind,
-                            stored_session_id=stable,
+                            conversation_session_id=stable,
                             mission_id="",
                             activity_id=activity_id,
                             run_id=_event_run_id(event),
@@ -1117,7 +1141,7 @@ def _poll_subscription_events() -> None:
                         event_type=event_type,
                         subscription_id=str(subscription.get("id") or ""),
                         subscription_kind=subscription_kind,
-                        stored_session_id=stable,
+                        conversation_session_id=stable,
                         mission_id="",
                         activity_id=activity_id,
                         run_id=_event_run_id(event_for_transport),
@@ -1151,24 +1175,24 @@ def _poll_subscription_events() -> None:
 
 def _ensure_run(
     *,
-    stable_session_id: str,
+    conversation_session_id: str,
     run_id: str,
     runtime_scope_key: str = "",
     turn_id: str = "",
-    runtime_session_id: str = "",
+    execution_session_id: str = "",
     db: Any = None,
 ) -> dict[str, Any]:
     now = time.time()
     memory_run_key = _memory_run_key(run_id, db)
-    memory_session_key = _memory_session_key(stable_session_id, db)
+    memory_session_key = _memory_session_key(conversation_session_id, db)
     state = _run_state_by_id.get(memory_run_key)
     if state is None:
         state = {
             "run_id": run_id,
             "turn_id": turn_id,
-            "session_id": runtime_session_id,
-            "stored_session_id": stable_session_id,
-            "runtime_scope_key": runtime_scope_key or stable_session_id,
+            "session_id": execution_session_id,
+            "conversation_session_id": conversation_session_id,
+            "runtime_scope_key": runtime_scope_key or conversation_session_id,
             "status": "running",
             "started_at": now,
             "updated_at": now,
@@ -1182,36 +1206,36 @@ def _ensure_run(
         state["updated_at"] = now
         if turn_id:
             state["turn_id"] = turn_id
-        if runtime_session_id:
-            state["session_id"] = runtime_session_id
+        if execution_session_id:
+            state["session_id"] = execution_session_id
         if runtime_scope_key:
             state["runtime_scope_key"] = runtime_scope_key
-        if stable_session_id:
-            state["stored_session_id"] = stable_session_id
+        if conversation_session_id:
+            state["conversation_session_id"] = conversation_session_id
     return state
 
 
 def mark_run_started(
     *,
-    stored_session_id: str,
-    runtime_session_id: str,
+    conversation_session_id: str,
+    execution_session_id: str,
     run_id: str,
     turn_id: str = "",
     runtime_scope_key: str = "",
     metadata: dict[str, Any] | None = None,
     db: Any = None,
 ) -> dict[str, Any]:
-    stable = str(stored_session_id or runtime_session_id or "").strip()
+    stable = str(conversation_session_id or execution_session_id or "").strip()
     normalized_run_id = str(run_id or "").strip()
     if not stable or not normalized_run_id:
         return {}
     with _lock:
         state = _ensure_run(
-            stable_session_id=stable,
+            conversation_session_id=stable,
             run_id=normalized_run_id,
             runtime_scope_key=runtime_scope_key or stable,
             turn_id=turn_id,
-            runtime_session_id=str(runtime_session_id or "").strip(),
+            execution_session_id=str(execution_session_id or "").strip(),
             db=db,
         )
         state["status"] = "running"
@@ -1224,7 +1248,7 @@ def mark_run_started(
                 session_id=stable,
                 runtime_scope_key=runtime_scope_key or stable,
                 turn_id=turn_id,
-                runtime_session_id=str(runtime_session_id or "").strip(),
+                execution_session_id=str(execution_session_id or "").strip(),
                 status="running",
                 started_at=float(snapshot.get("started_at") or time.time()),
                 updated_at=float(snapshot.get("updated_at") or time.time()),
@@ -1241,15 +1265,15 @@ def mark_run_started(
 
 def create_run_if_session_idle(
     *,
-    stored_session_id: str,
+    conversation_session_id: str,
     run_id: str,
     turn_id: str = "",
     runtime_scope_key: str = "",
-    runtime_session_id: str = "",
+    execution_session_id: str = "",
     metadata: dict[str, Any] | None = None,
     db: Any = None,
 ) -> dict[str, Any]:
-    stable = str(stored_session_id or runtime_session_id or "").strip()
+    stable = str(conversation_session_id or execution_session_id or "").strip()
     normalized_run_id = str(run_id or "").strip()
     if not stable or not normalized_run_id:
         return {"run": None, "conflict": None}
@@ -1265,7 +1289,7 @@ def create_run_if_session_idle(
                 session_id=stable,
                 runtime_scope_key=runtime_scope_key or stable,
                 turn_id=turn_id,
-                runtime_session_id=runtime_session_id,
+                execution_session_id=execution_session_id,
                 status="queued",
                 metadata=metadata,
             )
@@ -1275,11 +1299,11 @@ def create_run_if_session_idle(
             if isinstance(run, dict) and run:
                 with _lock:
                     state = _ensure_run(
-                        stable_session_id=stable,
+                        conversation_session_id=stable,
                         run_id=normalized_run_id,
                         runtime_scope_key=runtime_scope_key or stable,
                         turn_id=turn_id,
-                        runtime_session_id=runtime_session_id,
+                        execution_session_id=execution_session_id,
                         db=db,
                     )
                     state.update(run)
@@ -1294,7 +1318,7 @@ def create_run_if_session_idle(
                         "session_id": stable,
                         "turn_id": turn_id,
                         "runtime_scope_key": runtime_scope_key or stable,
-                        "runtime_session_id": runtime_session_id,
+                        "execution_session_id": execution_session_id,
                         "gateway_instance_id": _gateway_instance_id_from_metadata(metadata),
                         "gateway_pid": os.getpid(),
                     },
@@ -1318,7 +1342,7 @@ def create_run_if_session_idle(
                     "run_id": active_run_id,
                     "turn_id": str(persisted_status.get("active_turn_id") or ""),
                     "session_id": stable,
-                    "stored_session_id": stable,
+                    "conversation_session_id": stable,
                     "runtime_scope_key": str(persisted_status.get("runtime_scope_key") or ""),
                     "status": "running",
                     "started_at": float(persisted_status.get("run_started_at") or 0),
@@ -1346,7 +1370,7 @@ def create_run_if_session_idle(
                         "session_id": stable,
                         "turn_id": turn_id,
                         "runtime_scope_key": runtime_scope_key or stable,
-                        "runtime_session_id": runtime_session_id,
+                        "execution_session_id": execution_session_id,
                         "gateway_instance_id": _gateway_instance_id_from_metadata(metadata),
                         "gateway_pid": os.getpid(),
                     },
@@ -1354,11 +1378,11 @@ def create_run_if_session_idle(
                 )
                 return {"run": None, "conflict": dict(active), "created": False}
         state = _ensure_run(
-            stable_session_id=stable,
+            conversation_session_id=stable,
             run_id=normalized_run_id,
             runtime_scope_key=runtime_scope_key or stable,
             turn_id=turn_id,
-            runtime_session_id=runtime_session_id,
+            execution_session_id=execution_session_id,
             db=db,
         )
         state["status"] = "queued"
@@ -1371,8 +1395,8 @@ def create_run_if_session_idle(
         return {"run": dict(state), "conflict": None, "created": True}
 
 
-def next_event_seq(stored_session_id: str, fallback_seq: int = 0, db: Any = None) -> int:
-    stable = str(stored_session_id or "").strip()
+def next_event_seq(conversation_session_id: str, fallback_seq: int = 0, db: Any = None) -> int:
+    stable = str(conversation_session_id or "").strip()
     if not stable:
         return int(fallback_seq or 0)
     persisted_next = 0
@@ -1403,10 +1427,10 @@ def _apply_run_context_to_frame(
         frame["payload"] = payload
     activity_id = str(getattr(run_context, "activity_id", "") or "").strip()
     activity_kind = str(getattr(run_context, "activity_kind", "") or "").strip()
-    existing_stored_session_id = str(
-        frame.get("stored_session_id")
-        or payload.get("stored_session_id")
-        or payload.get("storedSessionId")
+    existing_conversation_session_id = str(
+        frame.get("conversation_session_id")
+        or payload.get("conversation_session_id")
+        or payload.get("conversationSessionId")
         or payload.get("session_key")
         or ""
     ).strip()
@@ -1414,10 +1438,10 @@ def _apply_run_context_to_frame(
     # session. The visible team conversation consumes the canonical
     # team_mission.runtime.event projection and final summary only.
     if activity_kind == "mission" and activity_id.startswith("act-node:"):
-        if existing_stored_session_id:
-            frame["stored_session_id"] = existing_stored_session_id
+        if existing_conversation_session_id:
+            frame["conversation_session_id"] = existing_conversation_session_id
     else:
-        frame["stored_session_id"] = run_context.conversation_session_id
+        frame["conversation_session_id"] = run_context.conversation_session_id
     if not str(frame.get("participant_id") or "").strip():
         frame["participant_id"] = run_context.participant_id
     # ADR-0001: surface activity_id at frame top-level so append_run_event
@@ -1626,13 +1650,13 @@ def record_event(
         _ensure_outbound_run_identity(params)
     frame = _apply_run_context_to_frame(dict(params), run_context)
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
-    stable = _stable_session_id(frame)
+    stable = _conversation_session_id(frame)
     run_id = _event_run_id(frame)
     turn_id = _event_turn_id(frame)
     frame = _normalize_team_mission_deliverable_terminal_event(frame, run_id=run_id, db=db)
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     event_type = str(frame.get("type") or "").strip()
-    runtime_session_id = str(frame.get("session_id") or "").strip()
+    execution_session_id = str(frame.get("session_id") or "").strip()
     owner_metadata = frame.get("owner_metadata")
     owner_metadata = owner_metadata if isinstance(owner_metadata, dict) else {}
     now = time.time()
@@ -1683,7 +1707,7 @@ def record_event(
             if isinstance(persisted_run, dict):
                 persisted_stable = str(
                     persisted_run.get("session_id")
-                    or persisted_run.get("stored_session_id")
+                    or persisted_run.get("conversation_session_id")
                     or ""
                 ).strip()
                 persisted_terminal_reopen = bool(
@@ -1703,7 +1727,7 @@ def record_event(
             existing_state = _run_state_by_id.get(_memory_run_key(run_id, db))
             if existing_state is None:
                 existing_state = _run_state_by_id.get(run_id)
-            existing_state_stable = str((existing_state or {}).get("stored_session_id") or "").strip()
+            existing_state_stable = str((existing_state or {}).get("conversation_session_id") or "").strip()
             memory_terminal_reopen = bool(
                 existing_state is not None
                 and (not existing_state_stable or existing_state_stable == stable)
@@ -1728,7 +1752,7 @@ def record_event(
             )
             if should_track_run:
                 state = _ensure_run(
-                    stable_session_id=stable,
+                    conversation_session_id=stable,
                     run_id=run_id,
                     runtime_scope_key=str(
                         (payload or {}).get("runtime_scope_key")
@@ -1736,7 +1760,7 @@ def record_event(
                         or ""
                     ),
                     turn_id=turn_id,
-                    runtime_session_id=runtime_session_id,
+                    execution_session_id=execution_session_id,
                     db=db,
                 )
                 state["last_seq"] = int(frame.get("seq") or state.get("last_seq") or 0)
@@ -1787,8 +1811,8 @@ def record_event(
             _trace_stream_route(
                 "run-control-record",
                 event_type=event_type,
-                session_id=runtime_session_id,
-                stored_session_id=stable,
+                session_id=execution_session_id,
+                conversation_session_id=stable,
                 run_id=run_id,
                 turn_id=turn_id,
                 runtime_scope_key=str(frame.get("runtime_scope_key") or ""),
@@ -1867,7 +1891,7 @@ def record_event(
                     run_id=run_id,
                     turn_id=turn_id,
                     runtime_scope_key=str(frame.get("runtime_scope_key") or ""),
-                    runtime_session_id=runtime_session_id,
+                    execution_session_id=execution_session_id,
                     seq=int(frame.get("seq") or 0),
                 )
             reducer = _db_method(db, "reduce_team_mission_run_event")
@@ -1908,7 +1932,7 @@ def record_event(
                         "record-event-projection",
                         event_type=event_type,
                         session_id=stable,
-                        runtime_session_id=runtime_session_id,
+                        execution_session_id=execution_session_id,
                         run_id=run_id,
                         turn_id=turn_id,
                         runtime_scope_key=str(frame.get("runtime_scope_key") or ""),
@@ -1935,11 +1959,14 @@ def record_event(
                 binding: dict[str, Any] = {}
                 if isinstance(reduced_node, dict):
                     scheduler_mission_id = str(reduced_node.get("mission_id") or "").strip()
-                if not scheduler_mission_id:
-                    binding_getter = _db_method(db, "get_team_mission_run_binding")
-                    if binding_getter is not None:
+                binding_getter = _db_method(db, "get_team_mission_run_binding")
+                if binding_getter is not None:
+                    try:
                         candidate_binding = binding_getter(run_id)
-                        binding = dict(candidate_binding) if isinstance(candidate_binding, dict) else {}
+                    except Exception:
+                        candidate_binding = None
+                    binding = dict(candidate_binding) if isinstance(candidate_binding, dict) else {}
+                    if not scheduler_mission_id:
                         scheduler_mission_id = str(binding.get("mission_id") or "").strip()
                 if scheduler_mission_id:
                     try:
@@ -1953,7 +1980,7 @@ def record_event(
                             source="runtime_event",
                         )
                         if mirrored:
-                            mirror_stable = _stable_session_id(mirrored)
+                            mirror_stable = _conversation_session_id(mirrored)
                             mirror_subscribers = set()
                             with _lock:
                                 if mirror_stable:
@@ -1996,8 +2023,12 @@ def record_event(
                             exc_info=True,
                         )
                     if (
-                        event_type in _TEAM_MISSION_STATUS_SOURCE_EVENT_TYPES
-                        and mission_event
+                        mission_event
+                        and _team_mission_runtime_event_allows_conversation_status(
+                            event_type=event_type,
+                            binding=binding,
+                            db=db,
+                        )
                         and (status_appender := _db_method(db, "append_team_mission_conversation_status_event"))
                     ):
                         try:
@@ -2081,7 +2112,7 @@ def record_event(
                 run_id=run_id,
                 turn_id=turn_id,
                 runtime_scope_key=str(frame.get("runtime_scope_key") or ""),
-                runtime_session_id=runtime_session_id,
+                execution_session_id=execution_session_id,
                 seq=int(frame.get("seq") or 0),
                 error=str(exc),
             )
@@ -2127,7 +2158,7 @@ def record_event(
                     "run_id": run_id,
                     "turn_id": turn_id,
                     "runtime_scope_key": str(frame.get("runtime_scope_key") or ""),
-                    "runtime_session_id": runtime_session_id,
+                    "execution_session_id": execution_session_id,
                     "seq": int(frame.get("seq") or 0),
                 }),
             )
@@ -2143,7 +2174,7 @@ def record_event(
                     "run_id": run_id,
                     "turn_id": turn_id,
                     "runtime_scope_key": str(frame.get("runtime_scope_key") or ""),
-                    "runtime_session_id": runtime_session_id,
+                    "execution_session_id": execution_session_id,
                     "seq": int(frame.get("seq") or 0),
                 }),
             )
@@ -2181,7 +2212,7 @@ def publish_recorded_event(
     publish_params = _apply_run_context_to_frame(dict(params), run_context)
     _stamp_participant_id(
         publish_params,
-        stable=_stable_session_id(publish_params),
+        stable=_conversation_session_id(publish_params),
         event_type=str(publish_params.get("type") or "").strip(),
         run_id=_event_run_id(publish_params),
         turn_id=_event_turn_id(publish_params),
@@ -2212,11 +2243,11 @@ def publish_recorded_event(
 
 def terminate_run(
     *,
-    stored_session_id: str,
+    conversation_session_id: str,
     run_id: str,
     turn_id: str = "",
     runtime_scope_key: str = "",
-    runtime_session_id: str = "",
+    execution_session_id: str = "",
     activity_id: str = "",
     status: str = "failed",
     message: str = "",
@@ -2224,7 +2255,7 @@ def terminate_run(
     db: Any = None,
     owner_transport: Transport | None = None,
 ) -> dict[str, Any]:
-    stable = str(stored_session_id or runtime_session_id or "").strip()
+    stable = str(conversation_session_id or execution_session_id or "").strip()
     normalized_run_id = str(run_id or "").strip()
     if not stable or not normalized_run_id:
         return {}
@@ -2304,8 +2335,8 @@ def terminate_run(
             payload["terminal_degraded"] = True
     frame = {
         "type": "message.complete",
-        "session_id": str(runtime_session_id or stable).strip(),
-        "stored_session_id": stable,
+        "session_id": str(execution_session_id or stable).strip(),
+        "conversation_session_id": stable,
         "run_id": normalized_run_id,
         "turn_id": str(turn_id or "").strip(),
         "runtime_scope_key": str(runtime_scope_key or stable).strip(),
@@ -2326,7 +2357,7 @@ def terminate_run(
         run_id=normalized_run_id,
         turn_id=str(turn_id or "").strip(),
         runtime_scope_key=str(runtime_scope_key or stable).strip(),
-        runtime_session_id=str(runtime_session_id or stable).strip(),
+        execution_session_id=str(execution_session_id or stable).strip(),
         seq=0,
         message=str(message or ""),
     )
@@ -2347,11 +2378,11 @@ def terminate_run(
 
 def publish_run_terminal_event(
     *,
-    stored_session_id: str,
+    conversation_session_id: str,
     run_id: str,
     turn_id: str = "",
     runtime_scope_key: str = "",
-    runtime_session_id: str = "",
+    execution_session_id: str = "",
     activity_id: str = "",
     status: str = "failed",
     message: str = "",
@@ -2360,11 +2391,11 @@ def publish_run_terminal_event(
 ) -> dict[str, Any]:
     """Compatibility wrapper for the Phase C terminal entrypoint."""
     return terminate_run(
-        stored_session_id=stored_session_id,
+        conversation_session_id=conversation_session_id,
         run_id=run_id,
         turn_id=turn_id,
         runtime_scope_key=runtime_scope_key,
-        runtime_session_id=runtime_session_id,
+        execution_session_id=execution_session_id,
         activity_id=activity_id,
         status=status,
         message=message,
@@ -2375,7 +2406,7 @@ def publish_run_terminal_event(
 
 def subscribe_session(
     *,
-    stored_session_id: str,
+    conversation_session_id: str,
     transport: Transport | None,
     after_seq: int = 0,
     active_only: bool = False,
@@ -2385,7 +2416,7 @@ def subscribe_session(
     db: Any = None,
 ) -> list[dict[str, Any]]:
     _subscription_id, events = subscribe_session_with_id(
-        stored_session_id=stored_session_id,
+        conversation_session_id=conversation_session_id,
         transport=transport,
         after_seq=after_seq,
         active_only=active_only,
@@ -2404,7 +2435,7 @@ def _remove_subscription_ids_locked(subscription_ids: set[str]) -> int:
         if not subscription:
             continue
         removed += 1
-        sid = str(subscription.get("stored_session_id") or "")
+        sid = str(subscription.get("conversation_session_id") or "")
         sub_transport = subscription.get("transport")
         if sid:
             _subscription_ids_by_session.get(sid, set()).discard(sub_id)
@@ -2533,7 +2564,7 @@ def subscribe_activity(
                 "id": normalized_subscription_id,
                 "kind": "activity",
                 "activity_id": normalized_activity_id,
-                "stored_session_id": "",
+                "conversation_session_id": "",
                 "transport": transport,
                 "active_only": False,
                 "runtime_scope_key": "",
@@ -2620,7 +2651,7 @@ def subscribe_activity(
 
 def subscribe_session_with_id(
     *,
-    stored_session_id: str,
+    conversation_session_id: str,
     transport: Transport | None,
     after_seq: int = 0,
     active_only: bool = False,
@@ -2630,7 +2661,7 @@ def subscribe_session_with_id(
     db: Any = None,
     subscription_id: str = "",
 ) -> tuple[str, list[dict[str, Any]]]:
-    stable = str(stored_session_id or "").strip()
+    stable = str(conversation_session_id or "").strip()
     if not stable:
         return "", []
     scope = str(runtime_scope_key or "").strip()
@@ -2646,7 +2677,7 @@ def subscribe_session_with_id(
                     sub_id == normalized_subscription_id
                     or (
                         str((_subscriptions_by_id.get(sub_id) or {}).get("kind") or "session") == "session"
-                        and str((_subscriptions_by_id.get(sub_id) or {}).get("stored_session_id") or "").strip() == stable
+                        and str((_subscriptions_by_id.get(sub_id) or {}).get("conversation_session_id") or "").strip() == stable
                     )
                 )
             }
@@ -2654,7 +2685,7 @@ def subscribe_session_with_id(
             _subscriptions_by_id[normalized_subscription_id] = {
                 "id": normalized_subscription_id,
                 "kind": "session",
-                "stored_session_id": stable,
+                "conversation_session_id": stable,
                 "transport": transport,
                 "active_only": bool(active_only),
                 "runtime_scope_key": scope,
@@ -2762,12 +2793,12 @@ def unsubscribe_activity(subscription_id: str) -> int:
 def unsubscribe_session(
     *,
     subscription_id: str = "",
-    stored_session_id: str = "",
+    conversation_session_id: str = "",
     transport: Transport | None = None,
 ) -> int:
     removed = 0
     normalized_subscription_id = str(subscription_id or "").strip()
-    stable = str(stored_session_id or "").strip()
+    stable = str(conversation_session_id or "").strip()
     with _lock:
         if normalized_subscription_id:
             ids = {normalized_subscription_id}
@@ -2775,7 +2806,7 @@ def unsubscribe_session(
             ids = {
                 sub_id
                 for sub_id in _subscription_ids_by_transport.get(transport, set())
-                if (_subscriptions_by_id.get(sub_id) or {}).get("stored_session_id") == stable
+                if (_subscriptions_by_id.get(sub_id) or {}).get("conversation_session_id") == stable
             }
         elif transport is not None:
             ids = set(_subscription_ids_by_transport.get(transport, set()))
@@ -2821,13 +2852,13 @@ def get_run(run_id: str, db: Any = None) -> dict[str, Any] | None:
 
 
 def list_runs(
-    stored_session_id: str = "",
+    conversation_session_id: str = "",
     db: Any = None,
     runtime_scope_key: str = "",
     statuses: list[str] | None = None,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
-    stable = str(stored_session_id or "").strip()
+    stable = str(conversation_session_id or "").strip()
     scope = str(runtime_scope_key or "").strip()
     normalized_statuses = [
         str(status or "").strip()
@@ -2884,7 +2915,7 @@ def list_runs(
 
 
 def session_status(
-    stored_session_id: str,
+    conversation_session_id: str,
     db: Any = None,
     *,
     current_gateway_instance_id: str = "",
@@ -2896,17 +2927,17 @@ def session_status(
     persisted_status = None
     if method := _db_method(db, "get_session_run_status"):
         try:
-            persisted_status = method(stored_session_id)
+            persisted_status = method(conversation_session_id)
         except Exception:
             persisted_status = None
-    runs = list_runs(stored_session_id, db=db)
+    runs = list_runs(conversation_session_id, db=db)
     active = [
         run for run in runs
         if str(run.get("status") or "") in ACTIVE_RUN_STATUSES
     ]
     last_seq = 0
     with _lock:
-        stable = str(stored_session_id or "").strip()
+        stable = str(conversation_session_id or "").strip()
         events = _events_by_session.get(_memory_session_key(stable, db), ())
         for event in events:
             last_seq = max(last_seq, int(event.get("seq") or 0))

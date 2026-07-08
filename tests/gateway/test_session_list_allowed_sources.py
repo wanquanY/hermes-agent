@@ -202,7 +202,7 @@ def test_session_list_surfaces_team_conversation_route_metadata(tmp_path, monkey
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
             team_id="team-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             title="团队会话标题",
             objective="团队任务预览",
             workspace_id="workspace-1",
@@ -249,7 +249,7 @@ def test_session_list_hides_team_mission_node_run_sessions(tmp_path, monkeypatch
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
             team_id="team-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             title="团队会话",
             active_mission_id="mission-1",
             created_at=100,
@@ -283,7 +283,7 @@ def test_session_list_hides_team_mission_node_run_sessions(tmp_path, monkeypatch
             node_id="node-worker",
             run_id="run-worker",
             session_id="member-session-leaked-as-tui",
-            runtime_session_id="runtime-worker",
+            execution_session_id="runtime-worker",
             runtime_scope_key="team:mission-1:node:node-worker",
         )
     finally:
@@ -339,7 +339,7 @@ def test_session_list_overlays_live_running_state(monkeypatch):
 
     assert session["id"] == "stored-live"
     assert session["running"] is True
-    assert session["active_runtime_session_id"] == "runtime-live"
+    assert session["active_execution_session_id"] == "runtime-live"
     assert session["active_run_id"] == "run-live"
     assert session["run_started_at"] == 10
     assert session["run_updated_at"] == 20
@@ -464,7 +464,7 @@ def test_team_conversation_list_reads_requested_dovie_profile_home(tmp_path, mon
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
             team_id="team-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             title="Profile scoped team conversation",
             workspace_id="workspace-1",
             workspace_path="/tmp/workspace",
@@ -540,7 +540,7 @@ def test_team_conversation_list_projects_active_mission_runtime_state(tmp_path, 
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-running",
             team_id="team-1",
-            stable_session_id="team-session-running",
+            conversation_session_id="team-session-running",
             title="运行中团队会话",
             active_mission_id="mission-running",
             created_at=100,
@@ -569,7 +569,7 @@ def test_team_conversation_list_projects_active_mission_runtime_state(tmp_path, 
             node_id="node-running",
             run_id="run-worker",
             session_id="worker-session-1",
-            runtime_session_id="runtime-worker-1",
+            execution_session_id="runtime-worker-1",
             runtime_scope_key="team:mission-running:node:node-running",
             role="worker",
         )
@@ -612,7 +612,7 @@ def test_team_conversation_list_uses_active_member_run_bindings_when_mission_sta
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-member-running",
             team_id="team-1",
-            stable_session_id="team-session-member-running",
+            conversation_session_id="team-session-member-running",
             title="成员执行团队会话",
             active_mission_id="mission-member-running",
             created_at=100,
@@ -639,7 +639,7 @@ def test_team_conversation_list_uses_active_member_run_bindings_when_mission_sta
         run_control.record_event(
             {
                 "type": "message.start",
-                "stored_session_id": "team:mission-member-running:node:node-verify",
+                "conversation_session_id": "team:mission-member-running:node:node-verify",
                 "session_id": "runtime-verify",
                 "runtime_scope_key": "team:mission-member-running:node:node-verify",
                 "run_id": "run-verify",
@@ -654,7 +654,7 @@ def test_team_conversation_list_uses_active_member_run_bindings_when_mission_sta
             node_id="node-verify",
             run_id="run-verify",
             session_id="team:mission-member-running:node:node-verify",
-            runtime_session_id="runtime-verify",
+            execution_session_id="runtime-verify",
             runtime_scope_key="team:mission-member-running:node:node-verify",
             role="verifier",
         )
@@ -682,7 +682,7 @@ def test_team_conversation_list_uses_active_member_run_bindings_when_mission_sta
         assert conversation["run_state"] == "running"
         assert conversation["mission_status"] == "ready"
         assert conversation["active_run_id"] == "run-verify"
-        assert conversation["active_runtime_session_id"] == "runtime-verify"
+        assert conversation["active_execution_session_id"] == "runtime-verify"
         assert conversation["active_node_count"] == 1
     finally:
         for db in list(server._db_by_home.values()):
@@ -696,7 +696,7 @@ def test_team_conversation_list_projects_final_deliverable_and_artifacts(tmp_pat
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-completed",
             team_id="team-1",
-            stable_session_id="team-session-completed",
+            conversation_session_id="team-session-completed",
             title="已完成团队会话",
             active_mission_id="mission-completed",
             created_at=100,
@@ -777,7 +777,7 @@ def test_team_conversation_list_prioritizes_approval_gate_state(tmp_path, monkey
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-approval",
             team_id="team-1",
-            stable_session_id="team-session-approval",
+            conversation_session_id="team-session-approval",
             title="待审批团队会话",
             active_mission_id="mission-approval",
             created_at=100,
@@ -832,7 +832,7 @@ def test_conversation_activity_list_projects_run_and_approval_state(monkeypatch)
                 return {}
             return {
                 "conversation_id": "conversation-approval",
-                "stable_session_id": "team-session-approval",
+                "conversation_session_id": "team-session-approval",
                 "team_id": "team-1",
                 "active_mission_id": "mission-approval",
                 "status": "waiting_approval",
@@ -885,7 +885,7 @@ def test_conversation_activity_list_projects_run_and_approval_state(monkeypatch)
     original_approval = server._methods.get("approval.pending.list")
 
     def fake_pending_approvals(rid, params):
-        session_id = params.get("stored_session_id")
+        session_id = params.get("conversation_session_id")
         return {
             "jsonrpc": "2.0",
             "id": rid,
@@ -907,7 +907,7 @@ def test_conversation_activity_list_projects_run_and_approval_state(monkeypatch)
             server._methods["approval.pending.list"] = original_approval
 
     assert "error" not in resp
-    activities = {item["stable_session_id"]: item for item in resp["result"]["activities"]}
+    activities = {item["conversation_session_id"]: item for item in resp["result"]["activities"]}
     assert activities["ordinary-running"]["run_state"] == "waiting_approval"
     assert activities["ordinary-running"]["pending_approval_count"] == 1
     assert activities["ordinary-running"]["active_run_id"] == "run-ordinary"
@@ -943,7 +943,7 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
             session_id TEXT NOT NULL,
             run_id TEXT,
             turn_id TEXT,
-            runtime_session_id TEXT,
+            execution_session_id TEXT,
             runtime_scope_key TEXT,
             participant_id TEXT,
             activity_id TEXT,
@@ -975,7 +975,7 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
         session_id="s1",
         run_id="run-1",
         turn_id="turn-1",
-        runtime_session_id="runtime-run-1",
+        execution_session_id="runtime-run-1",
         runtime_scope_key="profile:agent-default:version:v1",
         participant_id="",
         activity_id="",
@@ -986,7 +986,7 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
         event_json=json.dumps(
             {
                 "type": "tool.complete",
-                "stored_session_id": "s1",
+                "conversation_session_id": "s1",
                 "session_id": "runtime-run-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
@@ -1049,7 +1049,7 @@ def test_session_status_reads_stored_profile_session_without_runtime(monkeypatch
         })
 
         assert "error" not in resp
-        assert resp["result"]["stored_session_id"] == "stored-1"
+        assert resp["result"]["conversation_session_id"] == "stored-1"
         assert resp["result"]["running"] is False
     finally:
         db.close()

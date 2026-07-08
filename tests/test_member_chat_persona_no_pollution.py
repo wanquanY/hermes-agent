@@ -94,7 +94,7 @@ def _hydrate_worker_history(
         RunStartFrame(
             run_id="run-alice-1",
             turn_id="turn-alice-1",
-            stored_session_id=CONVERSATION_SESSION_ID,
+            conversation_session_id=CONVERSATION_SESSION_ID,
             prompt="@Alice please respond",
             params={
                 "runtime_scope_key": "profile:alice",

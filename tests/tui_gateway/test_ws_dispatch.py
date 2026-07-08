@@ -47,7 +47,7 @@ def test_session_list_uses_control_plane_executor():
 
 def test_session_title_uses_control_plane_executor():
     executor = ws._executor_for_request(  # noqa: SLF001
-        {"id": "1", "method": "session.title", "params": {"stored_session_id": "s"}}
+        {"id": "1", "method": "session.title", "params": {"conversation_session_id": "s"}}
     )
 
     assert executor is ws._ws_control_executor  # noqa: SLF001
@@ -55,7 +55,7 @@ def test_session_title_uses_control_plane_executor():
 
 def test_run_status_uses_control_plane_executor():
     executor = ws._executor_for_request(  # noqa: SLF001
-        {"id": "1", "method": "run.status", "params": {"stored_session_id": "s"}}
+        {"id": "1", "method": "run.status", "params": {"conversation_session_id": "s"}}
     )
 
     assert executor is ws._ws_control_executor  # noqa: SLF001
@@ -116,7 +116,7 @@ def test_profile_scoped_runtime_read_methods_are_proxied_to_runtime_worker(metho
             "id": "1",
             "method": method,
             "params": {
-                "stored_session_id": "stored-session-1",
+                "conversation_session_id": "stored-session-1",
                 "runtime_scope_key": "profile:agent-a:version:v1",
                 "dovie_profile": {
                     "id": "agent-a",
@@ -167,7 +167,7 @@ def test_event_read_methods_stay_on_control_plane(method):
             "id": "1",
             "method": method,
             "params": {
-                "stored_session_id": "stored-session-1",
+                "conversation_session_id": "stored-session-1",
                 "runtime_scope_key": "profile:agent-a:version:v1",
                 "dovie_profile": {
                     "id": "agent-a",
@@ -298,7 +298,7 @@ def test_unscoped_runtime_read_methods_stay_on_control_plane(method):
             "id": "1",
             "method": method,
             "params": {
-                "stored_session_id": "stored-session-1",
+                "conversation_session_id": "stored-session-1",
             },
         }
     )
@@ -415,7 +415,7 @@ def test_team_mission_emit_uses_control_db_while_profile_context_is_active(tmp_p
         session_id=stable,
         runtime_scope_key="profile:agent-7",
         turn_id="turn-verifier",
-        runtime_session_id=runtime_sid,
+        execution_session_id=runtime_sid,
         status="running",
     )
 
@@ -523,7 +523,7 @@ def test_run_control_does_not_deliver_duplicate_terminal_events(tmp_path):
             return True
 
     subscription_id, _replay = run_control.subscribe_session_with_id(
-        stored_session_id="stored-terminal-dedupe",
+        conversation_session_id="stored-terminal-dedupe",
         transport=CapturingTransport(),
         db=db,
     )
@@ -533,7 +533,7 @@ def test_run_control_does_not_deliver_duplicate_terminal_events(tmp_path):
                 {
                     "type": "message.complete",
                     "session_id": "runtime-terminal-dedupe",
-                    "stored_session_id": "stored-terminal-dedupe",
+                    "conversation_session_id": "stored-terminal-dedupe",
                     "run_id": "run-terminal-dedupe",
                     "turn_id": "turn-terminal-dedupe",
                     "runtime_scope_key": "profile:agent-default",
@@ -569,7 +569,7 @@ def test_run_control_does_not_deliver_stream_events_after_terminal(tmp_path):
             return True
 
     subscription_id, _replay = run_control.subscribe_session_with_id(
-        stored_session_id="stored-terminal-boundary",
+        conversation_session_id="stored-terminal-boundary",
         transport=CapturingTransport(),
         db=db,
     )
@@ -578,7 +578,7 @@ def test_run_control_does_not_deliver_stream_events_after_terminal(tmp_path):
             {
                 "type": "message.complete",
                 "session_id": "runtime-terminal-boundary",
-                "stored_session_id": "stored-terminal-boundary",
+                "conversation_session_id": "stored-terminal-boundary",
                 "run_id": "run-terminal-boundary",
                 "turn_id": "turn-terminal-boundary",
                 "runtime_scope_key": "profile:agent-default",
@@ -591,7 +591,7 @@ def test_run_control_does_not_deliver_stream_events_after_terminal(tmp_path):
             {
                 "type": "message.delta",
                 "session_id": "runtime-terminal-boundary",
-                "stored_session_id": "stored-terminal-boundary",
+                "conversation_session_id": "stored-terminal-boundary",
                 "run_id": "run-terminal-boundary",
                 "turn_id": "turn-terminal-boundary",
                 "runtime_scope_key": "profile:agent-default",
@@ -635,7 +635,7 @@ def test_run_control_live_publish_preserves_append_stream_delta_chunks(tmp_path)
             return True
 
     subscription_id, _replay = run_control.subscribe_session_with_id(
-        stored_session_id="stored-coalesced-live",
+        conversation_session_id="stored-coalesced-live",
         transport=CapturingTransport(),
         db=db,
     )
@@ -644,7 +644,7 @@ def test_run_control_live_publish_preserves_append_stream_delta_chunks(tmp_path)
             {
                 "type": "message.delta",
                 "session_id": "runtime-coalesced-live",
-                "stored_session_id": "stored-coalesced-live",
+                "conversation_session_id": "stored-coalesced-live",
                 "run_id": "run-coalesced-live",
                 "turn_id": "turn-coalesced-live",
                 "runtime_scope_key": "profile:agent-default",
@@ -662,7 +662,7 @@ def test_run_control_live_publish_preserves_append_stream_delta_chunks(tmp_path)
             {
                 "type": "message.delta",
                 "session_id": "runtime-coalesced-live",
-                "stored_session_id": "stored-coalesced-live",
+                "conversation_session_id": "stored-coalesced-live",
                 "run_id": "run-coalesced-live",
                 "turn_id": "turn-coalesced-live",
                 "runtime_scope_key": "profile:agent-default",
@@ -709,7 +709,7 @@ def test_run_control_fans_out_team_mission_activity_event_after_persist(tmp_path
         title="Mission",
         mode="autonomous_mission",
         leader_session_id="team-session-1",
-        metadata={"task_id": "task-1", "stableTeamSessionId": "team-session-1"},
+        metadata={"task_id": "task-1", "conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -724,7 +724,7 @@ def test_run_control_fans_out_team_mission_activity_event_after_persist(tmp_path
         node_id="node-worker",
         run_id="run-worker",
         session_id="session-worker",
-        runtime_session_id="runtime-worker",
+        execution_session_id="runtime-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
         role="worker",
     )
@@ -740,7 +740,7 @@ def test_run_control_fans_out_team_mission_activity_event_after_persist(tmp_path
             {
                 "type": "message.delta",
                 "session_id": "runtime-worker",
-                "stored_session_id": "session-worker",
+                "conversation_session_id": "session-worker",
                 "run_id": "run-worker",
                 "runtime_scope_key": "team:mission-1:node:node-worker",
                 "activity_id": "mission:mission-1",
@@ -782,7 +782,7 @@ def test_run_control_session_subscription_ignores_team_mission_projection_events
             return True
 
     subscription_id, _replay = run_control.subscribe_session_with_id(
-        stored_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         transport=CapturingTransport(),
         db=db,
     )
@@ -791,8 +791,8 @@ def test_run_control_session_subscription_ignores_team_mission_projection_events
             {
                 "type": "team_mission.runtime.event",
                 "session_id": "runtime-team-session",
-                "stored_session_id": "team-session-1",
-                "stable_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "mission_id": "mission-1",
                 "run_id": "run-worker",
                 "turn_id": "turn-worker",
@@ -810,7 +810,7 @@ def test_run_control_session_subscription_ignores_team_mission_projection_events
             {
                 "type": "message.delta",
                 "session_id": "runtime-team-session",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "run_id": "run-leader",
                 "turn_id": "turn-leader",
                 "runtime_scope_key": "team:conversation:leader",
@@ -846,12 +846,12 @@ def test_run_control_replaces_duplicate_session_subscriptions_per_transport(tmp_
 
     transport = CapturingTransport()
     first_subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="stored-duplicate-session",
+        conversation_session_id="stored-duplicate-session",
         transport=transport,
         db=db,
     )
     second_subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="stored-duplicate-session",
+        conversation_session_id="stored-duplicate-session",
         transport=transport,
         db=db,
     )
@@ -860,7 +860,7 @@ def test_run_control_replaces_duplicate_session_subscriptions_per_transport(tmp_
             {
                 "type": "message.delta",
                 "session_id": "runtime-duplicate-session",
-                "stored_session_id": "stored-duplicate-session",
+                "conversation_session_id": "stored-duplicate-session",
                 "run_id": "run-duplicate-session",
                 "turn_id": "turn-duplicate-session",
                 "runtime_scope_key": "profile:agent-default",
@@ -901,7 +901,7 @@ def test_run_control_replaces_duplicate_activity_subscriptions_per_transport(tmp
         title="Mission",
         mode="autonomous_mission",
         leader_session_id="team-session-1",
-        metadata={"task_id": "task-1", "stableTeamSessionId": "team-session-1"},
+        metadata={"task_id": "task-1", "conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -916,7 +916,7 @@ def test_run_control_replaces_duplicate_activity_subscriptions_per_transport(tmp
         node_id="node-worker",
         run_id="run-worker",
         session_id="session-worker",
-        runtime_session_id="runtime-worker",
+        execution_session_id="runtime-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
         role="worker",
     )
@@ -937,7 +937,7 @@ def test_run_control_replaces_duplicate_activity_subscriptions_per_transport(tmp
             {
                 "type": "message.delta",
                 "session_id": "runtime-worker",
-                "stored_session_id": "session-worker",
+                "conversation_session_id": "session-worker",
                 "run_id": "run-worker",
                 "runtime_scope_key": "team:mission-1:node:node-worker",
                 "activity_id": "mission:mission-1",
@@ -988,7 +988,7 @@ def test_control_plane_session_title_is_not_proxied_to_runtime_worker():
             "id": "1",
             "method": "session.title",
             "params": {
-                "stored_session_id": "stored-session-1",
+                "conversation_session_id": "stored-session-1",
                 "runtime_scope_key": "profile:agent-a:version:v1",
                 "dovie_profile": {
                     "id": "agent-a",
@@ -1007,7 +1007,7 @@ def test_control_plane_session_messages_are_not_proxied_to_runtime_worker():
             "id": "1",
             "method": "session.messages",
             "params": {
-                "stored_session_id": "stored-session-1",
+                "conversation_session_id": "stored-session-1",
                 "runtime_scope_key": "team:conversation-1:leader-conversation",
                 "profile_runtime_scope_key": "profile:agent-a:version:v1",
                 "dovie_profile": {

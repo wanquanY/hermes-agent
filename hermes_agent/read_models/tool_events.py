@@ -70,10 +70,10 @@ def _source_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _session_id(event: dict[str, Any]) -> str:
     payload = _payload(event)
     return _first_text(
-        event.get("stored_session_id"),
-        event.get("storedSessionId"),
-        payload.get("stored_session_id"),
-        payload.get("storedSessionId"),
+        event.get("conversation_session_id"),
+        event.get("conversationSessionId"),
+        payload.get("conversation_session_id"),
+        payload.get("conversationSessionId"),
         event.get("session_id"),
         event.get("sessionId"),
     )
@@ -257,7 +257,7 @@ def _metadata_json(event: dict[str, Any], explicit_tool_call_id: str) -> str:
         "source_event_type": _text(event.get("type")),
     }
     for key, value in {
-        "runtime_session_id": event.get("runtime_session_id") or event.get("session_id"),
+        "execution_session_id": event.get("execution_session_id") or event.get("session_id"),
         "runtime_scope_key": event.get("runtime_scope_key"),
         "client_message_id": _client_message_id(payload),
         "context": payload.get("context"),
@@ -537,10 +537,10 @@ def backfill_tool_events_from_run_events(
                 "payload": payload,
             }
         event.setdefault("type", _row_value(row, "event_type"))
-        event.setdefault("stored_session_id", _row_value(row, "session_id"))
+        event.setdefault("conversation_session_id", _row_value(row, "session_id"))
         event.setdefault("run_id", _row_value(row, "run_id"))
         event.setdefault("turn_id", _row_value(row, "turn_id"))
-        event.setdefault("runtime_session_id", _row_value(row, "runtime_session_id"))
+        event.setdefault("execution_session_id", _row_value(row, "execution_session_id"))
         event.setdefault("runtime_scope_key", _row_value(row, "runtime_scope_key"))
         event.setdefault("participant_id", _row_value(row, "participant_id"))
         event.setdefault("seq", _row_value(row, "seq"))
@@ -572,7 +572,7 @@ def tool_event_row_to_dict(row: Any) -> dict[str, Any]:
         "id": int(_row_value(row, "id", 0) or 0),
         "type": event_type,
         "session_id": _text(_row_value(row, "session_id")),
-        "stored_session_id": _text(_row_value(row, "session_id")),
+        "conversation_session_id": _text(_row_value(row, "session_id")),
         "run_id": _text(_row_value(row, "run_id")),
         "turn_id": _text(_row_value(row, "turn_id")),
         "tool_call_id": tool_call_id,
@@ -678,7 +678,7 @@ def list_tool_events_as_canonical(
     Reads directly from the ``run_events`` table so each returned event carries
     its *real* ``run_events.seq`` — not the ``tool_events.seq_start`` projection
     value.  The returned dicts have the same shape as ``list_run_events``
-    output: ``{type, seq, run_id, turn_id, payload, stored_session_id, ...}``.
+    output: ``{type, seq, run_id, turn_id, payload, conversation_session_id, ...}``.
 
     Parameters mirror ``list_run_events`` for cursor compatibility:
     ``after_seq`` is an exclusive forward cursor (only events with ``seq >

@@ -56,7 +56,7 @@ def session_info_record(
     session_id: str,
     payload: dict[str, Any],
     runtime_scope_key: str = "",
-    runtime_session_id: str = "",
+    execution_session_id: str = "",
     run_id: str = "",
     turn_id: str = "",
     updated_at: float = 0.0,
@@ -66,7 +66,7 @@ def session_info_record(
     return {
         "session_id": str(session_id or "").strip(),
         "runtime_scope_key": str(runtime_scope_key or "").strip(),
-        "runtime_session_id": str(runtime_session_id or "").strip(),
+        "execution_session_id": str(execution_session_id or "").strip(),
         "run_id": str(run_id or "").strip(),
         "turn_id": str(turn_id or "").strip(),
         "status": str(normalized_payload.get("status") or "").strip(),
@@ -92,7 +92,7 @@ def session_runtime_state_from_row(row: Any) -> dict[str, Any]:
     return {
         "session_id": str(value("session_id") or ""),
         "runtime_scope_key": str(value("runtime_scope_key") or ""),
-        "runtime_session_id": str(value("runtime_session_id") or ""),
+        "execution_session_id": str(value("execution_session_id") or ""),
         "run_id": str(value("run_id") or ""),
         "turn_id": str(value("turn_id") or ""),
         "status": str(value("status") or ""),
@@ -108,7 +108,7 @@ def session_runtime_state_from_row(row: Any) -> dict[str, Any]:
 def session_runtime_identity_matches(row: Any, record: dict[str, Any]) -> bool:
     if row is None:
         return False
-    for key in ("runtime_scope_key", "runtime_session_id", "run_id", "turn_id"):
+    for key in ("runtime_scope_key", "execution_session_id", "run_id", "turn_id"):
         try:
             current = row[key]
         except (KeyError, IndexError, TypeError):

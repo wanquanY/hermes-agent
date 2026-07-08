@@ -71,7 +71,7 @@ def _team_task_brief(label: str = "deliverable") -> dict:
     }
 
 
-def test_team_mission_conversation_runtime_session_ids_gateway_is_lightweight(monkeypatch, tmp_path: Path):
+def test_team_mission_conversation_execution_session_ids_gateway_is_lightweight(monkeypatch, tmp_path: Path):
     import importlib
 
     from hermes_state import SessionDB
@@ -85,7 +85,7 @@ def test_team_mission_conversation_runtime_session_ids_gateway_is_lightweight(mo
         conversation_id="conversation-1",
         team_id="team-1",
         workspace_id="workspace-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         title="团队会话",
         active_mission_id="mission-1",
     )
@@ -104,19 +104,19 @@ def test_team_mission_conversation_runtime_session_ids_gateway_is_lightweight(mo
         node_id="worker",
         run_id="run-worker",
         session_id="worker-session-1",
-        runtime_session_id="runtime-worker-1",
+        execution_session_id="runtime-worker-1",
         runtime_scope_key="team:mission-1:node:worker",
         role="worker",
     )
 
-    response = server._methods["team_mission.conversation.runtime_session_ids"](
+    response = server._methods["team_mission.conversation.execution_session_ids"](
         1,
         {"team_id": "team-1", "workspace_id": "workspace-1", "mission_id": "mission-1"},
     )
 
     assert "error" not in response
     assert response["result"]["session_ids"] == ["team-session-1", "worker-session-1", "runtime-worker-1"]
-    assert response["result"]["runtime_session_ids"] == response["result"]["session_ids"]
+    assert response["result"]["execution_session_ids"] == response["result"]["session_ids"]
     assert "conversations" not in response["result"]
 
 
@@ -239,7 +239,7 @@ def test_team_capability_gateway_builds_snapshot_from_registry_team_id(monkeypat
             "run_id": params["run_id"],
             "turn_id": params["turn_id"],
             "session_id": "runtime-leader",
-            "stored_session_id": params["stored_session_id"],
+            "conversation_session_id": params["conversation_session_id"],
             "runtime_scope_key": params["runtime_scope_key"],
         },
     })
@@ -459,7 +459,7 @@ def test_team_profile_get_resolves_conversation_registry_without_active_mission(
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="监督执行",
     )
@@ -493,7 +493,7 @@ def test_leader_team_profile_tool_resolves_conversation_registry(monkeypatch, tm
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="监督执行",
     )
@@ -536,7 +536,7 @@ def test_team_mission_gateway_methods_create_graph_and_replay_events(monkeypatch
         submitted.update(params)
         db.upsert_run(
             run_id=params["run_id"],
-            session_id=params["stored_session_id"],
+            session_id=params["conversation_session_id"],
             runtime_scope_key=params["runtime_scope_key"],
             status="running",
         )
@@ -548,7 +548,7 @@ def test_team_mission_gateway_methods_create_graph_and_replay_events(monkeypatch
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -631,7 +631,7 @@ def test_team_mission_snapshot_and_result_rpc_return_canonical_read_models(monke
                 "status": "running",
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
             },
         },
     )
@@ -694,7 +694,7 @@ def test_team_mission_snapshot_get_returns_conversation_snapshot_without_active_
     db.create_session(session_id="team-session-conversation-only", source="team_mission")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-only",
-        stable_session_id="team-session-conversation-only",
+        conversation_session_id="team-session-conversation-only",
         team_id="team-1",
         title="只和 Leader 聊天的团队会话",
         workspace_id="workspace-1",
@@ -770,7 +770,7 @@ def test_team_mission_graph_returns_conversation_graph_when_conversation_id_is_p
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="连续任务",
         active_mission_id="mission-2",
@@ -832,7 +832,7 @@ def test_team_mission_graph_rejects_mission_from_another_conversation(
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         active_mission_id="mission-1",
     )
     db.upsert_team_mission(
@@ -889,7 +889,7 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(mo
             "mode": "supervised_mission",
             "conversation_only": True,
             "workspace": _workspace_payload(tmp_path),
-            "metadata": {"stableTeamSessionId": "team-session-1"},
+            "metadata": {"conversationTeamSessionId": "team-session-1"},
         },
     )
 
@@ -897,7 +897,7 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(mo
     assert graph["mission"] == {}
     assert response["result"]["conversation_id"] == "mission-1"
     assert graph["conversation"]["conversation_id"] == "mission-1"
-    assert graph["conversation"]["stable_session_id"] == "team-session-1"
+    assert graph["conversation"]["conversation_session_id"] == "team-session-1"
     assert graph["conversation"]["active_mission_id"] == ""
     assert graph["nodes"] == []
     assert graph["run_bindings"] == []
@@ -919,7 +919,7 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(mo
 
     assert submit_response["result"]["conversation_session_id"] == "team-session-1"
     assert submit_response["result"]["conversation_id"] == "mission-1"
-    assert submitted[0]["stored_session_id"] == "team-session-1"
+    assert submitted[0]["conversation_session_id"] == "team-session-1"
     assert submitted[0]["agent_profile_id"] == "profile-leader"
     assert submitted[0]["persist_user_message"] == ""
     assert db.get_team_mission_graph("mission-1") == {}
@@ -945,7 +945,7 @@ def test_team_mission_message_submit_derives_conversation_title_from_first_user_
     workspace = _workspace_payload(tmp_path)
     db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team Mission",
         objective="占位会话",
@@ -964,7 +964,7 @@ def test_team_mission_message_submit_derives_conversation_title_from_first_user_
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader-conversation",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -1111,7 +1111,7 @@ def test_team_mission_message_submit_conversation_only_does_not_bind_previous_ac
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="老团队会话",
         active_mission_id="mission-old",
@@ -1127,7 +1127,7 @@ def test_team_mission_message_submit_conversation_only_does_not_bind_previous_ac
         mode="supervised_mission",
         status="completed",
         **_workspace_kwargs(tmp_path),
-        metadata={"conversation_id": "conversation-1", "stableTeamSessionId": "team-session-1"},
+        metadata={"conversation_id": "conversation-1", "conversationTeamSessionId": "team-session-1"},
     )
     submitted = {}
 
@@ -1141,7 +1141,7 @@ def test_team_mission_message_submit_conversation_only_does_not_bind_previous_ac
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader-conversation",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -1235,7 +1235,7 @@ def test_team_conversation_detail_returns_registry_team_members(monkeypatch, tmp
     workspace = _workspace_payload(tmp_path)
     db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="团队会话",
         objective="协作",
@@ -1329,7 +1329,7 @@ def test_team_mission_plan_complete_requires_leader_planned_finalizers(tmp_path:
         node_id="team-mission:mission-1:root",
         run_id="run-leader",
         session_id="leader-session",
-        runtime_session_id="leader-runtime",
+        execution_session_id="leader-runtime",
         runtime_scope_key="team:mission-1:leader",
         role="leader",
     )
@@ -1379,7 +1379,7 @@ def test_team_mission_create_records_user_task_in_stable_team_session(monkeypatc
     def fake_run_submit(rid, params):
         db.upsert_run(
             run_id=params["run_id"],
-            session_id=params["stored_session_id"],
+            session_id=params["conversation_session_id"],
             runtime_scope_key=params["runtime_scope_key"],
             status="running",
         )
@@ -1391,7 +1391,7 @@ def test_team_mission_create_records_user_task_in_stable_team_session(monkeypatc
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -1407,7 +1407,7 @@ def test_team_mission_create_records_user_task_in_stable_team_session(monkeypatc
             "objective": "继续做第二个任务",
             "mode": "supervised_mission",
             "workspace": _workspace_payload(tmp_path),
-            "metadata": {"stableTeamSessionId": "team-session-1"},
+            "metadata": {"conversationTeamSessionId": "team-session-1"},
         },
     )
 
@@ -1457,7 +1457,7 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader-conversation",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -1493,7 +1493,7 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
     )
 
     assert response["result"]["conversation_session_id"] == "team-session-1"
-    assert submitted["stored_session_id"] == "team-session-1"
+    assert submitted["conversation_session_id"] == "team-session-1"
     assert submitted["persist_user_message"] == ""
     assert submitted["enabled_toolsets"] == [
         "team_mission_conversation_leader",
@@ -1550,7 +1550,7 @@ def test_team_mission_message_submit_direct_reply_disables_tools_and_reasoning(m
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader-conversation",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -1601,7 +1601,7 @@ def test_team_mission_message_submit_explicit_start_task_overrides_negated_direc
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader-conversation",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -1659,7 +1659,7 @@ def test_team_mission_message_submit_registers_worker_runtime_session_shell(monk
 
     control_db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="团队会话",
         objective="继续沟通",
@@ -1680,7 +1680,7 @@ def test_team_mission_message_submit_registers_worker_runtime_session_shell(monk
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader-conversation",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -1701,7 +1701,7 @@ def test_team_mission_message_submit_registers_worker_runtime_session_shell(monk
 
     assert "error" not in response
     assert response["result"]["conversation_session_id"] == "team-session-1"
-    assert submitted["stored_session_id"] == "team-session-1"
+    assert submitted["conversation_session_id"] == "team-session-1"
     assert runtime_db.get_session("team-session-1")["source"] == "team_mission"
 
 
@@ -1750,7 +1750,7 @@ def test_team_mission_message_submit_forwards_leader_profile_context(monkeypatch
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader-conversation",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -1808,7 +1808,7 @@ def test_team_mission_message_submit_keeps_team_scope_out_of_profile_owner_check
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader-conversation",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -1858,7 +1858,7 @@ def test_team_mission_message_submit_allows_control_plane_outer_call_to_owner_ru
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader-conversation",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -1882,7 +1882,7 @@ def test_team_mission_message_submit_allows_control_plane_outer_call_to_owner_ru
     assert response["result"]["conversation_id"] == "team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0"
     assert response["result"]["conversation_session_id"] == "team-session-team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0"
     assert submitted["runtime_scope_key"] == "team:team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0:leader-conversation"
-    assert submitted["stored_session_id"] == "team-session-team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0"
+    assert submitted["conversation_session_id"] == "team-session-team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0"
     assert submitted["agent_profile_id"] == "agent-default"
 
 
@@ -1901,7 +1901,7 @@ def test_team_mission_conversation_ensure_keeps_team_scope_out_of_profile_owner_
         1,
         {
             "conversation_id": "conversation-1",
-            "stable_team_session_id": "team-session-1",
+            "conversation_team_session_id": "team-session-1",
             "team_id": "team-1",
             "title": "团队会话",
             "agentProfileId": "agent-default",
@@ -2081,7 +2081,7 @@ def test_team_mission_message_submit_merges_requested_leader_conversation_toolse
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader-conversation",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -2128,7 +2128,7 @@ def test_team_leader_direct_reply_prompt_keeps_team_speaker_ownership():
             "conversation": {
                 "conversation_id": "team-conversation-1",
                 "title": "团队会话",
-                "stable_session_id": "team-session-team-conversation-1",
+                "conversation_session_id": "team-session-team-conversation-1",
             },
             "mission": {},
             "nodes": [],
@@ -2152,7 +2152,7 @@ def test_team_leader_router_prompt_returns_start_task_result_to_leader():
             "conversation": {
                 "conversation_id": "team-conversation-1",
                 "title": "团队会话",
-                "stable_session_id": "team-session-team-conversation-1",
+                "conversation_session_id": "team-session-team-conversation-1",
             },
             "mission": {},
             "nodes": [],
@@ -2218,7 +2218,7 @@ def test_team_mission_member_node_start_keeps_delegation_available(monkeypatch, 
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-builder",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -2252,7 +2252,7 @@ def test_team_mission_message_submit_does_not_inject_other_conversation_memory(m
         title="Old mission",
         objective="Build filescan",
         mode="autonomous_mission",
-        metadata={"stableTeamSessionId": "team-session-old", "task_id": "task-old"},
+        metadata={"conversationTeamSessionId": "team-session-old", "task_id": "task-old"},
     )
     db.upsert_team_mission_memory_item(
         team_id="team-1",
@@ -2289,7 +2289,7 @@ def test_team_mission_message_submit_does_not_inject_other_conversation_memory(m
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader-conversation",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -2307,7 +2307,7 @@ def test_team_mission_message_submit_does_not_inject_other_conversation_memory(m
     )
 
     assert response["result"]["conversation_session_id"] == "team-session-new"
-    assert submitted["stored_session_id"] == "team-session-new"
+    assert submitted["conversation_session_id"] == "team-session-new"
     assert "Team Conversation Memory Pack" not in submitted["text"]
     assert "filescan.py" not in submitted["text"]
     memory_context = submitted["dovie_product_context"]["team_mission"]["memory"]
@@ -2398,7 +2398,7 @@ def test_archived_team_history_is_readable_but_team_writes_are_rejected(monkeypa
     workspace = _workspace_payload(tmp_path)
     db.ensure_team_mission_conversation(
         conversation_id="conversation-archived-team",
-        stable_session_id="team-session-archived",
+        conversation_session_id="team-session-archived",
         team_id="team-1",
         title="历史团队会话",
         objective="历史内容",
@@ -2469,7 +2469,7 @@ def test_team_mission_conversation_rename_gateway_updates_canonical_state(monkey
         objective="初始任务",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
 
     response = server._methods["team_mission.conversation.rename"](
@@ -2503,7 +2503,7 @@ def test_team_mission_conversation_delete_gateway_blocks_active_leader_run(monke
         objective="初始任务",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_run(
         run_id="run-leader",
@@ -2544,7 +2544,7 @@ def test_team_mission_conversation_delete_gateway_removes_canonical_conversation
         objective="初始任务",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -2560,7 +2560,7 @@ def test_team_mission_conversation_delete_gateway_removes_canonical_conversation
         node_id="node-worker",
         run_id="run-worker",
         session_id="worker-session-1",
-        runtime_session_id="runtime-worker-1",
+        execution_session_id="runtime-worker-1",
         runtime_scope_key="team:mission-1:node-worker",
         role="worker",
     )
@@ -2597,7 +2597,7 @@ def test_team_mission_conversation_delete_gateway_removes_canonical_conversation
     assert "result" in response, response
     assert response["result"]["deleted"] is True
     assert response["result"]["conversation_id"] == "conversation-1"
-    assert response["result"]["stable_session_id"] == "team-session-1"
+    assert response["result"]["conversation_session_id"] == "team-session-1"
     assert response["result"]["run_session_ids"] == ["worker-session-1", "runtime-worker-1"]
     assert response["result"]["deleted_session_ids"] == [
         "team-session-1",
@@ -2643,7 +2643,7 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
             "mode": "supervised_mission",
             "conversation_only": True,
             "workspace": _workspace_payload(tmp_path),
-            "metadata": {"stableTeamSessionId": "team-session-1"},
+            "metadata": {"conversationTeamSessionId": "team-session-1"},
         },
     )["result"]["graph"]
     submitted = {}
@@ -2658,7 +2658,7 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-planning",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -2853,7 +2853,7 @@ def test_team_mission_plan_approve_uses_requested_mission_native_graph(monkeypat
     try:
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             team_id="team-1",
             active_mission_id="mission-current",
             title="团队会话",
@@ -2939,7 +2939,7 @@ def test_team_mission_plan_approve_starts_ready_worker_with_runtime_projection(m
     monkeypatch.setattr(server, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         active_mission_id="mission-current",
         title="团队会话",
@@ -2955,7 +2955,7 @@ def test_team_mission_plan_approve_starts_ready_worker_with_runtime_projection(m
         mode="supervised_mission",
         status="waiting_approval",
         leader_session_id="team-session-1",
-        metadata={"conversation_id": "conversation-1", "stableTeamSessionId": "team-session-1"},
+        metadata={"conversation_id": "conversation-1", "conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-current",
@@ -2993,7 +2993,7 @@ def test_team_mission_plan_approve_starts_ready_worker_with_runtime_projection(m
                 {
                     "type": event_type,
                     "session_id": "runtime-worker",
-                    "stored_session_id": params["stored_session_id"],
+                    "conversation_session_id": params["conversation_session_id"],
                     "run_id": params["run_id"],
                     "turn_id": params["turn_id"],
                     "runtime_scope_key": params["runtime_scope_key"],
@@ -3010,7 +3010,7 @@ def test_team_mission_plan_approve_starts_ready_worker_with_runtime_projection(m
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-worker",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -3033,8 +3033,8 @@ def test_team_mission_plan_approve_starts_ready_worker_with_runtime_projection(m
     worker = db.get_team_mission_node("mission-current", "node-worker")
     assert worker["status"] == "running"
     assert worker["run_id"]
-    assert worker["runtime_stable_session_id"] == "team:mission-current:node:node-worker"
-    assert worker["runtime_session_id"] == "runtime-worker"
+    assert worker["runtime_conversation_session_id"] == "team:mission-current:node:node-worker"
+    assert worker["execution_session_id"] == "runtime-worker"
     assert worker["runtime_scope_key"] == "profile:worker-a"
 
     events = db.list_team_mission_run_events("mission-current")
@@ -3046,7 +3046,7 @@ def test_team_mission_plan_approve_starts_ready_worker_with_runtime_projection(m
         and event["payload"]["node_id"] == "node-worker"
     )
     assert delta_event["payload"]["kind"] == "node.output.delta"
-    assert delta_event["payload"]["subject"]["runtime_stable_session_id"] == "team:mission-current:node:node-worker"
+    assert delta_event["payload"]["subject"]["runtime_conversation_session_id"] == "team:mission-current:node:node-worker"
     assert delta_event["payload"]["text_stream"]["delta"] == "worker-live"
     status_events = [event for event in events if event["type"] == "team_mission.conversation.status"]
     assert status_events
@@ -3077,7 +3077,7 @@ def test_team_mission_direct_root_task_activation_replaces_draft_objective(monke
             "mode": "supervised_mission",
             "conversation_only": True,
             "workspace": _workspace_payload(tmp_path),
-            "metadata": {"stableTeamSessionId": "team-session-1"},
+            "metadata": {"conversationTeamSessionId": "team-session-1"},
         },
     )
     submitted = {}
@@ -3092,7 +3092,7 @@ def test_team_mission_direct_root_task_activation_replaces_draft_objective(monke
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-planning",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -3138,7 +3138,7 @@ def test_team_mission_runtime_output_stays_inside_node_session(tmp_path: Path):
         title="监督执行",
         objective="规划审批后执行",
         mode="supervised_mission",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     root_node_id = db.get_team_mission_graph("mission-1")["nodes"][0]["node_id"]
     db.bind_team_mission_run(
@@ -3146,7 +3146,7 @@ def test_team_mission_runtime_output_stays_inside_node_session(tmp_path: Path):
         node_id=root_node_id,
         run_id="run-leader",
         session_id="node-session-1",
-        runtime_session_id="runtime-leader",
+        execution_session_id="runtime-leader",
         runtime_scope_key="team:mission-1:leader",
         role="leader",
     )
@@ -3155,7 +3155,7 @@ def test_team_mission_runtime_output_stays_inside_node_session(tmp_path: Path):
         {
             "type": "message.complete",
             "session_id": "runtime-leader",
-            "stored_session_id": "node-session-1",
+            "conversation_session_id": "node-session-1",
             "run_id": "run-leader",
             "turn_id": "turn-leader",
             "runtime_scope_key": "team:mission-1:leader",
@@ -3194,7 +3194,7 @@ def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(tm
         title="监督执行",
         objective="规划审批后执行",
         mode="supervised_mission",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -3208,7 +3208,7 @@ def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(tm
         node_id="node-worker",
         run_id="run-worker",
         session_id="worker-session-1",
-        runtime_session_id="runtime-worker",
+        execution_session_id="runtime-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
         role="worker",
     )
@@ -3225,7 +3225,7 @@ def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(tm
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
@@ -3234,7 +3234,7 @@ def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(tm
         {
             "type": "message.complete",
             "session_id": "runtime-worker",
-            "stored_session_id": "worker-session-1",
+            "conversation_session_id": "worker-session-1",
             "run_id": "run-worker",
             "turn_id": "turn-worker",
             "runtime_scope_key": "team:mission-1:node:node-worker",
@@ -3247,7 +3247,7 @@ def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(tm
         {
             "type": "message.start",
             "session_id": "runtime-synthesis",
-            "stored_session_id": "synthesis-session-1",
+            "conversation_session_id": "synthesis-session-1",
             "run_id": "run-synthesis",
             "turn_id": "turn-synthesis",
             "runtime_scope_key": "team:mission-1:synthesis",
@@ -3260,7 +3260,7 @@ def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(tm
         {
             "type": "message.delta",
             "session_id": "runtime-synthesis",
-            "stored_session_id": "synthesis-session-1",
+            "conversation_session_id": "synthesis-session-1",
             "run_id": "run-synthesis",
             "turn_id": "turn-synthesis",
             "runtime_scope_key": "team:mission-1:synthesis",
@@ -3277,7 +3277,7 @@ def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(tm
         {
             "type": "message.delta",
             "session_id": "runtime-synthesis",
-            "stored_session_id": "synthesis-session-1",
+            "conversation_session_id": "synthesis-session-1",
             "run_id": "run-synthesis",
             "turn_id": "turn-synthesis",
             "runtime_scope_key": "team:mission-1:synthesis",
@@ -3293,7 +3293,7 @@ def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(tm
         {
             "type": "message.complete",
             "session_id": "runtime-synthesis",
-            "stored_session_id": "synthesis-session-1",
+            "conversation_session_id": "synthesis-session-1",
             "run_id": "run-synthesis",
             "turn_id": "turn-synthesis",
             "runtime_scope_key": "team:mission-1:synthesis",
@@ -3321,7 +3321,7 @@ def test_submit_mission_leader_report_run_queues_leader_without_user_message(tmp
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="团队会话",
         workspace_id="workspace-1",
@@ -3338,7 +3338,7 @@ def test_submit_mission_leader_report_run_queues_leader_without_user_message(tmp
         workspace_id="workspace-1",
         workspace_path=str(workspace),
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     result = db.upsert_team_mission_result(
         mission_id="mission-report",
@@ -3371,7 +3371,7 @@ def test_submit_mission_leader_report_run_queues_leader_without_user_message(tmp
     assert response["status"] == "queued"
     assert captured["rid"].startswith("leader-report:")
     submitted = captured["params"]
-    assert submitted["stored_session_id"] == "team-session-1"
+    assert submitted["conversation_session_id"] == "team-session-1"
     assert submitted["persist_user_message"] == ""
     assert submitted["draft_text"] == ""
     assert submitted["enabled_toolsets"] == []
@@ -3399,7 +3399,7 @@ def test_team_mission_synthesis_stream_does_not_publish_to_conversation_subscrib
         title="监督执行",
         objective="规划审批后执行",
         mode="supervised_mission",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -3413,14 +3413,14 @@ def test_team_mission_synthesis_stream_does_not_publish_to_conversation_subscrib
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
 
     transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         transport=transport,
         active_only=False,
         db=db,
@@ -3430,7 +3430,7 @@ def test_team_mission_synthesis_stream_does_not_publish_to_conversation_subscrib
             {
                 "type": "message.start",
                 "session_id": "runtime-synthesis",
-                "stored_session_id": "synthesis-session-1",
+                "conversation_session_id": "synthesis-session-1",
                 "run_id": "run-synthesis",
                 "turn_id": "turn-synthesis",
                 "runtime_scope_key": "team:mission-1:synthesis",
@@ -3443,7 +3443,7 @@ def test_team_mission_synthesis_stream_does_not_publish_to_conversation_subscrib
             {
                 "type": "message.delta",
                 "session_id": "runtime-synthesis",
-                "stored_session_id": "synthesis-session-1",
+                "conversation_session_id": "synthesis-session-1",
                 "run_id": "run-synthesis",
                 "turn_id": "turn-synthesis",
                 "runtime_scope_key": "team:mission-1:synthesis",
@@ -3456,7 +3456,7 @@ def test_team_mission_synthesis_stream_does_not_publish_to_conversation_subscrib
             {
                 "type": "message.delta",
                 "session_id": "runtime-synthesis",
-                "stored_session_id": "synthesis-session-1",
+                "conversation_session_id": "synthesis-session-1",
                 "run_id": "run-synthesis",
                 "turn_id": "turn-synthesis",
                 "runtime_scope_key": "team:mission-1:synthesis",
@@ -3515,7 +3515,7 @@ def test_team_mission_node_start_prebinds_run_before_fast_synthesis_events(monke
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="团队会话",
         active_mission_id="mission-1",
@@ -3530,7 +3530,7 @@ def test_team_mission_node_start_prebinds_run_before_fast_synthesis_events(monke
         **_workspace_kwargs(tmp_path),
         mode="supervised_mission",
         status="running",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -3542,7 +3542,7 @@ def test_team_mission_node_start_prebinds_run_before_fast_synthesis_events(monke
     )
     transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         transport=transport,
         active_only=False,
         db=db,
@@ -3558,7 +3558,7 @@ def test_team_mission_node_start_prebinds_run_before_fast_synthesis_events(monke
                 {
                     "type": event_type,
                     "session_id": "runtime-synthesis",
-                    "stored_session_id": params["stored_session_id"],
+                    "conversation_session_id": params["conversation_session_id"],
                     "run_id": params["run_id"],
                     "turn_id": params["turn_id"],
                     "runtime_scope_key": params["runtime_scope_key"],
@@ -3575,7 +3575,7 @@ def test_team_mission_node_start_prebinds_run_before_fast_synthesis_events(monke
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-synthesis",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -3589,7 +3589,7 @@ def test_team_mission_node_start_prebinds_run_before_fast_synthesis_events(monke
                 "node_id": "node-synthesis-delivery",
                 "run_id": "run-synthesis",
                 "turn_id": "turn-synthesis",
-                "stored_session_id": "synthesis-session-1",
+                "conversation_session_id": "synthesis-session-1",
             },
         )
     finally:
@@ -3616,7 +3616,7 @@ def test_team_mission_synthesis_failed_complete_with_text_does_not_mirror_delive
         title="监督执行",
         objective="规划审批后执行",
         mode="supervised_mission",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -3630,7 +3630,7 @@ def test_team_mission_synthesis_failed_complete_with_text_does_not_mirror_delive
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
@@ -3639,7 +3639,7 @@ def test_team_mission_synthesis_failed_complete_with_text_does_not_mirror_delive
         {
             "type": "message.complete",
             "session_id": "runtime-synthesis",
-            "stored_session_id": "synthesis-session-1",
+            "conversation_session_id": "synthesis-session-1",
             "run_id": "run-synthesis",
             "turn_id": "turn-synthesis",
             "runtime_scope_key": "team:mission-1:synthesis",
@@ -3672,7 +3672,7 @@ def test_final_deliverable_recovery_does_not_rewrite_legacy_snapshot_mirror_even
         title="监督执行",
         objective="规划审批后执行",
         mode="supervised_mission",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -3686,7 +3686,7 @@ def test_final_deliverable_recovery_does_not_rewrite_legacy_snapshot_mirror_even
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
@@ -3695,7 +3695,7 @@ def test_final_deliverable_recovery_does_not_rewrite_legacy_snapshot_mirror_even
         {
             "type": "message.delta",
             "session_id": "runtime-synthesis",
-            "stored_session_id": "synthesis-session-1",
+            "conversation_session_id": "synthesis-session-1",
             "run_id": "run-synthesis",
             "turn_id": "turn-synthesis",
             "runtime_scope_key": "team:mission-1:synthesis",
@@ -3717,7 +3717,7 @@ def test_final_deliverable_recovery_does_not_rewrite_legacy_snapshot_mirror_even
         {
             "type": "message.delta",
             "session_id": "runtime-synthesis",
-            "stored_session_id": "team-session-1",
+            "conversation_session_id": "team-session-1",
             "run_id": "team-mission:mission-1:conversation:run-synthesis",
             "turn_id": "turn-synthesis",
             "runtime_scope_key": "team_mission:mission-1",
@@ -3735,7 +3735,7 @@ def test_final_deliverable_recovery_does_not_rewrite_legacy_snapshot_mirror_even
         {
             "type": "message.delta",
             "session_id": "runtime-synthesis",
-            "stored_session_id": "team-session-1",
+            "conversation_session_id": "team-session-1",
             "run_id": "team-mission:mission-1:conversation:run-synthesis",
             "turn_id": "turn-synthesis",
             "runtime_scope_key": "team_mission:mission-1",
@@ -3753,7 +3753,7 @@ def test_final_deliverable_recovery_does_not_rewrite_legacy_snapshot_mirror_even
         {
             "type": "message.complete",
             "session_id": "runtime-synthesis",
-            "stored_session_id": "team-session-1",
+            "conversation_session_id": "team-session-1",
             "run_id": "team-mission:mission-1:conversation:run-synthesis",
             "turn_id": "turn-synthesis",
             "runtime_scope_key": "team_mission:mission-1",
@@ -3766,7 +3766,7 @@ def test_final_deliverable_recovery_does_not_rewrite_legacy_snapshot_mirror_even
         },
     )
 
-    assert recover_legacy_final_deliverables(db, {"stable_session_id": "team-session-1"}) == 1
+    assert recover_legacy_final_deliverables(db, {"conversation_session_id": "team-session-1"}) == 1
 
     # Terminal-run retention prunes replay-redundant stream deltas from the
     # durable run_events log. Recovery must therefore use the source run or
@@ -3821,7 +3821,7 @@ def test_team_mission_cancel_marks_graph_and_cancels_active_runs(monkeypatch, tm
         node_id="node-worker",
         run_id="run-worker",
         session_id="node-session-1",
-        runtime_session_id="runtime-worker",
+        execution_session_id="runtime-worker",
         runtime_scope_key="team:mission-1:worker",
         role="worker",
     )
@@ -3831,7 +3831,7 @@ def test_team_mission_cancel_marks_graph_and_cancels_active_runs(monkeypatch, tm
         canceled.append(params)
         db.upsert_run(
             run_id=params["run_id"],
-            session_id=params["stored_session_id"],
+            session_id=params["conversation_session_id"],
             runtime_scope_key=params["runtime_scope_key"],
             status="cancelled",
         )
@@ -3841,7 +3841,7 @@ def test_team_mission_cancel_marks_graph_and_cancels_active_runs(monkeypatch, tm
             "result": {
                 "status": "cancelled",
                 "run_id": params["run_id"],
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
             },
         }
 
@@ -3864,8 +3864,8 @@ def test_team_mission_cancel_marks_graph_and_cancels_active_runs(monkeypatch, tm
     assert canceled == [
         {
             "run_id": "run-worker",
-            "stored_session_id": "node-session-1",
-            "runtime_session_id": "runtime-worker",
+            "conversation_session_id": "node-session-1",
+            "execution_session_id": "runtime-worker",
             "runtime_scope_key": "team:mission-1:worker",
             "reason": "用户终止团队任务",
         }
@@ -3890,7 +3890,7 @@ def test_team_mission_cancel_resolves_active_mission_from_conversation_id(monkey
     )
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-conversation-1",
+        conversation_session_id="team-session-conversation-1",
         team_id="team-1",
         title="团队会话",
         active_mission_id="mission-active",
@@ -3977,31 +3977,31 @@ def test_gateway_emit_publishes_terminal_event_to_session_subscribers(monkeypatc
     from tui_gateway import server
     from tui_gateway.services import run_control
 
-    stable_session_id = "team-session-live"
-    runtime_session_id = "runtime-live"
+    conversation_session_id = "team-session-live"
+    execution_session_id = "runtime-live"
     db = SessionDB(tmp_path / "state.db")
-    db.create_session(stable_session_id, source="test")
+    db.create_session(conversation_session_id, source="test")
     db.upsert_run(
         run_id="run-live",
-        session_id=stable_session_id,
+        session_id=conversation_session_id,
         runtime_scope_key="team:mission-live:leader-conversation",
-        runtime_session_id=runtime_session_id,
+        execution_session_id=execution_session_id,
         status="running",
     )
     monkeypatch.setattr(server, "_db_for_stable_session", lambda _stable: db)
     subscriber_transport = _MemoryTransport()
     owner_transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id=stable_session_id,
+        conversation_session_id=conversation_session_id,
         transport=subscriber_transport,
         active_only=True,
         db=db,
     )
     previous_session = None
     with server._sessions_lock:
-        previous_session = server._sessions.get(runtime_session_id)
-        server._sessions[runtime_session_id] = {
-            "session_key": stable_session_id,
+        previous_session = server._sessions.get(execution_session_id)
+        server._sessions[execution_session_id] = {
+            "session_key": conversation_session_id,
             "active_run_id": "run-live",
             "active_turn_id": "turn-live",
             "active_runtime_scope_key": "team:mission-live:leader-conversation",
@@ -4011,7 +4011,7 @@ def test_gateway_emit_publishes_terminal_event_to_session_subscribers(monkeypatc
     try:
         server._emit(
             "message.complete",
-            runtime_session_id,
+            execution_session_id,
             {
                 "run_id": "run-live",
                 "turn_id": "turn-live",
@@ -4025,15 +4025,15 @@ def test_gateway_emit_publishes_terminal_event_to_session_subscribers(monkeypatc
         run_control.unsubscribe_session(subscription_id=subscription_id)
         with server._sessions_lock:
             if previous_session is None:
-                server._sessions.pop(runtime_session_id, None)
+                server._sessions.pop(execution_session_id, None)
             else:
-                server._sessions[runtime_session_id] = previous_session
+                server._sessions[execution_session_id] = previous_session
         db.close()
 
     assert any(
         frame.get("method") == "event"
         and (frame.get("params") or {}).get("type") == "message.complete"
-        and (frame.get("params") or {}).get("stored_session_id") == stable_session_id
+        and (frame.get("params") or {}).get("conversation_session_id") == conversation_session_id
         and ((frame.get("params") or {}).get("payload") or {}).get("text") == "done"
         for frame in subscriber_transport.frames
     ), subscriber_transport.frames
@@ -4046,7 +4046,7 @@ def test_event_bus_delivers_explicit_subscription_on_owner_transport(tmp_path: P
     db = SessionDB(tmp_path / "state.db")
     transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="team-session-owner-live",
+        conversation_session_id="team-session-owner-live",
         transport=transport,
         active_only=False,
         db=db,
@@ -4056,7 +4056,7 @@ def test_event_bus_delivers_explicit_subscription_on_owner_transport(tmp_path: P
             {
                 "type": "message.delta",
                 "session_id": "runtime-owner-live",
-                "stored_session_id": "team-session-owner-live",
+                "conversation_session_id": "team-session-owner-live",
                 "run_id": "run-owner-live",
                 "turn_id": "turn-owner-live",
                 "runtime_scope_key": "team:conversation-owner:leader-conversation",
@@ -4076,7 +4076,7 @@ def test_event_bus_delivers_explicit_subscription_on_owner_transport(tmp_path: P
         if frame.get("method") == "event"
     ]
     assert [event["type"] for event in streamed] == ["message.delta"]
-    assert streamed[0]["stored_session_id"] == "team-session-owner-live"
+    assert streamed[0]["conversation_session_id"] == "team-session-owner-live"
     assert streamed[0]["payload"]["delta"] == "实时"
 
 
@@ -4087,7 +4087,7 @@ def test_worker_event_path_uses_persisted_event_bus_for_owner_subscription(tmp_p
     db = SessionDB(tmp_path / "state.db")
     transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="team-session-relay-live",
+        conversation_session_id="team-session-relay-live",
         transport=transport,
         active_only=False,
         db=db,
@@ -4097,7 +4097,7 @@ def test_worker_event_path_uses_persisted_event_bus_for_owner_subscription(tmp_p
             {
                 "type": "message.delta",
                 "session_id": "runtime-relay-live",
-                "stored_session_id": "team-session-relay-live",
+                "conversation_session_id": "team-session-relay-live",
                 "run_id": "run-relay-live",
                 "turn_id": "turn-relay-live",
                 "runtime_scope_key": "team:conversation-relay:leader-conversation",
@@ -4117,7 +4117,7 @@ def test_worker_event_path_uses_persisted_event_bus_for_owner_subscription(tmp_p
         if frame.get("method") == "event"
     ]
     assert [event["type"] for event in streamed] == ["message.delta"]
-    assert streamed[0]["stored_session_id"] == "team-session-relay-live"
+    assert streamed[0]["conversation_session_id"] == "team-session-relay-live"
     assert streamed[0]["seq"] == 1
     assert streamed[0]["runtime_source_seq"] == 77
     assert streamed[0]["payload"]["runtime_source_seq"] == 77
@@ -4139,7 +4139,7 @@ def test_worker_terminal_event_updates_owner_team_mission_db(tmp_path: Path):
         {
             "type": "mission.node.started",
             "session_id": "runtime-verifier",
-            "stored_session_id": "team:mission-1:node:node-verifier",
+            "conversation_session_id": "team:mission-1:node:node-verifier",
             "run_id": "run-verifier",
             "turn_id": "turn-verifier",
             "runtime_scope_key": "profile:agent-7:version:v1",
@@ -4162,7 +4162,7 @@ def test_worker_terminal_event_updates_owner_team_mission_db(tmp_path: Path):
         session_id="team:mission-1:node:node-verifier",
         runtime_scope_key="profile:agent-7:version:v1",
         turn_id="turn-verifier",
-        runtime_session_id="runtime-verifier",
+        execution_session_id="runtime-verifier",
         status="running",
     )
     db.bind_team_mission_run(
@@ -4170,7 +4170,7 @@ def test_worker_terminal_event_updates_owner_team_mission_db(tmp_path: Path):
         node_id="node-verifier",
         run_id="run-verifier",
         session_id="team:mission-1:node:node-verifier",
-        runtime_session_id="runtime-verifier",
+        execution_session_id="runtime-verifier",
         runtime_scope_key="profile:agent-7:version:v1",
         role="verifier",
     )
@@ -4179,7 +4179,7 @@ def test_worker_terminal_event_updates_owner_team_mission_db(tmp_path: Path):
         {
             "type": "message.complete",
             "session_id": "runtime-verifier",
-            "stored_session_id": "team:mission-1:node:node-verifier",
+            "conversation_session_id": "team:mission-1:node:node-verifier",
             "run_id": "run-verifier",
             "turn_id": "turn-verifier",
             "runtime_scope_key": "profile:agent-7:version:v1",
@@ -4200,11 +4200,11 @@ def test_worker_terminal_event_updates_owner_team_mission_db(tmp_path: Path):
     assert run["status"] == "completed"
 
     run_control.terminate_run(
-        stored_session_id="team:mission-1:node:node-verifier",
+        conversation_session_id="team:mission-1:node:node-verifier",
         run_id="run-verifier",
         turn_id="turn-verifier",
         runtime_scope_key="profile:agent-7:version:v1",
-        runtime_session_id="runtime-verifier",
+        execution_session_id="runtime-verifier",
         status="failed",
         message="prompt worker terminal event did not close active run",
         db=db,
@@ -4224,11 +4224,11 @@ def test_gateway_emit_stream_subscription_persists_append_chunks_without_coalesc
     from tui_gateway.services import run_control
 
     db = SessionDB(tmp_path / "state.db")
-    stable_session_id = "team-session-stream"
-    runtime_session_id = "runtime-stream"
+    conversation_session_id = "team-session-stream"
+    execution_session_id = "runtime-stream"
     owner_transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id=stable_session_id,
+        conversation_session_id=conversation_session_id,
         transport=owner_transport,
         active_only=False,
         db=db,
@@ -4236,9 +4236,9 @@ def test_gateway_emit_stream_subscription_persists_append_chunks_without_coalesc
     previous_session = None
     monkeypatch.setattr(server, "_get_db", lambda: db)
     with server._sessions_lock:
-        previous_session = server._sessions.get(runtime_session_id)
-        server._sessions[runtime_session_id] = {
-            "session_key": stable_session_id,
+        previous_session = server._sessions.get(execution_session_id)
+        server._sessions[execution_session_id] = {
+            "session_key": conversation_session_id,
             "active_run_id": "run-stream",
             "active_turn_id": "turn-stream",
             "active_runtime_scope_key": "team:mission-stream:leader-conversation",
@@ -4248,7 +4248,7 @@ def test_gateway_emit_stream_subscription_persists_append_chunks_without_coalesc
     try:
         server._emit(
             "message.delta",
-            runtime_session_id,
+            execution_session_id,
             {
                 "run_id": "run-stream",
                 "turn_id": "turn-stream",
@@ -4260,7 +4260,7 @@ def test_gateway_emit_stream_subscription_persists_append_chunks_without_coalesc
         )
         server._emit(
             "message.delta",
-            runtime_session_id,
+            execution_session_id,
             {
                 "run_id": "run-stream",
                 "turn_id": "turn-stream",
@@ -4276,9 +4276,9 @@ def test_gateway_emit_stream_subscription_persists_append_chunks_without_coalesc
         run_control.unsubscribe_session(subscription_id=subscription_id)
         with server._sessions_lock:
             if previous_session is None:
-                server._sessions.pop(runtime_session_id, None)
+                server._sessions.pop(execution_session_id, None)
             else:
-                server._sessions[runtime_session_id] = previous_session
+                server._sessions[execution_session_id] = previous_session
 
     delta_payloads = [
         (frame.get("params") or {}).get("payload") or {}
@@ -4288,7 +4288,7 @@ def test_gateway_emit_stream_subscription_persists_append_chunks_without_coalesc
     assert [payload.get("delta") for payload in delta_payloads] == ["你", "好"]
     persisted_deltas = [
         event
-        for event in db.list_run_events(stable_session_id)
+        for event in db.list_run_events(conversation_session_id)
         if event.get("type") == "message.delta"
     ]
     assert [event["seq"] for event in persisted_deltas] == [1, 2]
@@ -4302,12 +4302,12 @@ def test_run_control_subscription_poll_delivers_new_append_after_direct_delivery
     monkeypatch.setattr(run_control, "_STREAM_TRACE_EVENT_TYPES", set())
     db = SessionDB(tmp_path / "state.db")
     transport = _MemoryTransport()
-    stable_session_id = "stored-direct-stream"
+    conversation_session_id = "stored-direct-stream"
     run_id = "run-direct-stream"
     turn_id = "turn-direct-stream"
     runtime_scope_key = "profile:agent-default"
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id=stable_session_id,
+        conversation_session_id=conversation_session_id,
         transport=transport,
         active_only=False,
         runtime_scope_key=runtime_scope_key,
@@ -4316,7 +4316,7 @@ def test_run_control_subscription_poll_delivers_new_append_after_direct_delivery
     direct_event = {
         "type": "message.delta",
         "session_id": "runtime-direct-stream",
-        "stored_session_id": stable_session_id,
+        "conversation_session_id": conversation_session_id,
         "run_id": run_id,
         "turn_id": turn_id,
         "runtime_scope_key": runtime_scope_key,
@@ -4324,10 +4324,10 @@ def test_run_control_subscription_poll_delivers_new_append_after_direct_delivery
         "payload": {"mode": "append", "text": "你", "delta": "你", "offset": 0},
     }
     try:
-        saved_direct = db.append_run_event(stable_session_id, direct_event)
+        saved_direct = db.append_run_event(conversation_session_id, direct_event)
         run_control.remember_transport_delivery(transport, saved_direct)
         db.append_run_event(
-            stable_session_id,
+            conversation_session_id,
             {
                 **direct_event,
                 "seq": 2,
@@ -4356,12 +4356,12 @@ def test_run_control_subscription_poll_delivers_persisted_append_events_without_
     monkeypatch.setattr(run_control, "_STREAM_TRACE_EVENT_TYPES", set())
     db = SessionDB(tmp_path / "state.db")
     transport = _MemoryTransport()
-    stable_session_id = "stored-coalesced-stream"
+    conversation_session_id = "stored-coalesced-stream"
     run_id = "run-coalesced-stream"
     turn_id = "turn-coalesced-stream"
     runtime_scope_key = "profile:agent-default"
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id=stable_session_id,
+        conversation_session_id=conversation_session_id,
         transport=transport,
         active_only=False,
         runtime_scope_key=runtime_scope_key,
@@ -4384,11 +4384,11 @@ def test_run_control_subscription_poll_delivers_persisted_append_events_without_
 
     try:
         db.append_run_event(
-            stable_session_id,
+            conversation_session_id,
             {
                 "type": "message.delta",
                 "session_id": "runtime-coalesced-stream",
-                "stored_session_id": stable_session_id,
+                "conversation_session_id": conversation_session_id,
                 "run_id": run_id,
                 "turn_id": turn_id,
                 "runtime_scope_key": runtime_scope_key,
@@ -4398,11 +4398,11 @@ def test_run_control_subscription_poll_delivers_persisted_append_events_without_
         )
         wait_for_delta_count(1)
         db.append_run_event(
-            stable_session_id,
+            conversation_session_id,
             {
                 "type": "message.delta",
                 "session_id": "runtime-coalesced-stream",
-                "stored_session_id": stable_session_id,
+                "conversation_session_id": conversation_session_id,
                 "run_id": run_id,
                 "turn_id": turn_id,
                 "runtime_scope_key": runtime_scope_key,
@@ -4430,7 +4430,7 @@ def test_active_only_subscription_keeps_seen_live_run_for_terminal_polling(monke
     transport = _MemoryTransport()
     owner_transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="team-session-poll",
+        conversation_session_id="team-session-poll",
         transport=transport,
         active_only=True,
         db=db,
@@ -4440,7 +4440,7 @@ def test_active_only_subscription_keeps_seen_live_run_for_terminal_polling(monke
             {
                 "type": "message.start",
                 "session_id": "runtime-poll",
-                "stored_session_id": "team-session-poll",
+                "conversation_session_id": "team-session-poll",
                 "run_id": "run-poll",
                 "turn_id": "turn-poll",
                 "runtime_scope_key": "team:mission-poll:leader-conversation",
@@ -4453,7 +4453,7 @@ def test_active_only_subscription_keeps_seen_live_run_for_terminal_polling(monke
             {
                 "type": "message.complete",
                 "session_id": "runtime-poll",
-                "stored_session_id": "team-session-poll",
+                "conversation_session_id": "team-session-poll",
                 "run_id": "run-poll",
                 "turn_id": "turn-poll",
                 "runtime_scope_key": "team:mission-poll:leader-conversation",
@@ -4497,7 +4497,7 @@ def test_team_mission_plan_approval_event_is_projected_to_mission_event_log(monk
         title="监督执行",
         objective="规划审批后执行",
         mode="supervised_mission",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     root_node_id = db.get_team_mission_graph("mission-1")["nodes"][0]["node_id"]
     db.upsert_run(
@@ -4618,7 +4618,7 @@ def test_runtime_activity_subscribe_replays_and_streams_team_mission_runtime_eve
         {
             "type": "message.delta",
             "session_id": "runtime-leader",
-            "stored_session_id": "session-leader",
+            "conversation_session_id": "session-leader",
             "run_id": "run-leader",
             "runtime_scope_key": "team:mission-1:leader",
             "activity_id": "mission:mission-1",
@@ -4658,7 +4658,7 @@ def test_runtime_activity_subscribe_replays_and_streams_team_mission_runtime_eve
         {
             "type": "message.delta",
             "session_id": "runtime-leader",
-            "stored_session_id": "session-leader",
+            "conversation_session_id": "session-leader",
             "run_id": "run-leader",
             "runtime_scope_key": "team:mission-1:leader",
             "activity_id": "mission:mission-1",
@@ -4740,7 +4740,7 @@ def test_runtime_activity_subscribe_uses_compact_team_mission_transport_events(m
             event={
                 "type": "message.delta",
                 "seq": idx + 1,
-                "stored_session_id": "session-leader",
+                "conversation_session_id": "session-leader",
                 "run_id": "run-leader",
                 "runtime_scope_key": "team:mission-1:leader",
                 "payload": {
@@ -4806,7 +4806,7 @@ def test_runtime_activity_subscribe_preserves_structural_transport_payload(monke
         event={
             "type": "mission.node.created",
             "seq": 11,
-            "stored_session_id": "team:mission-1:node:root",
+            "conversation_session_id": "team:mission-1:node:root",
             "run_id": "run-planner",
             "runtime_scope_key": "profile:agent-default",
             "payload": {
@@ -4829,7 +4829,7 @@ def test_runtime_activity_subscribe_preserves_structural_transport_payload(monke
         source_event={
             "type": "mission.approval.requested",
             "seq": 12,
-            "stored_session_id": "team:mission-1:node:root",
+            "conversation_session_id": "team:mission-1:node:root",
             "run_id": "run-planner",
             "runtime_scope_key": "profile:agent-default",
             "payload": {
@@ -4946,12 +4946,12 @@ def test_runtime_activity_subscribe_streams_team_mission_completion_event(monkey
         workspace_path=_workspace_payload(tmp_path)["workspace_path"],
         mode="autonomous_mission",
         leader_session_id="team-session-1",
-        metadata={"task_id": "task-1", "stableTeamSessionId": "team-session-1"},
+        metadata={"task_id": "task-1", "conversationTeamSessionId": "team-session-1"},
     )
     mission = db.get_team_mission_graph("mission-1")["mission"]
     db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         mission=mission,
         mission_id="mission-1",
         team_id="team-1",
@@ -4986,7 +4986,7 @@ def test_runtime_activity_subscribe_streams_team_mission_completion_event(monkey
         {
             "type": "message.start",
             "session_id": "runtime-worker",
-            "stored_session_id": "session-worker",
+            "conversation_session_id": "session-worker",
             "run_id": "run-worker",
             "runtime_scope_key": "team:mission-1:node:node-worker",
             "activity_id": "mission:mission-1",
@@ -5013,7 +5013,7 @@ def test_runtime_activity_subscribe_streams_team_mission_completion_event(monkey
         {
             "type": "message.complete",
             "session_id": "runtime-worker",
-            "stored_session_id": "session-worker",
+            "conversation_session_id": "session-worker",
             "run_id": "run-worker",
             "runtime_scope_key": "team:mission-1:node:node-worker",
             "activity_id": "mission:mission-1",
@@ -5085,7 +5085,7 @@ def test_team_mission_node_history_reads_runtime_from_hermes_store(monkeypatch, 
         run_id="run-worker",
         session_id="session-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
-        runtime_session_id="runtime-worker",
+        execution_session_id="runtime-worker",
         status="running",
     )
     db.bind_team_mission_run(
@@ -5093,7 +5093,7 @@ def test_team_mission_node_history_reads_runtime_from_hermes_store(monkeypatch, 
         node_id="node-worker",
         run_id="run-worker",
         session_id="session-worker",
-        runtime_session_id="runtime-worker",
+        execution_session_id="runtime-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
         role="worker",
     )
@@ -5114,7 +5114,7 @@ def test_team_mission_node_history_reads_runtime_from_hermes_store(monkeypatch, 
         "session-worker",
         {
             "type": "message.complete",
-            "stored_session_id": "session-worker",
+            "conversation_session_id": "session-worker",
             "run_id": "run-worker",
             "seq": 7,
             "turn_id": "turn-worker",
@@ -5136,7 +5136,7 @@ def test_team_mission_node_history_reads_runtime_from_hermes_store(monkeypatch, 
     assert "error" not in response
     result = response["result"]
     assert result["source"]["session_id"] == "session-worker"
-    assert result["source"]["runtime_session_id"] == "runtime-worker"
+    assert result["source"]["execution_session_id"] == "runtime-worker"
     assert result["source"]["run_id"] == "run-worker"
     assert result["messages"][0]["message_id"] == "msg-worker"
     assert result["messages"][0]["text"] == "final answer"
@@ -5181,7 +5181,7 @@ def test_team_mission_node_history_filters_stream_chunks(monkeypatch, tmp_path: 
         run_id="run-worker",
         session_id="session-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
-        runtime_session_id="runtime-worker",
+        execution_session_id="runtime-worker",
         status="running",
     )
     db.bind_team_mission_run(
@@ -5189,7 +5189,7 @@ def test_team_mission_node_history_filters_stream_chunks(monkeypatch, tmp_path: 
         node_id="node-worker",
         run_id="run-worker",
         session_id="session-worker",
-        runtime_session_id="runtime-worker",
+        execution_session_id="runtime-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
         role="worker",
     )
@@ -5204,7 +5204,7 @@ def test_team_mission_node_history_filters_stream_chunks(monkeypatch, tmp_path: 
                 {
                     "type": event_type,
                     "session_id": "runtime-worker",
-                    "stored_session_id": "team-session-1",
+                    "conversation_session_id": "team-session-1",
                     "run_id": "run-worker",
                     "turn_id": "turn-worker",
                     "runtime_scope_key": "team:mission-1:node:node-worker",
@@ -5246,7 +5246,7 @@ def test_team_mission_node_history_resolves_active_conversation_mission(monkeypa
 
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team",
         active_mission_id="mission-active",
@@ -5513,7 +5513,7 @@ def test_team_mission_node_start_reuses_run_submit_and_binds_worker_run(monkeypa
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-worker",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -5530,8 +5530,8 @@ def test_team_mission_node_start_reuses_run_submit_and_binds_worker_run(monkeypa
         },
     )
 
-    assert started["result"]["stored_session_id"] == "team:mission-1:node:node-worker"
-    assert submitted["stored_session_id"] == "team:mission-1:node:node-worker"
+    assert started["result"]["conversation_session_id"] == "team:mission-1:node:node-worker"
+    assert submitted["conversation_session_id"] == "team:mission-1:node:node-worker"
     assert submitted["runtime_scope_key"] == "profile:worker-a"
     assert "You are executing one assigned node in a DoXie team task." in submitted["text"]
     assert "完成交付" in submitted["text"]
@@ -5545,13 +5545,13 @@ def test_team_mission_node_start_reuses_run_submit_and_binds_worker_run(monkeypa
     assert node["status"] == "running"
     assert node["metadata"]["run_id"] == "run-worker"
     assert node["run_id"] == "run-worker"
-    assert node["stored_session_id"] == "team:mission-1:node:node-worker"
-    assert node["actual_stable_session_id"] == "team:mission-1:node:node-worker"
-    assert node["runtime_session_id"] == "runtime-worker"
+    assert node["conversation_session_id"] == "team:mission-1:node:node-worker"
+    assert node["actual_conversation_session_id"] == "team:mission-1:node:node-worker"
+    assert node["execution_session_id"] == "runtime-worker"
     assert node["runtime_scope_key"] == "profile:worker-a"
     assert node["runtime_binding"]["run_id"] == "run-worker"
     assert graph["run_bindings"][0]["run_id"] == "run-worker"
-    assert graph["run_bindings"][0]["runtime_session_id"] == "runtime-worker"
+    assert graph["run_bindings"][0]["execution_session_id"] == "runtime-worker"
     events = db.list_team_mission_run_events("mission-1")
     source_events = [event for event in events if event["type"] == "team_mission.runtime.event"]
     assert source_events[-1]["payload"]["source_event_type"] == "mission.node.started"
@@ -5609,7 +5609,7 @@ def test_team_mission_node_start_registers_worker_runtime_session_shell(monkeypa
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-worker",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -5627,8 +5627,8 @@ def test_team_mission_node_start_registers_worker_runtime_session_shell(monkeypa
     )
 
     assert "error" not in started
-    assert started["result"]["stored_session_id"] == expected_session_id
-    assert submitted["stored_session_id"] == expected_session_id
+    assert started["result"]["conversation_session_id"] == expected_session_id
+    assert submitted["conversation_session_id"] == expected_session_id
     assert control_db.get_session(expected_session_id)["source"] == "team_mission"
     assert runtime_db.get_session(expected_session_id)["source"] == "team_mission"
 
@@ -5686,7 +5686,7 @@ def test_team_mission_node_start_forwards_assignee_profile_context(monkeypatch, 
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-worker",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -5734,7 +5734,7 @@ def test_team_mission_bound_worker_run_event_updates_node_status(tmp_path: Path)
         node_id="node-worker",
         run_id="run-worker",
         session_id="session-worker",
-        runtime_session_id="runtime-worker",
+        execution_session_id="runtime-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
         role="worker",
     )
@@ -5743,7 +5743,7 @@ def test_team_mission_bound_worker_run_event_updates_node_status(tmp_path: Path)
         {
             "type": "message.complete",
             "session_id": "runtime-worker",
-            "stored_session_id": "session-worker",
+            "conversation_session_id": "session-worker",
             "run_id": "run-worker",
             "runtime_scope_key": "team:mission-1:node:node-worker",
             "seq": 1,
@@ -6197,7 +6197,7 @@ def test_team_mission_terminal_event_auto_starts_unblocked_child_node(monkeypatc
         node_id="node-a",
         run_id="run-a",
         session_id="session-a",
-        runtime_session_id="runtime-a",
+        execution_session_id="runtime-a",
         runtime_scope_key="team:mission-1:node:node-a",
         role="worker",
     )
@@ -6213,7 +6213,7 @@ def test_team_mission_terminal_event_auto_starts_unblocked_child_node(monkeypatc
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-b",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -6224,7 +6224,7 @@ def test_team_mission_terminal_event_auto_starts_unblocked_child_node(monkeypatc
         {
             "type": "message.complete",
             "session_id": "runtime-a",
-            "stored_session_id": "session-a",
+            "conversation_session_id": "session-a",
             "run_id": "run-a",
             "runtime_scope_key": "team:mission-1:node:node-a",
             "seq": 1,
@@ -6259,7 +6259,7 @@ def test_team_mission_node_start_injects_leader_memory_pack(monkeypatch, tmp_pat
         objective="Research market",
         **_workspace_kwargs(tmp_path),
         mode="autonomous_mission",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-old"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-old"},
     )
     memory_item = db.upsert_team_mission_memory_item(
         team_id="team-1",
@@ -6281,7 +6281,7 @@ def test_team_mission_node_start_injects_leader_memory_pack(monkeypatch, tmp_pat
         **_workspace_kwargs(tmp_path),
         mode="supervised_mission",
         members=[{"member_id": "leader", "role": "leader"}],
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-new"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-new"},
     )
     root_node_id = db.get_team_mission_graph("mission-new")["nodes"][0]["node_id"]
     submitted = {}
@@ -6296,7 +6296,7 @@ def test_team_mission_node_start_injects_leader_memory_pack(monkeypatch, tmp_pat
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-leader",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -6337,7 +6337,7 @@ def test_team_mission_memory_gateway_methods(monkeypatch, tmp_path: Path):
         title="Mission",
         objective="Create launch plan",
         mode="autonomous_mission",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     item = db.upsert_team_mission_memory_item(
         team_id="team-1",
@@ -6404,7 +6404,7 @@ def test_team_mission_terminal_event_starts_legacy_auto_verifier_finalizer(monke
         node_id="node-a",
         run_id="run-a",
         session_id="session-a",
-        runtime_session_id="runtime-a",
+        execution_session_id="runtime-a",
         runtime_scope_key="team:mission-1:node:node-a",
         role="worker",
     )
@@ -6420,7 +6420,7 @@ def test_team_mission_terminal_event_starts_legacy_auto_verifier_finalizer(monke
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-verifier",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }
@@ -6431,7 +6431,7 @@ def test_team_mission_terminal_event_starts_legacy_auto_verifier_finalizer(monke
         {
             "type": "message.complete",
             "session_id": "runtime-a",
-            "stored_session_id": "session-a",
+            "conversation_session_id": "session-a",
             "run_id": "run-a",
             "runtime_scope_key": "team:mission-1:node:node-a",
             "seq": 1,
@@ -6465,7 +6465,7 @@ def _recall_setup_team_conversation(monkeypatch, tmp_path: Path):
         conversation_id="conv-1",
         team_id="team-1",
         workspace_id="workspace-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         title="团队会话",
     )
     from hermes_state_participants import member_participant_id
@@ -6554,7 +6554,7 @@ def test_recall_turn_member_chat_cancels_conversation_run_and_syncs_legacy_view(
     assert result["cascade_type"] == "A"
     assert calls["run_cancel"] == [{
         "run_id": "team-member-run-A",
-        "stored_session_id": "team-session-1",
+        "conversation_session_id": "team-session-1",
         "reason": "Recalled by user.",
     }]
     assert calls["team_mission_cancel"] == []
@@ -6692,7 +6692,7 @@ def test_recall_turn_path_A_leader_direct_cancels_leader_run(monkeypatch, tmp_pa
     assert calls["team_mission_cancel"] == []
     assert calls["run_cancel"] == [{
         "run_id": "team-leader-run-plain",
-        "stored_session_id": "team-session-1",
+        "conversation_session_id": "team-session-1",
         "reason": "Recalled by user.",
     }]
 
@@ -6720,7 +6720,7 @@ def test_leader_turn_for_this_submit_forces_per_submission_identity():
     )
     assert leader_turn["run_id"] == "team-leader-run-fef9fb80-6941-4e2d-ab29-821799d48477"
     assert leader_turn["turn_id"] == "team-leader-turn-9e654e48-0000-4000-8000-000000000000"
-    assert leader_turn["stored_session_id"] == "team-session-team-conversation-ea11b9d6"
+    assert leader_turn["conversation_session_id"] == "team-session-team-conversation-ea11b9d6"
     assert leader_turn["runtime_scope_key"] == "team:team-conversation-ea11b9d6:leader-conversation"
     # The foreign member turn's runtime session must not leak onto this submit.
     assert leader_turn["session_id"] == "team-session-team-conversation-ea11b9d6"

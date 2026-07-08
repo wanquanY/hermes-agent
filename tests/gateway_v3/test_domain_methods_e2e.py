@@ -39,6 +39,9 @@ def _make_conn() -> sqlite3.Connection:
         CREATE TABLE sessions (
             id TEXT PRIMARY KEY,
             source TEXT NOT NULL DEFAULT '',
+            user_id TEXT,
+            model TEXT,
+            model_config TEXT,
             title TEXT,
             display_title TEXT,
             display_title_source TEXT,
@@ -48,7 +51,8 @@ def _make_conn() -> sqlite3.Connection:
             started_at REAL NOT NULL DEFAULT 0,
             updated_at REAL NOT NULL DEFAULT 0,
             ended_at REAL,
-            end_reason TEXT
+            end_reason TEXT,
+            transient INTEGER DEFAULT 0
         );
         CREATE TABLE session_index (
             session_id TEXT PRIMARY KEY,
@@ -58,13 +62,14 @@ def _make_conn() -> sqlite3.Connection:
             title TEXT NOT NULL DEFAULT '',
             preview TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT '',
+            transient INTEGER NOT NULL DEFAULT 0,
             session_kind TEXT NOT NULL DEFAULT '',
             conversation_kind TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'idle',
             running INTEGER NOT NULL DEFAULT 0,
             waiting_approval INTEGER NOT NULL DEFAULT 0,
             active_run_id TEXT NOT NULL DEFAULT '',
-            active_runtime_session_id TEXT NOT NULL DEFAULT '',
+            active_execution_session_id TEXT NOT NULL DEFAULT '',
             pending_approval_count INTEGER NOT NULL DEFAULT 0,
             message_count INTEGER NOT NULL DEFAULT 0,
             started_at REAL NOT NULL DEFAULT 0,
@@ -76,7 +81,7 @@ def _make_conn() -> sqlite3.Connection:
             session_id TEXT NOT NULL,
             runtime_scope_key TEXT,
             turn_id TEXT,
-            runtime_session_id TEXT,
+            execution_session_id TEXT,
             status TEXT NOT NULL,
             started_at REAL NOT NULL,
             updated_at REAL NOT NULL,
@@ -98,6 +103,7 @@ def _make_conn() -> sqlite3.Connection:
             timestamp REAL NOT NULL,
             payload_json TEXT,
             event_json TEXT NOT NULL,
+            activity_id TEXT,
             UNIQUE(session_id, seq)
         );
         CREATE TABLE seq_counter (
@@ -214,13 +220,13 @@ def test_session_get_returns_5005_when_missing():
     assert resp["error"]["code"] == ErrorCode.SESSION_NOT_FOUND.value
 
 
-def test_session_get_normalises_stored_session_id_alias():
+def test_session_get_normalises_conversation_session_id_alias():
     """Phase G identity fold — legacy alias is accepted at the boundary."""
     stack = _wired_stack()
     stack["session_repo"].create(SessionSpec(session_id="s-1", source="test"))
     resp = dispatch(
         stack["registry"],
-        {"id": "r1", "method": "session.get", "params": {"storedSessionId": "s-1"}},
+        {"id": "r1", "method": "session.get", "params": {"conversationSessionId": "s-1"}},
         resolver=AllowAllResolver(),
     )
     assert "error" not in resp

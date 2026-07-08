@@ -36,7 +36,7 @@ def test_team_conversation_create_upserts_leader_and_members(tmp_path: Path):
 
     db.ensure_team_mission_conversation(
         conversation_id="conv-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team Conversation",
     )
@@ -57,7 +57,7 @@ def test_member_submit_upserts_mentioned_member_idempotently(tmp_path: Path, mon
     _seed_team(db)
     db.ensure_team_mission_conversation(
         conversation_id="conv-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team Conversation",
     )
@@ -143,7 +143,7 @@ def test_session_create_upserts_user_and_agent_participants(tmp_path: Path, monk
     )
 
     assert "error" not in response
-    session_id = response["result"]["stored_session_id"]
+    session_id = response["result"]["conversation_session_id"]
     participants = db.list_conversation_participants(session_id)
     by_id = {p["participant_id"]: p for p in participants}
     assert set(by_id) == {"user", "agent:profile-1"}

@@ -24,7 +24,7 @@ holds the blocked agent thread is identified solely through the table.
 
 Phase 4c (this file) implements the router. Phase 5 ``prompt.submit``
 populates ``record_run_start`` so terminal/event lookups can cross-fill
-``stored_session_id`` if the worker omits it. Phase 6 rewires the
+``conversation_session_id`` if the worker omits it. Phase 6 rewires the
 ``clarify.respond`` / ``approval.respond`` / ``secret.respond`` /
 ``sudo.respond`` handlers to call ``router.respond`` instead of the
 legacy in-worker registry.
@@ -98,14 +98,14 @@ def _interaction_anchor_seq(params: dict[str, Any], payload: dict[str, Any]) -> 
 @dataclass
 class RunInfo:
     """Cross-fill source for run-terminal / event publishes when the
-    worker doesn't echo the original ``stored_session_id`` / ``turn_id``
+    worker doesn't echo the original ``conversation_session_id`` / ``turn_id``
     in its frame. Populated by ``record_run_start`` from
     ``prompt.submit`` at run-create time."""
 
     run_id: str
     scope_key: str
     conversation_id: str
-    stored_session_id: str
+    conversation_session_id: str
     turn_id: str
     run_context_json: Any = ""
     dispatch_activity_id: str = ""
@@ -121,7 +121,7 @@ class _Pending:
     scope_key: str
     conversation_id: str
     kind: str
-    stored_session_id: str
+    conversation_session_id: str
 
 
 # ── PendingRegistry: single source of truth for interactive request state ──
@@ -384,7 +384,7 @@ class WorkerFrameRouter:
         scope_key: str,
         conversation_id: str = "",
         run_id: str,
-        stored_session_id: str,
+        conversation_session_id: str,
         turn_id: str = "",
         run_context_json: Any = "",
         dispatch_activity_id: str = "",
@@ -400,8 +400,8 @@ class WorkerFrameRouter:
             self._runs[run_id] = RunInfo(
                 run_id=run_id,
                 scope_key=str(scope_key or ""),
-                conversation_id=str(conversation_id or stored_session_id or ""),
-                stored_session_id=str(stored_session_id or ""),
+                conversation_id=str(conversation_id or conversation_session_id or ""),
+                conversation_session_id=str(conversation_session_id or ""),
                 turn_id=str(turn_id or ""),
                 run_context_json=run_context_json,
                 dispatch_activity_id=str(dispatch_activity_id or ""),
@@ -434,7 +434,7 @@ class WorkerFrameRouter:
                 scope_key=info.scope_key,
                 run_id=run_id,
                 conversation_id=info.conversation_id,
-                stored_session_id=info.stored_session_id,
+                conversation_session_id=info.conversation_session_id,
                 turn_id=info.turn_id,
                 run_context_json=info.run_context_json,
                 dispatch_activity_id=info.dispatch_activity_id,
@@ -458,7 +458,7 @@ class WorkerFrameRouter:
                     scope_key=info.scope_key,
                     run_id=str(getattr(info, "run_id", "") or ""),
                     conversation_id=info.conversation_id,
-                    stored_session_id=info.stored_session_id,
+                    conversation_session_id=info.conversation_session_id,
                     turn_id=info.turn_id,
                     run_context_json=info.run_context_json,
                     dispatch_activity_id=info.dispatch_activity_id,
@@ -535,17 +535,17 @@ class WorkerFrameRouter:
                 scope_key,
             )
             return True
-        stored_session_id = str(
-            params.get("stored_session_id")
-            or params.get("storedSessionId")
-            or payload.get("stored_session_id")
-            or payload.get("storedSessionId")
+        conversation_session_id = str(
+            params.get("conversation_session_id")
+            or params.get("conversationSessionId")
+            or payload.get("conversation_session_id")
+            or payload.get("conversationSessionId")
             or payload.get("session_key")
             or conversation_id
             or params.get("session_id")
             or ""
         ).strip()
-        runtime_session_id = str(params.get("session_id") or payload.get("session_id") or payload.get("sessionId") or "").strip()
+        execution_session_id = str(params.get("session_id") or payload.get("session_id") or payload.get("sessionId") or "").strip()
         runtime_scope_key = str(
             params.get("runtime_scope_key")
             or params.get("runtimeScopeKey")
@@ -567,8 +567,8 @@ class WorkerFrameRouter:
         entry = PendingEntry(
             request_id=request_id,
             kind=kind,
-            conversation_id=runtime_session_id or conversation_id or stored_session_id,
-            session_key=stored_session_id,
+            conversation_id=execution_session_id or conversation_id or conversation_session_id,
+            session_key=conversation_session_id,
             scope_key=runtime_scope_key,
             state="pending" if status == "requested" else status,
             anchor_seq=anchor_seq,
@@ -580,10 +580,10 @@ class WorkerFrameRouter:
             "type": f"interaction.{status}",
             "kind": kind,
             "request_id": request_id,
-            "stored_session_id": stored_session_id,
-            "session_id": runtime_session_id,
+            "conversation_session_id": conversation_session_id,
+            "session_id": execution_session_id,
             "runtime_scope_key": runtime_scope_key,
-            "conversation_id": conversation_id or stored_session_id,
+            "conversation_id": conversation_id or conversation_session_id,
             "run_id": str(params.get("run_id") or payload.get("run_id") or payload.get("runId") or ""),
             "turn_id": str(params.get("turn_id") or payload.get("turn_id") or payload.get("turnId") or ""),
             "seq": int(params.get("seq") or 0),
@@ -625,7 +625,7 @@ class WorkerFrameRouter:
         not the full payload renderers expect."""
         if frame is None and isinstance(conversation_id, InteractiveRequestFrame):
             frame = conversation_id
-            conversation_id = frame.stored_session_id
+            conversation_id = frame.conversation_session_id
         if frame is None:
             return
         conversation = str(conversation_id or "")
@@ -639,16 +639,16 @@ class WorkerFrameRouter:
         if not request_id:
             _log.warning(
                 "[worker-router] dropping interactive.request without request_id "
-                "kind=%s scope_key=%s conversation_id=%s stored_session_id=%s",
+                "kind=%s scope_key=%s conversation_id=%s conversation_session_id=%s",
                 frame.kind,
                 scope_key,
                 conversation,
-                frame.stored_session_id,
+                frame.conversation_session_id,
             )
             return
-        stored = frame.stored_session_id
+        stored = frame.conversation_session_id
         if not stored:
-            # No explicit stored_session_id — try cross-filling from the
+            # No explicit conversation_session_id — try cross-filling from the
             # run that's currently active for this scope (best-effort;
             # if multiple are concurrent, the answer routing still
             # works because we key by request_id, not session).
@@ -660,7 +660,7 @@ class WorkerFrameRouter:
                 scope_key=scope_key,
                 conversation_id=conversation,
                 kind=frame.kind,
-                stored_session_id=stored,
+                conversation_session_id=stored,
             )
 
     async def on_run_terminal(
@@ -671,16 +671,16 @@ class WorkerFrameRouter:
     ) -> None:
         if frame is None and isinstance(conversation_id, RunTerminalFrame):
             frame = conversation_id
-            conversation_id = frame.stored_session_id
+            conversation_id = frame.conversation_session_id
         if frame is None:
             return
         conversation = str(conversation_id or "")
-        stored = frame.stored_session_id
+        stored = frame.conversation_session_id
         turn_id = frame.turn_id
         with self._lock:
             info = self._runs.get(frame.run_id)
         if info is not None:
-            stored = stored or info.stored_session_id
+            stored = stored or info.conversation_session_id
             turn_id = turn_id or info.turn_id
             if not conversation:
                 conversation = info.conversation_id
@@ -694,7 +694,7 @@ class WorkerFrameRouter:
                 if (
                     pending.scope_key == scope_key
                     and pending.conversation_id == conversation
-                    and pending.stored_session_id == stored
+                    and pending.conversation_session_id == stored
                 )
             ]
             for rid in stale_ids:
@@ -703,7 +703,7 @@ class WorkerFrameRouter:
         if not stored:
             _log.warning(
                 "[worker-router] run.terminal scope=%s run_id=%s status=%s "
-                "has no stored_session_id — dropping (record_run_start was "
+                "has no conversation_session_id — dropping (record_run_start was "
                 "not called for this run_id)",
                 scope_key, frame.run_id, frame.status,
             )
@@ -734,11 +734,11 @@ class WorkerFrameRouter:
                     except Exception:
                         terminal_activity_id = ""
             self._publish_run_terminal(
-                stored_session_id=stored,
+                conversation_session_id=stored,
                 run_id=frame.run_id,
                 turn_id=turn_id,
                 runtime_scope_key=scope_key,
-                runtime_session_id=stored,
+                execution_session_id=stored,
                 activity_id=terminal_activity_id,
                 status=frame.status,
                 message=frame.message,
@@ -824,7 +824,7 @@ class WorkerFrameRouter:
                         "scopeKey": pending.scope_key,
                         "conversationId": pending.conversation_id,
                         "kind": pending.kind,
-                        "storedSessionId": pending.stored_session_id,
+                        "conversationSessionId": pending.conversation_session_id,
                     }
                     for rid, pending in self._pending.items()
                 ],
@@ -833,7 +833,7 @@ class WorkerFrameRouter:
                         "runId": rid,
                         "scopeKey": info.scope_key,
                         "conversationId": info.conversation_id,
-                        "storedSessionId": info.stored_session_id,
+                        "conversationSessionId": info.conversation_session_id,
                         "turnId": info.turn_id,
                     }
                     for rid, info in self._runs.items()
@@ -849,7 +849,7 @@ class WorkerFrameRouter:
             return
         _kind_label, present = event_state
         session_key = str(
-            params.get("stored_session_id")
+            params.get("conversation_session_id")
             or params.get("session_id")
             or params.get("session_key")
             or ""
@@ -875,16 +875,16 @@ class WorkerFrameRouter:
 
     def _infer_stored_session_for_scope(self, scope_key: str, conversation_id: str) -> str:
         """Best-effort: when an interactive.request arrives without an
-        explicit ``stored_session_id``, look at the active runs for the
+        explicit ``conversation_session_id``, look at the active runs for the
         scope. If exactly one run is active for this scope, use its
-        stored_session_id; otherwise leave empty (the response leg
+        conversation_session_id; otherwise leave empty (the response leg
         still works because it routes by request_id, not session)."""
         candidates = [
-            info.stored_session_id
+            info.conversation_session_id
             for info in self._runs.values()
             if info.scope_key == scope_key
             and (not conversation_id or info.conversation_id == (conversation_id or ""))
-            and info.stored_session_id
+            and info.conversation_session_id
         ]
         if len(candidates) == 1:
             return candidates[0]
@@ -929,7 +929,7 @@ class WorkerFrameRouter:
         conversation_id: str,
         frame: RunTerminalFrame,
         info: RunInfo | None,
-        stored_session_id: str,
+        conversation_session_id: str,
     ) -> None:
         if info is None or not info.dispatch_activity_id:
             return
@@ -956,7 +956,7 @@ class WorkerFrameRouter:
             status = _activity_status(frame.status)
             last_message = _last_message_from_event(info.last_message_event if info else None)
             if not last_message:
-                last_message = _last_message_for_activity(db, stored_session_id)
+                last_message = _last_message_for_activity(db, conversation_session_id)
             result_summary = _result_summary(last_message, frame.message)
             result_json = {
                 "last_message": last_message,
@@ -1061,9 +1061,9 @@ def _activity_status(status: str) -> str:
     return "failed"
 
 
-def _last_message_for_activity(db: Any, stored_session_id: str) -> dict[str, Any]:
+def _last_message_for_activity(db: Any, conversation_session_id: str) -> dict[str, Any]:
     try:
-        messages = load_conversation_history(db, stored_session_id)
+        messages = load_conversation_history(db, conversation_session_id)
     except Exception:
         return {}
     if not isinstance(messages, list):
@@ -1170,6 +1170,6 @@ def _activity_ws_frame(event: dict[str, Any]) -> dict[str, Any]:
     return {
         "type": event.get("kind") or "activity.completed",
         "session_id": str(event.get("conversation_id") or ""),
-        "stored_session_id": str(event.get("conversation_id") or ""),
+        "conversation_session_id": str(event.get("conversation_id") or ""),
         "payload": event,
     }

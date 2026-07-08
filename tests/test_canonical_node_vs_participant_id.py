@@ -48,7 +48,7 @@ def _upsert_mission_with_node(
         node_id=node_id,
         run_id=run_id,
         session_id=session_id,
-        runtime_session_id=f"runtime-{run_id}",
+        execution_session_id=f"runtime-{run_id}",
         runtime_scope_key="member-chat:conversation-1:member-alpha",
         role="worker",
         metadata={"participant_id": participant_id},
@@ -70,7 +70,7 @@ def _message_complete(
     return {
         "type": "message.complete",
         "session_id": session_id,
-        "stored_session_id": session_id,
+        "conversation_session_id": session_id,
         "run_id": run_id,
         "turn_id": f"turn-{run_id}",
         "seq": seq,
@@ -171,7 +171,7 @@ def test_render_snapshot_messages_speaker_field_uses_participant_id(tmp_path: Pa
                 "result": {
                     "conversation": {
                         "conversation_id": "conversation-1",
-                        "stable_session_id": "team-session-render",
+                        "conversation_session_id": "team-session-render",
                     },
                     "mission": {},
                     "team": {},

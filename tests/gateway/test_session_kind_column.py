@@ -114,7 +114,7 @@ def test_team_conversation_projection_sets_team_conversation_kind(
 
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session",
+        conversation_session_id="team-session",
         team_id="team-1",
         title="Team",
         active_mission_id="mission-1",
@@ -133,7 +133,7 @@ def test_gateway_session_lists_emit_conversation_kind(monkeypatch, tmp_path: Pat
     db.append_message("direct-session", role="user", content="hello")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session",
+        conversation_session_id="team-session",
         team_id="team-1",
         title="Team",
         active_mission_id="mission-1",

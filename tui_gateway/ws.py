@@ -87,7 +87,7 @@ _WS_CONTROL_METHODS = frozenset(
         "team_mission.conversation.ensure",
         "team_mission.conversation.list",
         "team_mission.conversation.participants",
-        "team_mission.conversation.runtime_session_ids",
+        "team_mission.conversation.execution_session_ids",
         "team_mission.message.submit",
         "team_mission.conversation.rename",
         "team_mission.conversation.render",
@@ -162,8 +162,8 @@ def _frame_meta(line: str) -> dict[str, Any]:
             or "",
             "event_type": str(params.get("type") or ""),
             "session_id": params.get("session_id") or payload.get("session_id") or "",
-            "stored_session_id": params.get("stored_session_id")
-            or payload.get("stored_session_id")
+            "conversation_session_id": params.get("conversation_session_id")
+            or payload.get("conversation_session_id")
             or "",
             "runtime_scope_key": params.get("runtime_scope_key")
             or payload.get("runtime_scope_key")
@@ -243,7 +243,7 @@ class WSTransport:
             "method": method,
             "bytes": int(meta.get("bytes") or 0),
             "mission_id": meta.get("mission_id") or "",
-            "stored_session_id": meta.get("stored_session_id") or "",
+            "conversation_session_id": meta.get("conversation_session_id") or "",
             "run_id": meta.get("run_id") or "",
             "runtime_scope_key": _runtime_scope_key(req),
             "received_at": time.time(),
@@ -260,7 +260,7 @@ class WSTransport:
             {
                 "response_to_method": request["method"],
                 "response_to_mission_id": request["mission_id"],
-                "response_to_stored_session_id": request["stored_session_id"],
+                "response_to_conversation_session_id": request["conversation_session_id"],
                 "response_to_run_id": request["run_id"],
                 "response_to_runtime_scope_key": request["runtime_scope_key"],
                 "request_bytes": request["bytes"],

@@ -12,7 +12,7 @@ def test_schema_migration_compacts_legacy_conversation_status_event_json(tmp_pat
     try:
         db.upsert_team_mission_conversation(
             conversation_id="conversation-legacy",
-            stable_session_id="team-session-legacy",
+            conversation_session_id="team-session-legacy",
             team_id="team-1",
             active_mission_id="mission-legacy",
             title="Legacy Mission",
@@ -105,7 +105,7 @@ def test_startup_maintenance_repairs_terminal_team_session_stale_running(tmp_pat
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-done",
-            stable_session_id="team-session-done",
+            conversation_session_id="team-session-done",
             team_id="team-1",
             active_mission_id="mission-done",
             title="Done Mission",
@@ -124,7 +124,7 @@ def test_startup_maintenance_repairs_terminal_team_session_stale_running(tmp_pat
             running=True,
             status="running",
             active_run_id="leader-run-done",
-            active_runtime_session_id="runtime-done",
+            active_execution_session_id="runtime-done",
             started_at=1.0,
             updated_at=2.0,
         )
@@ -141,12 +141,12 @@ def test_startup_maintenance_repairs_terminal_team_session_stale_running(tmp_pat
     reopened = SessionDB(db_path)
     try:
         healed = reopened._conn.execute(  # noqa: SLF001 - startup maintenance contract.
-            "SELECT running, status, active_run_id, active_runtime_session_id FROM session_index WHERE session_id = ?",
+            "SELECT running, status, active_run_id, active_execution_session_id FROM session_index WHERE session_id = ?",
             ("team-session-done",),
         ).fetchone()
         assert int(healed["running"]) == 0
         assert healed["status"] == "idle"
         assert healed["active_run_id"] == ""
-        assert healed["active_runtime_session_id"] == ""
+        assert healed["active_execution_session_id"] == ""
     finally:
         reopened.close()

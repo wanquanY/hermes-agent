@@ -63,11 +63,11 @@ def test_run_start_frame_carries_all_fields_for_runner() -> None:
     frame = RunStartFrame(
         run_id="r1",
         turn_id="t1",
-        stored_session_id="20260625_120000_abcdef",
+        conversation_session_id="20260625_120000_abcdef",
         prompt="hello",
         params={"runtime_scope_key": "profile:test", "cwd": "/tmp"},
     )
-    assert frame.stored_session_id
+    assert frame.conversation_session_id
     assert frame.run_id
     assert frame.turn_id
     assert isinstance(frame.params, dict)
@@ -93,7 +93,7 @@ def test_worker_session_defers_agent_build_until_prompt_submit(monkeypatch: pyte
         RunStartFrame(
             run_id="team-run-1",
             turn_id="team-turn-1",
-            stored_session_id="team-session-team-conversation-1",
+            conversation_session_id="team-session-team-conversation-1",
             prompt="start team task",
             params={
                 "runtime_scope_key": "team:team-conversation-1:leader-conversation",
@@ -187,7 +187,7 @@ def test_team_leader_worker_hydrates_member_replies_as_observed_group_speech(
         RunStartFrame(
             run_id="team-leader-run-1",
             turn_id="team-leader-turn-1",
-            stored_session_id="team-session-team-conversation-1",
+            conversation_session_id="team-session-team-conversation-1",
             prompt="总结一下我们的对话记录",
             params={
                 "cwd": str(tmp_path),
@@ -249,7 +249,7 @@ def test_worker_session_restores_workspace_context(
         RunStartFrame(
             run_id="run-1",
             turn_id="turn-1",
-            stored_session_id="stored-session-1",
+            conversation_session_id="stored-session-1",
             prompt="pwd",
             params={"runtime_scope_key": "profile:test"},
         )

@@ -330,7 +330,7 @@ def _(rid, params: dict) -> dict:
         try:
             conversation = db.ensure_team_mission_conversation(
                 conversation_id=conversation_id,
-                stable_session_id=conversation_session_id,
+                conversation_session_id=conversation_session_id,
                 team_id=team_id,
                 title=str(params.get("title") or ""),
                 objective=str(params.get("conversation_objective") or params.get("conversationObjective") or ""),
@@ -641,7 +641,7 @@ def _(rid, params: dict) -> dict:
         bound_mission_id = mission_id if isinstance(mission, dict) and mission else ""
         conversation = db.ensure_team_mission_conversation(
             conversation_id=conversation_id,
-            stable_session_id=conversation_session_id,
+            conversation_session_id=conversation_session_id,
             mission=mission if isinstance(mission, dict) else {},
             mission_id=bound_mission_id,
             team_id=str(params.get("team_id") or params.get("teamId") or ""),
@@ -668,7 +668,7 @@ def _(rid, params: dict) -> dict:
     except Exception as exc:
         return _err(rid, 5008, f"team mission conversation unavailable: {exc}")
     conversation_session_id = str(
-        (conversation or {}).get("stable_session_id")
+        (conversation or {}).get("conversation_session_id")
         or conversation_session_id
         or ""
     )
@@ -713,7 +713,7 @@ def _(rid, params: dict) -> dict:
     if isinstance(conversation, dict):
         refreshed_identifier = str(
             conversation.get("conversation_id")
-            or conversation.get("stable_session_id")
+            or conversation.get("conversation_session_id")
             or identifier
         ).strip()
         refreshed = db.resolve_team_mission_conversation(refreshed_identifier) if refreshed_identifier else {}
@@ -778,14 +778,14 @@ def _(rid, params: dict) -> dict:
     )
 
 
-@method("team_mission.conversation.runtime_session_ids")
+@method("team_mission.conversation.execution_session_ids")
 def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
-        return _ok(rid, {"session_ids": [], "runtime_session_ids": []})
-    getter = getattr(db, "list_team_mission_conversation_runtime_session_ids", None)
+        return _ok(rid, {"session_ids": [], "execution_session_ids": []})
+    getter = getattr(db, "list_team_mission_conversation_execution_session_ids", None)
     if not callable(getter):
-        return _ok(rid, {"session_ids": [], "runtime_session_ids": []})
+        return _ok(rid, {"session_ids": [], "execution_session_ids": []})
     session_ids = getter(
         team_id=str(params.get("team_id") or params.get("teamId") or ""),
         workspace_id=_workspace_id_from_params(params),
@@ -803,8 +803,8 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {
         "session_ids": normalized,
         "sessionIds": normalized,
-        "runtime_session_ids": normalized,
-        "runtimeSessionIds": normalized,
+        "execution_session_ids": normalized,
+        "executionSessionIds": normalized,
     })
 
 
@@ -858,10 +858,10 @@ def _(rid, params: dict) -> dict:
     conversation = resolved.get("conversation") if isinstance(resolved, dict) else {}
     if not conversation:
         return _err(rid, 4040, "team mission conversation not found")
-    stable_session_id = str(conversation.get("stable_session_id") or "").strip()
-    if stable_session_id:
+    conversation_session_id = str(conversation.get("conversation_session_id") or "").strip()
+    if conversation_session_id:
         run_state = run_control.session_status(
-            stable_session_id,
+            conversation_session_id,
             db=db,
             current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
         )
@@ -911,8 +911,8 @@ def _(rid, params: dict) -> dict:
             result["deleted_workspace_binding_count"] = len(workspace_bindings)
             if workspace_binding_cleanup_error:
                 result["workspace_binding_cleanup_error"] = workspace_binding_cleanup_error
-        if stable_session_id:
-            result.setdefault("stable_session_id", stable_session_id)
+        if conversation_session_id:
+            result.setdefault("conversation_session_id", conversation_session_id)
     except Exception as exc:
         return _err(rid, 5008, f"team mission conversation delete failed: {exc}")
     if not result:

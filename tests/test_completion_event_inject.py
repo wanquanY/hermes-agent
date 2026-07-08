@@ -164,7 +164,7 @@ async def test_dispatched_worker_completion_marks_activity_completed(
     router.record_run_start(
         scope_key="conv-child",
         run_id="run-1",
-        stored_session_id="conv-child",
+        conversation_session_id="conv-child",
         turn_id="turn-1",
         dispatch_activity_id="act-1",
         activity_kind="agent_dispatch",
@@ -210,7 +210,7 @@ async def test_dispatched_worker_failure_marks_activity_failed_with_error(
     router.record_run_start(
         scope_key="conv-child",
         run_id="run-1",
-        stored_session_id="conv-child",
+        conversation_session_id="conv-child",
         dispatch_activity_id="act-1",
         activity_kind="agent_dispatch",
         parent_scope_key="leader-scope",
@@ -279,7 +279,7 @@ def test_agent_runner_parses_run_context_without_recursing(tmp_path: Path) -> No
         RunStartFrame(
             run_id="run-1",
             turn_id="turn-1",
-            stored_session_id="conv-parent",
+            conversation_session_id="conv-parent",
             prompt="hello",
             params={"run_context_json": json.dumps(context.to_payload())},
         )

@@ -19,7 +19,7 @@ from hermes_agent.gateway import (
 
 def test_to_snake_case_basic():
     assert to_snake_case("sessionId") == "session_id"
-    assert to_snake_case("storedSessionId") == "stored_session_id"
+    assert to_snake_case("conversationSessionId") == "conversation_session_id"
     assert to_snake_case("runId") == "run_id"
 
 

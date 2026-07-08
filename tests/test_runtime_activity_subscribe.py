@@ -94,17 +94,17 @@ def _record_activity_event(
     db: SessionDB,
     *,
     activity_id: str = "act-test-1",
-    stored_session_id: str = "session-activity-1",
+    conversation_session_id: str = "session-activity-1",
     event_type: str = "activity.command.created",
     command_id: str = "cmd-test-1",
     publish: bool = False,
 ) -> dict[str, Any]:
     frame = {
         "type": event_type,
-        "session_id": stored_session_id,
-        "stored_session_id": stored_session_id,
+        "session_id": conversation_session_id,
+        "conversation_session_id": conversation_session_id,
         "activity_id": activity_id,
-        "seq": run_control.next_event_seq(stored_session_id, db=db),
+        "seq": run_control.next_event_seq(conversation_session_id, db=db),
         "payload": {
             "activity_id": activity_id,
             "command_id": command_id,
@@ -485,7 +485,7 @@ def test_future_team_mission_activity_subscription_receives_first_event_after_gr
         {
             "type": "message.delta",
             "session_id": "runtime-node-future",
-            "stored_session_id": "team:mission-future:node:root",
+            "conversation_session_id": "team:mission-future:node:root",
             "run_id": "run-future",
             "runtime_scope_key": "team:mission-future:node:root",
             "activity_id": f"act-node:mission-future:{root_node_id}",
@@ -529,7 +529,7 @@ def test_team_dispatch_raw_cursor_does_not_block_bound_mission_graph_event(
         {
             "type": "message.delta",
             "session_id": "leader-runtime",
-            "stored_session_id": "team-session-live",
+            "conversation_session_id": "team-session-live",
             "run_id": "leader-run",
             "runtime_scope_key": "team-session-live",
             "activity_id": activity_id,
@@ -591,12 +591,12 @@ def test_team_dispatch_raw_cursor_does_not_block_bound_mission_graph_event(
 def test_record_event_does_not_double_push_when_transport_subscribed_by_session_and_activity(
     db: SessionDB,
 ) -> None:
-    stored_session_id = "session-double-subscribe"
+    conversation_session_id = "session-double-subscribe"
     activity_id = "act-test-double"
-    _record_activity_event(db, activity_id=activity_id, stored_session_id=stored_session_id)
+    _record_activity_event(db, activity_id=activity_id, conversation_session_id=conversation_session_id)
     transport = _CaptureTransport()
     run_control.subscribe_session_with_id(
-        stored_session_id=stored_session_id,
+        conversation_session_id=conversation_session_id,
         transport=transport,
         db=db,
     )
@@ -611,7 +611,7 @@ def test_record_event_does_not_double_push_when_transport_subscribed_by_session_
     _record_activity_event(
         db,
         activity_id=activity_id,
-        stored_session_id=stored_session_id,
+        conversation_session_id=conversation_session_id,
         command_id="cmd-double-live",
         publish=True,
     )
@@ -680,26 +680,26 @@ def test_list_run_events_by_activity_returns_only_matching_rows(db: SessionDB) -
     _record_activity_event(
         db,
         activity_id="act-test-dao",
-        stored_session_id="session-dao-a",
+        conversation_session_id="session-dao-a",
         command_id="cmd-dao-a",
     )
     _record_activity_event(
         db,
         activity_id="act-test-dao",
-        stored_session_id="session-dao-b",
+        conversation_session_id="session-dao-b",
         command_id="cmd-dao-b",
     )
     _record_activity_event(
         db,
         activity_id="act-test-other",
-        stored_session_id="session-dao-a",
+        conversation_session_id="session-dao-a",
         command_id="cmd-other",
     )
 
     events = db.list_run_events_by_activity("act-test-dao")
 
     assert [event["payload"]["command_id"] for event in events] == ["cmd-dao-a", "cmd-dao-b"]
-    assert {event["stored_session_id"] for event in events} == {"session-dao-a", "session-dao-b"}
+    assert {event["conversation_session_id"] for event in events} == {"session-dao-a", "session-dao-b"}
 
 
 def test_list_run_events_by_activity_returns_empty_for_unknown(db: SessionDB) -> None:

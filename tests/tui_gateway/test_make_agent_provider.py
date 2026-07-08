@@ -689,7 +689,7 @@ def test_member_chat_profile_context_builds_byo_codex_agent_without_turn_model()
         "model": {"default": "gpt-5.5", "provider": "dovie-cloud"},
     }
     params = {
-        "stored_session_id": "team-session-1",
+        "conversation_session_id": "team-session-1",
         "session_id": "team-session-1",
         "agent_context_mode": "member_chat",
         "runtime_scope_key": "member-chat:conv-1:codex-member",

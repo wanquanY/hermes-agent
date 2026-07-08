@@ -424,8 +424,8 @@ def test_emit_realtime_frame_includes_stable_run_metadata(capture):
     params = json.loads(buf.getvalue())["params"]
 
     assert params["session_id"] == "runtime-meta"
-    assert params["runtime_session_id"] == "runtime-meta"
-    assert params["stored_session_id"] == "stored-meta"
+    assert params["execution_session_id"] == "runtime-meta"
+    assert params["conversation_session_id"] == "stored-meta"
     assert params["run_id"] == "run-meta"
     assert params["turn_id"] == "turn-meta"
     assert params["runtime_scope_key"] == "scope-meta"
@@ -486,7 +486,7 @@ def test_sess_found(server):
     assert err is None
 
 
-def test_sess_resolves_stored_session_id_to_running_runtime(server):
+def test_sess_resolves_conversation_session_id_to_running_runtime(server):
     idle = {"agent": MagicMock(), "session_key": "stored-1", "running": False}
     running = {
         "agent": MagicMock(),
@@ -640,7 +640,7 @@ def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server
         ("user", "next", 3.0)
     ]
     assert [json.loads(row["metadata_json"])["turn_id"] for row in stored_rows] == ["turn-2"]
-    assert resp["result"]["stored_session_id"] == "stored-1"
+    assert resp["result"]["conversation_session_id"] == "stored-1"
     assert resp["result"]["removed_messages"] == 2
     assert resp["result"]["draft"]["text"] == "请读这个文件"
     assert resp["result"]["draft"]["attachments"][0]["name"] == "spec.pdf"
@@ -749,7 +749,7 @@ def test_session_recall_turn_records_recall_boundary_with_run_id_and_seq(server,
                 {
                     "type": "message.delta",
                     "session_id": "runtime-live",
-                    "stored_session_id": "stored-live",
+                    "conversation_session_id": "stored-live",
                     "run_id": "run-canonical",
                     "turn_id": "turn-canonical",
                     "seq": 7,
@@ -766,7 +766,7 @@ def test_session_recall_turn_records_recall_boundary_with_run_id_and_seq(server,
                 [
                     int(event.get("seq") or 0)
                     for event in self.events
-                    if event.get("stored_session_id") == session_id
+                    if event.get("conversation_session_id") == session_id
                 ],
                 default=0,
             )
@@ -776,7 +776,7 @@ def test_session_recall_turn_records_recall_boundary_with_run_id_and_seq(server,
             frame = dict(event)
             payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
             frame["payload"] = dict(payload)
-            frame["stored_session_id"] = session_id
+            frame["conversation_session_id"] = session_id
             if not int(frame.get("seq") or 0):
                 frame["seq"] = self.next_run_event_seq(session_id)
             self.events.append(frame)
@@ -786,7 +786,7 @@ def test_session_recall_turn_records_recall_boundary_with_run_id_and_seq(server,
             return [
                 event
                 for event in self.events
-                if event.get("stored_session_id") == session_id
+                if event.get("conversation_session_id") == session_id
                 and int(event.get("seq") or 0) > int(after_seq or 0)
             ]
 
@@ -856,7 +856,7 @@ def test_session_status_returns_machine_readable_run_state(server):
 
     assert "error" not in resp
     assert resp["result"]["session_id"] == "runtime-status"
-    assert resp["result"]["stored_session_id"] == "stored-status"
+    assert resp["result"]["conversation_session_id"] == "stored-status"
     assert resp["result"]["running"] is True
     assert resp["result"]["active_run_id"] == "run-status"
     assert resp["result"]["run_started_at"] == 11
@@ -921,11 +921,11 @@ def test_session_create_control_plane_only_persists_through_session_repo(
     )
 
     assert "error" not in resp
-    assert resp["result"]["session_id"] == resp["result"]["stored_session_id"]
+    assert resp["result"]["session_id"] == resp["result"]["conversation_session_id"]
     assert resp["result"]["info"]["control_plane_only"] is True
     assert resp["result"]["info"]["lazy"] is True
     assert resp["result"]["info"]["transient"] is True
-    session_id = resp["result"]["stored_session_id"]
+    session_id = resp["result"]["conversation_session_id"]
     session_row = conn.execute(
         "SELECT id, source, model, transient FROM sessions WHERE id = ?",
         (session_id,),
@@ -948,7 +948,7 @@ def test_session_create_control_plane_only_persists_through_session_repo(
     conn.close()
 
 
-def test_approval_control_plane_methods_accept_stored_session_id(server, monkeypatch):
+def test_approval_control_plane_methods_accept_conversation_session_id(server, monkeypatch):
     import importlib
 
     importlib.reload(importlib.import_module("tui_gateway.methods.prompt"))
@@ -984,7 +984,7 @@ def test_approval_control_plane_methods_accept_stored_session_id(server, monkeyp
         {
             "id": "before",
             "method": "approval.policy.get",
-            "params": {"stored_session_id": "stored-approval"},
+            "params": {"conversation_session_id": "stored-approval"},
         }
     )
     updated = server.handle_request(
@@ -1032,7 +1032,7 @@ def test_run_control_replays_events_and_tracks_status(capture):
         {
             "id": "r1",
             "method": "events.subscribe",
-            "params": {"stored_session_id": "stored-events"},
+            "params": {"conversation_session_id": "stored-events"},
         }
     )
     status = server.handle_request(
@@ -1045,7 +1045,7 @@ def test_run_control_replays_events_and_tracks_status(capture):
 
     assert "error" not in replay
     assert replay["result"]["events"][0]["type"] == "message.start"
-    assert replay["result"]["events"][0]["stored_session_id"] == "stored-events"
+    assert replay["result"]["events"][0]["conversation_session_id"] == "stored-events"
     assert "error" not in status
     assert status["result"]["run"]["status"] == "running"
 
@@ -1111,7 +1111,7 @@ def test_terminal_event_releases_live_session_before_client_delivery(capture, mo
             {
                 "id": "terminal-status",
                 "method": "session.status",
-                "params": {"stored_session_id": "stored-terminal"},
+                "params": {"conversation_session_id": "stored-terminal"},
             }
         )
     finally:
@@ -1142,7 +1142,7 @@ def test_terminal_event_releases_live_session_before_subscription_delivery(captu
                         {
                             "id": "subscriber-status",
                             "method": "session.status",
-                            "params": {"stored_session_id": "stored-subscriber"},
+                            "params": {"conversation_session_id": "stored-subscriber"},
                         }
                     )
                 )
@@ -1162,7 +1162,7 @@ def test_terminal_event_releases_live_session_before_subscription_delivery(captu
         "history_lock": threading.Lock(),
     }
     subscription_id, _replay = run_control.subscribe_session_with_id(
-        stored_session_id="stored-subscriber",
+        conversation_session_id="stored-subscriber",
         transport=_StatusCheckingTransport(),
     )
 
@@ -1210,7 +1210,7 @@ def test_run_control_control_events_do_not_mark_session_busy(capture):
         {
             "id": "control-status",
             "method": "session.status",
-            "params": {"stored_session_id": "stored-control"},
+            "params": {"conversation_session_id": "stored-control"},
         }
     )
 
@@ -1248,7 +1248,7 @@ def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
         {
             "id": "r1",
             "method": "run.submit",
-            "params": {"stored_session_id": "stored-active", "text": "hello"},
+            "params": {"conversation_session_id": "stored-active", "text": "hello"},
         }
     )
 
@@ -1283,7 +1283,7 @@ def test_run_submit_preserves_prestart_cancelled_run(server, monkeypatch):
             "id": "cancel",
             "method": "run.cancel",
             "params": {
-                "stored_session_id": "stored-prestart-cancel",
+                "conversation_session_id": "stored-prestart-cancel",
                 "run_id": "run-prestart-cancel",
                 "turn_id": "turn-prestart-cancel",
                 "runtime_scope_key": "profile:agent-default",
@@ -1295,7 +1295,7 @@ def test_run_submit_preserves_prestart_cancelled_run(server, monkeypatch):
             "id": "submit",
             "method": "run.submit",
             "params": {
-                "stored_session_id": "stored-prestart-cancel",
+                "conversation_session_id": "stored-prestart-cancel",
                 "run_id": "run-prestart-cancel",
                 "turn_id": "turn-prestart-cancel",
                 "text": "hello",
@@ -1353,7 +1353,7 @@ def test_run_submit_extracts_image_paths_from_prompt_attachments(server, monkeyp
             "id": "submit-image",
             "method": "run.submit",
             "params": {
-                "stored_session_id": "stored-image-submit",
+                "conversation_session_id": "stored-image-submit",
                 "run_id": "run-image",
                 "turn_id": "turn-image",
                 "text": "分析图片",
@@ -1413,7 +1413,7 @@ def test_events_subscribe_returns_subscription_id_and_unsubscribes(capture):
             {
                 "id": "r1",
                 "method": "events.subscribe",
-                "params": {"stored_session_id": "stored-sub"},
+                "params": {"conversation_session_id": "stored-sub"},
             }
         )
         subscription_id = subscribed["result"]["subscription_id"]
@@ -1443,7 +1443,7 @@ def test_run_events_replays_without_creating_subscription(server, monkeypatch, t
             session_id TEXT NOT NULL,
             run_id TEXT,
             turn_id TEXT,
-            runtime_session_id TEXT,
+            execution_session_id TEXT,
             runtime_scope_key TEXT,
             participant_id TEXT,
             activity_id TEXT,
@@ -1471,7 +1471,7 @@ def test_run_events_replays_without_creating_subscription(server, monkeypatch, t
         session_id="stored-run-events",
         run_id="run-a",
         turn_id="turn-a",
-        runtime_session_id="runtime-run-a",
+        execution_session_id="runtime-run-a",
         runtime_scope_key="profile:agent-a",
         participant_id="",
         activity_id="",
@@ -1482,7 +1482,7 @@ def test_run_events_replays_without_creating_subscription(server, monkeypatch, t
         event_json=json.dumps(
             {
                 "type": "message.delta",
-                "stored_session_id": "stored-run-events",
+                "conversation_session_id": "stored-run-events",
                 "session_id": "runtime-run-a",
                 "run_id": "run-a",
                 "runtime_scope_key": "profile:agent-a",
@@ -1503,7 +1503,7 @@ def test_run_events_replays_without_creating_subscription(server, monkeypatch, t
             "id": "r1",
             "method": "run.events",
             "params": {
-                "stored_session_id": "stored-run-events",
+                "conversation_session_id": "stored-run-events",
                 "after_seq": 1,
                 "runtime_scope_key": "profile:agent-a",
                 "run_id": "run-a",
@@ -1513,7 +1513,7 @@ def test_run_events_replays_without_creating_subscription(server, monkeypatch, t
     )
 
     assert "error" not in resp
-    assert resp["result"]["stored_session_id"] == "stored-run-events"
+    assert resp["result"]["conversation_session_id"] == "stored-run-events"
     assert resp["result"]["last_event_seq"] == 2
     assert resp["result"]["events"][0]["run_id"] == "run-a"
     assert run_control._subscriptions_by_id == {}

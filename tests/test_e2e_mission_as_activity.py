@@ -53,7 +53,7 @@ def gateway(monkeypatch: pytest.MonkeyPatch, db: SessionDB):
             "id": rid,
             "result": {
                 "run_id": params.get("run_id") or "run-leader",
-                "stored_session_id": params.get("stored_session_id") or "",
+                "conversation_session_id": params.get("conversation_session_id") or "",
                 "runtime_scope_key": params.get("runtime_scope_key") or "",
                 "status": "running",
             },
@@ -186,7 +186,7 @@ def _bind_member_run(
     db.upsert_run(
         run_id=run_id,
         session_id=session_id,
-        runtime_session_id=f"runtime-{run_id}",
+        execution_session_id=f"runtime-{run_id}",
         runtime_scope_key=session_id,
         status=status,
     )
@@ -195,7 +195,7 @@ def _bind_member_run(
         node_id=node_id,
         run_id=run_id,
         session_id=session_id,
-        runtime_session_id=f"runtime-{run_id}",
+        execution_session_id=f"runtime-{run_id}",
         runtime_scope_key=session_id,
         role="worker",
         metadata={"participant_id": participant_id},
@@ -219,8 +219,8 @@ def _install_run_cancel_fake(monkeypatch: pytest.MonkeyPatch, db: SessionDB) -> 
         canceled.append(dict(params))
         db.upsert_run(
             run_id=params["run_id"],
-            session_id=params["stored_session_id"],
-            runtime_session_id=params["runtime_session_id"],
+            session_id=params["conversation_session_id"],
+            execution_session_id=params["execution_session_id"],
             runtime_scope_key=params["runtime_scope_key"],
             status="cancelled",
         )
@@ -294,7 +294,7 @@ def test_e2e_mission_cancel_marks_activity_cancelled_conversation_stays_running_
         status="running",
         running=True,
         active_run_id="run-B",
-        active_runtime_session_id="runtime-run-B",
+        active_execution_session_id="runtime-run-B",
         team_id=TEAM_ID,
         mission_id="mission-A",
         conversation_id=CONVERSATION_ID,
@@ -331,7 +331,7 @@ def test_e2e_multi_parallel_missions_in_same_conversation(
         "mission-A": "active",
         "mission-B": "active",
     }
-    assert conversation["stable_session_id"] == CONVERSATION_SESSION_ID
+    assert conversation["conversation_session_id"] == CONVERSATION_SESSION_ID
     assert conversation["active_mission_id"] == "mission-B"
 
 

@@ -27,14 +27,14 @@ class TeamMissionConversationMissionMixin:
             return ""
         row = conn.execute(
             """
-            SELECT stable_session_id
+            SELECT conversation_session_id
             FROM team_mission_conversations
             WHERE conversation_id = ?
             """,
             (conversation_id,),
         ).fetchone()
-        stable_session_id = _text(_row_value(row, "stable_session_id", ""))
-        return stable_session_id or conversation_id
+        conversation_session_id = _text(_row_value(row, "conversation_session_id", ""))
+        return conversation_session_id or conversation_id
 
     def _sync_mission_activity_for_conversation_mission_on_conn(
         self,

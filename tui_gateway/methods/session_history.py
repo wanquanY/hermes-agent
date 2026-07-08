@@ -504,7 +504,7 @@ def _recall_stored_turn(rid, sid: str, target: dict[str, str]) -> dict | None:
     return _ok(rid, {
         "status": "recalled",
         "session_id": sid,
-        "stored_session_id": session_key,
+        "conversation_session_id": session_key,
         "turn_id": turn_id,
         "interrupted": False,
         "removed_messages": removed,
@@ -582,7 +582,7 @@ def _(rid, params: dict) -> dict:
                 return _ok(rid, {
                     "status": "recalled",
                     "session_id": sid,
-                    "stored_session_id": str(session.get("session_key") or ""),
+                    "conversation_session_id": str(session.get("session_key") or ""),
                     "turn_id": turn_id,
                     "interrupted": interrupted,
                     "removed_messages": 0,
@@ -624,7 +624,7 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {
         "status": "recalled",
         "session_id": sid,
-        "stored_session_id": str(session.get("session_key") or ""),
+        "conversation_session_id": str(session.get("session_key") or ""),
         "turn_id": turn_id,
         "interrupted": interrupted,
         "removed_messages": removed,

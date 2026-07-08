@@ -56,7 +56,7 @@ def _identity_params(
         payload.update(extra_payload)
     params: dict[str, Any] = {
         "type": event_type,
-        "stored_session_id": session,
+        "conversation_session_id": session,
         "turn_id": turn,
         "seq": 7,
         "payload": payload,
@@ -325,7 +325,7 @@ class TestTransientMarking:
         # inspect it after the call.
         params = {
             "type": "message.delta",
-            "stored_session_id": "sess-T",
+            "conversation_session_id": "sess-T",
             "run_id": "run-T",
             "turn_id": "turn-T",
             "seq": 1,
@@ -340,7 +340,7 @@ class TestTransientMarking:
         db.create_session("sess-T", source="test", transient=False)
         params = {
             "type": "message.delta",
-            "stored_session_id": "sess-T",
+            "conversation_session_id": "sess-T",
             "run_id": "run-T",
             "turn_id": "turn-T",
             "seq": 1,
@@ -364,7 +364,7 @@ class TestTransientMarking:
         try:
             params = {
                 "type": "message.delta",
-                "stored_session_id": "sess-T",
+                "conversation_session_id": "sess-T",
                 "run_id": "run-T",
                 "turn_id": "turn-T",
                 "seq": 1,
@@ -383,7 +383,7 @@ class TestTransientMarking:
         # guard at line 1611 skips _run_state_by_id tracking).
         params = {
             "type": "message.delta",  # an run-opening event type
-            "stored_session_id": "sess-T",
+            "conversation_session_id": "sess-T",
             "turn_id": "",  # force synthesis
             "seq": 1,
             "payload": {"delta": "x"},
@@ -402,7 +402,7 @@ class TestTransientMarking:
         # must NOT be synthesized (it's not an identity event type).
         params = {
             "type": "session.info",
-            "stored_session_id": "sess-T",
+            "conversation_session_id": "sess-T",
             "seq": 1,
             "payload": {"info": "something"},
         }
@@ -422,7 +422,7 @@ class TestIdentityGuardIntegration:
         # confirms the explicit-type set path works, not just prefixes.
         params = {
             "type": "error",
-            "stored_session_id": "sess-E",
+            "conversation_session_id": "sess-E",
             "turn_id": "turn-E",
             "seq": 1,
             "payload": {"message": "boom"},
@@ -444,7 +444,7 @@ class TestIdentityGuardIntegration:
             "turn_id": "turn-1",
             "seq": 1,
             "payload": {"delta": "x"},
-            # no stored_session_id / session_id
+            # no conversation_session_id / session_id
         }
         rc._ensure_outbound_run_identity(params)
         assert params["run_id"] == "synthetic-run:unknown-session:turn-1"

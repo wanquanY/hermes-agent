@@ -44,10 +44,10 @@ def _frame(*, run_id: str = "run-1", session: str = "sess-1") -> dict[str, Any]:
     return {
         "type": "tool.start",
         "session_id": session,
-        "stored_session_id": session,
+        "conversation_session_id": session,
         "run_id": run_id,
         "turn_id": "turn-1",
-        "runtime_session_id": session,
+        "execution_session_id": session,
         "runtime_scope_key": "scope-1",
         "payload": {"tool_id": "call_1", "name": "write_file"},
         "seq": 1,

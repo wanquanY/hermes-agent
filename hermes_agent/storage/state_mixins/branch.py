@@ -210,7 +210,7 @@ class BranchStateMixin:
         if row is None:
             raise ValueError("branch result session not found")
         return {
-            "stored_session_id": row["id"],
+            "conversation_session_id": row["id"],
             "parent_session_id": row["parent_session_id"] or "",
             "root_session_id": row["root_session_id"] or row["id"],
             "title": row["title"] or "",

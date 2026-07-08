@@ -74,7 +74,7 @@ def _submit_leader(
     if conversation_ensure_index_only:
         def fake_ensure_team_mission_conversation(**kwargs: Any) -> dict[str, Any]:
             db.upsert_session_index(
-                session_id=kwargs["stable_session_id"],
+                session_id=kwargs["conversation_session_id"],
                 source="team_mission",
                 session_kind="team_mission",
                 conversation_kind="team",
@@ -85,7 +85,7 @@ def _submit_leader(
             )
             return {
                 "conversation_id": kwargs["conversation_id"],
-                "stable_session_id": kwargs["stable_session_id"],
+                "conversation_session_id": kwargs["conversation_session_id"],
                 "title": kwargs.get("title") or "",
                 "team_id": kwargs.get("team_id") or "",
             }
@@ -198,13 +198,13 @@ def test_leader_team_dispatch_request_uses_team_dispatch_run_context(
     assert messages[0]["metadata"]["transcript_activity_kind"] == "mission_start"
 
 
-def test_leader_spawn_stored_session_id_is_conv_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_leader_spawn_conversation_session_id_is_conv_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     _db, captured, response = _submit_leader(monkeypatch, tmp_path)
 
-    assert captured["stored_session_id"] == CONVERSATION_SESSION_ID
+    assert captured["conversation_session_id"] == CONVERSATION_SESSION_ID
     assert captured["session_id"] == CONVERSATION_SESSION_ID
-    assert not captured["stored_session_id"].startswith("memberchat:")
-    assert response["result"]["leader_turn"]["stored_session_id"] == CONVERSATION_SESSION_ID
+    assert not captured["conversation_session_id"].startswith("memberchat:")
+    assert response["result"]["leader_turn"]["conversation_session_id"] == CONVERSATION_SESSION_ID
 
 
 def test_leader_submit_persists_visible_user_message_before_worker(
@@ -311,7 +311,7 @@ async def test_leader_events_route_to_conv_via_run_context(monkeypatch: pytest.M
     router.record_run_start(
         scope_key=captured["runtime_scope_key"],
         run_id=captured["run_id"],
-        stored_session_id=captured["stored_session_id"],
+        conversation_session_id=captured["conversation_session_id"],
         turn_id=captured["turn_id"],
         run_context_json=captured["run_context_json"],
     )
@@ -322,7 +322,7 @@ async def test_leader_events_route_to_conv_via_run_context(monkeypatch: pytest.M
             params={
                 "type": "message.complete",
                 "session_id": "runtime-leader-conversation",
-                "stored_session_id": "runtime-leader-conversation",
+                "conversation_session_id": "runtime-leader-conversation",
                 "run_id": captured["run_id"],
                 "turn_id": captured["turn_id"],
                 "seq": 1,
@@ -334,7 +334,7 @@ async def test_leader_events_route_to_conv_via_run_context(monkeypatch: pytest.M
     conv_events = _events_for_session(db, CONVERSATION_SESSION_ID)
     assert [event["type"] for event in conv_events] == ["message.complete"]
     assert conv_events[0]["payload"]["text"] == "leader reply via worker router"
-    assert conv_events[0]["frame"]["stored_session_id"] == CONVERSATION_SESSION_ID
+    assert conv_events[0]["frame"]["conversation_session_id"] == CONVERSATION_SESSION_ID
     assert conv_events[0]["payload"]["run_context"]["conversation_session_id"] == CONVERSATION_SESSION_ID
     assert _events_for_session(db, "runtime-leader-conversation") == []
 

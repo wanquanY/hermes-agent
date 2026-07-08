@@ -16,7 +16,7 @@ def _db(tmp_path: Path) -> SessionDB:
 def _create_conversation(db: SessionDB) -> None:
     db.upsert_team_mission_conversation(
         conversation_id=CONVERSATION_ID,
-        stable_session_id=CONVERSATION_SESSION_ID,
+        conversation_session_id=CONVERSATION_SESSION_ID,
         title="Conversation",
         status="active",
     )

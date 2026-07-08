@@ -25,7 +25,7 @@ def _make_conn() -> sqlite3.Connection:
             session_id TEXT NOT NULL,
             runtime_scope_key TEXT,
             turn_id TEXT,
-            runtime_session_id TEXT,
+            execution_session_id TEXT,
             status TEXT NOT NULL,
             started_at REAL NOT NULL,
             updated_at REAL NOT NULL,
@@ -184,7 +184,7 @@ def test_run_get_identity_fold_at_dispatch_boundary():
         {
             "id": "req",
             "method": "run.get",
-            "params": {"runId": "r1", "storedSessionId": "s1"},
+            "params": {"runId": "r1", "conversationSessionId": "s1"},
         },
         resolver=AllowAllResolver(),
     )

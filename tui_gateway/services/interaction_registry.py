@@ -83,7 +83,7 @@ class InteractionRegistry:
             "session_id": str(getattr(entry, "conversation_id", "") or session_id),
             # Wire compatibility only: storage ownership is the local
             # ``session_id`` variable above.
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "runtime_scope_key": str(getattr(entry, "scope_key", "") or session_id),
             "payload": payload,
         }

@@ -267,10 +267,11 @@ class TeamMissionEventMixin:
         )
         frame = dict(event or {})
         payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+        runtime_conversation_session_id = str(binding["session_id"] or "").strip()
         frame.update({
             "run_id": run_id,
-            "session_id": str(frame.get("session_id") or binding["runtime_session_id"] or ""),
-            "stored_session_id": str(binding["session_id"] or ""),
+            "session_id": str(frame.get("session_id") or binding["execution_session_id"] or ""),
+            "conversation_session_id": runtime_conversation_session_id,
             "runtime_scope_key": str(frame.get("runtime_scope_key") or binding["runtime_scope_key"] or binding["session_id"] or ""),
             "payload": payload,
         })
@@ -292,18 +293,17 @@ class TeamMissionEventMixin:
                 and saved.get("_persistence_disposition") in {"duplicate_terminal", "ignored_after_terminal"}
             ):
                 return saved
-            source_event = saved or frame
-            if _text(frame.get("type")) == "message.delta":
-                source_event = dict(frame)
-                if isinstance(saved, dict):
-                    for key in ("seq", "timestamp", "session_id", "stored_session_id", "runtime_scope_key", "runtime_session_id"):
-                        if saved.get(key) is not None and not source_event.get(key):
-                            source_event[key] = saved.get(key)
+            source_event = dict(frame)
+            if isinstance(saved, dict):
+                for key in ("timestamp", "session_id", "conversation_session_id", "runtime_scope_key", "execution_session_id"):
+                    if saved.get(key) is not None and not source_event.get(key):
+                        source_event[key] = saved.get(key)
             self._project_team_mission_run_event_locked(
                 mission_id=mission_id,
                 run_id=run_id,
                 binding=binding_value,
                 identity=identity,
+                node=node,
                 source_event=source_event,
             )
             terminal_status = _terminal_run_status_for_event(
@@ -332,6 +332,7 @@ class TeamMissionEventMixin:
         run_id: str,
         binding: Dict[str, Any],
         identity: Dict[str, str],
+        node: Dict[str, Any],
         source_event: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Canonical projection for one runtime event of a team-mission-bound run.
@@ -363,7 +364,7 @@ class TeamMissionEventMixin:
         if (
             isinstance(mission_event, dict)
             and not mission_event.get("_persistence_disposition")
-            and _should_emit_conversation_status_projection(source_event)
+            and _should_emit_conversation_status_projection(source_event, node=node)
         ):
             _event_log.append_team_mission_conversation_status_event(
                 self,

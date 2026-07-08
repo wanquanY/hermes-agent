@@ -58,8 +58,8 @@ def team_mission_memory_context(db: Any, mission: Dict[str, Any]) -> Dict[str, A
     conversation_session_id = text(
         metadata.get("conversation_session_id")
         or metadata.get("conversationSessionId")
-        or metadata.get("stable_team_session_id")
-        or metadata.get("stableTeamSessionId")
+        or metadata.get("conversation_team_session_id")
+        or metadata.get("conversationTeamSessionId")
         or metadata.get("team_session_id")
         or metadata.get("teamSessionId")
         or mission.get("leader_session_id")

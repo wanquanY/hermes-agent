@@ -262,7 +262,7 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
     if not conversation_session_id:
         resolved = db.resolve_team_mission_conversation(conversation_id) if conversation_id else {}
         conversation = resolved.get("conversation") if isinstance(resolved, dict) and isinstance(resolved.get("conversation"), Mapping) else {}
-        conversation_session_id = _text(conversation.get("stable_session_id")) or conversation_id
+        conversation_session_id = _text(conversation.get("conversation_session_id")) or conversation_id
     if not conversation_id or not conversation_session_id:
         return tool_error("Team Mission conversation context is not available for this Leader turn.")
     active_run_id = _active_run_id(parent_agent)
@@ -325,7 +325,7 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
     task_execution_mode = _task_execution_mode(team_context)
     metadata = {
         "conversation_id": conversation_id,
-        "stableTeamSessionId": conversation_session_id,
+        "conversationTeamSessionId": conversation_session_id,
         "started_from_leader_conversation_run_id": active_run_id,
         "task_id": task_id,
         "task_title": title,

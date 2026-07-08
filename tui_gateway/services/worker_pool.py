@@ -53,7 +53,7 @@ class WorkerLease:
 @dataclass
 class _RunRecord:
     run_id: str
-    stored_session_id: str
+    conversation_session_id: str
     turn_id: str = ""
     started_at: float = field(default_factory=time.time)
 
@@ -283,7 +283,7 @@ class WorkerPool:
         *,
         conversation_id: str,
         run_id: str,
-        stored_session_id: str,
+        conversation_session_id: str,
         turn_id: str = "",
         scope_key: str | None = None,
     ) -> None:
@@ -318,7 +318,7 @@ class WorkerPool:
             before_active_runs = sorted(state.inflight)
             state.inflight[normalized_run_id] = _RunRecord(
                 run_id=normalized_run_id,
-                stored_session_id=str(stored_session_id or conv).strip(),
+                conversation_session_id=str(conversation_session_id or conv).strip(),
                 turn_id=str(turn_id or "").strip(),
             )
             self._run_to_state_key[normalized_run_id] = key
@@ -444,7 +444,7 @@ class WorkerPool:
         for run_id in run_ids:
             record = state.inflight.get(run_id) or _RunRecord(
                 run_id=run_id,
-                stored_session_id=state.conversation_id,
+                conversation_session_id=state.conversation_id,
             )
             message = f"{reason}: worker process exited"
             if self._terminal_callback is not None:
@@ -455,7 +455,7 @@ class WorkerPool:
                         RunTerminalFrame(
                             run_id=run_id,
                             status="failed",
-                            stored_session_id=record.stored_session_id or state.conversation_id,
+                            conversation_session_id=record.conversation_session_id or state.conversation_id,
                             turn_id=record.turn_id,
                             message=message,
                         ),
@@ -482,11 +482,11 @@ class WorkerPool:
             from tui_gateway.services import run_control
 
             run_control.terminate_run(
-                stored_session_id=record.stored_session_id or state.conversation_id,
+                conversation_session_id=record.conversation_session_id or state.conversation_id,
                 run_id=record.run_id,
                 turn_id=record.turn_id,
                 runtime_scope_key=state.worker.scope_key,
-                runtime_session_id=record.stored_session_id or state.conversation_id,
+                execution_session_id=record.conversation_session_id or state.conversation_id,
                 status="failed",
                 cause="worker_crashed",  # spec §7.3 — pool reap = WORKER_CRASHED
                 message=message,

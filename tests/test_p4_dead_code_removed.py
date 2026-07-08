@@ -29,7 +29,7 @@ def test_session_index_active_mission_id_no_longer_written(tmp_path: Path) -> No
 
     conversation = db.upsert_team_mission_conversation(
         conversation_id="conv-p4",
-        stable_session_id="session-p4",
+        conversation_session_id="session-p4",
         title="P4",
         active_mission_id="mission-p4",
     )

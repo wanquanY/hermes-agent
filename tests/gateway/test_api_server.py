@@ -1471,7 +1471,7 @@ class TestChatCompletionsEndpoint:
             assert "Provider failed" in data["error"]["message"]
 
     @pytest.mark.asyncio
-    async def test_stable_session_id_across_turns(self, adapter):
+    async def test_conversation_session_id_across_turns(self, adapter):
         """Same conversation (same first user message) produces the same session_id."""
         mock_result = {"final_response": "ok", "messages": [], "api_calls": 1}
 

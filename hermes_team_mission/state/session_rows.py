@@ -32,7 +32,7 @@ class TeamMissionRowsMixin:
         return {
             "conversation_id": str(_row_value(row, "conversation_id", "") or ""),
             "team_id": str(_row_value(row, "team_id", "") or ""),
-            "stable_session_id": str(_row_value(row, "stable_session_id", "") or ""),
+            "conversation_session_id": str(_row_value(row, "conversation_session_id", "") or ""),
             "title": str(_row_value(row, "title", "") or ""),
             "display_title": str(_row_value(row, "title", "") or ""),
             "display_title_source": display_title_source,
@@ -103,10 +103,10 @@ class TeamMissionRowsMixin:
                 if _text(_row_value(row, "mission_id", ""))
                 else ""
             ),
-            "runtime_stable_session_id": _text(_row_value(row, "runtime_stable_session_id", "")),
-            "runtimeStableSessionId": _text(_row_value(row, "runtime_stable_session_id", "")),
-            "runtime_session_id": _text(_row_value(row, "runtime_session_id", "")),
-            "runtimeSessionId": _text(_row_value(row, "runtime_session_id", "")),
+            "runtime_conversation_session_id": _text(_row_value(row, "runtime_conversation_session_id", "")),
+            "runtimeConversationSessionId": _text(_row_value(row, "runtime_conversation_session_id", "")),
+            "execution_session_id": _text(_row_value(row, "execution_session_id", "")),
+            "executionSessionId": _text(_row_value(row, "execution_session_id", "")),
             "runtime_scope_key": str(row["runtime_scope_key"] or ""),
             "runtimeScopeKey": str(row["runtime_scope_key"] or ""),
             "output_contract": _json_loads(row["output_contract_json"], {}),
@@ -186,7 +186,7 @@ class TeamMissionRowsMixin:
             "node_id": str(row["node_id"] or ""),
             "run_id": str(row["run_id"] or ""),
             "session_id": str(row["session_id"] or ""),
-            "runtime_session_id": str(row["runtime_session_id"] or ""),
+            "execution_session_id": str(row["execution_session_id"] or ""),
             "runtime_scope_key": str(row["runtime_scope_key"] or ""),
             "role": str(row["role"] or ""),
             "metadata": _json_loads(row["metadata_json"], {}),
@@ -236,8 +236,8 @@ class TeamMissionRowsMixin:
         if node_id and _text(binding.get("node_id")) and node_id != _text(binding.get("node_id")):
             return node
 
-        session_id = _text(node.get("runtime_stable_session_id")) or _text(binding.get("session_id"))
-        runtime_session_id = _text(node.get("runtime_session_id")) or _text(binding.get("runtime_session_id"))
+        session_id = _text(node.get("runtime_conversation_session_id")) or _text(binding.get("session_id"))
+        execution_session_id = _text(node.get("execution_session_id")) or _text(binding.get("execution_session_id"))
         runtime_scope_key = _text(node.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key"))
         run_id = _text(binding.get("run_id"))
         # CR-P3.3: graph identity only; for speaker use participant_id.
@@ -261,16 +261,16 @@ class TeamMissionRowsMixin:
             "runId": run_id,
             "session_id": session_id,
             "sessionId": session_id,
-            "stable_session_id": session_id,
-            "stableSessionId": session_id,
-            "stored_session_id": session_id,
-            "storedSessionId": session_id,
-            "actual_stable_session_id": session_id,
-            "actualStableSessionId": session_id,
-            "runtime_stable_session_id": session_id,
-            "runtimeStableSessionId": session_id,
-            "runtime_session_id": runtime_session_id,
-            "runtimeSessionId": runtime_session_id,
+            "conversation_session_id": session_id,
+            "conversationSessionId": session_id,
+            "conversation_session_id": session_id,
+            "conversationSessionId": session_id,
+            "actual_conversation_session_id": session_id,
+            "actualConversationSessionId": session_id,
+            "runtime_conversation_session_id": session_id,
+            "runtimeConversationSessionId": session_id,
+            "execution_session_id": execution_session_id,
+            "executionSessionId": execution_session_id,
             "runtime_scope_key": runtime_scope_key,
             "runtimeScopeKey": runtime_scope_key,
             "runtime_binding": binding,

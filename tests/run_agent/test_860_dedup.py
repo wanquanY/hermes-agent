@@ -510,7 +510,7 @@ class TestFlushDeduplication:
 
         def record_leader_event_shape(db, *, run_id: str, turn_id: str) -> None:
             base = {
-                "stored_session_id": visible_session_id,
+                "conversation_session_id": visible_session_id,
                 "session_id": visible_session_id,
                 "run_id": run_id,
                 "turn_id": turn_id,

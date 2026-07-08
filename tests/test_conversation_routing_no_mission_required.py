@@ -29,7 +29,7 @@ def _seed_zero_mission_team_conversation(db: SessionDB) -> None:
     db.append_message("team-session-zero", role="user", content="team conversation stays open")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-zero",
-        stable_session_id="team-session-zero",
+        conversation_session_id="team-session-zero",
         team_id="team-1",
         title="Zero mission team",
         active_mission_id="",
@@ -62,7 +62,7 @@ def _seed_active_mission_team_conversation(db: SessionDB) -> None:
     db.append_message("team-session-active", role="assistant", content="active team render")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-active",
-        stable_session_id="team-session-active",
+        conversation_session_id="team-session-active",
         team_id="team-1",
         title="Active mission team",
         active_mission_id="mission-active",

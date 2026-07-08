@@ -92,10 +92,10 @@ def _tool_call_id_from_payload(payload: dict[str, Any]) -> str:
 def _message_row_for_event(conn: sqlite3.Connection, event: dict[str, Any]) -> sqlite3.Row | None:
     payload = _record(event.get("payload"))
     session_id = _text(
-        event.get("stored_session_id")
-        or event.get("storedSessionId")
-        or payload.get("stored_session_id")
-        or payload.get("storedSessionId")
+        event.get("conversation_session_id")
+        or event.get("conversationSessionId")
+        or payload.get("conversation_session_id")
+        or payload.get("conversationSessionId")
         or event.get("session_id")
         or event.get("sessionId")
     )
@@ -136,8 +136,8 @@ def _tool_row_for_event(
 ) -> sqlite3.Row | None:
     payload = _record(event.get("payload"))
     session_id = _text(
-        event.get("stored_session_id")
-        or payload.get("stored_session_id")
+        event.get("conversation_session_id")
+        or payload.get("conversation_session_id")
         or _row_value(row, "session_id")
     )
     if not session_id:

@@ -28,7 +28,7 @@ def _seed_team_conversation(db: SessionDB, *, mission_status: str = "running") -
     db.create_session(session_id="team-session-1", source="team_mission")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team conversation",
         active_mission_id="mission-1",
@@ -62,7 +62,7 @@ def _message_complete(
     return {
         "type": "message.complete",
         "session_id": f"runtime-{run_id}",
-        "stored_session_id": "team-session-1",
+        "conversation_session_id": "team-session-1",
         "run_id": run_id,
         "turn_id": f"turn-{run_id}",
         "runtime_scope_key": "team:conversation-1",

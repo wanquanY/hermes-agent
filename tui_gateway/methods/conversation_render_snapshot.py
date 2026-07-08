@@ -180,8 +180,8 @@ def _conversation_identifier(params: dict[str, Any]) -> str:
         or params.get("sessionId")
         or params.get("conversation_session_id")
         or params.get("conversationSessionId")
-        or params.get("stable_session_id")
-        or params.get("stableSessionId")
+        or params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or metadata.get("conversation_id")
         or metadata.get("conversationId")
     )
@@ -249,7 +249,7 @@ def _route_conversation_kind(params: dict[str, Any]) -> str:
     if db is None:
         return "direct"
 
-    session_id = _stored_session_id(params)
+    session_id = _conversation_session_id(params)
     identifier = _conversation_identifier(params)
     for candidate in dict.fromkeys([session_id, identifier]):
         kind = _route_kind_from_session_index(db, candidate)
@@ -265,19 +265,19 @@ def _route_conversation_kind(params: dict[str, Any]) -> str:
     return "direct"
 
 
-def _stored_session_id(params: dict[str, Any]) -> str:
+def _conversation_session_id(params: dict[str, Any]) -> str:
     metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
     return _text(
         params.get("session_id")
         or params.get("sessionId")
-        or params.get("stored_session_id")
-        or params.get("storedSessionId")
-        or params.get("stable_session_id")
-        or params.get("stableSessionId")
         or params.get("conversation_session_id")
         or params.get("conversationSessionId")
-        or metadata.get("stable_session_id")
-        or metadata.get("stableSessionId")
+        or params.get("conversation_session_id")
+        or params.get("conversationSessionId")
+        or params.get("conversation_session_id")
+        or params.get("conversationSessionId")
+        or metadata.get("conversation_session_id")
+        or metadata.get("conversationSessionId")
     )
 
 
@@ -974,11 +974,11 @@ def _team_conversation_snapshot(
     team = resolved.get("team") if isinstance(resolved.get("team"), dict) else {}
     graph_conversation = graph.get("conversation") if isinstance(graph.get("conversation"), dict) else {}
     session_id = _text(
-        conversation.get("stable_session_id")
-        or conversation.get("stableSessionId")
-        or graph_conversation.get("stable_session_id")
-        or graph_conversation.get("stableSessionId")
-        or _stored_session_id(params)
+        conversation.get("conversation_session_id")
+        or conversation.get("conversationSessionId")
+        or graph_conversation.get("conversation_session_id")
+        or graph_conversation.get("conversationSessionId")
+        or _conversation_session_id(params)
     )
     page, error = _messages_page(session_id, params, required=False)
     if error:
@@ -1074,8 +1074,8 @@ def _team_conversation_snapshot(
             "kind": "team_mission",
             "schemaVersion": _SNAPSHOT_SCHEMA_VERSION,
             "renderReady": True,
-            "stable_session_id": session_id,
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
+            "conversation_session_id": session_id,
             "session_id": session_id,
             "conversation": conversation,
             "mission": mission,
@@ -1109,7 +1109,7 @@ def _team_conversation_snapshot(
 
 
 def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[str, Any]:
-    session_id = _stored_session_id(params) or _conversation_identifier(params)
+    session_id = _conversation_session_id(params) or _conversation_identifier(params)
     page, error = _messages_page(session_id, params, required=True)
     if error:
         return error
@@ -1120,8 +1120,8 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
             "kind": "ordinary",
             "schemaVersion": _SNAPSHOT_SCHEMA_VERSION,
             "renderReady": True,
-            "stable_session_id": session_id,
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
+            "conversation_session_id": session_id,
             "session_id": session_id,
             "participants": _participants_for_session(session_id),
             "messages": list(page.get("messages") or []),

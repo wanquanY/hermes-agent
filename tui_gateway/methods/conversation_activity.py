@@ -36,8 +36,8 @@ def _bounded_limit(value: Any, default: int = 200, maximum: int = 500) -> int:
 
 def _session_id(session: dict[str, Any]) -> str:
     return _text(
-        session.get("stored_session_id")
-        or session.get("storedSessionId")
+        session.get("conversation_session_id")
+        or session.get("conversationSessionId")
         or session.get("id")
         or session.get("session_id")
     )
@@ -95,7 +95,7 @@ def _pending_approvals_for_session(session_id: str, params: dict[str, Any]) -> l
         "conversation-activity-approval",
         {
             **params,
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
         },
     )
     if not isinstance(response, dict) or response.get("error"):
@@ -134,8 +134,8 @@ def _activity_from_session(
     run_state = _run_state(session, mission=mission, pending_approval_count=pending_approval_count)
     is_active = run_state in {"running", "waiting_approval"}
     return {
-        "stable_session_id": session_id,
-        "stored_session_id": session_id,
+        "conversation_session_id": session_id,
+        "conversation_session_id": session_id,
         "session_id": session_id,
         "conversation_id": _text(session.get("conversation_id") or session.get("conversationId")),
         "kind": _session_kind(session),
@@ -146,11 +146,11 @@ def _activity_from_session(
         "waiting_approval": run_state == "waiting_approval",
         "active_run_id": _text(session.get("active_run_id") or session.get("activeRunId")) if is_active else "",
         "active_turn_id": _text(session.get("active_turn_id") or session.get("activeTurnId")) if is_active else "",
-        "active_runtime_session_id": (
+        "active_execution_session_id": (
             _text(
-                session.get("active_runtime_session_id")
-                or session.get("activeRuntimeSessionId")
-                or session.get("runtime_session_id")
+                session.get("active_execution_session_id")
+                or session.get("activeExecutionSessionId")
+                or session.get("execution_session_id")
             )
             if is_active
             else ""

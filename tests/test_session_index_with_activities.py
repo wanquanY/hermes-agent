@@ -129,7 +129,7 @@ def test_session_index_aggregates_across_multiple_activities_per_conv(tmp_path: 
     assert item["unread_completion_count"] == 2
 
 
-def test_session_index_activity_join_falls_back_to_stored_session_id(tmp_path: Path) -> None:
+def test_session_index_activity_join_falls_back_to_conversation_session_id(tmp_path: Path) -> None:
     db = _db(tmp_path)
     _upsert_index_row(db, session_id="plain-session", conversation_id="")
     _create_activity(db, "pending", conversation_id="plain-session")

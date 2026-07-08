@@ -129,7 +129,7 @@ def gateway_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SessionDB:
                 "run_id": params.get("run_id") or params.get("client_run_id") or "run-1",
                 "turn_id": params.get("turn_id") or "turn-1",
                 "session_id": "runtime-1",
-                "stored_session_id": params.get("stored_session_id") or params.get("session_id") or "",
+                "conversation_session_id": params.get("conversation_session_id") or params.get("session_id") or "",
                 "runtime_scope_key": params.get("runtime_scope_key") or "",
             },
         }
@@ -142,7 +142,7 @@ def gateway_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SessionDB:
                 "status": "cancelled",
                 "run_id": params.get("run_id") or "",
                 "turn_id": params.get("turn_id") or "",
-                "stored_session_id": params.get("stored_session_id") or "",
+                "conversation_session_id": params.get("conversation_session_id") or "",
             },
         }
 
@@ -363,7 +363,7 @@ def test_team_mission_message_submit_records_activity_command(
                 "mode": "supervised_mission",
                 "conversation_only": True,
                 "workspace": _workspace_payload(tmp_path),
-                "metadata": {"stableTeamSessionId": "team-session-1"},
+                "metadata": {"conversationTeamSessionId": "team-session-1"},
             },
         )
     )
@@ -438,7 +438,7 @@ def test_prompt_submit_records_activity_command_for_single_agent(
     row = _command_by_source(gateway_db, "chat:prompt-session", "prompt.submit")
     assert row["kind"] == "start"
     assert row["payload"] == {"session_id": "prompt-session", "text_len": 5}
-    assert result["stored_session_id"] == "prompt-session"
+    assert result["conversation_session_id"] == "prompt-session"
     assert "command_id" not in result
 
 
@@ -522,7 +522,7 @@ def test_team_mission_node_start_response_shape_unchanged(
         )
     )
 
-    assert set(result) == {"mission_id", "node", "binding", "run", "stored_session_id"}
+    assert set(result) == {"mission_id", "node", "binding", "run", "conversation_session_id"}
     assert "command_id" not in result
 
 

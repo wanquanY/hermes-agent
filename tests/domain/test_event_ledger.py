@@ -23,7 +23,7 @@ def _make_conn() -> sqlite3.Connection:
             session_id TEXT NOT NULL,
             run_id TEXT,
             turn_id TEXT,
-            runtime_session_id TEXT,
+            execution_session_id TEXT,
             runtime_scope_key TEXT,
             participant_id TEXT,
             activity_id TEXT,
@@ -133,7 +133,7 @@ def test_append_runtime_frame_persists_full_gateway_columns():
         session_id="s1",
         run_id="r1",
         turn_id="t1",
-        runtime_session_id="runtime-s1",
+        execution_session_id="runtime-s1",
         runtime_scope_key="scope:s1",
         participant_id="participant:leader",
         activity_id="activity-1",
@@ -157,7 +157,7 @@ def test_append_runtime_frame_persists_full_gateway_columns():
     row = conn.execute("SELECT * FROM run_events WHERE session_id = 's1'").fetchone()
     assert row["run_id"] == "r1"
     assert row["turn_id"] == "t1"
-    assert row["runtime_session_id"] == "runtime-s1"
+    assert row["execution_session_id"] == "runtime-s1"
     assert row["runtime_scope_key"] == "scope:s1"
     assert row["participant_id"] == "participant:leader"
     assert row["activity_id"] == "activity-1"
@@ -182,7 +182,7 @@ def test_projection_markers_update_runtime_frame_row():
         session_id="s1",
         run_id="r1",
         turn_id="t1",
-        runtime_session_id="runtime-s1",
+        execution_session_id="runtime-s1",
         runtime_scope_key="scope:s1",
         participant_id="",
         activity_id=None,
@@ -214,7 +214,7 @@ def test_maintenance_updates_frame_activity_runtime_source_and_referenced_projec
         session_id="s1",
         run_id="r1",
         turn_id="t1",
-        runtime_session_id="runtime-s1",
+        execution_session_id="runtime-s1",
         runtime_scope_key="scope:s1",
         participant_id="",
         activity_id=None,
@@ -270,7 +270,7 @@ def test_compaction_rewrite_preserves_existing_retention_and_deletes_rows():
             session_id="s1",
             run_id="r1",
             turn_id="t1",
-            runtime_session_id="runtime-s1",
+            execution_session_id="runtime-s1",
             runtime_scope_key="scope:s1",
             participant_id="old",
             activity_id=None,
@@ -292,7 +292,7 @@ def test_compaction_rewrite_preserves_existing_retention_and_deletes_rows():
         row_id=keep_id,
         run_id="r2",
         turn_id="t2",
-        runtime_session_id="runtime-s2",
+        execution_session_id="runtime-s2",
         runtime_scope_key="scope:s2",
         activity_id="activity-2",
         seq=10,
@@ -315,7 +315,7 @@ def test_compaction_rewrite_preserves_existing_retention_and_deletes_rows():
     assert row["seq"] == 10
     assert row["run_id"] == "r2"
     assert row["turn_id"] == "t2"
-    assert row["runtime_session_id"] == "runtime-s2"
+    assert row["execution_session_id"] == "runtime-s2"
     assert row["runtime_scope_key"] == "scope:s2"
     assert row["activity_id"] == "activity-2"
     assert row["participant_id"] == "participant-2"
@@ -323,14 +323,14 @@ def test_compaction_rewrite_preserves_existing_retention_and_deletes_rows():
     assert row["runtime_source_seq"] == 9
 
 
-def test_delete_sessions_matches_visible_and_runtime_session_ids():
+def test_delete_sessions_matches_visible_and_execution_session_ids():
     conn = _make_conn()
     ledger = EventLedger(conn)
     ledger.append_runtime_frame(
         session_id="visible-s1",
         run_id="r1",
         turn_id="t1",
-        runtime_session_id="runtime-s1",
+        execution_session_id="runtime-s1",
         runtime_scope_key="scope:s1",
         participant_id="",
         activity_id=None,
@@ -348,7 +348,7 @@ def test_delete_sessions_matches_visible_and_runtime_session_ids():
         session_id="visible-s2",
         run_id="r2",
         turn_id="t2",
-        runtime_session_id="runtime-s2",
+        execution_session_id="runtime-s2",
         runtime_scope_key="scope:s2",
         participant_id="",
         activity_id=None,
@@ -376,7 +376,7 @@ def test_runtime_row_queries_apply_scope_run_activity_and_internal_filters():
         session_id="s1",
         run_id="run-1",
         turn_id="t1",
-        runtime_session_id="runtime-s1",
+        execution_session_id="runtime-s1",
         runtime_scope_key="scope-a",
         participant_id="p1",
         activity_id="activity-a",
@@ -394,7 +394,7 @@ def test_runtime_row_queries_apply_scope_run_activity_and_internal_filters():
         session_id="s1",
         run_id="run-2",
         turn_id="t2",
-        runtime_session_id="runtime-s1",
+        execution_session_id="runtime-s1",
         runtime_scope_key="scope-b",
         participant_id="p1",
         activity_id="activity-b",
@@ -455,7 +455,7 @@ def test_filtered_rows_support_type_prefix_explicit_types_scope_and_search_index
             session_id="s1",
             run_id="run-1",
             turn_id="t1",
-            runtime_session_id="runtime-s1",
+            execution_session_id="runtime-s1",
             runtime_scope_key=scope,
             participant_id="",
             activity_id=None,

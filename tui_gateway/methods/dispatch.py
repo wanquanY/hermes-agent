@@ -291,7 +291,7 @@ async def dispatch_agent_async(
             scope_key=lease.scope_key,
             conversation_id=conversation_id,
             run_id=run_id,
-            stored_session_id=conversation_id,
+            conversation_session_id=conversation_id,
             turn_id=turn_id,
             dispatch_activity_id=activity_id,
             activity_kind="agent_dispatch",
@@ -303,7 +303,7 @@ async def dispatch_agent_async(
         await pool.record_run_start(
             conversation_id=conversation_id,
             run_id=run_id,
-            stored_session_id=conversation_id,
+            conversation_session_id=conversation_id,
             turn_id=turn_id,
         )
 
@@ -331,7 +331,7 @@ async def dispatch_agent_async(
             RunStartFrame(
                 run_id=run_id,
                 turn_id=turn_id,
-                stored_session_id=conversation_id,
+                conversation_session_id=conversation_id,
                 prompt=prompt,
                 params=frame_params,
                 dovie_product_context=dovie_product_context,

@@ -66,7 +66,7 @@ def test_session_index_aggregation_team_context_from_mission_tables(tmp_path: Pa
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
         team_id="team-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         title="Team",
         active_mission_id="mission-1",
         created_at=1.0,
@@ -101,7 +101,7 @@ def test_session_index_aggregation_member_context_from_participants(tmp_path: Pa
     db.upsert_team_mission_conversation(
         conversation_id="conversation-member",
         team_id="team-member",
-        stable_session_id="team-session-member",
+        conversation_session_id="team-session-member",
         title="Team",
         active_mission_id="mission-member",
         created_at=1.0,
@@ -151,7 +151,7 @@ def test_session_index_aggregation_waiting_approval_from_pending_gate(tmp_path: 
     db.upsert_team_mission_conversation(
         conversation_id="conversation-approval",
         team_id="team-approval",
-        stable_session_id="team-session-approval",
+        conversation_session_id="team-session-approval",
         title="Team",
         active_mission_id="mission-approval",
         created_at=1.0,
@@ -254,12 +254,12 @@ def test_run_state_projects_into_session_index(tmp_path: Path):
     # user-facing session has an index row (as session.create would create)
     db.upsert_session_index(session_id="s1", source="cli", started_at=1.0, updated_at=1.0)
 
-    db.upsert_run(run_id="run-1", session_id="s1", status="running", runtime_session_id="rt-1")
+    db.upsert_run(run_id="run-1", session_id="s1", status="running", execution_session_id="rt-1")
     item = db.list_session_index()["sessions"][0]
     assert item["running"] is True
     assert item["status"] == "running"
     assert item["active_run_id"] == "run-1"
-    assert item["active_runtime_session_id"] == "rt-1"
+    assert item["active_execution_session_id"] == "rt-1"
 
     db.upsert_run(run_id="run-1", session_id="s1", status="completed")
     item = db.list_session_index()["sessions"][0]
@@ -463,7 +463,7 @@ def test_team_conversation_leader_terminal_clears_index_when_no_mission_is_activ
     db.upsert_team_mission_conversation(
         conversation_id="conv-chat",
         team_id="team-1",
-        stable_session_id="team-session-chat",
+        conversation_session_id="team-session-chat",
         title="团队会话",
     )
     db.upsert_run(run_id="team-leader-run-1", session_id="team-session-chat", status="running")
@@ -506,7 +506,7 @@ def test_team_mission_active_run_terminal_does_not_clear_active_mission_index(tm
     db.upsert_team_mission_conversation(
         conversation_id="conv-mission",
         team_id="team-1",
-        stable_session_id="team-session-mission",
+        conversation_session_id="team-session-mission",
         title="团队任务",
         active_mission_id="mission-live",
     )
@@ -543,7 +543,7 @@ def test_team_conversation_projects_into_session_index(tmp_path: Path):
     db.upsert_team_mission_conversation(
         conversation_id="conv-1",
         team_id="team-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         title="团队会话",
         active_mission_id="mission-1",
     )
@@ -561,7 +561,7 @@ def test_update_session_index_for_mission_sets_running(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conv-1", team_id="team-1",
-        stable_session_id="team-session-1", title="t", active_mission_id="mission-1",
+        conversation_session_id="team-session-1", title="t", active_mission_id="mission-1",
     )
     assert db.update_session_index_for_mission("mission-1", status="running", running=True) == 1
     it = db.list_session_index()["sessions"][0]
@@ -579,7 +579,7 @@ def test_team_conversation_projection_carries_canonical_runtime_scope(tmp_path: 
     db.upsert_team_mission_conversation(
         conversation_id="conv-scope",
         team_id="team-1",
-        stable_session_id="team-session-scope",
+        conversation_session_id="team-session-scope",
         title="团队任务",
     )
 
@@ -593,7 +593,7 @@ def test_list_session_index_repairs_active_team_runtime_identity_from_leader_run
     db.upsert_team_mission_conversation(
         conversation_id="conv-repair",
         team_id="team-1",
-        stable_session_id="team-session-repair",
+        conversation_session_id="team-session-repair",
         title="团队任务",
         active_mission_id="mission-repair",
     )
@@ -610,7 +610,7 @@ def test_list_session_index_repairs_active_team_runtime_identity_from_leader_run
         run_id="leader-run-repair",
         session_id="team-session-repair",
         runtime_scope_key="team:conv-repair:leader-conversation",
-        runtime_session_id="runtime-leader-repair",
+        execution_session_id="runtime-leader-repair",
         status="running",
     )
     db._conn.execute(  # noqa: SLF001 - simulate legacy production projection.
@@ -620,7 +620,7 @@ def test_list_session_index_repairs_active_team_runtime_identity_from_leader_run
                status = 'running',
                runtime_scope_key = '',
                active_run_id = '',
-               active_runtime_session_id = ''
+               active_execution_session_id = ''
          WHERE session_id = ?
         """,
         ("team-session-repair",),
@@ -635,20 +635,20 @@ def test_list_session_index_repairs_active_team_runtime_identity_from_leader_run
     assert item["running"] is True
     assert item["runtime_scope_key"] == "team:conv-repair:leader-conversation"
     assert item["active_run_id"] == "leader-run-repair"
-    assert item["active_runtime_session_id"] == "runtime-leader-repair"
+    assert item["active_execution_session_id"] == "runtime-leader-repair"
 
 
 def test_team_conversation_touch_preserves_live_mission_status(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conv-1", team_id="team-1",
-        stable_session_id="team-session-1", title="t", active_mission_id="mission-1",
+        conversation_session_id="team-session-1", title="t", active_mission_id="mission-1",
     )
     db.update_session_index_for_mission("mission-1", status="running", running=True)
     # a later conversation touch (e.g. title update) must NOT reset running
     db.upsert_team_mission_conversation(
         conversation_id="conv-1", team_id="team-1",
-        stable_session_id="team-session-1", title="renamed", active_mission_id="mission-1",
+        conversation_session_id="team-session-1", title="renamed", active_mission_id="mission-1",
         replace_title=True,
     )
     it = db.list_session_index()["sessions"][0]
@@ -719,7 +719,7 @@ def test_reconcile_heals_terminal_mission_conversation_stuck_running(tmp_path: P
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="m-x", team_id="t", title="T", mode="supervised_mission", status="cancelled")
     db.upsert_team_mission_conversation(
-        conversation_id="c-x", team_id="t", stable_session_id="team-session-x",
+        conversation_id="c-x", team_id="t", conversation_session_id="team-session-x",
         title="t", active_mission_id="m-x",
     )
     # simulate the stale running projection (cancel bypassed the reducer)
@@ -737,7 +737,7 @@ def test_cancel_team_mission_sets_conversation_index_idle(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="m-y", team_id="t", title="T", mode="supervised_mission", status="running")
     db.upsert_team_mission_conversation(
-        conversation_id="c-y", team_id="t", stable_session_id="team-session-y",
+        conversation_id="c-y", team_id="t", conversation_session_id="team-session-y",
         title="t", active_mission_id="m-y",
     )
     db.update_session_index_for_mission("m-y", status="running", running=True)
@@ -769,7 +769,7 @@ def test_reject_team_mission_plan_clears_conversation_approval_projection(tmp_pa
     db.upsert_team_mission_conversation(
         conversation_id="c-r",
         team_id="t",
-        stable_session_id="team-session-r",
+        conversation_session_id="team-session-r",
         title="t",
         active_mission_id="m-r",
     )
@@ -838,7 +838,7 @@ def test_reconcile_clears_stale_waiting_approval_for_rejected_draft_mission(tmp_
     db.upsert_team_mission_conversation(
         conversation_id="c-r2",
         team_id="t",
-        stable_session_id="team-session-r2",
+        conversation_session_id="team-session-r2",
         title="t",
         active_mission_id="m-r2",
     )
@@ -882,7 +882,7 @@ def test_update_for_mission_not_running_clears_active_run_id(tmp_path: Path):
     db.upsert_session_index(
         session_id="team-session-z", session_kind="team_mission", mission_id="m-z",
         running=True, status="running", active_run_id="team-leader-run-z",
-        active_runtime_session_id="rt-z", started_at=1.0, updated_at=1.0,
+        active_execution_session_id="rt-z", started_at=1.0, updated_at=1.0,
     )
 
     db.update_session_index_for_mission("m-z", status="idle", running=False)
@@ -891,14 +891,14 @@ def test_update_for_mission_not_running_clears_active_run_id(tmp_path: Path):
     assert item["running"] is False
     # the sidebar treats a non-empty active_run_id as running — it MUST be cleared.
     assert item["active_run_id"] == ""
-    assert item["active_runtime_session_id"] == ""
+    assert item["active_execution_session_id"] == ""
 
 
 def test_reconcile_clears_stale_active_run_on_already_idle_terminal_mission(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="m-w", team_id="t", title="T", mode="supervised_mission", status="completed")
     db.upsert_team_mission_conversation(
-        conversation_id="c-w", team_id="t", stable_session_id="team-session-w",
+        conversation_id="c-w", team_id="t", conversation_session_id="team-session-w",
         title="t", active_mission_id="m-w",
     )
     # running/status already healed to idle, but a stale active_run_id lingers —
@@ -906,14 +906,14 @@ def test_reconcile_clears_stale_active_run_on_already_idle_terminal_mission(tmp_
     db.upsert_session_index(
         session_id="team-session-w", session_kind="team_mission", mission_id="m-w",
         running=False, status="idle", active_run_id="team-leader-run-w",
-        active_runtime_session_id="rt-w", started_at=1.0, updated_at=1.0,
+        active_execution_session_id="rt-w", started_at=1.0, updated_at=1.0,
     )
 
     db.reconcile_session_index()
 
     item = db.list_session_index()["sessions"][0]
     assert item["active_run_id"] == ""
-    assert item["active_runtime_session_id"] == ""
+    assert item["active_execution_session_id"] == ""
 
 
 def test_initialize_team_mission_lights_up_sidebar_immediately(tmp_path: Path):
@@ -932,7 +932,7 @@ def test_initialize_team_mission_lights_up_sidebar_immediately(tmp_path: Path):
     of mission init."""
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
-        conversation_id="conv-a", team_id="t", stable_session_id="team-session-a",
+        conversation_id="conv-a", team_id="t", conversation_session_id="team-session-a",
         title="t",
     )
     # Conversation row exists, running=0 by default.
@@ -979,7 +979,7 @@ def test_list_session_index_repairs_team_conversation_row_with_terminal_active_r
         status="running",
         running=True,
         active_run_id="run-completed",
-        active_runtime_session_id="rt-x",
+        active_execution_session_id="rt-x",
         mission_id="",
         conversation_id="conv-stuck",
         started_at=1.0,

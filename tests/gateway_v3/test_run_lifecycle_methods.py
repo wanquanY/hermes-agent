@@ -27,7 +27,7 @@ def _make_conn() -> sqlite3.Connection:
             session_id TEXT NOT NULL,
             runtime_scope_key TEXT,
             turn_id TEXT,
-            runtime_session_id TEXT,
+            execution_session_id TEXT,
             status TEXT NOT NULL,
             started_at REAL NOT NULL,
             updated_at REAL NOT NULL,
@@ -275,7 +275,7 @@ def test_run_launch_denied_when_permission_write_missing():
 
 
 def test_run_launch_identity_alias_fold_at_dispatch_boundary():
-    """`storedSessionId` still normalises to `session_id` for the write path."""
+    """`conversationSessionId` still normalises to `session_id` for the write path."""
     conn, orch, registry = _wired()
     resp = dispatch(
         registry,
@@ -284,7 +284,7 @@ def test_run_launch_identity_alias_fold_at_dispatch_boundary():
             "method": "run.launch",
             "params": {
                 "runId": "r1",
-                "storedSessionId": "s1",  # legacy alias
+                "conversationSessionId": "s1",  # legacy alias
                 "workerId": "w1",
             },
         },

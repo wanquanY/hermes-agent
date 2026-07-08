@@ -41,11 +41,11 @@ def _db(tmp_path: Path) -> SessionDB:
     return db
 
 
-def _frame(*, stored_session_id: str = "memberchat:Y", participant_id: str = "") -> dict[str, Any]:
+def _frame(*, conversation_session_id: str = "memberchat:Y", participant_id: str = "") -> dict[str, Any]:
     frame: dict[str, Any] = {
         "type": "message.delta",
-        "session_id": stored_session_id,
-        "stored_session_id": stored_session_id,
+        "session_id": conversation_session_id,
+        "conversation_session_id": conversation_session_id,
         "run_id": "run-1",
         "turn_id": "turn-1",
         "seq": 1,
@@ -65,7 +65,7 @@ def test_record_event_with_run_context_forces_conversation_session_id(tmp_path: 
     member_events = db.list_run_events("memberchat:Y", run_id="run-1")
     assert len(conv_events) == 1
     assert member_events == []
-    assert conv_events[0]["stored_session_id"] == "conv-X"
+    assert conv_events[0]["conversation_session_id"] == "conv-X"
     assert (conv_events[0]["payload"] or {})["run_context"]["conversation_session_id"] == "conv-X"
 
 
@@ -79,7 +79,7 @@ def test_record_event_with_node_run_context_preserves_node_runtime_session(tmp_p
     )
 
     record_event(
-        _frame(stored_session_id="team:mission-1:node:root"),
+        _frame(conversation_session_id="team:mission-1:node:root"),
         db=db,
         run_context=context,
     )
@@ -88,7 +88,7 @@ def test_record_event_with_node_run_context_preserves_node_runtime_session(tmp_p
     conv_events = db.list_run_events("conv-X", run_id="run-1")
     assert len(node_events) == 1
     assert conv_events == []
-    assert node_events[0]["stored_session_id"] == "team:mission-1:node:root"
+    assert node_events[0]["conversation_session_id"] == "team:mission-1:node:root"
     assert node_events[0]["activity_id"] == "act-node:mission-1:team-mission:mission-1:root"
     assert (node_events[0]["payload"] or {})["run_context"]["conversation_session_id"] == "conv-X"
 
@@ -118,13 +118,13 @@ def test_record_event_with_run_context_preserves_existing_participant_id(tmp_pat
 def test_record_event_without_run_context_unchanged_legacy_path(tmp_path: Path):
     db = _db(tmp_path)
 
-    record_event(_frame(stored_session_id="legacy-session"), db=db)
+    record_event(_frame(conversation_session_id="legacy-session"), db=db)
 
     legacy_events = db.list_run_events("legacy-session", run_id="run-1")
     conv_events = db.list_run_events("conv-X", run_id="run-1")
     assert len(legacy_events) == 1
     assert conv_events == []
-    assert legacy_events[0]["stored_session_id"] == "legacy-session"
+    assert legacy_events[0]["conversation_session_id"] == "legacy-session"
     assert "run_context" not in (legacy_events[0].get("payload") or {})
 
 
@@ -150,12 +150,12 @@ async def test_worker_router_passes_run_context_from_spawn_payload():
     router.record_run_start(
         scope_key="member-chat:alice",
         run_id="run-1",
-        stored_session_id="memberchat:Y",
+        conversation_session_id="memberchat:Y",
         turn_id="turn-1",
         run_context_json=json.dumps(context.to_payload()),
     )
 
     await router.on_event("member-chat:alice", EventFrame(params=_frame()))
 
-    assert captured["params"]["stored_session_id"] == "memberchat:Y"
+    assert captured["params"]["conversation_session_id"] == "memberchat:Y"
     assert captured["run_context"] == context

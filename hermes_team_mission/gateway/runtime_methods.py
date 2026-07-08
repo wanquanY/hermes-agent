@@ -244,8 +244,8 @@ def _submit_run_via_worker_with_response(rid, submit_params: dict) -> dict:
                 or ""
             ),
             "turn_id": str(submit_params.get("turn_id") or ""),
-            "stored_session_id": str(
-                submit_params.get("stored_session_id")
+            "conversation_session_id": str(
+                submit_params.get("conversation_session_id")
                 or submit_params.get("session_id")
                 or ""
             ),
@@ -256,7 +256,7 @@ def _submit_run_via_worker_with_response(rid, submit_params: dict) -> dict:
     # but better than dropping the run.
     run_control._diagnostic_warning(  # noqa: SLF001
         "team-mission-run-proxy-fallback-in-process",
-        stored_session_id=str(submit_params.get("stored_session_id") or ""),
+        conversation_session_id=str(submit_params.get("conversation_session_id") or ""),
         runtime_scope_key=str(submit_params.get("runtime_scope_key") or ""),
         reason=proxied.get("reason") or "",
     )
@@ -339,7 +339,7 @@ except Exception:
     pass
 
 
-def _clear_stuck_member_session_run(db, stored_session_id: str) -> None:
+def _clear_stuck_member_session_run(db, conversation_session_id: str) -> None:
     """Release any non-terminal run left on the member session by a prior turn
     that did not close cleanly (no reaper guards a member-chat session). Keeps
     multi-turn from hitting 'session busy'."""
@@ -349,7 +349,7 @@ def _clear_stuck_member_session_run(db, stored_session_id: str) -> None:
         with db._lock:
             rows = db._conn.execute(
                 "SELECT run_id, status, runtime_scope_key, turn_id FROM runs WHERE session_id = ? ORDER BY rowid DESC LIMIT 5",
-                (stored_session_id,),
+                (conversation_session_id,),
             ).fetchall()
     except Exception:
         return
@@ -361,7 +361,7 @@ def _clear_stuck_member_session_run(db, stored_session_id: str) -> None:
         try:
             db.upsert_run(
                 run_id=run_id,
-                session_id=stored_session_id,
+                session_id=conversation_session_id,
                 runtime_scope_key=str((row["runtime_scope_key"] if hasattr(row, "keys") else row[2]) or ""),
                 turn_id=str((row["turn_id"] if hasattr(row, "keys") else row[3]) or ""),
                 status="interrupted",
@@ -511,7 +511,7 @@ def _submit_message_to_member(
     try:
         ensured_conversation = db.ensure_team_mission_conversation(
             conversation_id=conversation_id,
-            stable_session_id=conversation_session_id,
+            conversation_session_id=conversation_session_id,
             mission=mission if isinstance(mission, dict) and mission else {},
             mission_id=str((mission or {}).get("mission_id") or "") if isinstance(mission, dict) and mission else "",
             team_id=team_id_for_ensure,
@@ -588,7 +588,7 @@ def _submit_message_to_member(
     # 6. run.submit with CLEAN member params only — NOT {**params} (which carries
     #    the frontend's leader scope/profile and breaks the worker spawn).
     submit_params = {
-        "stored_session_id": conversation_session_id,
+        "conversation_session_id": conversation_session_id,
         "session_id": conversation_session_id,
         "client_run_id": run_id,
         "run_id": run_id,
@@ -641,7 +641,7 @@ def _submit_message_to_member(
         # we can catch any caller still on the old path.
         run_control._diagnostic_warning(  # noqa: SLF001
             "member-chat-proxy-fallback-in-process",
-            stored_session_id=conversation_session_id,
+            conversation_session_id=conversation_session_id,
             member_scope=member_scope,
             reason=proxied.get("reason") or "",
         )
@@ -660,9 +660,9 @@ def _submit_message_to_member(
         "worker_run_id": run_id,
         "source_run_id": run_id,
         "turn_id": turn_id,
-        "stored_session_id": conversation_session_id,
+        "conversation_session_id": conversation_session_id,
         "session_id": conversation_session_id,
-        "worker_stored_session_id": conversation_session_id,
+        "worker_conversation_session_id": conversation_session_id,
         "runtime_scope_key": member_scope,
         "status": "streaming",
     }
@@ -742,7 +742,7 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4006, "conversation_id required")
     conversation_session_id = (
         conversation_session_id
-        or str((conversation or {}).get("stable_session_id") or "").strip()
+        or str((conversation or {}).get("conversation_session_id") or "").strip()
         or (_team_conversation_session_id(mission) if mission else "")
     )
     if not conversation_session_id:
@@ -838,7 +838,7 @@ def _(rid, params: dict) -> dict:
         conversation_title = _conversation_title_from_submit(db, params, text)
         conversation = db.ensure_team_mission_conversation(
             conversation_id=conversation_id,
-            stable_session_id=conversation_session_id,
+            conversation_session_id=conversation_session_id,
             mission=mission if isinstance(mission, dict) and mission else {},
             mission_id=mission_id if isinstance(mission, dict) and mission else "",
             team_id=str(params.get("team_id") or params.get("teamId") or (identity_mission or {}).get("team_id") or ""),
@@ -957,7 +957,7 @@ def _(rid, params: dict) -> dict:
     submit_params = {
         **params,
         **profile_params,
-        "stored_session_id": conversation_session_id,
+        "conversation_session_id": conversation_session_id,
         "session_id": conversation_session_id,
         "client_run_id": run_id,
         "run_id": run_id,
@@ -1064,7 +1064,7 @@ def _leader_turn_for_this_submit(
         **worker_result,
         "run_id": run_id,
         "turn_id": turn_id,
-        "stored_session_id": conversation_session_id,
+        "conversation_session_id": conversation_session_id,
         "session_id": worker_result.get("session_id") or conversation_session_id,
         "runtime_scope_key": runtime_scope_key,
     }
@@ -1607,14 +1607,14 @@ def _(rid, params: dict) -> dict:
         if not bound_run_id or bound_run_id in seen_run_ids:
             continue
         seen_run_ids.add(bound_run_id)
-        stored_session_id = str(
-            binding.get("session_id") or binding.get("stored_session_id") or ""
+        conversation_session_id = str(
+            binding.get("session_id") or binding.get("conversation_session_id") or ""
         ).strip()
         cancel_params = {
             "run_id": bound_run_id,
-            "stored_session_id": stored_session_id,
-            "runtime_session_id": str(binding.get("runtime_session_id") or ""),
-            "runtime_scope_key": str(binding.get("runtime_scope_key") or stored_session_id),
+            "conversation_session_id": conversation_session_id,
+            "execution_session_id": str(binding.get("execution_session_id") or ""),
+            "runtime_scope_key": str(binding.get("runtime_scope_key") or conversation_session_id),
             "reason": reason or "用户拒绝了团队任务图计划。",
         }
         try:
@@ -1636,7 +1636,7 @@ def _(rid, params: dict) -> dict:
         )
         canceled_runs.append({
             "run_id": bound_run_id,
-            "stored_session_id": stored_session_id,
+            "conversation_session_id": conversation_session_id,
             "status": str(response_result.get("status") or "cancelled"),
             "turn_id": str(response_result.get("turn_id") or ""),
         })
@@ -1850,7 +1850,7 @@ def _(rid, params: dict) -> dict:
         try:
             cancel_resp = _methods["run.cancel"](rid, {
                 "run_id": optimistic_run_id,
-                "stored_session_id": conversation_session_id,
+                "conversation_session_id": conversation_session_id,
                 "reason": reason,
             })
         except Exception as exc:
@@ -1858,7 +1858,7 @@ def _(rid, params: dict) -> dict:
         if isinstance(cancel_resp, dict) and not cancel_resp.get("error"):
             cancelled_run_ids.append({
                 "run_id": optimistic_run_id,
-                "stored_session_id": conversation_session_id,
+                "conversation_session_id": conversation_session_id,
                 "status": "cancelled",
             })
         else:
@@ -2051,12 +2051,12 @@ def _(rid, params: dict) -> dict:
         if not run_id or run_id in seen_run_ids:
             continue
         seen_run_ids.add(run_id)
-        stored_session_id = str(binding.get("session_id") or binding.get("stored_session_id") or "").strip()
+        conversation_session_id = str(binding.get("session_id") or binding.get("conversation_session_id") or "").strip()
         cancel_params = {
             "run_id": run_id,
-            "stored_session_id": stored_session_id,
-            "runtime_session_id": str(binding.get("runtime_session_id") or ""),
-            "runtime_scope_key": str(binding.get("runtime_scope_key") or stored_session_id),
+            "conversation_session_id": conversation_session_id,
+            "execution_session_id": str(binding.get("execution_session_id") or ""),
+            "runtime_scope_key": str(binding.get("runtime_scope_key") or conversation_session_id),
             "reason": reason,
         }
         try:
@@ -2074,7 +2074,7 @@ def _(rid, params: dict) -> dict:
         response_result = response.get("result") if isinstance(response, dict) and isinstance(response.get("result"), dict) else {}
         canceled_runs.append({
             "run_id": run_id,
-            "stored_session_id": stored_session_id,
+            "conversation_session_id": conversation_session_id,
             "status": str(response_result.get("status") or "cancelled"),
             "turn_id": str(response_result.get("turn_id") or ""),
         })
@@ -2099,9 +2099,9 @@ def _(rid, params: dict) -> dict:
     mission_id = _mission_id_from_params(params)
     node_id = _node_id_from_params(params)
     run_id = _run_id_from_params(params)
-    stored_session_id = str(
-        params.get("stored_session_id")
-        or params.get("storedSessionId")
+    conversation_session_id = str(
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or params.get("session_id")
         or params.get("sessionId")
         or ""
@@ -2110,8 +2110,8 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4006, "mission_id required")
     if not node_id:
         return _err(rid, 4006, "node_id required")
-    if not run_id or not stored_session_id:
-        return _err(rid, 4006, "run_id and stored_session_id required")
+    if not run_id or not conversation_session_id:
+        return _err(rid, 4006, "run_id and conversation_session_id required")
     node = db.get_team_mission_node(mission_id, node_id)
     if not node:
         return _err(rid, 4040, "team mission node not found")
@@ -2119,14 +2119,14 @@ def _(rid, params: dict) -> dict:
         params.get("runtime_scope_key")
         or params.get("runtimeScopeKey")
         or node.get("runtime_scope_key")
-        or stored_session_id
+        or conversation_session_id
     ).strip()
     binding = db.bind_team_mission_run(
         mission_id=mission_id,
         node_id=node_id,
         run_id=run_id,
-        session_id=stored_session_id,
-        runtime_session_id=str(params.get("runtime_session_id") or params.get("runtimeSessionId") or ""),
+        session_id=conversation_session_id,
+        execution_session_id=str(params.get("execution_session_id") or params.get("executionSessionId") or ""),
         runtime_scope_key=runtime_scope_key,
         role=str(params.get("role") or node.get("kind") or "worker"),
         metadata={"source": "team_mission.node.bind_run"},
@@ -2142,7 +2142,7 @@ def _(rid, params: dict) -> dict:
         assignee_profile_version_id=str(node.get("assignee_profile_version_id") or ""),
         runtime_scope_key=runtime_scope_key,
         output_contract=dict(node.get("output_contract") or {}),
-        metadata={**dict(node.get("metadata") or {}), "stored_session_id": stored_session_id, "run_id": run_id},
+        metadata={**dict(node.get("metadata") or {}), "conversation_session_id": conversation_session_id, "run_id": run_id},
         position_x=float(node.get("position_x") or 0),
         position_y=float(node.get("position_y") or 0),
     )
@@ -2193,7 +2193,7 @@ def _(rid, params: dict) -> dict:
     if isinstance(mission, dict) and mission:
         db.ensure_team_mission_conversation(
             conversation_id=conversation_id,
-            stable_session_id=conversation_session_id,
+            conversation_session_id=conversation_session_id,
             mission=mission,
         )
     if isinstance(mission, dict) and _is_root_planning_node(node):
@@ -2211,10 +2211,10 @@ def _(rid, params: dict) -> dict:
             node_id=node_id,
             task_id=str(metadata.get("submitted_task_id") or metadata.get("task_id") or ""),
         )
-    stored_session_id = str(
-        params.get("stored_session_id")
-        or params.get("storedSessionId")
-        or metadata.get("stored_session_id")
+    conversation_session_id = str(
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
+        or metadata.get("conversation_session_id")
         or _default_node_session_id(mission_id, node_id)
     ).strip()
     try:
@@ -2226,23 +2226,23 @@ def _(rid, params: dict) -> dict:
         or params.get("runtimeScopeKey")
         or profile_params.get("runtime_scope_key")
         or node.get("runtime_scope_key")
-        or stored_session_id
+        or conversation_session_id
     ).strip()
     run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
     turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
-    if not db.get_session(stored_session_id):
-        db.create_session(stored_session_id, source="team_mission", transient=False)
+    if not db.get_session(conversation_session_id):
+        db.create_session(conversation_session_id, source="team_mission", transient=False)
     try:
         workspace_context = resolve_team_mission_workspace_context(
             params,
             mission=mission if isinstance(mission, dict) else {},
-            session_id=stored_session_id,
+            session_id=conversation_session_id,
             require=True,
         )
     except ValueError as exc:
         return _err(rid, 4004, str(exc))
     bind_team_mission_session_workspace(
-        session_id=stored_session_id,
+        session_id=conversation_session_id,
         context=workspace_context,
         metadata={
             "source": "team_mission.node.start",
@@ -2252,7 +2252,7 @@ def _(rid, params: dict) -> dict:
             "team_id": str((mission or {}).get("team_id") or ""),
         },
     )
-    runtime_session_error = _ensure_team_mission_runtime_session_shell(stored_session_id)
+    runtime_session_error = _ensure_team_mission_runtime_session_shell(conversation_session_id)
     if runtime_session_error:
         return _err(rid, 5008, runtime_session_error)
     leader_control_node = _is_team_leader_control_node(node)
@@ -2361,8 +2361,8 @@ def _(rid, params: dict) -> dict:
         mission_id=mission_id,
         node_id=node_id,
         run_id=run_id,
-        session_id=stored_session_id,
-        runtime_session_id="",
+        session_id=conversation_session_id,
+        execution_session_id="",
         runtime_scope_key=runtime_scope_key,
         role=_node_role(node),
         metadata={**binding_metadata, "prebound": True, "run_context_json": _run_context_json(run_context)},
@@ -2370,8 +2370,8 @@ def _(rid, params: dict) -> dict:
     submit_params = {
         **params,
         **profile_params,
-        "stored_session_id": stored_session_id,
-        "session_id": stored_session_id,
+        "conversation_session_id": conversation_session_id,
+        "session_id": conversation_session_id,
         "client_run_id": run_id,
         "run_id": run_id,
         "turn_id": turn_id,
@@ -2435,7 +2435,7 @@ def _(rid, params: dict) -> dict:
             output_contract=dict(node.get("output_contract") or {}),
             metadata={
                 **metadata,
-                "stored_session_id": stored_session_id,
+                "conversation_session_id": conversation_session_id,
                 "start_error": str(response_error.get("message") or response_error.get("error") or ""),
                 "effective_toolsets": enabled_toolsets,
                 **({
@@ -2456,8 +2456,8 @@ def _(rid, params: dict) -> dict:
         mission_id=mission_id,
         node_id=node_id,
         run_id=result_run_id,
-        session_id=stored_session_id,
-        runtime_session_id=str((result or {}).get("session_id") or ""),
+        session_id=conversation_session_id,
+        execution_session_id=str((result or {}).get("session_id") or ""),
         runtime_scope_key=result_scope,
         role=_node_role(node),
         metadata=binding_metadata,
@@ -2475,7 +2475,7 @@ def _(rid, params: dict) -> dict:
         output_contract=dict(node.get("output_contract") or {}),
         metadata={
             **metadata,
-            "stored_session_id": stored_session_id,
+            "conversation_session_id": conversation_session_id,
             "run_id": result_run_id,
             "turn_id": result_turn_id,
             "effective_toolsets": enabled_toolsets,
@@ -2516,7 +2516,7 @@ def _(rid, params: dict) -> dict:
             "node": node,
             "binding": binding,
             "run": result,
-            "stored_session_id": stored_session_id,
+            "conversation_session_id": conversation_session_id,
         },
     )
 

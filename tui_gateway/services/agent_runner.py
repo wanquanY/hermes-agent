@@ -102,8 +102,8 @@ def setup_worker_environment() -> None:
             # The worker process must not materialize the legacy state facade. Keep the
             # legacy resolver shape but return the IPC proxy everywhere the
             # prompt/run-control stack asks for a DB handle.
-            def _worker_db_for_stable_session(stable_session_id: str):
-                return db_proxy.scoped(stable_session_id)
+            def _worker_db_for_stable_session(conversation_session_id: str):
+                return db_proxy.scoped(conversation_session_id)
 
             _server._db = db_proxy
             _server._get_db = lambda: db_proxy  # type: ignore[assignment]
@@ -127,7 +127,7 @@ def _run_context_from_frame(frame: RunStartFrame) -> Any:
     except Exception as exc:
         _log.warning(
             "[agent-runner] run_context_json parse failed stored_session=%s: %s",
-            frame.stored_session_id,
+            frame.conversation_session_id,
             exc,
         )
         return None
@@ -160,7 +160,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
     ``_sessions`` dict — the worker has no record. We build one inline
     with the same field shape ``methods/session.py:780-819`` produces,
     keyed by a fresh runtime sid, with ``session_key`` bound to the
-    frame's ``stored_session_id`` (the stable id the agent uses for
+    frame's ``conversation_session_id`` (the stable id the agent uses for
     DB row lookups).
 
     The AIAgent build is intentionally NOT started here. The prompt
@@ -181,7 +181,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
     except Exception:
         activity_event_bus = None
 
-    workspace_context = session_workspace_run_context(frame.stored_session_id, params)
+    workspace_context = session_workspace_run_context(frame.conversation_session_id, params)
     cwd = str(workspace_context.get("cwd") or "").strip() or None
     workspace = (
         workspace_context.get("workspace")
@@ -261,7 +261,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         "interrupted_turn_id": "",
         "interrupt_seq": 0,
         "recalled_turn_ids": set(),
-        "session_key": frame.stored_session_id,
+        "session_key": frame.conversation_session_id,
         "show_reasoning": False,
         "slash_worker": None,
         "tool_progress_mode": None,
@@ -300,16 +300,16 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
     # sequence and the agent's ``repair_message_sequence`` would drop
     # the tool result anyway.
     try:
-        db = _server._db_for_stable_session(frame.stored_session_id)
+        db = _server._db_for_stable_session(frame.conversation_session_id)
     except Exception:
         db = None
     if db is not None:
         try:
-            full_history = load_conversation_history(db, frame.stored_session_id)
+            full_history = load_conversation_history(db, frame.conversation_session_id)
             if _should_project_member_perspective(run_context):
                 try:
                     participants = db.list_conversation_participants(  # type: ignore[attr-defined]
-                        frame.stored_session_id
+                        frame.conversation_session_id
                     )
                 except Exception:
                     participants = []
@@ -325,7 +325,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         except Exception:
             _log.warning(
                 "[agent-runner] history hydration failed stored_session=%s",
-                frame.stored_session_id, exc_info=True,
+                frame.conversation_session_id, exc_info=True,
             )
             full_history = []
         trimmed_history = _trim_history_to_window(full_history)
@@ -443,7 +443,7 @@ def run_agent(frame: RunStartFrame, cancel_event: threading.Event) -> None:
     prompt_params: dict[str, Any] = {
         **base_params,
         "session_id": sid,
-        "stored_session_id": frame.stored_session_id,
+        "conversation_session_id": frame.conversation_session_id,
         "text": frame.prompt,
         "run_id": frame.run_id,
         "client_run_id": frame.run_id,

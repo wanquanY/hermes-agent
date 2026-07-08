@@ -7,7 +7,7 @@ from hermes_team_mission.state.schema import migrate_active_mission_id_to_conver
 def _create_conversation(db: SessionDB, conversation_id: str = "conv-1") -> dict:
     return db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=f"{conversation_id}-session",
+        conversation_session_id=f"{conversation_id}-session",
         title="Conversation",
         status="active",
     )
@@ -88,7 +88,7 @@ def test_migration_backfills_existing_active_mission_id(tmp_path: Path):
     db._conn.execute(  # noqa: SLF001 - direct legacy-row setup for migration coverage.
         """
         INSERT INTO team_mission_conversations (
-            conversation_id, stable_session_id, title, status, active_mission_id,
+            conversation_id, conversation_session_id, title, status, active_mission_id,
             metadata_json, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -111,7 +111,7 @@ def test_migration_is_idempotent(tmp_path: Path):
     db._conn.execute(  # noqa: SLF001 - direct legacy-row setup for migration coverage.
         """
         INSERT INTO team_mission_conversations (
-            conversation_id, stable_session_id, title, status, active_mission_id,
+            conversation_id, conversation_session_id, title, status, active_mission_id,
             metadata_json, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -131,7 +131,7 @@ def test_upsert_conversation_projects_active_mission_from_join_table(tmp_path: P
 
     conversation = db.upsert_team_mission_conversation(
         conversation_id="conv-1",
-        stable_session_id="conv-1-session",
+        conversation_session_id="conv-1-session",
         title="Conversation",
         status="active",
         active_mission_id="mission-x",
@@ -147,7 +147,7 @@ def test_legacy_active_mission_id_field_is_not_written_by_new_upsert(tmp_path: P
     db = SessionDB(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conv-1",
-        stable_session_id="conv-1-session",
+        conversation_session_id="conv-1-session",
         title="Conversation",
         status="active",
         active_mission_id="mission-x",

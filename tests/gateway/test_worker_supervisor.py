@@ -118,7 +118,7 @@ async def test_spawn_send_run_start_receive_terminal(tmp_path) -> None:
             RunStartFrame(
                 run_id="run-e2e-1",
                 turn_id="turn-1",
-                stored_session_id="sess-1",
+                conversation_session_id="sess-1",
                 prompt="hello",
                 params={},
             ),
@@ -131,7 +131,7 @@ async def test_spawn_send_run_start_receive_terminal(tmp_path) -> None:
         assert scope == worker.scope_key
         assert terminal.run_id == "run-e2e-1"
         assert terminal.status == "completed"
-        assert terminal.stored_session_id == "sess-1"
+        assert terminal.conversation_session_id == "sess-1"
         assert terminal.turn_id == "turn-1"
         # The bridge surfaced the agent-init failure as an EventFrame.
         event_payloads = [

@@ -913,17 +913,17 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             event = event if isinstance(event, dict) else {}
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else None
             payload = payload if isinstance(payload, dict) else {}
-            session_id = str(event.get("stored_session_id") or row["session_id"] or "").strip()
+            session_id = str(event.get("conversation_session_id") or row["session_id"] or "").strip()
             if not session_id:
                 continue
             record = session_info_record(
                 session_id=session_id,
                 payload=payload,
                 runtime_scope_key=str(event.get("runtime_scope_key") or row["runtime_scope_key"] or ""),
-                runtime_session_id=str(
-                    event.get("runtime_session_id")
+                execution_session_id=str(
+                    event.get("execution_session_id")
                     or event.get("session_id")
-                    or row["runtime_session_id"]
+                    or row["execution_session_id"]
                     or ""
                 ),
                 run_id=str(event.get("run_id") or row["run_id"] or ""),
@@ -937,14 +937,14 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             cursor.execute(
                 """
                 INSERT INTO session_runtime_state (
-                    session_id, runtime_scope_key, runtime_session_id, run_id,
+                    session_id, runtime_scope_key, execution_session_id, run_id,
                     turn_id, status, model, provider, profile_json,
                     payload_hash, updated_at, source_seq
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     runtime_scope_key = excluded.runtime_scope_key,
-                    runtime_session_id = excluded.runtime_session_id,
+                    execution_session_id = excluded.execution_session_id,
                     run_id = excluded.run_id,
                     turn_id = excluded.turn_id,
                     status = excluded.status,
@@ -959,7 +959,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                 (
                     record["session_id"],
                     record["runtime_scope_key"],
-                    record["runtime_session_id"],
+                    record["execution_session_id"],
                     record["run_id"],
                     record["turn_id"],
                     record["status"],
@@ -1019,7 +1019,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             project_run_event_search_index(
                 cursor.connection,
                 row_id=int(row["id"]),
-                session_id=str(row["session_id"] or event.get("stored_session_id") or ""),
+                session_id=str(row["session_id"] or event.get("conversation_session_id") or ""),
                 seq=int(row["seq"] or event.get("seq") or 0),
                 event_type=event_type,
                 runtime_scope_key=str(row["runtime_scope_key"] or event.get("runtime_scope_key") or ""),
@@ -1505,7 +1505,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             team_rows = conn.execute(
                 """
                 SELECT
-                    tmc.stable_session_id AS session_id,
+                    tmc.conversation_session_id AS session_id,
                     tmc.team_id AS team_id,
                     tmc.conversation_id AS conversation_id,
                     COALESCE(at.lead_agent_profile_id, '') AS leader_profile_id,
@@ -1548,7 +1548,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             member_rows = conn.execute(
                 """
                 SELECT
-                    tmc.stable_session_id AS session_id,
+                    tmc.conversation_session_id AS session_id,
                     tmc.conversation_id AS conversation_id,
                     m.id AS member_id,
                     m.agent_profile_id AS agent_profile_id,
@@ -1613,7 +1613,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                     """
                     SELECT DISTINCT
                         tmc.conversation_id,
-                        tmc.stable_session_id,
+                        tmc.conversation_session_id,
                         cm.mission_id AS active_mission_id,
                         tmc.title,
                         tmc.created_at,
@@ -1625,7 +1625,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                     UNION
                     SELECT
                         tmc.conversation_id,
-                        tmc.stable_session_id,
+                        tmc.conversation_session_id,
                         tmc.active_mission_id,
                         tmc.title,
                         tmc.created_at,
@@ -1639,8 +1639,8 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             inserted = 0
             for row in rows:
                 mission_id = str(row["active_mission_id"] or "").strip()
-                stable_session_id = str(row["stable_session_id"] or row["conversation_id"] or "").strip()
-                if not mission_id or not stable_session_id:
+                conversation_session_id = str(row["conversation_session_id"] or row["conversation_id"] or "").strip()
+                if not mission_id or not conversation_session_id:
                     continue
                 existed = conn.execute(
                     """
@@ -1653,7 +1653,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                 ).fetchone()
                 self._ensure_mission_activity_on_conn(
                     conn,
-                    conversation_id=stable_session_id,
+                    conversation_id=conversation_session_id,
                     mission_id=mission_id,
                     status="running",
                     prompt_summary=str(row["title"] or ""),
@@ -1684,13 +1684,21 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         user_id: str = None,
         parent_session_id: str = None,
         transient: bool = False,
+        title: str = None,
+        cwd: str = None,
+        archived: bool = False,
+        session_kind: str = "hermes_session",
+        conversation_kind: str = "direct",
     ) -> None:
         """Shared INSERT OR IGNORE for session rows."""
         def _do(conn):
             conn.execute(
-                """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
-                   system_prompt, parent_session_id, started_at, transient)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT OR IGNORE INTO sessions (
+                   id, source, user_id, model, model_config, system_prompt,
+                   parent_session_id, started_at, updated_at, title, cwd, archived,
+                   session_kind, conversation_kind, transient
+                )
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     source,
@@ -1699,7 +1707,13 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                     json.dumps(model_config) if model_config else None,
                     system_prompt,
                     parent_session_id,
-                    time.time(),
+                    (now := time.time()),
+                    now,
+                    title,
+                    cwd,
+                    1 if archived else 0,
+                    session_kind or "hermes_session",
+                    conversation_kind or "direct",
                     1 if transient else 0,
                 ),
             )
@@ -1805,6 +1819,15 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             conn.execute(
                 "UPDATE sessions SET system_prompt = ? WHERE id = ?",
                 (system_prompt, session_id),
+            )
+        self._execute_write(_do)
+
+    def update_session_cwd(self, session_id: str, cwd: str) -> None:
+        """Store the current working directory for a CLI/runtime session."""
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET cwd = ?, updated_at = ? WHERE id = ?",
+                (str(cwd or ""), time.time(), session_id),
             )
         self._execute_write(_do)
 
@@ -2548,7 +2571,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         "session_id", "owner_agent_profile_id", "owner_profile_version_id",
         "runtime_scope_key", "title", "preview", "source", "transient",
         "session_kind", "conversation_kind", "status", "running",
-        "waiting_approval", "active_run_id", "active_runtime_session_id",
+        "waiting_approval", "active_run_id", "active_execution_session_id",
         "pending_approval_count", "team_id", "mission_id", "conversation_id",
         "message_count", "started_at", "updated_at", "last_activity",
     )
@@ -2611,7 +2634,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         running: bool = False,
         waiting_approval: bool = False,
         active_run_id: str = "",
-        active_runtime_session_id: str = "",
+        active_execution_session_id: str = "",
         pending_approval_count: int = 0,
         team_id: str = "",
         mission_id: str = "",
@@ -2652,7 +2675,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             "running": 1 if running else 0,
             "waiting_approval": 1 if waiting_approval else 0,
             "active_run_id": str(active_run_id or ""),
-            "active_runtime_session_id": str(active_runtime_session_id or ""),
+            "active_execution_session_id": str(active_execution_session_id or ""),
             "pending_approval_count": int(pending_approval_count or 0),
             "team_id": str(team_id or ""),
             "mission_id": str(mission_id or ""),
@@ -2725,7 +2748,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                 f"""
                 UPDATE session_index
                    SET running = 0, status = 'idle', waiting_approval = 0,
-                       active_run_id = '', active_runtime_session_id = '',
+                       active_run_id = '', active_execution_session_id = '',
                        pending_approval_count = 0
                  WHERE active_run_id != ''
                    AND ({active_run_id_is_terminal})
@@ -2915,7 +2938,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             "  LEFT JOIN team_pending_approvals "
             "    ON team_pending_approvals.conversation_id = si.conversation_id "
             "  LEFT JOIN conversation_participants member_participant "
-            "    ON member_participant.conversation_session_id = COALESCE(NULLIF(tmc.stable_session_id, ''), NULLIF(si.conversation_id, ''), si.session_id) "
+            "    ON member_participant.conversation_session_id = COALESCE(NULLIF(tmc.conversation_session_id, ''), NULLIF(si.conversation_id, ''), si.session_id) "
             "   AND member_participant.runtime_scope_key = si.runtime_scope_key "
             "   AND member_participant.member_id != '' "
             "   AND LOWER(COALESCE(member_participant.role, '')) = 'member' "
@@ -3127,11 +3150,11 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                 f"""
                 UPDATE session_index
                    SET running = 0, status = 'idle', waiting_approval = 0,
-                       active_run_id = '', active_runtime_session_id = '',
+                       active_run_id = '', active_execution_session_id = '',
                        pending_approval_count = 0
                  WHERE conversation_kind = 'team'
                    AND (running = 1 OR waiting_approval = 1 OR status != 'idle'
-                        OR active_run_id != '' OR active_runtime_session_id != '')
+                        OR active_run_id != '' OR active_execution_session_id != '')
                    AND mission_id IN (
                        SELECT mission_id FROM team_missions
                         WHERE LOWER(COALESCE(status,'')) IN
@@ -3151,7 +3174,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                 f"""
                 UPDATE session_index
                    SET running = 0, status = 'idle', waiting_approval = 0,
-                       active_run_id = '', active_runtime_session_id = '',
+                       active_run_id = '', active_execution_session_id = '',
                        pending_approval_count = 0
                  WHERE conversation_kind = 'team'
                    AND waiting_approval = 1
@@ -4043,9 +4066,9 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         include_inactive: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Return one visible transcript row by its stable conversation id."""
-        stable_session_id = str(session_id or "").strip()
+        conversation_session_id = str(session_id or "").strip()
         stable_message_id = str(conversation_message_id or "").strip()
-        if not stable_session_id or not stable_message_id:
+        if not conversation_session_id or not stable_message_id:
             return None
         active_clause = "" if include_inactive else " AND active = 1"
         with self._lock:
@@ -4055,7 +4078,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                 "WHERE session_id = ? AND conversation_message_id = ? "
                 f"{active_clause} "
                 "ORDER BY id LIMIT 1",
-                (stable_session_id, stable_message_id),
+                (conversation_session_id, stable_message_id),
             ).fetchone()
         if row is None:
             return None
@@ -4079,9 +4102,9 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         timestamp: float | None = None,
         tool_calls: Any = None,
     ) -> Dict[str, Any]:
-        stable_session_id = str(session_id or "").strip()
+        conversation_session_id = str(session_id or "").strip()
         stable_message_id = str(conversation_message_id or "").strip()
-        if not stable_session_id:
+        if not conversation_session_id:
             raise ValueError("session_id is required")
         if not stable_message_id:
             raise ValueError("conversation_message_id is required")
@@ -4089,7 +4112,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         normalized_role = str(role or "assistant").strip() or "assistant"
         normalized_participant_id = str(participant_id or "").strip()
         next_metadata = dict(metadata) if isinstance(metadata, dict) else {}
-        next_metadata["session_id"] = stable_session_id
+        next_metadata["session_id"] = conversation_session_id
         next_metadata["conversation_message_id"] = stable_message_id
         projection_status = str(status or "").strip()
         if projection_status:
@@ -4128,10 +4151,10 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                      WHERE session_id = ?
                     """,
                     (
-                        stable_session_id,
+                        conversation_session_id,
                         message_timestamp,
                         message_timestamp,
-                        stable_session_id,
+                        conversation_session_id,
                     ),
                 )
             except sqlite3.OperationalError:
@@ -4143,7 +4166,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                 "FROM messages "
                 "WHERE session_id = ? AND conversation_message_id = ? "
                 "ORDER BY id LIMIT 1",
-                (stable_session_id, stable_message_id),
+                (conversation_session_id, stable_message_id),
             ).fetchone()
 
         def _select_legacy_shadow_row():
@@ -4159,7 +4182,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                 "  AND COALESCE(conversation_message_id, '') = '' "
                 "  AND active = 1 "
                 "ORDER BY id",
-                (stable_session_id, normalized_role),
+                (conversation_session_id, normalized_role),
             ).fetchall()
             for candidate in candidates:
                 metadata = self._decode_message_metadata_json(candidate["metadata_json"])
@@ -4193,7 +4216,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    stable_session_id,
+                    conversation_session_id,
                     normalized_role,
                     stored_content,
                     normalized_participant_id,
@@ -4211,7 +4234,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                        last_active = ?
                  WHERE id = ?
                 """,
-                (message_timestamp, stable_session_id),
+                (message_timestamp, conversation_session_id),
             )
             _update_session_index()
             row_id = cursor.lastrowid
@@ -4263,7 +4286,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                    SET last_active = MAX(COALESCE(last_active, 0), ?)
                  WHERE id = ?
                 """,
-                (message_timestamp, stable_session_id),
+                (message_timestamp, conversation_session_id),
             )
             _update_session_index()
             row_id = existing["id"]

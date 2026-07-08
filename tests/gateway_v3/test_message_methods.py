@@ -254,7 +254,7 @@ def test_message_write_permission_denied_returns_4003():
     assert resp["error"]["code"] == ErrorCode.PERMISSION_DENIED.value
 
 
-def test_message_get_page_alias_fold_stored_session_id():
+def test_message_get_page_alias_fold_conversation_session_id():
     conn, repo, registry = _wired()
     repo.append("s1", MessageSpec(session_id="s1", role="user", content="m"))
     resp = dispatch(
@@ -262,7 +262,7 @@ def test_message_get_page_alias_fold_stored_session_id():
         {
             "id": "req",
             "method": "message.get_page",
-            "params": {"storedSessionId": "s1"},  # legacy alias
+            "params": {"conversationSessionId": "s1"},  # legacy alias
         },
         resolver=AllowAllResolver(),
     )

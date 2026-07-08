@@ -115,7 +115,7 @@ def test_session_create_get_list_dispatches_through_repo_sqlite(tmp_path):
     got = _dispatch(
         registry,
         "session.get",
-        {"storedSessionId": "session-1"},
+        {"conversationSessionId": "session-1"},
         request_id="req-2",
     )
     assert "error" not in got

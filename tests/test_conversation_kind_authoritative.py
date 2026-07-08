@@ -55,7 +55,7 @@ def test_session_index_conversation_kind_team_for_team_mission(tmp_path: Path) -
 
     db.upsert_team_mission_conversation(
         conversation_id="conversation-team",
-        stable_session_id="team-session",
+        conversation_session_id="team-session",
         team_id="team-1",
         title="Team",
         active_mission_id="mission-1",
@@ -74,7 +74,7 @@ def test_conversation_kind_field_decoupled_from_active_mission_id(
     db = _db(tmp_path)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-with-mission",
-        stable_session_id="separate-team-session",
+        conversation_session_id="separate-team-session",
         team_id="team-1",
         title="Team",
         active_mission_id="mission-active",
@@ -104,7 +104,7 @@ def test_team_conversation_with_no_active_mission_still_kind_team(
 
     db.upsert_team_mission_conversation(
         conversation_id="conversation-no-active",
-        stable_session_id="team-session-no-active",
+        conversation_session_id="team-session-no-active",
         team_id="team-1",
         title="Team",
         active_mission_id="",

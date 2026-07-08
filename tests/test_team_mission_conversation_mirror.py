@@ -54,7 +54,7 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
         objective="规划审批后执行",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -69,7 +69,7 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
@@ -78,7 +78,7 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
     ]
     transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         transport=transport,
         active_only=False,
         db=db,
@@ -93,7 +93,7 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
                 {
                     "type": event_type,
                     "session_id": "runtime-synthesis",
-                    "stored_session_id": "synthesis-session-1",
+                    "conversation_session_id": "synthesis-session-1",
                     "run_id": "run-synthesis",
                     "turn_id": "turn-synthesis",
                     "runtime_scope_key": "team:mission-1:synthesis",
@@ -155,11 +155,11 @@ def test_leader_report_completion_uses_canonical_result_and_records_message_id(m
         mode="autonomous_mission",
         status="completed",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         mission_id="mission-report",
         title="生成市场报告",
         objective="生成市场报告",
@@ -185,7 +185,7 @@ def test_leader_report_completion_uses_canonical_result_and_records_message_id(m
             node_id="",
             run_id=run_id,
             session_id=kwargs["conversation_session_id"],
-            runtime_session_id="",
+            execution_session_id="",
             runtime_scope_key="team:conversation-1:leader-conversation",
             role="leader",
             metadata={
@@ -228,7 +228,7 @@ def test_leader_report_completion_uses_canonical_result_and_records_message_id(m
         {
             "type": "message.complete",
             "session_id": "runtime-leader-report",
-            "stored_session_id": "team-session-1",
+            "conversation_session_id": "team-session-1",
             "run_id": "leader-report-run-1",
             "turn_id": "turn-leader-report",
             "runtime_scope_key": "team:conversation-1:leader-conversation",
@@ -280,7 +280,7 @@ def test_synthesis_append_deltas_are_not_mirrored_to_conversation_stream(tmp_pat
         objective="规划审批后执行",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -295,14 +295,14 @@ def test_synthesis_append_deltas_are_not_mirrored_to_conversation_stream(tmp_pat
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
 
     transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         transport=transport,
         active_only=False,
         db=db,
@@ -319,7 +319,7 @@ def test_synthesis_append_deltas_are_not_mirrored_to_conversation_stream(tmp_pat
                 {
                     "type": event_type,
                     "session_id": "runtime-synthesis",
-                    "stored_session_id": "synthesis-session-1",
+                    "conversation_session_id": "synthesis-session-1",
                     "run_id": "run-synthesis",
                     "turn_id": "turn-synthesis",
                     "runtime_scope_key": "team:mission-1:synthesis",
@@ -355,7 +355,7 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         objective="规划审批后执行",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -370,7 +370,7 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
@@ -378,7 +378,7 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
     transport = _MemoryTransport()
     mission_transport = _MemoryTransport()
     node_subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="synthesis-session-1",
+        conversation_session_id="synthesis-session-1",
         transport=transport,
         active_only=False,
         db=db,
@@ -398,7 +398,7 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
                 {
                     "type": "message.delta",
                     "session_id": "runtime-synthesis",
-                    "stored_session_id": "synthesis-session-1",
+                    "conversation_session_id": "synthesis-session-1",
                     "run_id": "run-synthesis",
                     "turn_id": "turn-synthesis",
                     "runtime_scope_key": "team:mission-1:synthesis",
@@ -469,7 +469,7 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         objective="规划审批后执行",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -484,14 +484,14 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         node_id="team-mission:mission-1:root",
         run_id="run-root",
         session_id="root-session-1",
-        runtime_session_id="runtime-root",
+        execution_session_id="runtime-root",
         runtime_scope_key="team:mission-1:root",
         role="leader",
     )
 
     transport = _MemoryTransport()
     node_subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="root-session-1",
+        conversation_session_id="root-session-1",
         transport=transport,
         active_only=False,
         db=db,
@@ -500,7 +500,7 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         direct_event = {
             "type": "message.complete",
             "session_id": "runtime-root",
-            "stored_session_id": "root-session-1",
+            "conversation_session_id": "root-session-1",
             "run_id": "run-root",
             "turn_id": "turn-root",
             "runtime_scope_key": "team:mission-1:root",
@@ -541,7 +541,7 @@ def test_conversation_resolve_recovers_legacy_final_deliverable_state(
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="团队会话",
         active_mission_id="mission-1",
@@ -554,7 +554,7 @@ def test_conversation_resolve_recovers_legacy_final_deliverable_state(
         objective="规划审批后执行",
         mode="supervised_mission",
         status="completed",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -568,7 +568,7 @@ def test_conversation_resolve_recovers_legacy_final_deliverable_state(
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
@@ -584,7 +584,7 @@ def test_conversation_resolve_recovers_legacy_final_deliverable_state(
     }
     db.append_run_event("team-session-1", {
         "type": "message.delta",
-        "stored_session_id": "team-session-1",
+        "conversation_session_id": "team-session-1",
         "run_id": mirror_run_id,
         "turn_id": "turn-synthesis",
         "runtime_scope_key": "team_mission:mission-1",
@@ -596,7 +596,7 @@ def test_conversation_resolve_recovers_legacy_final_deliverable_state(
     })
     db.append_run_event("team-session-1", {
         "type": "message.complete",
-        "stored_session_id": "team-session-1",
+        "conversation_session_id": "team-session-1",
         "run_id": mirror_run_id,
         "turn_id": "turn-synthesis",
         "runtime_scope_key": "team_mission:mission-1",
@@ -639,7 +639,7 @@ def test_final_deliverable_complete_noops_and_preserves_existing_transcript(
         objective="规划审批后执行",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -654,7 +654,7 @@ def test_final_deliverable_complete_noops_and_preserves_existing_transcript(
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
@@ -674,7 +674,7 @@ def test_final_deliverable_complete_noops_and_preserves_existing_transcript(
     )
     db.append_run_event("synthesis-session-1", {
         "type": "message.delta",
-        "stored_session_id": "synthesis-session-1",
+        "conversation_session_id": "synthesis-session-1",
         "run_id": "run-synthesis",
         "turn_id": "turn-synthesis",
         "runtime_scope_key": "team:mission-1:synthesis",
@@ -684,7 +684,7 @@ def test_final_deliverable_complete_noops_and_preserves_existing_transcript(
     mirror_run_id = "team-mission:mission-1:conversation:run-synthesis"
     db.append_run_event("team-session-1", {
         "type": "message.delta",
-        "stored_session_id": "team-session-1",
+        "conversation_session_id": "team-session-1",
         "run_id": mirror_run_id,
         "turn_id": "turn-synthesis",
         "runtime_scope_key": "team_mission:mission-1",
@@ -722,7 +722,7 @@ def test_final_deliverable_complete_noops_and_preserves_existing_transcript(
         event={
             "type": "message.complete",
             "session_id": "runtime-synthesis",
-            "stored_session_id": "synthesis-session-1",
+            "conversation_session_id": "synthesis-session-1",
             "run_id": "run-synthesis",
             "turn_id": "turn-synthesis",
             "runtime_scope_key": "team:mission-1:synthesis",
@@ -750,7 +750,7 @@ def test_final_deliverable_complete_noops_after_repeated_markdown_chunks(tmp_pat
         objective="规划审批后执行",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -765,7 +765,7 @@ def test_final_deliverable_complete_noops_after_repeated_markdown_chunks(tmp_pat
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
@@ -782,7 +782,7 @@ def test_final_deliverable_complete_noops_after_repeated_markdown_chunks(tmp_pat
             "synthesis-session-1",
             {
                 "type": "message.delta",
-                "stored_session_id": "synthesis-session-1",
+                "conversation_session_id": "synthesis-session-1",
                 "run_id": "run-synthesis",
                 "turn_id": "turn-synthesis",
                 "runtime_scope_key": "team:mission-1:synthesis",
@@ -797,7 +797,7 @@ def test_final_deliverable_complete_noops_after_repeated_markdown_chunks(tmp_pat
         event={
             "type": "message.complete",
             "session_id": "runtime-synthesis",
-            "stored_session_id": "synthesis-session-1",
+            "conversation_session_id": "synthesis-session-1",
             "run_id": "run-synthesis",
             "turn_id": "turn-synthesis",
             "runtime_scope_key": "team:mission-1:synthesis",
@@ -824,7 +824,7 @@ def test_conversation_resolve_hides_legacy_final_message_without_rewriting_strea
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="团队会话",
         active_mission_id="mission-1",
@@ -838,7 +838,7 @@ def test_conversation_resolve_hides_legacy_final_message_without_rewriting_strea
         mode="supervised_mission",
         status="completed",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -853,7 +853,7 @@ def test_conversation_resolve_hides_legacy_final_message_without_rewriting_strea
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
@@ -872,7 +872,7 @@ def test_conversation_resolve_hides_legacy_final_message_without_rewriting_strea
     )
     db.append_run_event("synthesis-session-1", {
         "type": "message.delta",
-        "stored_session_id": "synthesis-session-1",
+        "conversation_session_id": "synthesis-session-1",
         "run_id": "run-synthesis",
         "turn_id": "turn-synthesis",
         "runtime_scope_key": "team:mission-1:synthesis",
@@ -891,7 +891,7 @@ def test_conversation_resolve_hides_legacy_final_message_without_rewriting_strea
     }
     db.append_run_event("team-session-1", {
         "type": "message.delta",
-        "stored_session_id": "team-session-1",
+        "conversation_session_id": "team-session-1",
         "run_id": mirror_run_id,
         "turn_id": "turn-synthesis",
         "runtime_scope_key": "team_mission:mission-1",
@@ -905,7 +905,7 @@ def test_conversation_resolve_hides_legacy_final_message_without_rewriting_strea
     })
     db.append_run_event("team-session-1", {
         "type": "message.complete",
-        "stored_session_id": "team-session-1",
+        "conversation_session_id": "team-session-1",
         "run_id": mirror_run_id,
         "turn_id": "turn-synthesis",
         "runtime_scope_key": "team_mission:mission-1",
@@ -960,7 +960,7 @@ def test_conversation_projection_exposes_final_deliverable_artifacts_to_list_and
     ]
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="团队会话",
         active_mission_id="mission-1",
@@ -976,7 +976,7 @@ def test_conversation_projection_exposes_final_deliverable_artifacts_to_list_and
         mode="supervised_mission",
         status="completed",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -1078,7 +1078,7 @@ def test_conversation_list_recovers_terminal_mission_with_active_mirror_run(
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="团队会话",
         active_mission_id="mission-1",
@@ -1091,7 +1091,7 @@ def test_conversation_list_recovers_terminal_mission_with_active_mirror_run(
         objective="规划审批后执行",
         mode="supervised_mission",
         status=mission_status,
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     mirror_run_id = "team-mission:mission-1:conversation:run-synthesis"
     db.upsert_run(
@@ -1099,12 +1099,12 @@ def test_conversation_list_recovers_terminal_mission_with_active_mirror_run(
         session_id="team-session-1",
         runtime_scope_key="team_mission:mission-1",
         turn_id="turn-synthesis",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         status="running",
     )
     transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         transport=transport,
         active_only=False,
         db=db,
@@ -1158,7 +1158,7 @@ def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp
     db.create_session(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=session_id,
+        conversation_session_id=session_id,
         team_id="team-1",
         title="团队会话",
         active_mission_id="mission-progress",
@@ -1168,7 +1168,7 @@ def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp
         {
             "type": "message.complete",
             "session_id": "runtime-leader-progress",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",
@@ -1225,7 +1225,7 @@ def test_participant_only_team_chat_events_project_to_transcript(tmp_path: Path)
     db.create_session(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=session_id,
+        conversation_session_id=session_id,
         team_id="team-1",
         title="团队会话",
     )
@@ -1291,7 +1291,7 @@ def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_
     db.create_session(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=session_id,
+        conversation_session_id=session_id,
         team_id="team-1",
         title="团队会话",
     )
@@ -1300,7 +1300,7 @@ def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_
         {
             "type": "artifact.created",
             "session_id": "runtime-leader-artifacts",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",
@@ -1321,7 +1321,7 @@ def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_
         {
             "type": "message.complete",
             "session_id": "runtime-leader-artifacts",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",
@@ -1362,7 +1362,7 @@ def test_late_artifact_event_merges_into_projected_leader_chat_message(tmp_path:
     db.create_session(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=session_id,
+        conversation_session_id=session_id,
         team_id="team-1",
         title="团队会话",
     )
@@ -1371,7 +1371,7 @@ def test_late_artifact_event_merges_into_projected_leader_chat_message(tmp_path:
         {
             "type": "message.complete",
             "session_id": "runtime-leader-late-artifact",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",
@@ -1395,7 +1395,7 @@ def test_late_artifact_event_merges_into_projected_leader_chat_message(tmp_path:
         {
             "type": "artifact.created",
             "session_id": "runtime-leader-late-artifact",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",
@@ -1433,7 +1433,7 @@ def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path
     event = {
         "type": "message.complete",
         "session_id": "runtime-leader-backfill",
-        "stored_session_id": session_id,
+        "conversation_session_id": session_id,
         "run_id": run_id,
         "turn_id": "team-leader-turn-backfill",
         "runtime_scope_key": "profile:leader",
@@ -1458,7 +1458,7 @@ def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path
     db.create_session(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=session_id,
+        conversation_session_id=session_id,
         team_id="team-1",
         title="团队会话",
         active_mission_id="mission-backfill",
@@ -1468,7 +1468,7 @@ def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path
         conn.execute(
             """
             INSERT INTO run_events (
-                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                session_id, run_id, turn_id, execution_session_id, runtime_scope_key,
                 activity_id, event_type, seq, timestamp, payload_json, event_json,
                 status, participant_id, projection_state, runtime_source_seq
             )
@@ -1533,7 +1533,7 @@ def test_team_conversation_read_model_backfills_projected_leader_artifacts(tmp_p
     db.create_session(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=session_id,
+        conversation_session_id=session_id,
         team_id="team-1",
         title="团队会话",
     )
@@ -1542,7 +1542,7 @@ def test_team_conversation_read_model_backfills_projected_leader_artifacts(tmp_p
         {
             "type": "artifact.created",
             "session_id": "runtime-leader-projected-artifact-backfill",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",
@@ -1563,7 +1563,7 @@ def test_team_conversation_read_model_backfills_projected_leader_artifacts(tmp_p
         {
             "type": "message.complete",
             "session_id": "runtime-leader-projected-artifact-backfill",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",

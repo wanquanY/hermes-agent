@@ -190,7 +190,7 @@ async def test_clarify_hook_emits_interactive_request(fake_clarify) -> None:
     sink = _Sink()
     loop = asyncio.get_running_loop()
     bridge = WorkerPublishBridge(emit=sink.emit, loop=loop)
-    bridge.install(stored_session_id="sess-1")
+    bridge.install(conversation_session_id="sess-1")
     try:
         entry = mod.register("clr-1", "sess-1", "Pick one", ["A", "B"])
         await asyncio.sleep(0.05)
@@ -210,7 +210,7 @@ async def test_clarify_hook_emits_interactive_request(fake_clarify) -> None:
                 "question": "Pick one",
                 "choices": ["A", "B"],
             },
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
         )
     ]
 
@@ -221,7 +221,7 @@ async def test_approval_hook_emits_interactive_request(fake_approval) -> None:
     sink = _Sink()
     loop = asyncio.get_running_loop()
     bridge = WorkerPublishBridge(emit=sink.emit, loop=loop)
-    bridge.install(stored_session_id="sess-A")
+    bridge.install(conversation_session_id="sess-A")
     try:
         mod.submit_pending("sess-A", {"command": "rm -rf /", "description": "danger"})
         await asyncio.sleep(0.05)
@@ -234,7 +234,7 @@ async def test_approval_hook_emits_interactive_request(fake_approval) -> None:
             kind="approval",
             request_id="sess-A",
             payload={"command": "rm -rf /", "description": "danger"},
-            stored_session_id="sess-A",
+            conversation_session_id="sess-A",
         )
     ]
 

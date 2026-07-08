@@ -148,7 +148,7 @@ def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
         # through _block so we can tell at a glance whether a missing
         # popup is a backend (event not emitted) or frontend (event
         # arrived but no handler) issue. We also dump the session keys
-        # that _emit will derive runtime_scope_key / stored_session_id
+        # that _emit will derive runtime_scope_key / conversation_session_id
         # from, because subscription filtering downstream rejects events
         # whose runtime_scope_key doesn't match the FE-side scope key,
         # and that mismatch is invisible from the event_type alone.
@@ -198,9 +198,9 @@ def _project_block_state(sid: str, *, present: bool) -> None:
     mechanism.
 
     The agent's ``sid`` here is the gateway's INTERNAL 8-char hex id
-    (e.g. ``1cf7689d``), NOT the conversation's stored_session_id
+    (e.g. ``1cf7689d``), NOT the conversation's conversation_session_id
     (e.g. ``team-session-team-conversation-d254d3d0-…``). The
-    session_index table is keyed by stored_session_id, so feeding the
+    session_index table is keyed by conversation_session_id, so feeding the
     short sid straight into the resolver matches zero rows. We resolve
     via the gateway's ``_sessions[sid]["session_key"]`` (the stored
     session id) and fall back to the short sid if the lookup fails.
@@ -238,7 +238,7 @@ def _project_block_state(sid: str, *, present: bool) -> None:
         session = None
     if isinstance(session, dict):
         _add(session.get("session_key"))
-        _add(session.get("stored_session_id"))
+        _add(session.get("conversation_session_id"))
         _add(session.get("runtime_scope_key"))
     # Always include the raw sid as the last resort — it might be the
     # stored id itself in non-Dovie code paths, and the resolver is

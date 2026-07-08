@@ -75,7 +75,7 @@ class TeamMissionGraphMixin:
                 MissionSummaryWriter.emit_mission_summary(
                     self,
                     mission_id=mission_id,
-                    conversation_session_id=_text(conversation.get("stable_session_id")),
+                    conversation_session_id=_text(conversation.get("conversation_session_id")),
                     outcome=normalized_status,
                 )
             except Exception:
@@ -114,14 +114,14 @@ class TeamMissionGraphMixin:
             merged_metadata = _json_loads(_row_value(existing, "metadata_json", ""), {})
             if isinstance(metadata, dict):
                 merged_metadata.update(metadata)
-            candidate_stable_session_id = _stable_session_id_from_metadata(
+            candidate_conversation_session_id = _conversation_session_id_from_metadata(
                 merged_metadata,
                 _text(leader_session_id or team_id or mission_id),
             )
             conversation_by_session = conn.execute(
-                "SELECT conversation_id FROM team_mission_conversations WHERE stable_session_id = ?",
-                (candidate_stable_session_id,),
-            ).fetchone() if candidate_stable_session_id else None
+                "SELECT conversation_id FROM team_mission_conversations WHERE conversation_session_id = ?",
+                (candidate_conversation_session_id,),
+            ).fetchone() if candidate_conversation_session_id else None
             resolved_conversation_id = (
                 _text(conversation_id)
                 or _text(_row_value(existing, "conversation_id", ""))
@@ -316,8 +316,8 @@ class TeamMissionGraphMixin:
         assignee_profile_version_id: str = "",
         canonical_node_id: str = "",
         task_frame_id: str = "",
-        runtime_stable_session_id: str = "",
-        runtime_session_id: str = "",
+        runtime_conversation_session_id: str = "",
+        execution_session_id: str = "",
         runtime_scope_key: str = "",
         output_contract: Dict[str, Any] | None = None,
         metadata: Dict[str, Any] | None = None,
@@ -379,8 +379,8 @@ class TeamMissionGraphMixin:
             )
             existing_canonical_node_id = _text(_row_value(existing, "canonical_node_id", ""))
             existing_task_frame_id = _text(_row_value(existing, "task_frame_id", ""))
-            existing_runtime_stable_session_id = _text(_row_value(existing, "runtime_stable_session_id", ""))
-            existing_runtime_session_id = _text(_row_value(existing, "runtime_session_id", ""))
+            existing_runtime_conversation_session_id = _text(_row_value(existing, "runtime_conversation_session_id", ""))
+            existing_execution_session_id = _text(_row_value(existing, "execution_session_id", ""))
             effective_canonical_node_id = (
                 _text(canonical_node_id)
                 or existing_canonical_node_id
@@ -392,21 +392,21 @@ class TeamMissionGraphMixin:
                 or existing_task_frame_id
                 or (f"mission-frame:{mission_id}" if mission_id else "")
             )
-            effective_runtime_stable_session_id = (
-                _text(runtime_stable_session_id)
-                or existing_runtime_stable_session_id
+            effective_runtime_conversation_session_id = (
+                _text(runtime_conversation_session_id)
+                or existing_runtime_conversation_session_id
             )
-            effective_runtime_session_id = (
-                _text(runtime_session_id)
-                or existing_runtime_session_id
+            effective_execution_session_id = (
+                _text(execution_session_id)
+                or existing_execution_session_id
             )
             conn.execute(
                 """
                 INSERT INTO team_mission_nodes (
                     node_id, mission_id, kind, title, objective, status,
                     assignee_profile_id, assignee_profile_version_id,
-                    canonical_node_id, task_frame_id, runtime_stable_session_id,
-                    runtime_session_id, runtime_scope_key,
+                    canonical_node_id, task_frame_id, runtime_conversation_session_id,
+                    execution_session_id, runtime_scope_key,
                     output_contract_json, metadata_json, position_x, position_y,
                     created_at, updated_at
                 )
@@ -420,8 +420,8 @@ class TeamMissionGraphMixin:
                     assignee_profile_version_id = excluded.assignee_profile_version_id,
                     canonical_node_id = excluded.canonical_node_id,
                     task_frame_id = excluded.task_frame_id,
-                    runtime_stable_session_id = excluded.runtime_stable_session_id,
-                    runtime_session_id = excluded.runtime_session_id,
+                    runtime_conversation_session_id = excluded.runtime_conversation_session_id,
+                    execution_session_id = excluded.execution_session_id,
                     runtime_scope_key = excluded.runtime_scope_key,
                     output_contract_json = excluded.output_contract_json,
                     metadata_json = excluded.metadata_json,
@@ -440,8 +440,8 @@ class TeamMissionGraphMixin:
                     resolved_profile_version_id,
                     effective_canonical_node_id,
                     effective_task_frame_id,
-                    effective_runtime_stable_session_id,
-                    effective_runtime_session_id,
+                    effective_runtime_conversation_session_id,
+                    effective_execution_session_id,
                     resolved_runtime_scope_key,
                     _json_dumps(output_contract or {}),
                     _json_dumps(resolved_metadata),
@@ -946,7 +946,7 @@ class TeamMissionGraphMixin:
                         session_id=_text(run.get("session_id")) or _text(binding.get("session_id")),
                         runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key")),
                         turn_id=_text(run.get("turn_id")),
-                        runtime_session_id=_text(run.get("runtime_session_id")) or _text(binding.get("runtime_session_id")),
+                        execution_session_id=_text(run.get("execution_session_id")) or _text(binding.get("execution_session_id")),
                         status="cancelled",
                         completed_at=rejected_at,
                         metadata={
@@ -1083,7 +1083,7 @@ class TeamMissionGraphMixin:
                         session_id=_text(run.get("session_id")) or _text(binding.get("session_id")),
                         runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key")),
                         turn_id=_text(run.get("turn_id")),
-                        runtime_session_id=_text(run.get("runtime_session_id")) or _text(binding.get("runtime_session_id")),
+                        execution_session_id=_text(run.get("execution_session_id")) or _text(binding.get("execution_session_id")),
                         status="cancelled",
                         completed_at=canceled_at,
                         metadata={
@@ -1176,7 +1176,7 @@ class TeamMissionGraphMixin:
                             session_id=_text(run.get("session_id")) or _text(binding.get("session_id")),
                             runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key")),
                             turn_id=_text(run.get("turn_id")),
-                            runtime_session_id=_text(run.get("runtime_session_id")) or _text(binding.get("runtime_session_id")),
+                            execution_session_id=_text(run.get("execution_session_id")) or _text(binding.get("execution_session_id")),
                             status="cancelled",
                             completed_at=canceled_at,
                             metadata={
@@ -1264,7 +1264,7 @@ class TeamMissionGraphMixin:
                     b.mission_id AS binding_mission_id,
                     b.session_id AS binding_session_id,
                     b.runtime_scope_key AS binding_runtime_scope_key,
-                    b.runtime_session_id AS binding_runtime_session_id,
+                    b.execution_session_id AS binding_execution_session_id,
                     b.metadata_json AS binding_metadata_json,
                     m.status AS mission_status,
                     m.conversation_id AS mission_conversation_id
@@ -1299,7 +1299,7 @@ class TeamMissionGraphMixin:
                     """
                     SELECT conversation_id
                     FROM team_mission_conversations
-                    WHERE stable_session_id = ? OR conversation_id = ?
+                    WHERE conversation_session_id = ? OR conversation_id = ?
                     LIMIT 1
                     """,
                     (session_id, session_id),
@@ -1351,7 +1351,7 @@ class TeamMissionGraphMixin:
                 session_id=_text(run.get("session_id")) or _text(_row_value(row, "binding_session_id", "")),
                 runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(_row_value(row, "binding_runtime_scope_key", "")),
                 turn_id=_text(run.get("turn_id")),
-                runtime_session_id=_text(run.get("runtime_session_id")) or _text(_row_value(row, "binding_runtime_session_id", "")),
+                execution_session_id=_text(run.get("execution_session_id")) or _text(_row_value(row, "binding_execution_session_id", "")),
                 status="interrupted",
                 completed_at=now,
                 error=error,
@@ -1412,7 +1412,7 @@ class TeamMissionGraphMixin:
         run_id: str,
         session_id: str,
         role: str = "worker",
-        runtime_session_id: str = "",
+        execution_session_id: str = "",
         runtime_scope_key: str = "",
         metadata: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
@@ -1434,7 +1434,7 @@ class TeamMissionGraphMixin:
             conn.execute(
                 """
                 INSERT INTO team_mission_run_bindings (
-                    mission_id, node_id, run_id, session_id, runtime_session_id,
+                    mission_id, node_id, run_id, session_id, execution_session_id,
                     runtime_scope_key, role, metadata_json, created_at, updated_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1442,7 +1442,7 @@ class TeamMissionGraphMixin:
                     mission_id = excluded.mission_id,
                     node_id = excluded.node_id,
                     session_id = excluded.session_id,
-                    runtime_session_id = excluded.runtime_session_id,
+                    execution_session_id = excluded.execution_session_id,
                     runtime_scope_key = excluded.runtime_scope_key,
                     role = excluded.role,
                     metadata_json = excluded.metadata_json,
@@ -1453,7 +1453,7 @@ class TeamMissionGraphMixin:
                     str(node_id or ""),
                     run_id,
                     session_id,
-                    str(runtime_session_id or ""),
+                    str(execution_session_id or ""),
                     str(runtime_scope_key or ""),
                     str(role or "worker"),
                     _json_dumps(merged_metadata if isinstance(merged_metadata, dict) else {}),
@@ -1470,8 +1470,8 @@ class TeamMissionGraphMixin:
                     UPDATE team_mission_nodes
                        SET canonical_node_id = COALESCE(NULLIF(canonical_node_id, ''), ?),
                            task_frame_id = COALESCE(NULLIF(task_frame_id, ''), ?),
-                           runtime_stable_session_id = COALESCE(NULLIF(?, ''), runtime_stable_session_id),
-                           runtime_session_id = COALESCE(NULLIF(?, ''), runtime_session_id),
+                           runtime_conversation_session_id = COALESCE(NULLIF(?, ''), runtime_conversation_session_id),
+                           execution_session_id = COALESCE(NULLIF(?, ''), execution_session_id),
                            runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
                            updated_at = ?
                      WHERE mission_id = ?
@@ -1481,7 +1481,7 @@ class TeamMissionGraphMixin:
                         canonical_node_id,
                         task_frame_id,
                         session_id,
-                        str(runtime_session_id or ""),
+                        str(execution_session_id or ""),
                         str(runtime_scope_key or ""),
                         now,
                         mission_id,
@@ -1515,17 +1515,17 @@ class TeamMissionGraphMixin:
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                SELECT DISTINCT session_id, runtime_session_id
+                SELECT DISTINCT session_id, execution_session_id
                 FROM team_mission_run_bindings
                 WHERE session_id IN ({placeholders})
-                   OR runtime_session_id IN ({placeholders})
+                   OR execution_session_id IN ({placeholders})
                 """,
                 tuple(normalized + normalized),
             ).fetchall()
         requested = set(normalized)
         internal_ids: set[str] = set()
         for row in rows:
-            for key in ("session_id", "runtime_session_id"):
+            for key in ("session_id", "execution_session_id"):
                 value = str(_row_value(row, key, "") or "").strip()
                 if value and value in requested:
                     internal_ids.add(value)

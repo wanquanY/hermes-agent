@@ -19,12 +19,12 @@ def _message_event(
     *,
     run_id: str = "run-worker-1",
     participant_id: str = "member:writer",
-    stored_session_id: str = "worker-session-1",
+    conversation_session_id: str = "worker-session-1",
 ) -> dict[str, Any]:
     return {
         "type": "message.complete",
-        "session_id": stored_session_id,
-        "stored_session_id": stored_session_id,
+        "session_id": conversation_session_id,
+        "conversation_session_id": conversation_session_id,
         "run_id": run_id,
         "turn_id": "turn-worker-1",
         "seq": 1,
@@ -85,7 +85,7 @@ class _MirrorDb:
     def append_run_event(self, session_id: str, event: dict[str, Any], participant_id: str = "") -> dict[str, Any]:
         saved = {
             **event,
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "participant_id": participant_id or event.get("participant_id", ""),
             "seq": event.get("seq") or len(self.appended_events) + 1,
         }
@@ -248,7 +248,7 @@ def test_team_conversation_render_history_messages_have_participant_id(tmp_path:
                 "result": {
                     "conversation": {
                         "conversation_id": "conversation-1",
-                        "stable_session_id": "team-session-1",
+                        "conversation_session_id": "team-session-1",
                     },
                     "mission": {},
                     "team": {},

@@ -119,12 +119,12 @@ def test_submit_does_not_create_member_chat_runs_table(monkeypatch, tmp_path: Pa
 def test_worker_spawn_uses_conversation_session_id(monkeypatch, tmp_path: Path):
     _db, captured, response = _submit_member(monkeypatch, tmp_path)
 
-    assert captured["stored_session_id"] == CONVERSATION_SESSION_ID
+    assert captured["conversation_session_id"] == CONVERSATION_SESSION_ID
     assert captured["session_id"] == CONVERSATION_SESSION_ID
-    assert not captured["stored_session_id"].startswith("memberchat:")
+    assert not captured["conversation_session_id"].startswith("memberchat:")
     member_turn = response["result"]["member_turn"]
-    assert member_turn["stored_session_id"] == CONVERSATION_SESSION_ID
-    assert member_turn["worker_stored_session_id"] == CONVERSATION_SESSION_ID
+    assert member_turn["conversation_session_id"] == CONVERSATION_SESSION_ID
+    assert member_turn["worker_conversation_session_id"] == CONVERSATION_SESSION_ID
 
 
 def test_member_submit_without_codex_contract_keeps_clean_dovie_profile(

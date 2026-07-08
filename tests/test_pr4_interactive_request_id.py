@@ -461,7 +461,7 @@ class TestClarifySignatureRequestId:
 # worker_publish_bridge: register_interactive_request
 # =========================================================================
 
-def _make_bridge(stored_session_id: str = "stored-1") -> tuple[WorkerPublishBridge, list]:
+def _make_bridge(conversation_session_id: str = "stored-1") -> tuple[WorkerPublishBridge, list]:
     """Build a WorkerPublishBridge with a recording emit_threadsafe.
 
     Returns (bridge, emitted_frames) where ``emitted_frames`` collects every
@@ -470,7 +470,7 @@ def _make_bridge(stored_session_id: str = "stored-1") -> tuple[WorkerPublishBrid
     """
     loop = SimpleNamespace(is_closed=lambda: False)
     bridge = WorkerPublishBridge(emit=_noop_emit, loop=loop)  # type: ignore[arg-type]
-    bridge._stored_session_id = stored_session_id
+    bridge._conversation_session_id = conversation_session_id
     emitted: list = []
 
     def _record(frame):
@@ -488,7 +488,7 @@ class TestRegisterInteractiveRequest:
     def test_emits_frame_and_returns_true(self):
         bridge, emitted = _make_bridge()
         ok = bridge.register_interactive_request(
-            "req-1", "approval", {"command": "rm"}, stored_session_id="sess-1"
+            "req-1", "approval", {"command": "rm"}, conversation_session_id="sess-1"
         )
         assert ok is True
         assert len(emitted) == 1
@@ -497,12 +497,12 @@ class TestRegisterInteractiveRequest:
         assert frame.kind == "approval"
         assert frame.request_id == "req-1"
         assert frame.payload == {"command": "rm"}
-        assert frame.stored_session_id == "sess-1"
+        assert frame.conversation_session_id == "sess-1"
 
-    def test_uses_bridge_stored_session_id_when_arg_empty(self):
-        bridge, emitted = _make_bridge(stored_session_id="bridge-default")
+    def test_uses_bridge_conversation_session_id_when_arg_empty(self):
+        bridge, emitted = _make_bridge(conversation_session_id="bridge-default")
         bridge.register_interactive_request("req-2", "clarify")
-        assert emitted[0].stored_session_id == "bridge-default"
+        assert emitted[0].conversation_session_id == "bridge-default"
 
     def test_payload_defaults_to_empty_dict(self):
         bridge, emitted = _make_bridge()
@@ -631,14 +631,14 @@ class TestRegisterApprovalRequestBackstop:
         bridge._register_approval_request("sess-approval-5", "not-a-dict")  # type: ignore[arg-type]
         assert emitted == []
 
-    def test_stored_session_id_falls_back_to_session_key(self):
-        bridge, emitted = _make_bridge(stored_session_id="")
+    def test_conversation_session_id_falls_back_to_session_key(self):
+        bridge, emitted = _make_bridge(conversation_session_id="")
         data = {"command": "rm"}
         bridge._register_approval_request("sess-fallback", data)
-        assert emitted[0].stored_session_id == "sess-fallback"
+        assert emitted[0].conversation_session_id == "sess-fallback"
 
-    def test_stored_session_id_prefers_bridge_value(self):
-        bridge, emitted = _make_bridge(stored_session_id="bridge-sess")
+    def test_conversation_session_id_prefers_bridge_value(self):
+        bridge, emitted = _make_bridge(conversation_session_id="bridge-sess")
         data = {"command": "rm"}
         bridge._register_approval_request("other-sess", data)
-        assert emitted[0].stored_session_id == "bridge-sess"
+        assert emitted[0].conversation_session_id == "bridge-sess"

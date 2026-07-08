@@ -26,7 +26,7 @@ def _run_projection(run) -> dict[str, Any]:
         "completed_at": run.completed_at,
         "turn_id": run.turn_id,
         "runtime_scope_key": run.runtime_scope_key,
-        "runtime_session_id": run.runtime_session_id,
+        "execution_session_id": run.execution_session_id,
         "last_seq": run.last_seq,
         "terminal_seq": run.terminal_seq,
         "terminal_degraded": run.terminal_degraded,
@@ -82,7 +82,7 @@ def make_method_run_list(conn_provider):
         rows = conn.execute(
             f"""
             SELECT run_id, session_id, status, started_at, updated_at,
-                   completed_at, turn_id, runtime_scope_key, runtime_session_id,
+                   completed_at, turn_id, runtime_scope_key, execution_session_id,
                    last_seq, terminal_seq, terminal_degraded, terminal_cause
               FROM runs
              WHERE {" AND ".join(clauses)}

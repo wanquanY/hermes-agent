@@ -15,7 +15,7 @@ def test_collect_run_event_storage_sample_groups_payload_bytes_by_event_type(tmp
             {
                 "type": "message.delta",
                 "session_id": "runtime-1",
-                "stored_session_id": "stored-1",
+                "conversation_session_id": "stored-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "seq": 1,
@@ -27,7 +27,7 @@ def test_collect_run_event_storage_sample_groups_payload_bytes_by_event_type(tmp
             {
                 "type": "message.delta",
                 "session_id": "runtime-1",
-                "stored_session_id": "stored-1",
+                "conversation_session_id": "stored-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "seq": 2,
@@ -39,7 +39,7 @@ def test_collect_run_event_storage_sample_groups_payload_bytes_by_event_type(tmp
             {
                 "type": "tool.complete",
                 "session_id": "runtime-1",
-                "stored_session_id": "stored-1",
+                "conversation_session_id": "stored-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "seq": 3,

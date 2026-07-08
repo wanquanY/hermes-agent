@@ -17,6 +17,7 @@ from .session import (
     build_session_context_prompt,
 )
 from .delivery import DeliveryRouter, DeliveryTarget
+from channels import session_context
 
 __all__ = [
     # Config
@@ -32,4 +33,5 @@ __all__ = [
     # Delivery
     "DeliveryRouter",
     "DeliveryTarget",
+    "session_context",
 ]

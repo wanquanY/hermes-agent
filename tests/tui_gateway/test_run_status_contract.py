@@ -90,7 +90,7 @@ def test_run_status_returns_common_top_level_fields_for_run_and_session_paths(se
         {
             "id": "by-session",
             "method": "run.status",
-            "params": {"stored_session_id": "stored-common"},
+            "params": {"conversation_session_id": "stored-common"},
         }
     )
 
@@ -99,7 +99,7 @@ def test_run_status_returns_common_top_level_fields_for_run_and_session_paths(se
     expected_common = {
         "status": "running",
         "run_id": "run-common",
-        "stored_session_id": "stored-common",
+        "conversation_session_id": "stored-common",
         "last_event_seq": 9,
     }
     assert {key: by_run["result"][key] for key in expected_common} == expected_common

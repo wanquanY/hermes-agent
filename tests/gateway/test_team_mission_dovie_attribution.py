@@ -398,7 +398,7 @@ async def test_worker_dispatch_warns_when_dovie_context_missing(
     caplog.set_level(logging.WARNING, logger="tui_gateway.services.worker_runtime")
     await _dispatch_submit_params_to_frame(
         {
-            "stored_session_id": CONVERSATION_SESSION_ID,
+            "conversation_session_id": CONVERSATION_SESSION_ID,
             "run_id": "run-no-context",
             "turn_id": "turn-no-context",
             "runtime_scope_key": "profile:profile-leader",

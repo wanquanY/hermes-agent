@@ -34,7 +34,7 @@ def _create_team_session(tmp_path: Path, conversation_id: str) -> tuple[SessionD
     db.create_session(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=session_id,
+        conversation_session_id=session_id,
         team_id="team-1",
         title="Team conversation",
     )
@@ -117,7 +117,7 @@ def _message_complete_frame(
     return {
         "type": "message.complete",
         "session_id": f"runtime-{run_id}",
-        "stored_session_id": session_id,
+        "conversation_session_id": session_id,
         "run_id": run_id,
         "turn_id": turn_id,
         "runtime_scope_key": "team:conv-1:leader-conversation",

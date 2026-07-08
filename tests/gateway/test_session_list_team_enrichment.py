@@ -32,14 +32,14 @@ def _create_team_sidebar_session(
     db: SessionDB,
     *,
     conversation_id: str = "conversation-1",
-    stable_session_id: str = "team-session-1",
+    conversation_session_id: str = "team-session-1",
     team_id: str = "team-1",
     title: str = "Team Conversation",
     active_mission_id: str = "mission-1",
 ) -> None:
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=stable_session_id,
+        conversation_session_id=conversation_session_id,
         team_id=team_id,
         title=title,
         objective="Team objective",
@@ -47,8 +47,8 @@ def _create_team_sidebar_session(
         created_at=100,
         updated_at=200,
     )
-    db.create_session(stable_session_id, source="team_mission", transient=False)
-    db.append_message(stable_session_id, role="user", content="hello team")
+    db.create_session(conversation_session_id, source="team_mission", transient=False)
+    db.append_message(conversation_session_id, role="user", content="hello team")
 
 
 def test_session_list_returns_team_metadata_for_team_session(monkeypatch, tmp_path: Path):
@@ -157,7 +157,7 @@ def test_session_index_list_embeds_workspace_team_context_and_derived_state(
     )
     db.upsert_team_mission_conversation(
         conversation_id="conversation-index-contract",
-        stable_session_id="team-session-index-contract",
+        conversation_session_id="team-session-index-contract",
         team_id="team-index-contract",
         title="Indexed Team",
         active_mission_id="mission-index-contract",

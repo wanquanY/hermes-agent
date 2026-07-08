@@ -192,23 +192,23 @@ async def _complete_dispatched_run(
     scope_key: str,
     conversation_id: str | None = None,
     run_id: str,
-    stored_session_id: str,
+    conversation_session_id: str,
     text: str,
     usage: dict[str, Any] | None = None,
 ) -> None:
     try:
-        db.create_session(stored_session_id, source="worker")
+        db.create_session(conversation_session_id, source="worker")
     except Exception:
         pass
     db.append_message(
-        stored_session_id,
+        conversation_session_id,
         role="assistant",
         content=text,
         metadata={"usage": usage or {"total_tokens": 1}},
     )
     await router.on_event(
         scope_key,
-        conversation_id or stored_session_id,
+        conversation_id or conversation_session_id,
         EventFrame(
             params={
                 "type": "message.complete",
@@ -222,8 +222,8 @@ async def _complete_dispatched_run(
     )
     await router.on_run_terminal(
         scope_key,
-        conversation_id or stored_session_id,
-        RunTerminalFrame(run_id=run_id, stored_session_id=stored_session_id, status="completed"),
+        conversation_id or conversation_session_id,
+        RunTerminalFrame(run_id=run_id, conversation_session_id=conversation_session_id, status="completed"),
     )
 
 
@@ -364,7 +364,7 @@ async def test_e2e_team_mission_member_chat(
     run_context = json.loads(captured_submit["run_context_json"])
     assert run_context["conversation_session_id"] == "conv-B"
     assert run_context["participant_id"] == "member:member-alice"
-    assert captured_submit["stored_session_id"] == "conv-B"
+    assert captured_submit["conversation_session_id"] == "conv-B"
     assert captured_submit["runtime_scope_key"] == "member-chat:conversation-B:member-alice"
 
     messages = _messages(harness.db, "conv-B")
@@ -416,7 +416,7 @@ async def test_e2e_async_agent_dispatch_round_trip(harness, tmp_path: Path) -> N
         scope_key="profile:profile-worker",
         conversation_id="conv-C-child",
         run_id="run-C",
-        stored_session_id="conv-C-child",
+        conversation_session_id="conv-C-child",
         text="Shard fixed and tests are green.",
         usage={"total_tokens": 42},
     )
@@ -448,7 +448,7 @@ async def test_e2e_late_worker_completion_after_activity_cancel_stays_cancelled(
         scope_key="profile:worker",
         conversation_id="conv-cancel-child",
         run_id="run-cancel",
-        stored_session_id="conv-cancel-child",
+        conversation_session_id="conv-cancel-child",
         turn_id="turn-cancel",
         dispatch_activity_id="act-cancel",
         activity_kind="agent_dispatch",
@@ -463,7 +463,7 @@ async def test_e2e_late_worker_completion_after_activity_cancel_stays_cancelled(
         scope_key="profile:worker",
         conversation_id="conv-cancel-child",
         run_id="run-cancel",
-        stored_session_id="conv-cancel-child",
+        conversation_session_id="conv-cancel-child",
         text="Late worker completion must not bounce the UI.",
     )
 
@@ -507,7 +507,7 @@ async def test_e2e_async_team_dispatch_round_trip(harness) -> None:
         scope_key="mission-D",
         conversation_id="mission-D",
         run_id="run-D",
-        stored_session_id="mission-D",
+        conversation_session_id="mission-D",
         turn_id="turn-D",
         dispatch_activity_id="act-D",
         activity_kind="team_dispatch",
@@ -522,7 +522,7 @@ async def test_e2e_async_team_dispatch_round_trip(harness) -> None:
         harness.router,
         scope_key="mission-D",
         run_id="run-D",
-        stored_session_id="mission-D",
+        conversation_session_id="mission-D",
         text="Team mission completed.",
     )
 
@@ -584,7 +584,7 @@ async def test_e2e_multi_activity_per_conversation(
                 scope_key="profile:profile-worker",
                 conversation_id=result["conversation_id"],
                 run_id=f"run-E{idx}",
-                stored_session_id=result["conversation_id"],
+                conversation_session_id=result["conversation_id"],
                 text=f"Task {idx} complete.",
             )
             for idx, result in enumerate(dispatches, start=1)

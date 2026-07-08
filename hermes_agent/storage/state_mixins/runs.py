@@ -728,7 +728,7 @@ class RunStateMixin:
                 session_id=str(row["session_id"] or ""),
                 runtime_scope_key=str(row["runtime_scope_key"] or row["session_id"] or ""),
                 turn_id=str(row["turn_id"] or ""),
-                runtime_session_id=str(row["runtime_session_id"] or ""),
+                execution_session_id=str(row["execution_session_id"] or ""),
                 status="completed",
                 started_at=float(row["started_at"] or repaired_at),
                 updated_at=repaired_at,
@@ -772,7 +772,7 @@ class RunStateMixin:
         session_id: str,
         runtime_scope_key: str = "",
         turn_id: str = "",
-        runtime_session_id: str = "",
+        execution_session_id: str = "",
         status: str = "running",
         started_at: float | None = None,
         updated_at: float | None = None,
@@ -804,7 +804,7 @@ class RunStateMixin:
                 session_id=session_id,
                 runtime_scope_key=normalized_scope,
                 turn_id=turn_id,
-                runtime_session_id=runtime_session_id,
+                execution_session_id=execution_session_id,
                 status=normalized_status,
                 started_at=started,
                 updated_at=updated,
@@ -822,7 +822,7 @@ class RunStateMixin:
                 session_id=session_id,
                 run_id=run_id,
                 runtime_scope_key=str(runtime_scope_key or ""),
-                runtime_session_id=runtime_session_id,
+                execution_session_id=execution_session_id,
                 status=str((row["status"] if row else normalized_status) or ""),
                 updated_at=updated,
             )
@@ -836,7 +836,7 @@ class RunStateMixin:
         *,
         session_id: str,
         run_id: str,
-        runtime_session_id: str,
+        execution_session_id: str,
         status: str,
         updated_at: float,
         runtime_scope_key: str = "",
@@ -862,7 +862,7 @@ class RunStateMixin:
         try:
             row = conn.execute(
                 """
-                SELECT tmc.stable_session_id, tmc.conversation_id
+                SELECT tmc.conversation_session_id, tmc.conversation_id
                   FROM team_mission_run_bindings tmrb
                   JOIN team_missions tm
                     ON tm.mission_id = tmrb.mission_id
@@ -894,14 +894,14 @@ class RunStateMixin:
                         """
                         UPDATE session_index
                            SET running = 1, status = 'running',
-                               active_run_id = ?, active_runtime_session_id = ?,
+                               active_run_id = ?, active_execution_session_id = ?,
                                runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
                                updated_at = MAX(updated_at, ?)
                          WHERE session_id = ?
                         """,
                         (
                             run_id,
-                            str(runtime_session_id or ""),
+                            str(execution_session_id or ""),
                             run_scope_key,
                             float(updated_at or 0),
                             sid,
@@ -911,14 +911,14 @@ class RunStateMixin:
                         """
                         UPDATE session_index
                            SET running = 1, status = 'running',
-                               active_run_id = ?, active_runtime_session_id = ?,
+                               active_run_id = ?, active_execution_session_id = ?,
                                runtime_scope_key = COALESCE(NULLIF(?, ''), NULLIF(?, ''), runtime_scope_key),
                                updated_at = MAX(updated_at, ?)
                          WHERE session_id = ?
                         """,
                         (
                             run_id,
-                            str(runtime_session_id or ""),
+                            str(execution_session_id or ""),
                             conv_scope_key,
                             run_scope_key,
                             float(updated_at or 0),
@@ -934,14 +934,14 @@ class RunStateMixin:
                         """
                         UPDATE session_index
                            SET running = 1, status = 'running',
-                               active_run_id = ?, active_runtime_session_id = ?,
+                               active_run_id = ?, active_execution_session_id = ?,
                                runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
                                updated_at = MAX(updated_at, ?)
                          WHERE session_id = ?
                         """,
                         (
                             run_id,
-                            str(runtime_session_id or ""),
+                            str(execution_session_id or ""),
                             conv_scope_key or run_scope_key,
                             float(updated_at or 0),
                             sid,
@@ -972,7 +972,7 @@ class RunStateMixin:
                     f"""
                     UPDATE session_index
                        SET running = 0, status = 'idle',
-                           active_run_id = '', active_runtime_session_id = '',
+                           active_run_id = '', active_execution_session_id = '',
                            updated_at = MAX(updated_at, ?)
                      WHERE session_id IN ({id_placeholders})
                        AND (active_run_id = ? OR active_run_id = '')
@@ -1003,7 +1003,7 @@ class RunStateMixin:
         session_id: str,
         runtime_scope_key: str = "",
         turn_id: str = "",
-        runtime_session_id: str = "",
+        execution_session_id: str = "",
         status: str = "queued",
         started_at: float | None = None,
         updated_at: float | None = None,
@@ -1067,7 +1067,7 @@ class RunStateMixin:
                     session_id=stable,
                     runtime_scope_key=normalized_scope,
                     turn_id=turn_id,
-                    runtime_session_id=runtime_session_id,
+                    execution_session_id=execution_session_id,
                     status=normalized_status,
                     started_at=started,
                     updated_at=updated,
@@ -1104,7 +1104,7 @@ class RunStateMixin:
         session_id: str,
         payload: Dict[str, Any],
         runtime_scope_key: str = "",
-        runtime_session_id: str = "",
+        execution_session_id: str = "",
         run_id: str = "",
         turn_id: str = "",
         updated_at: float = 0.0,
@@ -1114,7 +1114,7 @@ class RunStateMixin:
             session_id=session_id,
             payload=payload,
             runtime_scope_key=runtime_scope_key,
-            runtime_session_id=runtime_session_id,
+            execution_session_id=execution_session_id,
             run_id=run_id,
             turn_id=turn_id,
             updated_at=updated_at,
@@ -1131,14 +1131,14 @@ class RunStateMixin:
         conn.execute(
             """
             INSERT INTO session_runtime_state (
-                session_id, runtime_scope_key, runtime_session_id, run_id,
+                session_id, runtime_scope_key, execution_session_id, run_id,
                 turn_id, status, model, provider, profile_json,
                 payload_hash, updated_at, source_seq
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 runtime_scope_key = excluded.runtime_scope_key,
-                runtime_session_id = excluded.runtime_session_id,
+                execution_session_id = excluded.execution_session_id,
                 run_id = excluded.run_id,
                 turn_id = excluded.turn_id,
                 status = excluded.status,
@@ -1153,7 +1153,7 @@ class RunStateMixin:
             (
                 record["session_id"],
                 record["runtime_scope_key"],
-                record["runtime_session_id"],
+                record["execution_session_id"],
                 record["run_id"],
                 record["turn_id"],
                 record["status"],
@@ -1191,7 +1191,7 @@ class RunStateMixin:
         if not stable:
             return {}
         frame = dict(event or {})
-        frame["stored_session_id"] = str(frame.get("stored_session_id") or stable)
+        frame["conversation_session_id"] = str(frame.get("conversation_session_id") or stable)
         event_type = str(frame.get("type") or "").strip()
         payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
         run_id = _event_run_id(frame)
@@ -1217,7 +1217,7 @@ class RunStateMixin:
                     normalized_payload["nonfatal_error"] = original_error
                 frame["payload"] = normalized_payload
                 payload = normalized_payload
-        runtime_session_id = str(frame.get("session_id") or "").strip()
+        execution_session_id = str(frame.get("session_id") or "").strip()
         runtime_scope_key = _event_runtime_scope_key(frame, stable)
         frame["runtime_scope_key"] = runtime_scope_key
         timestamp = float(frame.get("timestamp") or time.time())
@@ -1371,7 +1371,7 @@ class RunStateMixin:
                     session_id=stable,
                     payload=payload,
                     runtime_scope_key=runtime_scope_key,
-                    runtime_session_id=runtime_session_id,
+                    execution_session_id=execution_session_id,
                     run_id=run_id,
                     turn_id=turn_id,
                     updated_at=timestamp,
@@ -1460,11 +1460,11 @@ class RunStateMixin:
                         merged_payload = _merge_stream_payload(previous_event, frame)
                         merged_event = {
                             **previous_event,
-                            "session_id": runtime_session_id or previous_event.get("session_id") or "",
-                            "stored_session_id": stable,
+                            "session_id": execution_session_id or previous_event.get("session_id") or "",
+                            "conversation_session_id": stable,
                             "run_id": run_id or previous_event.get("run_id") or "",
                             "turn_id": turn_id or previous_event.get("turn_id") or "",
-                            "runtime_session_id": runtime_session_id or previous_event.get("runtime_session_id") or "",
+                            "execution_session_id": execution_session_id or previous_event.get("execution_session_id") or "",
                             "runtime_scope_key": runtime_scope_key,
                             "participant_id": event_participant_id or _event_participant_id(previous_event),
                             "participantId": event_participant_id or _event_participant_id(previous_event),
@@ -1486,7 +1486,7 @@ class RunStateMixin:
                             row_id=int(previous["id"]),
                             run_id=run_id,
                             turn_id=turn_id,
-                            runtime_session_id=runtime_session_id,
+                            execution_session_id=execution_session_id,
                             runtime_scope_key=runtime_scope_key,
                             participant_id=merged_participant_id,
                             activity_id=merged_activity_id or None,
@@ -1511,7 +1511,7 @@ class RunStateMixin:
                     session_id=stable,
                     run_id=run_id,
                     turn_id=turn_id,
-                    runtime_session_id=runtime_session_id,
+                    execution_session_id=execution_session_id,
                     runtime_scope_key=runtime_scope_key,
                     participant_id=event_participant_id,
                     activity_id=event_activity_id or None,
@@ -1714,7 +1714,7 @@ class RunStateMixin:
                     session_id=stable,
                     runtime_scope_key=runtime_scope_key,
                     turn_id=turn_id,
-                    runtime_session_id=runtime_session_id,
+                    execution_session_id=execution_session_id,
                     status=next_status,
                     started_at=timestamp,
                     updated_at=timestamp,
@@ -1737,7 +1737,7 @@ class RunStateMixin:
                         session_id=stable,
                         run_id=run_id,
                         runtime_scope_key=runtime_scope_key,
-                        runtime_session_id=runtime_session_id,
+                        execution_session_id=execution_session_id,
                         status=next_status,
                         updated_at=timestamp,
                     )
@@ -2069,7 +2069,7 @@ class RunStateMixin:
                 project_run_event_search_index(
                     conn,
                     row_id=int(row["id"]),
-                    session_id=str(row["session_id"] or event.get("stored_session_id") or ""),
+                    session_id=str(row["session_id"] or event.get("conversation_session_id") or ""),
                     seq=int(row["seq"] or event.get("seq") or 0),
                     event_type=str(row["event_type"] or event.get("type") or ""),
                     runtime_scope_key=str(row["runtime_scope_key"] or event.get("runtime_scope_key") or ""),
@@ -2126,7 +2126,7 @@ class RunStateMixin:
         session_id: str,
         *,
         run_id: str = "",
-        runtime_session_id: str = "",
+        execution_session_id: str = "",
         event_type: str = "",
         runtime_source_seq: int = 0,
     ) -> bool:
@@ -2146,10 +2146,10 @@ class RunStateMixin:
         if normalized_run_id:
             clauses.append("run_id = ?")
             params.append(normalized_run_id)
-        normalized_runtime_session_id = str(runtime_session_id or "").strip()
-        if normalized_runtime_session_id:
-            clauses.append("runtime_session_id = ?")
-            params.append(normalized_runtime_session_id)
+        normalized_execution_session_id = str(execution_session_id or "").strip()
+        if normalized_execution_session_id:
+            clauses.append("execution_session_id = ?")
+            params.append(normalized_execution_session_id)
         normalized_type = str(event_type or "").strip()
         if normalized_type:
             clauses.append("event_type = ?")
@@ -2172,7 +2172,7 @@ class RunStateMixin:
         *,
         seq: int = 0,
         run_id: str = "",
-        runtime_session_id: str = "",
+        execution_session_id: str = "",
         event_type: str = "",
     ) -> bool:
         stable = str(session_id or "").strip()
@@ -2188,10 +2188,10 @@ class RunStateMixin:
         if normalized_run_id:
             clauses.append("run_id = ?")
             params.append(normalized_run_id)
-        normalized_runtime_session_id = str(runtime_session_id or "").strip()
-        if normalized_runtime_session_id:
-            clauses.append("runtime_session_id = ?")
-            params.append(normalized_runtime_session_id)
+        normalized_execution_session_id = str(execution_session_id or "").strip()
+        if normalized_execution_session_id:
+            clauses.append("execution_session_id = ?")
+            params.append(normalized_execution_session_id)
         normalized_type = str(event_type or "").strip()
         if normalized_type:
             clauses.append("event_type = ?")
@@ -2345,7 +2345,7 @@ class RunStateMixin:
                 "run_id": str(row["run_id"] or ""),
                 "session_id": str(row["session_id"] or ""),
                 "runtime_scope_key": str(row["runtime_scope_key"] or ""),
-                "runtime_session_id": str(row["runtime_session_id"] or ""),
+                "execution_session_id": str(row["execution_session_id"] or ""),
                 "status": str(row["status"] or ""),
                 "updated_age_seconds": round(now - float(row["updated_at"] or row["started_at"] or 0), 3),
                 "owner_pid": metadata.get("gateway_pid"),
@@ -2536,9 +2536,9 @@ class RunStateMixin:
                     payload = payload_from_run_event_row(row)
                 payload = payload if isinstance(payload, dict) else {}
                 identity = (
-                    str(event.get("stored_session_id") or row["session_id"] or ""),
+                    str(event.get("conversation_session_id") or row["session_id"] or ""),
                     str(event.get("runtime_scope_key") or row["runtime_scope_key"] or ""),
-                    str(event.get("runtime_session_id") or event.get("session_id") or row["runtime_session_id"] or ""),
+                    str(event.get("execution_session_id") or event.get("session_id") or row["execution_session_id"] or ""),
                     str(event.get("run_id") or row["run_id"] or ""),
                     str(event.get("turn_id") or row["turn_id"] or ""),
                 )
@@ -2873,7 +2873,7 @@ class RunStateMixin:
                     project_run_event_search_index(
                         conn,
                         row_id=int(keep_row["id"]),
-                        session_id=str(group["session_id"] or keep_event.get("stored_session_id") or ""),
+                        session_id=str(group["session_id"] or keep_event.get("conversation_session_id") or ""),
                         seq=canonical_seq,
                         event_type=str(group["event_type"] or keep_event.get("type") or ""),
                         runtime_scope_key=str(
@@ -2922,10 +2922,10 @@ class RunStateMixin:
                     merged_event = {
                         **merged_event,
                         "session_id": event.get("session_id") or merged_event.get("session_id") or "",
-                        "stored_session_id": event.get("stored_session_id") or merged_event.get("stored_session_id") or "",
+                        "conversation_session_id": event.get("conversation_session_id") or merged_event.get("conversation_session_id") or "",
                         "run_id": _event_run_id(event) or _event_run_id(merged_event),
                         "turn_id": _event_turn_id(event) or _event_turn_id(merged_event),
-                        "runtime_session_id": event.get("runtime_session_id") or merged_event.get("runtime_session_id") or "",
+                        "execution_session_id": event.get("execution_session_id") or merged_event.get("execution_session_id") or "",
                         "runtime_scope_key": _event_runtime_scope_key(event, _event_runtime_scope_key(merged_event)),
                         "participant_id": _event_participant_id(event, _event_participant_id(merged_event)),
                         "participantId": _event_participant_id(event, _event_participant_id(merged_event)),
@@ -2948,7 +2948,7 @@ class RunStateMixin:
                     row_id=int(keep_row["id"]),
                     run_id=_event_run_id(merged_event),
                     turn_id=_event_turn_id(merged_event),
-                    runtime_session_id=str(merged_event.get("runtime_session_id") or ""),
+                    execution_session_id=str(merged_event.get("execution_session_id") or ""),
                     runtime_scope_key=_event_runtime_scope_key(merged_event),
                     participant_id=merged_participant_id,
                     seq=int(merged_event.get("seq") or 0),
@@ -2963,7 +2963,7 @@ class RunStateMixin:
                 project_run_event_search_index(
                     conn,
                     row_id=int(keep_row["id"]),
-                    session_id=str(keep_row["session_id"] or merged_event.get("stored_session_id") or ""),
+                    session_id=str(keep_row["session_id"] or merged_event.get("conversation_session_id") or ""),
                     seq=int(merged_event.get("seq") or 0),
                     event_type=str(keep_row["event_type"] or merged_event.get("type") or ""),
                     runtime_scope_key=_event_runtime_scope_key(merged_event),

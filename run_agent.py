@@ -1929,9 +1929,9 @@ class AIAgent:
                             )
                         continue
                     if not is_main_team_transcript_message:
-                        runtime_session_id = str(getattr(self, "session_id", "") or "").strip()
-                        if runtime_session_id:
-                            target_session_id = runtime_session_id
+                        execution_session_id = str(getattr(self, "session_id", "") or "").strip()
+                        if execution_session_id:
+                            target_session_id = execution_session_id
                             self._ensure_visible_transcript_session(target_session_id)
                         else:
                             if len(skipped_samples) < 12:

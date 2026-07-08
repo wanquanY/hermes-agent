@@ -262,7 +262,7 @@ class _ProfileRegistry:
                 return ctx
             # Backfill identity fields on a context first created with
             # only the scope_key (e.g. when the very first call into a
-            # profile was by stable_session_id, before the profile
+            # profile was by conversation_session_id, before the profile
             # resolver attached the agent_profile_id).
             if agent_profile_id and not ctx.agent_profile_id:
                 ctx.agent_profile_id = str(agent_profile_id)
@@ -448,11 +448,11 @@ class _PerProfileDict:
         return f"_PerProfileDict(attr={self._attr_name!r})"
 
 
-# ── stable_session_id → scope_key resolver cache ─────────────────
+# ── conversation_session_id → scope_key resolver cache ─────────────────
 # The @method dispatch wrapper (Phase 2) needs to map a request to a
 # ProfileContext as fast as possible. Some methods carry the scope
 # directly (``runtime_scope_key`` in params), but many only carry a
-# ``stored_session_id`` — for those we need to look up which profile
+# ``conversation_session_id`` — for those we need to look up which profile
 # the session belongs to. Hitting the DB on every method call would
 # blow latency, so cache the mapping here.
 #
@@ -467,11 +467,11 @@ _stable_to_scope_cache: Dict[str, str] = {}
 _stable_to_scope_lock = _threading.RLock()
 
 
-def cache_stable_session_scope(stable_session_id: str, scope_key: str) -> None:
-    """Record the ``stable_session_id → scope_key`` mapping. Called
+def cache_stable_session_scope(conversation_session_id: str, scope_key: str) -> None:
+    """Record the ``conversation_session_id → scope_key`` mapping. Called
     by any code path that just resolved the binding (typically the
     runtime-scope routing layer)."""
-    stable = str(stable_session_id or "").strip()
+    stable = str(conversation_session_id or "").strip()
     scope = str(scope_key or "").strip()
     if not stable or not scope:
         return
@@ -479,21 +479,21 @@ def cache_stable_session_scope(stable_session_id: str, scope_key: str) -> None:
         _stable_to_scope_cache[stable] = scope
 
 
-def lookup_stable_session_scope(stable_session_id: str) -> Optional[str]:
-    """Return the cached scope_key for a stable_session_id, or
+def lookup_stable_session_scope(conversation_session_id: str) -> Optional[str]:
+    """Return the cached scope_key for a conversation_session_id, or
     ``None`` if it's never been seen. Phase 2 dispatch wrapper falls
     through to a DB lookup on miss."""
-    stable = str(stable_session_id or "").strip()
+    stable = str(conversation_session_id or "").strip()
     if not stable:
         return None
     with _stable_to_scope_lock:
         return _stable_to_scope_cache.get(stable)
 
 
-def forget_stable_session_scope(stable_session_id: str) -> None:
+def forget_stable_session_scope(conversation_session_id: str) -> None:
     """Drop the cache entry when a session is deleted / its scope
     changes. Currently unused — Phase 2 wires up the call site."""
-    stable = str(stable_session_id or "").strip()
+    stable = str(conversation_session_id or "").strip()
     if not stable:
         return
     with _stable_to_scope_lock:

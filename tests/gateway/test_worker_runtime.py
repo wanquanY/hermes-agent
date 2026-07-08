@@ -99,7 +99,7 @@ async def test_team_mission_proxy_run_submit_uses_control_plane_transport(monkey
     result = await asyncio.to_thread(
         runtime_methods._proxy_run_submit_via_worker,
         {
-            "stored_session_id": "team:mission-1:node:root",
+            "conversation_session_id": "team:mission-1:node:root",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "runtime_scope_key": "profile:agent-default",
@@ -147,7 +147,7 @@ def _scoped_prompt_submit(text: str = "hi", **extra) -> dict:
         "method": "prompt.submit",
         "params": {
             "text": text,
-            "stored_session_id": "sess-1",
+            "conversation_session_id": "sess-1",
             "runtime_scope_key": "profile:test",
             "agent_profile_id": "test",
             "dovie_profile": {
@@ -211,7 +211,7 @@ async def test_primary_dispatch_skips_scopeless_prompt_submit() -> None:
     handled = await worker_runtime.primary_dispatch(
         {
             "jsonrpc": "2.0", "id": 1, "method": "prompt.submit",
-            "params": {"text": "hi", "stored_session_id": "sess-1"},
+            "params": {"text": "hi", "conversation_session_id": "sess-1"},
         },
         transport,
     )
@@ -224,7 +224,7 @@ async def test_primary_dispatch_skips_scopeless_prompt_submit() -> None:
 async def test_primary_dispatch_errors_when_no_stored_session() -> None:
     transport = _RecordingTransport()
     req = _scoped_prompt_submit()
-    req["params"].pop("stored_session_id")
+    req["params"].pop("conversation_session_id")
     handled = await worker_runtime.primary_dispatch(req, transport)
     assert handled is True
     assert len(transport.written) == 1
@@ -260,13 +260,13 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
             scope_key,
             conversation_id,
             run_id,
-            stored_session_id,
+            conversation_session_id,
             turn_id,
         ):
             self.starts.append(
                 {"scope_key": scope_key, "run_id": run_id,
                  "conversation_id": conversation_id,
-                 "stored_session_id": stored_session_id, "turn_id": turn_id}
+                 "conversation_session_id": conversation_session_id, "turn_id": turn_id}
             )
 
         def forget_run(self, run_id):
@@ -289,18 +289,18 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
     assert conversation_id == "sess-1"
     from tui_gateway.run_worker import RunStartFrame
     assert isinstance(frame, RunStartFrame)
-    assert frame.stored_session_id == "sess-1"
+    assert frame.conversation_session_id == "sess-1"
     assert frame.prompt == "hello"
     # Params include everything EXCEPT the keys we already lifted into
     # named fields.
     assert "text" not in frame.params
-    assert "stored_session_id" not in frame.params
+    assert "conversation_session_id" not in frame.params
     assert frame.params["runtime_scope_key"] == "profile:test"
     assert frame.params["conversation_id"] == "sess-1"
     # router recorded the run
     assert len(fake_router.starts) == 1
     assert fake_router.starts[0]["conversation_id"] == "sess-1"
-    assert fake_router.starts[0]["stored_session_id"] == "sess-1"
+    assert fake_router.starts[0]["conversation_session_id"] == "sess-1"
     # ack returned
     assert len(transport.written) == 1
     result = transport.written[0]["result"]
@@ -332,7 +332,7 @@ async def test_primary_dispatch_injects_session_workspace_context(monkeypatch, t
 
     def _workspace_context(session_id, params):
         assert session_id == "sess-1"
-        assert params["stored_session_id"] == "sess-1"
+        assert params["conversation_session_id"] == "sess-1"
         return {
             "cwd": str(workspace_root),
             "workspace": {
@@ -355,7 +355,7 @@ async def test_primary_dispatch_injects_session_workspace_context(monkeypatch, t
     _scope_key, _conversation_id, frame = sent_frames[0]
     assert frame.params["cwd"] == str(workspace_root)
     assert frame.params["workspace"]["id"] == "workspace-1"
-    assert "stored_session_id" not in frame.params
+    assert "conversation_session_id" not in frame.params
 
 
 @pytest.mark.asyncio

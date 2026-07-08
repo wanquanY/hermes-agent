@@ -164,7 +164,7 @@ def worker_frame_router() -> WorkerFrameRouter:
     construction order between supervisor and router doesn't deadlock.
 
     ``publish_event`` is wrapped to RESOLVE the per-profile DB from
-    ``params["stored_session_id"]`` BEFORE calling
+    ``params["conversation_session_id"]`` BEFORE calling
     ``publish_recorded_event``. Without this, ``db`` defaults to None
     and the run-control persist path drops the event with
     ``terminal-event-not-persisted-no-db-method`` — and worse, the
@@ -224,7 +224,7 @@ def worker_frame_router() -> WorkerFrameRouter:
                     stable = str(getattr(run_context, "conversation_session_id", "") or "").strip()
                 if isinstance(params, dict):
                     stable = stable or str(
-                        params.get("stored_session_id")
+                        params.get("conversation_session_id")
                         or params.get("session_id")
                         or ""
                     ).strip()
@@ -258,8 +258,8 @@ def worker_frame_router() -> WorkerFrameRouter:
 
             def _publish_run_terminal_with_db(**kwargs):
                 stable = str(
-                    kwargs.get("stored_session_id")
-                    or kwargs.get("runtime_session_id")
+                    kwargs.get("conversation_session_id")
+                    or kwargs.get("execution_session_id")
                     or ""
                 ).strip()
                 db = kwargs.get("db")
@@ -534,7 +534,7 @@ async def _dispatch_run_cancel(req: dict, transport: Any, params: dict) -> bool:
     await _ack_success(transport, rid, {
         "status": "cancelled",
         "run_id": run_id,
-        "stored_session_id": info.stored_session_id,
+        "conversation_session_id": info.conversation_session_id,
         "turn_id": info.turn_id,
         "source": "primary-run-worker",
     })
@@ -549,22 +549,22 @@ async def _dispatch_prompt_submit(
         params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex
     ).strip()
     turn_id = str(params.get("turn_id") or uuid.uuid4().hex).strip()
-    stored_session_id = str(
-        params.get("stored_session_id")
-        or params.get("storedSessionId")
+    conversation_session_id = str(
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or params.get("session_id")
         or ""
     ).strip()
-    if not stored_session_id:
+    if not conversation_session_id:
         await _ack_error(
             transport, rid, code=4006,
-            message="stored_session_id or session_id required",
+            message="conversation_session_id or session_id required",
         )
         return True
 
     prompt_text = str(params.get("text") or "")
     try:
-        workspace_context = session_workspace_run_context(stored_session_id, params)
+        workspace_context = session_workspace_run_context(conversation_session_id, params)
     except ValueError as exc:
         await _ack_error(transport, rid, code=4002, message=str(exc))
         return True
@@ -577,7 +577,7 @@ async def _dispatch_prompt_submit(
         request_id=rid,
         scope_key=scope.runtime_scope_key,
         agent_profile_id=scope.agent_profile_id,
-        stored_session_id=stored_session_id,
+        conversation_session_id=conversation_session_id,
         run_id=run_id,
         turn_id=turn_id,
         source=str(params.get("source") or ""),
@@ -588,7 +588,7 @@ async def _dispatch_prompt_submit(
 
     try:
         lease = await pool.get_or_spawn(
-            stored_session_id,
+            conversation_session_id,
             _profile_context_for_worker_pool(scope, params),
             scope_key=scope.runtime_scope_key,
         )
@@ -597,14 +597,14 @@ async def _dispatch_prompt_submit(
             "dispatch-spawn-error",
             request_id=rid,
             scope_key=scope.runtime_scope_key,
-            stored_session_id=stored_session_id,
+            conversation_session_id=conversation_session_id,
             run_id=run_id,
             error=f"{type(exc).__name__}: {exc}",
         )
         _log.exception(
             "[worker-runtime] worker_pool.get_or_spawn failed scope=%s conversation=%s",
             scope.runtime_scope_key,
-            stored_session_id,
+            conversation_session_id,
         )
         await _ack_error(
             transport, rid, code=5021,
@@ -616,7 +616,7 @@ async def _dispatch_prompt_submit(
         request_id=rid,
         requested_scope_key=scope.runtime_scope_key,
         lease_scope_key=lease.scope_key,
-        stored_session_id=stored_session_id,
+        conversation_session_id=conversation_session_id,
         worker_conversation_id=lease.worker_conversation_id,
         run_id=run_id,
         turn_id=turn_id,
@@ -625,9 +625,9 @@ async def _dispatch_prompt_submit(
     )
     run_start_kwargs = {
         "scope_key": lease.scope_key,
-        "conversation_id": stored_session_id,
+        "conversation_id": conversation_session_id,
         "run_id": run_id,
-        "stored_session_id": stored_session_id,
+        "conversation_session_id": conversation_session_id,
         "turn_id": turn_id,
     }
     if params.get("run_context_json") is not None:
@@ -648,7 +648,7 @@ async def _dispatch_prompt_submit(
     _worker_run_log(
         "router-record-run-start",
         request_id=rid,
-        stored_session_id=stored_session_id,
+        conversation_session_id=conversation_session_id,
         run_id=run_id,
         turn_id=turn_id,
         scope_key=lease.scope_key,
@@ -656,16 +656,16 @@ async def _dispatch_prompt_submit(
         dispatch_activity_id=str(run_start_kwargs.get("dispatch_activity_id") or ""),
     )
     await pool.record_run_start(
-        conversation_id=stored_session_id,
+        conversation_id=conversation_session_id,
         run_id=run_id,
-        stored_session_id=stored_session_id,
+        conversation_session_id=conversation_session_id,
         turn_id=turn_id,
         scope_key=lease.scope_key,
     )
     _worker_run_log(
         "pool-record-run-start-complete",
         request_id=rid,
-        stored_session_id=stored_session_id,
+        conversation_session_id=conversation_session_id,
         run_id=run_id,
         turn_id=turn_id,
         scope_key=lease.scope_key,
@@ -674,7 +674,7 @@ async def _dispatch_prompt_submit(
     frame_params = {
         k: v for k, v in params.items()
         if k not in {
-            "text", "stored_session_id", "storedSessionId",
+            "text", "conversation_session_id", "conversationSessionId",
             "session_id", "client_run_id", "run_id", "turn_id",
             "cwd", "workspace",
         }
@@ -682,11 +682,11 @@ async def _dispatch_prompt_submit(
     dovie_product_context = dovie_product_context_from_params(params)
     if not dovie_product_context:
         _log.warning(
-            "dovie_attribution_context_missing request_id=%s method=%s stored_session_id=%s "
+            "dovie_attribution_context_missing request_id=%s method=%s conversation_session_id=%s "
             "runtime_scope_key=%s agent_profile_id=%s session_kind=%s",
             rid,
             str(req.get("method") or ""),
-            stored_session_id,
+            conversation_session_id,
             lease.scope_key,
             scope.agent_profile_id,
             _runtime_session_kind_summary(params, scope),
@@ -697,7 +697,7 @@ async def _dispatch_prompt_submit(
         frame_params["cwd"] = workspace_context["cwd"]
         frame_params["workspace"] = workspace_context["workspace"]
     frame_params["runtime_scope_key"] = lease.scope_key
-    frame_params["conversation_id"] = stored_session_id
+    frame_params["conversation_id"] = conversation_session_id
     if scope.agent_profile_id:
         frame_params.setdefault("agent_profile_id", scope.agent_profile_id)
         frame_params.setdefault("agentProfileId", scope.agent_profile_id)
@@ -705,7 +705,7 @@ async def _dispatch_prompt_submit(
     _worker_run_log(
         "supervisor-send-start",
         request_id=rid,
-        stored_session_id=stored_session_id,
+        conversation_session_id=conversation_session_id,
         run_id=run_id,
         turn_id=turn_id,
         scope_key=lease.scope_key,
@@ -713,11 +713,11 @@ async def _dispatch_prompt_submit(
     )
     ok = await worker_supervisor().send(
         lease.scope_key,
-        stored_session_id,
+        conversation_session_id,
         RunStartFrame(
             run_id=run_id,
             turn_id=turn_id,
-            stored_session_id=stored_session_id,
+            conversation_session_id=conversation_session_id,
             prompt=prompt_text,
             # Strip params we either already lifted or that are too
             # large to send over the JSON-line pipe. The worker re-
@@ -726,11 +726,11 @@ async def _dispatch_prompt_submit(
             dovie_product_context=dovie_product_context,
         ),
     )
-    await pool.release(stored_session_id, scope_key=lease.scope_key)
+    await pool.release(conversation_session_id, scope_key=lease.scope_key)
     _worker_run_log(
         "supervisor-send-result",
         request_id=rid,
-        stored_session_id=stored_session_id,
+        conversation_session_id=conversation_session_id,
         run_id=run_id,
         turn_id=turn_id,
         scope_key=lease.scope_key,
@@ -748,7 +748,7 @@ async def _dispatch_prompt_submit(
     _worker_run_log(
         "dispatch-ack-ok",
         request_id=rid,
-        stored_session_id=stored_session_id,
+        conversation_session_id=conversation_session_id,
         run_id=run_id,
         turn_id=turn_id,
         scope_key=lease.scope_key,
@@ -759,9 +759,9 @@ async def _dispatch_prompt_submit(
             "status": "queued",
             "run_id": run_id,
             "turn_id": turn_id,
-            "stored_session_id": stored_session_id,
+            "conversation_session_id": conversation_session_id,
             "runtime_scope_key": lease.scope_key,
-            "conversation_id": stored_session_id,
+            "conversation_id": conversation_session_id,
             "source": "primary-run-worker",
         },
     )

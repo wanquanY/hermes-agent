@@ -113,7 +113,7 @@ def gateway(monkeypatch: pytest.MonkeyPatch, db: SessionDB):
             "result": {
                 "run_id": params.get("run_id") or params.get("client_run_id") or "run-leader",
                 "turn_id": params.get("turn_id") or "turn-leader",
-                "stored_session_id": params.get("stored_session_id") or "",
+                "conversation_session_id": params.get("conversation_session_id") or "",
                 "runtime_scope_key": params.get("runtime_scope_key") or "",
                 "status": "running",
             },
@@ -204,7 +204,7 @@ def _create_direct_conversation(gateway_server: Any, tmp_path: Path) -> str:
             },
         }
     )
-    return str(_assert_ok(response)["stored_session_id"])
+    return str(_assert_ok(response)["conversation_session_id"])
 
 
 def _create_team_conversation(
@@ -254,7 +254,7 @@ def _message_complete(
     return {
         "type": "message.complete",
         "session_id": session_id,
-        "stored_session_id": session_id,
+        "conversation_session_id": session_id,
         "run_id": run_id,
         "turn_id": f"turn-{run_id}",
         "seq": seq,
@@ -336,7 +336,7 @@ async def _record_member_reply(
 ) -> tuple[list[dict[str, Any]], _CaptureTransport]:
     transport = _CaptureTransport()
     run_control.subscribe_session(
-        stored_session_id=CONVERSATION_SESSION_ID,
+        conversation_session_id=CONVERSATION_SESSION_ID,
         transport=transport,
         db=db,
     )
@@ -353,7 +353,7 @@ async def _record_member_reply(
         scope_key=captured_submit["runtime_scope_key"],
         conversation_id=CONVERSATION_ID,
         run_id=captured_submit["run_id"],
-        stored_session_id=CONVERSATION_SESSION_ID,
+        conversation_session_id=CONVERSATION_SESSION_ID,
         turn_id=captured_submit["turn_id"],
         run_context_json=captured_submit["run_context_json"],
     )
@@ -644,7 +644,7 @@ def test_e2e_sidebar_single_source_session_index_only(
     )
     monkeypatch.setitem(
         gateway_server._methods,
-        "team_mission.conversation.runtime_session_ids",
+        "team_mission.conversation.execution_session_ids",
         lambda _rid, _params: pytest.fail("sidebar must not fetch runtime session ids"),
     )
 

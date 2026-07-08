@@ -115,7 +115,7 @@ class TestS5ToolEventsDualSeqIdentity:
                 session_id TEXT NOT NULL,
                 run_id TEXT,
                 turn_id TEXT,
-                runtime_session_id TEXT,
+                execution_session_id TEXT,
                 runtime_scope_key TEXT,
                 participant_id TEXT NOT NULL DEFAULT '',
                 activity_id TEXT,

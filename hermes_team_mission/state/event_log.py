@@ -145,24 +145,24 @@ def _canonical_subject(source_event: Dict[str, Any], identity: Dict[str, str]) -
     event_type = source_event_type(source_event)
     mission_id = _first_text(identity.get("mission_id"), identity.get("missionId"), payload.get("mission_id"), payload.get("missionId"))
     conversation_id = _first_text(identity.get("conversation_id"), identity.get("conversationId"), payload.get("conversation_id"), payload.get("conversationId"))
-    conversation_stable_session_id = _first_text(identity.get("stable_session_id"), identity.get("stableSessionId"), payload.get("stable_session_id"), payload.get("stableSessionId"))
-    runtime_stable_session_id = _first_text(
-        source_event.get("stored_session_id"),
-        source_event.get("storedSessionId"),
-        payload.get("stored_session_id"),
-        payload.get("storedSessionId"),
+    conversation_conversation_session_id = _first_text(identity.get("conversation_session_id"), identity.get("conversationSessionId"), payload.get("conversation_session_id"), payload.get("conversationSessionId"))
+    runtime_conversation_session_id = _first_text(
+        source_event.get("conversation_session_id"),
+        source_event.get("conversationSessionId"),
+        payload.get("conversation_session_id"),
+        payload.get("conversationSessionId"),
         payload.get("session_key"),
         payload.get("sessionKey"),
-        identity.get("runtime_stable_session_id"),
-        identity.get("runtimeStableSessionId"),
+        identity.get("runtime_conversation_session_id"),
+        identity.get("runtimeConversationSessionId"),
     )
-    runtime_session_id = _first_text(
+    execution_session_id = _first_text(
         source_event.get("session_id"),
         source_event.get("sessionId"),
-        payload.get("runtime_session_id"),
-        payload.get("runtimeSessionId"),
-        identity.get("runtime_session_id"),
-        identity.get("runtimeSessionId"),
+        payload.get("execution_session_id"),
+        payload.get("executionSessionId"),
+        identity.get("execution_session_id"),
+        identity.get("executionSessionId"),
     )
     runtime_scope_key = _first_text(
         source_event.get("runtime_scope_key"),
@@ -186,12 +186,12 @@ def _canonical_subject(source_event: Dict[str, Any], identity: Dict[str, str]) -
     subject: Dict[str, Any] = {
         "mission_id": mission_id,
         "conversation_id": conversation_id,
-        "stable_session_id": conversation_stable_session_id,
-        "conversation_stable_session_id": conversation_stable_session_id,
-        "conversation_session_id": conversation_stable_session_id,
-        "runtime_stable_session_id": runtime_stable_session_id,
-        "source_session_id": runtime_stable_session_id,
-        "runtime_session_id": runtime_session_id,
+        "conversation_session_id": conversation_conversation_session_id,
+        "conversation_conversation_session_id": conversation_conversation_session_id,
+        "conversation_session_id": conversation_conversation_session_id,
+        "runtime_conversation_session_id": runtime_conversation_session_id,
+        "source_session_id": runtime_conversation_session_id,
+        "execution_session_id": execution_session_id,
         "runtime_scope_key": runtime_scope_key,
         "run_id": run_id,
         "turn_id": turn_id,
@@ -288,7 +288,7 @@ def _text_stream_contract(source_event: Dict[str, Any], subject: Dict[str, Any])
     stream_id = _first_text(
         payload.get("stream_id"),
         payload.get("streamId"),
-        f"{subject.get('runtime_stable_session_id') or subject.get('stable_session_id')}:{subject.get('node_id') or subject.get('id')}:{subject.get('run_id')}:assistant",
+        f"{subject.get('runtime_conversation_session_id') or subject.get('conversation_session_id')}:{subject.get('node_id') or subject.get('id')}:{subject.get('run_id')}:assistant",
     )
     fragment = _payload_stream_fragment(payload)
     contract: Dict[str, Any] = {
@@ -579,7 +579,7 @@ def projection_event(
         if text(value):
             event[key] = value
     _apply_subject_node_identity(event, subject)
-    for key in ("run_id", "turn_id", "session_id", "stored_session_id", "runtime_session_id", "runtime_scope_key"):
+    for key in ("run_id", "turn_id", "session_id", "execution_session_id", "runtime_scope_key"):
         value = source_event.get(key)
         if text(value):
             event[key] = value
@@ -607,7 +607,7 @@ def runtime_dedupe_key(mission_id: str, run_id: str, source_event: Dict[str, Any
             "runtime",
             text(mission_id),
             text(run_id) or text(source_event.get("run_id") or source_event.get("runId")),
-            text(source_event.get("stored_session_id") or source_event.get("session_id")),
+            text(source_event.get("conversation_session_id") or source_event.get("session_id")),
             source_event_type(source_event),
             str(event_seq(source_event)),
         ]
@@ -640,7 +640,7 @@ def runtime_stream_delta_dedupe_key(mission_id: str, run_id: str, source_event: 
             "runtime-stream-delta",
             text(mission_id),
             text(run_id) or text(source_event.get("run_id") or source_event.get("runId")),
-            text(source_event.get("stored_session_id") or source_event.get("session_id")),
+            text(source_event.get("conversation_session_id") or source_event.get("session_id")),
             event_type,
             stream_id,
             str(offset),
@@ -710,9 +710,9 @@ def append_team_mission_event(
     source_type = text(payload.get("source_event_type") or payload.get("sourceEventType") or source_event_type(source_event))
     source_run_id = text(event.get("run_id") or payload.get("run_id") or payload.get("runId") or source_event.get("run_id"))
     source_session_id = text(
-        event.get("stored_session_id")
-        or payload.get("stable_session_id")
-        or source_event.get("stored_session_id")
+        event.get("conversation_session_id")
+        or payload.get("conversation_session_id")
+        or source_event.get("conversation_session_id")
         or source_event.get("session_id")
     )
     source_seq = int(payload.get("source_seq") or payload.get("sourceSeq") or event_seq(source_event) or 0)
@@ -776,7 +776,7 @@ def append_team_mission_runtime_event(
         subject_type=subject.get("type"),
         subject_id=subject.get("id"),
         subject_node_id=subject.get("node_id") or subject.get("nodeId"),
-        runtime_stable_session_id=subject.get("runtime_stable_session_id") or subject.get("runtimeStableSessionId"),
+        runtime_conversation_session_id=subject.get("runtime_conversation_session_id") or subject.get("runtimeConversationSessionId"),
         text_event=text_stream.get("event"),
         text_len=len(raw_text(text_stream.get("delta") or text_stream.get("text"))),
     )
@@ -792,18 +792,18 @@ def _mission_activity_session_id(
     payload = event_payload(event)
     identity = identity or {}
     candidates = [
+        identity.get("runtime_conversation_session_id"),
+        identity.get("runtimeConversationSessionId"),
+        identity.get("source_session_id"),
+        identity.get("sourceSessionId"),
         identity.get("session_id"),
         identity.get("sessionId"),
-        identity.get("stored_session_id"),
-        identity.get("storedSessionId"),
-        identity.get("conversation_session_id"),
-        identity.get("conversationSessionId"),
-        event.get("stored_session_id"),
-        event.get("storedSessionId"),
+        payload.get("runtime_conversation_session_id"),
+        payload.get("runtimeConversationSessionId"),
+        payload.get("source_session_id"),
+        payload.get("sourceSessionId"),
         event.get("session_id"),
         event.get("sessionId"),
-        payload.get("stored_session_id"),
-        payload.get("storedSessionId"),
         payload.get("session_id"),
         payload.get("sessionId"),
     ]
@@ -858,8 +858,8 @@ def _append_mission_activity_run_event(
     payload = dict(event_payload(frame))
     frame["activity_id"] = activity_id
     frame["activityId"] = activity_id
-    frame["stored_session_id"] = session_id
-    frame.setdefault("session_id", frame.get("runtime_session_id") or session_id)
+    frame["conversation_session_id"] = session_id
+    frame.setdefault("session_id", frame.get("execution_session_id") or session_id)
     payload["activity_id"] = activity_id
     payload["activityId"] = activity_id
     frame["payload"] = payload

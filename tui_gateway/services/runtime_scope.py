@@ -54,7 +54,7 @@ _CONTROL_PLANE_METHODS = frozenset(
         "team_mission.conversation.rename",
         "team_mission.conversation.render",
         "team_mission.conversation.resolve",
-        "team_mission.conversation.runtime_session_ids",
+        "team_mission.conversation.execution_session_ids",
         "team_mission.create",
         "team_mission.events",
         "team_mission.graph",
@@ -175,8 +175,8 @@ def runtime_scope_from_params(params: dict[str, Any]) -> RuntimeScope:
     conversation_id = str(
         params.get("conversation_id")
         or params.get("conversationId")
-        or params.get("stored_session_id")
-        or params.get("storedSessionId")
+        or params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or params.get("session_id")
         or params.get("sessionId")
         or ""

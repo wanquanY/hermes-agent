@@ -83,8 +83,8 @@ def resolve_approval_session_key(params: dict) -> str:
     """Best-effort, non-raising variant of _approval_session_key for the runtime
     proxy's local-pending check. Returns "" when it cannot resolve a session key."""
     requested = str(
-        params.get("stored_session_id")
-        or params.get("storedSessionId")
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or params.get("session_id")
         or params.get("sessionId")
         or ""
@@ -265,14 +265,14 @@ def _approval_session_key(params: dict, rid):
     to request_id addressing.
     """
     requested = str(
-        params.get("stored_session_id")
-        or params.get("storedSessionId")
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or params.get("session_id")
         or params.get("sessionId")
         or ""
     ).strip()
     if not requested:
-        return "", _err(rid, 4006, "session_id or stored_session_id required")
+        return "", _err(rid, 4006, "session_id or conversation_session_id required")
 
     session = _sessions.get(requested)
     if session:

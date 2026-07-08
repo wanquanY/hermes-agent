@@ -11,13 +11,13 @@ def _seed_team_conversation(
     db: SessionDB,
     *,
     conversation_id: str = "conversation-1",
-    stable_session_id: str = "team-session-1",
+    conversation_session_id: str = "team-session-1",
     team_id: str = "team-1",
     mission_id: str = "mission-1",
 ) -> None:
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=stable_session_id,
+        conversation_session_id=conversation_session_id,
         team_id=team_id,
         title="团队会话",
         active_mission_id=mission_id,
@@ -29,14 +29,14 @@ def _seed_team_conversation(
         title="团队任务",
         objective="验证 canonical conversation id",
         status="active",
-        leader_session_id=stable_session_id,
-        metadata={"stableTeamSessionId": stable_session_id},
+        leader_session_id=conversation_session_id,
+        metadata={"conversationTeamSessionId": conversation_session_id},
     )
 
 
-def _assert_canonical_conversation(conversation: dict, *, conversation_id: str, stable_session_id: str, team_id: str) -> None:
+def _assert_canonical_conversation(conversation: dict, *, conversation_id: str, conversation_session_id: str, team_id: str) -> None:
     assert conversation["conversation_id"] == conversation_id
-    assert conversation["stable_session_id"] == stable_session_id
+    assert conversation["conversation_session_id"] == conversation_session_id
     assert conversation["team_id"] == team_id
 
 
@@ -49,7 +49,7 @@ def test_resolve_normal_team_mission_returns_canonical_conversation_id(tmp_path:
     _assert_canonical_conversation(
         resolved["conversation"],
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
     )
     assert resolved["mission"]["mission_id"] == "mission-1"
@@ -65,7 +65,7 @@ def test_resolve_member_chat_only_mission_returns_conversation_id(tmp_path: Path
         objective="隐藏 member chat 容器",
         status="active",
         leader_session_id="team-session-member-1",
-        metadata={"member_chat_only": True, "stableTeamSessionId": "team-session-member-1"},
+        metadata={"member_chat_only": True, "conversationTeamSessionId": "team-session-member-1"},
     )
 
     resolved = db.resolve_team_mission_conversation("team-conversation-member-1")
@@ -73,13 +73,13 @@ def test_resolve_member_chat_only_mission_returns_conversation_id(tmp_path: Path
     _assert_canonical_conversation(
         resolved["conversation"],
         conversation_id="team-conversation-member-1",
-        stable_session_id="team-session-member-1",
+        conversation_session_id="team-session-member-1",
         team_id="team-1",
     )
     assert resolved["mission"] == {}
 
 
-def test_resolve_with_stable_session_id_input_returns_conversation_id(tmp_path: Path):
+def test_resolve_with_conversation_session_id_input_returns_conversation_id(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     _seed_team_conversation(db)
 
@@ -88,7 +88,7 @@ def test_resolve_with_stable_session_id_input_returns_conversation_id(tmp_path: 
     _assert_canonical_conversation(
         resolved["conversation"],
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
     )
 
@@ -98,7 +98,7 @@ def test_resolve_with_team_conversation_prefix_identifier_returns_id(tmp_path: P
     _seed_team_conversation(
         db,
         conversation_id="team-conversation-abc123",
-        stable_session_id="team-session-team-conversation-abc123",
+        conversation_session_id="team-session-team-conversation-abc123",
         team_id="team-prefix",
         mission_id="mission-prefix",
     )
@@ -108,7 +108,7 @@ def test_resolve_with_team_conversation_prefix_identifier_returns_id(tmp_path: P
     _assert_canonical_conversation(
         resolved["conversation"],
         conversation_id="team-conversation-abc123",
-        stable_session_id="team-session-team-conversation-abc123",
+        conversation_session_id="team-session-team-conversation-abc123",
         team_id="team-prefix",
     )
 
@@ -141,7 +141,7 @@ def test_render_snapshot_rejects_resolve_response_with_empty_conversation_id(mon
             "result": {
                 "conversation": {
                     "conversation_id": "",
-                    "stable_session_id": "team-session-bad",
+                    "conversation_session_id": "team-session-bad",
                     "team_id": "team-bad",
                 },
                 "mission": {},

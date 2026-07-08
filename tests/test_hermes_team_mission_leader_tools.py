@@ -55,7 +55,7 @@ def test_start_task_does_not_inherit_non_planning_conversation_mode(monkeypatch,
             "mode": "discussion",
             "conversation_only": True,
             "workspace": {"workspace_id": "workspace-1", "workspace_path": str(workspace)},
-            "metadata": {"stableTeamSessionId": "team-session-1"},
+            "metadata": {"conversationTeamSessionId": "team-session-1"},
         },
     )
     submitted = {}
@@ -70,7 +70,7 @@ def test_start_task_does_not_inherit_non_planning_conversation_mode(monkeypatch,
                 "run_id": params["run_id"],
                 "turn_id": params["turn_id"],
                 "session_id": "runtime-planning",
-                "stored_session_id": params["stored_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
                 "runtime_scope_key": params["runtime_scope_key"],
             },
         }

@@ -180,7 +180,7 @@ def test_team_mission_workspace_rebase_paths_updates_hermes_state(tmp_path: Path
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             title="Team",
             workspace_path="/old/workspace",
         )

@@ -64,7 +64,7 @@ class SessionIndexReadModel:
 
 def _session_index_sql(where: list[str]) -> str:
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
-    conversation_session_column = "tmc.stable_" "session_" "id"
+    conversation_session_column = "tmc.conversation_session_id"
     waiting_expr = (
         "(COALESCE(si.waiting_approval, 0) != 0 "
         "OR COALESCE(si.pending_approval_count, 0) > 0 "

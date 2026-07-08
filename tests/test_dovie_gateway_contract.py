@@ -108,7 +108,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.conversation.render" in response["result"]["methods"]
     assert "team_mission.conversation.list" in response["result"]["methods"]
     assert "team_mission.conversation.participants" in response["result"]["methods"]
-    assert "team_mission.conversation.runtime_session_ids" in response["result"]["methods"]
+    assert "team_mission.conversation.execution_session_ids" in response["result"]["methods"]
     assert "team_mission.conversation.rename" in response["result"]["methods"]
     assert "team_mission.conversation.delete" in response["result"]["methods"]
     assert "team_mission.message.submit" in response["result"]["methods"]
@@ -164,7 +164,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.conversation.render" in server._methods
     assert "team_mission.conversation.list" in server._methods
     assert "team_mission.conversation.participants" in server._methods
-    assert "team_mission.conversation.runtime_session_ids" in server._methods
+    assert "team_mission.conversation.execution_session_ids" in server._methods
     assert "team_mission.conversation.rename" in server._methods
     assert "team_mission.conversation.delete" in server._methods
     assert "team_mission.message.submit" in server._methods
@@ -226,7 +226,7 @@ def test_extracted_gateway_methods_own_registered_handlers():
         "team_mission.conversation.render": "tui_gateway.methods.conversation_render_snapshot",
         "team_mission.conversation.list": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.conversation.participants": "hermes_team_mission.gateway.conversation_methods",
-        "team_mission.conversation.runtime_session_ids": "hermes_team_mission.gateway.conversation_methods",
+        "team_mission.conversation.execution_session_ids": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.conversation.rename": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.conversation.delete": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.graph": "hermes_team_mission.gateway.runtime_methods",
@@ -339,7 +339,7 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
             {
                 "type": "tool.complete",
                 "session_id": "runtime-1",
-                "stored_session_id": "stored-ordinary-1",
+                "conversation_session_id": "stored-ordinary-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "payload": {
@@ -360,7 +360,7 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
 
         assert response["result"]["kind"] == "ordinary"
         assert response["result"]["renderReady"] is True
-        assert response["result"]["stored_session_id"] == "stored-ordinary-1"
+        assert response["result"]["conversation_session_id"] == "stored-ordinary-1"
         assert response["result"]["messages"][0]["text"] == "我会读取文件。"
         assert response["result"]["runEvents"][0]["type"] == "tool.complete"
         assert response["result"]["runEvents"][0]["payload"]["tool_id"] == "tool-read-1"
@@ -393,7 +393,7 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
                 "type": "tool.complete",
                 "seq": 3,
                 "session_id": "runtime-team-1",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "run_id": "team-run-1",
                 "turn_id": "team-turn-1",
                 "runtime_scope_key": "team:conversation-1:leader",
@@ -406,7 +406,7 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             team_id="team-1",
             title="团队会话",
         )
@@ -427,7 +427,7 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
         assert response["result"]["kind"] == "team_mission"
         assert response["result"]["renderReady"] is True
         assert response["result"]["conversation"]["conversation_id"] == "conversation-1"
-        assert response["result"]["stored_session_id"] == "team-session-1"
+        assert response["result"]["conversation_session_id"] == "team-session-1"
         assert response["result"]["graph"]["recent_messages"][0]["text"] == "团队任务完成。"
         assert response["result"]["messages"][0]["text"] == "团队任务完成。"
         assert response["result"]["runEvents"] == []
@@ -463,7 +463,7 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
                 "type": "tool.complete",
                 "seq": 5,
                 "session_id": "runtime-team-1",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "run_id": "team-run-1",
                 "turn_id": "team-turn-1",
                 "payload": {
@@ -475,7 +475,7 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             team_id="team-1",
             title="团队会话",
             active_mission_id="mission-1",
@@ -487,7 +487,7 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
             title="团队任务",
             objective="测试",
             status="completed",
-            metadata={"stableTeamSessionId": "team-session-1"},
+            metadata={"conversationTeamSessionId": "team-session-1"},
         )
         db.upsert_team_mission_result(
             mission_id="mission-1",
@@ -516,7 +516,7 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
         assert response["result"]["kind"] == "team_mission"
         assert response["result"]["renderReady"] is True
         assert response["result"]["projection"]["source"] == "team_mission.conversation.render"
-        assert response["result"]["stable_session_id"] == "team-session-1"
+        assert response["result"]["conversation_session_id"] == "team-session-1"
         assert response["result"]["conversation"]["conversation_id"] == "conversation-1"
         assert response["result"]["mission"]["mission_id"] == "mission-1"
         assert response["result"]["projection"]["leaderReportStatus"] == "pending"
@@ -564,7 +564,7 @@ def test_conversation_render_snapshot_returns_active_team_structural_runtime_eve
             session_id="team-session-1",
             runtime_scope_key="team:conversation-1:leader",
             turn_id="active-team-turn-1",
-            runtime_session_id="runtime-team-active",
+            execution_session_id="runtime-team-active",
             status="running",
         )
         db.append_run_event(
@@ -572,7 +572,7 @@ def test_conversation_render_snapshot_returns_active_team_structural_runtime_eve
             {
                 "type": "message.delta",
                 "session_id": "runtime-team-old",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "run_id": "completed-run-1",
                 "turn_id": "completed-turn-1",
                 "runtime_scope_key": "team:conversation-1:leader",
@@ -584,7 +584,7 @@ def test_conversation_render_snapshot_returns_active_team_structural_runtime_eve
             {
                 "type": "message.delta",
                 "session_id": "runtime-team-active",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "run_id": "active-team-run-1",
                 "turn_id": "active-team-turn-1",
                 "runtime_scope_key": "team:conversation-1:leader",
@@ -596,7 +596,7 @@ def test_conversation_render_snapshot_returns_active_team_structural_runtime_eve
             {
                 "type": "tool.start",
                 "session_id": "runtime-team-active",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "run_id": "active-team-run-1",
                 "turn_id": "active-team-turn-1",
                 "runtime_scope_key": "team:conversation-1:leader",
@@ -605,7 +605,7 @@ def test_conversation_render_snapshot_returns_active_team_structural_runtime_eve
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             team_id="team-1",
             title="团队会话",
             active_mission_id="mission-active",
@@ -703,7 +703,7 @@ def test_conversation_render_snapshot_preserves_team_assistant_run_ids(tmp_path,
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             team_id="team-1",
             title="团队会话",
             active_mission_id="mission-1",
@@ -715,7 +715,7 @@ def test_conversation_render_snapshot_preserves_team_assistant_run_ids(tmp_path,
             title="团队任务",
             objective="测试",
             status="completed",
-            metadata={"stableTeamSessionId": "team-session-1"},
+            metadata={"conversationTeamSessionId": "team-session-1"},
         )
         monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
         monkeypatch.setattr(session_methods, "_get_db", lambda: db)
@@ -783,7 +783,7 @@ def test_conversation_render_snapshot_filters_node_transcript_but_keeps_mission_
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             team_id="team-1",
             title="团队会话",
             active_mission_id="mission-1",
@@ -795,7 +795,7 @@ def test_conversation_render_snapshot_filters_node_transcript_but_keeps_mission_
             title="团队任务",
             objective="测试",
             status="completed",
-            metadata={"stableTeamSessionId": "team-session-1"},
+            metadata={"conversationTeamSessionId": "team-session-1"},
         )
         monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
         monkeypatch.setattr(session_methods, "_get_db", lambda: db)
@@ -864,7 +864,7 @@ def test_conversation_render_snapshot_normalizes_same_turn_team_assistant_tool_m
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             team_id="team-1",
             title="团队会话",
             active_mission_id="mission-1",
@@ -876,7 +876,7 @@ def test_conversation_render_snapshot_normalizes_same_turn_team_assistant_tool_m
             title="团队任务",
             objective="测试",
             status="completed",
-            metadata={"stableTeamSessionId": "team-session-1"},
+            metadata={"conversationTeamSessionId": "team-session-1"},
         )
         monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
         monkeypatch.setattr(session_methods, "_get_db", lambda: db)
@@ -1047,7 +1047,7 @@ def test_session_db_persists_run_registry_and_event_log(tmp_path):
             session_id="session-1",
             runtime_scope_key="profile:agent-default",
             turn_id="turn-1",
-            runtime_session_id="runtime-1",
+            execution_session_id="runtime-1",
             status="queued",
             metadata={"source": "test"},
         )
@@ -1060,7 +1060,7 @@ def test_session_db_persists_run_registry_and_event_log(tmp_path):
             session_id="session-1",
             runtime_scope_key="profile:agent-default",
             turn_id="turn-2",
-            runtime_session_id="runtime-1",
+            execution_session_id="runtime-1",
             status="queued",
         )
         assert conflict["created"] is False
@@ -1071,7 +1071,7 @@ def test_session_db_persists_run_registry_and_event_log(tmp_path):
             {
                 "type": "message.delta",
                 "session_id": "runtime-1",
-                "stored_session_id": "session-1",
+                "conversation_session_id": "session-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "runtime_scope_key": "profile:agent-default",
@@ -1114,7 +1114,7 @@ def test_session_db_keeps_terminal_run_closed_after_late_delta(tmp_path):
             session_id="session-1",
             runtime_scope_key="profile:agent-default",
             turn_id="turn-1",
-            runtime_session_id="runtime-1",
+            execution_session_id="runtime-1",
             status="running",
         )
         assert first["created"] is True
@@ -1165,7 +1165,7 @@ def test_session_db_keeps_terminal_run_closed_after_late_delta(tmp_path):
             session_id="session-1",
             runtime_scope_key="profile:agent-default",
             turn_id="turn-2",
-            runtime_session_id="runtime-2",
+            execution_session_id="runtime-2",
             status="queued",
         )
         assert second["created"] is True
@@ -1186,7 +1186,7 @@ def test_run_control_session_status_recovers_dead_gateway_active_run(tmp_path, c
             run_id="stale-run",
             session_id="team-session-recovered",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-stale",
+            execution_session_id="runtime-stale",
             status="running",
             started_at=stale_time,
             updated_at=stale_time,
@@ -1226,7 +1226,7 @@ def test_run_control_session_status_does_not_warn_for_live_owner_run(tmp_path, c
             run_id="live-run",
             session_id="team-session-live",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-live",
+            execution_session_id="runtime-live",
             status="running",
             metadata={
                 "gateway_pid": os.getpid(),
@@ -1259,7 +1259,7 @@ def test_run_control_session_status_does_not_fail_fresh_dead_owner_run(tmp_path,
             run_id="fresh-run",
             session_id="team-session-fresh",
             runtime_scope_key="profile:agent-default:version:v1",
-            runtime_session_id="runtime-fresh",
+            execution_session_id="runtime-fresh",
             status="running",
             metadata={
                 "gateway_pid": 999_999_998,
@@ -1293,7 +1293,7 @@ def test_run_control_session_status_recovers_recent_dead_owner_run(tmp_path, cap
             run_id="recent-run",
             session_id="team-session-recent",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-recent",
+            execution_session_id="runtime-recent",
             status="running",
             started_at=recent_time,
             updated_at=recent_time,
@@ -1328,7 +1328,7 @@ def test_dead_owner_metadata_wins_over_stale_live_runtime_session_snapshot(tmp_p
             run_id="dead-owner-run",
             session_id="team-session-stale-live",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-stale-live",
+            execution_session_id="runtime-stale-live",
             status="running",
             started_at=recent_time,
             updated_at=recent_time,
@@ -1339,7 +1339,7 @@ def test_dead_owner_metadata_wins_over_stale_live_runtime_session_snapshot(tmp_p
         )
 
         failed = db.fail_orphaned_active_runs(
-            live_runtime_session_ids={"runtime-stale-live"},
+            live_execution_session_ids={"runtime-stale-live"},
             current_pid=os.getpid(),
             current_gateway_instance_id="current-gateway",
             stale_after_seconds=300,
@@ -1366,7 +1366,7 @@ def test_run_control_reservation_recovers_dead_gateway_active_run(tmp_path):
             run_id="stale-run",
             session_id="team-session-submit",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-stale",
+            execution_session_id="runtime-stale",
             status="running",
             started_at=stale_time,
             updated_at=stale_time,
@@ -1377,11 +1377,11 @@ def test_run_control_reservation_recovers_dead_gateway_active_run(tmp_path):
         )
 
         reservation = run_control.create_run_if_session_idle(
-            stored_session_id="team-session-submit",
+            conversation_session_id="team-session-submit",
             run_id="next-run",
             turn_id="next-turn",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-current",
+            execution_session_id="runtime-current",
             metadata={
                 "gateway_pid": os.getpid(),
                 "gateway_instance_id": "current-gateway",
@@ -1412,7 +1412,7 @@ def test_run_submit_recovers_dead_gateway_active_run_before_busy_check(tmp_path,
             run_id="stale-run",
             session_id="team-session-submit",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-stale",
+            execution_session_id="runtime-stale",
             status="running",
             started_at=stale_time,
             updated_at=stale_time,
@@ -1440,7 +1440,7 @@ def test_run_submit_recovers_dead_gateway_active_run_before_busy_check(tmp_path,
                     "status": "running",
                     "run_id": params["run_id"],
                     "turn_id": params["turn_id"],
-                    "stored_session_id": params["stored_session_id"],
+                    "conversation_session_id": params["conversation_session_id"],
                 },
             }
 
@@ -1449,7 +1449,7 @@ def test_run_submit_recovers_dead_gateway_active_run_before_busy_check(tmp_path,
         response = server._methods["run.submit"](
             1,
             {
-                "stored_session_id": "team-session-submit",
+                "conversation_session_id": "team-session-submit",
                 "client_run_id": "next-run",
                 "turn_id": "next-turn",
                 "runtime_scope_key": "team:conversation:leader",
@@ -1477,7 +1477,7 @@ def test_gateway_shutdown_terminalizes_active_run(tmp_path, monkeypatch):
             run_id="active-run",
             session_id="team-session-shutdown",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-live",
+            execution_session_id="runtime-live",
             turn_id="turn-1",
             status="running",
             metadata={
@@ -1523,7 +1523,7 @@ def test_team_conversation_resolve_recovers_dead_gateway_active_run(tmp_path, mo
     try:
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-resolve",
+            conversation_session_id="team-session-resolve",
             team_id="team-1",
             title="团队会话",
         )
@@ -1532,7 +1532,7 @@ def test_team_conversation_resolve_recovers_dead_gateway_active_run(tmp_path, mo
             run_id="stale-run",
             session_id="team-session-resolve",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-stale",
+            execution_session_id="runtime-stale",
             status="running",
             started_at=stale_time,
             updated_at=stale_time,
@@ -1548,7 +1548,7 @@ def test_team_conversation_resolve_recovers_dead_gateway_active_run(tmp_path, mo
             {"identifier": "conversation-1"},
         )
 
-        assert response["result"]["conversation"]["stable_session_id"] == "team-session-resolve"
+        assert response["result"]["conversation"]["conversation_session_id"] == "team-session-resolve"
         assert db.get_run("stale-run")["status"] == "failed"
     finally:
         db.close()
@@ -1591,7 +1591,7 @@ def test_session_db_does_not_open_active_run_for_team_mission_control_events(tmp
             session_id="team-session-1",
             runtime_scope_key="team:conversation-1:leader-conversation",
             turn_id="leader-turn-2",
-            runtime_session_id="runtime-2",
+            execution_session_id="runtime-2",
         )
         assert next_run["created"] is True
         assert next_run["conflict"] is None
@@ -1610,7 +1610,7 @@ def test_session_db_repairs_legacy_control_only_active_runs(tmp_path):
             run_id="team-mission:mission-1:conversation:legacy",
             session_id="team-session-1",
             runtime_scope_key="team_mission:mission-1",
-            runtime_session_id="runtime-control",
+            execution_session_id="runtime-control",
             status="running",
             started_at=stale_time,
             updated_at=stale_time,
@@ -1641,7 +1641,7 @@ def test_session_db_repairs_legacy_control_only_active_runs(tmp_path):
             session_id="team-session-1",
             runtime_scope_key="team:conversation-1:leader-conversation",
             turn_id="leader-turn-2",
-            runtime_session_id="runtime-2",
+            execution_session_id="runtime-2",
         )
         assert next_run["created"] is True
         assert next_run["conflict"] is None
@@ -1660,7 +1660,7 @@ def test_session_db_does_not_repair_live_control_only_team_leader_run(tmp_path):
             session_id="team-session-1",
             runtime_scope_key="team:team-conversation-1:leader-conversation",
             turn_id="turn-1",
-            runtime_session_id="runtime-leader",
+            execution_session_id="runtime-leader",
             status="running",
             metadata={
                 "gateway_pid": os.getpid(),
@@ -1672,7 +1672,7 @@ def test_session_db_does_not_repair_live_control_only_team_leader_run(tmp_path):
             {
                 "type": "session.info",
                 "session_id": "runtime-leader",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "run_id": "team-leader-run-1",
                 "turn_id": "turn-1",
                 "runtime_scope_key": "team:team-conversation-1:leader-conversation",
@@ -1695,7 +1695,7 @@ def test_session_db_does_not_repair_live_control_only_team_leader_run(tmp_path):
             session_id="team-session-1",
             runtime_scope_key="team:team-conversation-1:leader-conversation",
             turn_id="turn-2",
-            runtime_session_id="runtime-leader-2",
+            execution_session_id="runtime-leader-2",
         )
         assert next_run["created"] is False
         assert next_run["run"] is None

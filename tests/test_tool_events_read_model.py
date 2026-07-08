@@ -15,7 +15,7 @@ def _tool_event(
     body = {
         "type": event_type,
         "session_id": "runtime-1",
-        "stored_session_id": "session-1",
+        "conversation_session_id": "session-1",
         "run_id": run_id,
         "turn_id": "turn-1",
         "participant_id": "agent:default",

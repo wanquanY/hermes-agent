@@ -175,8 +175,8 @@ def submit_mission_leader_report_run(
     ).strip()
     conversation_session_id = str(
         conversation_session_id
-        or metadata.get("stableTeamSessionId")
-        or metadata.get("stable_team_session_id")
+        or metadata.get("conversationTeamSessionId")
+        or metadata.get("conversation_team_session_id")
         or metadata.get("conversation_session_id")
         or metadata.get("conversationSessionId")
         or mission.get("leader_session_id")
@@ -280,7 +280,7 @@ def submit_mission_leader_report_run(
         node_id="",
         run_id=run_id,
         session_id=conversation_session_id,
-        runtime_session_id="",
+        execution_session_id="",
         runtime_scope_key=runtime_scope_key,
         role="leader",
         metadata={
@@ -306,7 +306,7 @@ def submit_mission_leader_report_run(
     submit_params = {
         **params,
         **profile_params,
-        "stored_session_id": conversation_session_id,
+        "conversation_session_id": conversation_session_id,
         "session_id": conversation_session_id,
         "client_run_id": run_id,
         "run_id": run_id,

@@ -38,7 +38,7 @@ def _event(run_id: str = "run-1", **extra: Any) -> dict[str, Any]:
     return {
         "type": "message.complete",
         "session_id": "conv-1",
-        "stored_session_id": "conv-1",
+        "conversation_session_id": "conv-1",
         "run_id": run_id,
         "turn_id": f"turn-{run_id}",
         "seq": 1,
@@ -167,7 +167,7 @@ def test_render_snapshot_messages_include_message_row_participant_id(tmp_path: P
             {
                 **_event("run-render"),
                 "session_id": "team-session-1",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "turn_id": "turn-render",
             },
             participant_id="member:renderer",
@@ -183,7 +183,7 @@ def test_render_snapshot_messages_include_message_row_participant_id(tmp_path: P
                 "result": {
                     "conversation": {
                         "conversation_id": "conversation-1",
-                        "stable_session_id": "team-session-1",
+                        "conversation_session_id": "team-session-1",
                     },
                     "mission": {},
                     "team": {},
@@ -224,7 +224,7 @@ def test_legacy_event_without_participant_id_still_renders(tmp_path: Path, monke
             {
                 **_event("run-legacy"),
                 "session_id": "team-session-legacy",
-                "stored_session_id": "team-session-legacy",
+                "conversation_session_id": "team-session-legacy",
                 "turn_id": "turn-legacy",
             },
         )
@@ -239,7 +239,7 @@ def test_legacy_event_without_participant_id_still_renders(tmp_path: Path, monke
                 "result": {
                     "conversation": {
                         "conversation_id": "conversation-legacy",
-                        "stable_session_id": "team-session-legacy",
+                        "conversation_session_id": "team-session-legacy",
                     },
                     "mission": {},
                     "team": {},

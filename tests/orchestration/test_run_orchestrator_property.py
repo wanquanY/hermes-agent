@@ -27,7 +27,7 @@ def _make_conn(session_id: str = "s1") -> sqlite3.Connection:
             session_id TEXT NOT NULL,
             runtime_scope_key TEXT,
             turn_id TEXT,
-            runtime_session_id TEXT,
+            execution_session_id TEXT,
             status TEXT NOT NULL,
             started_at REAL NOT NULL,
             updated_at REAL NOT NULL,

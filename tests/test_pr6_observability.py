@@ -39,7 +39,7 @@ def _make_terminal_frame(*, session_id: str = "sess-1", run_id: str = "run-1") -
     return {
         "type": "message.complete",
         "session_id": session_id,
-        "stored_session_id": session_id,
+        "conversation_session_id": session_id,
         "run_id": run_id,
         "turn_id": "turn-1",
         "payload": {"status": "completed"},

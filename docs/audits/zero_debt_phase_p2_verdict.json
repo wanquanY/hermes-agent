@@ -1,0 +1,64 @@
+{
+  "checks": [
+    {
+      "id": "file_exists:docs/hermes_zero_debt_manifest.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:docs/hermes_zero_debt_execution_plan.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:scripts/zero_debt/verdict.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:scripts/zero_debt/phase_closure.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:tests/observability/test_zero_debt_gates.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:tests/observability/test_channels_p1_boundary.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p2:no_sessiondb_production",
+      "message": "production code has no hermes_state/SessionDB dependency",
+      "ok": true
+    },
+    {
+      "id": "p2:no_legacy_identity_alias_internal",
+      "message": "legacy identity aliases appear only at the wire folding boundary",
+      "ok": true
+    },
+    {
+      "id": "p2:event_ledger_single_writer",
+      "message": "run_events INSERT is owned by EventLedger only",
+      "ok": true
+    },
+    {
+      "id": "p2:run_state_single_writer",
+      "message": "runs UPDATE is owned by RunTerminator/RunRepo only",
+      "ok": true
+    }
+  ],
+  "next_required_human_signoff": "docs/audits/zero_debt_phase_p2_human_signoff.md",
+  "phase": "P2",
+  "required_test_commands": [
+    ".venv/bin/pytest tests/observability/test_zero_debt_gates.py -q",
+    ".venv/bin/pytest tests/gateway tests/storage tests/tui_gateway -q"
+  ],
+  "status": "pass",
+  "warnings": [
+    "worktree is dirty; P1+ requires an explicit baseline or clean handoff"
+  ]
+}

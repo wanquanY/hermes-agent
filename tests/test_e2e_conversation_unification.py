@@ -110,7 +110,7 @@ def _create_direct_session(
         }
     )
     result = _assert_ok(response)
-    session_id = str(result.get("stored_session_id") or result.get("session_id") or session_id_hint)
+    session_id = str(result.get("conversation_session_id") or result.get("session_id") or session_id_hint)
     db.append_message(session_id, role="user", content="direct hello")
     db.upsert_session_index(
         session_id=session_id,
@@ -155,7 +155,7 @@ def _create_team_conversation(
     if conversation_only:
         db.upsert_team_mission_conversation(
             conversation_id=conversation_id,
-            stable_session_id=session_id,
+            conversation_session_id=session_id,
             team_id="team-1",
             title="Team conversation",
             active_mission_id="",
@@ -179,7 +179,7 @@ def _create_team_conversation(
         )
         db.upsert_team_mission_conversation(
             conversation_id=conversation_id,
-            stable_session_id=session_id,
+            conversation_session_id=session_id,
             team_id="team-1",
             title="Team conversation",
             active_mission_id=mission_id,

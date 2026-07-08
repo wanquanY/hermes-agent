@@ -177,7 +177,7 @@ class WorkerPublishBridge:
         self._handles: list[_PatchHandle] = []
         self._lock = threading.RLock()
         self._installed = False
-        self._stored_session_id: str = ""
+        self._conversation_session_id: str = ""
         self._active_context_handle: _RunContextHandle | None = None
         # request_ids already shipped as InteractiveRequestFrame by THIS
         # bridge. Multiple hooks can observe the same request (e.g. the
@@ -187,14 +187,14 @@ class WorkerPublishBridge:
 
     # ── public API ───────────────────────────────────────────────────
 
-    def install(self, *, stored_session_id: str = "", run_context: Any = None) -> None:
+    def install(self, *, conversation_session_id: str = "", run_context: Any = None) -> None:
         with self._lock:
             if self._installed:
                 raise RuntimeError(
                     "WorkerPublishBridge.install: already installed; "
                     "build a new bridge per run instead of reusing."
                 )
-            self._stored_session_id = stored_session_id
+            self._conversation_session_id = conversation_session_id
             if run_context is not None:
                 self._active_context_handle = _push_active_run_context(run_context)
             self._install_publish_hook()
@@ -254,7 +254,7 @@ class WorkerPublishBridge:
         kind: str,
         payload: dict[str, Any] | None = None,
         *,
-        stored_session_id: str = "",
+        conversation_session_id: str = "",
     ) -> bool:
         """Single egress hook for interactive requests: ship an
         ``InteractiveRequestFrame`` so the main sidecar's PendingRegistry
@@ -293,7 +293,7 @@ class WorkerPublishBridge:
                 kind=normalized_kind,
                 request_id=rid,
                 payload=dict(payload) if isinstance(payload, dict) else {},
-                stored_session_id=str(stored_session_id or self._stored_session_id or ""),
+                conversation_session_id=str(conversation_session_id or self._conversation_session_id or ""),
             )
         )
         return True
@@ -322,7 +322,7 @@ class WorkerPublishBridge:
             rid,
             "approval",
             payload,
-            stored_session_id=self._stored_session_id or str(session_key or ""),
+            conversation_session_id=self._conversation_session_id or str(session_key or ""),
         )
 
     # ── per-hook installers ─────────────────────────────────────────
@@ -423,26 +423,26 @@ class WorkerPublishBridge:
                     ).strip()
                     if request_id:
                         stored = str(
-                            params.get("stored_session_id")
+                            params.get("conversation_session_id")
                             or params.get("session_id")
-                            or bridge._stored_session_id
+                            or bridge._conversation_session_id
                             or ""
                         ).strip()
                         bridge.register_interactive_request(
                             request_id,
                             interactive_kind,
                             payload_dict,
-                            stored_session_id=stored,
+                            conversation_session_id=stored,
                         )
                     else:
                         _log.warning(
                             "[worker-publish-bridge] interactive request missing request_id "
-                            "kind=%s event_type=%s stored_session_id=%s session_id=%s "
+                            "kind=%s event_type=%s conversation_session_id=%s session_id=%s "
                             "run_id=%s turn_id=%s payload_keys=%s has_question=%s choices_count=%s",
                             interactive_kind,
                             event_type,
                             str(
-                                params.get("stored_session_id")
+                                params.get("conversation_session_id")
                                 or params.get("session_key")
                                 or ""
                             ).strip(),
@@ -502,11 +502,11 @@ class WorkerPublishBridge:
                 payload["choices"] = list(choices)
             _log.info(
                 "[worker-publish-bridge] clarify gateway request registered "
-                "request_id=%s session_key=%s stored_session_id=%s payload_keys=%s "
+                "request_id=%s session_key=%s conversation_session_id=%s payload_keys=%s "
                 "has_question=%s choices_count=%s",
                 request_id,
                 str(session_key or "").strip(),
-                bridge._stored_session_id or str(session_key or "").strip(),
+                bridge._conversation_session_id or str(session_key or "").strip(),
                 _payload_keys(payload),
                 bool(str(question or "").strip()),
                 _choices_count(payload.get("choices")),
@@ -515,7 +515,7 @@ class WorkerPublishBridge:
                 request_id,
                 "clarify",
                 payload,
-                stored_session_id=bridge._stored_session_id or str(session_key or ""),
+                conversation_session_id=bridge._conversation_session_id or str(session_key or ""),
             )
             return entry
 
@@ -555,7 +555,7 @@ class WorkerPublishBridge:
                         kind="approval",
                         request_id=str(session_key),
                         payload=payload,
-                        stored_session_id=bridge._stored_session_id or str(session_key or ""),
+                        conversation_session_id=bridge._conversation_session_id or str(session_key or ""),
                     )
                 )
                 return result
@@ -570,11 +570,11 @@ def install_for_run(
     *,
     emit: EmitAsync,
     loop: asyncio.AbstractEventLoop,
-    stored_session_id: str = "",
+    conversation_session_id: str = "",
     run_context: Any = None,
 ) -> WorkerPublishBridge:
     """Convenience factory: build + install in one call. Returns the
     bridge so the caller can ``uninstall()`` it at run end."""
     bridge = WorkerPublishBridge(emit=emit, loop=loop)
-    bridge.install(stored_session_id=stored_session_id, run_context=run_context)
+    bridge.install(conversation_session_id=conversation_session_id, run_context=run_context)
     return bridge

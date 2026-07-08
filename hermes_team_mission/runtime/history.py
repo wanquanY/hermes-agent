@@ -111,7 +111,7 @@ def _binding_matches(binding: dict[str, Any], *, node_id: str, session_id: str) 
         return False
     if session_id and session_id not in {
         _text(binding.get("session_id")),
-        _text(binding.get("runtime_session_id")),
+        _text(binding.get("execution_session_id")),
     }:
         return False
     return True
@@ -140,8 +140,8 @@ def _conversation_from_params(db: Any, params: dict[str, Any]) -> dict[str, Any]
     conversation_session_id = _text(
         params.get("conversation_session_id")
         or params.get("conversationSessionId")
-        or params.get("stable_team_session_id")
-        or params.get("stableTeamSessionId")
+        or params.get("conversation_team_session_id")
+        or params.get("conversationTeamSessionId")
     )
     if conversation_id and hasattr(db, "get_team_mission_conversation"):
         conversation = db.get_team_mission_conversation(conversation_id)
@@ -353,9 +353,9 @@ def _event_from_row(row: Any, session_id: str) -> dict[str, Any]:
     return {
         **event,
         "type": _text(event.get("type") or _row_value(row, "event_type", "")),
-        "session_id": _text(event.get("session_id") or _row_value(row, "runtime_session_id", "")),
-        "stored_session_id": _text(event.get("stored_session_id")) or session_id,
-        "runtime_session_id": _text(event.get("runtime_session_id") or _row_value(row, "runtime_session_id", "")),
+        "session_id": _text(event.get("session_id") or _row_value(row, "execution_session_id", "")),
+        "conversation_session_id": _text(event.get("conversation_session_id")) or session_id,
+        "execution_session_id": _text(event.get("execution_session_id") or _row_value(row, "execution_session_id", "")),
         "runtime_scope_key": _text(event.get("runtime_scope_key") or _row_value(row, "runtime_scope_key", "")),
         "run_id": _text(event.get("run_id") or _row_value(row, "run_id", "")),
         "turn_id": _text(event.get("turn_id") or _row_value(row, "turn_id", "")),
@@ -460,8 +460,8 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
     requested_session_id = _text(
         params.get("session_id")
         or params.get("sessionId")
-        or params.get("stored_session_id")
-        or params.get("storedSessionId")
+        or params.get("conversation_session_id")
+        or params.get("conversationSessionId")
     )
     if not node_id and not requested_session_id:
         return {"error": "node_id or session_id required", "code": 4006}
@@ -470,8 +470,8 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
     conversation_session_id = _text(
         params.get("conversation_session_id")
         or params.get("conversationSessionId")
-        or params.get("stable_team_session_id")
-        or params.get("stableTeamSessionId")
+        or params.get("conversation_team_session_id")
+        or params.get("conversationTeamSessionId")
     )
     include_run_events = bool(params.get("include_run_events") or params.get("includeRunEvents"))
     run_event_types = _param_text_set(
@@ -554,10 +554,10 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
 
     _add_candidate(requested_session_id)
     _add_candidate(binding.get("session_id"))
-    _add_candidate(binding.get("runtime_session_id"))
+    _add_candidate(binding.get("execution_session_id"))
     _add_candidate(conversation_session_id)
     _add_candidate(mission_metadata.get("conversation_session_id") or mission_metadata.get("conversationSessionId"))
-    _add_candidate(mission_metadata.get("stable_session_id") or mission_metadata.get("stableSessionId"))
+    _add_candidate(mission_metadata.get("conversation_session_id") or mission_metadata.get("conversationSessionId"))
     run_id = _text(binding.get("run_id") or params.get("run_id") or params.get("runId"))
     include_control_events = bool(params.get("include_control_events") or params.get("includeControlEvents"))
     session_id = ""
@@ -613,7 +613,7 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
         resolved_session_id=session_id,
         candidate_session_ids=candidate_session_ids,
         run_id=_text(binding.get("run_id")),
-        runtime_session_id=_text(binding.get("runtime_session_id")),
+        execution_session_id=_text(binding.get("execution_session_id")),
         runtime_scope_key=_text(binding.get("runtime_scope_key")),
     )
     if not session_id:
@@ -630,7 +630,7 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
                 "last_run_event_seq": 0,
                 "last_message_id": 0,
             },
-            "source": {"session_id": "", "runtime_session_id": "", "runtime_scope_key": "", "run_id": ""},
+            "source": {"session_id": "", "execution_session_id": "", "runtime_scope_key": "", "run_id": ""},
         }
 
     if not messages:
@@ -667,7 +667,7 @@ def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> di
     }
     source = {
         "session_id": session_id,
-        "runtime_session_id": _text(binding.get("runtime_session_id")),
+        "execution_session_id": _text(binding.get("execution_session_id")),
         "runtime_scope_key": _text(binding.get("runtime_scope_key")),
         "run_id": _text(binding.get("run_id")),
         "node_id": resolved_node_id,

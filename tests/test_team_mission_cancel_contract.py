@@ -62,11 +62,11 @@ def _seed_mission(
         mode="supervised_mission",
         status="running",
         leader_session_id=conversation_session_id,
-        metadata={"stable_session_id": conversation_session_id},
+        metadata={"conversation_session_id": conversation_session_id},
     )
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=conversation_session_id,
+        conversation_session_id=conversation_session_id,
         team_id="team-1",
         title="Contract conversation",
         active_mission_id=mission_id,
