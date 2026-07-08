@@ -92,6 +92,8 @@ from agent.markdown_tables import (
     looks_like_table_row,
     realign_markdown_tables,
 )
+from hermes_agent.repositories.session_repo import sanitize_session_title
+from hermes_agent.storage.session_availability import format_session_store_unavailable
 # NOTE: `from agent.account_usage import ...` is deliberately NOT at module
 # top — it transitively pulls the OpenAI SDK chain (~230 ms cold) and is only
 # needed when the user runs `/limits`. Lazy-imported inside the handler below.
@@ -2883,10 +2885,12 @@ class HermesCLI:
         self._prompt_duration: float = 0.0  # frozen duration of last completed turn
         # Initialize SQLite session store early so /title works before first message
         self._session_db = None
+        self._session_store_unavailable_reason = ""
         try:
             from hermes_state import SessionDB
             self._session_db = SessionDB()
         except Exception as e:
+            self._session_store_unavailable_reason = str(e)
             logger.warning("Failed to initialize SessionDB — session will NOT be indexed for search: %s", e)
 
         # Opportunistic state.db maintenance — runs at most once per
@@ -4630,6 +4634,7 @@ class HermesCLI:
                 from hermes_state import SessionDB
                 self._session_db = SessionDB()
             except Exception as e:
+                self._session_store_unavailable_reason = str(e)
                 logger.warning("SQLite session store not available — session will NOT be indexed: %s", e)
         
         # If resuming, validate the session exists and load its history.
@@ -6203,9 +6208,8 @@ class HermesCLI:
                 except Exception:
                     pass
                 if title and self._session_db:
-                    from hermes_state import SessionDB
                     try:
-                        sanitized = SessionDB.sanitize_title(title)
+                        sanitized = sanitize_session_title(title)
                     except ValueError as e:
                         _cprint(f"  Title rejected: {e}")
                         sanitized = None
@@ -6265,8 +6269,6 @@ class HermesCLI:
         Returns:
             False to signal CLI exit, True to keep going.
         """
-        from hermes_state import format_session_db_unavailable
-
         parts = cmd_original.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
             _cprint("  Usage: /handoff <platform>")
@@ -6320,7 +6322,7 @@ class HermesCLI:
             except Exception:
                 pass
         if not self._session_db:
-            _cprint(f"  {format_session_db_unavailable()}")
+            _cprint(f"  {format_session_store_unavailable(self._session_store_unavailable_reason)}")
             return True
 
         # Make sure the session row exists in state.db. Most CLI sessions
@@ -6411,8 +6413,7 @@ class HermesCLI:
             return
 
         if not self._session_db:
-            from hermes_state import format_session_db_unavailable
-            _cprint(f"  {format_session_db_unavailable()}")
+            _cprint(f"  {format_session_store_unavailable(self._session_store_unavailable_reason)}")
             return
 
         # Resolve title or ID
@@ -6533,8 +6534,7 @@ class HermesCLI:
         # Bare /sessions or /sessions list — show recent sessions inline.
         if not arg or sub in {"list", "ls", "browse"}:
             if not self._session_db:
-                from hermes_state import format_session_db_unavailable
-                _cprint(f"  {format_session_db_unavailable()}")
+                _cprint(f"  {format_session_store_unavailable(self._session_store_unavailable_reason)}")
                 return
             if not self._show_recent_sessions(reason="sessions"):
                 _cprint("  (._.) No previous sessions yet.")
@@ -6555,8 +6555,7 @@ class HermesCLI:
             return
 
         if not self._session_db:
-            from hermes_state import format_session_db_unavailable
-            _cprint(f"  {format_session_db_unavailable()}")
+            _cprint(f"  {format_session_store_unavailable(self._session_store_unavailable_reason)}")
             return
 
         parts = cmd_original.split(None, 1)
@@ -8197,8 +8196,7 @@ class HermesCLI:
                     if self._session_db:
                         # Sanitize the title early so feedback matches what gets stored
                         try:
-                            from hermes_state import SessionDB
-                            new_title = SessionDB.sanitize_title(raw_title)
+                            new_title = sanitize_session_title(raw_title)
                         except ValueError as e:
                             _cprint(f"  {e}")
                             new_title = None
@@ -8223,8 +8221,7 @@ class HermesCLI:
                                 self._pending_title = new_title
                                 _cprint(f"  Session title queued: {new_title} (will be saved on first message)")
                     else:
-                        from hermes_state import format_session_db_unavailable
-                        _cprint(f"  {format_session_db_unavailable()}")
+                        _cprint(f"  {format_session_store_unavailable(self._session_store_unavailable_reason)}")
                 else:
                     _cprint("  Usage: /title <your session title>")
             # Show current title and session ID if no argument given
@@ -8238,8 +8235,7 @@ class HermesCLI:
                 else:
                     _cprint("  No title set. Usage: /title <your session title>")
             else:
-                from hermes_state import format_session_db_unavailable
-                _cprint(f"  {format_session_db_unavailable()}")
+                _cprint(f"  {format_session_store_unavailable(self._session_store_unavailable_reason)}")
         elif canonical == "handoff":
             if not self._handle_handoff_command(cmd_original):
                 return False

@@ -14,6 +14,7 @@ Wire-only legacy aliases are folded before requests enter the domain layer.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 import json
@@ -612,8 +613,30 @@ def _encode_model_config(value: dict[str, Any] | str | None) -> str | None:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+MAX_SESSION_TITLE_LENGTH = 100
+
+
+def sanitize_session_title(title: str | None) -> str | None:
+    if not title:
+        return None
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", str(title))
+    cleaned = re.sub(
+        r"[\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff\ufffc\ufff9-\ufffb]",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_SESSION_TITLE_LENGTH:
+        raise ValueError(
+            f"Title too long ({len(cleaned)} chars, max {MAX_SESSION_TITLE_LENGTH})"
+        )
+    return cleaned
+
+
 def _sanitize_title(title: str) -> str:
-    return " ".join(str(title or "").strip().split())
+    return sanitize_session_title(title) or ""
 
 
 def _table_columns(conn: RepositoryConnection, table_name: str) -> set[str]:
@@ -649,6 +672,7 @@ __all__ = [
     "Session",
     "SessionFilter",
     "SessionIndexPatch",
+    "sanitize_session_title",
     "SessionNotFound",
     "SessionRepo",
     "SessionRepoImpl",
