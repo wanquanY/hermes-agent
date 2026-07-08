@@ -354,6 +354,52 @@ def test_project_run_state_updates_bound_team_conversation_index():
     ]
 
 
+def test_ensure_runtime_session_inserts_runtime_row_once():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+
+    assert repo.ensure_runtime_session("runtime-session-1", started_at=42.0) is True
+    assert repo.ensure_runtime_session("runtime-session-1", started_at=99.0) is False
+
+    row = conn.execute(
+        """
+        SELECT id, source, started_at, updated_at
+          FROM sessions
+         WHERE id = 'runtime-session-1'
+        """
+    ).fetchone()
+    assert dict(row) == {
+        "id": "runtime-session-1",
+        "source": "runtime",
+        "started_at": 42.0,
+        "updated_at": 42.0,
+    }
+
+
+def test_ensure_runtime_session_supports_legacy_minimal_schema():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            started_at REAL NOT NULL
+        );
+        """
+    )
+    repo = SessionRepoImpl(conn)
+
+    assert repo.ensure_runtime_session("legacy-runtime", started_at=7.0) is True
+
+    row = conn.execute("SELECT * FROM sessions WHERE id = 'legacy-runtime'").fetchone()
+    assert dict(row) == {
+        "id": "legacy-runtime",
+        "source": "runtime",
+        "started_at": 7.0,
+    }
+
+
 def test_record_message_append_updates_session_and_index_projection():
     conn = _make_conn()
     repo = SessionRepoImpl(conn)

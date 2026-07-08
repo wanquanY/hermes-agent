@@ -777,13 +777,7 @@ class RunStateMixin:
         normalized_scope = str(runtime_scope_key or session_id).strip()
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO sessions (id, source, started_at)
-                VALUES (?, 'runtime', ?)
-                """,
-                (session_id, started),
-            )
+            SessionRepoImpl(conn).ensure_runtime_session(session_id, started_at=started)
             RunRepoImpl(conn).upsert_materialized_state(
                 run_id=run_id,
                 session_id=session_id,
@@ -1152,13 +1146,7 @@ class RunStateMixin:
 
         def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
             nonlocal seq
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO sessions (id, source, started_at)
-                VALUES (?, 'runtime', ?)
-                """,
-                (stable, timestamp),
-            )
+            SessionRepoImpl(conn).ensure_runtime_session(stable, started_at=timestamp)
             ensure_session_counter(conn, session_id=stable, updated_at=timestamp)
 
             def _assign_seq() -> int:

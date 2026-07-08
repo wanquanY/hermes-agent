@@ -179,6 +179,8 @@ class SessionRepo(Protocol):
 
     def finalize_orphaned_compression_sessions(self) -> int: ...
 
+    def ensure_runtime_session(self, session_id: str, *, started_at: float | None = None) -> bool: ...
+
     def record_message_append(
         self,
         session_id: str,
@@ -555,6 +557,32 @@ class SessionRepoImpl:
             (now, now),
         )
         return int(cursor.rowcount or 0)
+
+    def ensure_runtime_session(self, session_id: str, *, started_at: float | None = None) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return False
+        timestamp = float(started_at or time.time())
+        columns: list[str] = ["id"]
+        values: list[Any] = [stable]
+        if "source" in self._session_columns:
+            columns.append("source")
+            values.append("runtime")
+        if "started_at" in self._session_columns:
+            columns.append("started_at")
+            values.append(timestamp)
+        if "updated_at" in self._session_columns:
+            columns.append("updated_at")
+            values.append(timestamp)
+        placeholders = ", ".join("?" for _ in columns)
+        cursor = self._conn.execute(
+            f"""
+            INSERT OR IGNORE INTO sessions ({', '.join(columns)})
+            VALUES ({placeholders})
+            """,
+            values,
+        )
+        return int(cursor.rowcount or 0) > 0
 
     def record_message_append(
         self,
