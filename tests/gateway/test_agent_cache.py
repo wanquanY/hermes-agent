@@ -16,6 +16,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import hermes_gateway.agent_cache as agent_cache
+
 
 def _make_runner():
     """Create a minimal GatewayRunner with just the cache infrastructure."""
@@ -494,9 +496,8 @@ class TestAgentCacheBoundedGrowth:
 
     def test_cap_evicts_lru_when_exceeded(self, monkeypatch):
         """Inserting past _AGENT_CACHE_MAX_SIZE pops the oldest entry."""
-        from gateway import run as gw_run
 
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", 3)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", 3)
         runner = self._bounded_runner()
         runner._cleanup_agent_resources = MagicMock()
 
@@ -514,9 +515,8 @@ class TestAgentCacheBoundedGrowth:
 
     def test_cap_respects_move_to_end(self, monkeypatch):
         """Entries refreshed via move_to_end are NOT evicted as 'oldest'."""
-        from gateway import run as gw_run
 
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", 3)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", 3)
         runner = self._bounded_runner()
         runner._cleanup_agent_resources = MagicMock()
 
@@ -541,9 +541,8 @@ class TestAgentCacheBoundedGrowth:
         _cleanup_agent_resources — cache eviction must not tear down
         per-task state (terminal/browser/bg procs).
         """
-        from gateway import run as gw_run
 
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", 1)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", 1)
         runner = self._bounded_runner()
 
         release_calls: list = []
@@ -573,9 +572,8 @@ class TestAgentCacheBoundedGrowth:
 
     def test_idle_ttl_sweep_evicts_stale_agents(self, monkeypatch):
         """_sweep_idle_cached_agents removes agents idle past the TTL."""
-        from gateway import run as gw_run
 
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_IDLE_TTL_SECS", 0.05)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_IDLE_TTL_SECS", 0.05)
         runner = self._bounded_runner()
         runner._cleanup_agent_resources = MagicMock()
 
@@ -592,9 +590,8 @@ class TestAgentCacheBoundedGrowth:
 
     def test_idle_sweep_skips_agents_without_activity_ts(self, monkeypatch):
         """Agents missing _last_activity_ts are left alone (defensive)."""
-        from gateway import run as gw_run
 
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_IDLE_TTL_SECS", 0.01)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_IDLE_TTL_SECS", 0.01)
         runner = self._bounded_runner()
         runner._cleanup_agent_resources = MagicMock()
 
@@ -679,9 +676,8 @@ class TestAgentCacheActiveSafety:
         one that happens to be mid-turn.  Better to let the cache stay
         transiently over cap and re-check on the next insert.
         """
-        from gateway import run as gw_run
 
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", 2)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", 2)
         runner = self._runner()
         runner._cleanup_agent_resources = MagicMock()
 
@@ -713,9 +709,8 @@ class TestAgentCacheActiveSafety:
         oldest is active and the next is idle, we evict exactly one.
         Cache ends at CAP+1, which is still better than unbounded.
         """
-        from gateway import run as gw_run
 
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", 2)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", 2)
         runner = self._runner()
         runner._cleanup_agent_resources = MagicMock()
 
@@ -747,10 +742,9 @@ class TestAgentCacheActiveSafety:
         Better to temporarily exceed the cap than to crash an in-flight
         turn by tearing down its clients.
         """
-        from gateway import run as gw_run
         import logging as _logging
 
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", 1)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", 1)
         runner = self._runner()
         runner._cleanup_agent_resources = MagicMock()
 
@@ -766,7 +760,7 @@ class TestAgentCacheActiveSafety:
         runner._running_agents["s2"] = a2
         runner._running_agents["s3"] = a3
 
-        with caplog.at_level(_logging.WARNING, logger="gateway.run"):
+        with caplog.at_level(_logging.WARNING, logger="hermes_gateway.agent_cache"):
             with runner._agent_cache_lock:
                 runner._enforce_agent_cache_cap()
 
@@ -784,10 +778,9 @@ class TestAgentCacheActiveSafety:
         real AIAgent instance exists.  Cached agents from other sessions
         can still be evicted safely.
         """
-        from gateway import run as gw_run
         from gateway.run import _AGENT_PENDING_SENTINEL
 
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", 1)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", 1)
         runner = self._runner()
         runner._cleanup_agent_resources = MagicMock()
 
@@ -806,9 +799,8 @@ class TestAgentCacheActiveSafety:
 
     def test_idle_sweep_skips_active_agent(self, monkeypatch):
         """Idle-TTL sweep must not tear down an active agent even if 'stale'."""
-        from gateway import run as gw_run
 
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_IDLE_TTL_SECS", 0.01)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_IDLE_TTL_SECS", 0.01)
         runner = self._runner()
         runner._cleanup_agent_resources = MagicMock()
 
@@ -830,9 +822,8 @@ class TestAgentCacheActiveSafety:
         and the next API call inside the loop would crash.  With the
         active-agent skip, the client stays intact.
         """
-        from gateway import run as gw_run
 
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", 1)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", 1)
         runner = self._runner()
 
         # Build a proper fake agent whose close() matches AIAgent's contract.
@@ -892,10 +883,9 @@ class TestAgentCacheSpilloverLive:
 
     def test_fill_to_cap_then_spillover(self, monkeypatch):
         """Fill to cap with real agents, insert one more, oldest evicted."""
-        from gateway import run as gw_run
 
         CAP = 8
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", CAP)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", CAP)
         runner = self._runner()
 
         agents = [self._real_agent() for _ in range(CAP)]
@@ -925,11 +915,10 @@ class TestAgentCacheSpilloverLive:
 
     def test_spillover_all_active_keeps_cache_over_cap(self, monkeypatch, caplog):
         """Every slot active: cache goes over cap, no one gets torn down."""
-        from gateway import run as gw_run
         import logging as _logging
 
         CAP = 4
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", CAP)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", CAP)
         runner = self._runner()
 
         agents = [self._real_agent() for _ in range(CAP)]
@@ -938,7 +927,7 @@ class TestAgentCacheSpilloverLive:
             runner._running_agents[f"s{i}"] = a  # every session mid-turn
 
         newcomer = self._real_agent()
-        with caplog.at_level(_logging.WARNING, logger="gateway.run"):
+        with caplog.at_level(_logging.WARNING, logger="hermes_gateway.agent_cache"):
             with runner._agent_cache_lock:
                 runner._agent_cache["new"] = (newcomer, "sig")
                 runner._enforce_agent_cache_cap()
@@ -963,10 +952,9 @@ class TestAgentCacheSpilloverLive:
         Simulates the real spillover flow: evicted session sends another
         message, which builds a new AIAgent and re-enters the cache.
         """
-        from gateway import run as gw_run
 
         CAP = 2
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", CAP)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", CAP)
         runner = self._runner()
 
         a0 = self._real_agent()
@@ -1166,10 +1154,9 @@ class TestAgentCacheIdleResume:
         gets the same task_id — so tool state (terminal/browser/bg procs)
         that persisted across eviction is reachable via the new agent.
         """
-        from gateway import run as gw_run
         from run_agent import AIAgent
 
-        monkeypatch.setattr(gw_run, "_AGENT_CACHE_IDLE_TTL_SECS", 0.01)
+        monkeypatch.setattr(agent_cache, "AGENT_CACHE_IDLE_TTL_SECS", 0.01)
         runner = self._runner()
 
         # Build an agent representing a stale (idle) session.
@@ -1246,7 +1233,7 @@ class TestCachedAgentInactivityReset:
         agent = self._fake_agent(stale_seconds=1800.0)
         old_ts = agent._last_activity_ts
 
-        with patch("gateway.run.time") as mock_time:
+        with patch("hermes_gateway.agent_cache.time") as mock_time:
             mock_time.time.return_value = _FAKE_NOW
             GatewayRunner._init_cached_agent_for_turn(agent, interrupt_depth=0)
 
@@ -1263,7 +1250,7 @@ class TestCachedAgentInactivityReset:
 
         agent = self._fake_agent()
 
-        with patch("gateway.run.time") as mock_time:
+        with patch("hermes_gateway.agent_cache.time") as mock_time:
             mock_time.time.return_value = _FAKE_NOW
             GatewayRunner._init_cached_agent_for_turn(agent, interrupt_depth=0)
 
@@ -1315,7 +1302,7 @@ class TestCachedAgentInactivityReset:
         agent_fresh = self._fake_agent()
         agent_interrupted = self._fake_agent()
 
-        with patch("gateway.run.time") as mock_time:
+        with patch("hermes_gateway.agent_cache.time") as mock_time:
             mock_time.time.return_value = _FAKE_NOW
             GatewayRunner._init_cached_agent_for_turn(agent_fresh, interrupt_depth=0)
         GatewayRunner._init_cached_agent_for_turn(agent_interrupted, interrupt_depth=1)

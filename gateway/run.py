@@ -57,6 +57,12 @@ from hermes_agent.repositories.session_repo import sanitize_session_title
 from hermes_agent.storage.cli_session_store import open_cli_session_store
 from hermes_agent.storage.session_availability import format_session_store_unavailable
 from hermes_cli.config import cfg_get
+from hermes_gateway.agent_cache import (
+    AGENT_CACHE_IDLE_TTL_SECS as _AGENT_CACHE_IDLE_TTL_SECS,
+    AGENT_CACHE_MAX_SIZE as _AGENT_CACHE_MAX_SIZE,
+    AGENT_PENDING_SENTINEL as _AGENT_PENDING_SENTINEL,
+    GatewayAgentCacheMixin,
+)
 from hermes_gateway.assets import telegram_botfather_threads_settings_path
 from hermes_gateway.bootstrap import (
     ensure_ssl_certs as _ensure_ssl_certs,
@@ -115,13 +121,6 @@ from hermes_gateway.replay import (
     build_replay_entry as _build_replay_entry,
 )
 
-# --- Agent cache tuning ---------------------------------------------------
-# Bounds the per-session AIAgent cache to prevent unbounded growth in
-# long-lived gateways (each AIAgent holds LLM clients, tool schemas,
-# memory providers, etc.).  LRU order + idle TTL eviction are enforced
-# from _enforce_agent_cache_cap() and _session_expiry_watcher() below.
-_AGENT_CACHE_MAX_SIZE = 128
-_AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 
@@ -401,13 +400,6 @@ from channels.whatsapp_identity import (
 logger = logging.getLogger(__name__)
 
 
-# Sentinel placed into _running_agents immediately when a session starts
-# processing, *before* any await.  Prevents a second message for the same
-# session from bypassing the "already running" guard during the async gap
-# between the guard check and actual agent creation.
-_AGENT_PENDING_SENTINEL = object()
-
-
 def _resolve_runtime_agent_kwargs() -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
 
@@ -484,7 +476,7 @@ from hermes_gateway.runner_ref import gateway_runner_ref as _gateway_runner_ref
 from hermes_gateway.runner_ref import set_gateway_runner
 
 
-class GatewayRunner(GatewayProcessWatcherMixin):
+class GatewayRunner(GatewayAgentCacheMixin, GatewayProcessWatcherMixin):
     """
     Main gateway controller.
 
@@ -13219,56 +13211,6 @@ class GatewayRunner(GatewayProcessWatcherMixin):
             out["tools.registry_generation"] = None
         return out
 
-    @staticmethod
-    def _agent_config_signature(
-        model: str,
-        runtime: dict,
-        enabled_toolsets: list,
-        ephemeral_prompt: str,
-        cache_keys: dict | None = None,
-    ) -> str:
-        """Compute a stable string key from agent config values.
-
-        When this signature changes between messages, the cached AIAgent is
-        discarded and rebuilt.  When it stays the same, the cached agent is
-        reused — preserving the frozen system prompt and tool schemas for
-        prompt cache hits.
-
-        ``cache_keys`` is an optional flat dict of additional config values
-        that should invalidate the cache when they change.  Callers pass
-        the output of ``_extract_cache_busting_config(user_config)`` so
-        edits to model.context_length / compression.* in config.yaml are
-        picked up on the next gateway message without a manual restart.
-        """
-        import hashlib, json as _j
-
-        # Fingerprint the FULL credential string instead of using a short
-        # prefix. OAuth/JWT-style tokens frequently share a common prefix
-        # (e.g. "eyJhbGci"), which can cause false cache hits across auth
-        # switches if only the first few characters are considered.
-        _api_key = str(runtime.get("api_key", "") or "")
-        _api_key_fingerprint = hashlib.sha256(_api_key.encode()).hexdigest() if _api_key else ""
-
-        _cache_keys_sorted = sorted((cache_keys or {}).items())
-
-        blob = _j.dumps(
-            [
-                model,
-                _api_key_fingerprint,
-                runtime.get("base_url", ""),
-                runtime.get("provider", ""),
-                runtime.get("api_mode", ""),
-                sorted(enabled_toolsets) if enabled_toolsets else [],
-                # reasoning_config excluded — it's set per-message on the
-                # cached agent and doesn't affect system prompt or tools.
-                ephemeral_prompt or "",
-                _cache_keys_sorted,
-            ],
-            sort_keys=True,
-            default=str,
-        )
-        return hashlib.sha256(blob.encode()).hexdigest()[:16]
-
     def _apply_session_model_override(
         self, session_key: str, model: str, runtime_kwargs: dict
     ) -> tuple:
@@ -13465,242 +13407,6 @@ class GatewayRunner(GatewayProcessWatcherMixin):
         self._pending_messages.pop(session_key, None)
         if release_running_state:
             self._release_running_agent_state(session_key)
-
-    def _evict_cached_agent(self, session_key: str) -> None:
-        """Remove a cached agent for a session (called on /new, /model, etc).
-
-        Pops the entry AND soft-releases the evicted agent's LLM client
-        pool so the httpx connection (sockets + held buffers) is freed
-        promptly rather than waiting on CPython GC — AIAgent holds
-        reference cycles (callbacks, tool state) that delay refcount
-        collection, so a manual release is required to keep gateway RSS
-        flat across many /new, /model, undo and reset operations (#29298,
-        same leak class as #25315).
-
-        The release is soft (``release_clients()``): it frees the client
-        pool and per-turn child subagents but PRESERVES the session's
-        terminal sandbox, browser daemon, and tracked bg processes (keyed
-        on task_id), because the session may resume with a freshly-built
-        agent.  Call sites that want a hard teardown (true conversation
-        boundaries like /new) already call ``_cleanup_agent_resources``
-        before evicting; ``release_clients`` is idempotent and safe to
-        run again after that (the client is already None).
-
-        Cleanup runs on a daemon thread so we never block holding
-        ``_agent_cache_lock`` on slow socket teardown — mirrors the
-        cap-enforcer and idle-sweeper paths.
-        """
-        _lock = getattr(self, "_agent_cache_lock", None)
-        evicted = None
-        if _lock:
-            with _lock:
-                evicted = self._agent_cache.pop(session_key, None)
-        else:
-            _cache = getattr(self, "_agent_cache", None)
-            if _cache is not None:
-                evicted = _cache.pop(session_key, None)
-
-        agent = evicted[0] if isinstance(evicted, tuple) and evicted else evicted
-        if agent is None or agent is _AGENT_PENDING_SENTINEL:
-            return
-
-        # Don't tear down an agent that's actively mid-turn — its client,
-        # sandbox and child subagents are in use by the running request.
-        running_ids = {
-            id(a)
-            for a in getattr(self, "_running_agents", {}).values()
-            if a is not None and a is not _AGENT_PENDING_SENTINEL
-        }
-        if id(agent) in running_ids:
-            return
-
-        try:
-            threading.Thread(
-                target=self._release_evicted_agent_soft,
-                args=(agent,),
-                daemon=True,
-                name=f"agent-evict-{str(session_key)[:24]}",
-            ).start()
-        except Exception:
-            # If we can't spawn a thread (interpreter shutdown), release
-            # inline as a best-effort fallback.
-            try:
-                self._release_evicted_agent_soft(agent)
-            except Exception:
-                pass
-
-    @staticmethod
-    def _init_cached_agent_for_turn(agent: Any, interrupt_depth: int) -> None:
-        """Reset per-turn state on a cached agent before a new turn starts.
-
-        Both _last_activity_ts and _last_activity_desc are only reset for
-        fresh external turns (depth 0); they are semantically paired —
-        desc describes the activity *at* ts, so updating one without the
-        other would make get_activity_summary() misleading.
-        For interrupt-recursive turns both are preserved so the inactivity
-        watchdog can accumulate stuck-turn idle time and fire the 30-min
-        timeout (#15654).  The depth-0 reset is still needed: a session
-        idle for 29 min would otherwise trip the watchdog before the new
-        turn makes its first API call (#9051).
-        """
-        if interrupt_depth == 0:
-            agent._last_activity_ts = time.time()
-            agent._last_activity_desc = "starting new turn (cached)"
-        agent._api_call_count = 0
-
-    def _release_evicted_agent_soft(self, agent: Any) -> None:
-        """Soft cleanup for cache-evicted agents — preserves session tool state.
-
-        Called from _enforce_agent_cache_cap and _sweep_idle_cached_agents.
-        Distinct from _cleanup_agent_resources (full teardown) because a
-        cache-evicted session may resume at any time — its terminal
-        sandbox, browser daemon, and tracked bg processes must outlive
-        the Python AIAgent instance so the next agent built for the
-        same task_id inherits them.
-        """
-        if agent is None:
-            return
-        try:
-            if hasattr(agent, "release_clients"):
-                agent.release_clients()
-            else:
-                # Older agent instance (shouldn't happen in practice) —
-                # fall back to the legacy full-close path.
-                self._cleanup_agent_resources(agent)
-        except Exception:
-            pass
-        # Free conversation history memory — can be tens of MB with tool
-        # outputs (file reads, terminal output, search results) on heavy
-        # 100+-tool-call sessions. release_clients() deliberately preserves
-        # session tool state for resume, but the message list is rebuilt from
-        # persisted session JSON on the next turn, so dropping it here is safe.
-        if hasattr(agent, "_session_messages"):
-            agent._session_messages = []
-
-    def _enforce_agent_cache_cap(self) -> None:
-        """Evict oldest cached agents when cache exceeds _AGENT_CACHE_MAX_SIZE.
-
-        Must be called with _agent_cache_lock held.  Resource cleanup
-        (memory provider shutdown, tool resource close) is scheduled
-        on a daemon thread so the caller doesn't block on slow teardown
-        while holding the cache lock.
-
-        Agents currently in _running_agents are SKIPPED — their clients,
-        terminal sandboxes, background processes, and child subagents
-        are all in active use by the running turn.  Evicting them would
-        tear down those resources mid-turn and crash the request.  If
-        every candidate in the LRU order is active, we simply leave the
-        cache over the cap; it will be re-checked on the next insert.
-        """
-        _cache = getattr(self, "_agent_cache", None)
-        if _cache is None:
-            return
-        # OrderedDict.popitem(last=False) pops oldest; plain dict lacks the
-        # arg so skip enforcement if a test fixture swapped the cache type.
-        if not hasattr(_cache, "move_to_end"):
-            return
-
-        # Snapshot of agent instances that are actively mid-turn.  Use id()
-        # so the lookup is O(1) and doesn't depend on AIAgent.__eq__ (which
-        # MagicMock overrides in tests).
-        running_ids = {
-            id(a)
-            for a in getattr(self, "_running_agents", {}).values()
-            if a is not None and a is not _AGENT_PENDING_SENTINEL
-        }
-
-        # Walk LRU → MRU and evict excess-LRU entries that aren't mid-turn.
-        # We only consider entries in the first (size - cap) LRU positions
-        # as eviction candidates.  If one of those slots is held by an
-        # active agent, we SKIP it without compensating by evicting a
-        # newer entry — that would penalise a freshly-inserted session
-        # (which has no cache history to retain) while protecting an
-        # already-cached long-running one.  The cache may therefore stay
-        # temporarily over cap; it will re-check on the next insert,
-        # after active turns have finished.
-        excess = max(0, len(_cache) - _AGENT_CACHE_MAX_SIZE)
-        evict_plan: List[tuple] = []  # [(key, agent), ...]
-        if excess > 0:
-            ordered_keys = list(_cache.keys())
-            for key in ordered_keys[:excess]:
-                entry = _cache.get(key)
-                agent = entry[0] if isinstance(entry, tuple) and entry else None
-                if agent is not None and id(agent) in running_ids:
-                    continue  # active mid-turn; don't evict, don't substitute
-                evict_plan.append((key, agent))
-
-        for key, _ in evict_plan:
-            _cache.pop(key, None)
-
-        remaining_over_cap = len(_cache) - _AGENT_CACHE_MAX_SIZE
-        if remaining_over_cap > 0:
-            logger.warning(
-                "Agent cache over cap (%d > %d); %d excess slot(s) held by "
-                "mid-turn agents — will re-check on next insert.",
-                len(_cache), _AGENT_CACHE_MAX_SIZE, remaining_over_cap,
-            )
-
-        for key, agent in evict_plan:
-            logger.info(
-                "Agent cache at cap; evicting LRU session=%s (cache_size=%d)",
-                key, len(_cache),
-            )
-            if agent is not None:
-                threading.Thread(
-                    target=self._release_evicted_agent_soft,
-                    args=(agent,),
-                    daemon=True,
-                    name=f"agent-cache-evict-{key[:24]}",
-                ).start()
-
-    def _sweep_idle_cached_agents(self) -> int:
-        """Evict cached agents whose AIAgent has been idle > _AGENT_CACHE_IDLE_TTL_SECS.
-
-        Safe to call from the session expiry watcher without holding the
-        cache lock — acquires it internally.  Returns the number of entries
-        evicted.  Resource cleanup is scheduled on daemon threads.
-
-        Agents currently in _running_agents are SKIPPED for the same reason
-        as _enforce_agent_cache_cap: tearing down an active turn's clients
-        mid-flight would crash the request.
-        """
-        _cache = getattr(self, "_agent_cache", None)
-        _lock = getattr(self, "_agent_cache_lock", None)
-        if _cache is None or _lock is None:
-            return 0
-        now = time.time()
-        to_evict: List[tuple] = []
-        running_ids = {
-            id(a)
-            for a in getattr(self, "_running_agents", {}).values()
-            if a is not None and a is not _AGENT_PENDING_SENTINEL
-        }
-        with _lock:
-            for key, entry in list(_cache.items()):
-                agent = entry[0] if isinstance(entry, tuple) and entry else None
-                if agent is None:
-                    continue
-                if id(agent) in running_ids:
-                    continue  # mid-turn — don't tear it down
-                last_activity = getattr(agent, "_last_activity_ts", None)
-                if last_activity is None:
-                    continue
-                if (now - last_activity) > _AGENT_CACHE_IDLE_TTL_SECS:
-                    to_evict.append((key, agent))
-            for key, _ in to_evict:
-                _cache.pop(key, None)
-        for key, agent in to_evict:
-            logger.info(
-                "Agent cache idle-TTL evict: session=%s (idle=%.0fs)",
-                key, now - getattr(agent, "_last_activity_ts", now),
-            )
-            threading.Thread(
-                target=self._release_evicted_agent_soft,
-                args=(agent,),
-                daemon=True,
-                name=f"agent-cache-idle-{key[:24]}",
-            ).start()
-        return len(to_evict)
 
     # ------------------------------------------------------------------
     # Proxy mode: forward messages to a remote Hermes API server
