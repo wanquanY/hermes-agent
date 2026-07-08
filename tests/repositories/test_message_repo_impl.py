@@ -360,6 +360,62 @@ def test_annotate_stripped_speaker_prefix_updates_latest_projected_message():
     assert "stripped_speaker_prefix" not in (rows[2]["metadata_json"] or "")
 
 
+def test_copy_branch_prefix_materializes_ordered_messages_to_target_session():
+    conn = _make_conn()
+    repo = MessageRepoImpl(conn)
+    first = repo.append(
+        "source",
+        MessageSpec(
+            session_id="source",
+            role="user",
+            content="one",
+            timestamp=1.0,
+            metadata={"seq": 1},
+        ),
+    )
+    second = repo.append(
+        "source",
+        MessageSpec(
+            session_id="source",
+            role="assistant",
+            content="two",
+            tool_calls='[{"name":"search"}]',
+            tool_name="search",
+            reasoning="thinking",
+            platform_message_id="platform-2",
+            timestamp=2.0,
+        ),
+    )
+    repo.append(
+        "source",
+        MessageSpec(session_id="source", role="assistant", content="after", timestamp=3.0),
+    )
+    repo.append(
+        "other",
+        MessageSpec(session_id="other", role="user", content="ignored", timestamp=0.5),
+    )
+
+    assert repo.copy_branch_prefix(["source"], second.id, "branch", 100.0) == 2
+
+    rows = conn.execute(
+        """
+        SELECT session_id, role, content, tool_calls, tool_name, reasoning,
+               platform_message_id, metadata_json, timestamp
+          FROM messages
+         WHERE session_id = 'branch'
+         ORDER BY id
+        """
+    ).fetchall()
+    assert [row["content"] for row in rows] == ["one", "two"]
+    assert rows[0]["metadata_json"] == '{"seq": 1}'
+    assert rows[1]["tool_calls"] == '[{"name":"search"}]'
+    assert rows[1]["tool_name"] == "search"
+    assert rows[1]["reasoning"] == "thinking"
+    assert rows[1]["platform_message_id"] == "platform-2"
+    assert [row["timestamp"] for row in rows] == [100.000001, 100.000002]
+    assert first.id < second.id
+
+
 def test_conversation_message_append_updates_session_projection_via_session_repo():
     conn = _make_conversation_conn()
     sessions = SessionRepoImpl(conn)

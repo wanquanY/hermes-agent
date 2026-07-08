@@ -36,7 +36,10 @@ from hermes_agent.repositories.run_repo import (
     RunSpec,
 )
 from hermes_agent.repositories.session_repo import (
+    BranchLineageSpec,
+    BranchRequestSpec,
     BranchSpec,
+    MaterializedBranchSessionSpec,
     Session,
     SessionFilter,
     SessionIndexPatch,
@@ -70,6 +73,8 @@ __all__ = [
     "ActivityKind",
     "AgentProfileRepo",
     "AgentProfileRepoImpl",
+    "BranchLineageSpec",
+    "BranchRequestSpec",
     "BranchSpec",
     "CanonicalEventSpec",
     "GrowthSummary",
@@ -79,6 +84,7 @@ __all__ = [
     "MessageRepo",
     "MessageRepoImpl",
     "MessageSpec",
+    "MaterializedBranchSessionSpec",
     "PageDirection",
     "Profile",
     "ProfileSpec",

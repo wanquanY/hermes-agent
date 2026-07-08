@@ -34,6 +34,8 @@ _AGGREGATE_TABLES = {
         "session_index",
         "session_branches",
         "session_handoffs",
+        "session_lineage",
+        "session_branch_requests",
     },
     "run": {
         "runs",

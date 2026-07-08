@@ -7,6 +7,14 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from hermes_agent.repositories.message_repo import MessageRepoImpl
+from hermes_agent.repositories.session_repo import (
+    BranchLineageSpec,
+    BranchRequestSpec,
+    MaterializedBranchSessionSpec,
+    SessionRepoImpl,
+)
+
 
 class BranchStateMixin:
     @staticmethod
@@ -357,102 +365,57 @@ class BranchStateMixin:
                 conn,
                 str(base_title),
             )
-            conn.execute(
-                """
-                INSERT INTO sessions (
-                    id, source, user_id, model, model_config, system_prompt,
-                    parent_session_id, started_at, title, transient,
-                    message_count, tool_call_count
+            session_repo = SessionRepoImpl(conn)
+            session_repo.create_materialized_branch_session(
+                MaterializedBranchSessionSpec(
+                    new_session_id=new_session_id,
+                    title=branch_title,
+                    created_at=created_at,
+                    message_count=message_count,
+                    tool_call_count=tool_call_count,
+                    source_row=source,
                 )
-                VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
-                """,
-                (
-                    new_session_id,
-                    source["source"],
-                    source["user_id"],
-                    source["model"],
-                    source["model_config"],
-                    source["system_prompt"],
-                    created_at,
-                    branch_title,
-                    int(source["transient"] or 0),
-                    message_count,
-                    tool_call_count,
-                ),
             )
 
             root_session_id, branch_depth = self._branch_lineage_seed_conn(
                 conn,
                 source_session_id,
             )
-            conn.execute(
-                """
-                INSERT INTO session_lineage (
-                    session_id, parent_session_id, root_session_id,
-                    branch_from_message_row_id, branch_from_turn_id,
-                    branch_from_run_id, branch_from_client_message_id,
-                    branch_origin, branch_mode, branch_depth, created_at
+            session_repo.record_branch_lineage(
+                BranchLineageSpec(
+                    session_id=new_session_id,
+                    parent_session_id=source_session_id,
+                    root_session_id=root_session_id,
+                    branch_from_message_row_id=included_row_id,
+                    branch_from_turn_id=str(normalized_point.get("turn_id") or ""),
+                    branch_from_run_id=str(normalized_point.get("run_id") or ""),
+                    branch_from_client_message_id=str(
+                        normalized_point.get("client_message_id") or ""
+                    ),
+                    branch_origin=branch_origin,
+                    branch_mode="materialized_prefix",
+                    branch_depth=branch_depth,
+                    created_at=created_at,
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    new_session_id,
-                    source_session_id,
-                    root_session_id,
-                    included_row_id,
-                    normalized_point.get("turn_id") or None,
-                    normalized_point.get("run_id") or None,
-                    normalized_point.get("client_message_id") or None,
-                    branch_origin,
-                    "materialized_prefix",
-                    branch_depth,
-                    created_at,
-                ),
             )
 
             copy_started_at = created_at
-            conn.execute(
-                f"""
-                WITH selected AS (
-                    SELECT
-                        role, content, tool_call_id, tool_calls, tool_name,
-                        token_count, finish_reason, reasoning, reasoning_content,
-                        reasoning_details, codex_reasoning_items, codex_message_items,
-                        platform_message_id, metadata_json,
-                        ROW_NUMBER() OVER (ORDER BY id) AS rn
-                    FROM messages
-                    WHERE session_id IN ({placeholders}) AND id <= ?
-                    ORDER BY id
-                )
-                INSERT INTO messages (
-                    session_id, role, content, tool_call_id, tool_calls, tool_name,
-                    timestamp, token_count, finish_reason, reasoning, reasoning_content,
-                    reasoning_details, codex_reasoning_items, codex_message_items,
-                    platform_message_id, metadata_json
-                )
-                SELECT
-                    ?, role, content, tool_call_id, tool_calls, tool_name,
-                    ? + (rn * 0.000001), token_count, finish_reason, reasoning,
-                    reasoning_content, reasoning_details, codex_reasoning_items,
-                    codex_message_items, platform_message_id, metadata_json
-                FROM selected
-                ORDER BY rn
-                """,
-                source_params + (new_session_id, copy_started_at),
+            MessageRepoImpl(conn).copy_branch_prefix(
+                list(source_session_ids),
+                included_row_id,
+                new_session_id,
+                copy_started_at,
             )
 
             if idempotency_key:
-                conn.execute(
-                    "INSERT INTO session_branch_requests ("
-                    "idempotency_key, source_session_id, branch_fingerprint, result_session_id, created_at"
-                    ") VALUES (?, ?, ?, ?, ?)",
-                    (
-                        idempotency_key,
-                        source_session_id,
-                        fingerprint,
-                        new_session_id,
-                        created_at,
-                    ),
+                session_repo.record_branch_request(
+                    BranchRequestSpec(
+                        idempotency_key=idempotency_key,
+                        source_session_id=source_session_id,
+                        branch_fingerprint=fingerprint,
+                        result_session_id=new_session_id,
+                        created_at=created_at,
+                    )
                 )
             return self._branch_session_result_conn(conn, new_session_id)
 

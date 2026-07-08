@@ -139,6 +139,40 @@ class BranchSpec:
     display_title: str = ""
 
 
+@dataclass(frozen=True)
+class MaterializedBranchSessionSpec:
+    new_session_id: str
+    title: str
+    created_at: float
+    message_count: int
+    tool_call_count: int
+    source_row: Any
+
+
+@dataclass(frozen=True)
+class BranchLineageSpec:
+    session_id: str
+    parent_session_id: str
+    root_session_id: str
+    branch_from_message_row_id: int
+    branch_from_turn_id: str = ""
+    branch_from_run_id: str = ""
+    branch_from_client_message_id: str = ""
+    branch_origin: str = "user_message_action"
+    branch_mode: str = "materialized_prefix"
+    branch_depth: int = 1
+    created_at: float = 0.0
+
+
+@dataclass(frozen=True)
+class BranchRequestSpec:
+    idempotency_key: str
+    source_session_id: str
+    branch_fingerprint: str
+    result_session_id: str
+    created_at: float
+
+
 class SessionNotFound(LookupError):
     """Raised when a session_id has no corresponding row."""
 
@@ -148,7 +182,7 @@ class SessionRepo(Protocol):
     """Aggregate root for the ``sessions`` table family.
 
     Owned tables: ``sessions``, ``session_index``, ``session_branches``,
-    ``session_handoffs``.
+    ``session_handoffs``, ``session_lineage``, ``session_branch_requests``.
     """
 
     def create(self, spec: SessionSpec) -> Session: ...
@@ -180,6 +214,12 @@ class SessionRepo(Protocol):
     def finalize_orphaned_compression_sessions(self) -> int: ...
 
     def ensure_runtime_session(self, session_id: str, *, started_at: float | None = None) -> bool: ...
+
+    def create_materialized_branch_session(self, spec: MaterializedBranchSessionSpec) -> bool: ...
+
+    def record_branch_lineage(self, spec: BranchLineageSpec) -> None: ...
+
+    def record_branch_request(self, spec: BranchRequestSpec) -> None: ...
 
     def record_message_append(
         self,
@@ -583,6 +623,85 @@ class SessionRepoImpl:
             values,
         )
         return int(cursor.rowcount or 0) > 0
+
+    def create_materialized_branch_session(self, spec: MaterializedBranchSessionSpec) -> bool:
+        stable = str(spec.new_session_id or "").strip()
+        if not stable:
+            raise ValueError("new_session_id is required")
+        source_row = spec.source_row
+        created_at = float(spec.created_at or time.time())
+        values_by_column: dict[str, Any] = {
+            "id": stable,
+            "source": _row_any(source_row, "source", ""),
+            "user_id": _row_any(source_row, "user_id", ""),
+            "model": _row_any(source_row, "model", ""),
+            "model_config": _row_any(source_row, "model_config", ""),
+            "system_prompt": _row_any(source_row, "system_prompt", ""),
+            "parent_session_id": None,
+            "started_at": created_at,
+            "updated_at": created_at,
+            "last_active": created_at,
+            "title": str(spec.title or ""),
+            "display_title": str(spec.title or ""),
+            "display_title_source": "branch_title" if spec.title else "",
+            "transient": int(_row_any(source_row, "transient", 0) or 0),
+            "message_count": int(spec.message_count or 0),
+            "tool_call_count": int(spec.tool_call_count or 0),
+        }
+        columns = [column for column in values_by_column if column in self._session_columns]
+        placeholders = ", ".join("?" for _ in columns)
+        cursor = self._conn.execute(
+            f"""
+            INSERT INTO sessions ({', '.join(columns)})
+            VALUES ({placeholders})
+            """,
+            [values_by_column[column] for column in columns],
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def record_branch_lineage(self, spec: BranchLineageSpec) -> None:
+        created_at = float(spec.created_at or time.time())
+        self._conn.execute(
+            """
+            INSERT INTO session_lineage (
+                session_id, parent_session_id, root_session_id,
+                branch_from_message_row_id, branch_from_turn_id,
+                branch_from_run_id, branch_from_client_message_id,
+                branch_origin, branch_mode, branch_depth, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(spec.session_id or ""),
+                str(spec.parent_session_id or ""),
+                str(spec.root_session_id or ""),
+                int(spec.branch_from_message_row_id or 0),
+                str(spec.branch_from_turn_id or "") or None,
+                str(spec.branch_from_run_id or "") or None,
+                str(spec.branch_from_client_message_id or "") or None,
+                str(spec.branch_origin or "user_message_action"),
+                str(spec.branch_mode or "materialized_prefix"),
+                int(spec.branch_depth or 0),
+                created_at,
+            ),
+        )
+
+    def record_branch_request(self, spec: BranchRequestSpec) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO session_branch_requests (
+                idempotency_key, source_session_id, branch_fingerprint,
+                result_session_id, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                str(spec.idempotency_key or ""),
+                str(spec.source_session_id or ""),
+                str(spec.branch_fingerprint or ""),
+                str(spec.result_session_id or ""),
+                float(spec.created_at or time.time()),
+            ),
+        )
 
     def record_message_append(
         self,
@@ -1146,8 +1265,22 @@ def _row_int(row: Any, key: str, index: int) -> int:
     return int(row[index] or 0)
 
 
+def _row_any(row: Any, key: str, default: Any = None) -> Any:
+    if isinstance(row, sqlite3.Row):
+        try:
+            return row[key]
+        except (KeyError, IndexError):
+            return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    return getattr(row, key, default)
+
+
 __all__ = [
+    "BranchLineageSpec",
+    "BranchRequestSpec",
     "BranchSpec",
+    "MaterializedBranchSessionSpec",
     "Session",
     "SessionFilter",
     "SessionIndexPatch",
@@ -1157,5 +1290,6 @@ __all__ = [
     "SessionNotFound",
     "SessionRepo",
     "SessionRepoImpl",
+    "SessionRunProjection",
     "SessionSpec",
 ]

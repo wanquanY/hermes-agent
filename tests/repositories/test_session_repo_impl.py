@@ -7,7 +7,10 @@ import sqlite3
 import pytest
 
 from hermes_agent.repositories import (
+    BranchLineageSpec,
+    BranchRequestSpec,
     BranchSpec,
+    MaterializedBranchSessionSpec,
     Session,
     SessionFilter,
     SessionIndexPatch,
@@ -75,6 +78,26 @@ def _make_conn() -> sqlite3.Connection:
             child_session_id TEXT PRIMARY KEY,
             parent_session_id TEXT NOT NULL,
             branch_from_seq INTEGER NOT NULL,
+            created_at REAL NOT NULL
+        );
+        CREATE TABLE session_lineage (
+            session_id TEXT PRIMARY KEY,
+            parent_session_id TEXT NOT NULL,
+            root_session_id TEXT NOT NULL,
+            branch_from_message_row_id INTEGER NOT NULL,
+            branch_from_turn_id TEXT,
+            branch_from_run_id TEXT,
+            branch_from_client_message_id TEXT,
+            branch_origin TEXT NOT NULL,
+            branch_mode TEXT NOT NULL,
+            branch_depth INTEGER NOT NULL,
+            created_at REAL NOT NULL
+        );
+        CREATE TABLE session_branch_requests (
+            idempotency_key TEXT PRIMARY KEY,
+            source_session_id TEXT NOT NULL,
+            branch_fingerprint TEXT NOT NULL,
+            result_session_id TEXT NOT NULL,
             created_at REAL NOT NULL
         );
         """
@@ -397,6 +420,117 @@ def test_ensure_runtime_session_supports_legacy_minimal_schema():
         "id": "legacy-runtime",
         "source": "runtime",
         "started_at": 7.0,
+    }
+
+
+def test_materialized_branch_session_lineage_and_request_are_session_owned():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(
+        SessionSpec(
+            session_id="source",
+            source="tui",
+            user_id="user-1",
+            model="model-1",
+            model_config={"temperature": 0},
+            title="Source",
+            transient=True,
+        )
+    )
+    source = conn.execute("SELECT * FROM sessions WHERE id = 'source'").fetchone()
+
+    assert repo.create_materialized_branch_session(
+        MaterializedBranchSessionSpec(
+            new_session_id="branch",
+            title="Branch",
+            created_at=123.0,
+            message_count=3,
+            tool_call_count=2,
+            source_row=source,
+        )
+    ) is True
+    repo.record_branch_lineage(
+        BranchLineageSpec(
+            session_id="branch",
+            parent_session_id="source",
+            root_session_id="source",
+            branch_from_message_row_id=10,
+            branch_from_turn_id="turn-1",
+            branch_from_run_id="run-1",
+            branch_from_client_message_id="client-1",
+            branch_depth=1,
+            created_at=124.0,
+        )
+    )
+    repo.record_branch_request(
+        BranchRequestSpec(
+            idempotency_key="idem-1",
+            source_session_id="source",
+            branch_fingerprint="fingerprint-1",
+            result_session_id="branch",
+            created_at=125.0,
+        )
+    )
+
+    session_row = conn.execute(
+        """
+        SELECT id, source, user_id, model, model_config, title,
+               display_title, display_title_source, transient,
+               message_count, tool_call_count, parent_session_id,
+               started_at, updated_at, last_active
+          FROM sessions
+         WHERE id = 'branch'
+        """
+    ).fetchone()
+    assert dict(session_row) == {
+        "id": "branch",
+        "source": "tui",
+        "user_id": "user-1",
+        "model": "model-1",
+        "model_config": '{"temperature":0}',
+        "title": "Branch",
+        "display_title": "Branch",
+        "display_title_source": "branch_title",
+        "transient": 1,
+        "message_count": 3,
+        "tool_call_count": 2,
+        "parent_session_id": None,
+        "started_at": 123.0,
+        "updated_at": 123.0,
+        "last_active": 123.0,
+    }
+    lineage_row = conn.execute(
+        """
+        SELECT session_id, parent_session_id, root_session_id,
+               branch_from_message_row_id, branch_from_turn_id,
+               branch_from_run_id, branch_from_client_message_id,
+               branch_origin, branch_mode, branch_depth, created_at
+          FROM session_lineage
+         WHERE session_id = 'branch'
+        """
+    ).fetchone()
+    assert dict(lineage_row) == {
+        "session_id": "branch",
+        "parent_session_id": "source",
+        "root_session_id": "source",
+        "branch_from_message_row_id": 10,
+        "branch_from_turn_id": "turn-1",
+        "branch_from_run_id": "run-1",
+        "branch_from_client_message_id": "client-1",
+        "branch_origin": "user_message_action",
+        "branch_mode": "materialized_prefix",
+        "branch_depth": 1,
+        "created_at": 124.0,
+    }
+    request_row = conn.execute(
+        "SELECT * FROM session_branch_requests WHERE idempotency_key = 'idem-1'"
+    ).fetchone()
+    assert dict(request_row) == {
+        "idempotency_key": "idem-1",
+        "source_session_id": "source",
+        "branch_fingerprint": "fingerprint-1",
+        "result_session_id": "branch",
+        "created_at": 125.0,
     }
 
 
