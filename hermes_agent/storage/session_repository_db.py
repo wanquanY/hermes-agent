@@ -129,6 +129,11 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
         );
 
+        CREATE TABLE IF NOT EXISTS session_lineage (
+            session_id TEXT NOT NULL,
+            branch_origin TEXT NOT NULL DEFAULT ''
+        );
+
         CREATE INDEX IF NOT EXISTS idx_session_index_updated
             ON session_index(updated_at DESC, started_at DESC, session_id DESC);
         """

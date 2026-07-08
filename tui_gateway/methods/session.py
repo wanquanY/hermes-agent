@@ -9,6 +9,7 @@ from dovie_extension.display_transcript import (
     sanitize_session_list_item,
     sanitize_transcript_messages,
 )
+from hermes_agent.read_models.session_list import SessionListQuery, SessionListReadModel
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
@@ -142,6 +143,13 @@ def _session_repo_for_db(db):
     if conn is None:
         return None
     return SessionRepoImpl(conn)
+
+
+def _session_list_read_model_for_db(db):
+    conn = getattr(db, "_conn", None)
+    if conn is None:
+        return None
+    return SessionListReadModel(conn)
 
 
 def _requested_runtime_executor(params: dict | None = None) -> str:
@@ -1201,16 +1209,21 @@ def _(rid, params: dict) -> dict:
 
         limit = _bounded_page_limit(params.get("limit"), default=200, maximum=200)
         cursor = _decode_page_cursor(params.get("cursor"))
+        read_model = _session_list_read_model_for_db(db)
+        if read_model is None:
+            return _err(rid, 5006, "session list read model unavailable")
         rows = [
             s
-            for s in db.list_sessions_rich(
-                source=None,
-                exclude_sources=list(deny),
-                limit=limit + 1,
-                page_cursor=cursor,
-                order_by_last_active=True,
+            for s in read_model.list(
+                SessionListQuery(
+                    source=None,
+                    exclude_sources=tuple(deny),
+                    limit=limit + 1,
+                    page_cursor=cursor,
+                    order_by_last_active=True,
+                )
             )
-            if (s.get("source") or "").strip().lower() not in deny
+            if str(s.get("source") or "").strip().lower() not in deny
         ]
         has_more = len(rows) > limit
         page_rows = rows[:limit]

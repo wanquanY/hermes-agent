@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_1`
+状态：`in_progress_checkpoint_2`
 
 ## 前置门槛
 
@@ -11,8 +11,8 @@
 ```
 
 P1 human sign-off 已通过，P2 已开始执行。当前 checkpoint 已完成
-`gateway.SessionStore` 与 TUI `session.create` 的 repo-backed 写入迁移；
-TUI `session.list` 的富投影读路径仍在本 slice 的剩余范围内。
+`gateway.SessionStore`、TUI `session.create` 的 repo-backed 写入迁移，以及
+TUI `session.list` 的 read-model owner 迁移。
 
 ## 目标
 
@@ -165,3 +165,46 @@ tests/gateway/test_session_repository_dispatch.py
   内部 owner。
 - 禁止保留旧 `SessionDB` fallback。
 - 禁止先删除 `gateway/session.py` 而没有新 owner 承担等价 production 行为。
+
+## Checkpoint 2 证据
+
+已完成：
+
+- 新增 `hermes_agent/read_models/session_list.py`，由
+  `SessionListReadModel` 接管 user-facing session list 富投影 SQL。
+- `tui_gateway.methods.session` 的 `session.list` 不再调用
+  `db.list_sessions_rich`，改为通过 `SessionListReadModel` 从同一个 SQLite
+  connection 读取 `sessions/session_lineage` 并返回 wire response。
+- `hermes_agent/storage/session_repository_db.py` 的 repo bootstrap 补齐
+  `session_lineage`，保证 fresh profile 的 `session.list` 不依赖 legacy facade
+  建表副作用。
+- `pyproject.toml` package discovery 纳入 `hermes_agent.*`，避免新 owner 在
+  editable 以外的安装形态下不可用。
+- `tests/gateway/test_session_list_allowed_sources.py` 不再 mock
+  `list_sessions_rich`，改为真实 SQLite -> read model -> TUI handler 链路。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/session_list.py hermes_agent/read_models/__init__.py tui_gateway/methods/session.py tests/gateway/test_session_list_allowed_sources.py hermes_agent/storage/session_repository_db.py
+.venv/bin/pytest tests/gateway/test_session_list_allowed_sources.py tests/gateway/test_session_kind_column.py tests/gateway/test_session_list_team_enrichment.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_ws_dispatch.py::test_session_list_uses_control_plane_executor tests/tui_gateway/test_ws_dispatch.py::test_control_plane_session_list_is_not_proxied_to_runtime_worker -q
+.venv/bin/ruff check hermes_agent/read_models/session_list.py hermes_agent/read_models/__init__.py tui_gateway/methods/session.py tests/gateway/test_session_list_allowed_sources.py pyproject.toml hermes_agent/storage/session_repository_db.py
+python scripts/zero_debt/verdict.py --phase P2 --json
+python scripts/zero_debt/status.py --json
+```
+
+当前验证结果：
+
+- 定向 session-list / protocol / ws-dispatch 测试：`131 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `session.most_recent` 仍读取旧 `db.list_sessions_rich`，需要接到
+  `SessionListReadModel` 或更窄的 read model owner。
+- `session.messages/delete/title/status/usage` 等同文件旧 DB path 属于后续
+  message/read-model slice。
+- `gateway/session.py` transcript 相关 legacy storage 仍需在 message slice 迁出。

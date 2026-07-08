@@ -17,19 +17,52 @@ History:
 
 from __future__ import annotations
 
+import sqlite3
+
 from hermes_state import SessionDB
+from hermes_agent.storage.session_repository_db import ensure_session_repository_schema
 from tui_gateway import server
 from tui_gateway.services import run_control, runtime_scope
 
 
 class _StubDB:
     def __init__(self, rows):
-        self.rows = rows
-        self.calls: list[dict] = []
+        self._conn = sqlite3.connect(":memory:")
+        self._conn.row_factory = sqlite3.Row
+        ensure_session_repository_schema(self._conn)
+        for row in rows:
+            self._insert_session(row)
 
-    def list_sessions_rich(self, **kwargs):
-        self.calls.append(kwargs)
-        return list(self.rows)
+    def _insert_session(self, row: dict) -> None:
+        started_at = float(row.get("started_at") or 0)
+        last_active = row.get("last_active")
+        self._conn.execute(
+            """
+            INSERT INTO sessions (
+                id, source, title, display_title, display_title_source,
+                session_kind, conversation_kind, started_at, updated_at,
+                last_active, message_count, preview, transient
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row.get("id") or "",
+                row.get("source") or "unknown",
+                row.get("title") or "",
+                row.get("display_title") or row.get("title") or "",
+                row.get("display_title_source") or "",
+                row.get("session_kind") or "hermes_session",
+                row.get("conversation_kind") or "direct",
+                started_at,
+                float(row.get("updated_at") or last_active or started_at),
+                last_active,
+                int(row["message_count"]) if "message_count" in row else 1,
+                row.get("preview") or "",
+                1 if row.get("transient") else 0,
+            ),
+        )
+
+    def team_mission_run_session_ids(self, _session_ids):
+        return set()
 
 
 def _call(limit: int | None = None):
@@ -97,13 +130,17 @@ def test_session_list_surfaces_all_user_facing_sources(monkeypatch):
 
 def test_session_list_default_limit_stays_legacy_compatible(monkeypatch):
     """Clients that omit limit still get the historical broad first page."""
-    db = _StubDB([{"id": "x", "source": "cli", "started_at": 1}])
+    rows = [
+        {"id": f"s{i:03d}", "source": "cli", "started_at": float(i), "message_count": 1}
+        for i in range(205)
+    ]
+    db = _StubDB(rows)
     monkeypatch.setattr(server, "_get_db", lambda: db)
 
-    _call()  # no explicit limit
-    assert db.calls[0].get("limit") == 201, db.calls[0]
-    assert db.calls[0].get("order_by_last_active") is True, db.calls[0]
-    assert db.calls[0].get("exclude_sources") == ["tool", "cron"], db.calls[0]
+    resp = _call()  # no explicit limit
+    assert "error" not in resp
+    assert len(resp["result"]["sessions"]) == 200
+    assert resp["result"]["pageInfo"]["hasMore"] is True
 
 
 def test_session_list_surfaces_team_conversation_route_metadata(tmp_path, monkeypatch):
@@ -294,12 +331,16 @@ def test_session_list_hides_only_explicit_empty_stored_placeholders(monkeypatch)
 
 
 def test_session_list_respects_explicit_limit(monkeypatch):
-    db = _StubDB([{"id": "x", "source": "cli", "started_at": 1}])
+    db = _StubDB([
+        {"id": "new", "source": "cli", "started_at": 2, "message_count": 1},
+        {"id": "old", "source": "cli", "started_at": 1, "message_count": 1},
+    ])
     monkeypatch.setattr(server, "_get_db", lambda: db)
 
-    _call(limit=10)
-    assert db.calls[0].get("limit") == 11, db.calls[0]
-    assert db.calls[0].get("order_by_last_active") is True, db.calls[0]
+    resp = _call(limit=1)
+    assert "error" not in resp
+    assert [item["id"] for item in resp["result"]["sessions"]] == ["new"]
+    assert resp["result"]["pageInfo"]["hasMore"] is True
 
 
 def test_session_list_returns_page_info(monkeypatch):
