@@ -8356,7 +8356,7 @@ class GatewayRunner:
             # text, so we fire a separate trailing send below.
             _footer_line = ""
             try:
-                from gateway.runtime_footer import build_footer_line as _bfl
+                from hermes_gateway.runtime_footer import build_footer_line as _bfl
                 _footer_line = _bfl(
                     user_config=_load_gateway_config(),
                     platform_key=_platform_config_key(source.platform),
@@ -11455,7 +11455,7 @@ class GatewayRunner:
         are respected but not modified here — edit config.yaml directly for
         per-platform control.
         """
-        from gateway.runtime_footer import resolve_footer_config
+        from hermes_gateway.runtime_footer import resolve_footer_config
 
         config_path = _hermes_home / "config.yaml"
         platform_key = _platform_config_key(event.source.platform)
@@ -11515,7 +11515,7 @@ class GatewayRunner:
         example = ""
         if new_state:
             # Show a preview using current agent state if available.
-            from gateway.runtime_footer import format_runtime_footer
+            from hermes_gateway.runtime_footer import format_runtime_footer
             preview = format_runtime_footer(
                 model=_resolve_gateway_model(user_config) or None,
                 context_tokens=0,
