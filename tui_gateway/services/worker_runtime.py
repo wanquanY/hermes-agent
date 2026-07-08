@@ -49,7 +49,7 @@ from tui_gateway.services.runtime_scope import (
 )
 from tui_gateway.services.workspace import session_workspace_run_context
 from tui_gateway.services.worker_frame_router import WorkerFrameRouter
-from tui_gateway.services.worker_pool import WorkerPool
+from hermes_agent.orchestration.worker_lease_manager import WorkerLeaseManager
 from tui_gateway.services.worker_supervisor import WorkerSupervisor
 
 _log = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ _log = logging.getLogger(__name__)
 _singleton_lock = threading.RLock()
 _supervisor_singleton: Optional[WorkerSupervisor] = None
 _router_singleton: Optional[WorkerFrameRouter] = None
-_pool_singleton: Optional[WorkerPool] = None
+_pool_singleton: Optional[WorkerLeaseManager] = None
 _runtime_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
@@ -290,12 +290,12 @@ def worker_frame_router() -> WorkerFrameRouter:
         return _router_singleton
 
 
-def worker_pool() -> WorkerPool:
+def worker_pool() -> WorkerLeaseManager:
     """Process-wide per-conversation worker lease pool."""
     global _pool_singleton
     with _singleton_lock:
         if _pool_singleton is None:
-            _pool_singleton = WorkerPool(worker_supervisor())
+            _pool_singleton = WorkerLeaseManager(worker_supervisor())
         return _pool_singleton
 
 
@@ -310,7 +310,7 @@ async def shutdown_run_worker_runtime() -> None:
     """
     global _supervisor_singleton, _router_singleton, _pool_singleton, _runtime_loop
     supervisor: Optional[WorkerSupervisor]
-    pool: Optional[WorkerPool]
+    pool: Optional[WorkerLeaseManager]
     with _singleton_lock:
         pool = _pool_singleton
         supervisor = _supervisor_singleton

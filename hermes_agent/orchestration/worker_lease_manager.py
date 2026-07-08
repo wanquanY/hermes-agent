@@ -1,7 +1,7 @@
 """Per-conversation worker lease management.
 
 ``WorkerSupervisor`` owns subprocess mechanics keyed by
-``RuntimeScope.worker_identity``. ``WorkerPool`` adds the policy layer
+``RuntimeScope.worker_identity``. ``WorkerLeaseManager`` adds the policy layer
 the control plane needs: one live worker per conversation/scope lease,
 serialized spawn per lease, idle reaping, and crash terminalization.
 """
@@ -72,7 +72,7 @@ class _LeaseState:
         return bool(self.inflight)
 
 
-class WorkerPool:
+class WorkerLeaseManager:
     """Per-conversation worker subprocess pool with lease semantics."""
 
     def __init__(

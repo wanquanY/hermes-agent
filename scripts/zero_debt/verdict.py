@@ -213,6 +213,7 @@ _P4_WORKER_SERVICE_PATHS = [
 ]
 _P4_WORKER_MAX_TOTAL_LINES = 100
 _P4_WORKER_ALLOWED_OWNER_FILES = {
+    "hermes_agent/orchestration/worker_lease_manager.py",
     "hermes_agent/orchestration/worker_pool.py",
     "hermes_agent/orchestration/worker_runtime.py",
     "hermes_agent/runtime/worker_pool.py",
@@ -898,7 +899,7 @@ def _p4_worker_checks() -> list[Check]:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        if "WorkerPool" in text and rel not in _P4_WORKER_SERVICE_PATHS:
+        if "WorkerLeaseManager" in text and rel not in _P4_WORKER_SERVICE_PATHS:
             worker_owner_offenders.append(rel)
     worker_owner_offenders = sorted(set(worker_owner_offenders))
     return [

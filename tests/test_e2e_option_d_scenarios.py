@@ -18,7 +18,7 @@ from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway.run_worker import ActivityEventFrame, EventFrame, RunStartFrame, RunTerminalFrame
 from tui_gateway.services.runtime_scope import RuntimeScope
 from tui_gateway.services.worker_frame_router import WorkerFrameRouter
-from tui_gateway.services.worker_pool import WorkerPool
+from hermes_agent.orchestration.worker_lease_manager import WorkerLeaseManager
 from tui_gateway.services.worker_supervisor import RunWorker
 
 
@@ -113,7 +113,7 @@ def parent_bus() -> ActivityEventBus:
 @pytest_asyncio.fixture
 async def harness(db: SessionDB, parent_bus: ActivityEventBus, monkeypatch: pytest.MonkeyPatch):
     supervisor = _FakeSupervisor(parent_bus)
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     published_events: list[dict[str, Any]] = []
 
     def publish_event(payload: dict[str, Any], **kwargs: Any) -> list[Any]:
@@ -166,7 +166,7 @@ def _messages(db: SessionDB, session_id: str) -> list[dict[str, Any]]:
 
 async def _submit_plain_chat(
     db: SessionDB,
-    pool: WorkerPool,
+    pool: WorkerLeaseManager,
     *,
     conversation_id: str,
     text: str,

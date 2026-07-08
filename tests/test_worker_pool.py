@@ -7,7 +7,7 @@ import pytest
 
 from tui_gateway.run_worker import RunTerminalFrame
 from tui_gateway.services.runtime_scope import RuntimeScope
-from tui_gateway.services.worker_pool import WorkerPool
+from hermes_agent.orchestration.worker_lease_manager import WorkerLeaseManager
 from tui_gateway.services.worker_supervisor import RunWorker
 
 
@@ -91,7 +91,7 @@ def _profile(env: dict[str, str] | None = None) -> dict:
 @pytest.mark.asyncio
 async def test_get_or_spawn_new_conv_spawns_worker() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         lease = await pool.get_or_spawn("conv-1", _profile())
 
@@ -111,7 +111,7 @@ async def test_get_or_spawn_new_conv_spawns_worker() -> None:
 @pytest.mark.asyncio
 async def test_get_or_spawn_reuses_existing_worker_same_conv() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         first = await pool.get_or_spawn("conv-1", _profile())
         await pool.release("conv-1")
@@ -127,7 +127,7 @@ async def test_get_or_spawn_reuses_existing_worker_same_conv() -> None:
 @pytest.mark.asyncio
 async def test_get_or_spawn_passes_profile_env_to_worker_supervisor() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         await pool.get_or_spawn(
             "conv-1",
@@ -150,7 +150,7 @@ async def test_get_or_spawn_passes_profile_env_to_worker_supervisor() -> None:
 @pytest.mark.asyncio
 async def test_get_or_spawn_respawns_idle_worker_when_profile_env_changes() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         first = await pool.get_or_spawn("conv-1", _profile())
         await pool.release("conv-1")
@@ -180,7 +180,7 @@ async def test_get_or_spawn_respawns_idle_worker_when_profile_env_changes() -> N
 @pytest.mark.asyncio
 async def test_get_or_spawn_reuses_inflight_worker_when_profile_env_changes() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         first = await pool.get_or_spawn("conv-1", _profile())
         await pool.record_run_start(
@@ -210,7 +210,7 @@ async def test_get_or_spawn_reuses_inflight_worker_when_profile_env_changes() ->
 @pytest.mark.asyncio
 async def test_concurrent_get_or_spawn_same_conv_single_spawn() -> None:
     supervisor = _FakeSupervisor(ensure_delay_s=0.01)
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         leases = await asyncio.gather(
             *(pool.get_or_spawn("conv-1", _profile()) for _ in range(10))
@@ -225,7 +225,7 @@ async def test_concurrent_get_or_spawn_same_conv_single_spawn() -> None:
 @pytest.mark.asyncio
 async def test_idle_worker_reaped_after_threshold() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, idle_reap_after_s=0.01, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, idle_reap_after_s=0.01, reap_tick_s=60)
     try:
         await pool.get_or_spawn("conv-1", _profile())
         await pool.release("conv-1")
@@ -242,7 +242,7 @@ async def test_idle_worker_reaped_after_threshold() -> None:
 @pytest.mark.asyncio
 async def test_active_worker_not_reaped_while_run_inflight() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, idle_reap_after_s=0.01, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, idle_reap_after_s=0.01, reap_tick_s=60)
     try:
         await pool.get_or_spawn("conv-1", _profile())
         await pool.record_run_start(
@@ -265,7 +265,7 @@ async def test_active_worker_not_reaped_while_run_inflight() -> None:
 @pytest.mark.asyncio
 async def test_pool_is_single_source_for_active_runs() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         lease = await pool.get_or_spawn("conv-1", _profile())
         await pool.record_run_start(
@@ -286,7 +286,7 @@ async def test_pool_is_single_source_for_active_runs() -> None:
 @pytest.mark.asyncio
 async def test_worker_crash_marks_inflight_runs_failed() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         lease = await pool.get_or_spawn("conv-1", _profile())
         await pool.record_run_start(
@@ -317,7 +317,7 @@ async def test_worker_crash_marks_inflight_runs_failed() -> None:
 @pytest.mark.asyncio
 async def test_worker_pool_emits_events_with_profile_based_scope_key() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         lease = await pool.get_or_spawn("conv-1", _profile())
         await pool.record_run_start(
@@ -341,7 +341,7 @@ async def test_worker_pool_emits_events_with_profile_based_scope_key() -> None:
 @pytest.mark.asyncio
 async def test_shutdown_kills_all_workers_and_cancels_reap_task() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     await pool.get_or_spawn("conv-1", _profile())
     await pool.get_or_spawn("conv-2", _profile())
     task = pool._reap_task

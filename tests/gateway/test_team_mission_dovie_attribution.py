@@ -108,7 +108,7 @@ class _FakeLease:
         self.worker = _FakeWorker()
 
 
-class _FakeWorkerPool:
+class _FakeWorkerLeaseManager:
     def __init__(self) -> None:
         self.starts: list[dict[str, Any]] = []
 
@@ -164,7 +164,7 @@ def _reset_worker_runtime():
 
 @pytest.fixture
 def worker_dispatch(monkeypatch: pytest.MonkeyPatch) -> _FakeSupervisor:
-    fake_pool = _FakeWorkerPool()
+    fake_pool = _FakeWorkerLeaseManager()
     fake_router = _FakeRouter()
     fake_supervisor = _FakeSupervisor()
     monkeypatch.setattr(worker_runtime, "worker_pool", lambda: fake_pool)

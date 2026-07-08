@@ -23,7 +23,7 @@ from tui_gateway.run_worker import (
     RunStartFrame,
     RunTerminalFrame,
 )
-from tui_gateway.services.worker_pool import WorkerPool
+from hermes_agent.orchestration.worker_lease_manager import WorkerLeaseManager
 from tui_gateway.services.worker_supervisor import WorkerSupervisor
 
 
@@ -204,7 +204,7 @@ async def test_real_run_worker_subprocess_roundtrip_writes_db_via_ipc(
         on_run_terminal=collector.on_run_terminal,
         on_log=collector.on_log,
     )
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
 
     conversation_id = "audit-5-conversation"
     run_id = "audit-5-run"
