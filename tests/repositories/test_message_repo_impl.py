@@ -234,6 +234,78 @@ def test_delete_by_session_removes_only_target_messages():
     assert [(row["session_id"], row["content"]) for row in rows] == [("s2", "keep")]
 
 
+def test_deactivate_member_chat_view_sources_only_deactivates_matching_view_rows():
+    conn = _make_conn()
+    repo = MessageRepoImpl(conn)
+    repo.append(
+        "memberchat:s1:m1",
+        MessageSpec(
+            session_id="memberchat:s1:m1",
+            role="user",
+            content="target spaced",
+            metadata={"member_chat_view": {"source_message_id": "10"}},
+        ),
+    )
+    repo.append(
+        "memberchat:s1:m1",
+        MessageSpec(
+            session_id="memberchat:s1:m1",
+            role="assistant",
+            content="target compact",
+            metadata={"member_chat_view": {"source_message_id": "11"}},
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO messages (session_id, role, content, participant_id, timestamp, metadata_json, active)
+        VALUES (?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            "memberchat:s1:m1",
+            "user",
+            "manual compact",
+            "",
+            1.0,
+            '{"member_chat_view":{"source_message_id":"12"}}',
+        ),
+    )
+    repo.append(
+        "memberchat:s1:m1",
+        MessageSpec(
+            session_id="memberchat:s1:m1",
+            role="user",
+            content="different source",
+            metadata={"member_chat_view": {"source_message_id": "99"}},
+        ),
+    )
+    repo.append(
+        "memberchat:other:m1",
+        MessageSpec(
+            session_id="memberchat:other:m1",
+            role="user",
+            content="same source different session",
+            metadata={"member_chat_view": {"source_message_id": "10"}},
+        ),
+    )
+
+    assert repo.deactivate_member_chat_view_sources("memberchat:s1:m1", [10, 12]) == 2
+
+    rows = conn.execute(
+        """
+        SELECT session_id, content, active
+          FROM messages
+         ORDER BY id
+        """
+    ).fetchall()
+    assert [(row["session_id"], row["content"], row["active"]) for row in rows] == [
+        ("memberchat:s1:m1", "target spaced", 0),
+        ("memberchat:s1:m1", "target compact", 1),
+        ("memberchat:s1:m1", "manual compact", 0),
+        ("memberchat:s1:m1", "different source", 1),
+        ("memberchat:other:m1", "same source different session", 1),
+    ]
+
+
 def test_conversation_message_append_updates_session_projection_via_session_repo():
     conn = _make_conversation_conn()
     sessions = SessionRepoImpl(conn)

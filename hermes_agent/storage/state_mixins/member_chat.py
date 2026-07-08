@@ -14,13 +14,11 @@ This module owns:
 from __future__ import annotations
 
 import sqlite3
-import json
-from typing import Any, Dict
+from typing import Any
 
-from hermes_team_mission.domain.member_chat_projection import LEADER_PARTICIPANT_ID
+from hermes_agent.repositories.message_repo import MessageRepoImpl
 from hermes_team_mission.domain.member_chat_projection import coerce_message_metadata
 from hermes_team_mission.domain.member_chat_projection import project_message_for_viewer
-from hermes_team_mission.domain.member_chat_projection import project_messages_for_viewer
 
 
 def _text(value: Any) -> str:
@@ -28,11 +26,14 @@ def _text(value: Any) -> str:
 
 
 class MemberChatStateMixin:
+    def _message_repo(self, conn: sqlite3.Connection | None = None) -> MessageRepoImpl:
+        return MessageRepoImpl(conn or self._conn)  # type: ignore[attr-defined]
+
     def recall_member_chat_view_messages(
         self,
         *,
         member_chat_session_id: str,
-        source_message_ids: "list[int]",
+        source_message_ids: list[int],
     ) -> int:
         """Deactivate (active=0) any view rows in a member-chat session whose
         ``metadata.member_chat_view.source_message_id`` points at one of the
@@ -45,25 +46,15 @@ class MemberChatStateMixin:
         member_chat_session_id = _text(member_chat_session_id)
         if not member_chat_session_id or not source_message_ids:
             return 0
-        # source_message_id is stored stringified inside metadata_json; match
-        # the exact JSON fragment to avoid LIKE false positives.
         normalized_ids = [str(int(mid)) for mid in source_message_ids if str(mid).strip()]
         if not normalized_ids:
             return 0
 
         def _do(conn: sqlite3.Connection) -> int:
-            affected = 0
-            for mid in normalized_ids:
-                fragment = f'"source_message_id": "{mid}"'
-                alt_fragment = f'"source_message_id":"{mid}"'  # no-space variant
-                cur = conn.execute(
-                    "UPDATE messages SET active = 0 "
-                    "WHERE session_id = ? AND active = 1 "
-                    "  AND (instr(metadata_json, ?) > 0 OR instr(metadata_json, ?) > 0)",
-                    (member_chat_session_id, fragment, alt_fragment),
-                )
-                affected += int(cur.rowcount or 0)
-            return affected
+            return self._message_repo(conn).deactivate_member_chat_view_sources(
+                member_chat_session_id,
+                [int(mid) for mid in normalized_ids],
+            )
 
         return int(self._execute_write(_do) or 0)
 
@@ -136,14 +127,11 @@ class MemberChatStateMixin:
             projected = project_message_for_viewer(src, member_id)
             if projected is None:
                 continue
-            try:
-                self.append_message(
-                    member_chat_session_id,
-                    role=projected["role"],
-                    content=projected["content"],
-                    metadata={"member_chat_view": {"source_message_id": source_id}},
-                )
-                appended += 1
-            except Exception:
-                continue
+            self.append_message(
+                member_chat_session_id,
+                role=projected["role"],
+                content=projected["content"],
+                metadata={"member_chat_view": {"source_message_id": source_id}},
+            )
+            appended += 1
         return appended
