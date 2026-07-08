@@ -57,6 +57,7 @@ from hermes_agent.repositories.session_repo import sanitize_session_title
 from hermes_agent.storage.cli_session_store import open_cli_session_store
 from hermes_agent.storage.session_availability import format_session_store_unavailable
 from hermes_cli.config import cfg_get
+from hermes_gateway.assets import telegram_botfather_threads_settings_path
 from hermes_gateway.bootstrap import (
     ensure_ssl_certs as _ensure_ssl_certs,
     ensure_windows_gateway_venv_imports as _ensure_windows_gateway_venv_imports,
@@ -11564,7 +11565,7 @@ class GatewayRunner:
         adapter = self.adapters.get(source.platform) if getattr(self, "adapters", None) else None
         if adapter is None or not source.chat_id or not hasattr(adapter, "send_image_file"):
             return
-        image_path = Path(__file__).resolve().parent / "assets" / "telegram-botfather-threads-settings.jpg"
+        image_path = telegram_botfather_threads_settings_path()
         if not image_path.exists():
             return
         try:
