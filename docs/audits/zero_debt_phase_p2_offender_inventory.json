@@ -362,7 +362,7 @@
               ]
             },
             {
-              "line": 1629,
+              "line": 1573,
               "text": "session_id = str(event.get(\"stored_session_id\") or row[\"session_id\"] or \"\").strip()",
               "tokens": [
                 "stored_session_id"
@@ -2624,19 +2624,19 @@
       "total_offenders": 1199
     },
     "p2:no_sessiondb_production": {
-      "file_count": 39,
+      "file_count": 36,
       "files": [
         {
           "first_lines": [
             {
-              "line": 31,
+              "line": 32,
               "text": "from hermes_state_activities import ActivitiesMixin",
               "tokens": [
                 "from hermes_state"
               ]
             },
             {
-              "line": 32,
+              "line": 33,
               "text": "from hermes_state_agent_profiles import SessionDBAgentProfileMixin",
               "tokens": [
                 "from hermes_state",
@@ -2644,7 +2644,7 @@
               ]
             },
             {
-              "line": 33,
+              "line": 34,
               "text": "from hermes_state_branch import SessionDBBranchMixin",
               "tokens": [
                 "from hermes_state",
@@ -2652,7 +2652,7 @@
               ]
             },
             {
-              "line": 34,
+              "line": 35,
               "text": "from hermes_state_member_chat import SessionDBMemberChatMixin",
               "tokens": [
                 "from hermes_state",
@@ -2660,7 +2660,7 @@
               ]
             },
             {
-              "line": 35,
+              "line": 36,
               "text": "from hermes_state_participants import (",
               "tokens": [
                 "from hermes_state"
@@ -2936,46 +2936,6 @@
         {
           "first_lines": [
             {
-              "line": 16,
-              "text": "from hermes_state import FTS_SQL",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 17,
-              "text": "from hermes_state import FTS_TRIGRAM_SQL",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "hermes_agent/storage/migrations/0011_fts_reindex.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 12,
-              "text": "from hermes_state import compact_team_mission_event_json_storage",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 13,
-              "text": "from hermes_state import logger",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "hermes_agent/storage/migrations/0039_team_mission_event_json_storage.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 9,
               "text": "from hermes_state_run_event_codec import decode_run_event_row",
               "tokens": [
@@ -3078,19 +3038,6 @@
           ],
           "offenders": 1,
           "path": "hermes_agent/storage/migrations/0001_declarative_baseline.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 12,
-              "text": "from hermes_state import FTS_TRIGRAM_SQL",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_agent/storage/migrations/0010_fts_trigram_backfill.py"
         },
         {
           "first_lines": [
@@ -3380,7 +3327,7 @@
           "path": "plugins/memory/holographic/store.py"
         }
       ],
-      "total_offenders": 125
+      "total_offenders": 120
     }
   },
   "phase": "P2",

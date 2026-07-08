@@ -8,14 +8,14 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 125 | 39 |
+| `p2:no_sessiondb_production` | 120 | 36 |
 | `p2:no_legacy_identity_alias_internal` | 1199 | 80 |
 
 ## p2:no_sessiondb_production
 
 | Offenders | File | First evidence |
 |---:|---|---|
-| 32 | `hermes_state.py` | `31` from hermes_state_activities import ActivitiesMixin |
+| 32 | `hermes_state.py` | `32` from hermes_state_activities import ActivitiesMixin |
 | 17 | `hermes_team_mission/state/session_mixin.py` | `3` from .conversation_missions import SessionDBConversationMissionMixin |
 | 16 | `gateway/run.py` | `1755` from hermes_state import SessionDB |
 | 6 | `hermes_state_runs.py` | `24` from hermes_state_run_event_codec import ( |
@@ -23,15 +23,12 @@ Status: `preflight_only`
 | 5 | `hermes_team_mission/state/session_graph.py` | `4` from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS |
 | 3 | `hermes_state_run_event_reference.py` | `11` from hermes_state_run_event_codec import decode_run_event_row |
 | 3 | `tui_gateway/services/worker_db_proxy.py` | `1` """Worker-side SessionDB proxy over the run-worker stdio protocol. |
-| 2 | `hermes_agent/storage/migrations/0011_fts_reindex.py` | `16` from hermes_state import FTS_SQL |
-| 2 | `hermes_agent/storage/migrations/0039_team_mission_event_json_storage.py` | `12` from hermes_state import compact_team_mission_event_json_storage |
 | 2 | `hermes_state_tool_events.py` | `9` from hermes_state_run_event_codec import decode_run_event_row |
 | 2 | `hermes_team_mission/state/session_conversations.py` | `8` from hermes_state_participants import leader_participant_id, member_participant_id |
 | 2 | `tui_gateway/methods/session.py` | `1761` # Context compression ends the current SessionDB session and forks a |
 | 2 | `tui_gateway/services/run_control.py` | `24` from hermes_state_participants import agent_participant_id, leader_participant_id, member_participant_id |
 | 1 | `channels/platforms/api_server_support.py` | `346` from hermes_state import apply_wal_with_fallback |
 | 1 | `hermes_agent/storage/migrations/0001_declarative_baseline.py` | `22` from hermes_state import SCHEMA_SQL |
-| 1 | `hermes_agent/storage/migrations/0010_fts_trigram_backfill.py` | `12` from hermes_state import FTS_TRIGRAM_SQL |
 | 1 | `hermes_cli/kanban_db.py` | `1072` from hermes_state import apply_wal_with_fallback |
 | 1 | `hermes_state/migrations/merge_profile_dbs.py` | `4` the normal SessionDB lifecycle starts and must not import hermes_state.SessionDB. |
 | 1 | `hermes_state_agent_profiles.py` | `109` class SessionDBAgentProfileMixin: |

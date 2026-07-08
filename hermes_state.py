@@ -27,6 +27,7 @@ from pathlib import Path
 from agent.memory_manager import sanitize_context
 from hermes_agent.domain.event_ledger import EventLedger
 from hermes_agent.domain.seq_allocator import ensure_session_counter
+from hermes_agent.storage.fts_schema import FTS_SQL, FTS_TRIGRAM_SQL
 from hermes_constants import get_hermes_home
 from hermes_state_activities import ActivitiesMixin
 from hermes_state_agent_profiles import SessionDBAgentProfileMixin
@@ -49,7 +50,6 @@ from hermes_state_tool_events import backfill_tool_events_from_run_events
 from hermes_state_team_capabilities import SessionDBTeamCapabilityMixin
 from hermes_team_mission.state.session_mixin import SessionDBTeamMissionMixin
 from hermes_state_team_registry import SessionDBTeamRegistryMixin
-from hermes_team_mission.state.schema import compact_team_mission_event_json_storage
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
 from hermes_team_mission.state.schema import reconcile_team_mission_node_primary_key
 from hermes_team_mission.state.schema import team_mission_deferred_index_sql
@@ -807,62 +807,6 @@ CREATE INDEX IF NOT EXISTS idx_team_capability_snapshot_bindings_mission
 CREATE INDEX IF NOT EXISTS idx_team_capability_snapshot_bindings_conversation
     ON team_capability_snapshot_bindings(conversation_id);
 """
-
-FTS_SQL = """
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content
-);
-
-CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content) VALUES (
-        new.id,
-        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
-    );
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
-    DELETE FROM messages_fts WHERE rowid = old.id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
-    DELETE FROM messages_fts WHERE rowid = old.id;
-    INSERT INTO messages_fts(rowid, content) VALUES (
-        new.id,
-        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
-    );
-END;
-"""
-
-# Trigram FTS5 table for CJK substring search.  The default unicode61
-# tokenizer splits CJK characters into individual tokens, breaking phrase
-# matching.  The trigram tokenizer creates overlapping 3-byte sequences so
-# substring queries work natively for any script (CJK, Thai, etc.).
-FTS_TRIGRAM_SQL = """
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(
-    content,
-    tokenize='trigram'
-);
-
-CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_insert AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts_trigram(rowid, content) VALUES (
-        new.id,
-        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
-    );
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_delete AFTER DELETE ON messages BEGIN
-    DELETE FROM messages_fts_trigram WHERE rowid = old.id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_update AFTER UPDATE ON messages BEGIN
-    DELETE FROM messages_fts_trigram WHERE rowid = old.id;
-    INSERT INTO messages_fts_trigram(rowid, content) VALUES (
-        new.id,
-        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
-    );
-END;
-"""
-
 
 class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBMemberChatMixin, ParticipantsMixin, ActivitiesMixin, SessionDBRunMixin, SessionDBBranchMixin):
     """

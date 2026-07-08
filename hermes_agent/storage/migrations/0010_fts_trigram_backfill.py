@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import sqlite3
 
+from hermes_agent.storage.fts_schema import FTS_TRIGRAM_SQL
+
 version = 10
 description = "fts trigram backfill"
 
 
 def apply(cursor: sqlite3.Cursor) -> None:
-    from hermes_state import FTS_TRIGRAM_SQL
-
     # v10: trigram FTS5 table for CJK/substring search. The
     # virtual table + triggers are created unconditionally via
     # FTS_TRIGRAM_SQL below, but existing rows need a one-time

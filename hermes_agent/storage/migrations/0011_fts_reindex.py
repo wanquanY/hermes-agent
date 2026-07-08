@@ -5,6 +5,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 
+from hermes_agent.storage.fts_schema import FTS_SQL
+from hermes_agent.storage.fts_schema import FTS_TRIGRAM_SQL
+
 version = 11
 description = "fts reindex"
 
@@ -13,9 +16,6 @@ _logger = logging.getLogger(__name__)
 
 
 def apply(cursor: sqlite3.Cursor) -> None:
-    from hermes_state import FTS_SQL
-    from hermes_state import FTS_TRIGRAM_SQL
-
     # v11: re-index FTS5 tables to cover tool_name + tool_calls and
     # switch from external-content to inline mode. Existing DBs have
     # old-schema FTS tables and triggers that IF NOT EXISTS won't
