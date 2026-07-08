@@ -145,6 +145,21 @@ _ACTIVITY_KINDS = frozenset({
     "dispatch_completion",
 })
 
+_LEGACY_ACTIVITY_KINDS = frozenset({
+    "chat",
+    "agent_dispatch",
+    "team_dispatch",
+    "member_chat",
+    "mission",
+})
+_TERMINAL_ACTIVITY_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_LEGACY_ACTIVITY_STATUS_ALLOWED_PREVIOUS = {
+    "running": ("pending",),
+    "completed": ("pending", "running"),
+    "failed": ("pending", "running"),
+    "cancelled": ("pending", "running"),
+}
+
 
 @runtime_checkable
 class TeamMissionRepo(Protocol):
@@ -491,6 +506,512 @@ class TeamMissionRepoImpl:
             raise LookupError(f"activity {stable_aid!r} not found")
         return _row_to_activity(row)
 
+    # ------------------------------------------------------------------
+    # Legacy Activity table — current gateway/UI read model.
+    # ------------------------------------------------------------------
+
+    def create_legacy_activity(
+        self,
+        *,
+        activity_id: str,
+        conversation_id: str,
+        kind: str,
+        parent_activity_id: str | None = None,
+        target_profile_id: str | None = None,
+        target_team_id: str | None = None,
+        target_mission_id: str | None = None,
+        status: str = "pending",
+        prompt_summary: str | None = None,
+        notify_parent: bool = True,
+    ) -> dict[str, Any]:
+        stable_aid = _text(activity_id)
+        stable_conversation = _text(conversation_id)
+        stable_kind = _text(kind)
+        stable_status = _text(status) or "pending"
+        if not stable_aid:
+            raise ValueError("activity_id required")
+        if not stable_conversation:
+            raise ValueError("conversation_id required")
+        if not stable_kind:
+            raise ValueError("kind required")
+        if stable_kind not in _LEGACY_ACTIVITY_KINDS:
+            raise sqlite3.IntegrityError("invalid activity kind")
+        if stable_status not in {"pending", "running", "completed", "failed", "cancelled"}:
+            raise sqlite3.IntegrityError("invalid activity status")
+        now = time.time()
+        started_at = now if stable_status == "running" else None
+        completed_at = now if stable_status in _TERMINAL_ACTIVITY_STATUSES else None
+        self._conn.execute(
+            """
+            INSERT INTO activities (
+                activity_id, conversation_id, parent_activity_id, kind,
+                target_profile_id, target_team_id, target_mission_id, status,
+                prompt_summary, result_summary, result_json,
+                started_at, completed_at, notify_parent, read_at,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                stable_aid,
+                stable_conversation,
+                _optional_text(parent_activity_id),
+                stable_kind,
+                _optional_text(target_profile_id),
+                _optional_text(target_team_id),
+                _optional_text(target_mission_id),
+                stable_status,
+                _optional_text(prompt_summary),
+                started_at,
+                completed_at,
+                1 if notify_parent else 0,
+                now,
+                now,
+            ),
+        )
+        return self.get_legacy_activity(stable_aid) or {}
+
+    def ensure_legacy_mission_activity(
+        self,
+        *,
+        conversation_id: str,
+        mission_id: str,
+        status: str = "running",
+        prompt_summary: str | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        stable_conversation = _text(conversation_id)
+        stable_mission = _text(mission_id)
+        if not stable_conversation or not stable_mission:
+            return {}
+        stable_status = _text(status) or "running"
+        if stable_status not in {"pending", "running", "completed", "failed", "cancelled"}:
+            stable_status = "running"
+        timestamp = float(now if now is not None else time.time())
+        activity_id = _mission_activity_id(stable_mission)
+        existing = self._conn.execute(
+            """
+            SELECT activity_id, status, created_at, started_at
+            FROM activities
+            WHERE kind = 'mission' AND target_mission_id = ?
+            LIMIT 1
+            """,
+            (stable_mission,),
+        ).fetchone()
+        existing_activity_id = _row_text(existing, "activity_id", 0) if existing is not None else ""
+        existing_status = _row_text(existing, "status", 1) if existing is not None else ""
+        if existing_activity_id and existing_status in _TERMINAL_ACTIVITY_STATUSES:
+            return self.get_legacy_activity(existing_activity_id) or {}
+        row_created_at = (
+            float(_row_value(existing, "created_at", 2) or timestamp)
+            if existing is not None
+            else timestamp
+        )
+        started_at = (
+            float(_row_value(existing, "started_at", 3) or timestamp)
+            if existing is not None and stable_status == "running"
+            else timestamp if stable_status == "running" else None
+        )
+        completed_at = timestamp if stable_status in _TERMINAL_ACTIVITY_STATUSES else None
+        self._conn.execute(
+            """
+            INSERT INTO activities (
+                activity_id, conversation_id, parent_activity_id, kind,
+                target_profile_id, target_team_id, target_mission_id, status,
+                prompt_summary, result_summary, result_json,
+                started_at, completed_at, notify_parent, read_at,
+                created_at, updated_at
+            )
+            VALUES (?, ?, NULL, 'mission', NULL, NULL, ?, ?, ?, NULL, NULL, ?, ?, 1, NULL, ?, ?)
+            ON CONFLICT(activity_id) DO UPDATE SET
+                conversation_id = excluded.conversation_id,
+                kind = 'mission',
+                target_mission_id = excluded.target_mission_id,
+                status = CASE
+                    WHEN activities.status IN ('completed', 'failed', 'cancelled')
+                    THEN activities.status
+                    ELSE excluded.status
+                END,
+                prompt_summary = COALESCE(NULLIF(excluded.prompt_summary, ''), activities.prompt_summary),
+                started_at = COALESCE(activities.started_at, excluded.started_at),
+                completed_at = CASE
+                    WHEN activities.status IN ('completed', 'failed', 'cancelled')
+                    THEN activities.completed_at
+                    ELSE excluded.completed_at
+                END,
+                updated_at = excluded.updated_at
+            """,
+            (
+                existing_activity_id or activity_id,
+                stable_conversation,
+                stable_mission,
+                stable_status,
+                _optional_text(prompt_summary),
+                started_at,
+                completed_at,
+                row_created_at,
+                timestamp,
+            ),
+        )
+        return self.get_legacy_activity_for_mission(stable_mission) or {}
+
+    def bind_legacy_activity_to_mission(
+        self,
+        *,
+        activity_id: str,
+        conversation_id: str,
+        mission_id: str,
+        target_team_id: str | None = None,
+        prompt_summary: str | None = None,
+        status: str = "running",
+    ) -> dict[str, Any]:
+        stable_aid = _text(activity_id)
+        stable_conversation = _text(conversation_id)
+        stable_mission = _text(mission_id)
+        stable_status = _text(status) or "running"
+        if not stable_aid:
+            raise ValueError("activity_id required")
+        if not stable_conversation:
+            raise ValueError("conversation_id required")
+        if not stable_mission:
+            raise ValueError("mission_id required")
+        if stable_status not in {"pending", "running", "completed", "failed", "cancelled"}:
+            stable_status = "running"
+        now = time.time()
+        started_at = now if stable_status == "running" else None
+        row = self._conn.execute(
+            "SELECT * FROM activities WHERE activity_id = ?",
+            (stable_aid,),
+        ).fetchone()
+        if row is None:
+            self._conn.execute(
+                """
+                INSERT INTO activities (
+                    activity_id, conversation_id, parent_activity_id, kind,
+                    target_profile_id, target_team_id, target_mission_id, status,
+                    prompt_summary, result_summary, result_json,
+                    started_at, completed_at, notify_parent, read_at,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, NULL, 'team_dispatch', NULL, ?, ?, ?, ?, NULL, NULL, ?, NULL, 1, NULL, ?, ?)
+                """,
+                (
+                    stable_aid,
+                    stable_conversation,
+                    _optional_text(target_team_id),
+                    stable_mission,
+                    stable_status,
+                    _optional_text(prompt_summary),
+                    started_at,
+                    now,
+                    now,
+                ),
+            )
+        else:
+            self._conn.execute(
+                """
+                UPDATE activities
+                   SET conversation_id = ?,
+                       kind = CASE
+                           WHEN kind IN ('team_dispatch', 'mission') THEN kind
+                           ELSE 'team_dispatch'
+                       END,
+                       target_team_id = COALESCE(?, target_team_id),
+                       target_mission_id = ?,
+                       status = CASE
+                           WHEN status IN ('completed', 'failed', 'cancelled') THEN status
+                           WHEN ? = 'running' THEN 'running'
+                           ELSE status
+                       END,
+                       prompt_summary = COALESCE(NULLIF(?, ''), prompt_summary),
+                       started_at = CASE
+                           WHEN ? = 'running' THEN COALESCE(started_at, ?)
+                           ELSE started_at
+                       END,
+                       updated_at = ?
+                 WHERE activity_id = ?
+                """,
+                (
+                    stable_conversation,
+                    _optional_text(target_team_id),
+                    stable_mission,
+                    stable_status,
+                    _optional_text(prompt_summary),
+                    stable_status,
+                    started_at,
+                    now,
+                    stable_aid,
+                ),
+            )
+        return self.get_legacy_activity(stable_aid) or {}
+
+    def get_legacy_activity_for_mission(self, mission_id: str) -> dict[str, Any] | None:
+        stable_mission = _text(mission_id)
+        if not stable_mission:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT *
+            FROM activities
+            WHERE kind = 'mission' AND target_mission_id = ?
+            ORDER BY created_at ASC, activity_id ASC
+            LIMIT 1
+            """,
+            (stable_mission,),
+        ).fetchone()
+        return _legacy_activity_row(row)
+
+    def list_legacy_active_mission_activities(self, conversation_id: str) -> list[dict[str, Any]]:
+        stable_conversation = _text(conversation_id)
+        if not stable_conversation:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT *
+            FROM activities
+            WHERE conversation_id = ?
+              AND kind = 'mission'
+              AND status NOT IN ('completed', 'failed', 'cancelled')
+            ORDER BY started_at ASC, created_at ASC, activity_id ASC
+            """,
+            (stable_conversation,),
+        ).fetchall()
+        return [_legacy_activity_row(row) or {} for row in rows]
+
+    def mark_legacy_mission_activity_terminal(
+        self,
+        *,
+        mission_id: str,
+        status: str,
+        result_summary: str | None = None,
+        result_json: Any = None,
+        now: float | None = None,
+    ) -> bool:
+        stable_mission = _text(mission_id)
+        stable_status = _text(status)
+        if not stable_mission or stable_status not in _TERMINAL_ACTIVITY_STATUSES:
+            return False
+        timestamp = float(now if now is not None else time.time())
+        cursor = self._conn.execute(
+            """
+            UPDATE activities
+               SET status = ?,
+                   result_summary = COALESCE(?, result_summary),
+                   result_json = COALESCE(?, result_json),
+                   completed_at = COALESCE(completed_at, ?),
+                   updated_at = ?
+             WHERE kind = 'mission'
+               AND target_mission_id = ?
+               AND status NOT IN ('completed', 'failed', 'cancelled')
+            """,
+            (
+                stable_status,
+                _optional_text(result_summary),
+                _json_text(result_json) if result_json is not None else None,
+                timestamp,
+                timestamp,
+                stable_mission,
+            ),
+        )
+        return bool(cursor.rowcount)
+
+    def update_legacy_activity_status(
+        self,
+        activity_id: str,
+        status: str,
+        *,
+        target_profile_id: str | None = None,
+        target_team_id: str | None = None,
+        target_mission_id: str | None = None,
+        result_summary: str | None = None,
+        result_json: Any = None,
+        started_at: float | None = None,
+        completed_at: float | None = None,
+    ) -> bool:
+        stable_aid = _text(activity_id)
+        stable_status = _text(status)
+        if not stable_aid:
+            raise ValueError("activity_id required")
+        if not stable_status:
+            raise ValueError("status required")
+        if stable_status not in {"pending", "running", "completed", "failed", "cancelled"}:
+            raise sqlite3.IntegrityError("invalid activity status")
+        now = time.time()
+        assignments = ["status = ?", "updated_at = ?"]
+        params: list[Any] = [stable_status, now]
+        for column, value in (
+            ("target_profile_id", target_profile_id),
+            ("target_team_id", target_team_id),
+            ("target_mission_id", target_mission_id),
+            ("result_summary", result_summary),
+        ):
+            if value is not None:
+                assignments.append(f"{column} = ?")
+                params.append(_optional_text(value))
+        if result_json is not None:
+            assignments.append("result_json = ?")
+            params.append(_json_text(result_json))
+        if started_at is not None:
+            assignments.append("started_at = ?")
+            params.append(float(started_at))
+        if completed_at is not None:
+            assignments.append("completed_at = ?")
+            params.append(float(completed_at))
+        params.append(stable_aid)
+        allowed_previous = _LEGACY_ACTIVITY_STATUS_ALLOWED_PREVIOUS.get(stable_status)
+        where = "activity_id = ?"
+        update_params = list(params)
+        if allowed_previous is not None:
+            placeholders = ", ".join("?" for _ in allowed_previous)
+            where = f"{where} AND status IN ({placeholders})"
+            update_params.extend(allowed_previous)
+        cursor = self._conn.execute(
+            f"UPDATE activities SET {', '.join(assignments)} WHERE {where}",
+            tuple(update_params),
+        )
+        return cursor.rowcount > 0
+
+    def mark_legacy_activity_completed(
+        self,
+        activity_id: str,
+        *,
+        result_summary: str,
+        result_json: Any,
+    ) -> bool:
+        return self.update_legacy_activity_status(
+            activity_id,
+            "completed",
+            result_summary=result_summary,
+            result_json=result_json,
+            completed_at=time.time(),
+        )
+
+    def mark_legacy_activity_failed(
+        self,
+        activity_id: str,
+        *,
+        error_message: str,
+        result_json: Any = None,
+    ) -> bool:
+        return self.update_legacy_activity_status(
+            activity_id,
+            "failed",
+            result_summary=error_message,
+            result_json=result_json,
+            completed_at=time.time(),
+        )
+
+    def mark_legacy_activity_cancelled(
+        self,
+        activity_id: str,
+        *,
+        result_summary: str | None = None,
+        result_json: Any = None,
+    ) -> bool:
+        return self.update_legacy_activity_status(
+            activity_id,
+            "cancelled",
+            result_summary=result_summary,
+            result_json=result_json,
+            completed_at=time.time(),
+        )
+
+    def mark_legacy_activity_read(self, activity_id: str) -> bool:
+        stable_aid = _text(activity_id)
+        if not stable_aid:
+            raise ValueError("activity_id required")
+        now = time.time()
+        cursor = self._conn.execute(
+            """
+            UPDATE activities
+               SET read_at = ?, updated_at = ?
+             WHERE activity_id = ?
+            """,
+            (now, now, stable_aid),
+        )
+        return cursor.rowcount > 0
+
+    def list_legacy_activities(
+        self,
+        conversation_id: str,
+        *,
+        status: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        stable_conversation = _text(conversation_id)
+        if not stable_conversation:
+            return []
+        params: list[Any] = [stable_conversation]
+        where = ["conversation_id = ?"]
+        if status is not None:
+            where.append("status = ?")
+            params.append(_text(status))
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(max(0, int(limit)))
+        rows = self._conn.execute(
+            "SELECT * FROM activities "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY created_at ASC, activity_id ASC"
+            f"{limit_sql}",
+            tuple(params),
+        ).fetchall()
+        return [_legacy_activity_row(row) or {} for row in rows]
+
+    def list_legacy_unread_completions(
+        self,
+        parent_activity_id: str | None = None,
+        *,
+        conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where = ["status IN ('completed', 'failed')", "read_at IS NULL"]
+        params: list[Any] = []
+        if parent_activity_id is not None:
+            where.append("parent_activity_id = ?")
+            params.append(_text(parent_activity_id))
+        if conversation_id is not None:
+            where.append("conversation_id = ?")
+            params.append(_text(conversation_id))
+        rows = self._conn.execute(
+            "SELECT * FROM activities "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY COALESCE(completed_at, updated_at) ASC, activity_id ASC",
+            tuple(params),
+        ).fetchall()
+        return [_legacy_activity_row(row) or {} for row in rows]
+
+    def get_legacy_unread_completion_count(
+        self,
+        *,
+        parent_activity_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> int:
+        where = ["status IN ('completed', 'failed')", "read_at IS NULL"]
+        params: list[Any] = []
+        if parent_activity_id is not None:
+            where.append("parent_activity_id = ?")
+            params.append(_text(parent_activity_id))
+        if conversation_id is not None:
+            where.append("conversation_id = ?")
+            params.append(_text(conversation_id))
+        row = self._conn.execute(
+            "SELECT COUNT(1) AS count FROM activities "
+            f"WHERE {' AND '.join(where)}",
+            tuple(params),
+        ).fetchone()
+        return int(_row_value(row, "count", 0) or 0) if row is not None else 0
+
+    def get_legacy_activity(self, activity_id: str) -> dict[str, Any] | None:
+        stable_aid = _text(activity_id)
+        if not stable_aid:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM activities WHERE activity_id = ?",
+            (stable_aid,),
+        ).fetchone()
+        return _legacy_activity_row(row)
+
 
 def _row_to_mission(row: Any) -> Mission:
     def _g(name, idx):
@@ -560,6 +1081,53 @@ def _row_to_activity(row: Any) -> Activity:
         completed_at=float(completed_at_raw) if completed_at_raw is not None else None,
         metadata=metadata,
     )
+
+
+def _legacy_activity_row(row: Any) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = dict(row) if isinstance(row, sqlite3.Row) else {}
+    if not item:
+        return None
+    item["notify_parent"] = bool(item.get("notify_parent"))
+    return item
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _json_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _mission_activity_id(mission_id: str) -> str:
+    stable = _text(mission_id)
+    if not stable:
+        raise ValueError("mission_id required")
+    return f"mission:{stable}"
+
+
+def _row_value(row: Any, key: str, index: int) -> Any:
+    if row is None:
+        return None
+    if isinstance(row, sqlite3.Row):
+        return row[key]
+    return row[index]
+
+
+def _row_text(row: Any, key: str, index: int) -> str:
+    return str(_row_value(row, key, index) or "")
 
 
 __all__ = [
