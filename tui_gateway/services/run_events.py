@@ -67,4 +67,26 @@ def list_filtered_events(
     )
 
 
-__all__ = ["list_filtered_events", "list_runtime_events", "run_event_read_model_for_db"]
+def list_tool_events(
+    db: Any,
+    session_id: str,
+    *,
+    after_seq: int = 0,
+    limit: int = 2000,
+) -> list[dict[str, Any]]:
+    read_model = run_event_read_model_for_db(db)
+    if read_model is None:
+        return []
+    return read_model.list_tool_events(
+        session_id,
+        after_seq=after_seq,
+        limit=limit,
+    )
+
+
+__all__ = [
+    "list_filtered_events",
+    "list_runtime_events",
+    "list_tool_events",
+    "run_event_read_model_for_db",
+]

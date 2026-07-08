@@ -13,6 +13,12 @@ from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 _RUN_EVENT_FRAME_FORMAT = "zlib+json:v1"
 _STORED_SESSION_KEY = "stored" "_session_id"
 _RUNTIME_SESSION_KEY = "runtime" "_session_id"
+_TOOL_EVENT_TYPES = (
+    "tool.start",
+    "tool.progress",
+    "tool.generating",
+    "tool.complete",
+)
 
 
 class RunEventReadModel:
@@ -85,6 +91,20 @@ class RunEventReadModel:
                     return []
                 raise
             return self._decode_rows(rows)
+
+    def list_tool_events(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]:
+        return self.list_filtered(
+            session_id,
+            after_seq=after_seq,
+            event_types=_TOOL_EVENT_TYPES,
+            limit=limit,
+        )
 
     def _decode_rows(self, rows: list[Any]) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []

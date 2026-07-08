@@ -417,41 +417,89 @@ def test_session_messages_canonical_tool_events_empty_when_none(monkeypatch, tmp
     assert result["toolEvents"] == []
 
 
-def test_session_messages_refuses_legacy_tool_event_row_model(monkeypatch):
-    """``include_tool_events`` must not fall back to ``db.list_tool_events`` rows."""
+def test_session_messages_refuses_legacy_tool_event_row_model(monkeypatch, tmp_path):
+    db = _install_db(monkeypatch, tmp_path)
 
-    class LegacyOnlyDB:
-        def get_session(self, session_id):
-            return {"id": session_id}
+    def fail_legacy_tool_events(*args, **kwargs):
+        raise AssertionError("legacy db.list_tool_events must not be called")
 
-        def get_session_by_title(self, title):
-            return None
+    monkeypatch.setattr(db, "list_tool_events", fail_legacy_tool_events)
+    try:
+        db.create_session("session-1", "dovie")
+        db.append_run_event(
+            "session-1",
+            _tool_event("tool.complete", seq=1, run_id="run-1"),
+        )
 
-        def get_messages_page_as_conversation(self, *args, **kwargs):
-            return {"messages": [], "pageInfo": {}}
+        response = server._methods["session.messages"](
+            "no-legacy-row-model",
+            {"session_id": "session-1", "include_tool_events": True},
+        )
+    finally:
+        db.close()
 
-        def get_session_branch_info(self, session_id):
-            return None
+    assert "error" not in response, response
+    assert [event["seq"] for event in response["result"]["toolEvents"]] == [1]
 
+
+def test_session_messages_uses_run_event_read_model_for_tool_events(monkeypatch, tmp_path):
+    run_event_service = importlib.import_module("tui_gateway.services.run_events")
+    db = _install_db(monkeypatch, tmp_path)
+    calls: list[tuple[str, int]] = []
+    original = run_event_service.RunEventReadModel.list_tool_events
+
+    def traced(self, session_id, *, after_seq=0, limit=2000):
+        calls.append((session_id, after_seq))
+        return original(self, session_id, after_seq=after_seq, limit=limit)
+
+    monkeypatch.setattr(run_event_service.RunEventReadModel, "list_tool_events", traced)
+    try:
+        db.create_session("session-1", "dovie")
+        db.append_run_event(
+            "session-1",
+            _tool_event("tool.complete", seq=4, run_id="run-1"),
+        )
+        response = server._methods["session.messages"](
+            "read-model-tool-events",
+            {
+                "session_id": "session-1",
+                "include_tool_events": True,
+            },
+        )
+    finally:
+        db.close()
+
+    assert "error" not in response, response
+    assert calls == [("session-1", 0)]
+    assert [event["seq"] for event in response["result"]["toolEvents"]] == [1]
+
+
+def test_session_messages_returns_empty_tool_events_without_read_model(monkeypatch):
+    """A DB without a SQLite connection cannot serve the P2 read model and must
+    not resurrect legacy ``db.list_tool_events`` fallback behavior."""
+
+    class ConnectionlessDB:
         def list_tool_events(self, *args, **kwargs):
-            return [{"type": "tool.complete", "seq_start": 99}]
+            raise AssertionError("legacy db.list_tool_events must not be called")
 
     session_history = importlib.import_module("tui_gateway.methods.session_history")
-    monkeypatch.setattr(session_history, "_get_db", lambda: LegacyOnlyDB())
+    monkeypatch.setattr(session_history, "_get_db", lambda: ConnectionlessDB())
 
     response = server._methods["session.messages"](
         "legacy-row-model",
         {"session_id": "session-1", "include_tool_events": True},
     )
 
-    assert response["error"]["message"] == "canonical tool event reader unavailable"
+    assert response["error"]["message"] == "session repository unavailable"
 
 
 def test_session_messages_has_no_legacy_tool_events_fallback():
     session_history = importlib.import_module("tui_gateway.methods.session_history")
     source = inspect.getsource(session_history)
-    assert "list_tool_events_as_canonical" in source
-    assert "list_tool_events(" not in source
+    assert "list_tool_events_as_canonical" not in source
+    assert 'getattr(db, "list_tool_events' not in source
+    assert "db.list_tool_events" not in source
+    assert "from tui_gateway.services.run_events import list_runtime_events, list_tool_events" in source
 
 
 def test_session_messages_canonical_tool_events_off_by_default(monkeypatch, tmp_path):

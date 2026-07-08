@@ -17,7 +17,7 @@ from tui_gateway.services.message_history import (
     message_history_read_model_for_db,
     message_repository_for_db,
 )
-from tui_gateway.services.run_events import list_runtime_events
+from tui_gateway.services.run_events import list_runtime_events, list_tool_events
 
 _server = bind_server_globals(globals())
 
@@ -173,13 +173,8 @@ def _(rid, params: dict) -> dict:
     tool_events = []
     if include_tool_events:
         try:
-            # PR-3 §4.3: serve canonical tool-event shapes (tool.start /
-            # tool.complete with the real run_events.seq) so FE no longer
-            # reverse-derives events from the tool_events row model.
-            canonical_method = getattr(db, "list_tool_events_as_canonical", None)
-            if not callable(canonical_method):
-                return _err(rid, 5000, "canonical tool event reader unavailable")
-            tool_events = canonical_method(
+            tool_events = list_tool_events(
+                db,
                 target,
                 after_seq=after_seq,
                 limit=_bounded_page_limit(

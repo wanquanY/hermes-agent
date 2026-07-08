@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_14`
+状态：`in_progress_checkpoint_15`
 
 ## 前置门槛
 
@@ -770,8 +770,47 @@ python scripts/zero_debt/verdict.py --phase P2 --json
 
 剩余工作：
 
-- Tool canonical projection 仍有一处 `list_tool_events_as_canonical`
-  legacy reader，需单独迁到 tool/run-event projection owner。
+- `run_control` subscription poller、activity/team-mission event replay 仍有
+  legacy event reader，需要后续 subscription/activity 切片。
+- Team transcript projector/backfill 仍需要目标 owner。
+- `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。
+
+## Checkpoint 15 证据
+
+已完成：
+
+- `RunEventReadModel` 新增 `list_tool_events()`，由同一个 `EventLedger`
+  物理 row reader 过滤 `tool.*` canonical frames。
+- `tui_gateway.services.run_events` 暴露 gateway-facing tool event read-model
+  accessor，和 runtime/filtered event accessor 共用同一个 owner。
+- `session.messages include_tool_events` 不再调用
+  `list_tool_events_as_canonical` 或 `db.list_tool_events` row-model fallback，
+  改为通过 `RunEventReadModel.list_tool_events()` 返回真实 `run_events.seq`。
+- `tests/test_pr3_tool_events_canonical.py` 的 gateway 级断言改为验证：
+  production 入口不出现 legacy canonical helper，不调用 row-model fallback，
+  并实际经过 `RunEventReadModel`。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/run_events.py tui_gateway/services/run_events.py tui_gateway/methods/session_history.py tests/test_pr3_tool_events_canonical.py
+.venv/bin/pytest tests/test_pr3_tool_events_canonical.py tests/test_pr2_session_cursor.py -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+.venv/bin/ruff check hermes_agent/read_models/run_events.py tui_gateway/services/run_events.py tui_gateway/methods/session_history.py tests/test_pr3_tool_events_canonical.py
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Tool canonical/session cursor 定向测试：`30 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
 - `run_control` subscription poller、activity/team-mission event replay 仍有
   legacy event reader，需要后续 subscription/activity 切片。
 - Team transcript projector/backfill 仍需要目标 owner。
