@@ -334,10 +334,10 @@ class TestWhatsAppTier:
     """WhatsApp should be classified as TIER_MEDIUM."""
 
     def test_whatsapp_streaming_follows_global(self):
-        from gateway.display_config import resolve_display_setting
+        from hermes_gateway.display_config import resolve_display_setting
         # TIER_MEDIUM has streaming: None (follow global), not False
         assert resolve_display_setting({}, "whatsapp", "streaming") is None
 
     def test_whatsapp_tool_progress_is_new(self):
-        from gateway.display_config import resolve_display_setting
+        from hermes_gateway.display_config import resolve_display_setting
         assert resolve_display_setting({}, "whatsapp", "tool_progress") == "new"

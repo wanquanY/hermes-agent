@@ -196,7 +196,7 @@ class TestTitleInHelp:
         runner = _make_runner()
         event = _make_event(text="/help")
         # Need hooks for help command
-        from gateway.hooks import HookRegistry
+        from hermes_gateway.hooks import HookRegistry
         runner.hooks = HookRegistry()
         result = await runner._handle_help_command(event)
         assert "/title" in result

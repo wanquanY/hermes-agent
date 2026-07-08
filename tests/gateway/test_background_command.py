@@ -43,7 +43,7 @@ def _make_runner():
     mock_store = MagicMock()
     runner.session_store = mock_store
 
-    from gateway.hooks import HookRegistry
+    from hermes_gateway.hooks import HookRegistry
     runner.hooks = HookRegistry()
 
     return runner

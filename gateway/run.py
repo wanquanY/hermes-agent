@@ -1275,7 +1275,7 @@ class GatewayRunner:
         self.pairing_store = PairingStore()
         
         # Event hook system
-        from gateway.hooks import HookRegistry
+        from hermes_gateway.hooks import HookRegistry
         self.hooks = HookRegistry()
 
         # Per-chat voice reply mode: "off" | "voice_only" | "all"
@@ -3339,7 +3339,7 @@ class GatewayRunner:
         # default — in which case SIGKILL hits mid-drain and looks like
         # a phantom kill in the journal.  Best-effort, never raises.
         try:
-            from gateway.shutdown_forensics import check_systemd_timing_alignment
+            from hermes_gateway.shutdown_forensics import check_systemd_timing_alignment
             _alignment = check_systemd_timing_alignment(self._restart_drain_timeout)
             if _alignment is not None and _alignment.get("mismatch"):
                 logger.warning(
@@ -8329,7 +8329,7 @@ class GatewayRunner:
 
             # Prepend reasoning/thinking if display is enabled (per-platform)
             try:
-                from gateway.display_config import resolve_display_setting as _rds
+                from hermes_gateway.display_config import resolve_display_setting as _rds
                 _show_reasoning_effective = _rds(
                     _load_gateway_config(),
                     _platform_config_key(source.platform),
@@ -11415,7 +11415,7 @@ class GatewayRunner:
         }
 
         # Read current effective mode for this platform via the resolver
-        from gateway.display_config import resolve_display_setting
+        from hermes_gateway.display_config import resolve_display_setting
         current = resolve_display_setting(user_config, platform_key, "tool_progress", "all")
         if current not in cycle:
             current = "all"
@@ -14747,7 +14747,7 @@ class GatewayRunner:
 
         platform_key = _platform_config_key(source.platform)
         user_config = _load_gateway_config()
-        from gateway.display_config import resolve_display_setting
+        from hermes_gateway.display_config import resolve_display_setting
         _plat_streaming = resolve_display_setting(
             user_config, platform_key, "streaming"
         )
@@ -14999,7 +14999,7 @@ class GatewayRunner:
         # Per-platform display settings — resolve via display_config module
         # which checks display.platforms.<platform>.<key> first, then
         # display.<key> global, then built-in platform defaults.
-        from gateway.display_config import resolve_display_setting
+        from hermes_gateway.display_config import resolve_display_setting
 
         # Apply tool preview length config (0 = no limit)
         try:
@@ -17393,7 +17393,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # series in agent.log / gateway.log.  Ported from cline/cline#10343.
     # Controlled by the logging.memory_monitor section in config.yaml.
     try:
-        from gateway import memory_monitor as _memory_monitor
+        from hermes_gateway import memory_monitor as _memory_monitor
 
         _mm_cfg = {}
         try:
@@ -17494,7 +17494,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         # synchronously, blocking the event loop for up to 3s while
         # adapter teardown couldn't begin.
         try:
-            from gateway.shutdown_forensics import (
+            from hermes_gateway.shutdown_forensics import (
                 format_context_for_log,
                 snapshot_shutdown_context,
                 spawn_async_diagnostic,
@@ -17667,7 +17667,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # This also emits one final "[MEMORY] shutdown rss=..." line so the
     # last RSS reading before gateway exit is always in the log.
     try:
-        from gateway import memory_monitor as _memory_monitor
+        from hermes_gateway import memory_monitor as _memory_monitor
 
         _memory_monitor.stop_memory_monitoring(timeout=2.0)
     except Exception:
