@@ -9,7 +9,7 @@ import pytest
 from hermes_state import SessionDB
 from hermes_team_mission.state.session_views import transform_to_member_perspective
 from tui_gateway.run_worker import DBRpcRequestFrame
-from tui_gateway.services.worker_db_proxy import WorkerDBProxy
+from hermes_agent.orchestration.worker_db_proxy import WorkerDBProxy
 from tui_gateway.services.worker_supervisor import WorkerSupervisor
 
 

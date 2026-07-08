@@ -36,7 +36,7 @@ from tui_gateway.run_worker import (
     encode_incoming,
 )
 from tui_gateway.services.runtime_scope import RuntimeScope
-from tui_gateway.services.worker_db_proxy import serialize_db_value
+from hermes_agent.orchestration.worker_db_proxy import serialize_db_value
 
 _log = logging.getLogger(__name__)
 

@@ -95,7 +95,7 @@ def setup_worker_environment() -> None:
         # it before the swap so any later reassign there is too late.
         # Replace the transport instance instead.
         _server._stdio_transport = _NoopTransport()  # type: ignore[assignment]
-        from tui_gateway.services.worker_db_proxy import get_default_worker_db_proxy
+        from hermes_agent.orchestration.worker_db_proxy import get_default_worker_db_proxy
 
         db_proxy = get_default_worker_db_proxy()
         if db_proxy is not None:

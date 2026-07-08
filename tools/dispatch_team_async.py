@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from tools.registry import registry, tool_result
-from tui_gateway.services.worker_rpc_proxy import get_default_worker_rpc_proxy
+from hermes_agent.orchestration.worker_rpc_proxy import get_default_worker_rpc_proxy
 
 
 DISPATCH_TEAM_ASYNC_SCHEMA = {

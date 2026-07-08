@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-from tui_gateway.services.worker_db_proxy import (
+from hermes_agent.orchestration.worker_db_proxy import (
     WorkerDBProxyDisconnectedError,
     WorkerDBProxyRemoteError,
     WorkerDBProxyTimeoutError,

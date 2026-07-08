@@ -843,11 +843,11 @@ async def _main_async() -> int:
         ActivityEventBus,
         set_default_activity_event_bus,
     )
-    from tui_gateway.services.worker_db_proxy import (
+    from hermes_agent.orchestration.worker_db_proxy import (
         WorkerDBProxy,
         set_default_worker_db_proxy,
     )
-    from tui_gateway.services.worker_rpc_proxy import (
+    from hermes_agent.orchestration.worker_rpc_proxy import (
         WorkerRpcProxy,
         set_default_worker_rpc_proxy,
     )

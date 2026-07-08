@@ -39,7 +39,7 @@ from tui_gateway.run_worker import (
     RunTerminalFrame,
     WorkerRunBackend,
 )
-from tui_gateway.services.worker_db_proxy import get_default_worker_db_proxy
+from hermes_agent.orchestration.worker_db_proxy import get_default_worker_db_proxy
 
 
 class _Audit5Backend(WorkerRunBackend):

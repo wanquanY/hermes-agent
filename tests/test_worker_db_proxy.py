@@ -12,7 +12,7 @@ import pytest
 from hermes_state import SessionDB
 from tui_gateway.run_worker import DBRpcRequestFrame
 from tui_gateway import server
-from tui_gateway.services.worker_db_proxy import (
+from hermes_agent.orchestration.worker_db_proxy import (
     WorkerDBProxy,
     WorkerDBProxyDisconnectedError,
     WorkerDBProxyMethodError,

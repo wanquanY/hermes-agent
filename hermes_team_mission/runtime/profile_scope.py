@@ -226,7 +226,7 @@ def compact_team_profile_snapshot(
 
 def _worker_rpc_proxy() -> Any:
     try:
-        from tui_gateway.services.worker_rpc_proxy import get_default_worker_rpc_proxy
+        from hermes_agent.orchestration.worker_rpc_proxy import get_default_worker_rpc_proxy
 
         return get_default_worker_rpc_proxy()
     except Exception:
