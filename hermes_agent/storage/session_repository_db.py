@@ -83,6 +83,8 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
             title TEXT,
             display_title TEXT DEFAULT '',
             display_title_source TEXT DEFAULT '',
+            cwd TEXT,
+            archived INTEGER NOT NULL DEFAULT 0,
             session_kind TEXT NOT NULL DEFAULT 'hermes_session',
             conversation_kind TEXT NOT NULL DEFAULT 'direct',
             api_call_count INTEGER DEFAULT 0,
@@ -176,6 +178,8 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
             "updated_at": "REAL NOT NULL DEFAULT 0",
             "session_kind": "TEXT NOT NULL DEFAULT 'hermes_session'",
             "conversation_kind": "TEXT NOT NULL DEFAULT 'direct'",
+            "cwd": "TEXT",
+            "archived": "INTEGER NOT NULL DEFAULT 0",
         },
     )
     _ensure_columns(

@@ -69,6 +69,12 @@ class CliSessionStore:
         row = self._conn.execute("SELECT * FROM sessions WHERE id = ?", (stable,)).fetchone()
         return dict(row) if row else None
 
+    def resolve_session_id(self, session_id: str) -> str | None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return None
+        return stable if self.get_session(stable) is not None else None
+
     def end_session(self, session_id: str, end_reason: str) -> None:
         now = time.time()
         with self._lock:
@@ -102,7 +108,9 @@ class CliSessionStore:
             "SELECT title FROM sessions WHERE id = ?",
             (str(session_id or ""),),
         ).fetchone()
-        return str(row["title"] or "") if row else None
+        if not row or not row["title"]:
+            return None
+        return str(row["title"])
 
     def set_session_title(self, session_id: str, title: str, *, title_source: str = "user") -> bool:
         return self._sessions.set_title(session_id, title, title_source=title_source)
@@ -134,6 +142,9 @@ class CliSessionStore:
 
     def resolve_resume_session_id(self, session_id: str) -> str:
         return self._sessions.resolve_resume_session_id(session_id)
+
+    def get_compression_tip(self, session_id: str) -> str:
+        return self._recall.get_compression_tip(session_id)
 
     def list_sessions_rich(
         self,
@@ -169,6 +180,48 @@ class CliSessionStore:
             offset=offset,
             include_children=True,
             order_by_last_active=True,
+        )
+
+    def search_sessions_by_id(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        needle = str(query or "").strip().lower()
+        if not needle:
+            return []
+        bounded_limit = max(1, min(_to_int(limit, 20), 100))
+        candidates = self._recall.list_sessions_rich(
+            limit=max(bounded_limit * 4, bounded_limit),
+            offset=0,
+            include_children=True,
+            order_by_last_active=True,
+            id_query=needle,
+            archived="all",
+        )
+
+        def score(row: dict[str, Any]) -> int:
+            values = [
+                str(row.get("id") or "").lower(),
+                str(row.get("_lineage_root_id") or "").lower(),
+            ]
+            if any(value == needle for value in values):
+                return 0
+            if any(value.startswith(needle) for value in values):
+                return 1
+            return 2
+
+        ranked = sorted(enumerate(candidates), key=lambda item: (score(item[1]), item[0]))
+        return [row for _, row in ranked[:bounded_limit]]
+
+    def session_count(
+        self,
+        source: str | None = None,
+        *,
+        min_message_count: int = 0,
+        archived: str = "false",
+        **_kwargs: Any,
+    ) -> int:
+        return self._recall.session_count(
+            source=source,
+            min_message_count=min_message_count,
+            archived=archived,
         )
 
     def search_messages(
@@ -433,6 +486,151 @@ class CliSessionStore:
             )
             self._conn.commit()
 
+    def set_session_archived(self, session_id: str, archived: bool) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return False
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE sessions SET archived = ?, updated_at = ? WHERE id = ?",
+                (1 if archived else 0, time.time(), stable),
+            )
+            self._conn.commit()
+        return int(cursor.rowcount or 0) > 0
+
+    def latest_descendant(self, session_id: str) -> tuple[str | None, list[str]]:
+        stable = self.resolve_session_id(session_id)
+        if not stable:
+            return None, []
+        rows = self._conn.execute(
+            "SELECT id, parent_session_id, started_at FROM sessions"
+        ).fetchall()
+        children: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            item = dict(row)
+            parent = str(item.get("parent_session_id") or "")
+            if parent:
+                children.setdefault(parent, []).append(item)
+
+        def started(row: dict[str, Any]) -> float:
+            try:
+                return float(row.get("started_at") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        current = stable
+        path = [stable]
+        seen = {stable}
+        while children.get(current):
+            candidates = [row for row in children[current] if row.get("id") not in seen]
+            if not candidates:
+                break
+            candidates.sort(key=started, reverse=True)
+            current = str(candidates[0]["id"])
+            path.append(current)
+            seen.add(current)
+        return current, path
+
+    def usage_analytics(self, days: int = 30) -> dict[str, Any]:
+        from agent.insights import InsightsEngine
+
+        cutoff = time.time() - (int(days or 30) * 86400)
+        daily_rows = self._conn.execute(
+            """
+            SELECT date(started_at, 'unixepoch') AS day,
+                   SUM(input_tokens) AS input_tokens,
+                   SUM(output_tokens) AS output_tokens,
+                   SUM(cache_read_tokens) AS cache_read_tokens,
+                   SUM(reasoning_tokens) AS reasoning_tokens,
+                   COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost,
+                   COALESCE(SUM(actual_cost_usd), 0) AS actual_cost,
+                   COUNT(*) AS sessions,
+                   SUM(COALESCE(api_call_count, 0)) AS api_calls
+              FROM sessions WHERE started_at > ?
+             GROUP BY day ORDER BY day
+            """,
+            (cutoff,),
+        ).fetchall()
+        model_rows = self._conn.execute(
+            """
+            SELECT model,
+                   SUM(input_tokens) AS input_tokens,
+                   SUM(output_tokens) AS output_tokens,
+                   COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost,
+                   COUNT(*) AS sessions,
+                   SUM(COALESCE(api_call_count, 0)) AS api_calls
+              FROM sessions
+             WHERE started_at > ? AND model IS NOT NULL
+             GROUP BY model
+             ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
+            """,
+            (cutoff,),
+        ).fetchall()
+        totals = dict(self._conn.execute(
+            """
+            SELECT SUM(input_tokens) AS total_input,
+                   SUM(output_tokens) AS total_output,
+                   SUM(cache_read_tokens) AS total_cache_read,
+                   SUM(reasoning_tokens) AS total_reasoning,
+                   COALESCE(SUM(estimated_cost_usd), 0) AS total_estimated_cost,
+                   COALESCE(SUM(actual_cost_usd), 0) AS total_actual_cost,
+                   COUNT(*) AS total_sessions,
+                   SUM(COALESCE(api_call_count, 0)) AS total_api_calls
+              FROM sessions WHERE started_at > ?
+            """,
+            (cutoff,),
+        ).fetchone())
+        insights_report = InsightsEngine(self).generate(days=days)
+        return {
+            "daily": [dict(row) for row in daily_rows],
+            "by_model": [dict(row) for row in model_rows],
+            "totals": totals,
+            "period_days": days,
+            "skills": insights_report.get("skills", _empty_skill_breakdown()),
+        }
+
+    def model_analytics(self, days: int = 30) -> dict[str, Any]:
+        cutoff = time.time() - (int(days or 30) * 86400)
+        rows = self._conn.execute(
+            """
+            SELECT model,
+                   billing_provider,
+                   SUM(input_tokens) AS input_tokens,
+                   SUM(output_tokens) AS output_tokens,
+                   SUM(cache_read_tokens) AS cache_read_tokens,
+                   SUM(reasoning_tokens) AS reasoning_tokens,
+                   COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost,
+                   COALESCE(SUM(actual_cost_usd), 0) AS actual_cost,
+                   COUNT(*) AS sessions,
+                   SUM(COALESCE(api_call_count, 0)) AS api_calls,
+                   SUM(tool_call_count) AS tool_calls,
+                   MAX(started_at) AS last_used_at,
+                   AVG(input_tokens + output_tokens) AS avg_tokens_per_session
+              FROM sessions
+             WHERE started_at > ? AND model IS NOT NULL AND model != ''
+             GROUP BY model, billing_provider
+             ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
+            """,
+            (cutoff,),
+        ).fetchall()
+        totals = dict(self._conn.execute(
+            """
+            SELECT COUNT(DISTINCT model) AS distinct_models,
+                   SUM(input_tokens) AS total_input,
+                   SUM(output_tokens) AS total_output,
+                   SUM(cache_read_tokens) AS total_cache_read,
+                   SUM(reasoning_tokens) AS total_reasoning,
+                   COALESCE(SUM(estimated_cost_usd), 0) AS total_estimated_cost,
+                   COALESCE(SUM(actual_cost_usd), 0) AS total_actual_cost,
+                   COUNT(*) AS total_sessions,
+                   SUM(COALESCE(api_call_count, 0)) AS total_api_calls
+              FROM sessions
+             WHERE started_at > ? AND model IS NOT NULL AND model != ''
+            """,
+            (cutoff,),
+        ).fetchone())
+        return {"rows": [dict(row) for row in rows], "totals": totals, "period_days": days}
+
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
         with self._lock:
             self._conn.execute(
@@ -640,6 +838,25 @@ def _message_text(content: Any) -> str:
         ]
         return " ".join(" ".join(parts).split())
     return ""
+
+
+def _to_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _empty_skill_breakdown() -> dict[str, Any]:
+    return {
+        "summary": {
+            "total_skill_loads": 0,
+            "total_skill_edits": 0,
+            "total_skill_actions": 0,
+            "distinct_skills_used": 0,
+        },
+        "top_skills": [],
+    }
 
 
 __all__ = ["CliSessionStore", "open_cli_session_store"]

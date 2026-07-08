@@ -308,7 +308,7 @@ class SessionRepoImpl:
         normalized_source = str(title_source or "user").strip().lower() or "user"
         if normalized_source == "auto":
             return False
-        normalized_title = _sanitize_title(title)
+        normalized_title = sanitize_session_title(title)
         if normalized_title:
             conflict = self._conn.execute(
                 "SELECT id FROM sessions WHERE title = ? AND id != ?",
@@ -320,7 +320,11 @@ class SessionRepoImpl:
                 )
         now = time.time()
         assignments = ["title = ?", "display_title = COALESCE(?, '')", "display_title_source = ?"]
-        values: list[Any] = [normalized_title, normalized_title or "", normalized_source]
+        values: list[Any] = [
+            normalized_title,
+            normalized_title or "",
+            normalized_source if normalized_title else "",
+        ]
         if "updated_at" in self._session_columns:
             assignments.append("updated_at = ?")
             values.append(now)

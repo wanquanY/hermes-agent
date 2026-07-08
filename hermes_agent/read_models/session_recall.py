@@ -65,17 +65,35 @@ class SessionRecallReadModel:
         order_by_last_active: bool = False,
         page_cursor: dict[str, Any] | None = None,
         id_query: str | None = None,
+        min_message_count: int = 0,
+        archived: str = "false",
     ) -> list[dict[str, Any]]:
-        del project_compression_tips, page_cursor
         if not self._table_exists("sessions"):
             return []
         bounded_limit = max(1, min(_to_int(limit, 20), 100))
         bounded_offset = max(0, _to_int(offset, 0))
+        min_messages = max(0, _to_int(min_message_count, 0))
+        archived_mode = str(archived or "false").strip().lower()
+        if archived_mode not in {"false", "true", "only", "all"}:
+            raise ValueError(f"unsupported archived filter: {archived!r}")
         where: list[str] = []
         params: list[Any] = []
         columns = self._table_columns("sessions")
+        has_archived = "archived" in columns
         if not include_children and "parent_session_id" in columns:
-            where.append("(parent_session_id IS NULL OR parent_session_id = '')")
+            if self._table_exists("session_lineage"):
+                where.append(
+                    "(parent_session_id IS NULL OR parent_session_id = ''"
+                    " OR EXISTS (SELECT 1 FROM session_lineage l"
+                    "            WHERE l.session_id = sessions.id"
+                    "              AND l.branch_origin = 'user_message_action')"
+                    " OR EXISTS (SELECT 1 FROM sessions p"
+                    "            WHERE p.id = sessions.parent_session_id"
+                    "              AND p.end_reason = 'branched'"
+                    "              AND sessions.started_at >= p.ended_at))"
+                )
+            else:
+                where.append("(parent_session_id IS NULL OR parent_session_id = '')")
         if source:
             where.append("source = ?")
             params.append(str(source))
@@ -87,36 +105,141 @@ class SessionRecallReadModel:
             needle = f"%{_escape_like(str(id_query).strip().lower())}%"
             where.append("LOWER(id) LIKE ? ESCAPE '\\'")
             params.append(needle)
+        if min_messages > 0:
+            where.append("COALESCE(message_count, 0) >= ?")
+            params.append(min_messages)
+        if has_archived and archived_mode in {"false", "true", "only"}:
+            where.append("COALESCE(archived, 0) = ?")
+            params.append(1 if archived_mode in {"true", "only"} else 0)
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         last_active_expr = (
             "COALESCE(last_active, updated_at, started_at)"
             if {"last_active", "updated_at"}.issubset(columns)
             else "started_at"
         )
-        order_expr = (
-            f"{last_active_expr} DESC, started_at DESC, id DESC"
-            if order_by_last_active
-            else "started_at DESC, id DESC"
-        )
-        sql = f"""
-            SELECT *,
-                   {last_active_expr} AS _last_active_summary
-              FROM sessions
-              {where_sql}
-             ORDER BY {order_expr}
-             LIMIT ? OFFSET ?
-        """
+        if order_by_last_active and "parent_session_id" in columns:
+            sql = f"""
+                WITH RECURSIVE chain(root_id, cur_id) AS (
+                    SELECT id, id FROM sessions {where_sql}
+                    UNION ALL
+                    SELECT c.root_id, child.id
+                      FROM chain c
+                      JOIN sessions parent ON parent.id = c.cur_id
+                      JOIN sessions child ON child.parent_session_id = c.cur_id
+                     WHERE parent.end_reason = 'compression'
+                       AND child.started_at >= parent.ended_at
+                ),
+                chain_max AS (
+                    SELECT root_id, MAX({last_active_expr.replace('last_active', 'ss.last_active').replace('updated_at', 'ss.updated_at').replace('started_at', 'ss.started_at')}) AS effective_last_active
+                      FROM chain c
+                      JOIN sessions ss ON ss.id = c.cur_id
+                     GROUP BY root_id
+                )
+                SELECT sessions.*,
+                       COALESCE(sessions.preview, '') AS _preview_summary,
+                       {last_active_expr} AS _last_active_summary,
+                       COALESCE(cm.effective_last_active, {last_active_expr}) AS _effective_last_active
+                  FROM sessions
+                  LEFT JOIN chain_max cm ON cm.root_id = sessions.id
+                  {where_sql}
+                 ORDER BY _effective_last_active DESC, sessions.started_at DESC, sessions.id DESC
+                 LIMIT ? OFFSET ?
+            """
+            query_params = params + params + [bounded_limit, bounded_offset]
+        else:
+            order_expr = (
+                f"{last_active_expr} DESC, started_at DESC, id DESC"
+                if order_by_last_active
+                else "started_at DESC, id DESC"
+            )
+            sql = f"""
+                SELECT *,
+                       COALESCE(preview, '') AS _preview_summary,
+                       {last_active_expr} AS _last_active_summary
+                  FROM sessions
+                  {where_sql}
+                 ORDER BY {order_expr}
+                 LIMIT ? OFFSET ?
+            """
+            query_params = params + [bounded_limit, bounded_offset]
         with self._lock:
-            rows = self._conn.execute(sql, params + [bounded_limit, bounded_offset]).fetchall()
+            rows = self._conn.execute(sql, query_params).fetchall()
         result: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
+            item["preview"] = str(item.pop("_preview_summary", item.get("preview") or "") or "")
             item["last_active"] = item.pop(
                 "_last_active_summary",
                 item.get("last_active") or item.get("updated_at") or item.get("started_at") or 0,
             )
+            effective_last_active = item.pop("_effective_last_active", None)
+            if effective_last_active is None:
+                effective_last_active = item.get("last_active") or item.get("started_at") or 0
+            item["_page_cursor"] = {
+                "effective_last_active": effective_last_active,
+                "started_at": item.get("started_at") or 0,
+                "id": item.get("id") or "",
+            }
+            item["archived"] = bool(item.get("archived") or 0) if has_archived else False
+            if "cwd" not in item:
+                item["cwd"] = None
             result.append(item)
+        if project_compression_tips and not include_children:
+            result = self._project_compression_tips(result, has_archived=has_archived)
         return result
+
+    def get_compression_tip(self, session_id: str) -> str:
+        current = str(session_id or "").strip()
+        if not current:
+            return current
+        for _ in range(100):
+            with self._lock:
+                row = self._conn.execute(
+                    """
+                    SELECT id FROM sessions
+                     WHERE parent_session_id = ?
+                       AND started_at >= (
+                           SELECT ended_at FROM sessions
+                            WHERE id = ? AND end_reason = 'compression'
+                       )
+                     ORDER BY started_at DESC LIMIT 1
+                    """,
+                    (current, current),
+                ).fetchone()
+            if row is None:
+                return current
+            current = str(row["id"] or "")
+        return current
+
+    def session_count(
+        self,
+        source: str | None = None,
+        *,
+        min_message_count: int = 0,
+        archived: str = "false",
+    ) -> int:
+        if not self._table_exists("sessions"):
+            return 0
+        columns = self._table_columns("sessions")
+        archived_mode = str(archived or "false").strip().lower()
+        if archived_mode not in {"false", "true", "only", "all"}:
+            raise ValueError(f"unsupported archived filter: {archived!r}")
+        where: list[str] = []
+        params: list[Any] = []
+        if source:
+            where.append("source = ?")
+            params.append(str(source))
+        min_messages = max(0, _to_int(min_message_count, 0))
+        if min_messages > 0:
+            where.append("COALESCE(message_count, 0) >= ?")
+            params.append(min_messages)
+        if "archived" in columns and archived_mode in {"false", "true", "only"}:
+            where.append("COALESCE(archived, 0) = ?")
+            params.append(1 if archived_mode in {"true", "only"} else 0)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        with self._lock:
+            row = self._conn.execute(f"SELECT COUNT(*) AS count FROM sessions {where_sql}", params).fetchone()
+        return int(row["count"] or 0) if row else 0
 
     def search_messages(
         self,
@@ -162,6 +285,49 @@ class SessionRecallReadModel:
             order_by=order_by,
             include_inactive=include_inactive,
         )
+
+    def _project_compression_tips(
+        self,
+        sessions: list[dict[str, Any]],
+        *,
+        has_archived: bool,
+    ) -> list[dict[str, Any]]:
+        projected: list[dict[str, Any]] = []
+        for session in sessions:
+            if session.get("end_reason") != "compression":
+                projected.append(session)
+                continue
+            tip_id = self.get_compression_tip(str(session.get("id") or ""))
+            if not tip_id or tip_id == session.get("id"):
+                projected.append(session)
+                continue
+            tip = self.get_session(tip_id)
+            if not tip:
+                projected.append(session)
+                continue
+            merged = dict(session)
+            for key in (
+                "id",
+                "ended_at",
+                "end_reason",
+                "message_count",
+                "tool_call_count",
+                "title",
+                "display_title",
+                "display_title_source",
+                "last_active",
+                "preview",
+                "model",
+                "system_prompt",
+                "cwd",
+            ):
+                if key in tip:
+                    merged[key] = tip[key]
+            merged["_lineage_root_id"] = session.get("id")
+            merged["archived"] = bool(merged.get("archived") or 0) if has_archived else False
+            merged.setdefault("cwd", None)
+            projected.append(merged)
+        return projected
 
     def get_messages_around(
         self,

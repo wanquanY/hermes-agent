@@ -264,18 +264,15 @@ class TestWebServerEndpoints:
         assert row["cwd"] is None
 
     def test_get_sessions_forwards_min_messages(self, monkeypatch):
-        """The ?min_messages= filter must reach SessionDB.
+        """The ?min_messages= filter must reach the session store.
 
         The desktop session picker calls /api/sessions?...&min_messages=N to
         hide empty sessions. The param was silently dropped from the handler
-        in a merge once (SessionDB still supported it); guard the wiring.
+        in a merge once (storage still supported it); guard the wiring.
         """
         captured = {}
 
-        class _FakeDB:
-            def __init__(self, *args, **kwargs):
-                pass
-
+        class _FakeStore:
             def list_sessions_rich(self, limit, offset, min_message_count=0, **kwargs):
                 captured["list"] = min_message_count
                 return []
@@ -287,7 +284,7 @@ class TestWebServerEndpoints:
             def close(self):
                 pass
 
-        monkeypatch.setattr("hermes_state.SessionDB", _FakeDB)
+        monkeypatch.setattr("hermes_cli.web_server.open_cli_session_store", lambda: _FakeStore())
 
         resp = self.client.get("/api/sessions?limit=5&offset=0&min_messages=3")
         assert resp.status_code == 200

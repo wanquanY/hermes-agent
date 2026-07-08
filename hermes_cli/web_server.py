@@ -49,6 +49,7 @@ from hermes_cli.config import (
     check_config_version,
     redact_key,
 )
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from channels.runtime_status import get_running_pid, read_runtime_status
 from utils import env_var_enabled
 
@@ -711,6 +712,11 @@ class AudioTranscriptionRequest(BaseModel):
     mime_type: Optional[str] = None
 
 
+class SessionPatch(BaseModel):
+    title: Optional[str] = None
+    archived: Optional[bool] = None
+
+
 _AUDIO_MIME_EXTENSIONS: Dict[str, str] = {
     "audio/aac": ".aac",
     "audio/flac": ".flac",
@@ -943,10 +949,9 @@ async def get_status():
 
     active_sessions = 0
     try:
-        from hermes_state import SessionDB
-        db = SessionDB()
+        store = open_cli_session_store()
         try:
-            sessions = db.list_sessions_rich(limit=50)
+            sessions = store.list_sessions_rich(limit=50)
             now = time.time()
             active_sessions = sum(
                 1 for s in sessions
@@ -954,7 +959,7 @@ async def get_status():
                 and (now - s.get("last_active", s.get("started_at", 0))) < 300
             )
         finally:
-            db.close()
+            store.close()
     except Exception:
         pass
 
@@ -1159,14 +1164,50 @@ def _session_automation_counts() -> Dict[str, int]:
     return counts
 
 
+def _normalize_archived_filter(value: str) -> str:
+    normalized = str(value or "false").strip().lower()
+    if normalized in {"", "false", "0", "no"}:
+        return "false"
+    if normalized in {"true", "1", "yes", "only"}:
+        return "only"
+    if normalized == "all":
+        return "all"
+    raise HTTPException(status_code=400, detail="archived must be one of false, only, all")
+
+
+def _normalize_session_order(value: str) -> str:
+    normalized = str(value or "started").strip().lower()
+    if normalized in {"started", "created"}:
+        return "started"
+    if normalized in {"recent", "activity", "last_active"}:
+        return "recent"
+    raise HTTPException(status_code=400, detail="order must be one of started, recent")
+
+
 @app.get("/api/sessions")
-async def get_sessions(limit: int = 20, offset: int = 0):
+async def get_sessions(
+    limit: int = 20,
+    offset: int = 0,
+    min_messages: int = 0,
+    archived: str = "false",
+    order: str = "started",
+):
     try:
-        from hermes_state import SessionDB
-        db = SessionDB()
+        archived_filter = _normalize_archived_filter(archived)
+        order_filter = _normalize_session_order(order)
+        store = open_cli_session_store()
         try:
-            sessions = db.list_sessions_rich(limit=limit, offset=offset)
-            total = db.session_count()
+            sessions = store.list_sessions_rich(
+                limit=limit,
+                offset=offset,
+                min_message_count=min_messages,
+                archived=archived_filter,
+                order_by_last_active=order_filter == "recent",
+            )
+            total = store.session_count(
+                min_message_count=min_messages,
+                archived=archived_filter,
+            )
             now = time.time()
             automation_counts = _session_automation_counts()
             for s in sessions:
@@ -1180,9 +1221,54 @@ async def get_sessions(limit: int = 20, offset: int = 0):
                 s["automation_task_count"] = automation_count
             return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
         finally:
-            db.close()
+            store.close()
+    except HTTPException:
+        raise
     except Exception:
         _log.exception("GET /api/sessions failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/profiles/sessions")
+async def get_profile_sessions(
+    limit: int = 20,
+    offset: int = 0,
+    min_messages: int = 0,
+    archived: str = "false",
+    order: str = "started",
+):
+    archived_filter = _normalize_archived_filter(archived)
+    order_filter = _normalize_session_order(order)
+    try:
+        store = open_cli_session_store()
+        try:
+            sessions = store.list_sessions_rich(
+                limit=limit,
+                offset=offset,
+                min_message_count=min_messages,
+                archived=archived_filter,
+                order_by_last_active=order_filter == "recent",
+            )
+            total = store.session_count(
+                min_message_count=min_messages,
+                archived=archived_filter,
+            )
+            for session in sessions:
+                session["profile"] = "default"
+                session["is_default_profile"] = True
+            return {
+                "sessions": sessions,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "errors": [],
+            }
+        finally:
+            store.close()
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("GET /api/profiles/sessions failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -1192,8 +1278,7 @@ async def search_sessions(q: str = "", limit: int = 20):
     if not q or not q.strip():
         return {"results": []}
     try:
-        from hermes_state import SessionDB
-        db = SessionDB()
+        store = open_cli_session_store()
         try:
             try:
                 safe_limit = max(1, min(int(limit or 20), 100))
@@ -1218,7 +1303,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                         root = root_cache[cur]
                         break
                     try:
-                        session = db.get_session(cur)
+                        session = store.get_session(cur)
                     except Exception:
                         session = None
                     if not session:
@@ -1229,7 +1314,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                         root = cur
                         break
                     try:
-                        parent_session = db.get_session(parent)
+                        parent_session = store.get_session(parent)
                     except Exception:
                         parent_session = None
                     if not parent_session:
@@ -1258,7 +1343,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                     return tip_cache[root_id]
                 tip = root_id
                 try:
-                    resolved = db.get_compression_tip(root_id)
+                    resolved = store.get_compression_tip(root_id)
                     if resolved:
                         tip = resolved
                 except Exception:
@@ -1279,7 +1364,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                 payload["lineage_root"] = root
                 seen[root] = payload
 
-            for row in db.search_sessions_by_id(q, limit=safe_limit):
+            for row in store.search_sessions_by_id(q, limit=safe_limit):
                 sid = row.get("id")
                 preview = (row.get("preview") or "").strip()
                 snippet = preview or f"Session ID: {sid}"
@@ -1306,7 +1391,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                     terms.append(token + "*")
             prefix_query = " ".join(terms)
             fetch_limit = max(safe_limit * 5, 50)
-            matches = db.search_messages(query=prefix_query, limit=fetch_limit)
+            matches = store.search_messages(query=prefix_query, limit=fetch_limit)
             for m in matches:
                 if len(seen) >= safe_limit:
                     break
@@ -1322,7 +1407,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                 )
             return {"results": list(seen.values())}
         finally:
-            db.close()
+            store.close()
     except Exception:
         _log.exception("GET /api/sessions/search failed")
         raise HTTPException(status_code=500, detail="Search failed")
@@ -3045,88 +3130,23 @@ def _session_latest_descendant(session_id: str):
     /model may create child sessions. Dashboard refresh should continue the
     newest child instead of reopening the old parent.
     """
-    from hermes_state import SessionDB
-
-    def row_get(row, key, index):
-        if isinstance(row, dict):
-            return row.get(key)
-        try:
-            return row[key]
-        except Exception:
-            try:
-                return row[index]
-            except Exception:
-                return None
-
-    db = SessionDB()
+    store = open_cli_session_store()
     try:
-        sid = db.resolve_session_id(session_id)
-        if not sid or not db.get_session(sid):
-            return None, []
-
-        conn = (
-            getattr(db, "conn", None)
-            or getattr(db, "_conn", None)
-            or getattr(db, "connection", None)
-            or getattr(db, "_connection", None)
-        )
-
-        rows = []
-        if conn is not None:
-            raw_rows = conn.execute(
-                "SELECT id, parent_session_id, started_at FROM sessions"
-            ).fetchall()
-            for row in raw_rows:
-                rows.append({
-                    "id": row_get(row, "id", 0),
-                    "parent_session_id": row_get(row, "parent_session_id", 1),
-                    "started_at": row_get(row, "started_at", 2),
-                })
-        else:
-            rows = db.list_sessions_rich(limit=10000, offset=0)
-
-        children = {}
-        for row in rows:
-            rid = row.get("id")
-            parent = row.get("parent_session_id")
-            if rid and parent:
-                children.setdefault(parent, []).append(row)
-
-        def started(row):
-            try:
-                return float(row.get("started_at") or 0)
-            except Exception:
-                return 0.0
-
-        current = sid
-        path = [sid]
-        seen = {sid}
-
-        while children.get(current):
-            candidates = [r for r in children[current] if r.get("id") not in seen]
-            if not candidates:
-                break
-            candidates.sort(key=started, reverse=True)
-            current = candidates[0]["id"]
-            path.append(current)
-            seen.add(current)
-
-        return current, path
+        return store.latest_descendant(session_id)
     finally:
-        db.close()
+        store.close()
 
 @app.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str):
-    from hermes_state import SessionDB
-    db = SessionDB()
+    store = open_cli_session_store()
     try:
-        sid = db.resolve_session_id(session_id)
-        session = db.get_session(sid) if sid else None
+        sid = store.resolve_session_id(session_id)
+        session = store.get_session(sid) if sid else None
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         return session
     finally:
-        db.close()
+        store.close()
 
 
 
@@ -3144,29 +3164,52 @@ async def get_session_latest_descendant(session_id: str):
 
 @app.get("/api/sessions/{session_id}/messages")
 async def get_session_messages(session_id: str):
-    from hermes_state import SessionDB
-    db = SessionDB()
+    store = open_cli_session_store()
     try:
-        sid = db.resolve_session_id(session_id)
+        sid = store.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
-        sid = db.resolve_resume_session_id(sid)
-        messages = db.get_messages(sid)
+        sid = store.resolve_resume_session_id(sid)
+        messages = store.get_messages(sid)
         return {"session_id": sid, "messages": messages}
     finally:
-        db.close()
+        store.close()
 
 
 @app.delete("/api/sessions/{session_id}")
 async def delete_session_endpoint(session_id: str):
-    from hermes_state import SessionDB
-    db = SessionDB()
+    store = open_cli_session_store()
     try:
-        if not db.delete_session(session_id):
+        if not store.delete_session(session_id):
             raise HTTPException(status_code=404, detail="Session not found")
         return {"ok": True}
     finally:
-        db.close()
+        store.close()
+
+
+@app.patch("/api/sessions/{session_id}")
+async def patch_session_endpoint(session_id: str, body: SessionPatch):
+    store = open_cli_session_store()
+    try:
+        if not store.get_session(session_id):
+            raise HTTPException(status_code=404, detail="Session not found")
+        touched = False
+        response: dict[str, Any] = {"ok": True}
+        if body.title is not None:
+            if not store.set_session_title(session_id, body.title):
+                raise HTTPException(status_code=404, detail="Session not found")
+            response["title"] = body.title
+            touched = True
+        if body.archived is not None:
+            if not store.set_session_archived(session_id, body.archived):
+                raise HTTPException(status_code=404, detail="Session not found")
+            response["archived"] = bool(body.archived)
+            touched = True
+        if not touched:
+            raise HTTPException(status_code=400, detail="No supported fields provided")
+        return response
+    finally:
+        store.close()
 
 
 # ---------------------------------------------------------------------------
@@ -5265,71 +5308,11 @@ async def update_config_raw(body: RawConfigUpdate):
 
 @app.get("/api/analytics/usage")
 async def get_usage_analytics(days: int = 30):
-    from hermes_state import SessionDB
-    from agent.insights import InsightsEngine
-
-    db = SessionDB()
+    store = open_cli_session_store()
     try:
-        cutoff = time.time() - (days * 86400)
-        cur = db._conn.execute("""
-            SELECT date(started_at, 'unixepoch') as day,
-                   SUM(input_tokens) as input_tokens,
-                   SUM(output_tokens) as output_tokens,
-                   SUM(cache_read_tokens) as cache_read_tokens,
-                   SUM(reasoning_tokens) as reasoning_tokens,
-                   COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as actual_cost,
-                   COUNT(*) as sessions,
-                   SUM(COALESCE(api_call_count, 0)) as api_calls
-            FROM sessions WHERE started_at > ?
-            GROUP BY day ORDER BY day
-        """, (cutoff,))
-        daily = [dict(r) for r in cur.fetchall()]
-
-        cur2 = db._conn.execute("""
-            SELECT model,
-                   SUM(input_tokens) as input_tokens,
-                   SUM(output_tokens) as output_tokens,
-                   COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
-                   COUNT(*) as sessions,
-                   SUM(COALESCE(api_call_count, 0)) as api_calls
-            FROM sessions WHERE started_at > ? AND model IS NOT NULL
-            GROUP BY model ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
-        """, (cutoff,))
-        by_model = [dict(r) for r in cur2.fetchall()]
-
-        cur3 = db._conn.execute("""
-            SELECT SUM(input_tokens) as total_input,
-                   SUM(output_tokens) as total_output,
-                   SUM(cache_read_tokens) as total_cache_read,
-                   SUM(reasoning_tokens) as total_reasoning,
-                   COALESCE(SUM(estimated_cost_usd), 0) as total_estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as total_actual_cost,
-                   COUNT(*) as total_sessions,
-                   SUM(COALESCE(api_call_count, 0)) as total_api_calls
-            FROM sessions WHERE started_at > ?
-        """, (cutoff,))
-        totals = dict(cur3.fetchone())
-        insights_report = InsightsEngine(db).generate(days=days)
-        skills = insights_report.get("skills", {
-            "summary": {
-                "total_skill_loads": 0,
-                "total_skill_edits": 0,
-                "total_skill_actions": 0,
-                "distinct_skills_used": 0,
-            },
-            "top_skills": [],
-        })
-
-        return {
-            "daily": daily,
-            "by_model": by_model,
-            "totals": totals,
-            "period_days": days,
-            "skills": skills,
-        }
+        return store.usage_analytics(days=days)
     finally:
-        db.close()
+        store.close()
 
 
 @app.get("/api/analytics/models")
@@ -5339,34 +5322,11 @@ async def get_models_analytics(days: int = 30):
     Returns token/cost/session breakdown per model plus capability metadata
     from models.dev (context window, vision, tools, reasoning, etc.).
     """
-    from hermes_state import SessionDB
-
-    db = SessionDB()
+    store = open_cli_session_store()
     try:
-        cutoff = time.time() - (days * 86400)
-
-        cur = db._conn.execute("""
-            SELECT model,
-                   billing_provider,
-                   SUM(input_tokens) as input_tokens,
-                   SUM(output_tokens) as output_tokens,
-                   SUM(cache_read_tokens) as cache_read_tokens,
-                   SUM(reasoning_tokens) as reasoning_tokens,
-                   COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as actual_cost,
-                   COUNT(*) as sessions,
-                   SUM(COALESCE(api_call_count, 0)) as api_calls,
-                   SUM(tool_call_count) as tool_calls,
-                   MAX(started_at) as last_used_at,
-                   AVG(input_tokens + output_tokens) as avg_tokens_per_session
-            FROM sessions WHERE started_at > ? AND model IS NOT NULL AND model != ''
-            GROUP BY model, billing_provider
-            ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
-        """, (cutoff,))
-        rows = [dict(r) for r in cur.fetchall()]
-
         models = []
-        for row in rows:
+        analytics = store.model_analytics(days=days)
+        for row in analytics["rows"]:
             provider = row.get("billing_provider") or ""
             model_name = row["model"]
             caps = {}
@@ -5402,27 +5362,13 @@ async def get_models_analytics(days: int = 30):
                 "capabilities": caps,
             })
 
-        totals_cur = db._conn.execute("""
-            SELECT COUNT(DISTINCT model) as distinct_models,
-                   SUM(input_tokens) as total_input,
-                   SUM(output_tokens) as total_output,
-                   SUM(cache_read_tokens) as total_cache_read,
-                   SUM(reasoning_tokens) as total_reasoning,
-                   COALESCE(SUM(estimated_cost_usd), 0) as total_estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as total_actual_cost,
-                   COUNT(*) as total_sessions,
-                   SUM(COALESCE(api_call_count, 0)) as total_api_calls
-            FROM sessions WHERE started_at > ? AND model IS NOT NULL AND model != ''
-        """, (cutoff,))
-        totals = dict(totals_cur.fetchone())
-
         return {
             "models": models,
-            "totals": totals,
-            "period_days": days,
+            "totals": analytics["totals"],
+            "period_days": analytics["period_days"],
         }
     finally:
-        db.close()
+        store.close()
 
 
 # ---------------------------------------------------------------------------
