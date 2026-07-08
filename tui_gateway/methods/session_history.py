@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dovie_extension.display_transcript import sanitize_transcript_messages
+from hermes_agent.read_models.message_history import MessageHistoryReadModel, MessagePageQuery
 from tui_gateway.methods import session as _session_methods
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.methods.session import (
@@ -25,6 +26,13 @@ def _get_db():
 
 def _session_repo_for_db(db):
     return _session_methods._session_repo_for_db(db)
+
+
+def _message_history_read_model_for_db(db):
+    conn = getattr(db, "_conn", None)
+    if conn is None:
+        return None
+    return MessageHistoryReadModel(conn)
 
 
 def _resolve_session_row_id(rid, db, target: str) -> tuple[str, dict | None]:
@@ -103,13 +111,20 @@ def _(rid, params: dict) -> dict:
         cursor_id = int(cursor_id) if cursor_id is not None else None
     except (TypeError, ValueError):
         cursor_id = None
+    message_history = _message_history_read_model_for_db(db)
+    if message_history is None:
+        return _err(rid, 5000, "message history read model unavailable")
     try:
-        page = db.get_messages_page_as_conversation(
+        page = message_history.page_as_conversation(
             target,
-            direction=str(params.get("direction") or "tail"),
-            cursor_id=cursor_id,
-            limit=_bounded_page_limit(params.get("limit"), default=50, maximum=200),
-            include_ancestors=bool(params.get("include_ancestors", params.get("includeAncestors", True))),
+            MessagePageQuery(
+                direction=str(params.get("direction") or "tail"),
+                cursor_id=cursor_id,
+                limit=_bounded_page_limit(params.get("limit"), default=50, maximum=200),
+                include_ancestors=bool(
+                    params.get("include_ancestors", params.get("includeAncestors", True))
+                ),
+            ),
         )
     except Exception as exc:
         return _err(rid, 5000, f"messages page failed: {exc}")

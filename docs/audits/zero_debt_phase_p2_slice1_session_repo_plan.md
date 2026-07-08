@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_9`
+状态：`in_progress_checkpoint_10`
 
 ## 前置门槛
 
@@ -17,7 +17,8 @@ TUI `session.list/session.most_recent/session.index.list` 的 read-model owner
 将 TUI `session.delete` 迁到独立 domain deletion service，并将 TUI
 `session.resume` 的 stored metadata/reopen/compression-tip 解析迁到
 `SessionRepoImpl`，同时将 `session_history` 中的 session row identity
-解析迁到 repo。
+解析迁到 repo，并将 `session.messages` 的普通 message page projection
+迁到 `MessageHistoryReadModel`。
 
 ## 目标
 
@@ -527,3 +528,53 @@ python scripts/zero_debt/verdict.py --phase P2 --json
   rewrite 仍需要迁到 message read/write owner。
 - `session.history` 和 `session.resume` 的 display/history hydration 仍经
   legacy message projection。
+
+## Checkpoint 10 证据
+
+已完成：
+
+- 新增 `hermes_agent/read_models/message_history.py`，由
+  `MessageHistoryReadModel` 接管普通 conversation message page projection：
+  storage cursor、`pageInfo`、message row -> conversation message 转换、
+  ancestor replay 去重，以及 selected page turn-boundary 扩展。
+- `tui_gateway.methods.session_history` 的 `session.messages` 不再调用
+  legacy message page facade；普通 message page 读取改为
+  `MessageHistoryReadModel.page_as_conversation()`。
+- 本 checkpoint 不迁 team transcript projector/backfill，不迁
+  `session.history` / `session.resume` display-history hydration，不迁
+  message metadata merge 和 stored recall rewrite；这些分别属于后续
+  team message projection 和 message write owner slice。
+- `tests/gateway/test_session_list_allowed_sources.py` 和
+  `tests/tui_gateway/test_profile_data_context.py` 从 fake page reader 迁到
+  真实 SQLite `messages` row。
+- 新增 `tests/read_models/test_message_history.py`，覆盖 storage cursor、
+  turn-boundary 扩展和 ancestor duplicate user replay 去重。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/message_history.py tui_gateway/methods/session_history.py tests/read_models/test_message_history.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_profile_data_context.py
+.venv/bin/pytest tests/read_models/test_message_history.py tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py -k "message_history or session_messages" -q
+.venv/bin/pytest tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_ws_dispatch.py::test_control_plane_session_messages_are_not_proxied_to_runtime_worker tests/read_models/test_message_history.py -q
+.venv/bin/ruff check hermes_agent/read_models/message_history.py tui_gateway/methods/session_history.py tests/read_models/test_message_history.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_profile_data_context.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Message history read-model / session.messages 定向测试：`4 passed`
+- Session protocol/profile/list/ws/read-model 组合测试：`125 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- Team transcript page projection 仍需要从 legacy team projector/backfill 中拆出
+  目标 owner。
+- `session.history` / `session.resume` 的 display-history hydration 仍经 legacy
+  message projection。
+- Message metadata merge 和 stored recall rewrite 仍待迁到 message write owner。

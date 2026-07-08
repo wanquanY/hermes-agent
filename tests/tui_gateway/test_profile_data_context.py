@@ -25,15 +25,42 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
             SessionRepoImpl(self._conn).create(
                 SessionSpec(session_id="stored-session", source="tui")
             )
+            self._conn.execute(
+                """
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT,
+                    participant_id TEXT NOT NULL DEFAULT '',
+                    tool_call_id TEXT,
+                    tool_calls TEXT,
+                    tool_name TEXT,
+                    timestamp REAL NOT NULL,
+                    token_count INTEGER,
+                    finish_reason TEXT,
+                    reasoning TEXT,
+                    reasoning_content TEXT,
+                    reasoning_details TEXT,
+                    codex_reasoning_items TEXT,
+                    codex_message_items TEXT,
+                    platform_message_id TEXT,
+                    conversation_message_id TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT,
+                    active INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+            self._conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                ("stored-session", "user", "hello", 1.0),
+            )
 
-        def get_messages_page_as_conversation(self, _sid, **_kwargs):
+        def list_run_events(self, *_args, **_kwargs):
             from hermes_constants import get_hermes_home
 
             seen["home"] = str(get_hermes_home())
-            return {
-                "messages": [{"role": "user", "content": "hello"}],
-                "pageInfo": {"hasMoreBefore": False, "hasMoreAfter": False},
-            }
+            return []
 
     monkeypatch.setattr(server, "_profile_env_lock", _ExplodingEnvLock())
     monkeypatch.setattr(session_methods, "_get_db", lambda: _DB())
@@ -45,6 +72,7 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
             "method": "session.messages",
             "params": {
                 "session_id": "stored-session",
+                "includeRunEvents": True,
                 "dovie_profile": {
                     "hermesHomePath": str(profile_home),
                     "env": {"DOVIE_TEST_PROFILE_ENV": "must-not-leak"},
@@ -54,7 +82,9 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
     )
 
     assert "error" not in resp
-    assert resp["result"]["messages"] == [{"role": "user", "text": "hello"}]
+    assert resp["result"]["messages"] == [
+        {"role": "user", "text": "hello", "message_id": "1", "timestamp": 1.0}
+    ]
     assert seen["home"] == str(profile_home.resolve())
     assert os.environ.get("DOVIE_TEST_PROFILE_ENV") is None
 

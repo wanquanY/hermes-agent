@@ -32,6 +32,7 @@ class _StubDB:
         ensure_session_repository_schema(self._conn)
         for row in rows:
             self._insert_session(row)
+        self._ensure_messages()
 
     def _insert_session(self, row: dict) -> None:
         started_at = float(row.get("started_at") or 0)
@@ -63,6 +64,54 @@ class _StubDB:
 
     def team_mission_run_session_ids(self, _session_ids):
         return set()
+
+    def _ensure_messages(self) -> None:
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                participant_id TEXT NOT NULL DEFAULT '',
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                timestamp REAL NOT NULL,
+                token_count INTEGER,
+                finish_reason TEXT,
+                reasoning TEXT,
+                reasoning_content TEXT,
+                reasoning_details TEXT,
+                codex_reasoning_items TEXT,
+                codex_message_items TEXT,
+                platform_message_id TEXT,
+                conversation_message_id TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT,
+                active INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+
+    def insert_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        *,
+        timestamp: float = 1.0,
+        metadata_json: str | None = None,
+    ) -> int:
+        cursor = self._conn.execute(
+            """
+            INSERT INTO messages (
+                session_id, role, content, timestamp, metadata_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (session_id, role, content, timestamp, metadata_json),
+        )
+        assert cursor.lastrowid is not None
+        return int(cursor.lastrowid)
 
 
 def _call(limit: int | None = None):
@@ -882,23 +931,6 @@ def test_conversation_activity_list_is_control_plane_read_for_profile_scope():
 
 def test_session_messages_returns_paged_transcript(monkeypatch):
     class _MessagesDB(_StubDB):
-        def get_messages_page_as_conversation(self, *args, **kwargs):
-            assert args[0] == "s1"
-            assert kwargs["direction"] == "before"
-            assert kwargs["cursor_id"] == 20
-            return {
-                "messages": [
-                    {"id": 10, "role": "user", "content": "older", "timestamp": 10.0},
-                ],
-                "pageInfo": {
-                    "prev_cursor_id": 10,
-                    "next_cursor_id": 10,
-                    "hasMoreBefore": False,
-                    "hasMoreAfter": True,
-                    "totalCount": 3,
-                },
-            }
-
         def list_run_events(self, *args, **kwargs):
             assert args[0] == "s1"
             assert kwargs["runtime_scope_key"] == "profile:agent-default:version:v1"
@@ -927,12 +959,12 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
                 },
             ]
 
-    cursor = server._methods["session.messages"].__globals__["_encode_page_cursor"]({"id": 20})
-    monkeypatch.setattr(
-        server,
-        "_get_db",
-        lambda: _MessagesDB([{"id": "s1", "source": "tui", "title": "S1"}]),
-    )
+    db = _MessagesDB([{"id": "s1", "source": "tui", "title": "S1"}])
+    db.insert_message("s1", "user", "oldest", timestamp=1.0)
+    older_id = db.insert_message("s1", "user", "older", timestamp=10.0)
+    newer_id = db.insert_message("s1", "assistant", "newer", timestamp=30.0)
+    cursor = server._methods["session.messages"].__globals__["_encode_page_cursor"]({"id": newer_id})
+    monkeypatch.setattr(server, "_get_db", lambda: db)
 
     resp = server.handle_request({
         "id": "1",
@@ -948,11 +980,11 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
     })
 
     assert resp["result"]["messages"] == [
-        {"role": "user", "text": "older", "message_id": "10", "timestamp": 10.0},
+        {"role": "user", "text": "older", "message_id": str(older_id), "timestamp": 10.0},
     ]
     assert resp["result"]["runEvents"][0]["type"] == "tool.complete"
     assert resp["result"]["runEvents"][0]["payload"]["result"]["draft"]["id"] == "draft-1"
-    assert resp["result"]["pageInfo"]["hasMoreBefore"] is False
+    assert resp["result"]["pageInfo"]["hasMoreBefore"] is True
     assert resp["result"]["pageInfo"]["hasMoreAfter"] is True
     assert resp["result"]["pageInfo"]["totalCount"] == 3
 
