@@ -93,6 +93,7 @@ from agent.markdown_tables import (
     realign_markdown_tables,
 )
 from hermes_agent.repositories.session_repo import sanitize_session_title
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from hermes_agent.storage.session_availability import format_session_store_unavailable
 # NOTE: `from agent.account_usage import ...` is deliberately NOT at module
 # top — it transitively pulls the OpenAI SDK chain (~230 ms cold) and is only
@@ -1082,7 +1083,7 @@ def _cleanup_worktree(info: Dict[str, str] = None) -> None:
 
 
 def _run_state_db_auto_maintenance(session_db) -> None:
-    """Call ``SessionDB.maybe_auto_prune_and_vacuum`` using current config.
+    """Call session-store auto prune/vacuum using current config.
 
     Reads the ``sessions:`` section from config.yaml via
     :func:`hermes_cli.config.load_config` (the authoritative loader that
@@ -2887,11 +2888,10 @@ class HermesCLI:
         self._session_db = None
         self._session_store_unavailable_reason = ""
         try:
-            from hermes_state import SessionDB
-            self._session_db = SessionDB()
+            self._session_db = open_cli_session_store()
         except Exception as e:
             self._session_store_unavailable_reason = str(e)
-            logger.warning("Failed to initialize SessionDB — session will NOT be indexed for search: %s", e)
+            logger.warning("Failed to initialize CLI session store — session will NOT be indexed for search: %s", e)
 
         # Opportunistic state.db maintenance — runs at most once per
         # min_interval_hours, tracked via state_meta in state.db itself so
@@ -4631,8 +4631,7 @@ class HermesCLI:
         # Initialize SQLite session store for CLI sessions (if not already done in __init__)
         if self._session_db is None:
             try:
-                from hermes_state import SessionDB
-                self._session_db = SessionDB()
+                self._session_db = open_cli_session_store()
             except Exception as e:
                 self._session_store_unavailable_reason = str(e)
                 logger.warning("SQLite session store not available — session will NOT be indexed: %s", e)
@@ -4649,7 +4648,7 @@ class HermesCLI:
                 return False
             # If the requested session is the (empty) head of a compression
             # chain, walk to the descendant that actually holds the messages.
-            # See #15000 and SessionDB.resolve_resume_session_id.
+            # See #15000: compressed heads resume from their live descendant.
             try:
                 resolved_id = self._session_db.resolve_resume_session_id(self.session_id)
             except Exception:
@@ -6314,11 +6313,10 @@ class HermesCLI:
             _cprint("  Agent is busy. Wait for the current turn to finish, then retry /handoff.")
             return True
 
-        # Make sure we have a SessionDB handle.
+        # Make sure we have a session-store handle.
         if not self._session_db:
             try:
-                from hermes_state import SessionDB
-                self._session_db = SessionDB()
+                self._session_db = open_cli_session_store()
             except Exception:
                 pass
         if not self._session_db:

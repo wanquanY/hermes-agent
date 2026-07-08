@@ -134,8 +134,39 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
             branch_origin TEXT NOT NULL DEFAULT ''
         );
 
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT,
+            participant_id TEXT NOT NULL DEFAULT '',
+            tool_call_id TEXT,
+            tool_calls TEXT,
+            tool_name TEXT,
+            timestamp REAL NOT NULL,
+            token_count INTEGER,
+            finish_reason TEXT,
+            reasoning TEXT,
+            reasoning_content TEXT,
+            reasoning_details TEXT,
+            codex_reasoning_items TEXT,
+            codex_message_items TEXT,
+            platform_message_id TEXT,
+            conversation_message_id TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT,
+            active INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS state_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_session_index_updated
             ON session_index(updated_at DESC, started_at DESC, session_id DESC);
+        CREATE INDEX IF NOT EXISTS idx_messages_session_id
+            ON messages(session_id, id);
         """
     )
     _ensure_columns(
@@ -155,6 +186,16 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
             "team_id": "TEXT NOT NULL DEFAULT ''",
             "mission_id": "TEXT NOT NULL DEFAULT ''",
             "conversation_id": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "messages",
+        {
+            "participant_id": "TEXT NOT NULL DEFAULT ''",
+            "conversation_message_id": "TEXT NOT NULL DEFAULT ''",
+            "metadata_json": "TEXT",
+            "active": "INTEGER NOT NULL DEFAULT 1",
         },
     )
 
