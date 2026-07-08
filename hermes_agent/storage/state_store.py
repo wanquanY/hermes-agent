@@ -29,6 +29,7 @@ from hermes_agent.domain.event_ledger import EventLedger
 from hermes_agent.domain.seq_allocator import ensure_session_counter
 from hermes_agent.domain.session_deletion import SessionDeletionService
 from hermes_agent.domain.session_index_reconciler import SessionIndexReconciler
+from hermes_agent.read_models.message_history import MessageHistoryReadModel, MessagePageQuery
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.read_models.session_recall import (
     _contains_cjk as _recall_contains_cjk,
@@ -2646,81 +2647,12 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         window: int = 5,
         include_inactive: bool = False,
     ) -> Dict[str, Any]:
-        """Load a window of messages anchored on a specific message id.
-
-        Returns a dict with:
-          - ``window``: up to ``window`` messages before the anchor, the anchor
-            itself, and up to ``window`` messages after, ordered by id ascending.
-          - ``messages_before``: count of messages strictly before the anchor
-            still in the session (== window unless we hit the start).
-          - ``messages_after``: count of messages strictly after the anchor
-            still in the session (== window unless we hit the end).
-
-        Used by ``session_search`` for both the discovery shape (anchored on the
-        FTS5 match) and the scroll shape (anchored on any message id). The
-        ``messages_before`` / ``messages_after`` counts let the caller detect
-        session boundaries: when either is less than ``window``, the agent has
-        reached one end of the session.
-
-        Returns an empty window when ``around_message_id`` is not a real id in
-        ``session_id`` — callers decide how to surface that.
-        """
-        if window < 0:
-            window = 0
-        active_clause = "" if include_inactive else " AND active = 1"
-        with self._lock:
-            # Confirm the anchor exists in this session.
-            anchor_exists = self._conn.execute(
-                "SELECT 1 FROM messages WHERE id = ? AND session_id = ?"
-                f"{active_clause} LIMIT 1",
-                (around_message_id, session_id),
-            ).fetchone()
-            if not anchor_exists:
-                return {"window": [], "messages_before": 0, "messages_after": 0}
-
-            # Two queries: anchor + before (DESC, take window+1), and after
-            # (ASC, take window). Final order is id ASC.
-            before_rows = self._conn.execute(
-                "SELECT * FROM messages "
-                "WHERE session_id = ? AND id <= ? "
-                f"{active_clause} "
-                "ORDER BY id DESC LIMIT ?",
-                (session_id, around_message_id, window + 1),
-            ).fetchall()
-            after_rows = self._conn.execute(
-                "SELECT * FROM messages "
-                "WHERE session_id = ? AND id > ? "
-                f"{active_clause} "
-                "ORDER BY id ASC LIMIT ?",
-                (session_id, around_message_id, window),
-            ).fetchall()
-
-        # before_rows is DESC; reverse so it's ASC, then concatenate after_rows.
-        rows = list(reversed(before_rows)) + list(after_rows)
-        result = []
-        for row in rows:
-            msg = dict(row)
-            if "content" in msg:
-                msg["content"] = self._decode_content(msg["content"])
-            if msg.get("tool_calls"):
-                try:
-                    msg["tool_calls"] = json.loads(msg["tool_calls"])
-                except (json.JSONDecodeError, TypeError):
-                    logger.warning(
-                        "Failed to deserialize tool_calls in get_messages_around, falling back to []"
-                    )
-                    msg["tool_calls"] = []
-            result.append(msg)
-
-        # before_rows includes the anchor itself; subtract 1 for the count of
-        # messages strictly before the anchor in the returned slice.
-        messages_before = max(0, len(before_rows) - 1)
-        messages_after = len(after_rows)
-        return {
-            "window": result,
-            "messages_before": messages_before,
-            "messages_after": messages_after,
-        }
+        return SessionRecallReadModel(self._conn).get_messages_around(
+            session_id,
+            around_message_id,
+            window=window,
+            include_inactive=include_inactive,
+        )
 
     def get_anchored_view(
         self,
@@ -2731,121 +2663,14 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         keep_roles: Optional[Tuple[str, ...]] = ("user", "assistant"),
         include_inactive: bool = False,
     ) -> Dict[str, Any]:
-        """Return an anchored window plus session bookends.
-
-        Built on top of ``get_messages_around``. Three slices:
-
-          - ``window``: messages immediately surrounding the anchor. Filtered
-            to ``keep_roles`` (tool-response noise dropped by default), EXCEPT
-            the anchor itself is always preserved regardless of role.
-          - ``bookend_start``: first ``bookend`` user/assistant messages of the
-            session — but only those whose id is strictly before the window's
-            first message id. Empty when the window already overlaps the
-            session head. Empty-content messages (tool-call-only assistant
-            turns) are skipped so they don't crowd out actual prose openings.
-          - ``bookend_end``: last ``bookend`` user/assistant messages of the
-            session, same non-overlap rule at the tail.
-
-        Bookends let an FTS5 hit anywhere in a long session yield the goal
-        (opening) and the resolution (closing) on a single call — without
-        loading the whole transcript.
-
-        Returns ``{"window": [], "messages_before": 0, "messages_after": 0,
-        "bookend_start": [], "bookend_end": []}`` when the anchor isn't in
-        the session.
-
-        ``keep_roles=None`` disables role filtering (raw window + raw
-        bookends).
-        """
-        if bookend < 0:
-            bookend = 0
-
-        # Reuse the primitive — handles anchor-existence, content decoding,
-        # tool_calls deserialisation, and boundary counts.
-        primitive = self.get_messages_around(
+        return SessionRecallReadModel(self._conn).get_anchored_view(
             session_id,
             around_message_id,
             window=window,
+            bookend=bookend,
+            keep_roles=keep_roles,
             include_inactive=include_inactive,
         )
-        window_rows = primitive["window"]
-        if not window_rows:
-            return {
-                "window": [],
-                "messages_before": 0,
-                "messages_after": 0,
-                "bookend_start": [],
-                "bookend_end": [],
-            }
-
-        # Apply role filter to the window, but never drop the anchor itself.
-        if keep_roles is not None:
-            keep_set = set(keep_roles)
-            filtered_window = [
-                m for m in window_rows
-                if m.get("id") == around_message_id or m.get("role") in keep_set
-            ]
-        else:
-            filtered_window = window_rows
-
-        window_min_id = window_rows[0]["id"]
-        window_max_id = window_rows[-1]["id"]
-
-        # Fetch bookends only when there's room outside the window. SQL filters
-        # by id range, role, and non-empty content — tool-call-only assistant
-        # turns (content='' with tool_calls populated) are excluded so they
-        # don't crowd out actual prose openings/closings.
-        bookend_start_rows: List[Any] = []
-        bookend_end_rows: List[Any] = []
-        if bookend > 0:
-            with self._lock:
-                active_clause = "" if include_inactive else " AND active = 1"
-                role_clause = ""
-                role_params: list = []
-                if keep_roles is not None:
-                    role_placeholders = ",".join("?" for _ in keep_roles)
-                    role_clause = f" AND role IN ({role_placeholders})"
-                    role_params = list(keep_roles)
-
-                bookend_start_rows = self._conn.execute(
-                    f"SELECT * FROM messages "
-                    f"WHERE session_id = ? AND id < ?{active_clause}{role_clause} "
-                    f"AND length(content) > 0 "
-                    f"ORDER BY id ASC LIMIT ?",
-                    (session_id, window_min_id, *role_params, bookend),
-                ).fetchall()
-
-                bookend_end_rows = self._conn.execute(
-                    f"SELECT * FROM messages "
-                    f"WHERE session_id = ? AND id > ?{active_clause}{role_clause} "
-                    f"AND length(content) > 0 "
-                    f"ORDER BY id DESC LIMIT ?",
-                    (session_id, window_max_id, *role_params, bookend),
-                ).fetchall()
-                # End rows came back DESC for the LIMIT cap; flip to ASC.
-                bookend_end_rows = list(reversed(bookend_end_rows))
-
-        def _hydrate(row) -> Dict[str, Any]:
-            msg = dict(row)
-            if "content" in msg:
-                msg["content"] = self._decode_content(msg["content"])
-            if msg.get("tool_calls"):
-                try:
-                    msg["tool_calls"] = json.loads(msg["tool_calls"])
-                except (json.JSONDecodeError, TypeError):
-                    logger.warning(
-                        "Failed to deserialize tool_calls in get_anchored_view, falling back to []"
-                    )
-                    msg["tool_calls"] = []
-            return msg
-
-        return {
-            "window": filtered_window,
-            "messages_before": primitive["messages_before"],
-            "messages_after": primitive["messages_after"],
-            "bookend_start": [_hydrate(r) for r in bookend_start_rows],
-            "bookend_end": [_hydrate(r) for r in bookend_end_rows],
-        }
 
     def resolve_resume_session_id(self, session_id: str) -> str:
         """Redirect a resume target to the descendant session that holds the messages.
@@ -3132,34 +2957,12 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         include_storage_metadata: bool = False,
         include_inactive: bool = False,
     ) -> List[Dict[str, Any]]:
-        """
-        Load messages in the OpenAI conversation format (role + content dicts).
-        Used by the gateway to restore conversation history.
-        """
-        session_ids = [session_id]
-        if include_ancestors:
-            session_ids = self._session_lineage_root_to_tip(session_id)
-
-        active_clause = "" if include_inactive else " AND active = 1"
-        with self._lock:
-            placeholders = ",".join("?" for _ in session_ids)
-            rows = self._conn.execute(
-                f"SELECT {self._conversation_message_columns()} "
-                f"FROM messages WHERE session_id IN ({placeholders})"
-                f"{active_clause} ORDER BY id",
-                tuple(session_ids),
-            ).fetchall()
-
-        messages = []
-        for row in rows:
-            msg = self._message_row_as_conversation(
-                row,
-                include_storage_metadata=include_storage_metadata,
-            )
-            if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
-                continue
-            messages.append(msg)
-        return messages
+        return MessageHistoryReadModel(self._conn).all_as_conversation(
+            session_id,
+            include_ancestors=include_ancestors,
+            include_storage_metadata=include_storage_metadata,
+            include_inactive=include_inactive,
+        )
 
     def get_conversation_message_read_model(
         self,
@@ -3287,92 +3090,16 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
                 "pageInfo": page_info,
             }
 
-        with self._lock:
-            placeholders = ",".join("?" for _ in session_ids)
-            base_params: Tuple[Any, ...] = tuple(session_ids)
-            active_clause = "" if include_inactive else " AND active = 1"
-            total_count = self._conn.execute(
-                f"SELECT COUNT(*) FROM messages WHERE session_id IN ({placeholders})"
-                f"{active_clause}",
-                base_params,
-            ).fetchone()[0]
-
-            columns = self._conversation_message_columns()
-            if normalized_direction == "before" and cursor_id is not None:
-                rows = self._conn.execute(
-                    f"SELECT {columns} FROM messages "
-                    f"WHERE session_id IN ({placeholders}) AND id < ? "
-                    f"{active_clause} "
-                    "ORDER BY id DESC LIMIT ?",
-                    base_params + (cursor_id, page_limit + 1),
-                ).fetchall()
-                has_more_before = len(rows) > page_limit
-                selected_rows = list(reversed(rows[:page_limit]))
-                has_more_after = bool(selected_rows)
-            elif normalized_direction == "after" and cursor_id is not None:
-                rows = self._conn.execute(
-                    f"SELECT {columns} FROM messages "
-                    f"WHERE session_id IN ({placeholders}) AND id > ? "
-                    f"{active_clause} "
-                    "ORDER BY id ASC LIMIT ?",
-                    base_params + (cursor_id, page_limit + 1),
-                ).fetchall()
-                has_more_after = len(rows) > page_limit
-                selected_rows = list(rows[:page_limit])
-                has_more_before = bool(selected_rows)
-            else:
-                rows = self._conn.execute(
-                    f"SELECT {columns} FROM messages "
-                    f"WHERE session_id IN ({placeholders}) "
-                    f"{active_clause} "
-                    "ORDER BY id DESC LIMIT ?",
-                    base_params + (page_limit + 1,),
-                ).fetchall()
-                has_more_before = len(rows) > page_limit
-                selected_rows = list(reversed(rows[:page_limit]))
-                has_more_after = False
-
-            selected_rows = self._expand_message_page_rows_to_turn_boundaries(
-                selected_rows,
-                session_ids=session_ids,
-                columns=columns,
+        return MessageHistoryReadModel(self._conn).page_as_conversation(
+            session_id,
+            MessagePageQuery(
+                direction=normalized_direction,
+                cursor_id=cursor_id,
+                limit=page_limit,
+                include_ancestors=include_ancestors,
                 include_inactive=include_inactive,
-            )
-            first_id = int(selected_rows[0]["id"]) if selected_rows else None
-            last_id = int(selected_rows[-1]["id"]) if selected_rows else None
-            has_more_before = self._has_messages_on_page_side(
-                session_ids,
-                row_id=first_id,
-                side="before",
-                include_inactive=include_inactive,
-            )
-            has_more_after = self._has_messages_on_page_side(
-                session_ids,
-                row_id=last_id,
-                side="after",
-                include_inactive=include_inactive,
-            )
-
-        messages = []
-        for row in selected_rows:
-            msg = self._message_row_as_conversation(
-                row,
-                include_storage_metadata=True,
-            )
-            if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
-                continue
-            messages.append(msg)
-
-        return {
-            "messages": messages,
-            "pageInfo": {
-                "prev_cursor_id": first_id if has_more_before else None,
-                "next_cursor_id": last_id if has_more_after else None,
-                "hasMoreBefore": has_more_before,
-                "hasMoreAfter": has_more_after,
-                "totalCount": int(total_count or 0),
-            },
-        }
+            ),
+        )
 
     def _session_lineage_root_to_tip(self, session_id: str) -> List[str]:
         if not session_id:

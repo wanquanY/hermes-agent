@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent.memory_manager import sanitize_context
+from hermes_agent.repositories.message_repo import _decode_content as _decode_stored_content
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
 
@@ -375,15 +376,7 @@ def _is_duplicate_replayed_user_message(messages: list[dict[str, Any]], message:
 
 
 def _decode_content(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    try:
-        decoded = json.loads(value)
-    except (json.JSONDecodeError, TypeError):
-        return value
-    if isinstance(decoded, (dict, list)):
-        return decoded
-    return value
+    return _decode_stored_content(value)
 
 
 def _json_or(value: Any, default: Any) -> Any:
