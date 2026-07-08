@@ -10,7 +10,7 @@ from .session_common import *
 from hermes_agent.domain.team_mission_audit_log import TeamMissionAuditLog
 
 
-class SessionDBTeamMissionGraphMixin:
+class TeamMissionGraphMixin:
     def _linked_conversation_ids_for_mission(
         self,
         mission_id: str,

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_team_mission.context.worker_context import cap_text
+from hermes_team_mission.state.store import open_team_mission_state_store
 
 _log = logging.getLogger(__name__)
 
@@ -314,12 +315,10 @@ def team_mission_control_db(parent_agent: Any = None, *, create_if_missing: bool
     explicit_control_home = text(os.getenv("DOVIE_HERMES_CONTROL_HOME"))
     if explicit_control_home:
         try:
-            from hermes_state import SessionDB
-
             db_path = Path(explicit_control_home).expanduser().resolve() / "state.db"
             if not create_if_missing and not db_path.exists():
                 return None
-            return SessionDB(db_path=db_path)
+            return open_team_mission_state_store(db_path)
         except Exception:
             pass
     if db is not None:
@@ -333,19 +332,15 @@ def team_mission_control_db(parent_agent: Any = None, *, create_if_missing: bool
     control_home = text(os.getenv("HERMES_HOME"))
     if control_home:
         try:
-            from hermes_state import SessionDB
-
             db_path = Path(control_home).expanduser().resolve() / "state.db"
             if not create_if_missing and not db_path.exists():
                 return None
-            return SessionDB(db_path=db_path)
+            return open_team_mission_state_store(db_path)
         except Exception:
             pass
     if not create_if_missing:
         return None
-    from hermes_state import SessionDB
-
-    return SessionDB()
+    return open_team_mission_state_store()
 
 
 def _is_worker_db_proxy(db: Any) -> bool:

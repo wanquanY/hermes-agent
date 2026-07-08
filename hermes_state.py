@@ -51,7 +51,7 @@ from hermes_state_runtime import session_info_record
 from hermes_state_runs import SessionDBRunMixin
 from hermes_state_tool_events import backfill_tool_events_from_run_events
 from hermes_state_team_capabilities import SessionDBTeamCapabilityMixin
-from hermes_team_mission.state.session_mixin import SessionDBTeamMissionMixin
+from hermes_team_mission.state.session_mixin import TeamMissionStateMixin
 from hermes_state_team_registry import SessionDBTeamRegistryMixin
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
 from hermes_team_mission.state.schema import reconcile_team_mission_node_primary_key
@@ -724,7 +724,7 @@ CREATE INDEX IF NOT EXISTS idx_team_capability_snapshot_bindings_conversation
     ON team_capability_snapshot_bindings(conversation_id);
 """
 
-class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, SessionDBTeamMissionMixin, SessionDBMemberChatMixin, ParticipantsMixin, ActivitiesMixin, SessionDBRunMixin, SessionDBBranchMixin):
+class SessionDB(SessionDBAgentProfileMixin, SessionDBTeamRegistryMixin, SessionDBTeamCapabilityMixin, TeamMissionStateMixin, SessionDBMemberChatMixin, ParticipantsMixin, ActivitiesMixin, SessionDBRunMixin, SessionDBBranchMixin):
     """
     SQLite-backed session storage with FTS5 search.
 

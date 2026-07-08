@@ -29,7 +29,7 @@ def _team_mission_leader_report_status(
     return ""
 
 
-class SessionDBTeamMissionConversationMixin:
+class TeamMissionConversationMixin:
     _PROJECTED_ACTIVE_MISSION_ID_SQL = """
         COALESCE((
             SELECT cm.mission_id

@@ -4,7 +4,7 @@ from __future__ import annotations
 from .session_common import *
 
 
-class SessionDBTeamMissionEventMixin:
+class TeamMissionEventMixin:
     def _record_missing_team_mission_handoff(
         self,
         *,

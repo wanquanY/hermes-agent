@@ -8,22 +8,19 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 104 | 32 |
+| `p2:no_sessiondb_production` | 72 | 24 |
 | `p2:no_legacy_identity_alias_internal` | 1199 | 80 |
 
 ## p2:no_sessiondb_production
 
 | Offenders | File | First evidence |
 |---:|---|---|
-| 31 | `hermes_state.py` | `35` from hermes_state_activities import ActivitiesMixin |
-| 17 | `hermes_team_mission/state/session_mixin.py` | `3` from .conversation_missions import SessionDBConversationMissionMixin |
+| 30 | `hermes_state.py` | `35` from hermes_state_activities import ActivitiesMixin |
 | 7 | `gateway/run.py` | `1759` from hermes_state import SessionDB |
 | 6 | `hermes_state_runs.py` | `24` from hermes_state_run_event_codec import ( |
-| 6 | `hermes_team_mission/runtime/profile_scope.py` | `317` from hermes_state import SessionDB |
-| 5 | `hermes_team_mission/state/session_graph.py` | `4` from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS |
+| 4 | `hermes_team_mission/state/session_graph.py` | `4` from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS |
 | 3 | `hermes_state_run_event_reference.py` | `11` from hermes_state_run_event_codec import decode_run_event_row |
 | 2 | `hermes_state_tool_events.py` | `9` from hermes_state_run_event_codec import decode_run_event_row |
-| 2 | `hermes_team_mission/state/session_conversations.py` | `8` from hermes_state_participants import leader_participant_id, member_participant_id |
 | 2 | `tui_gateway/methods/session.py` | `1761` # Context compression ends the current SessionDB session and forks a |
 | 2 | `tui_gateway/services/run_control.py` | `24` from hermes_state_participants import agent_participant_id, leader_participant_id, member_participant_id |
 | 1 | `hermes_agent/storage/migrations/0001_declarative_baseline.py` | `22` from hermes_state import SCHEMA_SQL |
@@ -40,13 +37,8 @@ Status: `preflight_only`
 | 1 | `hermes_team_mission/gateway/runtime_methods.py` | `15` from hermes_state_participants import leader_participant_id, member_participant_id |
 | 1 | `hermes_team_mission/runtime/history.py` | `7` from hermes_state_run_event_codec import decode_run_event_row |
 | 1 | `hermes_team_mission/runtime/run_event_retention.py` | `9` from hermes_state_run_event_codec import payload_from_run_event_row |
-| 1 | `hermes_team_mission/state/conversation_missions.py` | `19` class SessionDBConversationMissionMixin: |
 | 1 | `hermes_team_mission/state/memory.py` | `8` from hermes_state_run_event_codec import decode_run_event_row |
-| 1 | `hermes_team_mission/state/session_context.py` | `7` class SessionDBTeamMissionContextMixin: |
-| 1 | `hermes_team_mission/state/session_events.py` | `7` class SessionDBTeamMissionEventMixin: |
-| 1 | `hermes_team_mission/state/session_finalizers.py` | `7` class SessionDBTeamMissionFinalizerMixin: |
-| 1 | `hermes_team_mission/state/session_rows.py` | `7` class SessionDBTeamMissionRowsMixin: |
-| 1 | `hermes_team_mission/state/session_views.py` | `164` class SessionDBTeamMissionViewMixin: |
+| 1 | `hermes_team_mission/state/session_conversations.py` | `8` from hermes_state_participants import leader_participant_id, member_participant_id |
 
 ## p2:no_legacy_identity_alias_internal
 

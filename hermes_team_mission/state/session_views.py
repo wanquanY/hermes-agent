@@ -161,7 +161,7 @@ def transform_to_member_perspective(
     return projected
 
 
-class SessionDBTeamMissionViewMixin:
+class TeamMissionViewMixin:
     def get_team_mission_graph(self, mission_id: str) -> Dict[str, Any]:
         mission_id = str(mission_id or "").strip()
         if not mission_id:

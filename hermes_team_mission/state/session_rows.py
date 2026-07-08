@@ -4,7 +4,7 @@ from __future__ import annotations
 from .session_common import *
 
 
-class SessionDBTeamMissionRowsMixin:
+class TeamMissionRowsMixin:
     def _team_mission_runtime_event_identity(
         self,
         *,

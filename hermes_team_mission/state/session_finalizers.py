@@ -4,7 +4,7 @@ from __future__ import annotations
 from .session_common import *
 
 
-class SessionDBTeamMissionFinalizerMixin:
+class TeamMissionFinalizerMixin:
     _warned_deprecated_team_mission_run_events = False
 
     def reduce_team_mission_graph(self, mission_id: str) -> Dict[str, Any]:

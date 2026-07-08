@@ -16,7 +16,7 @@ def _conversation_mission_status(value: str | None) -> str:
     return "active"
 
 
-class SessionDBConversationMissionMixin:
+class TeamMissionConversationMissionMixin:
     def _activity_conversation_id_for_mission_on_conn(
         self,
         conn: sqlite3.Connection,

@@ -2624,7 +2624,7 @@
       "total_offenders": 1199
     },
     "p2:no_sessiondb_production": {
-      "file_count": 32,
+      "file_count": 24,
       "files": [
         {
           "first_lines": [
@@ -2667,49 +2667,8 @@
               ]
             }
           ],
-          "offenders": 31,
+          "offenders": 30,
           "path": "hermes_state.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 3,
-              "text": "from .conversation_missions import SessionDBConversationMissionMixin",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 4,
-              "text": "from .session_context import SessionDBTeamMissionContextMixin",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 5,
-              "text": "from .session_conversations import SessionDBTeamMissionConversationMixin",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 6,
-              "text": "from .session_events import SessionDBTeamMissionEventMixin",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 7,
-              "text": "from .session_finalizers import SessionDBTeamMissionFinalizerMixin",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 17,
-          "path": "hermes_team_mission/state/session_mixin.py"
         },
         {
           "first_lines": [
@@ -2797,50 +2756,6 @@
         {
           "first_lines": [
             {
-              "line": 317,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 322,
-              "text": "return SessionDB(db_path=db_path)",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 336,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 341,
-              "text": "return SessionDB(db_path=db_path)",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 346,
-              "text": "from hermes_state import SessionDB",
-              "tokens": [
-                "from hermes_state",
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 6,
-          "path": "hermes_team_mission/runtime/profile_scope.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 4,
               "text": "from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS",
               "tokens": [
@@ -2867,16 +2782,9 @@
               "tokens": [
                 "from hermes_state"
               ]
-            },
-            {
-              "line": 13,
-              "text": "class SessionDBTeamMissionGraphMixin:",
-              "tokens": [
-                "SessionDB"
-              ]
             }
           ],
-          "offenders": 5,
+          "offenders": 4,
           "path": "hermes_team_mission/state/session_graph.py"
         },
         {
@@ -2925,26 +2833,6 @@
           ],
           "offenders": 2,
           "path": "hermes_state_tool_events.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 8,
-              "text": "from hermes_state_participants import leader_participant_id, member_participant_id",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 32,
-              "text": "class SessionDBTeamMissionConversationMixin:",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "hermes_team_mission/state/session_conversations.py"
         },
         {
           "first_lines": [
@@ -3172,19 +3060,6 @@
         {
           "first_lines": [
             {
-              "line": 19,
-              "text": "class SessionDBConversationMissionMixin:",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_team_mission/state/conversation_missions.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 8,
               "text": "from hermes_state_run_event_codec import decode_run_event_row",
               "tokens": [
@@ -3198,70 +3073,18 @@
         {
           "first_lines": [
             {
-              "line": 7,
-              "text": "class SessionDBTeamMissionContextMixin:",
+              "line": 8,
+              "text": "from hermes_state_participants import leader_participant_id, member_participant_id",
               "tokens": [
-                "SessionDB"
+                "from hermes_state"
               ]
             }
           ],
           "offenders": 1,
-          "path": "hermes_team_mission/state/session_context.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 7,
-              "text": "class SessionDBTeamMissionEventMixin:",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_team_mission/state/session_events.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 7,
-              "text": "class SessionDBTeamMissionFinalizerMixin:",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_team_mission/state/session_finalizers.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 7,
-              "text": "class SessionDBTeamMissionRowsMixin:",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_team_mission/state/session_rows.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 164,
-              "text": "class SessionDBTeamMissionViewMixin:",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_team_mission/state/session_views.py"
+          "path": "hermes_team_mission/state/session_conversations.py"
         }
       ],
-      "total_offenders": 104
+      "total_offenders": 72
     }
   },
   "phase": "P2",
