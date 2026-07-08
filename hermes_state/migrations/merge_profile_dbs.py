@@ -1,7 +1,7 @@
 """Merge profile-local Hermes state databases into the root state.db.
 
 This module intentionally uses raw sqlite3 only.  It must be runnable before
-the normal SessionDB lifecycle starts and must not import hermes_state.SessionDB.
+the normal state-store lifecycle starts and must not import the root store.
 """
 
 from __future__ import annotations

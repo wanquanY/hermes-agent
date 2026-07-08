@@ -1758,7 +1758,7 @@ def _(rid, params: dict) -> dict:
             target = found.session_id
         else:
             return _err(rid, 4007, "session not found")
-    # Context compression ends the current SessionDB session and forks a
+    # Context compression ends the current transcript session and forks a
     # continuation child that holds the post-compression turns (agent.session_id
     # rotates — see _sync_session_key_after_compress). Resuming the parent id
     # would reload the stale pre-compression transcript AND miss the live

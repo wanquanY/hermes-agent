@@ -171,9 +171,9 @@ def test_p2_inventory_reports_current_offender_baseline() -> None:
     inventory = json.loads(output)
     assert inventory["phase"] == "P2"
     gates = inventory["gates"]
-    assert gates["p2:no_sessiondb_production"]["total_offenders"] == 42
-    assert gates["p2:no_sessiondb_production"]["file_count"] == 7
-    assert gates["p2:no_legacy_identity_alias_internal"]["total_offenders"] == 1183
+    assert gates["p2:no_sessiondb_production"]["total_offenders"] == 38
+    assert gates["p2:no_sessiondb_production"]["file_count"] == 5
+    assert gates["p2:no_legacy_identity_alias_internal"]["total_offenders"] == 1181
     assert gates["p2:no_legacy_identity_alias_internal"]["file_count"] == 78
 
     markdown = subprocess.check_output(

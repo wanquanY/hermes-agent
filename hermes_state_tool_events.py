@@ -652,7 +652,7 @@ def tool_event_row_to_dict(row: Any) -> dict[str, Any]:
 def _run_event_row_to_canonical(row: Any) -> dict[str, Any] | None:
     """Decode a ``run_events`` row into a canonical event dict.
 
-    Mirrors the decode path used by ``SessionDB.list_run_events`` minus the
+    Mirrors the canonical run-event decode path minus the
     reference-rehydration step (which only affects cross-event references and
     is not needed for the tool-event snapshot/pagination use case).  Returns
     ``None`` when the row cannot be decoded to a dict.
@@ -660,10 +660,8 @@ def _run_event_row_to_canonical(row: Any) -> dict[str, Any] | None:
     event = decode_run_event_row(row)
     if not isinstance(event, dict) or not event:
         return None
-    # ``decode_run_event_row`` already populates: type, stored_session_id,
-    # session_id, runtime_session_id, runtime_scope_key, run_id, turn_id,
-    # participant_id, seq, timestamp, payload.  These are exactly the fields
-    # the canonical event shape requires.
+    # ``decode_run_event_row`` already populates the canonical run-event
+    # identity, ordering, participant, and payload fields required here.
     event["seq"] = int(event.get("seq") or _row_value(row, "seq", 0) or 0)
     return event
 

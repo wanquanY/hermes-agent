@@ -1359,47 +1359,6 @@
         {
           "first_lines": [
             {
-              "line": 73,
-              "text": "event.get(\"stored_session_id\"),",
-              "tokens": [
-                "stored_session_id"
-              ]
-            },
-            {
-              "line": 75,
-              "text": "payload.get(\"stored_session_id\"),",
-              "tokens": [
-                "stored_session_id"
-              ]
-            },
-            {
-              "line": 260,
-              "text": "\"runtime_session_id\": event.get(\"runtime_session_id\") or event.get(\"session_id\"),",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 540,
-              "text": "event.setdefault(\"stored_session_id\", _row_value(row, \"session_id\"))",
-              "tokens": [
-                "stored_session_id"
-              ]
-            },
-            {
-              "line": 543,
-              "text": "event.setdefault(\"runtime_session_id\", _row_value(row, \"runtime_session_id\"))",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            }
-          ],
-          "offenders": 9,
-          "path": "hermes_state_tool_events.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 138,
               "text": "requested_stored_session_id=frame.stored_session_id,",
               "tokens": [
@@ -1437,6 +1396,47 @@
           ],
           "offenders": 9,
           "path": "tui_gateway/services/agent_run_backend.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": 73,
+              "text": "event.get(\"stored_session_id\"),",
+              "tokens": [
+                "stored_session_id"
+              ]
+            },
+            {
+              "line": 75,
+              "text": "payload.get(\"stored_session_id\"),",
+              "tokens": [
+                "stored_session_id"
+              ]
+            },
+            {
+              "line": 260,
+              "text": "\"runtime_session_id\": event.get(\"runtime_session_id\") or event.get(\"session_id\"),",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            },
+            {
+              "line": 540,
+              "text": "event.setdefault(\"stored_session_id\", _row_value(row, \"session_id\"))",
+              "tokens": [
+                "stored_session_id"
+              ]
+            },
+            {
+              "line": 543,
+              "text": "event.setdefault(\"runtime_session_id\", _row_value(row, \"runtime_session_id\"))",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            }
+          ],
+          "offenders": 7,
+          "path": "hermes_state_tool_events.py"
         },
         {
           "first_lines": [
@@ -2574,10 +2574,10 @@
           "path": "tui_gateway/services/interaction_registry.py"
         }
       ],
-      "total_offenders": 1183
+      "total_offenders": 1181
     },
     "p2:no_sessiondb_production": {
-      "file_count": 7,
+      "file_count": 5,
       "files": [
         {
           "first_lines": [
@@ -2684,37 +2684,10 @@
               "tokens": [
                 "from hermes_state"
               ]
-            },
-            {
-              "line": 595,
-              "text": "class SessionDBRunMixin:",
-              "tokens": [
-                "SessionDB"
-              ]
             }
           ],
-          "offenders": 4,
+          "offenders": 3,
           "path": "hermes_state_runs.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 1761,
-              "text": "# Context compression ends the current SessionDB session and forks a",
-              "tokens": [
-                "SessionDB"
-              ]
-            },
-            {
-              "line": 1846,
-              "text": "from hermes_state_member_chat import project_messages_for_viewer",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "tui_gateway/methods/session.py"
         },
         {
           "first_lines": [
@@ -2732,32 +2705,18 @@
         {
           "first_lines": [
             {
-              "line": 4,
-              "text": "the normal SessionDB lifecycle starts and must not import hermes_state.SessionDB.",
+              "line": 1846,
+              "text": "from hermes_state_member_chat import project_messages_for_viewer",
               "tokens": [
-                "import hermes_state",
-                "SessionDB"
+                "from hermes_state"
               ]
             }
           ],
           "offenders": 1,
-          "path": "hermes_state/migrations/merge_profile_dbs.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 655,
-              "text": "Mirrors the decode path used by ``SessionDB.list_run_events`` minus the",
-              "tokens": [
-                "SessionDB"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_state_tool_events.py"
+          "path": "tui_gateway/methods/session.py"
         }
       ],
-      "total_offenders": 42
+      "total_offenders": 38
     }
   },
   "phase": "P2",

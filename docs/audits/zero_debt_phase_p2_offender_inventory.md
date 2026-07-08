@@ -8,8 +8,8 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 42 | 7 |
-| `p2:no_legacy_identity_alias_internal` | 1183 | 78 |
+| `p2:no_sessiondb_production` | 38 | 5 |
+| `p2:no_legacy_identity_alias_internal` | 1181 | 78 |
 
 ## p2:no_sessiondb_production
 
@@ -17,11 +17,9 @@ Status: `preflight_only`
 |---:|---|---|
 | 26 | `hermes_state.py` | `35` from hermes_state_activities import ActivitiesMixin |
 | 7 | `gateway/run.py` | `1759` from hermes_state import SessionDB |
-| 4 | `hermes_state_runs.py` | `37` from hermes_state_run_event_reference import ( |
-| 2 | `tui_gateway/methods/session.py` | `1761` # Context compression ends the current SessionDB session and forks a |
+| 3 | `hermes_state_runs.py` | `37` from hermes_state_run_event_reference import ( |
 | 1 | `hermes_agent/storage/migrations/0001_declarative_baseline.py` | `22` from hermes_state import SCHEMA_SQL |
-| 1 | `hermes_state/migrations/merge_profile_dbs.py` | `4` the normal SessionDB lifecycle starts and must not import hermes_state.SessionDB. |
-| 1 | `hermes_state_tool_events.py` | `655` Mirrors the decode path used by ``SessionDB.list_run_events`` minus the |
+| 1 | `tui_gateway/methods/session.py` | `1846` from hermes_state_member_chat import project_messages_for_viewer |
 
 ## p2:no_legacy_identity_alias_internal
 
@@ -60,8 +58,8 @@ Status: `preflight_only`
 | 10 | `hermes_team_mission/state/schema.py` | `19` stable_session_id TEXT NOT NULL UNIQUE, |
 | 10 | `tui_gateway/services/worker_db_proxy.py` | `115` return self._call(name, args, kwargs, stable_session_id="") |
 | 9 | `cron/scheduler.py` | `1005` "runtime_session_id": job.get("_runtime_session_id"), |
-| 9 | `hermes_state_tool_events.py` | `73` event.get("stored_session_id"), |
 | 9 | `tui_gateway/services/agent_run_backend.py` | `138` requested_stored_session_id=frame.stored_session_id, |
+| 7 | `hermes_state_tool_events.py` | `73` event.get("stored_session_id"), |
 | 7 | `tui_gateway/methods/conversation_activity.py` | `39` session.get("stored_session_id") |
 | 7 | `tui_gateway/services/team_mission_activity_events.py` | `174` "runtime_stable_session_id": text( |
 | 7 | `tui_gateway/services/worker_pool.py` | `56` stored_session_id: str |

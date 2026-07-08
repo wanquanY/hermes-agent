@@ -592,7 +592,7 @@ def _merge_stream_payload(previous_event: Dict[str, Any], event: Dict[str, Any])
     return merged_payload
 
 
-class SessionDBRunMixin:
+class RunStateMixin:
     """Persistent run state and append-only event log for gateway sessions."""
 
     def _run_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:

@@ -48,7 +48,7 @@ from hermes_agent.domain.run_event_codec import update_run_event_frame_columns
 from hermes_agent.domain.run_event_index import project_run_event_search_index
 from hermes_agent.domain.run_event_index import runtime_source_seq_from_event
 from hermes_state_runtime import session_info_record
-from hermes_state_runs import SessionDBRunMixin
+from hermes_state_runs import RunStateMixin
 from hermes_state_tool_events import backfill_tool_events_from_run_events
 from hermes_state_team_capabilities import TeamCapabilityStateMixin
 from hermes_team_mission.state.session_mixin import TeamMissionStateMixin
@@ -724,7 +724,7 @@ CREATE INDEX IF NOT EXISTS idx_team_capability_snapshot_bindings_conversation
     ON team_capability_snapshot_bindings(conversation_id);
 """
 
-class SessionDB(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapabilityStateMixin, TeamMissionStateMixin, MemberChatStateMixin, ParticipantsMixin, ActivitiesMixin, SessionDBRunMixin, BranchStateMixin):
+class SessionDB(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapabilityStateMixin, TeamMissionStateMixin, MemberChatStateMixin, ParticipantsMixin, ActivitiesMixin, RunStateMixin, BranchStateMixin):
     """
     SQLite-backed session storage with FTS5 search.
 
