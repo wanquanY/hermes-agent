@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import time
 from typing import Any, Dict, List, Optional
@@ -18,6 +17,9 @@ from hermes_agent.domain.run_state_machine import prefer_terminal_run_status
 from hermes_agent.domain.run_state_machine import resolve_explicit_run_status
 from hermes_agent.domain.run_state_machine import resolve_run_status_transition
 from hermes_agent.domain.run_state_machine import terminal_status_from_event
+from hermes_agent.domain.run_lifecycle import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS
+from hermes_agent.domain.run_lifecycle import DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS
+from hermes_agent.domain.run_lifecycle import orphaned_active_run_decision
 from hermes_agent.domain.seq_allocator import allocate_run_event_seq
 from hermes_agent.domain.seq_allocator import ensure_session_counter
 from hermes_agent.repositories.run_repo import RunRepoImpl
@@ -62,8 +64,6 @@ logger = logging.getLogger(__name__)
 RUN_EVENT_PRUNE_INTERVAL_EVENTS = 500
 CONTROL_ONLY_ACTIVE_RUN_REPAIR_STALE_SECONDS = 60.0
 CONTROL_ONLY_ACTIVE_RUN_REPAIR_OWNER_DEAD_GRACE_SECONDS = 10.0
-DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS = 300.0
-DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS = 2.0
 RUN_EVENT_RETENTION_POLICY = RunEventRetentionPolicy()
 STREAM_COMPACTION_BOUNDARY_EVENT_TYPES = {
     "message.start",
@@ -590,71 +590,6 @@ def _merge_stream_payload(previous_event: Dict[str, Any], event: Dict[str, Any])
     # the aggregate text is the durable representation.
     merged_payload.pop("rendered", None)
     return merged_payload
-
-
-def _pid_is_alive(pid: int, current_pid: int | None = None) -> bool:
-    if pid <= 0:
-        return False
-    if current_pid is not None and pid == current_pid:
-        return True
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except Exception:
-        return False
-
-
-def orphaned_active_run_decision(
-    row: sqlite3.Row | dict[str, Any],
-    *,
-    now: float,
-    live_runtime_session_ids: set[str] | None = None,
-    current_pid: int | None = None,
-    current_gateway_instance_id: str = "",
-    stale_after_seconds: float = DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS,
-    owner_dead_grace_seconds: float = DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS,
-) -> tuple[bool, str]:
-    live_runtime_session_ids = {
-        str(value or "").strip()
-        for value in (live_runtime_session_ids or set())
-        if str(value or "").strip()
-    }
-    stale_after = max(0.0, float(stale_after_seconds or 0))
-    owner_dead_grace = max(0.0, float(owner_dead_grace_seconds or 0))
-    instance_id = str(current_gateway_instance_id or "").strip()
-
-    metadata = _json_loads(row["metadata_json"], {})
-    metadata = metadata if isinstance(metadata, dict) else {}
-    updated_at = float(row["updated_at"] or row["started_at"] or 0)
-    updated_age = now - updated_at
-    owner_instance = str(metadata.get("gateway_instance_id") or "").strip()
-    try:
-        owner_pid = int(metadata.get("gateway_pid") or 0)
-    except (TypeError, ValueError):
-        owner_pid = 0
-    if owner_pid > 0:
-        if (
-            current_pid is not None
-            and owner_pid == current_pid
-            and owner_instance
-            and owner_instance != instance_id
-        ):
-            return True, "same-pid-different-gateway-instance"
-        if _pid_is_alive(owner_pid, current_pid=current_pid):
-            return False, "owner-pid-alive"
-        if updated_age < owner_dead_grace:
-            return False, "owner-pid-dead-fresh"
-        return True, "owner-pid-dead"
-    runtime_session_id = str(row["runtime_session_id"] or "").strip()
-    if runtime_session_id and runtime_session_id in live_runtime_session_ids:
-        return False, "live-runtime-session"
-    if updated_age >= stale_after:
-        return True, "legacy-owner-metadata-stale"
-    return False, "legacy-owner-metadata-fresh"
 
 
 class SessionDBRunMixin:
@@ -2380,7 +2315,7 @@ class SessionDBRunMixin:
     def fail_orphaned_active_runs(
         self,
         *,
-        live_runtime_session_ids: set[str] | None = None,
+        live_runtime_ids: set[str] | None = None,
         current_pid: int | None = None,
         current_gateway_instance_id: str = "",
         stale_after_seconds: float = DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS,
@@ -2394,9 +2329,9 @@ class SessionDBRunMixin:
         gateway processes sharing the same state DB. Older rows without owner
         metadata are only failed after a short stale window.
         """
-        live_runtime_session_ids = {
+        live_runtime_ids = {
             str(value or "").strip()
-            for value in (live_runtime_session_ids or set())
+            for value in (live_runtime_ids or set())
             if str(value or "").strip()
         }
         now = time.time()
@@ -2435,7 +2370,7 @@ class SessionDBRunMixin:
                 should_fail, decision = orphaned_active_run_decision(
                     row,
                     now=now,
-                    live_runtime_session_ids=live_runtime_session_ids,
+                    live_runtime_ids=live_runtime_ids,
                     current_pid=current_pid,
                     current_gateway_instance_id=instance_id,
                     stale_after_seconds=stale_after_seconds,
@@ -2513,7 +2448,7 @@ class SessionDBRunMixin:
                                 "failed": failed,
                                 "current_pid": current_pid,
                                 "current_gateway_instance_id": instance_id,
-                                "live_runtime_session_ids": sorted(live_runtime_session_ids),
+                                "live_runtime_ids": sorted(live_runtime_ids),
                                 "decisions": diagnostics,
                             },
                             ensure_ascii=False,

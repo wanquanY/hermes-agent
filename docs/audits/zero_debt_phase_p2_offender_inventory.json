@@ -129,47 +129,6 @@
         {
           "first_lines": [
             {
-              "line": 615,
-              "text": "live_runtime_session_ids: set[str] | None = None,",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 621,
-              "text": "live_runtime_session_ids = {",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 623,
-              "text": "for value in (live_runtime_session_ids or set())",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 652,
-              "text": "runtime_session_id = str(row[\"runtime_session_id\"] or \"\").strip()",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 653,
-              "text": "if runtime_session_id and runtime_session_id in live_runtime_session_ids:",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            }
-          ],
-          "offenders": 59,
-          "path": "hermes_state_runs.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 68,
               "text": "\"stored_session_id\": str(session.get(\"session_key\") or sid),",
               "tokens": [
@@ -248,6 +207,47 @@
           ],
           "offenders": 55,
           "path": "hermes_team_mission/gateway/runtime_methods.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": 731,
+              "text": "runtime_session_id=str(row[\"runtime_session_id\"] or \"\"),",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            },
+            {
+              "line": 775,
+              "text": "runtime_session_id: str = \"\",",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            },
+            {
+              "line": 807,
+              "text": "runtime_session_id=runtime_session_id,",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            },
+            {
+              "line": 825,
+              "text": "runtime_session_id=runtime_session_id,",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            },
+            {
+              "line": 839,
+              "text": "runtime_session_id: str,",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            }
+          ],
+          "offenders": 49,
+          "path": "hermes_state_runs.py"
         },
         {
           "first_lines": [
@@ -416,47 +416,6 @@
         {
           "first_lines": [
             {
-              "line": 78,
-              "text": "conversation_session_id=_text(conversation.get(\"stable_session_id\")),",
-              "tokens": [
-                "stable_session_id"
-              ]
-            },
-            {
-              "line": 117,
-              "text": "candidate_stable_session_id = _stable_session_id_from_metadata(",
-              "tokens": [
-                "stable_session_id"
-              ]
-            },
-            {
-              "line": 122,
-              "text": "\"SELECT conversation_id FROM team_mission_conversations WHERE stable_session_id = ?\",",
-              "tokens": [
-                "stable_session_id"
-              ]
-            },
-            {
-              "line": 123,
-              "text": "(candidate_stable_session_id,),",
-              "tokens": [
-                "stable_session_id"
-              ]
-            },
-            {
-              "line": 124,
-              "text": ").fetchone() if candidate_stable_session_id else None",
-              "tokens": [
-                "stable_session_id"
-              ]
-            }
-          ],
-          "offenders": 38,
-          "path": "hermes_team_mission/state/session_graph.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 193,
               "text": "def _conversation_stable_session_id(conversation: dict[str, Any], mission: dict[str, Any]) -> str:",
               "tokens": [
@@ -494,6 +453,47 @@
           ],
           "offenders": 37,
           "path": "hermes_team_mission/read_model.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": 78,
+              "text": "conversation_session_id=_text(conversation.get(\"stable_session_id\")),",
+              "tokens": [
+                "stable_session_id"
+              ]
+            },
+            {
+              "line": 117,
+              "text": "candidate_stable_session_id = _stable_session_id_from_metadata(",
+              "tokens": [
+                "stable_session_id"
+              ]
+            },
+            {
+              "line": 122,
+              "text": "\"SELECT conversation_id FROM team_mission_conversations WHERE stable_session_id = ?\",",
+              "tokens": [
+                "stable_session_id"
+              ]
+            },
+            {
+              "line": 123,
+              "text": "(candidate_stable_session_id,),",
+              "tokens": [
+                "stable_session_id"
+              ]
+            },
+            {
+              "line": 124,
+              "text": ").fetchone() if candidate_stable_session_id else None",
+              "tokens": [
+                "stable_session_id"
+              ]
+            }
+          ],
+          "offenders": 37,
+          "path": "hermes_team_mission/state/session_graph.py"
         },
         {
           "first_lines": [
@@ -2621,10 +2621,10 @@
           "path": "tui_gateway/services/interaction_registry.py"
         }
       ],
-      "total_offenders": 1199
+      "total_offenders": 1188
     },
     "p2:no_sessiondb_production": {
-      "file_count": 24,
+      "file_count": 21,
       "files": [
         {
           "first_lines": [
@@ -2715,35 +2715,35 @@
         {
           "first_lines": [
             {
-              "line": 24,
+              "line": 26,
               "text": "from hermes_state_run_event_codec import (",
               "tokens": [
                 "from hermes_state"
               ]
             },
             {
-              "line": 30,
+              "line": 32,
               "text": "from hermes_state_run_event_index import (",
               "tokens": [
                 "from hermes_state"
               ]
             },
             {
-              "line": 35,
+              "line": 37,
               "text": "from hermes_state_run_event_reference import (",
               "tokens": [
                 "from hermes_state"
               ]
             },
             {
-              "line": 39,
+              "line": 41,
               "text": "from hermes_state_runtime import (",
               "tokens": [
                 "from hermes_state"
               ]
             },
             {
-              "line": 46,
+              "line": 48,
               "text": "from hermes_state_tool_events import (",
               "tokens": [
                 "from hermes_state"
@@ -2752,40 +2752,6 @@
           ],
           "offenders": 6,
           "path": "hermes_state_runs.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 4,
-              "text": "from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 5,
-              "text": "from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 6,
-              "text": "from hermes_state_runs import orphaned_active_run_decision",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 7,
-              "text": "from hermes_state_run_event_codec import payload_from_run_event_row",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 4,
-          "path": "hermes_team_mission/state/session_graph.py"
         },
         {
           "first_lines": [
@@ -2995,19 +2961,6 @@
         {
           "first_lines": [
             {
-              "line": 19,
-              "text": "from hermes_state_run_event_codec import payload_from_run_event_row",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_team_mission/context/worker_context.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 11,
               "text": "from hermes_state_participants import leader_participant_id",
               "tokens": [
@@ -3047,19 +3000,6 @@
         {
           "first_lines": [
             {
-              "line": 9,
-              "text": "from hermes_state_run_event_codec import payload_from_run_event_row",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_team_mission/runtime/run_event_retention.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 8,
               "text": "from hermes_state_run_event_codec import decode_run_event_row",
               "tokens": [
@@ -3084,7 +3024,7 @@
           "path": "hermes_team_mission/state/session_conversations.py"
         }
       ],
-      "total_offenders": 72
+      "total_offenders": 66
     }
   },
   "phase": "P2",

@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from hermes_state_run_event_codec import payload_from_run_event_row
+from hermes_agent.domain.run_event_payload import payload_from_run_event_row
 
 
 DEFAULT_RUN_EVENT_RETENTION_DAYS = 14

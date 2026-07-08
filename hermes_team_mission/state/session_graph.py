@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 # ruff: noqa: F401,F403,F405
-from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS
-from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS
-from hermes_state_runs import orphaned_active_run_decision
-from hermes_state_run_event_codec import payload_from_run_event_row
+from hermes_agent.domain.run_event_payload import payload_from_run_event_row
+from hermes_agent.domain.run_lifecycle import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS
+from hermes_agent.domain.run_lifecycle import DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS
+from hermes_agent.domain.run_lifecycle import orphaned_active_run_decision
 
 from .session_common import *
 from hermes_agent.domain.team_mission_audit_log import TeamMissionAuditLog
@@ -1338,7 +1338,7 @@ class TeamMissionGraphMixin:
                 should_reap, stale_decision = orphaned_active_run_decision(
                     row,
                     now=now,
-                    live_runtime_session_ids=set(),
+                    live_runtime_ids=set(),
                     stale_after_seconds=stale_after_seconds,
                     owner_dead_grace_seconds=owner_dead_grace_seconds,
                 )

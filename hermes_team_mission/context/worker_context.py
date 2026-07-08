@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from hermes_team_mission.domain.handoff_contract import output_contract_requires_handoff
-from hermes_state_run_event_codec import payload_from_run_event_row
+from hermes_agent.domain.run_event_payload import payload_from_run_event_row
 
 
 TOOL_RESULT_BUDGET_CHARS = 8 * 1024
