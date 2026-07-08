@@ -173,8 +173,8 @@ def test_p2_inventory_reports_current_offender_baseline() -> None:
     gates = inventory["gates"]
     assert gates["p2:no_sessiondb_production"]["total_offenders"] == 48
     assert gates["p2:no_sessiondb_production"]["file_count"] == 13
-    assert gates["p2:no_legacy_identity_alias_internal"]["total_offenders"] == 1188
-    assert gates["p2:no_legacy_identity_alias_internal"]["file_count"] == 80
+    assert gates["p2:no_legacy_identity_alias_internal"]["total_offenders"] == 1183
+    assert gates["p2:no_legacy_identity_alias_internal"]["file_count"] == 78
 
     markdown = subprocess.check_output(
         [sys.executable, str(P2_INVENTORY), "--format", "markdown"],

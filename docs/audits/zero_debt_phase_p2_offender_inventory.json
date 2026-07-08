@@ -1,7 +1,7 @@
 {
   "gates": {
     "p2:no_legacy_identity_alias_internal": {
-      "file_count": 80,
+      "file_count": 78,
       "files": [
         {
           "first_lines": [
@@ -2042,33 +2042,6 @@
         {
           "first_lines": [
             {
-              "line": 77,
-              "text": "event.setdefault(\"stored_session_id\", _row_value(row, \"session_id\", \"\"))",
-              "tokens": [
-                "stored_session_id"
-              ]
-            },
-            {
-              "line": 78,
-              "text": "event.setdefault(\"session_id\", _row_value(row, \"runtime_session_id\", \"\"))",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 79,
-              "text": "event.setdefault(\"runtime_session_id\", _row_value(row, \"runtime_session_id\", \"\"))",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            }
-          ],
-          "offenders": 3,
-          "path": "hermes_agent/domain/run_event_codec.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 85,
               "text": "active_runtime_session_id: str | None = None",
               "tokens": [
@@ -2329,26 +2302,6 @@
           ],
           "offenders": 2,
           "path": "dovie_extension/manifest.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 101,
-              "text": "\"runtime_session_id\": event.get(\"runtime_session_id\") or event.get(\"session_id\"),",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 169,
-              "text": "session_id=str(_row_value(row, \"session_id\", \"\") or event.get(\"stored_session_id\") or \"\"),",
-              "tokens": [
-                "stored_session_id"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "hermes_agent/domain/run_event_index.py"
         },
         {
           "first_lines": [
@@ -2621,7 +2574,7 @@
           "path": "tui_gateway/services/interaction_registry.py"
         }
       ],
-      "total_offenders": 1188
+      "total_offenders": 1183
     },
     "p2:no_sessiondb_production": {
       "file_count": 13,

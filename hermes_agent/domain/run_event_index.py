@@ -96,9 +96,9 @@ def run_event_search_text(event: dict[str, Any]) -> str:
     payload = _record(event.get("payload"))
     searchable: dict[str, Any] = {
         "type": event.get("type"),
+        "session_id": event.get("session_id"),
         "run_id": event.get("run_id"),
         "turn_id": event.get("turn_id"),
-        "runtime_session_id": event.get("runtime_session_id") or event.get("session_id"),
         "runtime_scope_key": event.get("runtime_scope_key"),
         "participant_id": event.get("participant_id") or event.get("participantId"),
         "payload": payload,
@@ -166,7 +166,7 @@ def project_run_event_search_index_from_row(conn: sqlite3.Connection, row: Any) 
     project_run_event_search_index(
         conn,
         row_id=row_id,
-        session_id=str(_row_value(row, "session_id", "") or event.get("stored_session_id") or ""),
+        session_id=str(_row_value(row, "session_id", "") or event.get("session_id") or ""),
         seq=int(_row_value(row, "seq", event.get("seq") or 0) or 0),
         event_type=str(_row_value(row, "event_type", "") or event.get("type") or ""),
         runtime_scope_key=str(

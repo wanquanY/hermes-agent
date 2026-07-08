@@ -9,7 +9,7 @@ Status: `preflight_only`
 | Gate | Total offenders | Files |
 |---|---:|---:|
 | `p2:no_sessiondb_production` | 48 | 13 |
-| `p2:no_legacy_identity_alias_internal` | 1188 | 80 |
+| `p2:no_legacy_identity_alias_internal` | 1183 | 78 |
 
 ## p2:no_sessiondb_production
 
@@ -84,7 +84,6 @@ Status: `preflight_only`
 | 4 | `tui_gateway/core/session_config.py` | `151` # that _emit will derive runtime_scope_key / stored_session_id |
 | 3 | `channels/platforms/api_server_responses.py` | `714` stored_session_id = None |
 | 3 | `channels/platforms/api_server_runs.py` | `146` stored_session_id = None |
-| 3 | `hermes_agent/domain/run_event_codec.py` | `77` event.setdefault("stored_session_id", _row_value(row, "session_id", "")) |
 | 3 | `hermes_agent/repositories/session_repo.py` | `85` active_runtime_session_id: str \| None = None |
 | 3 | `hermes_cli/kanban_runtime_events.py` | `102` "stored_session_id": self.session_id, |
 | 3 | `hermes_conversation_message_identity.py` | `33` stable_session_id = _text(session_id) |
@@ -95,7 +94,6 @@ Status: `preflight_only`
 | 3 | `tui_gateway/methods/prompt_respond.py` | `86` params.get("stored_session_id") |
 | 3 | `tui_gateway/methods/session_history.py` | `507` "stored_session_id": session_key, |
 | 2 | `dovie_extension/manifest.py` | `78` "team_mission.conversation.runtime_session_ids", |
-| 2 | `hermes_agent/domain/run_event_index.py` | `101` "runtime_session_id": event.get("runtime_session_id") or event.get("session_id"), |
 | 2 | `hermes_agent/gateway/methods/run_methods.py` | `29` "runtime_session_id": run.runtime_session_id, |
 | 2 | `hermes_agent/gateway/methods/session_methods.py` | `205` "active_runtime_session_id", |
 | 2 | `hermes_team_leader_runtime_context.py` | `67` or params.get("stable_session_id") |

@@ -74,9 +74,11 @@ def decode_run_event_row(row: Any) -> dict[str, Any]:
         payload = json_loads(_row_value(row, "payload_json"), {})
     payload = payload if isinstance(payload, dict) else {}
     event.setdefault("type", _row_value(row, "event_type", ""))
-    event.setdefault("stored_session_id", _row_value(row, "session_id", ""))
-    event.setdefault("session_id", _row_value(row, "runtime_session_id", ""))
-    event.setdefault("runtime_session_id", _row_value(row, "runtime_session_id", ""))
+    transcript_session_id = _text(_row_value(row, "session_id", ""))
+    if transcript_session_id:
+        event["session_id"] = transcript_session_id
+    else:
+        event.setdefault("session_id", "")
     event.setdefault("runtime_scope_key", _row_value(row, "runtime_scope_key", ""))
     event.setdefault("run_id", _row_value(row, "run_id", ""))
     event.setdefault("turn_id", _row_value(row, "turn_id", ""))
