@@ -881,10 +881,7 @@ def test_conversation_activity_list_is_control_plane_read_for_profile_scope():
 
 
 def test_session_messages_returns_paged_transcript(monkeypatch):
-    class _MessagesDB:
-        def get_session(self, session_id):
-            return {"id": session_id} if session_id == "s1" else None
-
+    class _MessagesDB(_StubDB):
         def get_messages_page_as_conversation(self, *args, **kwargs):
             assert args[0] == "s1"
             assert kwargs["direction"] == "before"
@@ -931,7 +928,11 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
             ]
 
     cursor = server._methods["session.messages"].__globals__["_encode_page_cursor"]({"id": 20})
-    monkeypatch.setattr(server, "_get_db", lambda: _MessagesDB())
+    monkeypatch.setattr(
+        server,
+        "_get_db",
+        lambda: _MessagesDB([{"id": "s1", "source": "tui", "title": "S1"}]),
+    )
 
     resp = server.handle_request({
         "id": "1",

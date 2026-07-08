@@ -1,6 +1,8 @@
 import os
 from types import SimpleNamespace
 
+from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+from hermes_agent.storage.session_repository_db import connect_session_repository_db
 from tui_gateway import server
 from tui_gateway.methods import session as session_methods
 
@@ -18,11 +20,11 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
     seen: dict[str, str] = {}
 
     class _DB:
-        def get_session(self, _sid):
-            return {"id": "stored-session"}
-
-        def get_session_by_title(self, _title):
-            return None
+        def __init__(self):
+            self._conn = connect_session_repository_db(tmp_path / "profile-state.db")
+            SessionRepoImpl(self._conn).create(
+                SessionSpec(session_id="stored-session", source="tui")
+            )
 
         def get_messages_page_as_conversation(self, _sid, **_kwargs):
             from hermes_constants import get_hermes_home

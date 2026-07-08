@@ -533,53 +533,45 @@ def test_session_resume_reuses_live_running_runtime(server, monkeypatch, tmp_pat
     make_agent.assert_not_called()
 
 
-def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server, monkeypatch):
-    class _DB:
-        def __init__(self):
-            self.replaced = None
-
-        def get_session(self, sid):
-            return {"id": sid} if sid == "stored-1" else None
-
-        def get_session_by_title(self, _title):
-            return None
-
-        def get_messages_as_conversation(
-            self,
-            _sid,
-            include_ancestors=False,
-            include_storage_metadata=False,
-        ):
-            return [
-                {
-                    "role": "user",
-                    "content": "hidden attachment context",
-                    "metadata": {
-                        "turn_id": "turn-1",
-                        "draft_text": "请读这个文件",
-                        "attachments": [
-                            {
-                                "name": "spec.pdf",
-                                "path": "/tmp/spec.pdf",
-                                "mimeType": "application/pdf",
-                                "size": 123,
-                                "kind": "file",
-                            },
-                        ],
-                    },
+def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server, monkeypatch, tmp_path):
+    def history_reader(_sid, include_ancestors=False, include_storage_metadata=False):
+        return [
+            {
+                "role": "user",
+                "content": "hidden attachment context",
+                "metadata": {
+                    "turn_id": "turn-1",
+                    "draft_text": "请读这个文件",
+                    "attachments": [
+                        {
+                            "name": "spec.pdf",
+                            "path": "/tmp/spec.pdf",
+                            "mimeType": "application/pdf",
+                            "size": 123,
+                            "kind": "file",
+                        },
+                    ],
                 },
-                {"role": "assistant", "content": "ok", "metadata": {"turn_id": "turn-1"}},
-                {
-                    "role": "user",
-                    "content": "next",
-                    "metadata": {"turn_id": "turn-2", "draft_text": "下一条"},
-                },
-            ]
+            },
+            {"role": "assistant", "content": "ok", "metadata": {"turn_id": "turn-1"}},
+            {
+                "role": "user",
+                "content": "next",
+                "metadata": {"turn_id": "turn-2", "draft_text": "下一条"},
+            },
+        ]
 
-        def replace_messages(self, sid, messages):
-            self.replaced = (sid, messages)
+    db = _resume_gateway_db(
+        tmp_path,
+        rows=[("stored-1", "Stored")],
+        history_reader=history_reader,
+    )
+    db.replaced = None
 
-    db = _DB()
+    def replace_messages(sid, messages):
+        db.replaced = (sid, messages)
+
+    db.replace_messages = replace_messages
     make_agent = MagicMock()
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", make_agent)
@@ -610,41 +602,33 @@ def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server
     ]
 
 
-def test_session_recall_turn_matches_stored_client_message_id(server, monkeypatch):
-    class _DB:
-        def __init__(self):
-            self.replaced = None
-
-        def get_session(self, sid):
-            return {"id": sid} if sid == "stored-1" else None
-
-        def get_session_by_title(self, _title):
-            return None
-
-        def get_messages_as_conversation(
-            self,
-            _sid,
-            include_ancestors=False,
-            include_storage_metadata=False,
-        ):
-            return [
-                {
-                    "role": "user",
-                    "content": "hidden attachment context",
-                    "metadata": {
-                        "turn_id": "turn-canonical",
-                        "run_id": "run-canonical",
-                        "client_message_id": "client-msg-1",
-                        "draft_text": "恢复这个草稿",
-                    },
+def test_session_recall_turn_matches_stored_client_message_id(server, monkeypatch, tmp_path):
+    def history_reader(_sid, include_ancestors=False, include_storage_metadata=False):
+        return [
+            {
+                "role": "user",
+                "content": "hidden attachment context",
+                "metadata": {
+                    "turn_id": "turn-canonical",
+                    "run_id": "run-canonical",
+                    "client_message_id": "client-msg-1",
+                    "draft_text": "恢复这个草稿",
                 },
-                {"role": "assistant", "content": "ok", "metadata": {"turn_id": "turn-canonical"}},
-            ]
+            },
+            {"role": "assistant", "content": "ok", "metadata": {"turn_id": "turn-canonical"}},
+        ]
 
-        def replace_messages(self, sid, messages):
-            self.replaced = (sid, messages)
+    db = _resume_gateway_db(
+        tmp_path,
+        rows=[("stored-1", "Stored")],
+        history_reader=history_reader,
+    )
+    db.replaced = None
 
-    db = _DB()
+    def replace_messages(sid, messages):
+        db.replaced = (sid, messages)
+
+    db.replace_messages = replace_messages
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", MagicMock())
 

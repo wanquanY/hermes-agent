@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_8`
+状态：`in_progress_checkpoint_9`
 
 ## 前置门槛
 
@@ -16,7 +16,8 @@ TUI `session.list/session.most_recent/session.index.list` 的 read-model owner
 迁移，以及 TUI `session.title/session.status` 的 repo-backed metadata 迁移，
 将 TUI `session.delete` 迁到独立 domain deletion service，并将 TUI
 `session.resume` 的 stored metadata/reopen/compression-tip 解析迁到
-`SessionRepoImpl`。
+`SessionRepoImpl`，同时将 `session_history` 中的 session row identity
+解析迁到 repo。
 
 ## 目标
 
@@ -480,3 +481,49 @@ python scripts/zero_debt/verdict.py --phase P2 --json
 - `session.usage` 本身不依赖 DB，不是当前 P2 storage owner blocker。
 - `gateway/run.py`、`cli.py`、`run_agent.py` 仍存在直接 `SessionDB` 生产路径，
   属于 P2 后续垂直切片。
+
+## Checkpoint 9 证据
+
+已完成：
+
+- `tui_gateway.methods.session_history` 新增 repo-backed session row resolver，
+  `session.messages`、`session.events`、`session.message_metadata.merge` 和
+  stored `session.recall_turn` 不再调用 `db.get_session` /
+  `db.get_session_by_title` 做 session identity 解析。
+- 该 checkpoint 只迁 session identity owner，不迁 message projection：
+  `get_messages_page_as_conversation`、`list_run_events`、
+  `merge_message_metadata`、`replace_messages` 仍属于后续 message/event
+  read/write owner slice。
+- 相关测试从 fake legacy session metadata DB 迁到真实 SQLite +
+  `SessionRepoImpl`，保留 message/run-event reader fake 作为测试关注点。
+- 修正一次 helper 命名，避免新增 legacy identity alias inventory
+  offender。
+
+已运行：
+
+```bash
+python -m py_compile tui_gateway/methods/session_history.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_protocol.py
+.venv/bin/pytest tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py -k session_messages -q
+.venv/bin/pytest tests/tui_gateway/test_protocol.py -k "session_messages or message_metadata or recall" -q
+.venv/bin/pytest tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_ws_dispatch.py::test_control_plane_session_messages_are_not_proxied_to_runtime_worker -q
+.venv/bin/ruff check tui_gateway/methods/session_history.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Session history / protocol / profile-data / ws-dispatch 组合测试：
+  `122 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `session_history` 的 message page、message metadata merge、stored recall
+  rewrite 仍需要迁到 message read/write owner。
+- `session.history` 和 `session.resume` 的 display/history hydration 仍经
+  legacy message projection。

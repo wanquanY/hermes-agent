@@ -23,6 +23,22 @@ def _get_db():
     return _session_methods._get_db()
 
 
+def _session_repo_for_db(db):
+    return _session_methods._session_repo_for_db(db)
+
+
+def _resolve_session_row_id(rid, db, target: str) -> tuple[str, dict | None]:
+    repo = _session_repo_for_db(db)
+    if repo is None:
+        return "", _err(rid, 5000, "session repository unavailable")
+    found = repo.get(target)
+    if not found:
+        found = repo.get_by_title(target)
+    if not found:
+        return "", _err(rid, 4007, "session not found")
+    return found.session_id, None
+
+
 def _coerce_int(value, *, default: int = 0) -> int:
     """Best-effort int coercion for cursor params; falls back to ``default``."""
     try:
@@ -78,13 +94,9 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5000)
-    found = db.get_session(target)
-    if not found:
-        found = db.get_session_by_title(target)
-        if found:
-            target = found["id"]
-        else:
-            return _err(rid, 4007, "session not found")
+    target, resolve_err = _resolve_session_row_id(rid, db, target)
+    if resolve_err:
+        return resolve_err
     cursor = _decode_page_cursor(params.get("cursor"))
     cursor_id = cursor.get("id")
     try:
@@ -195,13 +207,9 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5000)
-    found = db.get_session(target)
-    if not found:
-        found = db.get_session_by_title(target)
-        if found:
-            target = found["id"]
-        else:
-            return _err(rid, 4007, "session not found")
+    target, resolve_err = _resolve_session_row_id(rid, db, target)
+    if resolve_err:
+        return resolve_err
     after_seq = _coerce_int(params.get("after_seq", params.get("afterSeq")), default=0)
     limit = _bounded_page_limit(
         params.get("limit"),
@@ -245,13 +253,9 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5000)
-    found = db.get_session(target)
-    if not found:
-        found = db.get_session_by_title(target)
-        if found:
-            target = found["id"]
-        else:
-            return _err(rid, 4007, "session not found")
+    target, resolve_err = _resolve_session_row_id(rid, db, target)
+    if resolve_err:
+        return resolve_err
     merge_message_metadata = getattr(db, "merge_message_metadata", None)
     if not callable(merge_message_metadata):
         return _err(rid, 5000, "message metadata merge is not available")
@@ -466,13 +470,11 @@ def _recall_stored_turn(rid, sid: str, target: dict[str, str]) -> dict | None:
     if db is None:
         return _db_unavailable_error(rid, code=5036)
     session_key = sid
-    found = db.get_session(session_key)
-    if not found:
-        found = db.get_session_by_title(session_key)
-        if found:
-            session_key = found["id"]
-        else:
+    session_key, resolve_err = _resolve_session_row_id(rid, db, session_key)
+    if resolve_err:
+        if resolve_err.get("error", {}).get("code") == 4007:
             return None
+        return resolve_err
     try:
         history = _load_stored_history_for_rewrite(db, session_key)
         recalled = _recall_turn_from_history(list(history or []), target)
