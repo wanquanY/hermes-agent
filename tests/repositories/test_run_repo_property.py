@@ -61,6 +61,7 @@ def _make_conn(session_id: str = "s1") -> sqlite3.Connection:
             timestamp REAL NOT NULL,
             payload_json TEXT,
             event_json TEXT NOT NULL,
+            activity_id TEXT,
             UNIQUE(session_id, seq)
         );
         CREATE TABLE seq_counter (

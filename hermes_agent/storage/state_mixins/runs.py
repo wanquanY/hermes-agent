@@ -2456,7 +2456,7 @@ class RunStateMixin:
             self._archive_run_event_rows(conn, rows, reason="terminal_run_stream_events")
             ids = [int(row["id"]) for row in rows]
             EventLedger(conn).delete_rows_by_id(ids)
-            RunRepoImpl(conn).refresh_last_seq(normalized_run_id)
+            RunRepoImpl(conn).reset_last_seq_from_events(normalized_run_id)
             return {"deleted_events": len(rows), "event_types": list(normalized_types)}
 
         return self._execute_write(_do)
@@ -2766,7 +2766,7 @@ class RunStateMixin:
                 pending_by_key[key] = [(row, event)]
             flush_pending()
             for run_id in affected_run_ids:
-                RunRepoImpl(conn).refresh_last_seq(run_id)
+                RunRepoImpl(conn).reset_last_seq_from_events(run_id)
             return {
                 "compacted_segments": compacted_segments,
                 "pruned_terminal_stream_events": pruned_terminal_stream_events,

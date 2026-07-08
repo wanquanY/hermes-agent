@@ -113,6 +113,8 @@ class RunRepo(Protocol):
 
     def refresh_last_seq(self, run_id: str) -> None: ...
 
+    def reset_last_seq_from_events(self, run_id: str) -> None: ...
+
     def append_event(
         self,
         session_id: str,
@@ -352,6 +354,35 @@ class RunRepoImpl:
         # compact/delete old run_events rows, so recomputing from the ledger is
         # both expensive and semantically wrong.
         return
+
+    def reset_last_seq_from_events(self, run_id: str) -> None:
+        """Reset maintenance-visible last_seq to the current ledger max.
+
+        Append paths keep ``last_seq`` monotonic while the run is live. Once a
+        maintenance job deletes or rewrites durable event rows, the materialized
+        run state must describe the remaining ledger, not a stale high-water
+        value from rows that no longer exist.
+        """
+        stable = str(run_id or "").strip()
+        if not stable:
+            return
+        row = self._conn.execute(
+            """
+            SELECT COALESCE(MAX(seq), 0) AS last_seq
+              FROM run_events
+             WHERE run_id = ?
+            """,
+            (stable,),
+        ).fetchone()
+        next_last_seq = int(row["last_seq"] if row else 0)
+        self._conn.execute(
+            """
+            UPDATE runs
+               SET last_seq = ?
+             WHERE run_id = ?
+            """,
+            (next_last_seq, stable),
+        )
 
     def append_event(
         self,
