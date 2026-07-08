@@ -76,6 +76,7 @@ from hermes_gateway.bootstrap import (
     resolve_hermes_bin as _resolve_hermes_bin,
     restart_notification_pending as _restart_notification_pending_for_home,
 )
+from hermes_gateway.debug_command import GatewayDebugCommandMixin
 from hermes_gateway.interrupt_control import is_control_interrupt_message as _is_control_interrupt_message
 from hermes_gateway.media_delivery import GatewayMediaDeliveryMixin
 from hermes_gateway.media_context import (
@@ -486,6 +487,7 @@ from hermes_gateway.runner_ref import set_gateway_runner
 class GatewayRunner(
     GatewayApprovalCommandMixin,
     GatewayBackgroundTaskMixin,
+    GatewayDebugCommandMixin,
     GatewayAgentCacheMixin,
     GatewayProcessWatcherMixin,
     GatewayProxyModeMixin,
@@ -11169,49 +11171,6 @@ class GatewayRunner(
         Platform.FEISHU, Platform.WECOM, Platform.WECOM_CALLBACK, Platform.WEIXIN, Platform.BLUEBUBBLES, Platform.QQBOT, Platform.LOCAL,
     })
 
-    async def _handle_debug_command(self, event: MessageEvent) -> str:
-        """Handle /debug — upload debug report (summary only) and return paste URLs.
-
-        Gateway uploads ONLY the summary report (system info + log tails),
-        NOT full log files, to protect conversation privacy.  Users who need
-        full log uploads should use ``hermes debug share`` from the CLI.
-        """
-        import asyncio
-        from hermes_cli.debug import (
-            _capture_dump, collect_debug_report,
-            upload_to_pastebin, _schedule_auto_delete,
-            _GATEWAY_PRIVACY_NOTICE, _best_effort_sweep_expired_pastes,
-        )
-
-        loop = asyncio.get_running_loop()
-
-        # Run blocking I/O (dump capture, log reads, uploads) in a thread.
-        def _collect_and_upload():
-            _best_effort_sweep_expired_pastes()
-            dump_text = _capture_dump()
-            report = collect_debug_report(log_lines=200, dump_text=dump_text)
-
-            urls = {}
-            try:
-                urls["Report"] = upload_to_pastebin(report)
-            except Exception as exc:
-                return t("gateway.debug.upload_failed", error=exc)
-
-            # Schedule auto-deletion after 6 hours
-            _schedule_auto_delete(list(urls.values()))
-
-            lines = [_GATEWAY_PRIVACY_NOTICE, "", t("gateway.debug.header"), ""]
-            label_width = max(len(k) for k in urls)
-            for label, url in urls.items():
-                lines.append(f"`{label:<{label_width}}`  {url}")
-
-            lines.append("")
-            lines.append(t("gateway.debug.auto_delete"))
-            lines.append(t("gateway.debug.full_logs_hint"))
-            lines.append(t("gateway.debug.share_hint"))
-            return "\n".join(lines)
-
-        return await loop.run_in_executor(None, _collect_and_upload)
 
 
 
