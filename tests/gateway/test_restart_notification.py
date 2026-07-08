@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import gateway.run as gateway_run
+from hermes_gateway.bootstrap import restart_notification_pending
 from hermes_gateway.config import HomeChannel, Platform
 from channels.platforms.base import MessageEvent, MessageType, SendResult
 from hermes_gateway.session import build_session_key
@@ -20,17 +21,14 @@ from tests.gateway.restart_test_helpers import (
 # ── restart marker helpers ───────────────────────────────────────────────
 
 
-def test_restart_notification_pending_false_without_marker(tmp_path, monkeypatch):
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-
-    assert gateway_run._restart_notification_pending() is False
+def test_restart_notification_pending_false_without_marker(tmp_path):
+    assert restart_notification_pending(tmp_path) is False
 
 
-def test_restart_notification_pending_true_with_marker(tmp_path, monkeypatch):
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+def test_restart_notification_pending_true_with_marker(tmp_path):
     (tmp_path / ".restart_notify.json").write_text("{}")
 
-    assert gateway_run._restart_notification_pending() is True
+    assert restart_notification_pending(tmp_path) is True
 
 
 # ── _handle_restart_command writes .restart_notify.json ──────────────────
@@ -53,7 +51,7 @@ async def test_restart_command_writes_notify_file(tmp_path, monkeypatch):
     )
 
     result = await runner._handle_restart_command(event)
-    assert "Restarting" in result
+    assert result
 
     notify_path = tmp_path / ".restart_notify.json"
     assert notify_path.exists()

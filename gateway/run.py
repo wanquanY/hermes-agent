@@ -57,6 +57,16 @@ from hermes_agent.repositories.session_repo import sanitize_session_title
 from hermes_agent.storage.cli_session_store import open_cli_session_store
 from hermes_agent.storage.session_availability import format_session_store_unavailable
 from hermes_cli.config import cfg_get
+from hermes_gateway.bootstrap import (
+    ensure_ssl_certs as _ensure_ssl_certs,
+    ensure_windows_gateway_venv_imports as _ensure_windows_gateway_venv_imports,
+    float_env as _float_env,
+    home_target_env_var as _home_target_env_var,
+    home_thread_env_var as _home_thread_env_var,
+    reload_runtime_env_preserving_config_authority,
+    resolve_hermes_bin as _resolve_hermes_bin,
+    restart_notification_pending as _restart_notification_pending_for_home,
+)
 from hermes_gateway.freshness import (
     auto_continue_freshness_window as _auto_continue_freshness_window,
     coerce_gateway_timestamp as _coerce_gateway_timestamp,
@@ -88,50 +98,6 @@ _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
-def _ensure_windows_gateway_venv_imports() -> None:
-    """Make detached Windows gateway runs see the Hermes venv packages.
-
-    Backfilled from upstream gateway/run.py — referenced by start_gateway
-    after the nous_auth_keepalive cherry-pick (4b09903de). On non-Windows
-    platforms this is an immediate return; on Windows it patches sys.path
-    so the MCP SDK is discoverable from a detached pythonw.exe launcher.
-    """
-    if sys.platform != "win32":
-        return
-    import site
-    project_root = Path(__file__).resolve().parent.parent
-    candidates: list[Path] = []
-    if os.environ.get("VIRTUAL_ENV"):
-        candidates.append(Path(os.environ["VIRTUAL_ENV"]))
-    candidates.append(project_root / "venv")
-    seen: set[str] = set()
-    for venv_dir in candidates:
-        try:
-            resolved_venv = venv_dir.resolve()
-        except OSError:
-            resolved_venv = venv_dir
-        venv_key = str(resolved_venv).lower()
-        if venv_key in seen:
-            continue
-        seen.add(venv_key)
-        site_packages = resolved_venv / "Lib" / "site-packages"
-        if not site_packages.exists():
-            continue
-        project_entry = str(project_root)
-        site_entry = str(site_packages)
-        if project_entry not in sys.path:
-            sys.path.insert(0, project_entry)
-        site.addsitedir(site_entry)
-        if site_entry in sys.path:
-            sys.path.remove(site_entry)
-        insert_at = 1 if sys.path and sys.path[0] == project_entry else 0
-        sys.path.insert(insert_at, site_entry)
-        os.environ["VIRTUAL_ENV"] = str(resolved_venv)
-        pythonpath = [project_entry, site_entry]
-        if os.environ.get("PYTHONPATH"):
-            pythonpath.append(os.environ["PYTHONPATH"])
-        os.environ["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(pythonpath))
-        return
 
 
 def _redact_approval_command(cmd: "str | None") -> str:
@@ -139,87 +105,6 @@ def _redact_approval_command(cmd: "str | None") -> str:
     from hermes_agent.gateway.runtime_config import redact_approval_command
 
     return redact_approval_command(cmd)
-
-
-def _float_env(name: str, default: float) -> float:
-    """Read an env var as float, falling back to ``default`` on typos/empty.
-
-    A misconfigured env var (e.g. ``HERMES_AGENT_TIMEOUT=abc``) must not
-    crash the gateway or an agent turn.  Unset/empty also falls back.
-    """
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return float(default)
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return float(default)
-
-
-# ---------------------------------------------------------------------------
-# SSL certificate auto-detection for NixOS and other non-standard systems.
-# Must run BEFORE any HTTP library (discord, aiohttp, etc.) is imported.
-# ---------------------------------------------------------------------------
-def _ensure_ssl_certs() -> None:
-    """Set SSL_CERT_FILE if the system doesn't expose CA certs to Python."""
-    if "SSL_CERT_FILE" in os.environ:
-        return  # user already configured it
-
-    import ssl
-
-    # 1. Python's compiled-in defaults
-    paths = ssl.get_default_verify_paths()
-    for candidate in (paths.cafile, paths.openssl_cafile):
-        if candidate and os.path.exists(candidate):
-            os.environ["SSL_CERT_FILE"] = candidate
-            return
-
-    # 2. certifi (ships its own Mozilla bundle)
-    try:
-        import certifi
-        os.environ["SSL_CERT_FILE"] = certifi.where()
-        return
-    except ImportError:
-        pass
-
-    # 3. Common distro / macOS locations
-    for candidate in (
-        "/etc/ssl/certs/ca-certificates.crt",               # Debian/Ubuntu/Gentoo
-        "/etc/pki/tls/certs/ca-bundle.crt",                 # RHEL/CentOS 7
-        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", # RHEL/CentOS 8+
-        "/etc/ssl/ca-bundle.pem",                            # SUSE/OpenSUSE
-        "/etc/ssl/cert.pem",                                 # Alpine / macOS
-        "/etc/pki/tls/cert.pem",                             # Fedora
-        "/usr/local/etc/openssl@1.1/cert.pem",               # macOS Homebrew Intel
-        "/opt/homebrew/etc/openssl@1.1/cert.pem",            # macOS Homebrew ARM
-    ):
-        if os.path.exists(candidate):
-            os.environ["SSL_CERT_FILE"] = candidate
-            return
-
-def _home_target_env_var(platform_name: str) -> str:
-    """Return the configured home-target env var for a platform.
-
-    Consults built-in ``_HOME_TARGET_ENV_VARS`` first, then the plugin
-    registry via ``cron.scheduler._resolve_home_env_var``, then falls back
-    to ``<PLATFORM>_HOME_CHANNEL`` for unknown names.
-    """
-    from cron.scheduler import _resolve_home_env_var
-
-    resolved = _resolve_home_env_var(platform_name)
-    if resolved:
-        return resolved
-    return f"{platform_name.upper()}_HOME_CHANNEL"
-
-
-def _home_thread_env_var(platform_name: str) -> str:
-    """Return the optional thread/topic env var for a platform home target."""
-    return f"{_home_target_env_var(platform_name)}_THREAD_ID"
-
-
-def _restart_notification_pending() -> bool:
-    """Return True when a /restart completion marker is waiting to be delivered."""
-    return (_hermes_home / ".restart_notify.json").exists()
 
 
 # Mark this process as a gateway so cli.py's module-level load_cli_config()
@@ -242,36 +127,6 @@ from dotenv import load_dotenv  # backward-compat for tests that monkeypatch thi
 from hermes_cli.env_loader import load_hermes_dotenv
 _env_path = _hermes_home / '.env'
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
-
-
-def _reload_runtime_env_preserving_config_authority() -> None:
-    """Reload .env for fresh credentials without letting stale .env override config.
-
-    Gateway processes are long-lived, so per-turn code reloads ~/.hermes/.env to
-    pick up rotated API keys. config.yaml remains authoritative for agent budget
-    settings such as agent.max_turns; otherwise a stale HERMES_MAX_ITERATIONS in
-    .env can replace the startup bridge on later turns.
-    """
-    load_hermes_dotenv(
-        hermes_home=_hermes_home,
-        project_env=Path(__file__).resolve().parents[1] / '.env',
-    )
-
-    config_path = _hermes_home / 'config.yaml'
-    if not config_path.exists():
-        return
-    try:
-        import yaml as _yaml
-        with open(config_path, encoding="utf-8") as f:
-            cfg = _yaml.safe_load(f) or {}
-        from hermes_cli.config import _expand_env_vars
-        cfg = _expand_env_vars(cfg)
-    except Exception:
-        return
-
-    agent_cfg = cfg.get("agent", {})
-    if isinstance(agent_cfg, dict) and "max_turns" in agent_cfg:
-        os.environ["HERMES_MAX_ITERATIONS"] = str(agent_cfg["max_turns"])
 
 
 _DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")
@@ -835,33 +690,6 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     from hermes_agent.gateway.runtime_config import resolve_gateway_model
 
     return resolve_gateway_model(config)
-
-
-def _resolve_hermes_bin() -> Optional[list[str]]:
-    """Resolve the Hermes update command as argv parts.
-
-    Tries in order:
-    1. ``shutil.which("hermes")`` — standard PATH lookup
-    2. ``sys.executable -m hermes_cli.main`` — fallback when Hermes is running
-       from a venv/module invocation and the ``hermes`` shim is not on PATH
-
-    Returns argv parts ready for quoting/joining, or ``None`` if neither works.
-    """
-    import shutil
-
-    hermes_bin = shutil.which("hermes")
-    if hermes_bin:
-        return [hermes_bin]
-
-    try:
-        import importlib.util
-
-        if importlib.util.find_spec("hermes_cli") is not None:
-            return [sys.executable, "-m", "hermes_cli.main"]
-    except Exception:
-        pass
-
-    return None
 
 
 def _parse_session_key(session_key: str) -> "dict | None":
@@ -3792,7 +3620,7 @@ class GatewayRunner:
             await asyncio.sleep(1.0)
 
         # Notify the chat that initiated /restart that the gateway is back.
-        restart_notification_pending = _restart_notification_pending()
+        restart_notification_pending = _restart_notification_pending_for_home(_hermes_home)
         delivered_restart_target = await self._send_restart_notification()
 
         # Broadcast a lightweight "gateway is back" message to configured
@@ -15661,7 +15489,10 @@ class GatewayRunner:
             # Re-read .env and config for fresh credentials (gateway is long-lived,
             # keys may change without restart). Keep config.yaml authoritative for
             # runtime budget settings bridged into env vars.
-            _reload_runtime_env_preserving_config_authority()
+            reload_runtime_env_preserving_config_authority(
+                _hermes_home,
+                project_env=Path(__file__).resolve().parents[1] / ".env",
+            )
 
             try:
                 model, runtime_kwargs = self._resolve_session_agent_runtime(

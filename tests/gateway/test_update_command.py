@@ -155,10 +155,10 @@ class TestHandleUpdateCommand:
     @pytest.mark.asyncio
     async def test_resolve_hermes_bin_prefers_which(self, tmp_path):
         """_resolve_hermes_bin returns argv parts from shutil.which when available."""
-        from gateway.run import _resolve_hermes_bin
+        from hermes_gateway.bootstrap import resolve_hermes_bin
 
         with patch("shutil.which", return_value="/custom/path/hermes"):
-            result = _resolve_hermes_bin()
+            result = resolve_hermes_bin()
 
         assert result == ["/custom/path/hermes"]
 
@@ -166,23 +166,23 @@ class TestHandleUpdateCommand:
     async def test_resolve_hermes_bin_fallback(self):
         """_resolve_hermes_bin falls back to sys.executable argv when which fails."""
         import sys
-        from gateway.run import _resolve_hermes_bin
+        from hermes_gateway.bootstrap import resolve_hermes_bin
 
         fake_spec = MagicMock()
         with patch("shutil.which", return_value=None), \
              patch("importlib.util.find_spec", return_value=fake_spec):
-            result = _resolve_hermes_bin()
+            result = resolve_hermes_bin()
 
         assert result == [sys.executable, "-m", "hermes_cli.main"]
 
     @pytest.mark.asyncio
     async def test_resolve_hermes_bin_returns_none_when_both_fail(self):
         """_resolve_hermes_bin returns None when both strategies fail."""
-        from gateway.run import _resolve_hermes_bin
+        from hermes_gateway.bootstrap import resolve_hermes_bin
 
         with patch("shutil.which", return_value=None), \
              patch("importlib.util.find_spec", return_value=None):
-            result = _resolve_hermes_bin()
+            result = resolve_hermes_bin()
 
         assert result is None
 
