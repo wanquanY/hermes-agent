@@ -53,8 +53,9 @@ def test_cli_session_store_title_resume_and_handoff(tmp_path):
 def test_cli_session_store_updates_usage_and_system_prompt(tmp_path):
     store = open_cli_session_store(tmp_path / "state.db")
 
-    store.create_session("s1", "cli")
+    store.create_session("s1", "cli", cwd="/workspace/initial")
     store.update_system_prompt("s1", "system")
+    store.update_session_cwd("s1", "/workspace/current")
     store.update_token_counts(
         "s1",
         input_tokens=10,
@@ -64,6 +65,7 @@ def test_cli_session_store_updates_usage_and_system_prompt(tmp_path):
     )
 
     row = store.get_session("s1")
+    assert row["cwd"] == "/workspace/current"
     assert row["system_prompt"] == "system"
     assert row["input_tokens"] == 10
     assert row["output_tokens"] == 5

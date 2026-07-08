@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from tui_gateway.methods._shared import bind_server_globals
 
 _server = bind_server_globals(globals())
@@ -682,10 +683,8 @@ def _ensure_session_db_row(session: dict) -> None:
     # unified list mis-tags it, and resume 404s ("session not found").
     profile_home = session.get("profile_home")
     if profile_home:
-        from hermes_state import SessionDB
-
         try:
-            db = SessionDB(db_path=Path(profile_home) / "state.db")
+            db = open_cli_session_store(Path(profile_home) / "state.db")
         except Exception:
             logger.debug("failed to open profile db for session row", exc_info=True)
             return
@@ -761,7 +760,7 @@ def _ensure_session_db_row(session: dict) -> None:
 
 @contextlib.contextmanager
 def _session_db(session: dict):
-    """Yield the SessionDB that owns this session's row (profile-aware).
+    """Yield the session store that owns this session's row (profile-aware).
 
     Mirrors :func:`_ensure_session_db_row`: a remote/profile session persists
     into its own profile's ``state.db`` (a fresh handle we close on exit);
@@ -771,10 +770,8 @@ def _session_db(session: dict):
     db, close_db = None, False
     profile_home = session.get("profile_home")
     if profile_home:
-        from hermes_state import SessionDB
-
         try:
-            db, close_db = SessionDB(db_path=Path(profile_home) / "state.db"), True
+            db, close_db = open_cli_session_store(Path(profile_home) / "state.db"), True
         except Exception:
             logger.debug("failed to open profile db for session", exc_info=True)
     else:

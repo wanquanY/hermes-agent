@@ -60,6 +60,9 @@ class CliSessionStore:
         system_prompt = kwargs.get("system_prompt")
         if system_prompt:
             self.update_system_prompt(session_id, str(system_prompt))
+        cwd = str(kwargs.get("cwd") or "").strip()
+        if cwd:
+            self.update_session_cwd(session_id, cwd)
         return str(session_id or "")
 
     def ensure_session(self, session_id: str, source: str = "unknown", **kwargs: Any) -> str:
@@ -122,6 +125,22 @@ class CliSessionStore:
 
     def set_session_title(self, session_id: str, title: str, *, title_source: str = "user") -> bool:
         return self._sessions.set_title(session_id, title, title_source=title_source)
+
+    def update_session_cwd(self, session_id: str, cwd: str) -> None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required")
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sessions SET cwd = ?, updated_at = ? WHERE id = ?",
+                (str(cwd or ""), now, stable),
+            )
+            self._conn.execute(
+                "UPDATE session_index SET updated_at = ? WHERE session_id = ?",
+                (now, stable),
+            )
+            self._conn.commit()
 
     def get_session_by_title(self, title: str) -> dict[str, Any] | None:
         normalized = sanitize_session_title(title)
