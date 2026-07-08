@@ -162,6 +162,105 @@ def test_get_growth_summary_reads_persisted_row():
     assert got.growth_score == 0.75
 
 
+def test_fold_removed_profile_versions_updates_latest_profile_and_drops_legacy_table():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE agent_profiles (
+            id TEXT PRIMARY KEY,
+            slug TEXT NOT NULL,
+            name TEXT NOT NULL,
+            avatar TEXT,
+            description TEXT,
+            category TEXT,
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'active',
+            is_system_default INTEGER NOT NULL DEFAULT 0,
+            hermes_profile_name TEXT,
+            hermes_home_path TEXT NOT NULL DEFAULT '',
+            default_model TEXT,
+            default_provider TEXT,
+            default_permission_mode TEXT,
+            default_toolsets_json TEXT,
+            recommended_skills_json TEXT,
+            current_version_id TEXT NOT NULL DEFAULT '',
+            current_version_number INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL DEFAULT 0
+        );
+        CREATE TABLE agent_profile_versions (
+            id TEXT PRIMARY KEY,
+            agent_profile_id TEXT NOT NULL,
+            version_number INTEGER NOT NULL,
+            name TEXT,
+            avatar TEXT,
+            description TEXT,
+            category TEXT,
+            tags_json TEXT,
+            default_model TEXT,
+            default_provider TEXT,
+            default_permission_mode TEXT,
+            default_toolsets_json TEXT,
+            recommended_skills_json TEXT,
+            published_at REAL NOT NULL DEFAULT 0
+        );
+        INSERT INTO agent_profiles (
+            id, slug, name, hermes_home_path, updated_at
+        ) VALUES ('p1', 'profile-one', 'Old name', '/tmp/p1', 10);
+        INSERT INTO agent_profile_versions (
+            id, agent_profile_id, version_number, name, avatar, description,
+            category, tags_json, default_model, default_provider,
+            default_permission_mode, default_toolsets_json,
+            recommended_skills_json, published_at
+        ) VALUES (
+            'v1', 'p1', 1, 'Version one', 'avatar-1', 'desc-1',
+            'general', '["old"]', 'model-1', 'provider-1',
+            'default', '["file"]', '["skill"]', 20
+        );
+        INSERT INTO agent_profile_versions (
+            id, agent_profile_id, version_number, name, avatar, description,
+            category, tags_json, default_model, default_provider,
+            default_permission_mode, default_toolsets_json,
+            recommended_skills_json, published_at
+        ) VALUES (
+            'v2', 'p1', 2, 'Version two', 'avatar-2', 'desc-2',
+            'ops', '["new"]', 'model-2', 'provider-2',
+            'advanced', '["terminal"]', '["debug"]', 30
+        );
+        """
+    )
+    repo = AgentProfileRepoImpl(conn)
+
+    assert repo.fold_removed_profile_versions() == 1
+
+    row = conn.execute(
+        """
+        SELECT name, avatar, description, category, tags_json,
+               default_model, default_provider, default_permission_mode,
+               default_toolsets_json, recommended_skills_json,
+               current_version_id, current_version_number, updated_at
+          FROM agent_profiles
+         WHERE id = 'p1'
+        """
+    ).fetchone()
+    assert dict(row) == {
+        "name": "Version two",
+        "avatar": "avatar-2",
+        "description": "desc-2",
+        "category": "ops",
+        "tags_json": '["new"]',
+        "default_model": "model-2",
+        "default_provider": "provider-2",
+        "default_permission_mode": "advanced",
+        "default_toolsets_json": '["terminal"]',
+        "recommended_skills_json": '["debug"]',
+        "current_version_id": "v2",
+        "current_version_number": 2,
+        "updated_at": 30.0,
+    }
+    assert conn.execute("PRAGMA table_info(agent_profile_versions)").fetchall() == []
+
+
 def test_add_version_requires_ids():
     repo = AgentProfileRepoImpl(_make_conn())
     with pytest.raises(ValueError):

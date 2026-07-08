@@ -28,6 +28,7 @@ from agent.memory_manager import sanitize_context
 from hermes_agent.domain.event_ledger import EventLedger
 from hermes_agent.domain.seq_allocator import ensure_session_counter
 from hermes_agent.domain.session_deletion import SessionDeletionService
+from hermes_agent.repositories.agent_profile_repo import AgentProfileRepoImpl
 from hermes_agent.repositories.message_repo import MessageRepoImpl
 from hermes_agent.repositories.session_repo import SessionRepoImpl
 from hermes_agent.storage.fts_schema import FTS_SQL, FTS_TRIGRAM_SQL
@@ -797,73 +798,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
     def _migrate_agent_profile_versions_to_latest_profiles(self, cursor: sqlite3.Cursor) -> None:
         """Fold the removed profile version table into latest profile rows."""
 
-        tables = cursor.execute(
-            """
-            SELECT name
-            FROM sqlite_master
-            WHERE type = 'table' AND name = 'agent_profile_versions'
-            """
-        ).fetchall()
-        if not tables:
-            return
-        rows = cursor.execute(
-            """
-            SELECT *
-            FROM agent_profile_versions
-            ORDER BY agent_profile_id ASC, version_number DESC, published_at DESC, id ASC
-            """
-        ).fetchall()
-        seen_profile_ids: set[str] = set()
-        for version in rows:
-            profile_id = str(version["agent_profile_id"] or "").strip()
-            if not profile_id or profile_id in seen_profile_ids:
-                continue
-            seen_profile_ids.add(profile_id)
-            profile = cursor.execute(
-                "SELECT * FROM agent_profiles WHERE id = ?",
-                (profile_id,),
-            ).fetchone()
-            if profile is None:
-                continue
-            cursor.execute(
-                """
-                UPDATE agent_profiles
-                SET
-                    name = COALESCE(NULLIF(?, ''), name),
-                    avatar = COALESCE(NULLIF(?, ''), avatar),
-                    description = COALESCE(NULLIF(?, ''), description),
-                    category = COALESCE(NULLIF(?, ''), category),
-                    tags_json = COALESCE(NULLIF(?, ''), tags_json),
-                    default_model = COALESCE(NULLIF(?, ''), default_model),
-                    default_provider = COALESCE(NULLIF(?, ''), default_provider),
-                    default_permission_mode = COALESCE(NULLIF(?, ''), default_permission_mode),
-                    default_toolsets_json = COALESCE(NULLIF(?, ''), default_toolsets_json),
-                    recommended_skills_json = COALESCE(NULLIF(?, ''), recommended_skills_json),
-                    current_version_id = COALESCE(NULLIF(?, ''), current_version_id),
-                    current_version_number = CASE WHEN ? > 0 THEN ? ELSE current_version_number END,
-                    updated_at = CASE WHEN ? > updated_at THEN ? ELSE updated_at END
-                WHERE id = ?
-                """,
-                (
-                    version["name"] or "",
-                    version["avatar"] or "",
-                    version["description"] or "",
-                    version["category"] or "",
-                    version["tags_json"] or "",
-                    version["default_model"] or "",
-                    version["default_provider"] or "",
-                    version["default_permission_mode"] or "",
-                    version["default_toolsets_json"] or "",
-                    version["recommended_skills_json"] or "",
-                    version["id"] or "",
-                    int(version["version_number"] or 0),
-                    int(version["version_number"] or 0),
-                    float(version["published_at"] or 0),
-                    float(version["published_at"] or 0),
-                    profile_id,
-                ),
-            )
-        cursor.execute("DROP TABLE IF EXISTS agent_profile_versions")
+        AgentProfileRepoImpl(cursor.connection).fold_removed_profile_versions()
 
     def _drop_deprecated_member_chat_runs(self, cursor: sqlite3.Cursor) -> None:
         """Physically remove the P2-P4 member-chat compatibility registry."""

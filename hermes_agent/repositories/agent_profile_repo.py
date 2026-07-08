@@ -84,6 +84,8 @@ class AgentProfileRepo(Protocol):
 
     def get_growth_summary(self, profile_id: str) -> GrowthSummary: ...
 
+    def fold_removed_profile_versions(self) -> int: ...
+
 
 class AgentProfileRepoImpl:
     """SQLite-backed AgentProfileRepo (spec §4.5)."""
@@ -260,6 +262,71 @@ class AgentProfileRepoImpl:
             growth_score=float(row["growth_score"] or 0) if isinstance(row, sqlite3.Row) else float(row[4] or 0),
             updated_at=float(row["updated_at"] or 0) if isinstance(row, sqlite3.Row) else float(row[5] or 0),
         )
+
+    def fold_removed_profile_versions(self) -> int:
+        if not _table_exists(self._conn, "agent_profile_versions"):
+            return 0
+        rows = self._conn.execute(
+            """
+            SELECT *
+            FROM agent_profile_versions
+            ORDER BY agent_profile_id ASC, version_number DESC, published_at DESC, id ASC
+            """
+        ).fetchall()
+        seen_profile_ids: set[str] = set()
+        folded = 0
+        for version in rows:
+            profile_id = _text(_row_value(version, "agent_profile_id", ""))
+            if not profile_id or profile_id in seen_profile_ids:
+                continue
+            seen_profile_ids.add(profile_id)
+            profile = self._conn.execute(
+                "SELECT * FROM agent_profiles WHERE id = ?",
+                (profile_id,),
+            ).fetchone()
+            if profile is None:
+                continue
+            self._conn.execute(
+                """
+                UPDATE agent_profiles
+                SET
+                    name = COALESCE(NULLIF(?, ''), name),
+                    avatar = COALESCE(NULLIF(?, ''), avatar),
+                    description = COALESCE(NULLIF(?, ''), description),
+                    category = COALESCE(NULLIF(?, ''), category),
+                    tags_json = COALESCE(NULLIF(?, ''), tags_json),
+                    default_model = COALESCE(NULLIF(?, ''), default_model),
+                    default_provider = COALESCE(NULLIF(?, ''), default_provider),
+                    default_permission_mode = COALESCE(NULLIF(?, ''), default_permission_mode),
+                    default_toolsets_json = COALESCE(NULLIF(?, ''), default_toolsets_json),
+                    recommended_skills_json = COALESCE(NULLIF(?, ''), recommended_skills_json),
+                    current_version_id = COALESCE(NULLIF(?, ''), current_version_id),
+                    current_version_number = CASE WHEN ? > 0 THEN ? ELSE current_version_number END,
+                    updated_at = CASE WHEN ? > updated_at THEN ? ELSE updated_at END
+                WHERE id = ?
+                """,
+                (
+                    _row_value(version, "name", "") or "",
+                    _row_value(version, "avatar", "") or "",
+                    _row_value(version, "description", "") or "",
+                    _row_value(version, "category", "") or "",
+                    _row_value(version, "tags_json", "") or "",
+                    _row_value(version, "default_model", "") or "",
+                    _row_value(version, "default_provider", "") or "",
+                    _row_value(version, "default_permission_mode", "") or "",
+                    _row_value(version, "default_toolsets_json", "") or "",
+                    _row_value(version, "recommended_skills_json", "") or "",
+                    _row_value(version, "id", "") or "",
+                    _safe_int(_row_value(version, "version_number", 0), 0),
+                    _safe_int(_row_value(version, "version_number", 0), 0),
+                    _timestamp(_row_value(version, "published_at", 0)),
+                    _timestamp(_row_value(version, "published_at", 0)),
+                    profile_id,
+                ),
+            )
+            folded += 1
+        self._conn.execute("DROP TABLE IF EXISTS agent_profile_versions")
+        return folded
 
     def upsert_agent_profile(
         self,
@@ -931,6 +998,13 @@ def _row_value(row: sqlite3.Row | None, key: str, default: Any = None) -> Any:
         return row[key]
     except Exception:
         return default
+
+
+def _table_exists(conn: RepositoryConnection, table_name: str) -> bool:
+    try:
+        return bool(conn.execute(f"PRAGMA table_info({table_name})").fetchall())
+    except sqlite3.Error:
+        return False
 
 
 def _timestamp(value: Any = None) -> float:
