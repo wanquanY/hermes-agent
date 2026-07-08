@@ -141,7 +141,7 @@ def _scan_worker_side_db_calls() -> dict[str, list[DBCallSite]]:
 
 
 def _worker_db_proxy_whitelist() -> set[str]:
-    supervisor_path = REPO_ROOT / "tui_gateway/services/worker_supervisor.py"
+    supervisor_path = REPO_ROOT / "hermes_agent/orchestration/worker_supervisor.py"
     tree = ast.parse(supervisor_path.read_text(encoding="utf-8"), filename=str(supervisor_path))
     for node in tree.body:
         if not isinstance(node, ast.Assign):

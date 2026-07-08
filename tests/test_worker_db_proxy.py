@@ -20,7 +20,7 @@ from hermes_agent.orchestration.worker_db_proxy import (
     WorkerDBProxyTimeoutError,
     serialize_db_value,
 )
-from tui_gateway.services.worker_supervisor import WorkerSupervisor
+from hermes_agent.orchestration.worker_supervisor import WorkerSupervisor
 
 
 class _Writer:
@@ -296,7 +296,7 @@ async def test_proxy_method_not_in_whitelist_rejected() -> None:
 @pytest.mark.asyncio
 async def test_concurrent_worker_calls_serialize(monkeypatch: pytest.MonkeyPatch) -> None:
     db = _FakeDB()
-    monkeypatch.setattr("tui_gateway.services.worker_supervisor.DB_RPC_ALLOWED_METHODS", {"slow_append_message"})
+    monkeypatch.setattr("hermes_agent.orchestration.worker_supervisor.DB_RPC_ALLOWED_METHODS", {"slow_append_message"})
     monkeypatch.setattr(
         "tui_gateway.server._db_for_stable_session",
         lambda _stable: db,
@@ -329,7 +329,7 @@ async def test_worker_db_rpc_locks_are_sharded_by_stable_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db = _FakeDB()
-    monkeypatch.setattr("tui_gateway.services.worker_supervisor.DB_RPC_ALLOWED_METHODS", {"slow_append_message"})
+    monkeypatch.setattr("hermes_agent.orchestration.worker_supervisor.DB_RPC_ALLOWED_METHODS", {"slow_append_message"})
     monkeypatch.setattr(
         "tui_gateway.server._db_for_stable_session",
         lambda _stable: db,

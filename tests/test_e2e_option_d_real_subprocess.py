@@ -24,7 +24,7 @@ from tui_gateway.run_worker import (
     RunTerminalFrame,
 )
 from hermes_agent.orchestration.worker_lease_manager import WorkerLeaseManager
-from tui_gateway.services.worker_supervisor import WorkerSupervisor
+from hermes_agent.orchestration.worker_supervisor import WorkerSupervisor
 
 
 _SITE_CUSTOMIZE = r'''

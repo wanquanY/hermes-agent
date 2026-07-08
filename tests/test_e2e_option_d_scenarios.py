@@ -19,7 +19,7 @@ from tui_gateway.run_worker import ActivityEventFrame, EventFrame, RunStartFrame
 from tui_gateway.services.runtime_scope import RuntimeScope
 from tui_gateway.services.worker_frame_router import WorkerFrameRouter
 from hermes_agent.orchestration.worker_lease_manager import WorkerLeaseManager
-from tui_gateway.services.worker_supervisor import RunWorker
+from hermes_agent.orchestration.worker_supervisor import RunWorker
 
 
 class _FakeProcess:

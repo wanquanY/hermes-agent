@@ -12,7 +12,7 @@ from hermes_state import SessionDB
 from tools.registry import registry
 from tui_gateway.methods.dispatch import dispatch_team_async
 from tui_gateway.run_worker import DBRpcRequestFrame
-from tui_gateway.services.worker_supervisor import WorkerSupervisor
+from hermes_agent.orchestration.worker_supervisor import WorkerSupervisor
 
 
 def _db(tmp_path: Path) -> SessionDB:

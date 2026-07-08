@@ -50,7 +50,7 @@ from tui_gateway.services.runtime_scope import (
 from tui_gateway.services.workspace import session_workspace_run_context
 from tui_gateway.services.worker_frame_router import WorkerFrameRouter
 from hermes_agent.orchestration.worker_lease_manager import WorkerLeaseManager
-from tui_gateway.services.worker_supervisor import WorkerSupervisor
+from hermes_agent.orchestration.worker_supervisor import WorkerSupervisor
 
 _log = logging.getLogger(__name__)
 

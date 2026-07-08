@@ -20,7 +20,7 @@ from hermes_team_mission.gateway import runtime_methods
 from tui_gateway.services import worker_runtime
 from tui_gateway.services.runtime_scope import RuntimeScope
 from tui_gateway.services.worker_frame_router import WorkerFrameRouter
-from tui_gateway.services.worker_supervisor import RunWorker, WorkerSupervisor
+from hermes_agent.orchestration.worker_supervisor import RunWorker, WorkerSupervisor
 
 
 @pytest.fixture(autouse=True)

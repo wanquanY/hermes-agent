@@ -8,7 +8,7 @@ import pytest
 
 from tui_gateway.run_worker import RunCancelFrame
 from tui_gateway.services.runtime_scope import RuntimeScope
-from tui_gateway.services.worker_supervisor import RunWorker, WorkerSupervisor
+from hermes_agent.orchestration.worker_supervisor import RunWorker, WorkerSupervisor
 
 
 class _FakeStdin:

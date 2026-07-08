@@ -7,7 +7,7 @@ import pytest
 
 from tui_gateway.services import worker_runtime
 from tui_gateway.services.runtime_scope import RuntimeScope
-from tui_gateway.services.worker_supervisor import RunWorker
+from hermes_agent.orchestration.worker_supervisor import RunWorker
 
 
 class _Transport:

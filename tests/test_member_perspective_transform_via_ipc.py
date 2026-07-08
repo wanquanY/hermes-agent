@@ -10,7 +10,7 @@ from hermes_state import SessionDB
 from hermes_team_mission.state.session_views import transform_to_member_perspective
 from tui_gateway.run_worker import DBRpcRequestFrame
 from hermes_agent.orchestration.worker_db_proxy import WorkerDBProxy
-from tui_gateway.services.worker_supervisor import WorkerSupervisor
+from hermes_agent.orchestration.worker_supervisor import WorkerSupervisor
 
 
 CONVERSATION_SESSION_ID = "team-session-ipc"

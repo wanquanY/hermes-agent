@@ -32,7 +32,7 @@ from tui_gateway.run_worker import (
     encode_outgoing,
 )
 from tui_gateway.services.runtime_scope import RuntimeScope
-from tui_gateway.services.worker_supervisor import (
+from hermes_agent.orchestration.worker_supervisor import (
     RunWorker,
     WorkerSupervisor,
     _DEFAULT_WORKER_STDIO_LIMIT_BYTES,
