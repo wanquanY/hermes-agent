@@ -27,8 +27,10 @@ from hermes_agent.storage.session_repository_db import connect_session_repositor
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
 
-def open_cli_session_store(db_path: Path | str | None = None) -> "CliSessionStore":
-    return CliSessionStore(connect_session_repository_db(db_path))
+def open_cli_session_store(db_path: Path | str | None = None):
+    from hermes_agent.storage.state_store import HermesStateStore
+
+    return HermesStateStore(Path(db_path) if db_path is not None else None)
 
 
 class CliSessionStore:

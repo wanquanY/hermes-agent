@@ -247,7 +247,7 @@
             }
           ],
           "offenders": 49,
-          "path": "hermes_state_runs.py"
+          "path": "hermes_agent/storage/state_mixins/runs.py"
         },
         {
           "first_lines": [
@@ -493,7 +493,7 @@
             }
           ],
           "offenders": 36,
-          "path": "hermes_state.py"
+          "path": "hermes_agent/storage/state_store.py"
         },
         {
           "first_lines": [
@@ -2527,7 +2527,7 @@
             }
           ],
           "offenders": 1,
-          "path": "hermes_state_branch.py"
+          "path": "hermes_agent/storage/state_mixins/branch.py"
         },
         {
           "first_lines": [
@@ -2611,51 +2611,9 @@
       "total_offenders": 1181
     },
     "p2:no_sessiondb_production": {
-      "file_count": 1,
-      "files": [
-        {
-          "first_lines": [
-            {
-              "line": 37,
-              "text": "from hermes_state_activities import ActivitiesMixin",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 38,
-              "text": "from hermes_state_agent_profiles import AgentProfileStateMixin",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 39,
-              "text": "from hermes_state_branch import BranchStateMixin",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 40,
-              "text": "from hermes_state_member_chat import MemberChatStateMixin",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 41,
-              "text": "from hermes_state_participants import (",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 25,
-          "path": "hermes_state.py"
-        }
-      ],
-      "total_offenders": 25
+      "file_count": 0,
+      "files": [],
+      "total_offenders": 0
     }
   },
   "phase": "P2",

@@ -155,7 +155,7 @@ def test_p2_verdict_reports_current_data_plane_debt() -> None:
         "p2:run_state_single_writer",
     ):
         assert gate_id in checks
-    assert not checks["p2:no_sessiondb_production"]["ok"]
+    assert checks["p2:no_sessiondb_production"]["ok"]
     assert not checks["p2:no_legacy_identity_alias_internal"]["ok"]
     assert verdict["next_required_human_signoff"] == (
         "docs/audits/zero_debt_phase_p2_human_signoff.md"
@@ -171,8 +171,8 @@ def test_p2_inventory_reports_current_offender_baseline() -> None:
     inventory = json.loads(output)
     assert inventory["phase"] == "P2"
     gates = inventory["gates"]
-    assert gates["p2:no_sessiondb_production"]["total_offenders"] == 25
-    assert gates["p2:no_sessiondb_production"]["file_count"] == 1
+    assert gates["p2:no_sessiondb_production"]["total_offenders"] == 0
+    assert gates["p2:no_sessiondb_production"]["file_count"] == 0
     assert gates["p2:no_legacy_identity_alias_internal"]["total_offenders"] == 1181
     assert gates["p2:no_legacy_identity_alias_internal"]["file_count"] == 79
 
@@ -198,4 +198,5 @@ def test_zero_debt_status_separates_verdict_from_closure() -> None:
     assert rows["P1"]["closure_failed_checks"] == []
     assert rows["P2"]["machine_verdict"] == "fail"
     assert rows["P2"]["closure"] == "fail"
-    assert "p2:no_sessiondb_production" in rows["P2"]["machine_failed_checks"]
+    assert "p2:no_sessiondb_production" not in rows["P2"]["machine_failed_checks"]
+    assert "p2:no_legacy_identity_alias_internal" in rows["P2"]["machine_failed_checks"]

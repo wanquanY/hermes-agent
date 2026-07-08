@@ -8,14 +8,13 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 25 | 1 |
+| `p2:no_sessiondb_production` | 0 | 0 |
 | `p2:no_legacy_identity_alias_internal` | 1181 | 79 |
 
 ## p2:no_sessiondb_production
 
 | Offenders | File | First evidence |
 |---:|---|---|
-| 25 | `hermes_state.py` | `37` from hermes_state_activities import ActivitiesMixin |
 
 ## p2:no_legacy_identity_alias_internal
 
@@ -26,13 +25,13 @@ Status: `preflight_only`
 | 94 | `tui_gateway/services/run_control.py` | `38` stable_session_id as _stable_session_id, |
 | 58 | `tui_gateway/methods/prompt.py` | `68` "stored_session_id": str(session.get("session_key") or sid), |
 | 55 | `hermes_team_mission/gateway/runtime_methods.py` | `247` "stored_session_id": str( |
-| 49 | `hermes_state_runs.py` | `731` runtime_session_id=str(row["runtime_session_id"] or ""), |
+| 49 | `hermes_agent/storage/state_mixins/runs.py` | `731` runtime_session_id=str(row["runtime_session_id"] or ""), |
 | 46 | `tui_gateway/server.py` | `137` "stored_session_id", |
 | 43 | `tui_gateway/services/worker_frame_router.py` | `27` ``stored_session_id`` if the worker omits it. Phase 6 rewires the |
 | 40 | `hermes_team_mission/state/conversation.py` | `31` f"OR EXISTS (SELECT 1 FROM sessions hist_s WHERE hist_s.id = {table_name}.stable_session_id AND COALESCE(hist_s.message_count, 0) > 0 LIMIT 1) " |
 | 37 | `hermes_team_mission/read_model.py` | `193` def _conversation_stable_session_id(conversation: dict[str, Any], mission: dict[str, Any]) -> str: |
 | 37 | `hermes_team_mission/state/session_graph.py` | `78` conversation_session_id=_text(conversation.get("stable_session_id")), |
-| 36 | `hermes_state.py` | `916` session_id = str(event.get("stored_session_id") or row["session_id"] or "").strip() |
+| 36 | `hermes_agent/storage/state_store.py` | `916` session_id = str(event.get("stored_session_id") or row["session_id"] or "").strip() |
 | 33 | `tui_gateway/services/worker_runtime.py` | `167` ``params["stored_session_id"]`` BEFORE calling |
 | 27 | `hermes_team_mission/state/event_log.py` | `148` conversation_stable_session_id = _first_text(identity.get("stable_session_id"), identity.get("stableSessionId"), payload.get("stable_session_id"), payload.get("stableSessionId")) |
 | 24 | `tui_gateway/methods/session.py` | `141` def _db_for_session_request(params: dict \| None, stable_session_id: str = ""): |
@@ -93,7 +92,7 @@ Status: `preflight_only`
 | 1 | `dovie_extension/gateway_methods.py` | `110` "team_mission.conversation.runtime_session_ids", |
 | 1 | `hermes_agent/orchestration/run_orchestrator.py` | `150` runtime_session_id, status |
 | 1 | `hermes_agent/storage/session_repository_db.py` | `114` active_runtime_session_id TEXT NOT NULL DEFAULT '', |
-| 1 | `hermes_state_branch.py` | `213` "stored_session_id": row["id"], |
+| 1 | `hermes_agent/storage/state_mixins/branch.py` | `213` "stored_session_id": row["id"], |
 | 1 | `hermes_team_mission/context/worker_context.py` | `277` SELECT b.run_id, b.session_id, b.runtime_session_id, b.role, b.created_at, |
 | 1 | `hermes_team_mission/domain/run_context.py` | `3` RunContext replaces the loose stored_session_id / runtime_scope_key / |
 | 1 | `hermes_team_mission/runtime/leader_runs.py` | `23` runtime_session_id=str(result.get("runtime_session_id") or result.get("session_id") or session_id), |
