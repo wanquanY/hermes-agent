@@ -206,9 +206,8 @@ class EventLedger:
     ) -> None:
         """Append a fully materialized runtime frame row.
 
-        This is the transitional production bridge for ``SessionDB.append_run_event``:
-        the gateway still owns frame normalization and projections, while this
-        domain service owns the physical ``run_events`` INSERT.
+        The gateway owns frame normalization and projections, while this domain
+        service owns the physical ``run_events`` INSERT.
         """
 
         self._conn.execute(
@@ -569,8 +568,8 @@ class EventLedger:
     ) -> list[Any]:
         """Return physical ``run_events`` rows for canonical replay.
 
-        This keeps the query contract in the ledger while letting transitional
-        SessionDB callers continue using their legacy row decoder.
+        This keeps the query contract in the ledger while callers finish their
+        own row decoding or projection work.
         """
 
         stable_sid = str(session_id or "").strip()
@@ -703,7 +702,7 @@ class EventLedger:
         """Read legacy ``tool_events`` projection rows.
 
         ``tool_events`` is a read model derived from ``run_events``. Keeping
-        this accessor on the ledger prevents SessionDB callers from treating
+        this accessor on the ledger prevents callers from treating
         the projection as an independent storage owner.
         """
 
