@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_2`
+状态：`in_progress_checkpoint_3`
 
 ## 前置门槛
 
@@ -12,7 +12,7 @@
 
 P1 human sign-off 已通过，P2 已开始执行。当前 checkpoint 已完成
 `gateway.SessionStore`、TUI `session.create` 的 repo-backed 写入迁移，以及
-TUI `session.list` 的 read-model owner 迁移。
+TUI `session.list/session.most_recent` 的 read-model owner 迁移。
 
 ## 目标
 
@@ -203,8 +203,47 @@ python scripts/zero_debt/status.py --json
 
 剩余工作：
 
-- `session.most_recent` 仍读取旧 `db.list_sessions_rich`，需要接到
-  `SessionListReadModel` 或更窄的 read model owner。
 - `session.messages/delete/title/status/usage` 等同文件旧 DB path 属于后续
   message/read-model slice。
+- `gateway/session.py` transcript 相关 legacy storage 仍需在 message slice 迁出。
+
+## Checkpoint 3 证据
+
+已完成：
+
+- `tui_gateway.methods.session` 的 `session.most_recent` 不再调用
+  `db.list_sessions_rich`，改为复用 `SessionListReadModel` 的
+  `order_by_last_active` projection。
+- `session.list` 与 `session.most_recent` 共享同一套 internal source deny-list
+  和 session list read owner，不再维护两套最近会话查询逻辑。
+- `tests/test_tui_gateway_server.py` 的 `session.most_recent` 用例不再 fake
+  `list_sessions_rich`，改为真实 SQLite `sessions` 行 -> read-model ->
+  JSON-RPC handler。
+
+已运行：
+
+```bash
+python -m py_compile tui_gateway/methods/session.py tests/test_tui_gateway_server.py
+.venv/bin/pytest tests/test_tui_gateway_server.py::test_session_most_recent_returns_first_non_denied tests/test_tui_gateway_server.py::test_session_most_recent_returns_null_when_only_internal_rows tests/test_tui_gateway_server.py::test_session_most_recent_folds_db_exception_into_null_result tests/test_tui_gateway_server.py::test_session_most_recent_handles_db_unavailable -q
+.venv/bin/ruff check tui_gateway/methods/session.py tests/test_tui_gateway_server.py
+.venv/bin/pytest tests/test_tui_gateway_server.py::test_session_most_recent_returns_first_non_denied tests/test_tui_gateway_server.py::test_session_most_recent_returns_null_when_only_internal_rows tests/test_tui_gateway_server.py::test_session_most_recent_folds_db_exception_into_null_result tests/test_tui_gateway_server.py::test_session_most_recent_handles_db_unavailable tests/gateway/test_session_list_allowed_sources.py tests/gateway/test_session_kind_column.py tests/gateway/test_session_list_team_enrichment.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_ws_dispatch.py::test_session_list_uses_control_plane_executor tests/tui_gateway/test_ws_dispatch.py::test_control_plane_session_list_is_not_proxied_to_runtime_worker -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- 组合 session list / most_recent / protocol / ws-dispatch 测试：`135 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `tui_gateway.methods.session` 中 `session.messages/delete/title/status/usage`
+  等旧 DB path 属于后续 message/read-model slice。
+- `tui_gateway/methods/insights_rollback.py` 仍有 `list_sessions_rich` 辅助查询，
+  需要在对应 rollback/read-model slice 中处理。
+- `tui_gateway/services/worker_supervisor.py` 仍暴露 legacy worker proxy method
+  allowlist，需随 worker storage owner 迁移移除。
 - `gateway/session.py` transcript 相关 legacy storage 仍需在 message slice 迁出。

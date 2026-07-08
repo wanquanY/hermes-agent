@@ -1674,7 +1674,17 @@ def _(rid, params: dict) -> dict:
         # users (lots of recent ``tool`` rows) don't get a false
         # "no eligible session" answer.  ``session.list`` uses a
         # similar over-fetch strategy.
-        rows = db.list_sessions_rich(source=None, limit=200)
+        read_model = _session_list_read_model_for_db(db)
+        if read_model is None:
+            return _ok(rid, {"session_id": None})
+        rows = read_model.list(
+            SessionListQuery(
+                source=None,
+                exclude_sources=tuple(deny),
+                limit=200,
+                order_by_last_active=True,
+            )
+        )
         for row in rows:
             src = (row.get("source") or "").strip().lower()
             if src in deny:

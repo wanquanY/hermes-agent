@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import sys
 import threading
 import time
@@ -7,6 +8,7 @@ import types
 from pathlib import Path
 from unittest.mock import patch
 
+from hermes_agent.storage.session_repository_db import ensure_session_repository_schema
 from tui_gateway import server
 
 
@@ -5563,18 +5565,46 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
 # ── session.most_recent ──────────────────────────────────────────────
 
 
+class _MostRecentDB:
+    def __init__(self, rows):
+        self._conn = sqlite3.connect(":memory:")
+        self._conn.row_factory = sqlite3.Row
+        ensure_session_repository_schema(self._conn)
+        for row in rows:
+            self._conn.execute(
+                """
+                INSERT INTO sessions (
+                    id, source, title, display_title, display_title_source,
+                    session_kind, conversation_kind, started_at, updated_at,
+                    last_active, message_count, preview, transient
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row.get("id") or "",
+                    row.get("source") or "unknown",
+                    row.get("title") or "",
+                    row.get("display_title") or row.get("title") or "",
+                    row.get("display_title_source") or "",
+                    row.get("session_kind") or "hermes_session",
+                    row.get("conversation_kind") or "direct",
+                    float(row.get("started_at") or 0),
+                    float(row.get("updated_at") or row.get("last_active") or row.get("started_at") or 0),
+                    row.get("last_active"),
+                    int(row.get("message_count") or 1),
+                    row.get("preview") or "",
+                    1 if row.get("transient") else 0,
+                ),
+            )
+
+
 def test_session_most_recent_returns_first_non_denied(monkeypatch):
     """Drops internal rows like session.list does, returns the first hit."""
 
-    class _DB:
-        def list_sessions_rich(self, *, source=None, limit=200):
-            return [
-                {"id": "tool-1", "source": "tool", "title": "noise", "started_at": 100},
-                {"id": "cron-1", "source": "cron", "title": "runtime", "started_at": 100},
-                {"id": "tui-1", "source": "tui", "title": "real", "started_at": 99},
-            ]
-
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_get_db", lambda: _MostRecentDB([
+        {"id": "tool-1", "source": "tool", "title": "noise", "started_at": 100},
+        {"id": "cron-1", "source": "cron", "title": "runtime", "started_at": 100},
+        {"id": "tui-1", "source": "tui", "title": "real", "started_at": 99},
+    ]))
 
     resp = server.handle_request(
         {"id": "1", "method": "session.most_recent", "params": {}}
@@ -5586,14 +5616,10 @@ def test_session_most_recent_returns_first_non_denied(monkeypatch):
 
 
 def test_session_most_recent_returns_null_when_only_internal_rows(monkeypatch):
-    class _DB:
-        def list_sessions_rich(self, *, source=None, limit=200):
-            return [
-                {"id": "cron-1", "source": "cron", "started_at": 2},
-                {"id": "tool-1", "source": "tool", "started_at": 1},
-            ]
-
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_get_db", lambda: _MostRecentDB([
+        {"id": "cron-1", "source": "cron", "started_at": 2},
+        {"id": "tool-1", "source": "tool", "started_at": 1},
+    ]))
 
     resp = server.handle_request(
         {"id": "1", "method": "session.most_recent", "params": {}}
@@ -5608,8 +5634,7 @@ def test_session_most_recent_folds_db_exception_into_null_result(monkeypatch):
     'no answer' (Copilot review on #17130)."""
 
     class _BrokenDB:
-        def list_sessions_rich(self, *, source=None, limit=200):
-            raise RuntimeError("db locked")
+        _conn = object()
 
     monkeypatch.setattr(server, "_get_db", lambda: _BrokenDB())
 
