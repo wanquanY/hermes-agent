@@ -40,7 +40,10 @@ _RUN_MATERIALIZED_VIEW_WRITERS = {
     "hermes_agent/repositories/run_repo.py",
 }
 _MIGRATION_ROOTS = {"hermes_agent/storage/migrations"}
-_EXCLUDED_DIRS = {"tests", "__pycache__", ".venv", ".import_linter_cache"}
+# ``scripts/`` is CI/audit tooling (``scripts/zero_debt/verdict.py`` is
+# itself a shadow-writer scanner containing the pattern strings) — not
+# production runtime.
+_EXCLUDED_DIRS = {"tests", "__pycache__", ".venv", ".import_linter_cache", "scripts"}
 
 
 def _iter_whole_repo():

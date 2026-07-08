@@ -41,8 +41,10 @@ _LEDGER_WRITERS = {
 # every migration file is one-off, not runtime.
 _MIGRATION_ROOTS = {"hermes_agent/storage/migrations"}
 
-# Test files never count.
-_EXCLUDED_DIRS = {"tests", "__pycache__", ".venv", ".import_linter_cache"}
+# Test files never count. ``scripts/`` is CI/audit tooling (e.g.
+# ``scripts/zero_debt/verdict.py`` is itself a shadow-writer scanner and
+# legitimately contains the pattern strings) — not production runtime.
+_EXCLUDED_DIRS = {"tests", "__pycache__", ".venv", ".import_linter_cache", "scripts"}
 
 
 def _iter_python_files_whole_repo():
