@@ -8,7 +8,7 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 66 | 21 |
+| `p2:no_sessiondb_production` | 62 | 18 |
 | `p2:no_legacy_identity_alias_internal` | 1188 | 80 |
 
 ## p2:no_sessiondb_production
@@ -21,7 +21,6 @@ Status: `preflight_only`
 | 3 | `hermes_state_run_event_reference.py` | `11` from hermes_state_run_event_codec import decode_run_event_row |
 | 2 | `hermes_state_tool_events.py` | `9` from hermes_state_run_event_codec import decode_run_event_row |
 | 2 | `tui_gateway/methods/session.py` | `1761` # Context compression ends the current SessionDB session and forks a |
-| 2 | `tui_gateway/services/run_control.py` | `24` from hermes_state_participants import agent_participant_id, leader_participant_id, member_participant_id |
 | 1 | `hermes_agent/storage/migrations/0001_declarative_baseline.py` | `22` from hermes_state import SCHEMA_SQL |
 | 1 | `hermes_state/migrations/merge_profile_dbs.py` | `4` the normal SessionDB lifecycle starts and must not import hermes_state.SessionDB. |
 | 1 | `hermes_state_agent_profiles.py` | `109` class SessionDBAgentProfileMixin: |
@@ -31,11 +30,9 @@ Status: `preflight_only`
 | 1 | `hermes_state_run_event_index.py` | `8` from hermes_state_run_event_codec import decode_run_event_row |
 | 1 | `hermes_state_team_capabilities.py` | `25` class SessionDBTeamCapabilityMixin: |
 | 1 | `hermes_state_team_registry.py` | `56` class SessionDBTeamRegistryMixin: |
-| 1 | `hermes_team_mission/gateway/leader_report_runtime.py` | `11` from hermes_state_participants import leader_participant_id |
-| 1 | `hermes_team_mission/gateway/runtime_methods.py` | `15` from hermes_state_participants import leader_participant_id, member_participant_id |
 | 1 | `hermes_team_mission/runtime/history.py` | `7` from hermes_state_run_event_codec import decode_run_event_row |
 | 1 | `hermes_team_mission/state/memory.py` | `8` from hermes_state_run_event_codec import decode_run_event_row |
-| 1 | `hermes_team_mission/state/session_conversations.py` | `8` from hermes_state_participants import leader_participant_id, member_participant_id |
+| 1 | `tui_gateway/services/run_control.py` | `45` from hermes_state_runs import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES |
 
 ## p2:no_legacy_identity_alias_internal
 

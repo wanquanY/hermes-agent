@@ -12,7 +12,7 @@ _log = logging.getLogger(__name__)
 from .dovie_context import persist_mission_dovie_product_context_from_submit
 from .participant_autocreate import ensure_member_chat_participant
 from hermes_profile_dir import resolve_default_agent_dir
-from hermes_state_participants import leader_participant_id, member_participant_id
+from hermes_agent.domain.participants import leader_participant_id, member_participant_id
 from hermes_team_mission.domain.activity import ACTIVITY_ID_FORMAT_PATTERN
 from hermes_team_mission.domain.run_context import RunContext
 from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command

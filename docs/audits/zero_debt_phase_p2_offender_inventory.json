@@ -2624,7 +2624,7 @@
       "total_offenders": 1188
     },
     "p2:no_sessiondb_production": {
-      "file_count": 21,
+      "file_count": 18,
       "files": [
         {
           "first_lines": [
@@ -2823,26 +2823,6 @@
         {
           "first_lines": [
             {
-              "line": 24,
-              "text": "from hermes_state_participants import agent_participant_id, leader_participant_id, member_participant_id",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 45,
-              "text": "from hermes_state_runs import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "tui_gateway/services/run_control.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 22,
               "text": "from hermes_state import SCHEMA_SQL",
               "tokens": [
@@ -2961,32 +2941,6 @@
         {
           "first_lines": [
             {
-              "line": 11,
-              "text": "from hermes_state_participants import leader_participant_id",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_team_mission/gateway/leader_report_runtime.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 15,
-              "text": "from hermes_state_participants import leader_participant_id, member_participant_id",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_team_mission/gateway/runtime_methods.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 7,
               "text": "from hermes_state_run_event_codec import decode_run_event_row",
               "tokens": [
@@ -3013,18 +2967,18 @@
         {
           "first_lines": [
             {
-              "line": 8,
-              "text": "from hermes_state_participants import leader_participant_id, member_participant_id",
+              "line": 45,
+              "text": "from hermes_state_runs import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES",
               "tokens": [
                 "from hermes_state"
               ]
             }
           ],
           "offenders": 1,
-          "path": "hermes_team_mission/state/session_conversations.py"
+          "path": "tui_gateway/services/run_control.py"
         }
       ],
-      "total_offenders": 66
+      "total_offenders": 62
     }
   },
   "phase": "P2",

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_profile_dir import resolve_default_agent_dir
-from hermes_state_participants import leader_participant_id
+from hermes_agent.domain.participants import leader_participant_id
 from hermes_team_mission.domain.run_context import RunContext
 from hermes_team_mission.gateway.common import _ensure_team_conversation_session
 from hermes_team_mission.gateway.common import _ensure_team_mission_runtime_session_shell

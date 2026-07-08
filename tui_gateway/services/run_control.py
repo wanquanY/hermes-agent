@@ -21,7 +21,7 @@ from collections.abc import Callable
 from typing import Any, TYPE_CHECKING
 
 from hermes_runtime_event_payloads import primary_deliverable_text
-from hermes_state_participants import agent_participant_id, leader_participant_id, member_participant_id
+from hermes_agent.domain.participants import agent_participant_id, leader_participant_id, member_participant_id
 from agent.dovie_diagnostics import emit_dovie_diagnostic, emit_dovie_runtime_diagnostic
 from tui_gateway.services import team_mission_activity_events as _team_activity_events
 from tui_gateway.services.run_control_events import (

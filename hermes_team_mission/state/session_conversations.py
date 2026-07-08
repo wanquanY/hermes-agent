@@ -5,7 +5,7 @@ from .session_common import *
 from hermes_team_mission.state.conversation_status_event import (
     slim_team_mission_conversation_status_payload as _slim_team_mission_conversation_status_payload,
 )
-from hermes_state_participants import leader_participant_id, member_participant_id
+from hermes_agent.domain.participants import leader_participant_id, member_participant_id
 
 
 def _team_mission_leader_report_status(
