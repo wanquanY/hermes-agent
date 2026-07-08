@@ -489,8 +489,9 @@ async def _send_via_adapter(
     """
     runner = None
     try:
-        from gateway.run import _gateway_runner_ref
-        runner = _gateway_runner_ref()
+        from hermes_gateway.runner_ref import gateway_runner_ref
+
+        runner = gateway_runner_ref()
     except Exception:
         runner = None
 

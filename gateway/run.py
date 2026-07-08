@@ -1482,11 +1482,10 @@ def _drain_gateway_watch_events(completion_queue) -> "list[dict]":
     return watch_events
 
 
-# Module-level weak reference to the active GatewayRunner instance.
-# Used by tools (e.g. send_message) that need to route through a live
-# adapter for plugin platforms.  Set in GatewayRunner.__init__().
-import weakref as _weakref
-_gateway_runner_ref: _weakref.ref = lambda: None
+# Module-level alias kept for gateway.run-internal tests while P5 retires this
+# module. Production callers must import hermes_gateway.runner_ref directly.
+from hermes_gateway.runner_ref import gateway_runner_ref as _gateway_runner_ref
+from hermes_gateway.runner_ref import set_gateway_runner
 
 
 def _normalize_empty_agent_response(
@@ -1630,11 +1629,10 @@ class GatewayRunner:
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
 
     def __init__(self, config: Optional[GatewayConfig] = None):
-        global _gateway_runner_ref
         self.config = config or load_gateway_config()
         self.adapters: Dict[Platform, BasePlatformAdapter] = {}
         self._warn_if_docker_media_delivery_is_risky()
-        _gateway_runner_ref = _weakref.ref(self)
+        set_gateway_runner(self)
 
         # Load ephemeral config from config.yaml / env vars.
         # Both are injected at API-call time only and never persisted.
