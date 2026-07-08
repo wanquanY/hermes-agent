@@ -77,12 +77,12 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is not None and session.get("session_key"):
         try:
-            history_reader = getattr(db, "get_conversation_message_read_model", None)
-            if not callable(history_reader):
-                history_reader = db.get_messages_as_conversation
-            history = history_reader(
-                session["session_key"], include_ancestors=True
-            )
+            read_model = _message_history_read_model_for_db(db)
+            if read_model is not None:
+                history = read_model.all_as_conversation(
+                    session["session_key"],
+                    include_ancestors=True,
+                )
         except Exception:
             pass
     return _ok(
@@ -466,17 +466,14 @@ def _recall_turn_from_history(
 
 
 def _load_stored_history_for_rewrite(db, session_key: str) -> list[dict]:
-    try:
-        history_reader = getattr(db, "get_conversation_message_read_model", None)
-        if not callable(history_reader):
-            history_reader = db.get_messages_as_conversation
-        return history_reader(
-            session_key,
-            include_ancestors=False,
-            include_storage_metadata=True,
-        )
-    except TypeError:
-        return db.get_messages_as_conversation(session_key, include_ancestors=False)
+    read_model = _message_history_read_model_for_db(db)
+    if read_model is None:
+        return []
+    return read_model.all_as_conversation(
+        session_key,
+        include_ancestors=False,
+        include_storage_metadata=True,
+    )
 
 
 def _recall_stored_turn(rid, sid: str, target: dict[str, str]) -> dict | None:

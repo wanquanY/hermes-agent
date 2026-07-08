@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,8 +30,13 @@ class MessageHistoryReadModel:
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
+        self._lock = _connection_lock(conn)
 
     def page_as_conversation(self, session_id: str, query: MessagePageQuery) -> dict[str, Any]:
+        with self._lock:
+            return self._page_as_conversation_locked(session_id, query)
+
+    def _page_as_conversation_locked(self, session_id: str, query: MessagePageQuery) -> dict[str, Any]:
         stable = str(session_id or "").strip()
         if not stable:
             return _empty_page()
@@ -121,6 +127,57 @@ class MessageHistoryReadModel:
                 "totalCount": int(total_count or 0),
             },
         }
+
+    def all_as_conversation(
+        self,
+        session_id: str,
+        *,
+        include_ancestors: bool = False,
+        include_storage_metadata: bool = False,
+        include_inactive: bool = False,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            return self._all_as_conversation_locked(
+                session_id,
+                include_ancestors=include_ancestors,
+                include_storage_metadata=include_storage_metadata,
+                include_inactive=include_inactive,
+            )
+
+    def _all_as_conversation_locked(
+        self,
+        session_id: str,
+        *,
+        include_ancestors: bool,
+        include_storage_metadata: bool,
+        include_inactive: bool,
+    ) -> list[dict[str, Any]]:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return []
+        session_ids = [stable]
+        if include_ancestors:
+            session_ids = self._lineage_root_to_tip(stable)
+        if not session_ids:
+            return []
+        placeholders = ",".join("?" for _ in session_ids)
+        active_clause = "" if include_inactive else " AND active = 1"
+        rows = self._conn.execute(
+            f"SELECT {_conversation_message_columns()} "
+            f"FROM messages WHERE session_id IN ({placeholders})"
+            f"{active_clause} ORDER BY id",
+            tuple(session_ids),
+        ).fetchall()
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            message = _row_as_conversation(
+                row,
+                include_storage_metadata=include_storage_metadata,
+            )
+            if include_ancestors and _is_duplicate_replayed_user_message(messages, message):
+                continue
+            messages.append(message)
+        return messages
 
     def _lineage_root_to_tip(self, session_id: str) -> list[str]:
         if not _table_exists(self._conn, "sessions"):
@@ -379,6 +436,20 @@ def _row_text(row: Any, key: str, index: int) -> str:
     if isinstance(row, sqlite3.Row):
         return str(row[key] or "")
     return str(row[index] or "")
+
+
+_CONNECTION_LOCKS: dict[int, threading.RLock] = {}
+_CONNECTION_LOCKS_GUARD = threading.Lock()
+
+
+def _connection_lock(conn: sqlite3.Connection) -> threading.RLock:
+    key = id(conn)
+    with _CONNECTION_LOCKS_GUARD:
+        lock = _CONNECTION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _CONNECTION_LOCKS[key] = lock
+        return lock
 
 
 __all__ = ["MessageHistoryReadModel", "MessagePageQuery"]

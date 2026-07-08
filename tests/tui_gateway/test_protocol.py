@@ -54,13 +54,58 @@ def _resume_gateway_db(tmp_path, rows=(), history_reader=None):
     repo = SessionRepoImpl(conn)
     for session_id, title in rows:
         repo.create(SessionSpec(session_id=session_id, source="tui", title=title))
+    _seed_resume_messages(conn, rows, history_reader)
+    return types.SimpleNamespace(_conn=conn)
 
-    def _history(_sid, include_ancestors=False):
-        if callable(history_reader):
-            return history_reader(_sid, include_ancestors=include_ancestors)
-        return []
 
-    return types.SimpleNamespace(_conn=conn, get_messages_as_conversation=_history)
+def _seed_resume_messages(conn, rows=(), history_reader=None) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT,
+            participant_id TEXT NOT NULL DEFAULT '',
+            tool_call_id TEXT,
+            tool_calls TEXT,
+            tool_name TEXT,
+            timestamp REAL NOT NULL,
+            token_count INTEGER,
+            finish_reason TEXT,
+            reasoning TEXT,
+            reasoning_content TEXT,
+            reasoning_details TEXT,
+            codex_reasoning_items TEXT,
+            codex_message_items TEXT,
+            platform_message_id TEXT,
+            conversation_message_id TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    if not callable(history_reader):
+        return
+    for session_id, _title in rows:
+        messages = history_reader(session_id, include_ancestors=True)
+        for index, message in enumerate(messages or [], start=1):
+            conn.execute(
+                """
+                INSERT INTO messages (
+                    session_id, role, content, timestamp, metadata_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    str((message or {}).get("role") or "user"),
+                    "" if (message or {}).get("content") is None else str((message or {}).get("content") or ""),
+                    float(index),
+                    json.dumps((message or {}).get("metadata"), ensure_ascii=False)
+                    if isinstance((message or {}).get("metadata"), dict)
+                    else None,
+                ),
+            )
 
 
 # ── JSON-RPC envelope ────────────────────────────────────────────────
@@ -493,9 +538,16 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch, tmp_path)
     assert "error" not in resp
     assert resp["result"]["message_count"] == 3
     assert resp["result"]["messages"] == [
-        {"role": "user", "text": "hello"},
-        {"role": "assistant", "text": "yo"},
-        {"role": "tool", "name": "tool", "context": "", "result_text": "searched"},
+        {"role": "user", "text": "hello", "message_id": "1", "timestamp": 1.0},
+        {"role": "assistant", "text": "yo", "message_id": "2", "timestamp": 2.0},
+        {
+            "role": "tool",
+            "name": "tool",
+            "context": "",
+            "result_text": "searched",
+            "message_id": "3",
+            "timestamp": 3.0,
+        },
     ]
 
 
@@ -597,6 +649,8 @@ def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server
         {
             "role": "user",
             "text": "next",
+            "message_id": "3",
+            "timestamp": 3.0,
             "metadata": {"turn_id": "turn-2", "draft_text": "下一条"},
         },
     ]

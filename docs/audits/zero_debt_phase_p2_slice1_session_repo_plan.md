@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_10`
+状态：`in_progress_checkpoint_11`
 
 ## 前置门槛
 
@@ -578,3 +578,57 @@ python scripts/zero_debt/verdict.py --phase P2 --json
 - `session.history` / `session.resume` 的 display-history hydration 仍经 legacy
   message projection。
 - Message metadata merge 和 stored recall rewrite 仍待迁到 message write owner。
+
+## Checkpoint 11 证据
+
+已完成：
+
+- `MessageHistoryReadModel` 新增 full-history projection：
+  `all_as_conversation()` 统一承载普通 transcript 全量读取、ancestor lineage
+  合并、inactive 过滤和 storage metadata 输出。
+- `session.history` 不再通过 legacy message facade 读取普通会话 transcript；
+  现在只从 `MessageHistoryReadModel` 读取，再进入 wire response。
+- `session.resume` 的 ordinary runtime hydration 与 display-history hydration
+  不再调用 legacy conversation message reader；恢复 runtime 所用 history 与
+  前端展示 history 共用同一个 read-model owner。
+- stored `session.recall_turn` 的历史加载改为 read-model；当前 checkpoint
+  只迁读路径，最终写回仍留给后续 message write owner slice。
+- 测试 helper 从 fake history facade 迁到真实 SQLite `messages` row，避免
+  单测继续覆盖旧入口。
+- `MessageHistoryReadModel` 为同一 SQLite connection 加入 read lock，恢复
+  legacy DB handle 曾提供的并发访问保护，覆盖 concurrent resume 场景。
+
+明确未完成：
+
+- Team transcript projector/backfill 仍是后续独立切片，不在本 checkpoint
+  中混合迁移。
+- Message metadata merge 与 stored recall 最终 writeback 仍待 message
+  write owner 接管。
+- P2 总门禁仍未关闭。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/message_history.py tui_gateway/methods/session_history.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py tests/tui_gateway/test_protocol.py
+.venv/bin/pytest tests/test_tui_gateway_server.py -k session_resume tests/tui_gateway/test_protocol.py -k "session_resume or recall" tests/read_models/test_message_history.py -q
+.venv/bin/pytest tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py tests/read_models/test_message_history.py -q
+.venv/bin/ruff check hermes_agent/read_models/message_history.py tui_gateway/methods/session.py tui_gateway/methods/session_history.py tests/test_tui_gateway_server.py tests/tui_gateway/test_protocol.py tests/read_models/test_message_history.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Session resume/recall/read-model 定向测试：`10 passed`
+- Session protocol/profile/list/read-model 组合测试：`124 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+下一步：
+
+- 继续拆 team transcript projection owner，或进入 message write owner
+  切片以接管 metadata merge / recall rewrite 写路径；二者完成后再回到
+  P2 production grep gate。

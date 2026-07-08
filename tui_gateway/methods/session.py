@@ -10,6 +10,7 @@ from dovie_extension.display_transcript import (
     sanitize_transcript_messages,
 )
 from hermes_agent.domain.session_deletion import SessionDeletionService
+from hermes_agent.read_models.message_history import MessageHistoryReadModel, MessagePageQuery
 from hermes_agent.read_models.session_index import SessionIndexQuery, SessionIndexReadModel
 from hermes_agent.read_models.session_list import SessionListQuery, SessionListReadModel
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
@@ -166,6 +167,13 @@ def _session_deletion_service_for_db(db):
     if conn is None:
         return None
     return SessionDeletionService(conn)
+
+
+def _message_history_read_model_for_db(db):
+    conn = getattr(db, "_conn", None)
+    if conn is None:
+        return None
+    return MessageHistoryReadModel(conn)
 
 
 def _requested_runtime_executor(params: dict | None = None) -> str:
@@ -844,29 +852,25 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
             "totalCount": 0,
         }
     if mode == "tail":
-        page = db.get_messages_page_as_conversation(
+        read_model = _message_history_read_model_for_db(db)
+        if read_model is None:
+            return [], _message_page_info({})
+        page = read_model.page_as_conversation(
             session_id,
-            direction="tail",
-            limit=limit,
-            include_ancestors=True,
+            MessagePageQuery(direction="tail", limit=limit, include_ancestors=True),
         )
         return (
             sanitize_transcript_messages(_history_to_messages(page.get("messages") or [])),
             _message_page_info(page.get("pageInfo")),
         )
-    try:
-        history_reader = getattr(db, "get_conversation_message_read_model", None)
-        if not callable(history_reader):
-            history_reader = db.get_messages_as_conversation
-        display_history = history_reader(
+    read_model = _message_history_read_model_for_db(db)
+    if read_model is None:
+        display_history = []
+    else:
+        display_history = read_model.all_as_conversation(
             session_id,
             include_ancestors=True,
             include_storage_metadata=True,
-        )
-    except TypeError:
-        display_history = db.get_messages_as_conversation(
-            session_id,
-            include_ancestors=True,
         )
     messages = sanitize_transcript_messages(_history_to_messages(display_history))
     page_info = {
@@ -880,20 +884,14 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
 
 
 def _display_history_conversation(db, session_id: str) -> list[dict]:
-    try:
-        history_reader = getattr(db, "get_conversation_message_read_model", None)
-        if not callable(history_reader):
-            history_reader = db.get_messages_as_conversation
-        return history_reader(
-            session_id,
-            include_ancestors=True,
-            include_storage_metadata=True,
-        )
-    except TypeError:
-        return db.get_messages_as_conversation(
-            session_id,
-            include_ancestors=True,
-        )
+    read_model = _message_history_read_model_for_db(db)
+    if read_model is None:
+        return []
+    return read_model.all_as_conversation(
+        session_id,
+        include_ancestors=True,
+        include_storage_metadata=True,
+    )
 
 
 def _page_live_history(history: list[dict], hydrate: str, limit: int) -> tuple[list[dict], dict]:
@@ -1838,10 +1836,10 @@ def _(rid, params: dict) -> dict:
     _enable_gateway_prompts()
     try:
         repo.reopen(target)
-        history_reader = getattr(db, "get_conversation_message_read_model", None)
-        if not callable(history_reader):
-            history_reader = db.get_messages_as_conversation
-        history = history_reader(target)
+        message_history = _message_history_read_model_for_db(db)
+        if message_history is None:
+            return _err(rid, 5000, "message history read model unavailable")
+        history = message_history.all_as_conversation(target)
         # P1 participant-view projection: when this runtime is hydrating a
         # MULTI-PARTICIPANT conversation (the team leader reading a team
         # conversation that also contains member-chat mirrored replies, or

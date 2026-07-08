@@ -905,11 +905,9 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch, tmp_path):
     )
 
     assert resp["result"]["messages"] == [
-        {"role": "user", "text": "root prompt"},
-        {"role": "assistant", "text": "root answer"},
+        {"role": "user", "text": "root prompt", "message_id": "1", "timestamp": 1.0},
+        {"role": "assistant", "text": "root answer", "message_id": "2", "timestamp": 2.0},
     ]
-    assert captured["history_calls"][0] == ("tip", False)
-    assert ("tip", True) in captured["history_calls"]
 
 
 def test_session_resume_reanchors_to_compression_tip(monkeypatch, tmp_path):
@@ -938,16 +936,6 @@ def test_session_resume_reanchors_to_compression_tip(monkeypatch, tmp_path):
         "UPDATE sessions SET started_at = 10, ended_at = 20, end_reason = 'compression' WHERE id = 'rotated_parent'"
     )
     db._conn.execute("UPDATE sessions SET started_at = 21, ended_at = NULL WHERE id = 'tip'")
-    db._conn.execute(
-        """
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1
-        )
-        """
-    )
-    db._conn.execute("INSERT INTO messages (session_id, active) VALUES ('tip', 1)")
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
     monkeypatch.setattr(server, "_set_session_context", lambda *args, **kwargs: [])
@@ -974,8 +962,6 @@ def test_session_resume_reanchors_to_compression_tip(monkeypatch, tmp_path):
     assert resp.get("result"), f"got error: {resp.get('error')}"
     # Everything downstream must target the compression tip, not the parent.
     assert captured.get("agent_target") == "tip"
-    assert "rotated_parent" not in captured.get("history_targets", [])
-    assert "tip" in captured.get("history_targets", [])
 
 
 def test_session_resume_reuses_existing_live_session_concurrently(monkeypatch, tmp_path):
@@ -1270,13 +1256,59 @@ def _resume_gateway_db(tmp_path, rows=(), history_reader=None):
                 parent_session_id=parent_session_id,
             )
         )
+    _seed_resume_messages(conn, rows, history_reader)
+    return types.SimpleNamespace(_conn=conn)
 
-    def _history(_target, include_ancestors=False, **_kwargs):
-        if callable(history_reader):
-            return history_reader(_target, include_ancestors=include_ancestors, **_kwargs)
-        return []
 
-    return types.SimpleNamespace(_conn=conn, get_messages_as_conversation=_history)
+def _seed_resume_messages(conn, rows=(), history_reader=None) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT,
+            participant_id TEXT NOT NULL DEFAULT '',
+            tool_call_id TEXT,
+            tool_calls TEXT,
+            tool_name TEXT,
+            timestamp REAL NOT NULL,
+            token_count INTEGER,
+            finish_reason TEXT,
+            reasoning TEXT,
+            reasoning_content TEXT,
+            reasoning_details TEXT,
+            codex_reasoning_items TEXT,
+            codex_message_items TEXT,
+            platform_message_id TEXT,
+            conversation_message_id TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    if not callable(history_reader):
+        return
+    for row in rows:
+        session_id = row[0]
+        messages = history_reader(session_id, include_ancestors=True)
+        for index, message in enumerate(messages or [], start=1):
+            conn.execute(
+                """
+                INSERT INTO messages (
+                    session_id, role, content, timestamp, metadata_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    str((message or {}).get("role") or "user"),
+                    "" if (message or {}).get("content") is None else str((message or {}).get("content") or ""),
+                    float(index),
+                    json.dumps((message or {}).get("metadata"), ensure_ascii=False)
+                    if isinstance((message or {}).get("metadata"), dict)
+                    else None,
+                ),
+            )
 
 
 def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
