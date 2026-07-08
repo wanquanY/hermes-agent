@@ -40,6 +40,7 @@ import uuid
 from typing import Any, Optional
 
 from tui_gateway.run_worker import RunStartFrame
+from tui_gateway.services.message_history import load_conversation_history
 from tui_gateway.services.profile_context import profile_context_for_params
 from tui_gateway.services.workspace import session_workspace_run_context
 
@@ -302,14 +303,9 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         db = _server._db_for_stable_session(frame.stored_session_id)
     except Exception:
         db = None
-    history_reader = None
     if db is not None:
-        history_reader = getattr(db, "get_conversation_message_read_model", None)
-        if not callable(history_reader):
-            history_reader = getattr(db, "get_messages_as_conversation", None)
-    if callable(history_reader):
         try:
-            full_history = list(history_reader(frame.stored_session_id))
+            full_history = load_conversation_history(db, frame.stored_session_id)
             if _should_project_member_perspective(run_context):
                 try:
                     participants = db.list_conversation_participants(  # type: ignore[attr-defined]

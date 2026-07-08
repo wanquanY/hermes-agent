@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dovie_extension.display_transcript import sanitize_transcript_messages
-from hermes_agent.read_models.message_history import MessageHistoryReadModel, MessagePageQuery
+from hermes_agent.read_models.message_history import MessagePageQuery
 from tui_gateway.methods import session as _session_methods
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.methods.session import (
@@ -11,6 +11,10 @@ from tui_gateway.methods.session import (
     _encode_page_cursor,
     _message_page_info,
     _requested_runtime_scope_key,
+)
+from tui_gateway.services.message_history import (
+    load_conversation_history,
+    message_history_read_model_for_db,
 )
 
 _server = bind_server_globals(globals())
@@ -26,13 +30,6 @@ def _get_db():
 
 def _session_repo_for_db(db):
     return _session_methods._session_repo_for_db(db)
-
-
-def _message_history_read_model_for_db(db):
-    conn = getattr(db, "_conn", None)
-    if conn is None:
-        return None
-    return MessageHistoryReadModel(conn)
 
 
 def _resolve_session_row_id(rid, db, target: str) -> tuple[str, dict | None]:
@@ -77,12 +74,11 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is not None and session.get("session_key"):
         try:
-            read_model = _message_history_read_model_for_db(db)
-            if read_model is not None:
-                history = read_model.all_as_conversation(
-                    session["session_key"],
-                    include_ancestors=True,
-                )
+            history = load_conversation_history(
+                db,
+                session["session_key"],
+                include_ancestors=True,
+            )
         except Exception:
             pass
     return _ok(
@@ -111,7 +107,7 @@ def _(rid, params: dict) -> dict:
         cursor_id = int(cursor_id) if cursor_id is not None else None
     except (TypeError, ValueError):
         cursor_id = None
-    message_history = _message_history_read_model_for_db(db)
+    message_history = message_history_read_model_for_db(db)
     if message_history is None:
         return _err(rid, 5000, "message history read model unavailable")
     try:
@@ -466,10 +462,8 @@ def _recall_turn_from_history(
 
 
 def _load_stored_history_for_rewrite(db, session_key: str) -> list[dict]:
-    read_model = _message_history_read_model_for_db(db)
-    if read_model is None:
-        return []
-    return read_model.all_as_conversation(
+    return load_conversation_history(
+        db,
         session_key,
         include_ancestors=False,
         include_storage_metadata=True,

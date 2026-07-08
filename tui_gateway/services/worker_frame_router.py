@@ -48,6 +48,7 @@ from tui_gateway.run_worker import (
     LogFrame,
     RunTerminalFrame,
 )
+from tui_gateway.services.message_history import load_conversation_history
 
 _log = logging.getLogger(__name__)
 
@@ -1062,10 +1063,7 @@ def _activity_status(status: str) -> str:
 
 def _last_message_for_activity(db: Any, stored_session_id: str) -> dict[str, Any]:
     try:
-        history_reader = getattr(db, "get_conversation_message_read_model", None)
-        if not callable(history_reader):
-            history_reader = db.get_messages_as_conversation
-        messages = history_reader(stored_session_id)
+        messages = load_conversation_history(db, stored_session_id)
     except Exception:
         return {}
     if not isinstance(messages, list):

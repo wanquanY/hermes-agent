@@ -1,6 +1,6 @@
 # P2 Slice 1 执行规格：Session Repository Ownership
 
-状态：`in_progress_checkpoint_11`
+状态：`in_progress_checkpoint_12`
 
 ## 前置门槛
 
@@ -632,3 +632,50 @@ python scripts/zero_debt/verdict.py --phase P2 --json
 - 继续拆 team transcript projection owner，或进入 message write owner
   切片以接管 metadata merge / recall rewrite 写路径；二者完成后再回到
   P2 production grep gate。
+
+## Checkpoint 12 证据
+
+已完成：
+
+- 新增 `tui_gateway.services.message_history`，作为 gateway/service 层唯一的
+  DB handle -> `MessageHistoryReadModel` 接线入口。
+- `session.py` 和 `session_history.py` 删除本地重复 read-model 构造逻辑，
+  统一通过 service helper 进入 canonical read model。
+- `tui_gateway.services.agent_runner` 的 worker runtime hydration 不再读取
+  legacy message facade；worker 运行时上下文恢复现在直接使用
+  `MessageHistoryReadModel`。
+- `tui_gateway.services.worker_frame_router` 的 activity terminal last-message
+  提取不再读取 legacy message facade。
+- `tests/gateway/test_agent_runner.py` 从 fake DB reader 改为真实 SQLite
+  `messages` row，确保测试穿过 read-model。
+
+已运行：
+
+```bash
+python -m py_compile tui_gateway/services/message_history.py tui_gateway/services/agent_runner.py tui_gateway/services/worker_frame_router.py tui_gateway/methods/session.py tui_gateway/methods/session_history.py tests/gateway/test_agent_runner.py
+.venv/bin/pytest tests/gateway/test_agent_runner.py tests/gateway/test_worker_frame_router.py tests/test_member_perspective_transform_via_ipc.py tests/read_models/test_message_history.py -q
+.venv/bin/ruff check tui_gateway/services/message_history.py tui_gateway/services/agent_runner.py tui_gateway/services/worker_frame_router.py tui_gateway/methods/session.py tui_gateway/methods/session_history.py tests/gateway/test_agent_runner.py
+.venv/bin/pytest tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py tests/read_models/test_message_history.py tests/gateway/test_agent_runner.py tests/gateway/test_worker_frame_router.py -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Agent runner / worker frame router / member perspective / read-model
+  定向测试：`31 passed`
+- Session protocol/profile/list/read-model/agent-runner/router 组合测试：
+  `149 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- Team transcript projector/backfill 仍需要目标 owner。
+- Message metadata merge 与 stored recall final rewrite 仍待 message write
+  owner 接管。
+- Event read side 仍有 `list_run_events` 直连，需要 run-event read-model
+  切片继续削减旧 DB facade。
